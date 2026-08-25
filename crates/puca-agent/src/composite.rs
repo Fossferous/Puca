@@ -83,6 +83,19 @@ fn paste_tile(
     let stride = canvas_w * 4;
     let fw = frame.width as usize;
     let fh = frame.height as usize;
+    if step == 0 {
+        return;
+    }
+    // ONE upfront guard instead of a bounds check per sample: the emission
+    // rule below (col < fw/step, row < fh/step) makes every block a FULL
+    // step x step block whose samples lie inside [0, fh) rows and [0, fw)
+    // columns — in range by these two facts alone. This loop runs at FULL
+    // source resolution per dirty tile (that is what any downscaling filter
+    // costs), so the inner accumulate must stay branch-free.
+    if frame.stride < fw * 4 || frame.bgra.len() < frame.stride * fh {
+        return;
+    }
+    let n = (step * step) as u32;
     for row in 0..(fh / step) {
         let dst_y = dst_t + row;
         if dst_y >= canvas_h {
@@ -109,26 +122,16 @@ fn paste_tile(
             if dst + 4 > canvas.len() {
                 continue;
             }
-            let x0 = col * step;
-            let y0 = row * step;
-            let bw = step.min(fw - x0);
-            let bh = step.min(fh - y0);
+            let x0 = col * step * 4;
             let (mut b, mut g, mut r) = (0u32, 0u32, 0u32);
-            let mut n = 0u32;
-            for yy in 0..bh {
-                let src_row = (y0 + yy) * frame.stride + x0 * 4;
-                for xx in 0..bw {
-                    let Some(px) = frame.bgra.get(src_row + xx * 4..src_row + xx * 4 + 4) else {
-                        continue;
-                    };
-                    b += px[0] as u32;
-                    g += px[1] as u32;
-                    r += px[2] as u32;
-                    n += 1;
+            for yy in 0..step {
+                let src_row = (row * step + yy) * frame.stride + x0;
+                for xx in 0..step {
+                    let at = src_row + xx * 4;
+                    b += frame.bgra[at] as u32;
+                    g += frame.bgra[at + 1] as u32;
+                    r += frame.bgra[at + 2] as u32;
                 }
-            }
-            if n == 0 {
-                continue;
             }
             canvas[dst] = (b / n) as u8;
             canvas[dst + 1] = (g / n) as u8;
@@ -603,11 +606,12 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_last_block_averages_only_what_exists() {
-        // 3x3 frame (uniform rows) at step 2: the first output pixel averages
-        // a full 2x2 block; the trailing partial source column produces NO
-        // output pixel (fw/step = 1, same emission rule as the old sampler) —
-        // pin both, so the partial-block clamps can never read out of bounds.
+    fn trailing_source_pixels_emit_nothing_and_full_blocks_average() {
+        // 3x3 frame at step 2: fw/step = 1, so exactly ONE output column is
+        // emitted (the same rule as the old sampler) and every emitted block
+        // is therefore a FULL step x step block — the fact the branch-free
+        // inner loop's bounds safety rests on. The trailing source column
+        // contributes nothing.
         let mut bgra = vec![0u8; 3 * 3 * 4];
         for y in 0..3usize {
             for (x, v) in [10u8, 30, 200].into_iter().enumerate() {

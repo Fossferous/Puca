@@ -229,19 +229,55 @@ fn connect(_pipe_name: &str, _token: &str, _attempts: u32) -> Result<Connection,
     Err("the host agent is only implemented on Windows".to_string())
 }
 
-/// Ceiling on ONE pipe exchange (write + read_line). FIELD-CONFIRMED
-/// 2026-08-25: agent.log carried `[inject-slow] agent_request round trip
-/// 46397ms` — one wedged exchange holding the CONN mutex parks every input
-/// event behind it, which the controller experiences as "the session froze".
-/// The pipe read had NO deadline at all (the file's own history at
-/// `agent_request` notes capabilities()/startSession as unbounded awaits —
-/// this bounds the whole class). 15s is far above any healthy exchange
-/// (inject <1ms, capabilities ~100ms, start_session a few seconds under AV
-/// scanning); past it, the read is cancelled, the caller's error path drops
-/// the connection, and the next request reconnects in ~1.5s instead of
-/// waiting forever.
+/// Ceiling on ONE pipe exchange (write + read_line) for HOT commands.
+/// FIELD-CONFIRMED 2026-08-25: agent.log carried `[inject-slow]
+/// agent_request round trip 46397ms` — one wedged exchange holding the CONN
+/// mutex parks every input event behind it, which the controller experiences
+/// as "the session froze". The pipe read had NO deadline at all. 15s is far
+/// above any healthy hot exchange (inject <1ms, session_status ~ms); past
+/// it, the read is cancelled and the caller's error path restarts the agent
+/// — for a pipe wedged that long, a 1.5s restart beats a frozen forever.
 #[cfg(windows)]
 const REPLY_DEADLINE_MS: u64 = 15_000;
+
+/// Ceiling for everything else. Some commands are LEGITIMATELY slow while
+/// the agent stays perfectly healthy — `set_file_access` canonicalises the
+/// granted root, which on a dead SMB mapping blocks in the redirector for
+/// tens of seconds; a cold `start_stream` under AV scanning takes seconds
+/// and a timeout there is self-perpetuating (each kill leaves the next
+/// attempt cold). Routing those into the 15s kill would tear down every
+/// live session the agent hosts over a share that merely went away. Two
+/// minutes still bounds the wedge class — nothing waits forever — without
+/// executing sessions for slowness the old code survived.
+#[cfg(windows)]
+const SLOW_REPLY_DEADLINE_MS: u64 = 120_000;
+
+/// The exchange deadline for one request, picked by its `cmd`.
+///
+/// A tight, explicit HOT list rather than a slow list: a future command
+/// wrongly classed slow merely waits up to two minutes when wedged, while
+/// one wrongly classed hot gets its host agent killed mid-session for being
+/// slow — the asymmetric cost decides the default.
+#[cfg(windows)]
+fn deadline_ms_for(request: &str) -> u64 {
+    const HOT: &[&str] = &[
+        "inject",
+        "release_input",
+        "session_status",
+        "request_keyframe",
+        "set_draw_cursor",
+        "set_caret_tracking",
+        "update_stream",
+        "set_monitor",
+    ];
+    let cmd = serde_json::from_str::<serde_json::Value>(request)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str().map(String::from)));
+    match cmd.as_deref() {
+        Some(c) if HOT.contains(&c) => REPLY_DEADLINE_MS,
+        _ => SLOW_REPLY_DEADLINE_MS,
+    }
+}
 
 /// Threads currently blocked inside `exchange`, with their deadlines. In
 /// production the CONN mutex serialises exchanges so this holds at most one
@@ -286,7 +322,7 @@ fn ensure_exchange_watchdog() {
 
 #[cfg(windows)]
 fn exchange(conn: &mut Connection, request: &str) -> Result<String, String> {
-    exchange_with_deadline(conn, request, REPLY_DEADLINE_MS)
+    exchange_with_deadline(conn, request, deadline_ms_for(request))
 }
 
 #[cfg(windows)]
@@ -357,7 +393,7 @@ fn exchange_with_deadline(
         .write_all(format!("{request}\n").as_bytes())
         .map_err(|e| {
             if timed_out(&e) {
-                format!("the agent did not accept a request within {}s — dropping the connection to reconnect", deadline_ms / 1000)
+                format!("the agent did not accept a request within {}s — restarting the agent connection", deadline_ms / 1000)
             } else {
                 format!("could not write to the agent: {e}")
             }
@@ -367,7 +403,10 @@ fn exchange_with_deadline(
     let mut line = String::new();
     conn.reader.read_line(&mut line).map_err(|e| {
         if timed_out(&e) {
-            format!("the agent did not answer within {}s — dropping the connection to reconnect", deadline_ms / 1000)
+            // Honest about the consequence: the caller's error arm drops the
+            // connection AND kills an agent this app spawned — for a pipe
+            // wedged past a hot deadline that restart is the recovery.
+            format!("the agent did not answer within {}s — restarting the agent connection", deadline_ms / 1000)
         } else {
             format!("could not read from the agent: {e}")
         }
@@ -763,6 +802,23 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         panic!("test pipe server never came up at {name}");
+    }
+
+    #[test]
+    fn hot_commands_get_the_short_deadline_and_everything_else_the_long_one() {
+        // The asymmetry this pins: a slow-but-healthy command (set_file_access
+        // canonicalising a dead SMB root, a cold start_stream under AV) must
+        // NOT be routed into the 15s kill — that tears down every session the
+        // agent hosts. Hot, polled commands keep the tight bound the field
+        // freeze demanded.
+        assert_eq!(deadline_ms_for(r#"{"cmd":"inject","session_id":"s","event":{}}"#), REPLY_DEADLINE_MS);
+        assert_eq!(deadline_ms_for(r#"{"cmd":"session_status","session_id":"s"}"#), REPLY_DEADLINE_MS);
+        assert_eq!(deadline_ms_for(r#"{"cmd":"set_file_access","root":"\\\\server\\share"}"#), SLOW_REPLY_DEADLINE_MS);
+        assert_eq!(deadline_ms_for(r#"{"cmd":"start_stream","session_id":"s"}"#), SLOW_REPLY_DEADLINE_MS);
+        assert_eq!(deadline_ms_for(r#"{"cmd":"capabilities"}"#), SLOW_REPLY_DEADLINE_MS);
+        // Unknown or unparseable requests take the SAFE (long) side.
+        assert_eq!(deadline_ms_for(r#"{"cmd":"some_future_command"}"#), SLOW_REPLY_DEADLINE_MS);
+        assert_eq!(deadline_ms_for("not json"), SLOW_REPLY_DEADLINE_MS);
     }
 
     #[test]

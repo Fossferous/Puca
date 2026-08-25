@@ -1077,9 +1077,15 @@ fn run(
     let mut switch_started: Option<Instant> = None;
     {
         let scope_for_worker = Arc::clone(&file_scope);
-        let _ = std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("fs-worker".into())
-            .spawn(move || run_fs_worker(fs_req_rx, scope_for_worker, audit, fs_done_tx));
+            .spawn(move || run_fs_worker(fs_req_rx, scope_for_worker, audit, fs_done_tx))
+        {
+            // The session goes on without file transfer; every file request
+            // gets an explicit refusal below (the send fails), and THIS line
+            // is the only place the cause is ever recorded.
+            eprintln!("[stream] could not start the fs worker: {e}");
+        }
     }
 
     while !stop.load(Ordering::Relaxed) {
@@ -1492,7 +1498,20 @@ fn run(
                         } else if fs_req_tx.send((data.id, req, req_id)).is_ok() {
                             fs_inflight += 1;
                         } else {
-                            eprintln!("[stream] the fs worker is gone; dropping a file request");
+                            // The worker never started (or died). ANSWER, not
+                            // drop: a dropped request is a 15s client timeout
+                            // per click with nothing anywhere saying why.
+                            eprintln!("[stream] the fs worker is gone; refusing a file request");
+                            if let Some(bytes) = encode_fs_reply(
+                                &crate::file_transfer::FsResponse::error(
+                                    "file transfer is unavailable on that computer",
+                                ),
+                                req_id,
+                            ) {
+                                if pending_fs_replies.len() < MAX_PENDING_FS_REPLIES {
+                                    pending_fs_replies.push_back((data.id, bytes));
+                                }
+                            }
                         }
                     }
                     _ => {}

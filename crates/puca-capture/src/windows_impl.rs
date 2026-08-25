@@ -674,9 +674,14 @@ struct CursorDib {
 ///    bits included.
 ///
 /// Position: DXGI reports the shape's top-left in output-relative,
-/// desktop-upright coordinates with the hotspot already subtracted; a
-/// CURSORINFO point is desktop coordinates with no hotspot subtraction, so
-/// both corrections are applied here. The shape is stored UNCONDITIONALLY;
+/// desktop-upright coordinates with the hotspot already subtracted; the
+/// point handed in here is desktop coordinates with no hotspot subtraction,
+/// so both corrections are applied. THE CALLER MUST PASS A PHYSICAL POINT:
+/// this process is deliberately DPI-unaware (see puca-agent session.rs), so
+/// a raw CURSORINFO.ptScreenPos is VIRTUALISED while the DXGI rect is
+/// physical — subtracting one from the other lands the pointer a scale
+/// factor away (a third of the screen at 150%) and can even pick the wrong
+/// output for `visible`. The shape is stored UNCONDITIONALLY;
 /// `visible` is true only when the point lies inside this output's rect —
 /// mirroring DXGI's per-output Visible semantics, so a pointer that wanders
 /// onto this screen later has a shape waiting for it.
@@ -744,7 +749,7 @@ fn seed_cursor(monitor: usize) -> CursorState {
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ, RGBQUAD,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, ICONINFO,
+        GetCursorInfo, GetIconInfo, GetPhysicalCursorPos, CURSORINFO, CURSOR_SHOWING, ICONINFO,
     };
 
     let Some(out) = outputs().into_iter().find(|o| o.index == monitor) else {
@@ -831,11 +836,23 @@ fn seed_cursor(monitor: usize) -> CursorState {
         let Some(mask) = mask else {
             return CursorState::default();
         };
+        // PHYSICAL point, not ptScreenPos: this process is deliberately
+        // DPI-unaware, so CURSORINFO's point is virtualised while the DXGI
+        // rect is physical — mixing them put the seeded pointer a scale
+        // factor off (a third of the screen at 150%, the laptop default) and
+        // could mark it visible on the wrong output. GetPhysicalCursorPos
+        // exists for exactly this caller; ptScreenPos stays as the fallback,
+        // which is only ever exact at 100% scale.
+        let mut pt = ci.ptScreenPos;
+        let mut phys = windows::Win32::Foundation::POINT::default();
+        if GetPhysicalCursorPos(&mut phys).is_ok() {
+            pt = phys;
+        }
         dib_to_cursor_state(
             color,
             mask,
             (ii.xHotspot as i32, ii.yHotspot as i32),
-            (ci.ptScreenPos.x, ci.ptScreenPos.y),
+            (pt.x, pt.y),
             showing,
             (out.left, out.top, out.width, out.height),
         )
