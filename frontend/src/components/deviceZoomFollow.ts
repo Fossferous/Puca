@@ -554,6 +554,160 @@ export function caretFollowTransform(input: CaretFollowInput): Transform | null 
     return next;
 }
 
+// --- MONITOR-HOP: pan off one screen's edge onto its neighbour -----------
+//
+// Zoomed into a single-monitor capture, the pan clamp stops dead at the
+// screen's edge — but on the real desktop there is another monitor right
+// there. Persisting the pan INTO the clamp is unambiguous intent to look at
+// it, so the stage switches the capture to the neighbour and lands the view
+// just inside the shared edge, physically continuous, exactly as the
+// zoom-follow switch does for the composite. Everything decision-shaped is
+// pure and lives here; DeviceStage feeds measured pushes and applies the
+// returned transform.
+
+/** Blocked-travel a hop needs. High enough that brushing the clamp while
+ *  panning around a screen never hops; low enough that a deliberate push
+ *  (half a thumb-swipe) does. */
+export const HOP_PRESSURE_PX = 48;
+/** Pressure this stale is forgotten: the pushes must be one gesture, not two
+ *  edge-brushes a sip of coffee apart. */
+export const HOP_PRESSURE_TTL_MS = 600;
+/** Desktop-px slack when deciding two monitors share an edge. Windows lays
+ *  out most side-by-side monitors at exactly adjacent coordinates, but a
+ *  mixed-DPI arrangement can leave a seam. */
+export const HOP_ADJACENCY_TOL_PX = 32;
+/** Below this zoom the whole screen (or nearly) is already visible and the
+ *  picker is the honest way to change screens — a hop from a fitted view
+ *  would be a surprise switch with no visual continuity to justify it. */
+export const HOP_MIN_SCALE = 1.1;
+/** After a hop, ignore pressure this long: the finger that pushed across is
+ *  usually still moving, and its tail must not ping-pong straight back. */
+export const HOP_COOLDOWN_MS = 500;
+/** What one rAF of follow-cursor edge dwell feeds the accumulator. The
+ *  follow writer has no finger-travel to measure (the residual it sees is a
+ *  position, and summing positions double-counts), so dwell is quantised:
+ *  48px / 3px ≈ 16 frames ≈ a quarter second of holding the cursor against
+ *  the edge at 60Hz. */
+export const HOP_EDGE_QUANTUM_PX = 3;
+
+export type HopDir = 'left' | 'right' | 'up' | 'down';
+
+/** Accumulated intent to leave through one edge. `sign` on x: +1 = rightward
+ *  (content pushed left, user looking right); on y: +1 = downward. */
+export interface HopPressure { axis: 'x' | 'y'; sign: 1 | -1; px: number; at: number }
+
+/**
+ * Fold one event's blocked push into the pressure. `pushX`/`pushY` are the
+ * travel the clamp refused, signed by WHERE THE USER IS TRYING TO LOOK
+ * (+x = right, +y = down); zero means the clamp did not pin that axis this
+ * event. The dominant axis of the event wins; a direction change or a stale
+ * accumulator starts over rather than mixing gestures.
+ */
+export function accumulateHopPressure(
+    prev: HopPressure | null, pushX: number, pushY: number, now: number,
+): HopPressure | null {
+    const ax = Math.abs(pushX), ay = Math.abs(pushY);
+    if (ax < 0.5 && ay < 0.5) {
+        // No push this event: pressure survives only its TTL.
+        return prev && now - prev.at <= HOP_PRESSURE_TTL_MS ? prev : null;
+    }
+    const axis: 'x' | 'y' = ax >= ay ? 'x' : 'y';
+    const val = axis === 'x' ? pushX : pushY;
+    const sign: 1 | -1 = val > 0 ? 1 : -1;
+    const mag = Math.abs(val);
+    if (prev && prev.axis === axis && prev.sign === sign && now - prev.at <= HOP_PRESSURE_TTL_MS) {
+        return { axis, sign, px: prev.px + mag, at: now };
+    }
+    return { axis, sign, px: mag, at: now };
+}
+
+export function hopDirection(p: HopPressure): HopDir {
+    return p.axis === 'x' ? (p.sign > 0 ? 'right' : 'left') : (p.sign > 0 ? 'down' : 'up');
+}
+
+/**
+ * The monitor on the far side of `dir`'s edge, or null when there is nothing
+ * plausibly adjacent (a gap beyond tolerance, no perpendicular overlap, or
+ * unmeasured geometry — an old host's list hops nowhere rather than
+ * somewhere guessed). Ties — an ultrawide flanked by two stacked screens —
+ * go to the LARGEST perpendicular overlap: the neighbour sharing the most
+ * edge is the one the pan is most plausibly aimed at.
+ */
+export function monitorNeighbour(
+    monitors: MonitorGeom[], activeId: number, dir: HopDir,
+): number | null {
+    const measured = monitors.filter(m =>
+        typeof m.left === 'number' && typeof m.top === 'number'
+        && typeof m.width === 'number' && typeof m.height === 'number'
+        && m.width > 0 && m.height > 0) as Required<MonitorGeom>[];
+    const a = measured.find(m => m.id === activeId);
+    if (!a) return null;
+    let best: { id: number; overlap: number } | null = null;
+    for (const m of measured) {
+        if (m.id === activeId) continue;
+        const horizontal = dir === 'left' || dir === 'right';
+        const gap = dir === 'right' ? Math.abs(m.left - (a.left + a.width))
+            : dir === 'left' ? Math.abs(a.left - (m.left + m.width))
+            : dir === 'down' ? Math.abs(m.top - (a.top + a.height))
+            : Math.abs(a.top - (m.top + m.height));
+        if (gap > HOP_ADJACENCY_TOL_PX) continue;
+        const overlap = horizontal
+            ? Math.min(a.top + a.height, m.top + m.height) - Math.max(a.top, m.top)
+            : Math.min(a.left + a.width, m.left + m.width) - Math.max(a.left, m.left);
+        if (overlap <= 0) continue;
+        if (!best || overlap > best.overlap) best = { id: m.id, overlap };
+    }
+    return best?.id ?? null;
+}
+
+/**
+ * The transform for the NEIGHBOUR's view after a hop: same physical
+ * magnification in DESKTOP pixels (the one space both monitors share — the
+ * two captures can have different native resolutions), the perpendicular
+ * coordinate carried straight across the shared edge, and the entry point
+ * half a viewport inside the near edge so the seam the user pushed through
+ * is visibly right there behind them.
+ *
+ * Floored at ZOOM_FOLLOW_LANDING_MIN like remapIntoMonitor, and for the same
+ * load-bearing reason: a landing inside the zoom-out window would hand the
+ * user straight to the composite return trigger — a hop that ends somewhere
+ * they never asked to go.
+ */
+export function remapAcrossBoundary(opts: {
+    box: Box;
+    from: View;                     // active monitor, measured BEFORE the switch
+    fromTransform: Transform;
+    fromMon: Required<MonitorGeom>; // its desktop-space rect
+    toMon: Required<MonitorGeom>;   // the neighbour's desktop-space rect
+    dir: HopDir;
+    to: View;                       // neighbour, measured AFTER the switch
+    maxZoom: number;
+}): Transform {
+    const { box, from, fromTransform, fromMon, toMon, dir, to, maxZoom } = opts;
+    // Screen px per DESKTOP px, before and after; equate and solve.
+    const pxPerDesk = fromTransform.scale * (from.pict.dispW / fromMon.width);
+    const raw = pxPerDesk * toMon.width / to.pict.dispW;
+    const scale = Math.max(ZOOM_FOLLOW_LANDING_MIN, Math.min(maxZoom, raw));
+
+    // The viewport centre in DESKTOP coordinates (via the from-video frame).
+    const centre = screenToVideo(box.w / 2, box.h / 2, from, fromTransform);
+    const deskX = fromMon.left + (centre.x / from.videoW) * fromMon.width;
+    const deskY = fromMon.top + (centre.y / from.videoH) * fromMon.height;
+
+    // Half a viewport, in the NEIGHBOUR's desktop px at the landing scale.
+    const halfW = box.w * toMon.width / (2 * scale * to.pict.dispW);
+    const halfH = box.h * toMon.height / (2 * scale * to.pict.dispH);
+
+    let fx: number, fy: number;
+    switch (dir) {
+        case 'right': fx = clamp01(halfW / toMon.width); fy = clamp01((deskY - toMon.top) / toMon.height); break;
+        case 'left': fx = clamp01(1 - halfW / toMon.width); fy = clamp01((deskY - toMon.top) / toMon.height); break;
+        case 'down': fy = clamp01(halfH / toMon.height); fx = clamp01((deskX - toMon.left) / toMon.width); break;
+        case 'up': fy = clamp01(1 - halfH / toMon.height); fx = clamp01((deskX - toMon.left) / toMon.width); break;
+    }
+    return centreOn(box, to, scale, fx, fy);
+}
+
 /**
  * The transform for the SINGLE-monitor view that keeps what the user was
  * looking at in place: same centre point, same physical magnification (a

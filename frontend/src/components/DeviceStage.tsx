@@ -41,10 +41,13 @@ import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
 import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
 import {
-    ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, captureSurfaceSize, caretBandFrom, caretFollowTransform, clampPanTo,
+    HOP_COOLDOWN_MS, HOP_EDGE_QUANTUM_PX, HOP_MIN_SCALE, HOP_PRESSURE_PX, HOP_PRESSURE_TTL_MS,
+    ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, accumulateHopPressure, captureSurfaceSize, caretBandFrom,
+    caretFollowTransform, clampPanTo, hopDirection,
     initialMonitorRequest, manualCompositeHoldActive,
-    monitorRegions, pickFollowTarget,
-    remapIntoComposite, remapIntoMonitor, viewportInVideo, type View as ZoomView,
+    monitorNeighbour, monitorRegions, pickFollowTarget,
+    remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
+    type HopPressure, type MonitorGeom, type View as ZoomView,
 } from './deviceZoomFollow';
 import {
     autoKeyboardVerdict, autoKeyboardVerdictAtPress,
@@ -699,6 +702,27 @@ export function DeviceStage() {
     const followTargetRef = useRef<{ x: number; y: number } | null>(null);
     const followRafRef = useRef<number | null>(null);
 
+    // MONITOR-HOP pressure: blocked pan travel against a single-monitor
+    // view's edge (deviceZoomFollow's accumulator — pure; these are just its
+    // storage). Declared here, above BOTH writers that feed it. `hopKick`
+    // exists because the one writer that can accumulate without changing the
+    // transform — follow-cursor pinned at the clamp returns `prev` unchanged
+    // — would otherwise never re-run the trigger effect: crossing the
+    // threshold bumps it, and it sits in that effect's deps.
+    const hopPressureRef = useRef<HopPressure | null>(null);
+    const lastHopAtRef = useRef(0);
+    const [hopKick, setHopKick] = useState(0);
+    const feedHopPressure = useCallback((pushX: number, pushY: number) => {
+        const now = performance.now();
+        const prev = hopPressureRef.current;
+        const next = accumulateHopPressure(prev, pushX, pushY, now);
+        hopPressureRef.current = next;
+        if (next && next.px >= HOP_PRESSURE_PX
+            && (!prev || prev.px < HOP_PRESSURE_PX || prev.axis !== next.axis || prev.sign !== next.sign)) {
+            setHopKick(k => k + 1);
+        }
+    }, []);
+
     const applyFollowPan = useCallback(() => {
         followRafRef.current = null;
         const target = followTargetRef.current;
@@ -730,6 +754,28 @@ export function DeviceStage() {
         const left = box.offX + target.x * box.dispW;
         const top = box.offY + target.y * box.dispH;
         const rect = surface.getBoundingClientRect();
+        // MONITOR-HOP dwell feed. The solve below wants the cursor centred;
+        // where the clamp refuses, the residual's SIGN says which edge the
+        // cursor is pressing (proposed further left than allowed = the user is
+        // looking right). No travel to measure — the residual is a position,
+        // and summing positions double-counts — so each pinned frame feeds a
+        // fixed quantum: ~a quarter second of holding against the edge trips
+        // the threshold. Read off transformRef: fine for detection (the exact
+        // solve stays inside the updater, as the comment above it demands).
+        {
+            const t0 = transformRef.current;
+            if (t0.scale > 1) {
+                const propX = rect.width * 0.5 - left * t0.scale;
+                const propY = rect.height * 0.5 - top * t0.scale;
+                const c0 = clampPan(v, rect, t0.scale, propX, propY);
+                const rx = propX - c0.x;
+                const ry = propY - c0.y;
+                feedHopPressure(
+                    rx < -0.5 ? HOP_EDGE_QUANTUM_PX : rx > 0.5 ? -HOP_EDGE_QUANTUM_PX : 0,
+                    ry < -0.5 ? HOP_EDGE_QUANTUM_PX : ry > 0.5 ? -HOP_EDGE_QUANTUM_PX : 0,
+                );
+            }
+        }
         setTransform(prev => {
             if (prev.scale <= 1) return prev;
             const c = clampPan(
@@ -742,7 +788,7 @@ export function DeviceStage() {
             if (c.x === prev.x && c.y === prev.y) return prev;
             return { ...prev, x: c.x, y: c.y };
         });
-    }, []);
+    }, [feedHopPressure]);
 
     const followPan = useCallback((x: number, y: number) => {
         // THE TRACKPAD'S AIM. Recorded here as well as in `send`, and not as
@@ -1101,6 +1147,10 @@ export function DeviceStage() {
         clearPendingFollow();
         followCorrectionRef.current = null;
         autoFollowRef.current = { mode: 'none' };
+        // Pressure was pushed against a screen that is no longer on the
+        // stage; carrying it over would let a pick from the menu instantly
+        // hop off the newly chosen screen.
+        hopPressureRef.current = null;
         // An EXPLICIT return to the grid while still zoomed must stick, or the
         // level check would re-follow a screen 300ms after the person chose the
         // composite on purpose. Recorded as the scale it was chosen AT, so
@@ -1117,6 +1167,8 @@ export function DeviceStage() {
         expectedAutoMonitorRef.current = null;
         manualCompositeHoldRef.current = null;
         autoFollowRef.current = { mode: 'none' };
+        hopPressureRef.current = null;
+        lastHopAtRef.current = 0;
     }, [session?.id, clearPendingFollow]);
 
     // EVERY SCREEN BY DEFAULT — the viewer's half. A host from 0.8.104 on
@@ -1245,13 +1297,45 @@ export function DeviceStage() {
                     if (!region) return { scale: 1, x: 0, y: 0 };
                     return remapIntoComposite({ box, from, fromTransform: t, region, to });
                 });
+            } else if (s.activeMonitor !== null && s.activeMonitor !== ALL_DISPLAYS
+                && t.scale >= HOP_MIN_SCALE) {
+                // MONITOR-HOP: enough pan pushed into this screen's edge,
+                // recently, past the cooldown — switch to the neighbour on
+                // the far side of that edge and land physically continuous,
+                // half a viewport inside it. Works from an auto-followed AND
+                // a hand-picked screen; `becomes` preserves which, so a hop
+                // from a manual pick never surprise-returns to the composite
+                // on zoom-out, while a hop from an auto follow still does.
+                const p = hopPressureRef.current;
+                const now = performance.now();
+                if (!p || p.px < HOP_PRESSURE_PX || now - p.at > HOP_PRESSURE_TTL_MS) return;
+                if (now - lastHopAtRef.current < HOP_COOLDOWN_MS) return;
+                const dir = hopDirection(p);
+                const neighbour = monitorNeighbour(s.monitors, s.activeMonitor, dir);
+                if (neighbour === null) return;
+                const fromMon = s.monitors.find(m => m.id === s.activeMonitor);
+                const toMon = s.monitors.find(m => m.id === neighbour);
+                // monitorNeighbour only answers from fully-measured geometry,
+                // so these casts hold whenever it answered at all.
+                if (!fromMon || !toMon) return;
+                hopPressureRef.current = null;
+                lastHopAtRef.current = now;
+                const becomes = autoFollowRef.current.mode === 'single'
+                    ? { mode: 'single' as const, monitorId: neighbour }
+                    : { mode: 'none' as const };
+                begin(neighbour, becomes, to => remapAcrossBoundary({
+                    box, from, fromTransform: t,
+                    fromMon: fromMon as Required<MonitorGeom>,
+                    toMon: toMon as Required<MonitorGeom>,
+                    dir, to, maxZoom: MAX_ZOOM,
+                }));
             }
         // 120ms, down from 180: the timer re-arms per transform change, so it
         // already fires N ms after the LAST pinch movement — this keeps the
         // flap protection while shaving 60ms off every zoom-to-read.
         }, 120);
         return () => clearTimeout(timer);
-    }, [transform, session, pointerLocked, applyPendingFollow, clearPendingFollow]);
+    }, [transform, hopKick, session, pointerLocked, applyPendingFollow, clearPendingFollow]);
 
     // --- ZOOM TO THE TEXT CARET WHILE TYPING (mobile) --------------------
     //
@@ -1999,6 +2083,33 @@ export function DeviceStage() {
                 // outside the updater — StrictMode invokes that twice.
                 if (caretActiveRef.current) userZoomedDuringCaretRef.current = true;
 
+                // MONITOR-HOP travel feed — a two-finger PAN (deltaScale ~1;
+                // a real pinch changes the focal maths and its "blocked"
+                // residual means nothing) whose motion the clamp refused.
+                // The magnitude is the FINGER's travel — motion the user made
+                // that the view could not follow — and the residual's sign
+                // says which edge (proposed further left than allowed = they
+                // are looking right). Computed OUTSIDE the updater from
+                // transformRef, which is exact here: with ratio 1 the
+                // proposed pan is just t.x + fingerDx, and updaters must stay
+                // side-effect-free (StrictMode runs them twice).
+                {
+                    const t0 = transformRef.current;
+                    const surface0 = surfaceRef.current;
+                    if (Math.abs(deltaScale - 1) < 0.02 && t0.scale > 1 && surface0) {
+                        const rect0 = surface0.getBoundingClientRect();
+                        const fdx = center.x - prev.center.x;
+                        const fdy = center.y - prev.center.y;
+                        const c0 = clampPan(videoRef.current, rect0, t0.scale, t0.x + fdx, t0.y + fdy);
+                        const rx = (t0.x + fdx) - c0.x;
+                        const ry = (t0.y + fdy) - c0.y;
+                        feedHopPressure(
+                            rx < -0.5 ? Math.abs(fdx) : rx > 0.5 ? -Math.abs(fdx) : 0,
+                            ry < -0.5 ? Math.abs(fdy) : ry > 0.5 ? -Math.abs(fdy) : 0,
+                        );
+                    }
+                }
+
                 setTransform(t => {
                     const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, t.scale * deltaScale));
                     const ratio = newScale / t.scale;
@@ -2052,7 +2163,7 @@ export function DeviceStage() {
                 if (p) send({ t: 'move', x: p.x, y: p.y });
             }
         }
-    }, [send, isMobile, isMouseMode, gestures, fpsMode, fpsSens, session]);
+    }, [send, isMobile, isMouseMode, gestures, fpsMode, fpsSens, session, feedHopPressure]);
 
     const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
         // GAME MODE (desktop): handled entirely here — no pointer capture

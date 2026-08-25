@@ -384,3 +384,149 @@ describe('captureSurfaceSize', () => {
         expect(captureSurfaceSize([], 0)).toBeNull();
     });
 });
+
+// --- MONITOR-HOP ---------------------------------------------------------
+
+import {
+    HOP_ADJACENCY_TOL_PX, HOP_PRESSURE_PX, HOP_PRESSURE_TTL_MS,
+    accumulateHopPressure, hopDirection, monitorNeighbour, remapAcrossBoundary,
+} from '../components/deviceZoomFollow';
+
+describe('accumulateHopPressure — one gesture, one direction, or start over', () => {
+    it('accumulates same-direction pushes and reports the direction', () => {
+        let p = accumulateHopPressure(null, 20, 0, 1000);
+        p = accumulateHopPressure(p, 20, 0, 1200);
+        p = accumulateHopPressure(p, 20, 0, 1400);
+        expect(p).toMatchObject({ axis: 'x', sign: 1, px: 60, at: 1400 });
+        expect(hopDirection(p!)).toBe('right');
+        expect(p!.px).toBeGreaterThanOrEqual(HOP_PRESSURE_PX);
+    });
+
+    it('a direction change resets rather than mixing gestures', () => {
+        let p = accumulateHopPressure(null, 40, 0, 1000);
+        p = accumulateHopPressure(p, -10, 0, 1100);
+        expect(p).toMatchObject({ axis: 'x', sign: -1, px: 10 });
+        expect(hopDirection(p!)).toBe('left');
+        // Axis change resets too.
+        p = accumulateHopPressure(p, 0, 30, 1200);
+        expect(p).toMatchObject({ axis: 'y', sign: 1, px: 30 });
+        expect(hopDirection(p!)).toBe('down');
+    });
+
+    it('stale pressure is forgotten — two edge-brushes far apart are not one push', () => {
+        let p = accumulateHopPressure(null, 40, 0, 1000);
+        p = accumulateHopPressure(p, 40, 0, 1000 + HOP_PRESSURE_TTL_MS + 1);
+        expect(p).toMatchObject({ px: 40, at: 1000 + HOP_PRESSURE_TTL_MS + 1 });
+    });
+
+    it('a no-push event preserves fresh pressure and clears stale', () => {
+        const p = accumulateHopPressure(null, 40, 0, 1000);
+        expect(accumulateHopPressure(p, 0, 0, 1100)).toBe(p);
+        expect(accumulateHopPressure(p, 0, 0, 1000 + HOP_PRESSURE_TTL_MS + 1)).toBeNull();
+    });
+});
+
+describe('monitorNeighbour — adjacency in desktop px, biggest shared edge wins', () => {
+    it('finds the side-by-side neighbour in both directions, and nothing past the last screen', () => {
+        expect(monitorNeighbour(MONITORS, 0, 'right')).toBe(1);
+        expect(monitorNeighbour(MONITORS, 1, 'left')).toBe(0);
+        expect(monitorNeighbour(MONITORS, 1, 'right')).toBeNull();
+        expect(monitorNeighbour(MONITORS, 0, 'up')).toBeNull();
+        expect(monitorNeighbour(MONITORS, 0, 'down')).toBeNull();
+    });
+
+    it('tolerates a small seam and refuses a real gap', () => {
+        const seam = [
+            { id: 0, left: 0, top: 0, width: 1920, height: 1080 },
+            { id: 1, left: 1920 + HOP_ADJACENCY_TOL_PX, top: 0, width: 1920, height: 1080 },
+        ];
+        expect(monitorNeighbour(seam, 0, 'right')).toBe(1);
+        const gap = [
+            { id: 0, left: 0, top: 0, width: 1920, height: 1080 },
+            { id: 1, left: 1920 + HOP_ADJACENCY_TOL_PX + 1, top: 0, width: 1920, height: 1080 },
+        ];
+        expect(monitorNeighbour(gap, 0, 'right')).toBeNull();
+    });
+
+    it('ties go to the larger perpendicular overlap; zero overlap does not count', () => {
+        // An ultrawide with two screens stacked on its right: the lower one
+        // shares 700px of edge, the upper only 380.
+        const trio = [
+            { id: 0, left: 0, top: 0, width: 2560, height: 1080 },
+            { id: 1, left: 2560, top: -380, width: 1920, height: 760 },
+            { id: 2, left: 2560, top: 380, width: 1920, height: 1080 },
+        ];
+        expect(monitorNeighbour(trio, 0, 'right')).toBe(2);
+        // A corner-touching screen (overlap exactly 0) is not a neighbour.
+        const corner = [
+            { id: 0, left: 0, top: 0, width: 1920, height: 1080 },
+            { id: 1, left: 1920, top: 1080, width: 1920, height: 1080 },
+        ];
+        expect(monitorNeighbour(corner, 0, 'right')).toBeNull();
+    });
+
+    it('unmeasured geometry hops nowhere rather than somewhere guessed', () => {
+        expect(monitorNeighbour([{ id: 0 }, { id: 1 }], 0, 'right')).toBeNull();
+        expect(monitorNeighbour(MONITORS, 99, 'right')).toBeNull();
+    });
+});
+
+describe('remapAcrossBoundary — land just inside the shared edge, physically continuous', () => {
+    // Both screens 1920x1080 native; each fills a 960x540 box exactly.
+    const HBOX = { w: 960, h: 540 };
+    const MON_VIEW: View = { pict: { offX: 0, offY: 0, dispW: 960, dispH: 540 }, videoW: 1920, videoH: 1080 };
+    const LEFT_MON = { id: 0, left: 0, top: 0, width: 1920, height: 1080 };
+    const RIGHT_MON = { id: 1, left: 1920, top: 0, width: 1920, height: 1080 };
+
+    it('equal monitors keep the scale, and the viewport starts at the entry edge', () => {
+        // Zoomed 2x on the left screen, pushed right.
+        const next = remapAcrossBoundary({
+            box: HBOX, from: MON_VIEW, fromTransform: { scale: 2, x: -480, y: -270 },
+            fromMon: LEFT_MON, toMon: RIGHT_MON, dir: 'right', to: MON_VIEW, maxZoom: 8,
+        });
+        expect(next.scale).toBeCloseTo(2, 5);
+        // Entry half a viewport inside the near (left) edge means the visible
+        // viewport's left edge sits exactly on the monitor's left edge.
+        expect(next.x).toBeCloseTo(0, 5);
+    });
+
+    it('carries the perpendicular coordinate across the edge', () => {
+        // Viewport centred on the left screen's lower half: the from-view
+        // centre is canvas (270, 405) at scale 2 → video y 810 → desktop y
+        // 810 → fy 0.75 on the target; centreOn puts that at the box centre:
+        // y = 270 - 2*(0.75*540) = -540.
+        const next = remapAcrossBoundary({
+            box: HBOX, from: MON_VIEW, fromTransform: { scale: 2, x: -480, y: -540 },
+            fromMon: LEFT_MON, toMon: RIGHT_MON, dir: 'right', to: MON_VIEW, maxZoom: 8,
+        });
+        expect(next.y).toBeCloseTo(-540, 5);
+    });
+
+    it('floors the landing at ZOOM_FOLLOW_LANDING_MIN so a hop cannot land in the zoom-out window', () => {
+        const next = remapAcrossBoundary({
+            box: HBOX, from: MON_VIEW, fromTransform: { scale: 1.1, x: -48, y: -27 },
+            fromMon: LEFT_MON, toMon: RIGHT_MON, dir: 'right', to: MON_VIEW, maxZoom: 8,
+        });
+        expect(next.scale).toBeCloseTo(ZOOM_FOLLOW_LANDING_MIN, 5);
+        expect(next.scale).toBeGreaterThan(ZOOM_FOLLOW_OUT_AT);
+    });
+
+    it('physical continuity is in DESKTOP px, so resolution and rect size split cleanly', () => {
+        // Same desktop rect, 4K native (200% DPI): the desktop magnification
+        // through the same display box is unchanged → same landing scale.
+        const to4k: View = { pict: { offX: 0, offY: 0, dispW: 960, dispH: 540 }, videoW: 3840, videoH: 2160 };
+        const next = remapAcrossBoundary({
+            box: HBOX, from: MON_VIEW, fromTransform: { scale: 4, x: -960, y: -540 },
+            fromMon: LEFT_MON, toMon: RIGHT_MON, dir: 'right', to: to4k, maxZoom: 8,
+        });
+        expect(next.scale).toBeCloseTo(4, 5);
+        // A desktop rect twice as wide through the same box needs twice the
+        // scale to keep a desktop px the same size on screen.
+        const wideMon = { id: 1, left: 1920, top: 0, width: 3840, height: 1080 };
+        const next2 = remapAcrossBoundary({
+            box: HBOX, from: MON_VIEW, fromTransform: { scale: 4, x: -960, y: -540 },
+            fromMon: LEFT_MON, toMon: wideMon, dir: 'right', to: MON_VIEW, maxZoom: 8,
+        });
+        expect(next2.scale).toBeCloseTo(8, 5);
+    });
+});
