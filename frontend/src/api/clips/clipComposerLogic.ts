@@ -34,20 +34,25 @@ export function postableChannels(all: Channel[], serverId: string | null): Chann
  *  fallback chain (pin → remembered choice → server default → first postable)
  *  meant the approval screen and the actual destination could disagree.
  *
- *  Four answers, each with its own UI, because collapsing them was the bug:
+ *  Five answers, each with its own UI, because collapsing them was the bug:
  *  the old composer rendered a silent empty select while channels loaded and
- *  fell back to a 403 at post time when the pin was unpostable. */
+ *  fell back to a 403 at post time when the pin was unpostable — and a
+ *  FAILED channel fetch collapsed into an empty list, which read as
+ *  'pin-unpostable' and told a user with a network blip they lacked
+ *  permission on a channel they can post in fine. */
 export type ClipTargetResolution =
     | { kind: 'ok'; channel: Channel }
     | { kind: 'loading' }
+    | { kind: 'load-failed' }
     | { kind: 'pin-missing' }
     | { kind: 'pin-unpostable' };
 
 export function resolveClipTarget(
     policy: { serverId: string | null; pinnedChannelId: number | null },
-    channels: Channel[] | null,
+    channels: Channel[] | null | 'load-failed',
 ): ClipTargetResolution {
     if (channels === null) return { kind: 'loading' };
+    if (channels === 'load-failed') return { kind: 'load-failed' };
     if (policy.pinnedChannelId === null) return { kind: 'pin-missing' };
     const pinned = postableChannels(channels, policy.serverId)
         .find(c => c.id === policy.pinnedChannelId);

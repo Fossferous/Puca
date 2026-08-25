@@ -99,12 +99,18 @@ describe('the broken-system-audio recovery routing', () => {
         expect(retryMock, 'retry cannot work without a graph and must not be offered or fired').not.toHaveBeenCalled();
     });
 
-    it('a picker session keeps Pick again — the control that was always its recovery', async () => {
+    it('a picker session keeps Pick again — labelled with what it costs', async () => {
         replayState = { ...baseArmed(), captureReason: null, systemAudioLost: null, notice: 'No system audio — pick again' };
         mount();
-        expect(buttons()).toContain('Pick again');
+        // The label must carry the cost: a repick DISARMS before the picker
+        // opens, so cancelling it still loses the footage — a bare "Pick
+        // again" read as free.
+        const pick = buttons().find(l => l.startsWith('Pick again'));
+        expect(pick).toBeTruthy();
+        expect(pick).toContain('clears current footage');
         expect(buttons()).not.toContain('Retry system audio');
-        const btn = [...container.querySelectorAll('button')].find(b => b.textContent === 'Pick again')!;
+        const btn = [...container.querySelectorAll('button')]
+            .find(b => (b.textContent ?? '').startsWith('Pick again'))!;
         await act(async () => { btn.click(); });
         expect(armMock).toHaveBeenCalledWith({ repick: true });
         expect(retryMock).not.toHaveBeenCalled();

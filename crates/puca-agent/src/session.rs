@@ -1169,11 +1169,27 @@ impl Agent {
                     let _ = &session_id;
                     false
                 };
-                // Live-read per poll, no cache: the caller (the app's
-                // secure-desktop poll) is already 1 Hz, and the probe is one
-                // user32 read against the process-global target monitor — the
-                // same one this agent injects onto.
-                let cursor_clipped = puca_input::cursor_clip_conflict();
+                // Answered for THIS session's streamed monitor (`self.sessions`
+                // is maintained at every aim site), never the process-global
+                // input target — two concurrent sessions stream different
+                // screens and the global only describes whichever aimed last.
+                // Elevated gate mirrors secure_desktop's: a SYSTEM agent lives
+                // on whatever desktop Windows is showing, its handler thread
+                // never follows the interactive desktop, and a clip banner
+                // over the PIN box would explain a conflict that does not
+                // apply there. Live-read per poll, no cache: the caller is
+                // already 1 Hz and the probe is two user32 reads.
+                let cursor_clipped = !self.flavour.is_elevated()
+                    && self
+                        .sessions
+                        .get(&session_id)
+                        .and_then(|&mon| {
+                            let outputs = puca_capture::outputs();
+                            let list = puca_input::list_monitors();
+                            resolve_target(mon, &outputs, &list)
+                        })
+                        .map(puca_input::cursor_clip_conflict_for)
+                        .unwrap_or(false);
                 Response::SessionState { secure_desktop, cursor_clipped }
             }
 
@@ -2497,10 +2513,20 @@ mod tests {
         }).unwrap();
 
         match a.handle(Request::SessionStatus { session_id: "s1".into() }) {
-            Response::SessionState { secure_desktop, .. } => assert!(
-                !secure_desktop,
-                "a SYSTEM agent can reach the secure desktop, so it must never                  tell the viewer the screen is out of reach — that banner lands                  on top of the PIN box it is supposed to be showing",
-            ),
+            Response::SessionState { secure_desktop, cursor_clipped } => {
+                assert!(
+                    !secure_desktop,
+                    "a SYSTEM agent can reach the secure desktop, so it must never                  tell the viewer the screen is out of reach — that banner lands                  on top of the PIN box it is supposed to be showing",
+                );
+                // Same gate, same reason: the SYSTEM agent lives on whatever
+                // desktop Windows shows and its clip reading describes the
+                // wrong one; a clip banner over the PIN box tells the person
+                // to close an app that is not in their way.
+                assert!(
+                    !cursor_clipped,
+                    "an elevated agent must never report a cursor clip",
+                );
+            }
             other => panic!("expected SessionState, got {other:?}"),
         }
         let _ = rx;

@@ -66,6 +66,12 @@ describe('resolveClipTarget — the no-picker destination, one answer per way it
         expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: 7 }, null))
             .toEqual({ kind: 'loading' });
 
+        // load-failed: the fetch errored. Distinct from an EMPTY list on
+        // purpose — collapsing them told a user with a network blip they
+        // lacked permission ('pin-unpostable') on a channel they post in fine.
+        expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: 7 }, 'load-failed'))
+            .toEqual({ kind: 'load-failed' });
+
         // pin-missing: the server never pinned a channel (pre-S1 or misconfigured).
         expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: null }, chans))
             .toEqual({ kind: 'pin-missing' });

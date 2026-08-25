@@ -78,7 +78,9 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     const [sealed, setSealed] = useState<SealedInfo | null>(null);
     const [replay, setReplay] = useState<ReplayState>(getReplayState());
     const [proposals, setProposals] = useState<ClipProposalState>(getClipProposalState());
-    const [channels, setChannels] = useState<Channel[] | null>(null);
+    const [channels, setChannels] = useState<Channel[] | 'load-failed' | null>(null);
+    /** Bumped by the retry link after a failed channel fetch. */
+    const [channelsFetchSeq, setChannelsFetchSeq] = useState(0);
     const [postedTo, setPostedTo] = useState<string | null>(null);
     const [uploadRetryable, setUploadRetryable] = useState(false);
     const [now, setNow] = useState(() => Date.now());
@@ -112,12 +114,17 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     useEffect(() => { const t = setInterval(() => setNow(Date.now()), 15_000); return () => clearInterval(t); }, []);
 
     // Text channels of the VOICE server (it may not be the viewed one).
+    // A FAILED fetch is its own state, never an empty list: an empty list
+    // reads as 'pin-unpostable', which told a user with a network blip they
+    // lacked permission on a channel they can post in fine.
     useEffect(() => {
         if (!isOpen || localOnly || !policy.serverId) return;
         let alive = true;
-        listChannels(policy.serverId).then(list => { if (alive) setChannels(list); }).catch(() => { if (alive) setChannels([]); });
+        listChannels(policy.serverId)
+            .then(list => { if (alive) setChannels(list); })
+            .catch(() => { if (alive) setChannels('load-failed'); });
         return () => { alive = false; };
-    }, [isOpen, localOnly, policy.serverId]);
+    }, [isOpen, localOnly, policy.serverId, channelsFetchSeq]);
 
     // Escape closes — a sealed clip must never linger unseen. While a request
     // is pending, Escape does nothing: closing must be a deliberate Cancel.
@@ -215,8 +222,18 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     const uploadAndPost = async (clipId: string, onlyMissing: boolean) => {
         const token = getToken();
         if (!token) { setError('You are signed out.'); setPhase('failed'); return; }
-        const targetId = target;
-        const targetName = resolution.kind === 'ok' ? resolution.channel.name : outgoing?.targetChannelName ?? '';
+        // THE APPROVED DESTINATION WINS. `target` is derived from the LIVE
+        // pin, which the owner can move between propose and post — and the
+        // approvers were told (and the server recorded) the channel at
+        // propose time. Posting to the live pin instead made the server
+        // reject an already-uploaded, fully-approved clip with "approved for
+        // a different channel", burning the approvals. The proposal carries
+        // the server-blessed id; the live resolution is only the fallback
+        // for the states where no proposal exists.
+        const approved = outgoing && outgoing.clipId === clipId ? outgoing : null;
+        const targetId = approved?.targetChannelId ?? target;
+        const targetName = approved?.targetChannelName
+            || (resolution.kind === 'ok' ? resolution.channel.name : '');
         if (targetId === null) { setError('No channel to post to.'); setPhase('failed'); return; }
         detachRef.current?.(); // the preview <video> unmounts with the phase change
         setPhase('uploading'); setError(null); setUploadRetryable(false);
@@ -372,6 +389,16 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                                 Buffered {formatClock(bufferedSeconds)} · you can clip up to {formatClock(maxSeconds)}
                                 {!replay.hasSystemAudio && <><br /><WarningIcon size={13} /> This buffer has no system audio — only your microphone.</>}
                             </p>
+                            {/* The dead end, announced BEFORE the seal is paid for
+                                (a seal doubles peak memory by design): a user who
+                                reads "no clips channel" only on the post screen
+                                already spent it. Same copy as the sealed phase. */}
+                            {!localOnly && policy.available && resolution.kind === 'pin-missing' && (
+                                <p className="clip-composer-hint"><WarningIcon size={13} /> This server has no clips channel yet — you can prepare a clip, but it cannot be posted until the owner picks one in Server Settings.</p>
+                            )}
+                            {!localOnly && policy.available && resolution.kind === 'pin-unpostable' && (
+                                <p className="clip-composer-hint"><WarningIcon size={13} /> You cannot post in this server&rsquo;s clips channel, so a prepared clip could not be posted.</p>
+                            )}
                         </div>
                         <div className="clip-composer-actions">
                             <button className="clip-btn secondary" onClick={onClose}>Cancel</button>
@@ -420,6 +447,11 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                                     <p className="clip-composer-hint" id="clip-target">#{resolution.channel.name} <span className="clip-composer-muted">(this server posts all clips to one channel)</span></p>
                                 ) : resolution.kind === 'loading' ? (
                                     <p className="clip-composer-hint" id="clip-target">Loading channels…</p>
+                                ) : resolution.kind === 'load-failed' ? (
+                                    <p className="clip-composer-hint" id="clip-target">
+                                        <WarningIcon size={13} /> Could not load this server&rsquo;s channels — check your connection.{' '}
+                                        <button className="clip-btn secondary" onClick={() => { setChannels(null); setChannelsFetchSeq(n => n + 1); }}>Retry</button>
+                                    </p>
                                 ) : resolution.kind === 'pin-missing' ? (
                                     <p className="clip-composer-hint" id="clip-target"><WarningIcon size={13} /> This server has no clips channel yet — the owner needs to pick one in Server Settings before clips can be posted. The clip stays in memory; Discard deletes it.</p>
                                 ) : (
@@ -437,7 +469,19 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                             ) : (
                                 <>
                                     <button className="clip-btn secondary" onClick={discard}>Discard</button>
-                                    <button className="clip-btn primary" onClick={() => void requestApproval()} disabled={!canRequest}>Request approval</button>
+                                    <button
+                                        className="clip-btn primary"
+                                        onClick={() => void requestApproval()}
+                                        disabled={!canRequest}
+                                        // The explanation is a section above; a
+                                        // dead button still owes a reason to a
+                                        // hover that never scrolled past it.
+                                        title={canRequest ? undefined
+                                            : resolution.kind === 'pin-missing' ? 'This server has no clips channel yet.'
+                                            : resolution.kind === 'pin-unpostable' ? 'You cannot post in this server’s clips channel.'
+                                            : resolution.kind === 'load-failed' ? 'The channel list could not be loaded.'
+                                            : 'Waiting for the channel list…'}
+                                    >Request approval</button>
                                 </>
                             )}
                         </div>

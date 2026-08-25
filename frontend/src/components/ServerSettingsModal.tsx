@@ -233,11 +233,20 @@ export function ServerSettingsModal({
 
     const handleSaveOverview = async () => {
         if (!isOwner) return;
-        // Clips-on-without-a-channel is not a state worth writing: members
+        // Clips-on-without-a-channel is not a state worth CREATING: members
         // would see the feature enabled and hit "no clips channel yet" at the
-        // composer. Block here with the reason; S1's server-side 400 is the
-        // backstop for clients older than this check.
-        if (clipsSupported && clipsEnabled && clipChannelId === null) {
+        // composer. But a server that is ALREADY in that state (configured
+        // under the old "let the clipper choose" default) must not have its
+        // whole Overview save hostage to it — the owner renaming the server
+        // would be told to configure clips they never touched. Block only
+        // saves that would create the state anew; preserving the legacy
+        // status quo saves fine, with the inline warning as the nudge.
+        // (Today this client check is the only gate: the server-side 400 for
+        // it ships with S1, the next backend release, alongside the 409 in
+        // propose_clip — until then an old client against an unpinned server
+        // can still post anywhere it can send.)
+        const legacyUnpinned = initialClipsEnabled && initialClipChannelId === null;
+        if (clipsSupported && clipsEnabled && clipChannelId === null && !legacyUnpinned) {
             setError('Choose a clips channel before turning clips on — members cannot post clips until you pick one.');
             return;
         }
@@ -446,10 +455,21 @@ export function ServerSettingsModal({
                                                     <option key={chan.id} value={chan.id}>#{chan.name}</option>
                                                 ))}
                                             </select>
-                                            {clipChannelId === null && (
+                                            {clipChannelId === null ? (
                                                 <span className="setting-help">
                                                     <WarningIcon size={13} /> Clips need one channel they always post
                                                     to. Until you pick one, members cannot post clips.
+                                                </span>
+                                            ) : textChannels.length > 0 && !textChannels.some(c => c.id === clipChannelId) && (
+                                                // The pin points at a channel the list no longer
+                                                // has (deleted, most likely). The select paints
+                                                // its placeholder for an unmatched value, so
+                                                // without this line the owner sees "no channel
+                                                // chosen" with no warning beside it — and every
+                                                // save 400s with a generic error.
+                                                <span className="setting-help">
+                                                    <WarningIcon size={13} /> The chosen clips channel no longer
+                                                    exists — pick another. Members cannot post clips until you do.
                                                 </span>
                                             )}
                                         </div>

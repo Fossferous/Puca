@@ -592,6 +592,41 @@ export const HOP_EDGE_QUANTUM_PX = 3;
 
 export type HopDir = 'left' | 'right' | 'up' | 'down';
 
+/**
+ * The push a clamped pan actually represents, per axis — or zero.
+ *
+ * "Proposed ≠ clamped" is NOT "pinned at an edge". `clampPanAxisWindow` has
+ * two regimes, and on an axis the scaled picture UNDERFILLS it ignores the
+ * proposal entirely and returns the centred constant — so on a portrait
+ * phone showing a landscape desktop (y underfills at nearly every usable
+ * zoom) every ordinary cursor move produced a residual whose sign merely
+ * said "above or below centre", and a quarter second of that hopped to a
+ * monitor nobody pushed toward. Pressure is only real on an axis the
+ * picture overfills, where the clamp genuinely ran out of pan room.
+ *
+ * `travel` is the finger/cursor movement to bank when the axis is pinned
+ * (the residual itself is a position; summing positions double-counts).
+ * Sign convention out: +x = the user is looking right, +y = down.
+ */
+export function hopPush(
+    box: Box, pict: Picture | null, scale: number,
+    proposed: { x: number; y: number },
+    clamped: { x: number; y: number },
+    travel: { x: number; y: number },
+): { pushX: number; pushY: number } {
+    if (!pict) return { pushX: 0, pushY: 0 };
+    const overX = scale * pict.dispW > box.w + 0.5;
+    const overY = scale * pict.dispH > box.h + 0.5;
+    const rx = proposed.x - clamped.x;
+    const ry = proposed.y - clamped.y;
+    return {
+        pushX: overX && rx < -0.5 ? Math.abs(travel.x)
+            : overX && rx > 0.5 ? -Math.abs(travel.x) : 0,
+        pushY: overY && ry < -0.5 ? Math.abs(travel.y)
+            : overY && ry > 0.5 ? -Math.abs(travel.y) : 0,
+    };
+}
+
 /** Accumulated intent to leave through one edge. `sign` on x: +1 = rightward
  *  (content pushed left, user looking right); on y: +1 = downward. */
 export interface HopPressure { axis: 'x' | 'y'; sign: 1 | -1; px: number; at: number }

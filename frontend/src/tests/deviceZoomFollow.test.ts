@@ -389,7 +389,7 @@ describe('captureSurfaceSize', () => {
 
 import {
     HOP_ADJACENCY_TOL_PX, HOP_PRESSURE_PX, HOP_PRESSURE_TTL_MS,
-    accumulateHopPressure, hopDirection, monitorNeighbour, remapAcrossBoundary,
+    accumulateHopPressure, hopDirection, hopPush, monitorNeighbour, remapAcrossBoundary,
 } from '../components/deviceZoomFollow';
 
 describe('accumulateHopPressure — one gesture, one direction, or start over', () => {
@@ -528,5 +528,65 @@ describe('remapAcrossBoundary — land just inside the shared edge, physically c
             fromMon: LEFT_MON, toMon: wideMon, dir: 'right', to: MON_VIEW, maxZoom: 8,
         });
         expect(next2.scale).toBeCloseTo(8, 5);
+    });
+});
+
+describe('hopPush — a clamp disagreement is only pressure on an axis that can pan', () => {
+    // The review-caught geometry: a portrait phone (390x820 surface) showing
+    // a landscape 1920x1080 capture. The picture letterboxes to 390x219.4;
+    // at scale 2 the y axis UNDERFILLS (438 < 820) and the clamp force-
+    // centres it — its residual is geometry, not intent — while x overfills
+    // (780 > 390) and can genuinely run out of room.
+    const PHONE = { w: 390, h: 820 };
+    const PICT = { offX: 0, offY: (820 - 219.375) / 2, dispW: 390, dispH: 219.375 };
+
+    it('an underfilled axis NEVER yields pressure, whatever the residual', () => {
+        // Cursor above centre: the solve proposes y far from the centred
+        // constant. Before the fix this banked a quantum per frame and
+        // hopped to the monitor "above" from a cursor mid-screen.
+        const { pushX, pushY } = hopPush(
+            PHONE, PICT, 2,
+            { x: -100, y: 400 }, { x: -100, y: 190 }, { x: 3, y: 3 },
+        );
+        expect(pushY).toBe(0);
+        expect(pushX).toBe(0); // x not pinned here either
+    });
+
+    it('an overfilled, pinned axis yields the travel with the looking-direction sign', () => {
+        // x overfills at scale 2; proposing further left than the bound
+        // (residual negative) means the user is looking RIGHT.
+        const { pushX } = hopPush(
+            PHONE, PICT, 2,
+            { x: -500, y: 190 }, { x: -390, y: 190 }, { x: 12, y: 0 },
+        );
+        expect(pushX).toBe(12);
+        // And the mirror: pinned at the other bound, looking LEFT.
+        const { pushX: back } = hopPush(
+            PHONE, PICT, 2,
+            { x: 60, y: 190 }, { x: 0, y: 190 }, { x: 12, y: 0 },
+        );
+        expect(back).toBe(-12);
+    });
+
+    it('no pin, no pressure; no picture, no pressure', () => {
+        const { pushX, pushY } = hopPush(
+            PHONE, PICT, 2,
+            { x: -100, y: 190 }, { x: -100, y: 190 }, { x: 12, y: 12 },
+        );
+        expect(pushX).toBe(0);
+        expect(pushY).toBe(0);
+        const blind = hopPush(PHONE, null, 2, { x: -500, y: 0 }, { x: 0, y: 0 }, { x: 12, y: 12 });
+        expect(blind).toEqual({ pushX: 0, pushY: 0 });
+    });
+
+    it('both axes overfilled and pinned: both report, accumulator picks the dominant', () => {
+        // Zoomed far enough that y overfills too (scale 8: 1755 > 820).
+        const deep = { offX: 0, offY: (820 - 219.375) / 2, dispW: 390, dispH: 219.375 };
+        const { pushX, pushY } = hopPush(
+            PHONE, deep, 8,
+            { x: -3000, y: -3500 }, { x: -2730, y: -3337.5 }, { x: 5, y: 9 },
+        );
+        expect(pushX).toBe(5);
+        expect(pushY).toBe(9);
     });
 });

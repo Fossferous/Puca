@@ -27,18 +27,30 @@
 
 use base64::Engine;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 pub struct ClipDesktopAudioState {
     pub is_capturing: AtomicBool,
     pub stop_signal: AtomicBool,
+    /// Which capture the state currently belongs to. The state is a process
+    /// singleton, and without an owner a FAILED start's cleanup could stop a
+    /// capture someone else had meanwhile started — review-caught: retry's
+    /// start loses the CAS race to a re-arm's, its teardown fires the global
+    /// stop, and the re-arm's healthy capture dies through the CLEAN exit
+    /// path, so no error event ever says so. Every event and the stop
+    /// command now carry the generation.
+    pub generation: AtomicU64,
 }
 
 impl Default for ClipDesktopAudioState {
     fn default() -> Self {
-        Self { is_capturing: AtomicBool::new(false), stop_signal: AtomicBool::new(false) }
+        Self {
+            is_capturing: AtomicBool::new(false),
+            stop_signal: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        }
     }
 }
 
@@ -49,6 +61,30 @@ struct ClipAudioDataEvent {
     channels: u32,
     bits_per_sample: u32,
     silent: bool,
+    /// Which capture produced this. The JS side drops events from a
+    /// generation it does not own — an old thread's tail (it can outlive its
+    /// stop signal by up to one 100ms wait) must not feed the new graph.
+    generation: u64,
+}
+
+/// What `start_clip_desktop_audio` resolves with. The desktop shell and its
+/// bundled frontend ship as ONE artifact (Tauri bundles dist/), so this shape
+/// can change freely with its caller — there is no cross-version skew on the
+/// invoke boundary.
+#[derive(Serialize, Clone)]
+pub struct ClipAudioStarted {
+    pub device_name: String,
+    pub generation: u64,
+}
+
+/// A capture death, attributed. `message` is the human string; `generation`
+/// lets the JS ignore a stale death that arrives after a successful retry
+/// (the capture thread clears `is_capturing` BEFORE it emits the error, so a
+/// successor can be fully started when the predecessor's error lands).
+#[derive(Serialize, Clone)]
+struct ClipAudioError {
+    message: String,
+    generation: u64,
 }
 
 /// Which render device should the loopback capture, given the friendly names
@@ -86,12 +122,17 @@ pub fn start_capture(
     app: AppHandle,
     state: Arc<ClipDesktopAudioState>,
     device_name: Option<String>,
-) -> Result<String, String> {
+) -> Result<ClipAudioStarted, String> {
     let mut waited_ms = 0u32;
     loop {
         match state.is_capturing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => break,
             Err(_) => {
+                // BOTH refusal paths return WITHOUT having claimed anything,
+                // and the caller must not clean up after them: someone else
+                // owns (or is about to own) the singleton, and the old
+                // unconditional stop-on-failure is exactly how a losing
+                // starter killed the winner's capture.
                 if !state.stop_signal.load(Ordering::SeqCst) {
                     return Err("Already capturing desktop audio".to_string());
                 }
@@ -104,6 +145,7 @@ pub fn start_capture(
         }
     }
     state.stop_signal.store(false, Ordering::SeqCst);
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
     // The ready channel carries the friendly name of the device the loop
     // actually opened, so the UI can name what the clip is listening to.
@@ -111,24 +153,38 @@ pub fn start_capture(
     let state_clone = state.clone();
     let emit_handle = app.clone();
     std::thread::spawn(move || {
-        let result = capture_loop(app, state_clone.clone(), device_name, ready_tx);
+        let result = capture_loop(app, state_clone.clone(), device_name, generation, ready_tx);
         state_clone.is_capturing.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             log::error!("Clip desktop audio capture error: {}", e);
-            let _ = emit_handle.emit("clip-audio-capture-error", e);
+            let _ = emit_handle
+                .emit("clip-audio-capture-error", ClipAudioError { message: e, generation });
         }
     });
 
     match ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
-        Ok(Ok(name)) => Ok(name),
+        Ok(Ok(name)) => Ok(ClipAudioStarted { device_name: name, generation }),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err("Desktop audio capture initialisation timed out".to_string()),
+        Err(_) => {
+            // WE claimed the singleton and our thread is wedged or slow
+            // mid-init: reclaim it ourselves, so the caller never needs the
+            // global stop on a failure path (see the refusal comment above —
+            // a failed start must never be able to stop anyone else).
+            state.stop_signal.store(true, Ordering::SeqCst);
+            Err("Desktop audio capture initialisation timed out".to_string())
+        }
     }
 }
 
+/// Signal the capture to stop — but only the capture the caller OWNS.
+/// `generation` from the start's reply; `None` stops whatever is running
+/// (the pre-generation behaviour, kept for teardown paths that genuinely
+/// mean "whatever it is, end it").
 #[cfg(windows)]
-pub fn stop_capture(state: Arc<ClipDesktopAudioState>) {
-    state.stop_signal.store(true, Ordering::SeqCst);
+pub fn stop_capture(state: Arc<ClipDesktopAudioState>, generation: Option<u64>) {
+    if generation.map_or(true, |g| g == state.generation.load(Ordering::SeqCst)) {
+        state.stop_signal.store(true, Ordering::SeqCst);
+    }
 }
 
 #[cfg(windows)]
@@ -136,6 +192,7 @@ fn capture_loop(
     app: AppHandle,
     state: Arc<ClipDesktopAudioState>,
     device_name: Option<String>,
+    generation: u64,
     ready: std::sync::mpsc::Sender<Result<String, String>>,
 ) -> Result<(), String> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
@@ -259,6 +316,7 @@ fn capture_loop(
                                 channels: 2,
                                 bits_per_sample: 32,
                                 silent: buffer_info.flags.silent,
+                                generation,
                             })
                             .is_err()
                         {
@@ -281,12 +339,12 @@ pub fn start_capture(
     _app: AppHandle,
     _state: Arc<ClipDesktopAudioState>,
     _device_name: Option<String>,
-) -> Result<String, String> {
+) -> Result<ClipAudioStarted, String> {
     Err("native desktop audio capture is only supported on Windows".into())
 }
 
 #[cfg(not(windows))]
-pub fn stop_capture(_state: Arc<ClipDesktopAudioState>) {}
+pub fn stop_capture(_state: Arc<ClipDesktopAudioState>, _generation: Option<u64>) {}
 
 #[cfg(test)]
 mod tests {

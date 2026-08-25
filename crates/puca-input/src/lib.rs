@@ -243,30 +243,44 @@ impl ClipRect {
 ///   deliberately. Only a clip entirely elsewhere — pointer provably unable to
 ///   reach any pixel the viewer can see — is a conflict.
 ///
-/// Pure and OS-free so it can be table-tested; `cursor_clip_conflict` is the
-/// thin OS shim that feeds it.
+/// Pure and OS-free so it can be table-tested; `cursor_clip_conflict_for` is
+/// the thin OS shim that feeds it.
 pub fn monitor_unreachable_under_clip(clip: ClipRect, monitor: ClipRect, virt: ClipRect) -> bool {
     if clip == virt {
+        return false;
+    }
+    // A monitor rect that does not intersect the desktop at all is a STALE
+    // snapshot (the screen was unplugged or re-arranged since the stream
+    // aimed at it) — unknowable, and unknowable must never become a banner.
+    if !monitor.intersects(&virt) {
         return false;
     }
     !clip.intersects(&monitor)
 }
 
-/// Read the live clip state against the CURRENT target monitor.
+/// Read the live clip state against ONE monitor — the one the asking
+/// SESSION streams, not the process-global input target (two concurrent
+/// sessions stream different screens, and the global answers only for
+/// whichever aimed last).
 ///
-/// `false` on every unknowable path (no target yet, the OS call failing):
+/// `false` on every unknowable path (the OS call failing, stale geometry):
 /// this feeds a banner asserting the machine is unreachable, and a probe
-/// hiccup must not paste that over a working session. All three rectangles
-/// come from the SAME process's GDI coordinate space — the target was built
-/// from this process's own `list_monitors` — so DPI virtualization cancels
-/// out instead of mattering.
+/// hiccup must not paste that over a working session. The monitor rect and
+/// `GetClipCursor` come from the SAME process's GDI coordinate space — the
+/// target was built from this process's own `list_monitors` — so DPI
+/// virtualization cancels out. The virtual-screen rect is read LIVE
+/// (`GetSystemMetrics`), never from the target snapshot: a display change
+/// makes the snapshot stale, and a stale `virt` broke the "no clip in
+/// force" equality — the unplugged-monitor false banner.
 ///
 /// Cheap enough for its caller's cadence (the app's 1 Hz `session_status`
-/// poll): one `user32` read, no allocation. Do not call it per input event.
+/// poll): two `user32` reads, no allocation. Do not call it per input event.
 #[cfg(windows)]
-pub fn cursor_clip_conflict() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::GetClipCursor;
-    let Some(t) = current_target() else { return false };
+pub fn cursor_clip_conflict_for(t: TargetMonitor) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClipCursor, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
     let mut r = windows::Win32::Foundation::RECT::default();
     if unsafe { GetClipCursor(&mut r) }.is_err() {
         return false;
@@ -278,17 +292,21 @@ pub fn cursor_clip_conflict() -> bool {
         right: t.left.saturating_add(t.width),
         bottom: t.top.saturating_add(t.height),
     };
-    let virt = ClipRect {
-        left: t.virt_left,
-        top: t.virt_top,
-        right: t.virt_left.saturating_add(t.virt_width),
-        bottom: t.virt_top.saturating_add(t.virt_height),
+    let (vl, vt, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
     };
+    let virt =
+        ClipRect { left: vl, top: vt, right: vl.saturating_add(vw), bottom: vt.saturating_add(vh) };
     monitor_unreachable_under_clip(clip, monitor, virt)
 }
 
 #[cfg(not(windows))]
-pub fn cursor_clip_conflict() -> bool {
+pub fn cursor_clip_conflict_for(_t: TargetMonitor) -> bool {
     // No ClipCursor equivalent is read on other platforms; "no conflict" is
     // the honest default, matching how session_status answers elsewhere.
     false
@@ -1166,6 +1184,15 @@ mod tests {
             monitor_unreachable_under_clip(flush_left, secondary, virt),
             "a clip flush against the boundary shares no pixel with the \
              secondary — still a conflict"
+        );
+        // A STALE monitor snapshot — the streamed screen was unplugged and
+        // its rect no longer intersects the live desktop. Unknowable, and
+        // before this guard it read as 'conflict' (the stale rect misses
+        // every live clip), blaming a fullscreen app for a missing screen.
+        let unplugged = ClipRect { left: 3840, top: 0, right: 5760, bottom: 1080 };
+        assert!(
+            !monitor_unreachable_under_clip(game_on_primary, unplugged, virt),
+            "a monitor outside the live desktop is stale geometry, not a conflict"
         );
     }
 

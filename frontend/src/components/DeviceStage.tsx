@@ -43,7 +43,7 @@ import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices
 import {
     HOP_COOLDOWN_MS, HOP_EDGE_QUANTUM_PX, HOP_MIN_SCALE, HOP_PRESSURE_PX, HOP_PRESSURE_TTL_MS,
     ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, accumulateHopPressure, captureSurfaceSize, caretBandFrom,
-    caretFollowTransform, clampPanTo, hopDirection,
+    caretFollowTransform, clampPanTo, hopDirection, hopPush,
     initialMonitorRequest, manualCompositeHoldActive,
     monitorNeighbour, monitorRegions, pickFollowTarget,
     remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
@@ -755,25 +755,28 @@ export function DeviceStage() {
         const top = box.offY + target.y * box.dispH;
         const rect = surface.getBoundingClientRect();
         // MONITOR-HOP dwell feed. The solve below wants the cursor centred;
-        // where the clamp refuses, the residual's SIGN says which edge the
-        // cursor is pressing (proposed further left than allowed = the user is
-        // looking right). No travel to measure — the residual is a position,
-        // and summing positions double-counts — so each pinned frame feeds a
-        // fixed quantum: ~a quarter second of holding against the edge trips
-        // the threshold. Read off transformRef: fine for detection (the exact
-        // solve stays inside the updater, as the comment above it demands).
+        // hopPush decides whether the clamp's refusal is a real edge (the
+        // axis overfills and ran out of pan room) or the underfill regime's
+        // forced centring, which says nothing about intent — the distinction
+        // that stops a portrait phone hopping monitors from ordinary cursor
+        // moves. Each genuinely-pinned frame banks a fixed quantum (~a
+        // quarter second against the edge trips the threshold). Read off
+        // transformRef: fine for detection (the exact solve stays inside the
+        // updater, as the comment above it demands).
         {
             const t0 = transformRef.current;
             if (t0.scale > 1) {
                 const propX = rect.width * 0.5 - left * t0.scale;
                 const propY = rect.height * 0.5 - top * t0.scale;
                 const c0 = clampPan(v, rect, t0.scale, propX, propY);
-                const rx = propX - c0.x;
-                const ry = propY - c0.y;
-                feedHopPressure(
-                    rx < -0.5 ? HOP_EDGE_QUANTUM_PX : rx > 0.5 ? -HOP_EDGE_QUANTUM_PX : 0,
-                    ry < -0.5 ? HOP_EDGE_QUANTUM_PX : ry > 0.5 ? -HOP_EDGE_QUANTUM_PX : 0,
+                const { pushX, pushY } = hopPush(
+                    { w: rect.width, h: rect.height },
+                    pictureBox(v.videoWidth, v.videoHeight, rect.width, rect.height),
+                    t0.scale,
+                    { x: propX, y: propY }, { x: c0.x, y: c0.y },
+                    { x: HOP_EDGE_QUANTUM_PX, y: HOP_EDGE_QUANTUM_PX },
                 );
+                feedHopPressure(pushX, pushY);
             }
         }
         setTransform(prev => {
@@ -1243,6 +1246,12 @@ export function DeviceStage() {
                 remap: (to: ZoomView) => { scale: number; x: number; y: number },
             ) => {
                 expectedAutoMonitorRef.current = expectMonitor;
+                // EVERY kind of switch consumes the pressure — not only the
+                // hop branch. Pressure left hot across a zoom-follow switch
+                // discharged on the next unrelated transform change, chaining
+                // a monitor hop onto the back of a switch the user did ask
+                // for, with no gesture in between.
+                hopPressureRef.current = null;
                 pendingFollowRef.current = {
                     expectMonitor, becomes, remap,
                     fromVw: v.videoWidth, fromVh: v.videoHeight,
@@ -1309,7 +1318,15 @@ export function DeviceStage() {
                 const p = hopPressureRef.current;
                 const now = performance.now();
                 if (!p || p.px < HOP_PRESSURE_PX || now - p.at > HOP_PRESSURE_TTL_MS) return;
-                if (now - lastHopAtRef.current < HOP_COOLDOWN_MS) return;
+                if (now - lastHopAtRef.current < HOP_COOLDOWN_MS) {
+                    // Swallowed by the cooldown: DISCARD rather than park.
+                    // Parked pressure would fire on the next unrelated
+                    // transform change inside the TTL — a second hop the
+                    // user's finger stopped asking for; a hop after a hop
+                    // must need fresh pushes.
+                    hopPressureRef.current = null;
+                    return;
+                }
                 const dir = hopDirection(p);
                 const neighbour = monitorNeighbour(s.monitors, s.activeMonitor, dir);
                 if (neighbour === null) return;
@@ -2085,28 +2102,32 @@ export function DeviceStage() {
 
                 // MONITOR-HOP travel feed — a two-finger PAN (deltaScale ~1;
                 // a real pinch changes the focal maths and its "blocked"
-                // residual means nothing) whose motion the clamp refused.
-                // The magnitude is the FINGER's travel — motion the user made
-                // that the view could not follow — and the residual's sign
-                // says which edge (proposed further left than allowed = they
-                // are looking right). Computed OUTSIDE the updater from
-                // transformRef, which is exact here: with ratio 1 the
+                // residual means nothing) whose motion the clamp refused. The
+                // magnitude is the FINGER's travel — motion the user made
+                // that the view could not follow — and hopPush keeps the
+                // underfilled axis's forced-centring residual from counting
+                // as an edge (the axis a vertical phone swipe visibly cannot
+                // pan must not hop a monitor). Computed OUTSIDE the updater
+                // from transformRef, which is exact here: with ratio 1 the
                 // proposed pan is just t.x + fingerDx, and updaters must stay
                 // side-effect-free (StrictMode runs them twice).
                 {
                     const t0 = transformRef.current;
                     const surface0 = surfaceRef.current;
-                    if (Math.abs(deltaScale - 1) < 0.02 && t0.scale > 1 && surface0) {
+                    const v0 = videoRef.current;
+                    if (Math.abs(deltaScale - 1) < 0.02 && t0.scale > 1 && surface0 && v0) {
                         const rect0 = surface0.getBoundingClientRect();
                         const fdx = center.x - prev.center.x;
                         const fdy = center.y - prev.center.y;
-                        const c0 = clampPan(videoRef.current, rect0, t0.scale, t0.x + fdx, t0.y + fdy);
-                        const rx = (t0.x + fdx) - c0.x;
-                        const ry = (t0.y + fdy) - c0.y;
-                        feedHopPressure(
-                            rx < -0.5 ? Math.abs(fdx) : rx > 0.5 ? -Math.abs(fdx) : 0,
-                            ry < -0.5 ? Math.abs(fdy) : ry > 0.5 ? -Math.abs(fdy) : 0,
+                        const c0 = clampPan(v0, rect0, t0.scale, t0.x + fdx, t0.y + fdy);
+                        const { pushX, pushY } = hopPush(
+                            { w: rect0.width, h: rect0.height },
+                            pictureBox(v0.videoWidth, v0.videoHeight, rect0.width, rect0.height),
+                            t0.scale,
+                            { x: t0.x + fdx, y: t0.y + fdy }, { x: c0.x, y: c0.y },
+                            { x: fdx, y: fdy },
                         );
+                        feedHopPressure(pushX, pushY);
                     }
                 }
 

@@ -168,7 +168,7 @@ mod tests {
     fn the_ts_listener_hears_the_event_this_file_emits() {
         let client = include_str!("../../src/api/devices/session.ts");
         assert!(
-            client.len() > 10_000,
+            client.len() > 100_000,
             "that is not the real session.ts ({} bytes) — the path is wrong and \
              this test is checking nothing",
             client.len()

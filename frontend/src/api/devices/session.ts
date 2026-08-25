@@ -1700,9 +1700,13 @@ export async function pollLockedFollow(): Promise<void> {
 }
 
 let secureDesktopPollBusy = false;
+/** An out-of-band nudge (the unlock event) that landed while a pass was in
+ *  flight. Dropped, it would silently degrade back to the next-tick latency
+ *  the event exists to remove; queued, the finishing pass re-runs once. */
+let secureDesktopPollAgain = false;
 async function pollSecureDesktop(): Promise<void> {
     if (sessions.size === 0) return;
-    if (secureDesktopPollBusy) return;
+    if (secureDesktopPollBusy) { secureDesktopPollAgain = true; return; }
     secureDesktopPollBusy = true;
     try {
         const hosts = [...sessions.values()].filter(
@@ -1764,6 +1768,10 @@ async function pollSecureDesktop(): Promise<void> {
         }
     } finally {
         secureDesktopPollBusy = false;
+        if (secureDesktopPollAgain) {
+            secureDesktopPollAgain = false;
+            void pollSecureDesktop();
+        }
     }
 }
 

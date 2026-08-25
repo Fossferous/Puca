@@ -8,7 +8,7 @@
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import { isTauri } from '../api/platform';
-import { CLIP_PRESETS, clipPreset, estimateRing, formatClock, formatMB, maxRingBytesForBudget, memoryBudgetBytes, MIB, presetBytesPerSecond } from '../api/clips/clipPresets';
+import { CLIP_PRESETS, clipPreset, estimateRing, formatClock, formatMB, maxRingBytesForBudget, memoryBudgetBytes, MIB, presetMbPerMinute } from '../api/clips/clipPresets';
 import { setClipMicGain } from '../api/clips/replayBuffer';
 import { getClipUsage, type ClipUsage } from '../api/clips/clipUpload';
 import { useServers } from '../hooks/queries';
@@ -78,13 +78,17 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                     <label>Buffer length</label>
                     <span className="option-hint">
                         How much is kept, rolling. Each server caps how long a posted clip may be
-                        {serverCaps.length > 0 && <>: {serverCaps.map(c => `${c.name} ${formatClock(c.maxSeconds)}`).join(' · ')}</>}.
+                        {serverCaps.length > 0 && <>: {
+                            // Bounded — a hint, not a directory. Someone in
+                            // fifteen servers gets the first few and a count.
+                            serverCaps.slice(0, 4).map(c => `${c.name} ${formatClock(c.maxSeconds)}`).join(' · ')
+                        }{serverCaps.length > 4 && ` · +${serverCaps.length - 4} more`}</>}.
                     </span>
                 </div>
                 <select value={settings.clipBufferSeconds ?? 300} onChange={(e) => updateSetting('clipBufferSeconds', parseInt(e.target.value))}>
                     {BUFFER_LENGTH_OPTIONS.map(s => (
                         <option key={s} value={s}>
-                            {lengthLabel(s)} (≈ {formatMB(s * presetBytesPerSecond(preset))})
+                            {lengthLabel(s)} (≈ {formatMB((s / 60) * presetMbPerMinute(preset) * MIB)})
                         </option>
                     ))}
                 </select>

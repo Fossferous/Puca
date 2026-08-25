@@ -146,12 +146,26 @@ describe('ServerSettingsModal — Clips', () => {
         expect(listChannels).toHaveBeenCalledWith('s1');
     });
 
-    it('REFUSES to save clips-on with no channel, and says why', async () => {
-        await open({ initialClipsEnabled: true, initialClipMaxSeconds: 120, initialClipChannelId: null });
+    it('REFUSES to CREATE clips-on with no channel, and says why', async () => {
+        await open({ initialClipsEnabled: false, initialClipChannelId: null });
+        const toggle = labelWith('Allow clips')!.querySelector('input')!;
+        await act(async () => { toggle.click(); });
 
         await save();
-        expect(updateServerSettings, 'the broken state must never reach the wire').not.toHaveBeenCalled();
+        expect(updateServerSettings, 'the broken state must never be created over the wire').not.toHaveBeenCalled();
         expect(container.textContent).toContain('Choose a clips channel before turning clips on');
+    });
+
+    it('a LEGACY enabled-but-unpinned server can still save unrelated Overview changes', async () => {
+        // Configured under the old "let the clipper choose" default. The
+        // required-pin rule must not hold a rename hostage to a clips field
+        // the owner never touched — the inline warning is the nudge, and S1's
+        // server-side enforcement is the gate that matters for posting.
+        await open({ initialClipsEnabled: true, initialClipMaxSeconds: 120, initialClipChannelId: null });
+        await save();
+        expect(updateServerSettings).toHaveBeenCalledTimes(1);
+        const [, body] = updateServerSettings.mock.calls[0] as unknown as [string, Record<string, unknown>];
+        expect(body).toMatchObject({ clips_enabled: true, clip_channel_id: 0 });
     });
 
     it('POSITIVE CONTROL: the same save goes through once a channel is picked', async () => {

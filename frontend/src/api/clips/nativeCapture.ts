@@ -137,6 +137,11 @@ interface ClipAudioDataEvent {
     channels: number;
     bits_per_sample: number;
     silent: boolean;
+    /** Which capture produced this (clip_desktop_audio.rs). Events from a
+     *  generation this handle does not own are dropped — an old capture
+     *  thread can outlive its stop signal by up to one 100ms wait, and its
+     *  tail must not feed (or error) the replacement. */
+    generation?: number;
 }
 
 const JITTER_S = 0.05;
@@ -203,8 +208,18 @@ export async function startNativeSystemAudioTrack(
     dest.channelCount = 2;
     let playhead = 0;
 
+    // Set once the start resolves. Events carrying a DIFFERENT generation are
+    // another capture's (a predecessor's tail, or a successor after this one
+    // lost an ownership race) and are dropped. Events arriving before the
+    // start resolves are accepted — the worst pre-resolve mistake is <100ms
+    // of the old device's PCM into a graph nobody is recording from yet.
+    let myGeneration: number | null = null;
+    const foreign = (g: number | undefined): boolean =>
+        typeof g === 'number' && myGeneration !== null && g !== myGeneration;
+
     const unlistenData = await listen<ClipAudioDataEvent>('clip-audio-data', (event) => {
         try {
+            if (foreign(event.payload.generation)) return;
             const { data, sample_rate, channels } = event.payload;
             const bytes = base64ToBytes(data);
             const interleaved = new Float32Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 4));
@@ -228,7 +243,16 @@ export async function startNativeSystemAudioTrack(
         }
     });
     const unlistenError = onError
-        ? await listen<string>('clip-audio-capture-error', (e) => onError(e.payload))
+        ? await listen<{ message?: string; generation?: number }>(
+            'clip-audio-capture-error',
+            (e) => {
+                // A stale death — the OLD thread's error landing after a
+                // successful retry — must not flip a healthy capture to
+                // 'died'. That ordering is real: the capture thread clears
+                // its claim BEFORE emitting the error.
+                if (foreign(e.payload?.generation)) return;
+                onError(typeof e.payload?.message === 'string' ? e.payload.message : String(e.payload));
+            })
         : null;
 
     const teardown = async () => {
@@ -237,18 +261,37 @@ export async function startNativeSystemAudioTrack(
         window.removeEventListener('keydown', nudge);
         unlistenData();
         unlistenError?.();
-        try { await invoke('stop_clip_desktop_audio'); } catch { /* already stopped */ }
+        // Stop ONLY the capture this handle owns. A start that never
+        // succeeded owns nothing, and the old unconditional stop here is
+        // exactly how a start that lost the singleton race killed the
+        // winner's capture through the clean exit path — no error event, a
+        // session claiming system audio while recording none. The one failed
+        // start that DID claim (the init timeout) reclaims itself Rust-side.
+        // A missing generation on a SUCCESSFUL start degrades to the
+        // unconditional stop (Rust treats absence that way) — owning a
+        // capture without its number must still be able to end it.
+        if (started) {
+            try {
+                await invoke('stop_clip_desktop_audio', { generation: myGeneration });
+            } catch { /* already stopped */ }
+        }
         ctx.close().catch(() => { /* already closed */ });
     };
 
     let capturedName: string | null = null;
+    let started = false;
     try {
-        // An older shell ignores the extra arg and answers `null`-ish (its
-        // command returns unit) — `typeof` guards the name either way.
-        const reply = await invoke<unknown>('start_clip_desktop_audio', {
-            deviceName: deviceName ?? null,
-        });
-        capturedName = typeof reply === 'string' && reply ? reply : null;
+        // The desktop shell bundles this frontend (one artifact), so the
+        // reply shape versions with us; the guards are against a malformed
+        // reply, not skew.
+        const reply = await invoke<{ device_name?: unknown; generation?: unknown }>(
+            'start_clip_desktop_audio',
+            { deviceName: deviceName ?? null },
+        );
+        started = true;
+        capturedName = typeof reply?.device_name === 'string' && reply.device_name
+            ? reply.device_name : null;
+        myGeneration = typeof reply?.generation === 'number' ? reply.generation : null;
     } catch (e) {
         await teardown();
         throw e instanceof Error ? e : new Error(String(e));

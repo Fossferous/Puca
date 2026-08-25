@@ -103,15 +103,17 @@ fn stop_clip_video_capture() {}
 /// device whose friendly name best matches, instead of whatever the DEFAULT
 /// output happens to be — the user who picked a headset in Settings hears the
 /// game there, and a clip that recorded the (silent) speakers instead reads
-/// as "clip audio is broken". Returns the friendly name actually captured so
-/// the UI can say which device the clip is listening to.
+/// as "clip audio is broken". Resolves with the friendly name actually
+/// captured plus the capture GENERATION the caller now owns (see
+/// clip_desktop_audio.rs — the state is a process singleton and ownership is
+/// what stops a failed start's cleanup killing someone else's capture).
 #[cfg(windows)]
 #[tauri::command]
 async fn start_clip_desktop_audio(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<ClipDesktopAudioState>>,
     device_name: Option<String>,
-) -> Result<String, String> {
+) -> Result<clip_desktop_audio::ClipAudioStarted, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         clip_desktop_audio::start_capture(app_handle, state, device_name)
@@ -121,18 +123,25 @@ async fn start_clip_desktop_audio(
 }
 #[cfg(not(windows))]
 #[tauri::command]
-async fn start_clip_desktop_audio(_device_name: Option<String>) -> Result<String, String> {
+async fn start_clip_desktop_audio(
+    _device_name: Option<String>,
+) -> Result<clip_desktop_audio::ClipAudioStarted, String> {
     Err("native desktop audio capture is only supported on Windows".into())
 }
 
+/// `generation` (JS: `generation`): stop only the capture the caller owns —
+/// absent means "whatever is running" (a whole-session teardown).
 #[cfg(windows)]
 #[tauri::command]
-fn stop_clip_desktop_audio(state: tauri::State<'_, Arc<ClipDesktopAudioState>>) {
-    clip_desktop_audio::stop_capture(state.inner().clone());
+fn stop_clip_desktop_audio(
+    state: tauri::State<'_, Arc<ClipDesktopAudioState>>,
+    generation: Option<u64>,
+) {
+    clip_desktop_audio::stop_capture(state.inner().clone(), generation);
 }
 #[cfg(not(windows))]
 #[tauri::command]
-fn stop_clip_desktop_audio() {}
+fn stop_clip_desktop_audio(_generation: Option<u64>) {}
 
 // start_system_audio_capture ("all audio except Puca") is REMOVED, not
 // broken: WASAPI's exclude-mode loopback only filters audio sessions created

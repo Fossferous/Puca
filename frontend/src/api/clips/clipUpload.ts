@@ -142,9 +142,14 @@ export interface ClipUsage {
  * wire shape `{used_bytes, quota_bytes}` (upload_handlers::clip_usage; the
  * snake_case names are the Rust side's serde output, pinned there).
  *
- * `null` on ANY failure, including the 404 a server predating the route
- * answers — the readout renders nothing rather than an error, so this ships
- * order-independently of the server release that adds the endpoint.
+ * `null` on ANY failure. On a server predating the route the path does not
+ * even miss cleanly — axum matches it into `GET /clips/:clip_id` with
+ * clip_id "usage", whose proposal lookup 404s — but every non-2xx lands in
+ * the same null, so the readout renders nothing rather than an error and
+ * this ships order-independently of the server release that adds the
+ * endpoint. S1 NOTE: register `/clips/usage` BEFORE `/clips/:clip_id`
+ * (exactly like the existing `/clips/pending` note in main.rs) or the
+ * static segment is shadowed forever and this stays null on new servers too.
  */
 export async function getClipUsage(
     o: Pick<UploadOptions, 'baseUrl' | 'token' | 'fetchImpl'>,

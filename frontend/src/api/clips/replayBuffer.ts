@@ -464,6 +464,17 @@ export async function arm(opts: { repick?: boolean } = {}): Promise<void> {
             // The user hit Chromium's "Stop sharing" — a dead recorder must not claim to be armed.
             if (session === s) { void disarm('capture-ended'); emit({ notice: 'Screen capture ended — the clip buffer is off.' }); }
         });
+        // The picker path's mirror of armNative's onAudioError: a system-audio
+        // track that ends mid-buffer (audio share stopped, device change) must
+        // flip the flags, or the session keeps recording mic-only clips that
+        // claim game audio — verbatim the native-path bug just fixed.
+        sysTrack?.addEventListener('ended', () => {
+            if (session !== s) return;
+            emit({
+                hasSystemAudio: false, systemAudioLost: 'died', systemAudioDevice: null,
+                notice: 'System audio ended — new footage has your microphone only.',
+            });
+        });
         emit({ hasSystemAudio: !!sysTrack, hasMic: !!micTrack, width, height, notice: sysTrack ? null : 'No system audio — pick "Entire screen" and turn on "Also share system audio", or keep mic only.' });
     } catch (e) {
         await disarm('arm-failed');

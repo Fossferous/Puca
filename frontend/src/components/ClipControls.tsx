@@ -187,7 +187,13 @@ export function ClipStatusRow() {
         case 'error': text = r.error ? `Clip buffer stopped: ${r.error}` : 'Clip buffer stopped.'; cls = 'error'; break;
         default: text = '';
     }
-    const showNoAudio = r.phase !== 'idle' && r.phase !== 'error' && !r.hasSystemAudio && r.notice;
+    // Gated on the DURABLE flag, not only the notice: `notice` is a shared
+    // slot that unrelated worker messages overwrite (a lossless capture
+    // reconfigure emits `notice: null`), and gating recovery on it made the
+    // Retry control vanish while the buffer silently kept recording mic-only.
+    // The picker's pre-flag arm still reaches this through `notice`.
+    const showNoAudio = r.phase !== 'idle' && r.phase !== 'error' && !r.hasSystemAudio
+        && (r.systemAudioLost !== null || !!r.notice);
     return (
         <div className={`voice-clip-status ${cls} ${showNoAudio ? 'warn' : ''}`}>
             {/* The live-updating counter must not be a screen-reader firehose:
@@ -221,7 +227,16 @@ export function ClipStatusRow() {
                         session keeps "Pick again": re-running the dialog is
                         its one recovery, and always was. */}
                     {r.captureReason === null ? (
-                        <button className="voice-clip-link" onClick={() => void arm({ repick: true })}>Pick again</button>
+                        <button
+                            className="voice-clip-link"
+                            disabled={audioBusy}
+                            onClick={() => {
+                                setAudioBusy(true);
+                                arm({ repick: true })
+                                    .catch((e) => console.warn('[clips] repick failed:', e))
+                                    .finally(() => setAudioBusy(false));
+                            }}
+                        >Pick again (clears current footage)</button>
                     ) : r.hasMic || r.hasSystemAudio ? (
                         <button
                             className="voice-clip-link"
@@ -248,6 +263,14 @@ export function ClipStatusRow() {
                         >Restart buffer (clears current footage)</button>
                     )}
                 </span>
+            )}
+            {/* The notice TEXT, which nothing rendered before — it was only a
+                boolean gate, so "Could not arm: <the reason>" after a failed
+                restart left a bare "Clip buffer off" and the reason in a
+                console nobody reads. Suppressed while showNoAudio carries its
+                own copy for the same condition. */}
+            {!showNoAudio && r.notice && (
+                <span className="voice-clip-notice"><WarningIcon size={14} /> {r.notice}</span>
             )}
             {r.phase === 'error' && (
                 <button className="voice-clip-link" onClick={() => void arm()}>Retry</button>
