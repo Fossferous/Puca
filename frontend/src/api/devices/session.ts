@@ -2822,6 +2822,15 @@ export function installDeviceSessions(): void {
                 // sign-in screen coming up; its return is the wake path's job.
                 if (e?.payload?.reason === 'lock') void handleConsoleLock();
             });
+            // The unlock twin (session_events.rs UNLOCK_EVENT, pinned by a
+            // test there). Purely a latency nudge: the poll below already
+            // runs at 1 Hz and is edge-triggered + busy-guarded, so calling
+            // it out of band is free — but it is the difference between the
+            // controller's secure-desktop banner clearing the instant the
+            // PIN lands and clearing on the next tick.
+            await listen('system-session-unlock', () => {
+                void pollSecureDesktop();
+            });
         } catch {
             // Not Tauri, or the event API is unavailable.
         }

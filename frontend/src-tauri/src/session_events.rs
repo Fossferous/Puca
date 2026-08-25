@@ -1,11 +1,21 @@
-//! System suspend / session lock notifications for the frontend.
+//! System suspend / session lock / session unlock notifications for the
+//! frontend.
 //!
 //! Emits the Tauri event `system-suspend-or-lock` (payload `{ reason }`,
 //! `"suspend"` or `"lock"`) so features that keep sensitive material in memory
-//! can drop it before the machine hibernates or the console locks. Today's one
-//! consumer is the clip replay buffer (frontend/src/api/clips/replayBuffer.ts,
-//! docs/CLIPS.md): a hibernation writes all of RAM to `hiberfil.sys`, so the
-//! buffer must not survive it.
+//! can drop it before the machine hibernates or the console locks. Consumers:
+//! the clip replay buffer (frontend/src/api/clips/replayBuffer.ts,
+//! docs/CLIPS.md — a hibernation writes all of RAM to `hiberfil.sys`, so the
+//! buffer must not survive it) and the device-session lock handover
+//! (session.ts `handleConsoleLock`).
+//!
+//! The unlock direction is a SEPARATE event, `system-session-unlock`, not a
+//! third reason on the first one. The lock event's consumers destroy things
+//! (wipe the clip ring, end sessions); widening its meaning would hand every
+//! existing listener a reason string it never planned for on the one code
+//! path where acting wrongly is destructive. Unlock's only consumer nudges a
+//! poll that already runs at 1 Hz (session.ts), so the two events also carry
+//! opposite stakes and deserve opposite blast radii.
 //!
 //! Mechanism: a HIDDEN TOP-LEVEL window on its own thread with a message loop.
 //! It has to be a real top-level window, not a message-only one — Windows
@@ -33,9 +43,17 @@ pub mod windows_impl {
     const PBT_APMSUSPEND: usize = 0x0004;
     const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
     const NOTIFY_FOR_THIS_SESSION: u32 = 0;
+    const WTS_CONSOLE_CONNECT: u32 = 1;
     const WTS_CONSOLE_DISCONNECT: u32 = 2;
+    const WTS_REMOTE_CONNECT: u32 = 3;
     const WTS_REMOTE_DISCONNECT: u32 = 4;
     const WTS_SESSION_LOCK: u32 = 7;
+    const WTS_SESSION_UNLOCK: u32 = 8;
+
+    /// The unlock event's name, shared with the one place that emits it and
+    /// pinned against the TS listener by the test below. See the module header
+    /// for why this is not a third `system-suspend-or-lock` reason.
+    pub const UNLOCK_EVENT: &str = "system-session-unlock";
 
     static APP: OnceLock<AppHandle> = OnceLock::new();
 
@@ -58,8 +76,12 @@ pub mod windows_impl {
     }
 
     fn emit(reason: &'static str) {
+        emit_on("system-suspend-or-lock", reason);
+    }
+
+    fn emit_on(event: &str, reason: &'static str) {
         if let Some(app) = APP.get() {
-            if let Err(e) = app.emit("system-suspend-or-lock", Payload { reason }) {
+            if let Err(e) = app.emit(event, Payload { reason }) {
                 log::warn!("[session-events] emit failed: {e:?}");
             } else {
                 log::info!("[session-events] {reason}");
@@ -77,6 +99,13 @@ pub mod windows_impl {
                 let code = wparam.0 as u32;
                 if code == WTS_SESSION_LOCK || code == WTS_CONSOLE_DISCONNECT || code == WTS_REMOTE_DISCONNECT {
                     emit("lock");
+                }
+                // The exact mirror of the line above: the lock side counts
+                // disconnects as locks, so the resume side counts connects as
+                // unlocks — a session that came back over RDP deserves the
+                // same fast re-poll as one whose owner typed a PIN.
+                if code == WTS_SESSION_UNLOCK || code == WTS_CONSOLE_CONNECT || code == WTS_REMOTE_CONNECT {
+                    emit_on(UNLOCK_EVENT, "unlock");
                 }
                 LRESULT(0)
             }
@@ -126,4 +155,29 @@ pub mod windows_impl {
     /// No suspend/lock feed off Windows yet; the frontend treats a missing event
     /// as "not wired" and keeps its other wipe paths.
     pub fn start(_app: tauri::AppHandle) {}
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    /// The unlock event is one wire contract compiled twice: this file emits
+    /// it, session.ts listens for it. A drifted name fails SILENTLY — the
+    /// emit succeeds, the listener never fires, and unlock resume degrades to
+    /// the 1 Hz poll with nothing logged anywhere. Reading the OTHER end's
+    /// source is the only check that can catch that (caret_wire.rs pattern).
+    #[test]
+    fn the_ts_listener_hears_the_event_this_file_emits() {
+        let client = include_str!("../../src/api/devices/session.ts");
+        assert!(
+            client.len() > 10_000,
+            "that is not the real session.ts ({} bytes) — the path is wrong and \
+             this test is checking nothing",
+            client.len()
+        );
+        assert!(
+            client.contains(&format!("listen('{}'", super::windows_impl::UNLOCK_EVENT)),
+            "session.ts no longer listens for {:?}; the two ends of the unlock \
+             contract have drifted",
+            super::windows_impl::UNLOCK_EVENT
+        );
+    }
 }

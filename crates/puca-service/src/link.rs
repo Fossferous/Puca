@@ -302,18 +302,45 @@ use std::sync::Arc;
 /// arbitrary points (between frames, mid-backoff) and only ever wants the
 /// LATEST answer. A queue would make it act on a stale one — e.g. connecting
 /// because a lock event arrived, after the unlock that superseded it.
+///
+/// The `Notify` beside it exists for one measured delay: with only the atomic,
+/// `run_socket` could not learn about an unlock until the next frame arrived,
+/// and between frames the only guaranteed traffic is the server's 15-second
+/// ping. The person had typed their PIN and was LOOKING at their desktop while
+/// the handover waited on a ping. The notify is a wake-up, never the answer —
+/// every woken path re-reads `wants_up()`, so a stale or spurious wake costs
+/// one loop iteration, and a missed one (the SCM flipping the flag in the gap
+/// before a waiter registers) degrades to exactly the old ping-bounded wait.
 #[derive(Clone, Default)]
-pub struct LinkGate(Arc<AtomicBool>);
+pub struct LinkGate(Arc<GateInner>);
+
+#[derive(Default)]
+struct GateInner {
+    up: AtomicBool,
+    changed: tokio::sync::Notify,
+}
 
 impl LinkGate {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
+        Self::default()
     }
     pub fn set(&self, up: bool) {
-        self.0.store(up, Ordering::SeqCst);
+        // Wake waiters ONLY on a real change. The worker loop re-asserts the
+        // gate on every liveness tick (main.rs) as belt and braces; waking the
+        // socket's select on each of those would turn a quiet connection into
+        // a permanent low-frequency spin.
+        let prev = self.0.up.swap(up, Ordering::SeqCst);
+        if prev != up {
+            self.0.changed.notify_waiters();
+        }
     }
     pub fn wants_up(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.up.load(Ordering::SeqCst)
+    }
+    /// Resolves when `set` next CHANGES the answer. Callers must treat this as
+    /// a hint and re-read `wants_up()` — see the type-level comment.
+    pub async fn changed(&self) {
+        self.0.changed.notified().await;
     }
 }
 
@@ -563,13 +590,14 @@ async fn fetch_ice_servers(cfg: &LinkConfig, token: &str) -> serde_json::Value {
 
 /// Hold one socket until it dies or the gate closes. `Ok(())` on a clean end.
 ///
-/// GATE CHECKED ON EVERY FRAME, not only at connect. The console can unlock at
-/// any moment, and the rule this service is built on — never hold a connection
-/// while somebody is using the machine — is only true if it can drop one
-/// mid-stream. `tokio::select!` on the gate would be tidier but needs a
-/// notification primitive; the server pings every 15s, so a check per frame
-/// bounds the delay to that, which is well inside the time it takes a user to
-/// do anything after unlocking.
+/// GATE CHECKED ON EVERY FRAME **and** the loop selects on `gate.changed()`,
+/// so an unlock interrupts the wait instead of riding out the gap to the next
+/// frame. The console can unlock at any moment, and the rule this service is
+/// built on — never hold a connection while somebody is using the machine — is
+/// only true if it can drop one mid-stream. The per-frame `wants_up()` check
+/// stays even with the notify: it is the truth the wake-up merely points at,
+/// and it is what bounds a missed notification to the server's 15-second ping
+/// (the pre-notify behaviour) rather than forever.
 pub async fn run_socket(
     cfg: &LinkConfig,
     token: &str,
@@ -599,7 +627,17 @@ pub async fn run_socket(
     // being locked rather than only for the first day.
     let opened = std::time::Instant::now();
 
-    while let Some(frame) = ws.next().await {
+    loop {
+        // `None` from the gate arm means "woken, no frame": fall through to
+        // the checks below with nothing to process. The frame arm ending the
+        // stream breaks out to the same clean return the old `while let` had.
+        let frame = tokio::select! {
+            maybe = ws.next() => match maybe {
+                Some(f) => Some(f),
+                None => break,
+            },
+            _ = gate.changed() => None,
+        };
         if opened.elapsed() >= REFRESH_EVERY {
             crate::log::line("[link] re-dialling to pick up a renewed token");
             let _ = ws.close(None).await;
@@ -625,6 +663,7 @@ pub async fn run_socket(
             let _ = ws.close(None).await;
             return Ok(());
         }
+        let Some(frame) = frame else { continue };
         let msg = frame.map_err(|e| format!("socket error: {e}"))?;
         let text = match msg {
             Message::Text(t) => t,
@@ -1067,8 +1106,14 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
     loop {
         if !gate.wants_up() {
             // Somebody is using the machine. Nothing to do, and deliberately no
-            // socket while that is true.
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // socket while that is true. The select means a lock starts the
+            // connect immediately instead of paying up to 2s of this nap; the
+            // sleep stays as the fallback for a wake-up lost to the register
+            // race (see `LinkGate`).
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = gate.changed() => {}
+            }
             continue;
         }
         if !is_enrolled() {
@@ -1362,6 +1407,39 @@ mod tests {
         // `true` that preceded it. This is why it is an atomic and not a queue.
         gate.set(false);
         assert!(!copy.wants_up());
+    }
+
+    #[test]
+    fn the_gate_wakes_a_waiter_only_when_the_answer_changes() {
+        // Both halves matter. The wake is what turns the unlock handover from
+        // ping-bounded (≤15s) into immediate; the NO-wake on a repeated value
+        // is what stops the worker loop's belt-and-braces re-assert on every
+        // liveness tick from spinning the socket's select forever.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("current-thread runtime");
+        rt.block_on(async {
+            let gate = LinkGate::new();
+            gate.set(true);
+            let watcher = gate.clone();
+            let fut = watcher.changed();
+            tokio::pin!(fut);
+
+            // Poll once (via a timeout that expires) so the waiter is
+            // REGISTERED — notify_waiters only reaches futures that have been
+            // polled, which is exactly the register race the atomic covers.
+            let quiet = tokio::time::timeout(Duration::from_millis(20), fut.as_mut()).await;
+            assert!(quiet.is_err(), "nothing changed, nothing should wake");
+
+            gate.set(true); // the liveness-tick re-assert
+            let still = tokio::time::timeout(Duration::from_millis(20), fut.as_mut()).await;
+            assert!(still.is_err(), "a repeated answer is not a change");
+
+            gate.set(false); // the unlock
+            let woken = tokio::time::timeout(Duration::from_secs(1), fut.as_mut()).await;
+            assert!(woken.is_ok(), "positive control: a real change wakes the waiter");
+        });
     }
 
     #[test]
