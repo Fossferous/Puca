@@ -975,6 +975,9 @@ export function DeviceStage() {
         remap: (to: ZoomView) => { scale: number; x: number; y: number };
         fallback: number;
         deadline: number;
+        /** performance.now() at request, for the [zoom-follow] timing line —
+         *  the number that says whether the agent-side switch work landed. */
+        startedAt: number;
     } | null>(null);
     /** Mirror of session.activeMonitor for callbacks that must read it fresh. */
     const activeMonitorRef = useRef<number | null>(null);
@@ -1029,6 +1032,7 @@ export function DeviceStage() {
         if (!pict) return;
         const to: ZoomView = { pict, videoW: v.videoWidth, videoH: v.videoHeight };
         const next = p.remap(to);
+        console.debug(`[zoom-follow] applied ${Math.round(performance.now() - p.startedAt)}ms after request (monitor ${p.expectMonitor})`);
         autoFollowRef.current = p.becomes;
         // Applying with UNCHANGED dimensions can mean two things: a genuine
         // same-size switch (correct), or the new capture's first frame is
@@ -1190,10 +1194,15 @@ export function DeviceStage() {
                 pendingFollowRef.current = {
                     expectMonitor, becomes, remap,
                     fromVw: v.videoWidth, fromVh: v.videoHeight,
+                    startedAt: performance.now(),
                     // The fallback covers a same-size switch, where no resize
                     // ever fires; a LATE frame instead of a same-size one is
-                    // healed by the correction the apply leaves behind.
-                    fallback: window.setTimeout(applyPendingFollow, 900),
+                    // healed by the correction the apply leaves behind
+                    // (followCorrectionRef) — which is why 350ms is safe where
+                    // 900 once sat: a blind apply against a late frame is
+                    // repaired the moment the real one lands, and the shorter
+                    // wait is over half a second off every same-size switch.
+                    fallback: window.setTimeout(applyPendingFollow, 350),
                     deadline: window.setTimeout(() => {
                         // The switch may still confirm after we stop waiting:
                         // leave the remap as a correction so a late confirm +
@@ -1237,7 +1246,10 @@ export function DeviceStage() {
                     return remapIntoComposite({ box, from, fromTransform: t, region, to });
                 });
             }
-        }, 180);
+        // 120ms, down from 180: the timer re-arms per transform change, so it
+        // already fires N ms after the LAST pinch movement — this keeps the
+        // flap protection while shaving 60ms off every zoom-to-read.
+        }, 120);
         return () => clearTimeout(timer);
     }, [transform, session, pointerLocked, applyPendingFollow, clearPendingFollow]);
 
