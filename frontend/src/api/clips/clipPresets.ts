@@ -8,7 +8,7 @@
  * shows the MEASURED kbps while armed.
  */
 
-export type ClipPresetId = '720p30' | '1080p30' | '1080p60' | '1440p30' | 'native';
+export type ClipPresetId = '720p30' | '720p60' | '1080p30' | '1080p60' | '1440p30' | '2160p30' | 'native';
 
 export interface ClipPreset {
     id: ClipPresetId;
@@ -23,9 +23,15 @@ export interface ClipPreset {
 
 export const CLIP_PRESETS: readonly ClipPreset[] = [
     { id: '720p30', label: '720p 30 fps — about 3.5 Mbps', maxWidth: 1280, maxHeight: 720, fps: 30, videoBitrate: 3_500_000, audioBitrate: 128_000 },
+    // 720p60: smoothness on a budget — the low-RAM answer to "my game is 60fps".
+    { id: '720p60', label: '720p 60 fps — about 5 Mbps', maxWidth: 1280, maxHeight: 720, fps: 60, videoBitrate: 5_000_000, audioBitrate: 128_000 },
     { id: '1080p30', label: '1080p 30 fps — about 6 Mbps', maxWidth: 1920, maxHeight: 1080, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 },
     { id: '1080p60', label: '1080p 60 fps — about 9 Mbps', maxWidth: 1920, maxHeight: 1080, fps: 60, videoBitrate: 9_000_000, audioBitrate: 128_000 },
     { id: '1440p30', label: '1440p 30 fps — about 10 Mbps', maxWidth: 2560, maxHeight: 1440, fps: 30, videoBitrate: 10_000_000, audioBitrate: 128_000 },
+    // 2160p30: 18 Mbps sits under clip_capture.rs's 20 Mbps scale_bitrate
+    // clamp, so a native auto-arm of a real 4K monitor is not silently capped
+    // below what the preset promises.
+    { id: '2160p30', label: '4K 30 fps — about 18 Mbps', maxWidth: 3840, maxHeight: 2160, fps: 30, videoBitrate: 18_000_000, audioBitrate: 160_000 },
     { id: 'native', label: 'Native (up to 1440p 60 fps) — about 14 Mbps', maxWidth: 2560, maxHeight: 1440, fps: 60, videoBitrate: 14_000_000, audioBitrate: 160_000 },
 ];
 
@@ -38,6 +44,12 @@ export function clipPreset(id: string | null | undefined): ClipPreset {
 /** Bytes per second the ring grows at for a preset (video + audio). */
 export function presetBytesPerSecond(p: ClipPreset): number {
     return (p.videoBitrate + p.audioBitrate) / 8;
+}
+
+/** Ring cost per minute at a preset, in MB — the per-option readout the
+ *  buffer-length menu shows so "15 minutes" is a number, not a surprise. */
+export function presetMbPerMinute(p: ClipPreset): number {
+    return (presetBytesPerSecond(p) * 60) / MIB;
 }
 
 export const MIB = 1024 * 1024;

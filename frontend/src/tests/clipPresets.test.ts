@@ -52,3 +52,24 @@ describe('clipPresets — memory budget', () => {
         expect(formatClock(167.4)).toBe('2:47');
     });
 });
+
+describe('clipPresets — the 720p60 / 2160p30 additions', () => {
+    it('both exist with the promised bitrates, and 4K stays under the native capture clamp', async () => {
+        const { clipPreset, presetMbPerMinute, MIB } = await import('../api/clips/clipPresets');
+        const p720 = clipPreset('720p60');
+        expect(p720).toMatchObject({ fps: 60, maxWidth: 1280, videoBitrate: 5_000_000 });
+        const p4k = clipPreset('2160p30');
+        expect(p4k).toMatchObject({ fps: 30, maxWidth: 3840, maxHeight: 2160, videoBitrate: 18_000_000 });
+        // clip_capture.rs::scale_bitrate clamps at 20 Mbps; a preset above it
+        // would promise quality the encoder is never configured for.
+        expect(p4k.videoBitrate).toBeLessThanOrEqual(20_000_000);
+
+        // The per-minute price the buffer-length menu prints: (video+audio)/8*60.
+        expect(presetMbPerMinute(p720)).toBeCloseTo(((5_000_000 + 128_000) / 8) * 60 / MIB, 5);
+    });
+
+    it('an unknown id still falls back to the default (the list grew, the guard held)', async () => {
+        const { clipPreset, DEFAULT_CLIP_PRESET } = await import('../api/clips/clipPresets');
+        expect(clipPreset('8k120').id).toBe(DEFAULT_CLIP_PRESET);
+    });
+});

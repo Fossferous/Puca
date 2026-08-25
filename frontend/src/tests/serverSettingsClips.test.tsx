@@ -8,9 +8,12 @@
  *  - The channel picker must list TEXT channels only. `listChannels` returns
  *    voice channels in the same array, and posting a clip to a voice channel
  *    is a 400 the owner would only discover when someone tries to clip.
- *  - "Let the clipper choose" must save as `clip_channel_id: 0`, not as an
- *    omitted key: 0 is what tells the server to CLEAR a pin, and omitting it
- *    leaves the old one in place — an unpin that silently does nothing.
+ *  - Clips-enabled REQUIRES a pinned channel: "let the clipper choose" is
+ *    gone (the approval prompt names where a clip lands, and a per-clip
+ *    choice let the clipper change that after approval). Saving clips-on
+ *    with no channel is blocked with the reason; an unchosen channel still
+ *    saves as `clip_channel_id: 0` when clips are OFF — 0 is what tells the
+ *    server to CLEAR a pin, and omitting the key leaves the old one in place.
  *  - On a server that predates clips, no clip_* key may be sent at all.
  *
  * Mounted with raw `react-dom/client` + `act`, as the repo's other component
@@ -137,23 +140,37 @@ describe('ServerSettingsModal — Clips', () => {
         const target = selectLabelled('Post clips to');
         expect(target).toBeTruthy();
         const options = [...target!.options].map(o => [o.value, o.textContent]);
-        expect(options).toEqual([['0', 'Let the clipper choose'], ['11', '#general']]);
+        expect(options).toEqual([['0', 'Choose a channel…'], ['11', '#general']]);
         // The voice channel came back from listChannels and must not be offered.
         expect(target!.textContent).not.toContain('Lounge');
         expect(listChannels).toHaveBeenCalledWith('s1');
     });
 
-    it('saves the chosen length and sends 0 for "let the clipper choose"', async () => {
+    it('REFUSES to save clips-on with no channel, and says why', async () => {
+        await open({ initialClipsEnabled: true, initialClipMaxSeconds: 120, initialClipChannelId: null });
+
+        await save();
+        expect(updateServerSettings, 'the broken state must never reach the wire').not.toHaveBeenCalled();
+        expect(container.textContent).toContain('Choose a clips channel before turning clips on');
+    });
+
+    it('POSITIVE CONTROL: the same save goes through once a channel is picked', async () => {
         await open({ initialClipsEnabled: true, initialClipMaxSeconds: 120, initialClipChannelId: null });
 
         await pick(selectLabelled('Longest clip')!, '300');
-        expect(selectLabelled('Longest clip')!.value).toBe('300');
-
+        await pick(selectLabelled('Post clips to')!, '11');
         await save();
         expect(updateServerSettings).toHaveBeenCalledTimes(1);
         const [serverId, body] = updateServerSettings.mock.calls[0] as unknown as [string, Record<string, unknown>];
         expect(serverId).toBe('s1');
-        expect(body).toMatchObject({ clips_enabled: true, clip_max_seconds: 300, clip_channel_id: 0 });
+        expect(body).toMatchObject({ clips_enabled: true, clip_max_seconds: 300, clip_channel_id: 11 });
+    });
+
+    it('clips OFF with no channel still saves — 0 clears the pin (an unpin must not silently no-op)', async () => {
+        await open({ initialClipsEnabled: false, initialClipChannelId: null });
+        await save();
+        const [, body] = updateServerSettings.mock.calls[0] as unknown as [string, Record<string, unknown>];
+        expect(body).toMatchObject({ clips_enabled: false, clip_channel_id: 0 });
     });
 
     it('saves a pinned channel by id', async () => {
@@ -212,7 +229,9 @@ describe('ServerSettingsModal — Clips', () => {
 describe('ServerSettingsModal — save → refresh handoff (the "toggle reverts on reopen" bug)', () => {
     it('awaits onSave; a failed refresh says so instead of "Failed to save" (the PATCH already landed)', async () => {
         const onSave = vi.fn(async () => { throw new Error('GET /servers offline'); });
-        await open({ initialClipsEnabled: false, onSave });
+        // A pinned channel, so turning clips ON passes the required-pin gate —
+        // this test is about the save→refresh handoff, not the gate.
+        await open({ initialClipsEnabled: false, initialClipChannelId: 11, onSave });
         const toggle = labelWith('Allow clips')!.querySelector('input')!;
         await act(async () => { toggle.click(); });
         await save();

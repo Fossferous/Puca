@@ -26,6 +26,35 @@ export function postableChannels(all: Channel[], serverId: string | null): Chann
         && (c.my_permissions === undefined || (hasPerm(c.my_permissions, PERM.VIEW_CHANNEL) && hasPerm(c.my_permissions, PERM.SEND_MESSAGES))));
 }
 
+/** Where a clip may be posted on this server — and when nowhere, exactly WHY.
+ *
+ *  There is deliberately no channel picker any more: a server that enables
+ *  clips pins ONE channel for them (the owner chooses it in Server Settings),
+ *  so every participant approving a clip knows where it will land. The old
+ *  fallback chain (pin → remembered choice → server default → first postable)
+ *  meant the approval screen and the actual destination could disagree.
+ *
+ *  Four answers, each with its own UI, because collapsing them was the bug:
+ *  the old composer rendered a silent empty select while channels loaded and
+ *  fell back to a 403 at post time when the pin was unpostable. */
+export type ClipTargetResolution =
+    | { kind: 'ok'; channel: Channel }
+    | { kind: 'loading' }
+    | { kind: 'pin-missing' }
+    | { kind: 'pin-unpostable' };
+
+export function resolveClipTarget(
+    policy: { serverId: string | null; pinnedChannelId: number | null },
+    channels: Channel[] | null,
+): ClipTargetResolution {
+    if (channels === null) return { kind: 'loading' };
+    if (policy.pinnedChannelId === null) return { kind: 'pin-missing' };
+    const pinned = postableChannels(channels, policy.serverId)
+        .find(c => c.id === policy.pinnedChannelId);
+    if (!pinned) return { kind: 'pin-unpostable' };
+    return { kind: 'ok', channel: pinned };
+}
+
 /** The copy for a proposal that ended without an upload. `closed` cannot reach
  *  a proposer (they get the real outcome) but is handled so a future frame
  *  shape cannot render a blank. */

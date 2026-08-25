@@ -51,3 +51,34 @@ describe('outcomeCopy', () => {
         expect(outcomeCopy('approved')).toBeNull();
     });
 });
+
+describe('resolveClipTarget — the no-picker destination, one answer per way it fails', () => {
+    it('all four kinds, each from a real state', async () => {
+        const { resolveClipTarget } = await import('../api/clips/clipComposerLogic');
+        const { PERM } = await import('../api/permissionBits');
+        const ok = PERM.VIEW_CHANNEL | PERM.SEND_MESSAGES;
+        const chans = [
+            { id: 7, name: 'clips', channel_type: 0, server_id: 'A', my_permissions: ok },
+            { id: 8, name: 'read-only', channel_type: 0, server_id: 'A', my_permissions: PERM.VIEW_CHANNEL },
+        ];
+
+        // loading: the channel list has not arrived — NOT the same as empty.
+        expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: 7 }, null))
+            .toEqual({ kind: 'loading' });
+
+        // pin-missing: the server never pinned a channel (pre-S1 or misconfigured).
+        expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: null }, chans))
+            .toEqual({ kind: 'pin-missing' });
+
+        // pin-unpostable: pinned, but this user cannot post there (or it is gone).
+        expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: 8 }, chans).kind)
+            .toBe('pin-unpostable');
+        expect(resolveClipTarget({ serverId: 'A', pinnedChannelId: 999 }, chans).kind)
+            .toBe('pin-unpostable');
+
+        // ok — the positive control, carrying the channel for the name + id.
+        const res = resolveClipTarget({ serverId: 'A', pinnedChannelId: 7 }, chans);
+        expect(res.kind).toBe('ok');
+        if (res.kind === 'ok') expect(res.channel).toMatchObject({ id: 7, name: 'clips' });
+    });
+});

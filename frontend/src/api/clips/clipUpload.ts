@@ -131,3 +131,34 @@ export function discardParts(ids: Iterable<string>, o: Pick<UploadOptions, 'base
         void fetchImpl(`${o.baseUrl}/files/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${o.token}` } }).catch(() => { /* best effort */ });
     }
 }
+
+export interface ClipUsage {
+    usedBytes: number;
+    quotaBytes: number;
+}
+
+/**
+ * How much of this account's clip storage is used — `GET /clips/usage`,
+ * wire shape `{used_bytes, quota_bytes}` (upload_handlers::clip_usage; the
+ * snake_case names are the Rust side's serde output, pinned there).
+ *
+ * `null` on ANY failure, including the 404 a server predating the route
+ * answers — the readout renders nothing rather than an error, so this ships
+ * order-independently of the server release that adds the endpoint.
+ */
+export async function getClipUsage(
+    o: Pick<UploadOptions, 'baseUrl' | 'token' | 'fetchImpl'>,
+): Promise<ClipUsage | null> {
+    const fetchImpl = o.fetchImpl ?? fetch;
+    try {
+        const res = await fetchImpl(`${o.baseUrl}/clips/usage`, {
+            headers: { Authorization: `Bearer ${o.token}` },
+        });
+        if (!res.ok) return null;
+        const body = (await res.json()) as { used_bytes?: unknown; quota_bytes?: unknown };
+        if (typeof body.used_bytes !== 'number' || typeof body.quota_bytes !== 'number') return null;
+        return { usedBytes: body.used_bytes, quotaBytes: body.quota_bytes };
+    } catch {
+        return null;
+    }
+}

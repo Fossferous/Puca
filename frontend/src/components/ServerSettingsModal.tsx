@@ -8,7 +8,7 @@ import { uploadFile, discardUpload } from '../api/uploads';
 import type { Invite, Ban, Report, AuditLogEntry, Channel } from '../api/servers';
 import { RoleSettingsModal } from './RoleSettingsModal';
 import { EmojiSettings } from './EmojiSettings';
-import { CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, ShieldCheckIcon, SparkleIcon, TrashIcon } from './Icons';
+import { CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, ShieldCheckIcon, SparkleIcon, TrashIcon, WarningIcon } from './Icons';
 import './ServerSettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { fetchFileUrl } from '../api/authedMedia';
@@ -233,6 +233,14 @@ export function ServerSettingsModal({
 
     const handleSaveOverview = async () => {
         if (!isOwner) return;
+        // Clips-on-without-a-channel is not a state worth writing: members
+        // would see the feature enabled and hit "no clips channel yet" at the
+        // composer. Block here with the reason; S1's server-side 400 is the
+        // backstop for clients older than this check.
+        if (clipsSupported && clipsEnabled && clipChannelId === null) {
+            setError('Choose a clips channel before turning clips on — members cannot post clips until you pick one.');
+            return;
+        }
         setIsSaving(true);
         setError(null);
         try {
@@ -422,17 +430,28 @@ export function ServerSettingsModal({
                                         </div>
                                         <div className="form-group">
                                             <label htmlFor="clip-channel">Post clips to</label>
+                                            {/* REQUIRED, no "let the clipper choose" any more: the
+                                                approval prompt names where the clip will land, and a
+                                                per-clip choice meant approvers were agreeing to a
+                                                destination the clipper could still change. `0` is the
+                                                unchosen state (and how the wire clears a pin). */}
                                             <select
                                                 id="clip-channel"
                                                 value={clipChannelId ?? 0}
                                                 onChange={e => setClipChannelId(Number(e.target.value) || null)}
                                                 disabled={!isOwner}
                                             >
-                                                <option value={0}>Let the clipper choose</option>
+                                                <option value={0}>Choose a channel…</option>
                                                 {textChannels.map(chan => (
                                                     <option key={chan.id} value={chan.id}>#{chan.name}</option>
                                                 ))}
                                             </select>
+                                            {clipChannelId === null && (
+                                                <span className="setting-help">
+                                                    <WarningIcon size={13} /> Clips need one channel they always post
+                                                    to. Until you pick one, members cannot post clips.
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
                                 )}

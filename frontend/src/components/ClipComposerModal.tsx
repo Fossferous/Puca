@@ -38,7 +38,7 @@ import { useEffect, useRef, useState } from 'react';
 import { attachPreview, discardSeal, getReplayState, subscribeReplay, trimSeal, uploadAndBuild, type ReplayState } from '../api/clips/replayBuffer';
 import type { SealedInfo } from '../api/clips/clipTypes';
 import { formatClock, formatMB } from '../api/clips/clipPresets';
-import { CHIP_SECONDS, durationChips, outcomeCopy, postableChannels } from '../api/clips/clipComposerLogic';
+import { CHIP_SECONDS, durationChips, outcomeCopy, resolveClipTarget } from '../api/clips/clipComposerLogic';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
 import { clipLabel } from '../api/clips/clipRef';
 import { TRIM_MAX_CIPHER_BYTES, TRIM_MIN_CLIP_MS } from '../api/clips/clipTrim';
@@ -79,7 +79,6 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     const [replay, setReplay] = useState<ReplayState>(getReplayState());
     const [proposals, setProposals] = useState<ClipProposalState>(getClipProposalState());
     const [channels, setChannels] = useState<Channel[] | null>(null);
-    const [targetRaw, setTarget] = useState<number | null>(null);
     const [postedTo, setPostedTo] = useState<string | null>(null);
     const [uploadRetryable, setUploadRetryable] = useState(false);
     const [now, setNow] = useState(() => Date.now());
@@ -101,12 +100,11 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     // Default chip: the longest available (what a "clip that" impulse wants) —
     // derived, not synced through an effect.
     const chosen = chosenRaw !== null && chips.includes(chosenRaw) ? chosenRaw : (chips.length ? chips[chips.length - 1] : null);
-    const targets = channels ? postableChannels(channels, policy.serverId) : [];
-    const pinned = policy.pinnedChannelId !== null ? targets.find(c => c.id === policy.pinnedChannelId) ?? null : null;
-    const target = pinned ? pinned.id
-        : targetRaw !== null && targets.some(c => c.id === targetRaw) ? targetRaw
-        : policy.defaultTargetChannelId !== null && targets.some(c => c.id === policy.defaultTargetChannelId) ? policy.defaultTargetChannelId
-        : (targets[0]?.id ?? null);
+    // NO PICKER, no fallback chain. The pinned clips channel is the only
+    // destination — everyone who approved knew where it would land — and each
+    // way that can fail renders its own explanation (resolveClipTarget).
+    const resolution = resolveClipTarget(policy, channels);
+    const target = resolution.kind === 'ok' ? resolution.channel.id : null;
     const outgoing = proposals.outgoing;
 
     useEffect(() => subscribeReplay(setReplay), []);
@@ -218,7 +216,7 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
         const token = getToken();
         if (!token) { setError('You are signed out.'); setPhase('failed'); return; }
         const targetId = target;
-        const targetName = targets.find(c => c.id === targetId)?.name ?? outgoing?.targetChannelName ?? '';
+        const targetName = resolution.kind === 'ok' ? resolution.channel.name : outgoing?.targetChannelName ?? '';
         if (targetId === null) { setError('No channel to post to.'); setPhase('failed'); return; }
         detachRef.current?.(); // the preview <video> unmounts with the phase change
         setPhase('uploading'); setError(null); setUploadRetryable(false);
@@ -418,16 +416,14 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                         {!localOnly && policy.available && (
                             <div className="clip-composer-section">
                                 <label className="clip-composer-label" htmlFor="clip-target">Post to</label>
-                                {pinned ? (
-                                    <p className="clip-composer-hint" id="clip-target">#{pinned.name} <span className="clip-composer-muted">(this server pins clips to one channel)</span></p>
-                                ) : channels === null ? (
+                                {resolution.kind === 'ok' ? (
+                                    <p className="clip-composer-hint" id="clip-target">#{resolution.channel.name} <span className="clip-composer-muted">(this server posts all clips to one channel)</span></p>
+                                ) : resolution.kind === 'loading' ? (
                                     <p className="clip-composer-hint" id="clip-target">Loading channels…</p>
-                                ) : targets.length === 0 ? (
-                                    <p className="clip-composer-hint" id="clip-target"><WarningIcon size={13} /> You cannot post in any text channel of this server.</p>
+                                ) : resolution.kind === 'pin-missing' ? (
+                                    <p className="clip-composer-hint" id="clip-target"><WarningIcon size={13} /> This server has no clips channel yet — the owner needs to pick one in Server Settings before clips can be posted. The clip stays in memory; Discard deletes it.</p>
                                 ) : (
-                                    <select id="clip-target" className="clip-composer-select" value={target ?? ''} onChange={e => setTarget(Number(e.target.value))}>
-                                        {targets.map(c => <option key={c.id} value={c.id}>#{c.name}</option>)}
-                                    </select>
+                                    <p className="clip-composer-hint" id="clip-target"><WarningIcon size={13} /> You cannot post in this server&rsquo;s clips channel, so this clip cannot be posted. It stays in memory; Discard deletes it.</p>
                                 )}
                             </div>
                         )}

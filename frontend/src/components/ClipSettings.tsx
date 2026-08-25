@@ -6,11 +6,24 @@
  * Not gated out on phones/browsers — a setting that silently does not exist is
  * how users conclude a feature is broken; there it renders one honest line.
  */
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { isTauri } from '../api/platform';
-import { CLIP_PRESETS, clipPreset, estimateRing, formatClock, formatMB, maxRingBytesForBudget, memoryBudgetBytes, MIB } from '../api/clips/clipPresets';
+import { CLIP_PRESETS, clipPreset, estimateRing, formatClock, formatMB, maxRingBytesForBudget, memoryBudgetBytes, MIB, presetBytesPerSecond } from '../api/clips/clipPresets';
 import { setClipMicGain } from '../api/clips/replayBuffer';
+import { getClipUsage, type ClipUsage } from '../api/clips/clipUpload';
+import { useServers } from '../hooks/queries';
+import { API_BASE_URL } from '../api/config';
+import { getToken } from '../api/auth';
 import type { Settings } from './settingsStore';
+
+/** The buffer lengths on offer. 30 s exists for tiny-RAM machines; the long
+ *  tail (10/15 min) is what "that thing five minutes ago" actually needs, and
+ *  each option prices itself in MB so the cost is visible where the choice is
+ *  made, not discovered at the memory-limit readout below. */
+const BUFFER_LENGTH_OPTIONS = [30, 60, 120, 180, 300, 600, 900];
+
+const lengthLabel = (s: number) =>
+    s < 60 ? `${s} seconds` : `${s / 60} minute${s > 60 ? 's' : ''}`;
 
 interface Props {
     settings: Settings;
@@ -20,6 +33,23 @@ interface Props {
 }
 
 export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
+    // Per-server caps + the storage quota. Both hooks run unconditionally
+    // (above the isTauri return — the v0.7.7 hook-below-early-return class).
+    const { data: servers = [] } = useServers();
+    const [usage, setUsage] = useState<ClipUsage | null>(null);
+    useEffect(() => {
+        const token = getToken();
+        if (!token) return;
+        let alive = true;
+        // null on any failure INCLUDING the 404 of a server without the
+        // route yet — the readout renders nothing, so this is
+        // order-independent of the server release that adds it.
+        void getClipUsage({ baseUrl: API_BASE_URL, token }).then(u => { if (alive) setUsage(u); });
+        return () => { alive = false; };
+    }, []);
+    const serverCaps = servers
+        .filter(s => s.clips_enabled === true && typeof s.clip_max_seconds === 'number')
+        .map(s => ({ id: s.id, name: s.name, maxSeconds: s.clip_max_seconds as number }));
     if (!isTauri()) {
         return (
             <div className="settings-card">
@@ -46,10 +76,17 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
             <div className="settings-option">
                 <div className="option-info">
                     <label>Buffer length</label>
-                    <span className="option-hint">The server can cap how long a clip may be; this is how much is kept.</span>
+                    <span className="option-hint">
+                        How much is kept, rolling. Each server caps how long a posted clip may be
+                        {serverCaps.length > 0 && <>: {serverCaps.map(c => `${c.name} ${formatClock(c.maxSeconds)}`).join(' · ')}</>}.
+                    </span>
                 </div>
                 <select value={settings.clipBufferSeconds ?? 300} onChange={(e) => updateSetting('clipBufferSeconds', parseInt(e.target.value))}>
-                    {[60, 120, 180, 300, 600].map(s => <option key={s} value={s}>{s / 60} minute{s > 60 ? 's' : ''}</option>)}
+                    {BUFFER_LENGTH_OPTIONS.map(s => (
+                        <option key={s} value={s}>
+                            {lengthLabel(s)} (≈ {formatMB(s * presetBytesPerSecond(preset))})
+                        </option>
+                    ))}
                 </select>
             </div>
             <div className="settings-option">
@@ -101,6 +138,20 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                 </div>
                 {bindControl}
             </div>
+            {usage !== null && usage.quotaBytes > 0 && (
+                <div className="settings-option">
+                    <div className="option-info">
+                        <label>Clip storage on your server</label>
+                        <span className="option-hint">
+                            {formatMB(usage.usedBytes)} of {formatMB(usage.quotaBytes)} used by posted clips.
+                            Deleting a clip message frees its share.
+                        </span>
+                    </div>
+                    <div className="slider-row" aria-hidden="true">
+                        <progress max={usage.quotaBytes} value={Math.min(usage.usedBytes, usage.quotaBytes)} />
+                    </div>
+                </div>
+            )}
             <p className="settings-description">
                 While the buffer is armed, everyone in the call sees a marker next to your name. The buffer lives in this app’s memory, encrypted, and is never written to disk. Closing Puca, disarming, leaving the call, or the system locking or sleeping erases it. Nothing is uploaded until every person in the clip approves.
             </p>
