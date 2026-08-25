@@ -1,44 +1,32 @@
-//! CPU AND GPU scheduling-priority boost for the WebView2 capture/encode
-//! processes while someone is WATCHING a live capture from this machine
-//! (voice screen share, device-control host capture).
+//! CPU scheduling-priority boost for the WebView2 capture/encode processes
+//! while someone is WATCHING a live capture from this machine (voice screen
+//! share, device-control host capture).
 //!
-//! Why, and why twice: field-confirmed 2026-08-20 — an uncapped fullscreen
-//! game gets Windows' foreground CPU scheduling boost while the share
-//! pipeline sits at NORMAL, so v0.8.111 raised WebView2's child processes to
-//! ABOVE_NORMAL_PRIORITY_CLASS. Field-confirmed 2026-08-21 that alone was
-//! NOT enough — the user's own log showed `qualityLimitationReason` never
-//! once reporting `cpu`, and Task Manager showed the GAME (not dwm.exe)
-//! pegging the GPU's 3D engine at 100% even in borderless (so it isn't an
-//! exclusive-fullscreen/independent-flip compositor bypass either). CPU
-//! thread priority and GPU ENGINE scheduling priority are two separate
-//! Windows subsystems — SetPriorityClass only ever touched the first. This
-//! adds the second: D3DKMTSetProcessSchedulingPriorityClass, the same
-//! GDI32.dll-exported, Microsoft-documented (learn.microsoft.com WDK DDI
-//! reference) call OBS Studio uses for exactly this failure mode ("prevent
-//! being deprioritized by Windows over fullscreen games" — see
-//! obs-studio@ec769ef). Resolved dynamically via GetProcAddress, matching
-//! OBS's own approach, so a Windows version without it (or a restricted
-//! environment) degrades to CPU-only boost rather than failing.
+//! Why: field-confirmed 2026-08-20 — an uncapped fullscreen game gets
+//! Windows' foreground CPU scheduling boost while the share pipeline sits at
+//! NORMAL, so v0.8.111 raised WebView2's child processes to
+//! ABOVE_NORMAL_PRIORITY_CLASS.
 //!
-//! UNVERIFIED, by design logged rather than assumed: whether raising
-//! ANOTHER process's GPU priority (as opposed to your own, which is what
-//! OBS's traced call site does) needs elevation on a machine running
-//! unelevated, as Puca always does. `try_boost_gpu`'s failure log below
-//! is the read: NTSTATUS 0 (STATUS_SUCCESS) on this machine means it worked
-//! with no elevation; a nonzero status is the machine telling us it needs more.
+//! THE GPU HALF WAS ARCHIVED (2026-08-25). v0.8.113 additionally raised the
+//! processes' GPU ENGINE scheduling priority via
+//! D3DKMTSetProcessSchedulingPriorityClass (the OBS technique) because the
+//! field logs showed the game pegging the GPU 3D engine, not the CPU. The
+//! field answer to that build's open question came back: on the reporting
+//! machine the cross-process raise returned a nonzero NTSTATUS — it needs
+//! elevation, which this app never runs under — so the call was a no-op that
+//! only logged. The user also traced the original choppiness to their own
+//! in-game GPU load, not to this app. The implementation lives in git
+//! history (sovereign v0.8.113, main 5727907) should an elevated pathway
+//! ever make it worth reviving; per-machine behaviour may differ, but a
+//! boost that needs an elevation prompt is its own feature decision, not a
+//! silent sweep.
 //!
-//! What it does: while active, every descendant `msedgewebview2.exe` of this
-//! app process is raised to ABOVE_NORMAL_PRIORITY_CLASS (CPU) and, where the
-//! call succeeds, D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH (GPU) — HIGH rather
-//! than REALTIME because REALTIME is documented as typically privileged and
-//! this app does not run elevated; renderer = software encoder, GPU process
-//! = capture copy + composition, utility = the video-capture service. A
+//! What it does now: while active, every descendant `msedgewebview2.exe` of
+//! this app process sitting at NORMAL is raised to ABOVE_NORMAL (CPU). A
 //! re-apply tick catches processes Chromium spawns or re-prioritises
-//! mid-share. On release, each process is restored to the CPU class it had
-//! (GPU priority has no queryable "previous value" resolved here, so it is
-//! reset to NORMAL, the OS default for a freshly spawned process) — after
-//! re-checking it is STILL one of our webview processes, so a recycled pid
-//! is never touched.
+//! mid-share. On release, each process is restored to the CPU class it had —
+//! after re-checking it is STILL one of our webview processes, so a recycled
+//! pid is never touched.
 //!
 //! Deliberately NOT active for the armed clip replay buffer: nobody is
 //! watching that capture live, and taking GPU/CPU time from the game to feed
@@ -102,10 +90,6 @@ pub fn descendants_named(rows: &[ProcRow], root: u32, name: &str) -> Vec<u32> {
 struct Boosted {
     /// CPU priority class it had before we raised it.
     cpu_old: u32,
-    /// Whether the GPU scheduling-priority call succeeded for this pid (so
-    /// release knows to reset it — there is no cheap "previous value" to
-    /// query back, see the module doc).
-    gpu_applied: bool,
 }
 
 #[cfg(windows)]
@@ -129,12 +113,11 @@ static STATE: std::sync::LazyLock<Mutex<BoostState>> = std::sync::LazyLock::new(
 #[cfg(windows)]
 mod imp {
     use super::{descendants_named, Boosted, ProcRow, STATE};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, NTSTATUS};
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::Threading::{
         GetPriorityClass, OpenProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
         NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -142,79 +125,6 @@ mod imp {
     };
 
     const WEBVIEW_EXE: &str = "msedgewebview2.exe";
-
-    /// D3DKMT_SCHEDULINGPRIORITYCLASS (d3dkmthk.h) — a WDK/driver-facing enum,
-    /// not part of the `windows` crate's win32metadata-generated bindings
-    /// (confirmed: it lives under learn.microsoft.com's "Windows drivers" WDK
-    /// DDI reference, not the public Win32 API reference), so it is declared
-    /// here to match the documented declaration order exactly: IDLE,
-    /// BELOW_NORMAL, NORMAL, ABOVE_NORMAL, HIGH, REALTIME = 0..5.
-    #[repr(i32)]
-    #[allow(dead_code)]
-    enum GpuPriorityClass {
-        Idle = 0,
-        BelowNormal = 1,
-        Normal = 2,
-        AboveNormal = 3,
-        High = 4,
-        /// Not used here: documented behavior (and OBS's own "not admin?"
-        /// fallback comment) suggests it typically needs elevation, which
-        /// this app does not run under.
-        #[allow(dead_code)]
-        Realtime = 5,
-    }
-
-    type SetGpuPriorityFn = unsafe extern "system" fn(HANDLE, i32) -> NTSTATUS;
-
-    /// Resolve D3DKMTSetProcessSchedulingPriorityClass from Gdi32.dll once.
-    /// GetModuleHandleW (not LoadLibraryW): gdi32.dll is already loaded in
-    /// any GUI process, so this never adds a new DLL dependency and never
-    /// fails for a reason other than "this Windows build lacks the export."
-    fn gpu_priority_fn() -> Option<SetGpuPriorityFn> {
-        static ADDR: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-        let addr = *ADDR.get_or_init(|| unsafe {
-            let module = GetModuleHandleW(windows::core::w!("gdi32.dll")).ok()?;
-            let proc = GetProcAddress(
-                module,
-                windows::core::s!("D3DKMTSetProcessSchedulingPriorityClass"),
-            )?;
-            Some(proc as usize)
-        });
-        // SAFETY: transmuting a resolved GetProcAddress result to the exact
-        // signature documented for this export (learn.microsoft.com
-        // nf-d3dkmthk-d3dkmtsetprocessschedulingpriorityclass).
-        addr.map(|a| unsafe { std::mem::transmute::<usize, SetGpuPriorityFn>(a) })
-    }
-
-    /// Attempt the GPU priority raise on an already-open handle. On failure,
-    /// logs the NTSTATUS — but only ONCE ever (not once per pid per 10s
-    /// sweep, which would spam the log for the whole session if this needs
-    /// elevation on this machine): the per-activation summary line in
-    /// `set_stream_boost` already reports the live success COUNT every
-    /// toggle, so the detailed NTSTATUS only needs to be captured once to
-    /// answer the module header's open question.
-    fn try_boost_gpu(handle: HANDLE, pid: u32) -> bool {
-        let Some(f) = gpu_priority_fn() else { return false };
-        // SAFETY: handle is a live, still-owned process handle for the
-        // duration of this call (caller holds it open); f's signature is the
-        // documented NTSTATUS(HANDLE, D3DKMT_SCHEDULINGPRIORITYCLASS).
-        let status = unsafe { f(handle, GpuPriorityClass::High as i32) };
-        let ok = status.0 == 0;
-        if !ok {
-            static LOGGED_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            LOGGED_ONCE.get_or_init(|| {
-                log::info!("[stream-boost] GPU priority raise for pid {pid} returned NTSTATUS {:#x} (elevation?) — logged once, see the per-toggle summary line for the ongoing count", status.0);
-            });
-        }
-        ok
-    }
-
-    fn try_restore_gpu(handle: HANDLE) {
-        if let Some(f) = gpu_priority_fn() {
-            // SAFETY: as in try_boost_gpu.
-            let _ = unsafe { f(handle, GpuPriorityClass::Normal as i32) };
-        }
-    }
 
     /// Re-apply cadence while active. Chromium re-prioritises children on its
     /// own events (visibility, audio) and spawns utility processes lazily; a
@@ -262,9 +172,8 @@ mod imp {
         descendants_named(&snapshot(), std::process::id(), WEBVIEW_EXE)
     }
 
-    /// Raise `pid`'s CPU priority to ABOVE_NORMAL and attempt its GPU
-    /// scheduling priority too. Returns what actually changed, when
-    /// anything did, so it can be restored later.
+    /// Raise `pid`'s CPU priority to ABOVE_NORMAL. Returns what changed,
+    /// when anything did, so it can be restored later.
     fn boost_one(pid: u32) -> Option<Boosted> {
         // SAFETY: handle is closed on every path; failures return None.
         unsafe {
@@ -280,9 +189,8 @@ mod imp {
             } else {
                 false
             };
-            let gpu_applied = try_boost_gpu(handle, pid);
             let _ = CloseHandle(handle);
-            (cpu_changed || gpu_applied).then_some(Boosted { cpu_old, gpu_applied })
+            cpu_changed.then_some(Boosted { cpu_old })
         }
     }
 
@@ -293,46 +201,35 @@ mod imp {
                 OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
             {
                 let _ = SetPriorityClass(handle, PROCESS_CREATION_FLAGS(boosted.cpu_old));
-                if boosted.gpu_applied {
-                    try_restore_gpu(handle);
-                }
                 let _ = CloseHandle(handle);
             }
         }
     }
 
     /// Boost every current webview descendant not already boosted. Returns
-    /// (processes currently held boosted, of those, how many got the GPU
-    /// priority raise too — the number that answers the module header's
-    /// open question about whether this needs elevation on this machine).
-    fn apply() -> (usize, usize) {
+    /// the number of processes currently held boosted.
+    fn apply() -> usize {
         let pids = our_webview_pids();
         let mut state = STATE.lock().unwrap();
         if !state.active {
-            return (0, 0); // released while we were snapshotting — don't re-boost
+            return 0; // released while we were snapshotting — don't re-boost
         }
         for pid in pids {
             // Called for pids we've ALREADY boosted too: Chromium re-asserts
             // its own child priorities on its own events (visibility, audio)
             // and can slide a process back to NORMAL mid-share — boost_one
-            // re-lifts exactly that case. and_modify/or_insert: cpu_old must
-            // stay the FIRST-seen original class (a re-sweep of an
-            // already-lifted pid would read back ABOVE_NORMAL as "old",
-            // corrupting the restore target) — but gpu_applied is OR'd
-            // forward, so a GPU raise that only succeeds on a LATER sweep
-            // (e.g. a transient failure, or a newly spawned utility process)
-            // still gets reset on release rather than silently skipped.
+            // re-lifts exactly that case. or_insert only: cpu_old must stay
+            // the FIRST-seen original class (a re-sweep of an already-lifted
+            // pid would read back ABOVE_NORMAL as "old", corrupting the
+            // restore target).
             if let Some(new) = boost_one(pid) {
-                state.boosted.entry(pid)
-                    .and_modify(|b| b.gpu_applied = b.gpu_applied || new.gpu_applied)
-                    .or_insert(new);
+                state.boosted.entry(pid).or_insert(new);
             }
         }
-        let gpu_ok = state.boosted.values().filter(|b| b.gpu_applied).count();
-        (state.boosted.len(), gpu_ok)
+        state.boosted.len()
     }
 
-    pub fn activate() -> (usize, usize) {
+    pub fn activate() -> usize {
         let generation = {
             let mut state = STATE.lock().unwrap();
             let was_active = state.active;
@@ -391,8 +288,8 @@ pub fn set_stream_boost(active: bool) -> Result<u32, String> {
     #[cfg(windows)]
     {
         if active {
-            let (n, gpu_ok) = imp::activate();
-            log::info!("[stream-boost] on ({n} webview process(es), {gpu_ok} with GPU priority raised)");
+            let n = imp::activate();
+            log::info!("[stream-boost] on ({n} webview process(es))");
             Ok(n as u32)
         } else {
             let n = imp::deactivate();
