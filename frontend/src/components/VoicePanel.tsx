@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react
 import { createPortal } from 'react-dom';
 import { webrtcManager } from '../api/webrtc';
 import { sfuManager } from '../api/rtc/sfuManager';
+import { setSfuControlSender } from '../api/rtc/controlDc';
 import type { MediaE2eeReason } from '../api/rtc/types';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import { defaultSettings, loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
@@ -1573,6 +1574,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         onDisconnectRef.current?.();
                     }
                 });
+                // P2P INPUT over the SFU (R3): hand controlDc a publisher so
+                // remote-control frames take the room's data path instead of
+                // the WS relay. Same frames and same sealed-hello gate as the
+                // mesh lanes — remoteControl never learns which pipe it is.
+                setSfuControlSender((userId, frame) => sfuManager.publishControlFrame(userId, frame));
                 const channelId = parseInt(roomId.replace(/^voice_/, ''), 10);
                 const micTrack = localStream.getAudioTracks()[0] ?? null;
                 await sfuManager.connect(channelId, micTrack);
@@ -1821,6 +1827,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // No-op when the call wasn't SFU; prevents a dangling LiveKit session
         // (and its capacity slot) when it was.
         sfuManager.setOnDisconnected(null);
+        // The publisher dies with the room: a frame sent into a disconnected
+        // room is silently lost, and the relay must take over instead.
+        setSfuControlSender(null);
         void sfuManager.disconnect();
         // Every media stop MUST precede leaveRoom: once we're out of the room
         // the server's membership gate refuses them, so the event is never

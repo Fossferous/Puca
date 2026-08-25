@@ -38,6 +38,8 @@
 
 export const CTL_STATE_LABEL = 'sov-ctl-s';
 export const CTL_MOTION_LABEL = 'sov-ctl-m';
+/** LiveKit data topic for the same frames over an SFU room (R3). */
+export const CTL_SFU_TOPIC = 'sov-ctl';
 
 /** Frame kinds. One byte, so a mis-shaped buffer is refused, not parsed. */
 export const FRAME_HELLO = 0x01;
@@ -73,8 +75,12 @@ export function encodeFrame(kind: number, payload: Uint8Array): Uint8Array {
     return out;
 }
 
-export function decodeFrame(buf: ArrayBuffer | Uint8Array): { kind: number; payload: Uint8Array } | null {
-    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+export function decodeFrame(
+    buf: ArrayBuffer | Uint8Array<ArrayBufferLike>,
+): { kind: number; payload: Uint8Array } | null {
+    // Copy through Uint8Array.from so a SHARED buffer (LiveKit types its
+    // payload as ArrayBufferLike) becomes a plain one the rest can hold.
+    const bytes = buf instanceof Uint8Array ? Uint8Array.from(buf) : new Uint8Array(buf);
     if (bytes.length < 1) return null;
     return { kind: bytes[0], payload: bytes.subarray(1) };
 }
@@ -87,7 +93,14 @@ export function decodeFrame(buf: ArrayBuffer | Uint8Array): { kind: number; payl
 // reach into pc internals), so they meet here.
 
 const byPeer = new Map<number, CtlChannels>();
-type FrameHandler = (peerId: number, lane: CtlLane, frame: { kind: number; payload: Uint8Array }) => void;
+type FrameHandler = (
+    peerId: number,
+    lane: CtlLane,
+    frame: { kind: number; payload: Uint8Array },
+    /** true = a mesh data channel, false = the SFU room's data path. The
+     *  hello must arm the pipe it ARRIVED on, not both. */
+    viaMesh: boolean,
+) => void;
 let handler: FrameHandler | null = null;
 
 /** remoteControl installs the single consumer of inbound frames. */
@@ -121,7 +134,7 @@ export function registerControlChannel(peerId: number, lane: CtlLane, dc: RTCDat
         if (!(data instanceof ArrayBuffer)) return; // text on a binary lane: ignore
         const frame = decodeFrame(data);
         if (!frame) return;
-        handler?.(peerId, lane, frame);
+        handler?.(peerId, lane, frame, true);
     };
     dc.onclose = () => {
         const cur = byPeer.get(peerId);
@@ -191,8 +204,57 @@ export function sendHello(peerId: number, sealed: Uint8Array): boolean {
     return sendControlFrame(peerId, 'state', FRAME_HELLO, sealed);
 }
 
+// --- SFU transport (R3) ---------------------------------------------------
+//
+// The mesh registry above tracks per-peer DATA CHANNELS. An SFU room has
+// none: one connection to the server carries everything, addressed per
+// participant. Same frames, same hello gate, same handler — so this is a
+// second SENDER plugged in beside the channels, not a second protocol.
+
+type SfuSender = (userId: number, frame: Uint8Array) => boolean;
+let sfuSend: SfuSender | null = null;
+const sfuHello = new Set<number>();
+
+/** sfuManager installs its publisher (null when it leaves the room). */
+export function setSfuControlSender(fn: SfuSender | null): void {
+    sfuSend = fn;
+    if (!fn) sfuHello.clear();
+}
+
+/** sfuManager hands every `sov-ctl` data packet here. */
+export function deliverSfuControlFrame(peerId: number, payload: Uint8Array<ArrayBufferLike>): void {
+    const frame = decodeFrame(payload);
+    if (!frame) return;
+    handler?.(peerId, 'state', frame, false);
+}
+
+/** The SFU's own capability flag — the same sealed hello, a different pipe. */
+export function markSfuHelloSeen(peerId: number): void {
+    sfuHello.add(peerId);
+}
+
+export function sfuControlReady(peerId: number): boolean {
+    return sfuSend !== null && sfuHello.has(peerId);
+}
+
+/** Publish one frame through the SFU; false = fall back to the relay. */
+export function sendSfuControlFrame(peerId: number, kind: number, payload: Uint8Array): boolean {
+    if (!sfuSend) return false;
+    try {
+        return sfuSend(peerId, encodeFrame(kind, payload));
+    } catch {
+        return false;
+    }
+}
+
+export function forgetSfuControl(peerId: number): void {
+    sfuHello.delete(peerId);
+}
+
 /** Test seam: drop every registration (a fresh module state per test). */
 export function resetControlChannels(): void {
     byPeer.clear();
     handler = null;
+    sfuSend = null;
+    sfuHello.clear();
 }

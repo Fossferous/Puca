@@ -14,8 +14,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
     CTL_MOTION_LABEL, CTL_STATE_LABEL, FRAME_HELLO, FRAME_SEALED_INPUT,
     controlDcReady, decodeFrame, encodeFrame, forgetControlChannels, laneFor,
-    markHelloSeen, registerControlChannel, resetControlChannels, sendControlFrame,
-    setControlFrameHandler,
+    markHelloSeen, markSfuHelloSeen, registerControlChannel, resetControlChannels,
+    deliverSfuControlFrame, forgetSfuControl, sendControlFrame, sendSfuControlFrame,
+    setControlFrameHandler, setSfuControlSender, sfuControlReady,
 } from '../api/rtc/controlDc';
 import { sealControl, openControl, sealControlBytes, openControlBytes } from '../api/e2ee';
 
@@ -154,5 +155,63 @@ describe('raw vs base64 sealing — one construction, two encodings', () => {
         const tampered = new Uint8Array(bytes);
         tampered[tampered.length - 1] ^= 0xff;
         expect(await openControlBytes(key, tampered), 'flipped tag').toBeNull();
+    });
+});
+
+describe('the SFU transport (R3) — same frames, a different pipe', () => {
+    it('is not ready until a sender exists AND a hello arrived', () => {
+        expect(sfuControlReady(7), 'no room, no sender').toBe(false);
+        setSfuControlSender(() => true);
+        expect(sfuControlReady(7), 'a room is not a capability').toBe(false);
+        markSfuHelloSeen(7);
+        expect(sfuControlReady(7)).toBe(true);
+    });
+
+    it('publishes framed bytes to the right peer and reports a refusal', () => {
+        const seen: Array<{ user: number; kind: number }> = [];
+        setSfuControlSender((user, frame) => {
+            seen.push({ user, kind: frame[0] });
+            return user !== 99; // 99 = "no such participant"
+        });
+        expect(sendSfuControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1, 2]))).toBe(true);
+        expect(sendSfuControlFrame(99, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+        expect(seen).toEqual([
+            { user: 7, kind: FRAME_SEALED_INPUT },
+            { user: 99, kind: FRAME_SEALED_INPUT },
+        ]);
+    });
+
+    it('a throwing publisher answers false — the relay takes the frame', () => {
+        setSfuControlSender(() => { throw new Error('room gone'); });
+        expect(sendSfuControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+    });
+
+    it('leaving the room disarms every SFU capability', () => {
+        setSfuControlSender(() => true);
+        markSfuHelloSeen(7);
+        expect(sfuControlReady(7)).toBe(true);
+        setSfuControlSender(null);
+        expect(sfuControlReady(7), 'no publisher, no P2P — back to the relay').toBe(false);
+    });
+
+    it('delivered frames reach the handler flagged as NOT mesh', () => {
+        const seen: Array<{ peer: number; kind: number; viaMesh: boolean }> = [];
+        setControlFrameHandler((peer, _lane, frame, viaMesh) => seen.push({ peer, kind: frame.kind, viaMesh }));
+        deliverSfuControlFrame(7, encodeFrame(FRAME_HELLO, new Uint8Array([1])));
+        // The flag is what makes a hello arm the pipe it ARRIVED on: a mesh
+        // hello says nothing about an SFU room, and vice versa.
+        expect(seen).toEqual([{ peer: 7, kind: FRAME_HELLO, viaMesh: false }]);
+        // A malformed (empty) packet is dropped, not handed on.
+        deliverSfuControlFrame(7, new Uint8Array([]));
+        expect(seen).toHaveLength(1);
+    });
+
+    it('forgetSfuControl drops one peer without disturbing another', () => {
+        setSfuControlSender(() => true);
+        markSfuHelloSeen(7);
+        markSfuHelloSeen(8);
+        forgetSfuControl(7);
+        expect(sfuControlReady(7)).toBe(false);
+        expect(sfuControlReady(8)).toBe(true);
     });
 });

@@ -29,8 +29,9 @@ import {
     type ControlEphemeral,
 } from './e2ee';
 import {
-    FRAME_HELLO, FRAME_SEALED_INPUT, controlDcReady, forgetControlChannels, laneFor,
-    markHelloSeen, sendControlFrame, sendHello, setControlFrameHandler, type CtlLane,
+    FRAME_HELLO, FRAME_SEALED_INPUT, controlDcReady, forgetControlChannels, forgetSfuControl,
+    laneFor, markHelloSeen, markSfuHelloSeen, sendControlFrame, sendHello, sendSfuControlFrame,
+    setControlFrameHandler, sfuControlReady, type CtlLane,
 } from './rtc/controlDc';
 import { getCachedPublicKey } from './dms';
 
@@ -523,6 +524,7 @@ export function stopControlling() {
     state.controlling = null;
     // Capability is per session on this side too — see endHostSession.
     forgetControlChannels(target.userId);
+    forgetSfuControl(target.userId);
     viewerCrypto = null;
     viewerEph = null;
     controlHostCapture = null;
@@ -672,25 +674,30 @@ function rawSend(event: ControlEvent) {
     // Fail closed: without a pairwise key we do NOT fall back to plaintext.
     if (!cc || cc.peerId !== target.userId) return;
     const targetId = target.userId;
-    // P2P FIRST (W5/R2): the DC when the peer has proved it understands
-    // these frames, else the relay — which stays the permanent fallback and
-    // the only path that always exists. The transport decides the SEQUENCE
-    // NAMESPACE too (see the crypto state comment).
+    // P2P FIRST: the mesh DC (R2) when the peer proved it understands these
+    // frames, else the SFU room's data path (R3) on the same proof, else the
+    // relay — which stays the permanent fallback and the only path that
+    // always exists. Mesh before SFU because the mesh path has NO server in
+    // it at all. Both P2P pipes share one SEQUENCE NAMESPACE (they are never
+    // both live for one peer — a call is mesh or SFU) and the relay keeps
+    // its own; see the crypto state comment.
     const lane: CtlLane = laneFor(event.t);
     const viaDc = controlDcReady(targetId, lane);
-    const seq = viaDc ? ++cc.dcSeq : ++cc.seq;
+    const viaSfu = !viaDc && sfuControlReady(targetId);
+    const seq = viaDc || viaSfu ? ++cc.dcSeq : ++cc.seq;
     const payload = JSON.stringify({ s: seq, e: event });
     sendChain = sendChain
         .then(async () => {
             if (viewerCrypto !== cc) return; // session torn down mid-flight
-            if (viaDc) {
+            if (viaDc || viaSfu) {
                 const bytes = await sealControlBytes(cc.key, payload);
-                if (sendControlFrame(targetId, lane, FRAME_SEALED_INPUT, bytes)) return;
-                // The channel died between the check and the send: fall back
-                // in place rather than dropping the event. Its DC sequence
+                if (viaDc && sendControlFrame(targetId, lane, FRAME_SEALED_INPUT, bytes)) return;
+                if (viaSfu && sendSfuControlFrame(targetId, FRAME_SEALED_INPUT, bytes)) return;
+                // The pipe died between the check and the send: fall back in
+                // place rather than dropping the event. Its P2P sequence
                 // number is spent — harmless, the namespaces are separate and
                 // the host only requires STRICTLY INCREASING within each.
-                dcFellBack(targetId, 'send failed');
+                dcFellBack(targetId, viaDc ? 'data channel send failed' : 'SFU publish failed');
             }
             const sealed = await sealControl(cc.key, payload);
             wsClient.send({ type: 'ControlInput', payload: { target_user: targetId, event: sealed } });
@@ -714,13 +721,17 @@ function dcFellBack(peerId: number, why: string): void {
 async function sendControlHello(peerId: number, key: Uint8Array): Promise<void> {
     try {
         const bytes = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
+        // Both pipes: a call is mesh OR SFU, and the sender does not know
+        // which until a hello comes back. Each send is a no-op where that
+        // transport does not exist.
         sendHello(peerId, bytes);
+        sendSfuControlFrame(peerId, FRAME_HELLO, bytes);
     } catch { /* the relay keeps working */ }
 }
 
 /** Install the single inbound-frame consumer. Idempotent. */
 function wireControlDc(): void {
-    setControlFrameHandler((peerId, lane, frame) => {
+    setControlFrameHandler((peerId, lane, frame, viaMesh) => {
         // Which side am I for THIS peer? A user can be host to one peer and
         // viewer to another at the same time.
         const asHost = hostCrypto && hostCrypto.peerId === peerId ? hostCrypto : null;
@@ -733,8 +744,12 @@ function wireControlDc(): void {
                 // forged one proves nothing and must not arm the transport.
                 const plain = await openControlBytes(key, frame.payload);
                 if (plain === null) return;
-                markHelloSeen(peerId);
-                console.info(`[p2p-input] peer ${peerId}: control data channel ready`);
+                // Arm the pipe it ARRIVED ON. A mesh hello says nothing about
+                // an SFU room and the reverse, and arming the wrong one would
+                // send input into a transport that never proved itself.
+                if (viaMesh) markHelloSeen(peerId);
+                else markSfuHelloSeen(peerId);
+                console.info(`[p2p-input] peer ${peerId}: ${viaMesh ? 'mesh data channel' : 'SFU data path'} ready`);
             }).catch(() => undefined);
             return;
         }
@@ -929,7 +944,7 @@ function endHostSession() {
     clearInactivity();
     // Forget the P2P lanes with the key: capability is per SESSION, and a
     // hello from the last one must not arm the next.
-    if (hostCrypto) forgetControlChannels(hostCrypto.peerId);
+    if (hostCrypto) { forgetControlChannels(hostCrypto.peerId); forgetSfuControl(hostCrypto.peerId); }
     hostCrypto = null;      // no key ⇒ any further ControlInput is dropped
     pendingViewerEph = null;
     void stopGuard();       // stops the LL hook AND releases held input natively

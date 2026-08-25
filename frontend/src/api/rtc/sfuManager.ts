@@ -26,6 +26,7 @@ import E2EEWorker from 'livekit-client/e2ee-worker?worker';
 import { apiClient } from '../client';
 import { noiseDiagnostics } from '../noiseFilter';
 import { ensureChannelKey } from '../channelKeys';
+import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
 import type { MediaE2eeReason, MediaE2eeStatus, RemoteStreamCallback } from './types';
@@ -702,6 +703,40 @@ export class SfuManager {
 
     // --- room events ---------------------------------------------------------
 
+    /**
+     * Publish one control frame to every connection of `userId` (a user can
+     * be in the room from two devices; the input must reach the one hosting,
+     * and the others drop it — an unopenable frame is dropped by design).
+     *
+     * `false` = not sent, use the relay: no room, no matching participant,
+     * or LiveKit refused. Reliable delivery, always — the lane split lives
+     * in the mesh transport; the SFU path carries the state semantics for
+     * everything, because a dropped absolute move here would be
+     * indistinguishable from the click that follows it going missing.
+     */
+    publishControlFrame(userId: number, frame: Uint8Array): boolean {
+        const room = this.room;
+        if (!room || room.state !== ConnectionState.Connected) return false;
+        const identities = [...room.remoteParticipants.values()]
+            .filter((p) => userIdFromIdentity(p.identity) === userId)
+            .map((p) => p.identity);
+        if (identities.length === 0) return false;
+        try {
+            // A fresh, plainly-backed copy: publishData's type excludes a
+            // SHARED-buffer view, and our frame builder is generic over both.
+            const owned = new Uint8Array(new ArrayBuffer(frame.byteLength));
+            owned.set(frame);
+            void room.localParticipant.publishData(owned, {
+                reliable: true,
+                destinationIdentities: identities,
+                topic: CTL_SFU_TOPIC,
+            });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     private wireRoomEvents(room: Room): void {
         room
             .on(RoomEvent.TrackSubscribed, (track, pub, participant) =>
@@ -732,6 +767,23 @@ export class SfuManager {
                     this.shareStreams.delete(uid);
                     this.onPeerDisconnected?.(uid, true); // LiveKit only fires this after its own retries
                 }
+            })
+            .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+                // P2P INPUT over the SFU (W6/R3). Same frames, same registry,
+                // same sealed-hello gate as the mesh lanes — only the pipe
+                // differs, so remoteControl needs no SFU branch at all.
+                //
+                // The SFU RELAYS these (it is a server in the path), unlike
+                // the mesh DC: the win here is latency and one fewer protocol
+                // hop, NOT removing a trust boundary. The frames stay sealed
+                // under the session key, so the SFU learns no more than the
+                // WS relay already does.
+                if (topic !== CTL_SFU_TOPIC || !participant) return;
+                const uid = userIdFromIdentity(participant.identity);
+                if (uid === null || uid === this.localUserId) return;
+                // Copy into a plain ArrayBuffer-backed view: LiveKit types
+                // its payload as ArrayBufferLike, which may be shared.
+                deliverSfuControlFrame(uid, Uint8Array.from(payload));
             })
             .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
                 const ids = speakers
