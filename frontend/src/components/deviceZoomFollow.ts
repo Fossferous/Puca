@@ -81,6 +81,11 @@ export interface MonitorGeom {
 }
 
 export interface Region { id: number; x: number; y: number; w: number; h: number }
+/** session.ts's ALL_DISPLAYS, NOT imported: this module is pure and must stay
+ *  importable without dragging the session (and its crypto) into every test.
+ *  The two are pinned equal by deviceZoomFollow.test.ts. */
+const ALL_DISPLAYS = 255;
+
 export interface Box { w: number; h: number }
 export interface Transform { scale: number; x: number; y: number }
 /** object-fit: contain letterbox of a video inside its element. */
@@ -109,10 +114,6 @@ export interface View { pict: Picture; videoW: number; videoH: number }
  * way.
  */
 export function initialMonitorRequest(monitors: MonitorGeom[], active: number | null): number | null {
-    // session.ts's ALL_DISPLAYS, NOT imported: this module is pure and must
-    // stay importable without dragging the session (and its crypto) into
-    // every test. The two are pinned equal by deviceZoomFollow.test.ts.
-    const ALL_DISPLAYS = 255;
     if (monitors.length < 2) return null;
     if (active === ALL_DISPLAYS) return null;
     const measured = monitors.every(m =>
@@ -554,24 +555,31 @@ export function caretFollowTransform(input: CaretFollowInput): Transform | null 
     return next;
 }
 
-// --- MONITOR-HOP: pan off one screen's edge onto its neighbour -----------
+// --- MONITOR-HOP: step off one screen's edge onto its neighbour ----------
 //
 // Zoomed into a single-monitor capture, the pan clamp stops dead at the
 // screen's edge — but on the real desktop there is another monitor right
-// there. Persisting the pan INTO the clamp is unambiguous intent to look at
-// it, so the stage switches the capture to the neighbour and lands the view
-// just inside the shared edge, physically continuous, exactly as the
-// zoom-follow switch does for the composite. Everything decision-shaped is
-// pure and lives here; DeviceStage feeds measured pushes and applies the
-// returned transform.
+// there. This offers the step across, landing the view just inside the
+// shared edge, physically continuous, exactly as the zoom-follow switch does
+// for the composite.
+//
+// IT IS A TAP, NOT A GESTURE, and that is the whole design. The first cut
+// inferred intent from "pan travel the clamp refused": 48px of blocked
+// movement while pinned at an edge switched the screen. In the field that
+// fired constantly and made the phone's desktop view unusable, for a reason
+// obvious only once seen — READING IS PANNING TO AN EDGE. You swipe to the
+// end of a line and the swipe does not stop when the picture does; the
+// remaining travel of one ordinary flick is several times the threshold. The
+// gesture that was supposed to mean "take me next door" is indistinguishable
+// from the gesture that means "I have finished reading this line".
+//
+// So the edge now OFFERS itself: reach the end of a screen that has a
+// neighbour and a chip appears naming it, which does nothing until tapped.
+// It cannot fire by accident, it is discoverable (the gesture never was),
+// and the escape from a wrong guess is not tapping. Everything
+// decision-shaped is pure and lives here; DeviceStage renders the chips and
+// applies the returned transform.
 
-/** Blocked-travel a hop needs. High enough that brushing the clamp while
- *  panning around a screen never hops; low enough that a deliberate push
- *  (half a thumb-swipe) does. */
-export const HOP_PRESSURE_PX = 48;
-/** Pressure this stale is forgotten: the pushes must be one gesture, not two
- *  edge-brushes a sip of coffee apart. */
-export const HOP_PRESSURE_TTL_MS = 600;
 /** Desktop-px slack when deciding two monitors share an edge. Windows lays
  *  out most side-by-side monitors at exactly adjacent coordinates, but a
  *  mixed-DPI arrangement can leave a seam. */
@@ -580,84 +588,53 @@ export const HOP_ADJACENCY_TOL_PX = 32;
  *  picker is the honest way to change screens — a hop from a fitted view
  *  would be a surprise switch with no visual continuity to justify it. */
 export const HOP_MIN_SCALE = 1.1;
-/** After a hop, ignore pressure this long: the finger that pushed across is
- *  usually still moving, and its tail must not ping-pong straight back. */
-export const HOP_COOLDOWN_MS = 500;
-/** What one rAF of follow-cursor edge dwell feeds the accumulator. The
- *  follow writer has no finger-travel to measure (the residual it sees is a
- *  position, and summing positions double-counts), so dwell is quantised:
- *  48px / 3px ≈ 16 frames ≈ a quarter second of holding the cursor against
- *  the edge at 60Hz. */
-export const HOP_EDGE_QUANTUM_PX = 3;
+/** How near the clamp counts as "panned to that edge", in surface px. The
+ *  pan is written by the clamp itself, so an exact hit is the normal case;
+ *  this only covers float drift. */
+export const HOP_EDGE_EPS_PX = 1;
 
 export type HopDir = 'left' | 'right' | 'up' | 'down';
 
-/**
- * The push a clamped pan actually represents, per axis — or zero.
- *
- * "Proposed ≠ clamped" is NOT "pinned at an edge". `clampPanAxisWindow` has
- * two regimes, and on an axis the scaled picture UNDERFILLS it ignores the
- * proposal entirely and returns the centred constant — so on a portrait
- * phone showing a landscape desktop (y underfills at nearly every usable
- * zoom) every ordinary cursor move produced a residual whose sign merely
- * said "above or below centre", and a quarter second of that hopped to a
- * monitor nobody pushed toward. Pressure is only real on an axis the
- * picture overfills, where the clamp genuinely ran out of pan room.
- *
- * `travel` is the finger/cursor movement to bank when the axis is pinned
- * (the residual itself is a position; summing positions double-counts).
- * Sign convention out: +x = the user is looking right, +y = down.
- */
-export function hopPush(
-    box: Box, pict: Picture | null, scale: number,
-    proposed: { x: number; y: number },
-    clamped: { x: number; y: number },
-    travel: { x: number; y: number },
-): { pushX: number; pushY: number } {
-    if (!pict) return { pushX: 0, pushY: 0 };
-    const overX = scale * pict.dispW > box.w + 0.5;
-    const overY = scale * pict.dispH > box.h + 0.5;
-    const rx = proposed.x - clamped.x;
-    const ry = proposed.y - clamped.y;
-    return {
-        pushX: overX && rx < -0.5 ? Math.abs(travel.x)
-            : overX && rx > 0.5 ? -Math.abs(travel.x) : 0,
-        pushY: overY && ry < -0.5 ? Math.abs(travel.y)
-            : overY && ry > 0.5 ? -Math.abs(travel.y) : 0,
-    };
-}
-
-/** Accumulated intent to leave through one edge. `sign` on x: +1 = rightward
- *  (content pushed left, user looking right); on y: +1 = downward. */
-export interface HopPressure { axis: 'x' | 'y'; sign: 1 | -1; px: number; at: number }
+/** An edge the view is currently against, that has somewhere to go. */
+export interface EdgeHop { dir: HopDir; neighbourId: number }
 
 /**
- * Fold one event's blocked push into the pressure. `pushX`/`pushY` are the
- * travel the clamp refused, signed by WHERE THE USER IS TRYING TO LOOK
- * (+x = right, +y = down); zero means the clamp did not pin that axis this
- * event. The dominant axis of the event wins; a direction change or a stale
- * accumulator starts over rather than mixing gestures.
+ * Which hops the CURRENT view is offering — a pure function of the transform,
+ * with no accumulator, no timer and no history to get out of step with what
+ * is on screen.
+ *
+ * An axis qualifies only when the scaled picture OVERFILLS the viewport and
+ * the pan sits at that side's clamp. The overfill test is not a nicety:
+ * `clampPanAxisWindow` has two regimes, and on an axis the picture underfills
+ * it ignores the proposed pan entirely and returns a centred constant. That
+ * value is permanently equal to both bounds, so without this test a portrait
+ * phone showing a landscape desktop would offer "up" and "down" the whole
+ * time — every vertical axis is always "at its edge" when there is no edge.
  */
-export function accumulateHopPressure(
-    prev: HopPressure | null, pushX: number, pushY: number, now: number,
-): HopPressure | null {
-    const ax = Math.abs(pushX), ay = Math.abs(pushY);
-    if (ax < 0.5 && ay < 0.5) {
-        // No push this event: pressure survives only its TTL.
-        return prev && now - prev.at <= HOP_PRESSURE_TTL_MS ? prev : null;
+export function availableEdgeHops(
+    box: Box, pict: Picture | null, scale: number, pan: { x: number; y: number },
+    monitors: MonitorGeom[], activeId: number | null,
+): EdgeHop[] {
+    if (!pict || activeId === null || activeId === ALL_DISPLAYS || scale < HOP_MIN_SCALE) return [];
+    const dirs: HopDir[] = [];
+    if (scale * pict.dispW > box.w + 0.5) {
+        const near = -scale * pict.offX;                          // picture's left edge at the viewport's
+        const far = box.w - scale * (pict.offX + pict.dispW);     // its right edge at the viewport's
+        if (pan.x >= near - HOP_EDGE_EPS_PX) dirs.push('left');
+        if (pan.x <= far + HOP_EDGE_EPS_PX) dirs.push('right');
     }
-    const axis: 'x' | 'y' = ax >= ay ? 'x' : 'y';
-    const val = axis === 'x' ? pushX : pushY;
-    const sign: 1 | -1 = val > 0 ? 1 : -1;
-    const mag = Math.abs(val);
-    if (prev && prev.axis === axis && prev.sign === sign && now - prev.at <= HOP_PRESSURE_TTL_MS) {
-        return { axis, sign, px: prev.px + mag, at: now };
+    if (scale * pict.dispH > box.h + 0.5) {
+        const near = -scale * pict.offY;
+        const far = box.h - scale * (pict.offY + pict.dispH);
+        if (pan.y >= near - HOP_EDGE_EPS_PX) dirs.push('up');
+        if (pan.y <= far + HOP_EDGE_EPS_PX) dirs.push('down');
     }
-    return { axis, sign, px: mag, at: now };
-}
-
-export function hopDirection(p: HopPressure): HopDir {
-    return p.axis === 'x' ? (p.sign > 0 ? 'right' : 'left') : (p.sign > 0 ? 'down' : 'up');
+    const out: EdgeHop[] = [];
+    for (const dir of dirs) {
+        const neighbourId = monitorNeighbour(monitors, activeId, dir);
+        if (neighbourId !== null) out.push({ dir, neighbourId });
+    }
+    return out;
 }
 
 /**

@@ -388,43 +388,9 @@ describe('captureSurfaceSize', () => {
 // --- MONITOR-HOP ---------------------------------------------------------
 
 import {
-    HOP_ADJACENCY_TOL_PX, HOP_PRESSURE_PX, HOP_PRESSURE_TTL_MS,
-    accumulateHopPressure, hopDirection, hopPush, monitorNeighbour, remapAcrossBoundary,
+    HOP_ADJACENCY_TOL_PX, HOP_MIN_SCALE,
+    availableEdgeHops, monitorNeighbour, remapAcrossBoundary,
 } from '../components/deviceZoomFollow';
-
-describe('accumulateHopPressure — one gesture, one direction, or start over', () => {
-    it('accumulates same-direction pushes and reports the direction', () => {
-        let p = accumulateHopPressure(null, 20, 0, 1000);
-        p = accumulateHopPressure(p, 20, 0, 1200);
-        p = accumulateHopPressure(p, 20, 0, 1400);
-        expect(p).toMatchObject({ axis: 'x', sign: 1, px: 60, at: 1400 });
-        expect(hopDirection(p!)).toBe('right');
-        expect(p!.px).toBeGreaterThanOrEqual(HOP_PRESSURE_PX);
-    });
-
-    it('a direction change resets rather than mixing gestures', () => {
-        let p = accumulateHopPressure(null, 40, 0, 1000);
-        p = accumulateHopPressure(p, -10, 0, 1100);
-        expect(p).toMatchObject({ axis: 'x', sign: -1, px: 10 });
-        expect(hopDirection(p!)).toBe('left');
-        // Axis change resets too.
-        p = accumulateHopPressure(p, 0, 30, 1200);
-        expect(p).toMatchObject({ axis: 'y', sign: 1, px: 30 });
-        expect(hopDirection(p!)).toBe('down');
-    });
-
-    it('stale pressure is forgotten — two edge-brushes far apart are not one push', () => {
-        let p = accumulateHopPressure(null, 40, 0, 1000);
-        p = accumulateHopPressure(p, 40, 0, 1000 + HOP_PRESSURE_TTL_MS + 1);
-        expect(p).toMatchObject({ px: 40, at: 1000 + HOP_PRESSURE_TTL_MS + 1 });
-    });
-
-    it('a no-push event preserves fresh pressure and clears stale', () => {
-        const p = accumulateHopPressure(null, 40, 0, 1000);
-        expect(accumulateHopPressure(p, 0, 0, 1100)).toBe(p);
-        expect(accumulateHopPressure(p, 0, 0, 1000 + HOP_PRESSURE_TTL_MS + 1)).toBeNull();
-    });
-});
 
 describe('monitorNeighbour — adjacency in desktop px, biggest shared edge wins', () => {
     it('finds the side-by-side neighbour in both directions, and nothing past the last screen', () => {
@@ -531,62 +497,70 @@ describe('remapAcrossBoundary — land just inside the shared edge, physically c
     });
 });
 
-describe('hopPush — a clamp disagreement is only pressure on an axis that can pan', () => {
-    // The review-caught geometry: a portrait phone (390x820 surface) showing
-    // a landscape 1920x1080 capture. The picture letterboxes to 390x219.4;
-    // at scale 2 the y axis UNDERFILLS (438 < 820) and the clamp force-
-    // centres it — its residual is geometry, not intent — while x overfills
-    // (780 > 390) and can genuinely run out of room.
+describe('availableEdgeHops — an edge only offers when it is genuinely an edge', () => {
+    // The field geometry that broke the gesture version: a portrait phone
+    // (390x820 surface) showing a landscape 1920x1080 capture. The picture
+    // letterboxes to 390x219.4; at scale 2 the y axis UNDERFILLS (438 < 820)
+    // and the clamp force-centres it, while x overfills (780 > 390) and can
+    // genuinely run out of room.
     const PHONE = { w: 390, h: 820 };
     const PICT = { offX: 0, offY: (820 - 219.375) / 2, dispW: 390, dispH: 219.375 };
+    // Two side-by-side screens plus one stacked ABOVE the first, so a wrong
+    // vertical answer has somewhere to wrongly go.
+    const M = [
+        { id: 0, left: 0, top: 0, width: 1920, height: 1080 },
+        { id: 1, left: 1920, top: 0, width: 1920, height: 1080 },
+        { id: 2, left: 0, top: -1080, width: 1920, height: 1080 },
+    ];
+    /** The pan bound on x for this geometry: picture's right edge at the
+     *  viewport's right edge. */
+    const farX = (scale: number) => PHONE.w - scale * PICT.dispW;
 
-    it('an underfilled axis NEVER yields pressure, whatever the residual', () => {
-        // Cursor above centre: the solve proposes y far from the centred
-        // constant. Before the fix this banked a quantum per frame and
-        // hopped to the monitor "above" from a cursor mid-screen.
-        const { pushX, pushY } = hopPush(
-            PHONE, PICT, 2,
-            { x: -100, y: 400 }, { x: -100, y: 190 }, { x: 3, y: 3 },
-        );
-        expect(pushY).toBe(0);
-        expect(pushX).toBe(0); // x not pinned here either
+    it('panned hard right on screen 0 offers screen 1, and nothing else', () => {
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, M, 0))
+            .toEqual([{ dir: 'right', neighbourId: 1 }]);
     });
 
-    it('an overfilled, pinned axis yields the travel with the looking-direction sign', () => {
-        // x overfills at scale 2; proposing further left than the bound
-        // (residual negative) means the user is looking RIGHT.
-        const { pushX } = hopPush(
-            PHONE, PICT, 2,
-            { x: -500, y: 190 }, { x: -390, y: 190 }, { x: 12, y: 0 },
-        );
-        expect(pushX).toBe(12);
-        // And the mirror: pinned at the other bound, looking LEFT.
-        const { pushX: back } = hopPush(
-            PHONE, PICT, 2,
-            { x: 60, y: 190 }, { x: 0, y: 190 }, { x: 12, y: 0 },
-        );
-        expect(back).toBe(-12);
+    it('panned hard left offers the way back', () => {
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: 0, y: 190 }, M, 1))
+            .toEqual([{ dir: 'left', neighbourId: 0 }]);
     });
 
-    it('no pin, no pressure; no picture, no pressure', () => {
-        const { pushX, pushY } = hopPush(
-            PHONE, PICT, 2,
-            { x: -100, y: 190 }, { x: -100, y: 190 }, { x: 12, y: 12 },
-        );
-        expect(pushX).toBe(0);
-        expect(pushY).toBe(0);
-        const blind = hopPush(PHONE, null, 2, { x: -500, y: 0 }, { x: 0, y: 0 }, { x: 12, y: 12 });
-        expect(blind).toEqual({ pushX: 0, pushY: 0 });
+    it('mid-pan offers NOTHING — the edge has to be reached', () => {
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2) / 2, y: 190 }, M, 0))
+            .toEqual([]);
     });
 
-    it('both axes overfilled and pinned: both report, accumulator picks the dominant', () => {
-        // Zoomed far enough that y overfills too (scale 8: 1755 > 820).
-        const deep = { offX: 0, offY: (820 - 219.375) / 2, dispW: 390, dispH: 219.375 };
-        const { pushX, pushY } = hopPush(
-            PHONE, deep, 8,
-            { x: -3000, y: -3500 }, { x: -2730, y: -3337.5 }, { x: 5, y: 9 },
-        );
-        expect(pushX).toBe(5);
-        expect(pushY).toBe(9);
+    it('an UNDERFILLED axis never offers, whichever monitor sits that way', () => {
+        // y underfills at scale 2, so the clamp returns a centred constant
+        // that is permanently equal to both bounds. Screen 2 is directly
+        // above screen 0 — if the underfill test were missing, this would
+        // offer "up" from a view that has no vertical pan at all, which is
+        // the shape of the bug that made the phone unusable.
+        const hops = availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, M, 0);
+        expect(hops.some(h => h.dir === 'up')).toBe(false);
+        // POSITIVE CONTROL: zoom until y overfills (scale 8 → 1755 > 820)
+        // and pan to the top, and the same call DOES offer it.
+        const deepTop = -8 * PICT.offY;   // picture's top edge at the viewport's
+        expect(availableEdgeHops(PHONE, PICT, 8, { x: -100, y: deepTop }, M, 0))
+            .toContainEqual({ dir: 'up', neighbourId: 2 });
+    });
+
+    it('an edge with nothing beyond it offers nothing', () => {
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, M, 1))
+            .toEqual([]);
+    });
+
+    it('below the zoom floor, on the composite, or with no picture: nothing', () => {
+        const below = HOP_MIN_SCALE - 0.01;
+        expect(availableEdgeHops(PHONE, PICT, below, { x: farX(below), y: 190 }, M, 0)).toEqual([]);
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, M, 255)).toEqual([]);
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, M, null)).toEqual([]);
+        expect(availableEdgeHops(PHONE, null, 2, { x: 0, y: 0 }, M, 0)).toEqual([]);
+    });
+
+    it('UNMEASURED geometry offers nothing rather than a guess', () => {
+        const vague = [{ id: 0 }, { id: 1 }];
+        expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, vague, 0)).toEqual([]);
     });
 });

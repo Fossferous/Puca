@@ -5,6 +5,14 @@
  * button while steering the cursor with the other thumb have no gesture — the
  * pad is what makes those possible.
  *
+ * TWO CLUSTERS, PARKED SEPARATELY. It was one bar carrying all five controls,
+ * and at ~290px that is most of a phone's width: wherever it sat it laid a
+ * band across the remote screen, and the thing you most want to read is
+ * usually the line it is covering. Split, each half is small enough to tuck
+ * into a corner, and the two can straddle the content instead of crossing
+ * it — buttons under one thumb, scroll under the other, which is also how
+ * they are actually used. Each remembers its own position.
+ *
  * Press semantics are a physical mouse's, deliberately: pointer DOWN on a
  * button presses it on the host, UP releases it. A quick tap is a click; a
  * hold is a hold, so hold-Left + move-cursor is a drag. The scroll buttons
@@ -14,7 +22,9 @@
  * exists to be used with two thumbs, and the first version keyed state by
  * button — so a second finger brushing an already-held button released it for
  * the finger still pressing, and lifting one scroll arrow silently killed the
- * repeat the other, still-held arrow owned.
+ * repeat the other, still-held arrow owned. The press maps are shared across
+ * both clusters for the same reason: they are one hand's worth of state, not
+ * one widget's.
  *
  * Owns no wire knowledge: the stage passes onButton/onWheel and keeps its own
  * record of what is pressed (its blur/session-end release-all covers the pad
@@ -23,7 +33,7 @@
  * strand a button down on the remote machine. A doubled release is harmless
  * (an unmatched button-up is a no-op on every host backend).
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronDownIcon, ChevronUpIcon, MoreVerticalIcon } from './Icons';
 
 /** One wheel notch, in the units the host feeds straight to the OS; positive
@@ -33,16 +43,20 @@ const WHEEL_NOTCH = 120;
 const REPEAT_DELAY_MS = 350;
 const REPEAT_EVERY_MS = 130;
 
-/** Where the user last parked the pad. Session-independent on purpose — a
- *  position that suited your thumb once suits it next time too. */
-const POS_KEY = 'device-stage-virtual-mouse-pos';
+/** Where the user last parked each cluster. Session-independent on purpose —
+ *  a position that suited your thumb once suits it next time too. Separate
+ *  keys, because they are now separately placeable; the single-bar key is
+ *  deliberately not reused, so both start at their own sensible corner rather
+ *  than stacked on the old bar's spot. */
+const BUTTONS_POS_KEY = 'device-stage-virtual-mouse-buttons-pos';
+const SCROLL_POS_KEY = 'device-stage-virtual-mouse-scroll-pos';
 
 interface PadPos { left: number; top: number }
 
-/** Keep the pad reachable: at least its grip corner inside the viewport.
+/** Keep a cluster reachable: at least its grip corner inside the viewport.
  *  Clamped against the MEASURED rect — the first version clamped a restored
- *  position against a made-up 80x60 footprint, and the real ~290px pad could
- *  still hang mostly off the right edge. */
+ *  position against a made-up 80x60 footprint, and the real pad could still
+ *  hang mostly off the right edge. */
 function clampTo(p: PadPos, rect: { width: number; height: number }): PadPos {
     return {
         left: Math.min(Math.max(p.left, 4), Math.max(4, window.innerWidth - rect.width - 4)),
@@ -50,14 +64,14 @@ function clampTo(p: PadPos, rect: { width: number; height: number }): PadPos {
     };
 }
 
-function readSavedPos(): PadPos | null {
+function readSavedPos(key: string): PadPos | null {
     try {
-        const raw = localStorage.getItem(POS_KEY);
+        const raw = localStorage.getItem(key);
         if (!raw) return null;
         const p = JSON.parse(raw) as PadPos;
         if (typeof p.left !== 'number' || typeof p.top !== 'number') return null;
         // Rough pre-paint clamp only — the layout effect below re-clamps
-        // against the measured pad the moment it exists.
+        // against the measured cluster the moment it exists.
         return clampTo(p, { width: 80, height: 60 });
     } catch {
         return null;
@@ -75,12 +89,89 @@ function capture(e: React.PointerEvent): void {
     }
 }
 
+/**
+ * One draggable cluster's position: restore, keep on screen, drag by the grip.
+ *
+ * The position to SAVE is tracked in the drag record itself, not read back
+ * from React state — state commits lag the event, so a quick flick used to
+ * save nothing (or the previous frame's spot) depending on when the up landed.
+ */
+function usePadPos(storageKey: string, ref: React.RefObject<HTMLDivElement | null>) {
+    const [pos, setPos] = useState<PadPos | null>(() => readSavedPos(storageKey));
+
+    // Keep it reachable across rotation and resize: a portrait position near
+    // the bottom is past the edge of a landscape viewport, and with the grip
+    // off-screen there is no way to drag it back.
+    useLayoutEffect(() => {
+        const reclamp = () => {
+            setPos(p => {
+                const rect = ref.current?.getBoundingClientRect();
+                if (!p || !rect) return p;
+                const c = clampTo(p, rect);
+                return c.left === p.left && c.top === p.top ? p : c;
+            });
+        };
+        reclamp();
+        window.addEventListener('resize', reclamp);
+        window.addEventListener('orientationchange', reclamp);
+        return () => {
+            window.removeEventListener('resize', reclamp);
+            window.removeEventListener('orientationchange', reclamp);
+        };
+    }, [ref]);
+
+    const drag = useRef<{ id: number; dx: number; dy: number; at: PadPos | null } | null>(null);
+    const onPointerDown = useCallback((e: React.PointerEvent) => {
+        const rect = ref.current?.getBoundingClientRect();
+        if (!rect) return;
+        drag.current = { id: e.pointerId, dx: e.clientX - rect.left, dy: e.clientY - rect.top, at: null };
+        capture(e);
+        e.preventDefault();
+    }, [ref]);
+    const onPointerMove = useCallback((e: React.PointerEvent) => {
+        const d = drag.current;
+        const rect = ref.current?.getBoundingClientRect();
+        if (!d || d.id !== e.pointerId || !rect) return;
+        const next = clampTo({ left: e.clientX - d.dx, top: e.clientY - d.dy }, rect);
+        d.at = next;
+        setPos(next);
+    }, [ref]);
+    const onPointerUp = useCallback((e: React.PointerEvent) => {
+        const d = drag.current;
+        if (d?.id !== e.pointerId) return;
+        drag.current = null;
+        try {
+            if (d.at) localStorage.setItem(storageKey, JSON.stringify(d.at));
+        } catch {
+            // Storage unavailable; the position still holds for this session.
+        }
+    }, [storageKey]);
+
+    return {
+        style: pos
+            ? { left: pos.left, top: pos.top, right: 'auto', bottom: 'auto', transform: 'none' }
+            : undefined,
+        gripHandlers: {
+            onPointerDown,
+            onPointerMove,
+            onPointerUp,
+            onPointerCancel: onPointerUp,
+        },
+    };
+}
+
 export function DeviceStageVirtualMouse({ onButton, onWheel }: {
     onButton: (button: number, down: boolean) => void;
     onWheel: (dy: number) => void;
 }) {
-    const padRef = useRef<HTMLDivElement>(null);
-    const [pos, setPos] = useState<PadPos | null>(readSavedPos);
+    // The refs are OWNED HERE and handed down, not returned from the hook:
+    // a hook returning an object with a ref in it makes every property read
+    // on that object look like a render-time ref access to eslint, and one of
+    // those genuinely is a bug worth catching.
+    const buttonsRef = useRef<HTMLDivElement>(null);
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const buttonsPad = usePadPos(BUTTONS_POS_KEY, buttonsRef);
+    const scrollPad = usePadPos(SCROLL_POS_KEY, scrollRef);
 
     // Live mirrors so the unmount cleanup releases through the CURRENT
     // callbacks, not the ones captured when the pad first mounted.
@@ -149,59 +240,6 @@ export function DeviceStageVirtualMouse({ onButton, onWheel }: {
     };
     useEffect(() => () => clearScrollTimers(), []);
 
-    // Keep the pad reachable across rotation and resize: a portrait position
-    // near the bottom is past the edge of a landscape viewport, and with the
-    // grip off-screen there is no way to drag it back.
-    useLayoutEffect(() => {
-        const reclamp = () => {
-            setPos(p => {
-                const rect = padRef.current?.getBoundingClientRect();
-                if (!p || !rect) return p;
-                const c = clampTo(p, rect);
-                return c.left === p.left && c.top === p.top ? p : c;
-            });
-        };
-        reclamp();
-        window.addEventListener('resize', reclamp);
-        window.addEventListener('orientationchange', reclamp);
-        return () => {
-            window.removeEventListener('resize', reclamp);
-            window.removeEventListener('orientationchange', reclamp);
-        };
-    }, []);
-
-    // Reposition by the grip. Pointer capture keeps the drag alive when the
-    // finger outruns the handle. The position to SAVE is tracked in the drag
-    // record itself, not read back from React state — state commits lag the
-    // event, so a quick flick used to save nothing (or the previous frame's
-    // spot) depending on when the up landed.
-    const drag = useRef<{ id: number; dx: number; dy: number; at: PadPos | null } | null>(null);
-    const onGripDown = (e: React.PointerEvent) => {
-        const rect = padRef.current?.getBoundingClientRect();
-        if (!rect) return;
-        drag.current = { id: e.pointerId, dx: e.clientX - rect.left, dy: e.clientY - rect.top, at: null };
-        capture(e);
-        e.preventDefault();
-    };
-    const onGripMove = (e: React.PointerEvent) => {
-        const d = drag.current;
-        const rect = padRef.current?.getBoundingClientRect();
-        if (!d || d.id !== e.pointerId || !rect) return;
-        const next = clampTo({ left: e.clientX - d.dx, top: e.clientY - d.dy }, rect);
-        d.at = next;
-        setPos(next);
-    };
-    const onGripUp = (e: React.PointerEvent) => {
-        const d = drag.current;
-        if (d?.id !== e.pointerId) return;
-        drag.current = null;
-        try {
-            if (d.at) localStorage.setItem(POS_KEY, JSON.stringify(d.at));
-        } catch {
-            // Storage unavailable; the position still holds for this session.
-        }
-    };
-
     /** Down/up/cancel wiring for one mouse button. `pointercancel` counts as a
      *  release: the OS stole the pointer and no up is coming. */
     const buttonHandlers = (button: number) => ({
@@ -224,27 +262,30 @@ export function DeviceStageVirtualMouse({ onButton, onWheel }: {
     });
 
     return (
-        <div
-            ref={padRef}
-            className="device-stage-virtual-mouse"
-            style={pos ? { left: pos.left, top: pos.top, right: 'auto', bottom: 'auto', transform: 'none' } : undefined}
-        >
+        <>
             <div
-                className="vm-grip"
-                aria-label="Move the virtual mouse pad"
-                onPointerDown={onGripDown}
-                onPointerMove={onGripMove}
-                onPointerUp={onGripUp}
-                onPointerCancel={onGripUp}
+                ref={buttonsRef}
+                className="device-stage-virtual-mouse vm-cluster-buttons"
+                style={buttonsPad.style}
             >
-                <MoreVerticalIcon />
+                <div className="vm-grip" aria-label="Move the mouse buttons" {...buttonsPad.gripHandlers}>
+                    <MoreVerticalIcon />
+                </div>
+                <button type="button" className={`vm-btn ${heldView.has(0) ? 'vm-held' : ''}`} aria-label="Left mouse button" {...buttonHandlers(0)}>L</button>
+                <button type="button" className={`vm-btn ${heldView.has(1) ? 'vm-held' : ''}`} aria-label="Middle mouse button" {...buttonHandlers(1)}>M</button>
+                <button type="button" className={`vm-btn ${heldView.has(2) ? 'vm-held' : ''}`} aria-label="Right mouse button" {...buttonHandlers(2)}>R</button>
             </div>
-            <button type="button" className={`vm-btn ${heldView.has(0) ? 'vm-held' : ''}`} aria-label="Left mouse button" {...buttonHandlers(0)}>L</button>
-            <button type="button" className={`vm-btn ${heldView.has(1) ? 'vm-held' : ''}`} aria-label="Middle mouse button" {...buttonHandlers(1)}>M</button>
-            <button type="button" className={`vm-btn ${heldView.has(2) ? 'vm-held' : ''}`} aria-label="Right mouse button" {...buttonHandlers(2)}>R</button>
-            <div className="vm-sep" aria-hidden="true" />
-            <button type="button" className="vm-btn" aria-label="Scroll up" {...scrollHandlers(1)}><ChevronUpIcon /></button>
-            <button type="button" className="vm-btn" aria-label="Scroll down" {...scrollHandlers(-1)}><ChevronDownIcon /></button>
-        </div>
+            <div
+                ref={scrollRef}
+                className="device-stage-virtual-mouse vm-cluster-scroll"
+                style={scrollPad.style}
+            >
+                <div className="vm-grip" aria-label="Move the scroll buttons" {...scrollPad.gripHandlers}>
+                    <MoreVerticalIcon />
+                </div>
+                <button type="button" className="vm-btn" aria-label="Scroll up" {...scrollHandlers(1)}><ChevronUpIcon /></button>
+                <button type="button" className="vm-btn" aria-label="Scroll down" {...scrollHandlers(-1)}><ChevronDownIcon /></button>
+            </div>
+        </>
     );
 }

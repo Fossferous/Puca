@@ -14,7 +14,7 @@
  * virtual-desktop coordinates are legitimately negative — a controller that
  * sent pixels would put the cursor on the wrong screen.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ALL_DISPLAYS,
     deviceDiagnosticsWindow,
@@ -42,13 +42,12 @@ import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
 import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
 import {
-    HOP_COOLDOWN_MS, HOP_EDGE_QUANTUM_PX, HOP_MIN_SCALE, HOP_PRESSURE_PX, HOP_PRESSURE_TTL_MS,
-    ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, accumulateHopPressure, captureSurfaceSize, caretBandFrom,
-    caretFollowTransform, clampPanTo, hopDirection, hopPush,
+    ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, availableEdgeHops, captureSurfaceSize, caretBandFrom,
+    caretFollowTransform, clampPanTo,
     initialMonitorRequest, manualCompositeHoldActive,
-    monitorNeighbour, monitorRegions, pickFollowTarget,
+    monitorRegions, pickFollowTarget,
     remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
-    type HopPressure, type MonitorGeom, type View as ZoomView,
+    type EdgeHop, type MonitorGeom, type View as ZoomView,
 } from './deviceZoomFollow';
 import {
     autoKeyboardVerdict, autoKeyboardVerdictAtPress,
@@ -70,7 +69,8 @@ import { MoreMenu, MonitorMenu, MouseMenu } from './DeviceStageMobileMenus';
 import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import {
-    MonitorIcon, CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon } from './Icons';
+    MonitorIcon, CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon,
+    ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import './DeviceStageMobile.css';
 
 
@@ -182,6 +182,10 @@ function readAutoKeyboardPreference(): boolean {
  *  users hit. */
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 40;
+
+/** Stable empty list so "no edge is offering anything" — the overwhelmingly
+ *  common case — never hands the render a fresh array reference. */
+const NO_EDGE_HOPS: EdgeHop[] = [];
 
 /** How long to wait for the peer's first caret report before placing the view
  *  from where this end last AIMED instead.
@@ -705,27 +709,6 @@ export function DeviceStage() {
     const followTargetRef = useRef<{ x: number; y: number } | null>(null);
     const followRafRef = useRef<number | null>(null);
 
-    // MONITOR-HOP pressure: blocked pan travel against a single-monitor
-    // view's edge (deviceZoomFollow's accumulator — pure; these are just its
-    // storage). Declared here, above BOTH writers that feed it. `hopKick`
-    // exists because the one writer that can accumulate without changing the
-    // transform — follow-cursor pinned at the clamp returns `prev` unchanged
-    // — would otherwise never re-run the trigger effect: crossing the
-    // threshold bumps it, and it sits in that effect's deps.
-    const hopPressureRef = useRef<HopPressure | null>(null);
-    const lastHopAtRef = useRef(0);
-    const [hopKick, setHopKick] = useState(0);
-    const feedHopPressure = useCallback((pushX: number, pushY: number) => {
-        const now = performance.now();
-        const prev = hopPressureRef.current;
-        const next = accumulateHopPressure(prev, pushX, pushY, now);
-        hopPressureRef.current = next;
-        if (next && next.px >= HOP_PRESSURE_PX
-            && (!prev || prev.px < HOP_PRESSURE_PX || prev.axis !== next.axis || prev.sign !== next.sign)) {
-            setHopKick(k => k + 1);
-        }
-    }, []);
-
     const applyFollowPan = useCallback(() => {
         followRafRef.current = null;
         const target = followTargetRef.current;
@@ -757,31 +740,6 @@ export function DeviceStage() {
         const left = box.offX + target.x * box.dispW;
         const top = box.offY + target.y * box.dispH;
         const rect = surface.getBoundingClientRect();
-        // MONITOR-HOP dwell feed. The solve below wants the cursor centred;
-        // hopPush decides whether the clamp's refusal is a real edge (the
-        // axis overfills and ran out of pan room) or the underfill regime's
-        // forced centring, which says nothing about intent — the distinction
-        // that stops a portrait phone hopping monitors from ordinary cursor
-        // moves. Each genuinely-pinned frame banks a fixed quantum (~a
-        // quarter second against the edge trips the threshold). Read off
-        // transformRef: fine for detection (the exact solve stays inside the
-        // updater, as the comment above it demands).
-        {
-            const t0 = transformRef.current;
-            if (t0.scale > 1) {
-                const propX = rect.width * 0.5 - left * t0.scale;
-                const propY = rect.height * 0.5 - top * t0.scale;
-                const c0 = clampPan(v, rect, t0.scale, propX, propY);
-                const { pushX, pushY } = hopPush(
-                    { w: rect.width, h: rect.height },
-                    pictureBox(v.videoWidth, v.videoHeight, rect.width, rect.height),
-                    t0.scale,
-                    { x: propX, y: propY }, { x: c0.x, y: c0.y },
-                    { x: HOP_EDGE_QUANTUM_PX, y: HOP_EDGE_QUANTUM_PX },
-                );
-                feedHopPressure(pushX, pushY);
-            }
-        }
         setTransform(prev => {
             if (prev.scale <= 1) return prev;
             const c = clampPan(
@@ -794,7 +752,7 @@ export function DeviceStage() {
             if (c.x === prev.x && c.y === prev.y) return prev;
             return { ...prev, x: c.x, y: c.y };
         });
-    }, [feedHopPressure]);
+    }, []);
 
     const followPan = useCallback((x: number, y: number) => {
         // THE TRACKPAD'S AIM. Recorded here as well as in `send`, and not as
@@ -1153,10 +1111,6 @@ export function DeviceStage() {
         clearPendingFollow();
         followCorrectionRef.current = null;
         autoFollowRef.current = { mode: 'none' };
-        // Pressure was pushed against a screen that is no longer on the
-        // stage; carrying it over would let a pick from the menu instantly
-        // hop off the newly chosen screen.
-        hopPressureRef.current = null;
         // An EXPLICIT return to the grid while still zoomed must stick, or the
         // level check would re-follow a screen 300ms after the person chose the
         // composite on purpose. Recorded as the scale it was chosen AT, so
@@ -1173,8 +1127,6 @@ export function DeviceStage() {
         expectedAutoMonitorRef.current = null;
         manualCompositeHoldRef.current = null;
         autoFollowRef.current = { mode: 'none' };
-        hopPressureRef.current = null;
-        lastHopAtRef.current = 0;
     }, [session?.id, clearPendingFollow]);
 
     // EVERY SCREEN BY DEFAULT — the viewer's half. A host from 0.8.104 on
@@ -1221,6 +1173,97 @@ export function DeviceStage() {
         if (want !== null) requestMonitor(session.id, want);
     }, [session, videoBox]);
 
+    // Start a monitor switch that the view will follow across: ask the host,
+    // and park the remap so it applies against the NEW picture once that
+    // arrives. Shared by the zoom-follow triggers below and by the edge-hop
+    // chip — one place that knows how a followed switch is sequenced, because
+    // the two used to drift.
+    const beginMonitorSwitch = useCallback((
+        expectMonitor: number,
+        becomes: { mode: 'none' } | { mode: 'single'; monitorId: number },
+        remap: (to: ZoomView) => { scale: number; x: number; y: number },
+    ) => {
+        const s = session;
+        const v = videoRef.current;
+        if (!s || !v) return;
+        expectedAutoMonitorRef.current = expectMonitor;
+        pendingFollowRef.current = {
+            expectMonitor, becomes, remap,
+            fromVw: v.videoWidth, fromVh: v.videoHeight,
+            startedAt: performance.now(),
+            // The fallback covers a same-size switch, where no resize
+            // ever fires; a LATE frame instead of a same-size one is
+            // healed by the correction the apply leaves behind
+            // (followCorrectionRef) — which is why 350ms is safe where
+            // 900 once sat: a blind apply against a late frame is
+            // repaired the moment the real one lands, and the shorter
+            // wait is over half a second off every same-size switch.
+            fallback: window.setTimeout(applyPendingFollow, 350),
+            deadline: window.setTimeout(() => {
+                // The switch may still confirm after we stop waiting:
+                // leave the remap as a correction so a late confirm +
+                // frame still lands the view in the right space.
+                const p = pendingFollowRef.current;
+                if (p) {
+                    followCorrectionRef.current = {
+                        expectMonitor: p.expectMonitor,
+                        remap: p.remap,
+                        until: Date.now() + 4_000,
+                        becomes: p.becomes,
+                    };
+                }
+                clearPendingFollow();
+            }, 3500),
+        };
+        requestMonitor(s.id, expectMonitor);
+    }, [session, applyPendingFollow, clearPendingFollow]);
+
+    // WHICH EDGES ARE OFFERING A NEIGHBOUR right now. Derived from state
+    // only — `videoBox` carries the intrinsic and laid-out video size, so
+    // this needs no ref read and cannot disagree with the transform it is
+    // rendered beside.
+    const edgeHops = useMemo(() => {
+        if (!session || pointerLocked || !videoBox || videoBox.vw <= 0) return NO_EDGE_HOPS;
+        const hops = availableEdgeHops(
+            { w: videoBox.w, h: videoBox.h },
+            pictureBox(videoBox.vw, videoBox.vh, videoBox.w, videoBox.h),
+            transform.scale, { x: transform.x, y: transform.y },
+            session.monitors, session.activeMonitor,
+        );
+        return hops.length === 0 ? NO_EDGE_HOPS : hops;
+    }, [session, pointerLocked, videoBox, transform]);
+
+    /** Take one of those offers. Same landing as the zoom-follow switch:
+     *  physically continuous, half a viewport inside the shared edge.
+     *  `becomes` preserves auto-vs-manual, so hopping from a hand-picked
+     *  screen never surprise-returns to the composite on zoom-out. */
+    const hopToNeighbour = useCallback((hop: EdgeHop) => {
+        const s = session;
+        const v = videoRef.current;
+        if (!s || !v || !v.videoWidth || !v.offsetWidth) return;
+        if (s.activeMonitor === null || s.activeMonitor === ALL_DISPLAYS) return;
+        if (pendingFollowRef.current) return;
+        const box = { w: v.offsetWidth, h: v.offsetHeight };
+        const fromPict = pictureBox(v.videoWidth, v.videoHeight, v.offsetWidth, v.offsetHeight);
+        if (!fromPict) return;
+        const from: ZoomView = { pict: fromPict, videoW: v.videoWidth, videoH: v.videoHeight };
+        const t = transformRef.current;
+        const fromMon = s.monitors.find(m => m.id === s.activeMonitor);
+        const toMon = s.monitors.find(m => m.id === hop.neighbourId);
+        // availableEdgeHops only answers from fully-measured geometry, so
+        // these hold whenever a chip was rendered at all.
+        if (!fromMon || !toMon) return;
+        const becomes = autoFollowRef.current.mode === 'single'
+            ? { mode: 'single' as const, monitorId: hop.neighbourId }
+            : { mode: 'none' as const };
+        beginMonitorSwitch(hop.neighbourId, becomes, to => remapAcrossBoundary({
+            box, from, fromTransform: t,
+            fromMon: fromMon as Required<MonitorGeom>,
+            toMon: toMon as Required<MonitorGeom>,
+            dir: hop.dir, to, maxZoom: MAX_ZOOM,
+        }));
+    }, [session, beginMonitorSwitch]);
+
     // Trigger evaluation, debounced past the pinch: level-based, so it
     // cannot flap (see deviceZoomFollow.ts for the hysteresis story).
     useEffect(() => {
@@ -1243,48 +1286,7 @@ export function DeviceStage() {
                 && !manualCompositeHoldActive(manualCompositeHoldRef.current, t.scale)) {
                 manualCompositeHoldRef.current = null;
             }
-            const begin = (
-                expectMonitor: number,
-                becomes: { mode: 'none' } | { mode: 'single'; monitorId: number },
-                remap: (to: ZoomView) => { scale: number; x: number; y: number },
-            ) => {
-                expectedAutoMonitorRef.current = expectMonitor;
-                // EVERY kind of switch consumes the pressure — not only the
-                // hop branch. Pressure left hot across a zoom-follow switch
-                // discharged on the next unrelated transform change, chaining
-                // a monitor hop onto the back of a switch the user did ask
-                // for, with no gesture in between.
-                hopPressureRef.current = null;
-                pendingFollowRef.current = {
-                    expectMonitor, becomes, remap,
-                    fromVw: v.videoWidth, fromVh: v.videoHeight,
-                    startedAt: performance.now(),
-                    // The fallback covers a same-size switch, where no resize
-                    // ever fires; a LATE frame instead of a same-size one is
-                    // healed by the correction the apply leaves behind
-                    // (followCorrectionRef) — which is why 350ms is safe where
-                    // 900 once sat: a blind apply against a late frame is
-                    // repaired the moment the real one lands, and the shorter
-                    // wait is over half a second off every same-size switch.
-                    fallback: window.setTimeout(applyPendingFollow, 350),
-                    deadline: window.setTimeout(() => {
-                        // The switch may still confirm after we stop waiting:
-                        // leave the remap as a correction so a late confirm +
-                        // frame still lands the view in the right space.
-                        const p = pendingFollowRef.current;
-                        if (p) {
-                            followCorrectionRef.current = {
-                                expectMonitor: p.expectMonitor,
-                                remap: p.remap,
-                                until: Date.now() + 4_000,
-                                becomes: p.becomes,
-                            };
-                        }
-                        clearPendingFollow();
-                    }, 3500),
-                };
-                requestMonitor(s.id, expectMonitor);
-            };
+            const begin = beginMonitorSwitch;
 
             if (s.activeMonitor === ALL_DISPLAYS) {
                 if (t.scale < ZOOM_FOLLOW_IN || manualCompositeHoldRef.current !== null) return;
@@ -1309,53 +1311,20 @@ export function DeviceStage() {
                     if (!region) return { scale: 1, x: 0, y: 0 };
                     return remapIntoComposite({ box, from, fromTransform: t, region, to });
                 });
-            } else if (s.activeMonitor !== null && s.activeMonitor !== ALL_DISPLAYS
-                && t.scale >= HOP_MIN_SCALE) {
-                // MONITOR-HOP: enough pan pushed into this screen's edge,
-                // recently, past the cooldown — switch to the neighbour on
-                // the far side of that edge and land physically continuous,
-                // half a viewport inside it. Works from an auto-followed AND
-                // a hand-picked screen; `becomes` preserves which, so a hop
-                // from a manual pick never surprise-returns to the composite
-                // on zoom-out, while a hop from an auto follow still does.
-                const p = hopPressureRef.current;
-                const now = performance.now();
-                if (!p || p.px < HOP_PRESSURE_PX || now - p.at > HOP_PRESSURE_TTL_MS) return;
-                if (now - lastHopAtRef.current < HOP_COOLDOWN_MS) {
-                    // Swallowed by the cooldown: DISCARD rather than park.
-                    // Parked pressure would fire on the next unrelated
-                    // transform change inside the TTL — a second hop the
-                    // user's finger stopped asking for; a hop after a hop
-                    // must need fresh pushes.
-                    hopPressureRef.current = null;
-                    return;
-                }
-                const dir = hopDirection(p);
-                const neighbour = monitorNeighbour(s.monitors, s.activeMonitor, dir);
-                if (neighbour === null) return;
-                const fromMon = s.monitors.find(m => m.id === s.activeMonitor);
-                const toMon = s.monitors.find(m => m.id === neighbour);
-                // monitorNeighbour only answers from fully-measured geometry,
-                // so these casts hold whenever it answered at all.
-                if (!fromMon || !toMon) return;
-                hopPressureRef.current = null;
-                lastHopAtRef.current = now;
-                const becomes = autoFollowRef.current.mode === 'single'
-                    ? { mode: 'single' as const, monitorId: neighbour }
-                    : { mode: 'none' as const };
-                begin(neighbour, becomes, to => remapAcrossBoundary({
-                    box, from, fromTransform: t,
-                    fromMon: fromMon as Required<MonitorGeom>,
-                    toMon: toMon as Required<MonitorGeom>,
-                    dir, to, maxZoom: MAX_ZOOM,
-                }));
             }
+            // NO AUTOMATIC MONITOR HOP. Panning into a screen's edge used to
+            // switch screens on its own, and it made the phone's desktop view
+            // unusable in the field: reading IS panning to an edge, and the
+            // tail of an ordinary reading swipe is several times any
+            // threshold that a deliberate push could clear. The step across
+            // is now the tappable chip rendered from `edgeHops` — see
+            // deviceZoomFollow.ts.
         // 120ms, down from 180: the timer re-arms per transform change, so it
         // already fires N ms after the LAST pinch movement — this keeps the
         // flap protection while shaving 60ms off every zoom-to-read.
         }, 120);
         return () => clearTimeout(timer);
-    }, [transform, hopKick, session, pointerLocked, applyPendingFollow, clearPendingFollow]);
+    }, [transform, session, pointerLocked, beginMonitorSwitch]);
 
     // --- ZOOM TO THE TEXT CARET WHILE TYPING (mobile) --------------------
     //
@@ -2103,37 +2072,6 @@ export function DeviceStage() {
                 // outside the updater — StrictMode invokes that twice.
                 if (caretActiveRef.current) userZoomedDuringCaretRef.current = true;
 
-                // MONITOR-HOP travel feed — a two-finger PAN (deltaScale ~1;
-                // a real pinch changes the focal maths and its "blocked"
-                // residual means nothing) whose motion the clamp refused. The
-                // magnitude is the FINGER's travel — motion the user made
-                // that the view could not follow — and hopPush keeps the
-                // underfilled axis's forced-centring residual from counting
-                // as an edge (the axis a vertical phone swipe visibly cannot
-                // pan must not hop a monitor). Computed OUTSIDE the updater
-                // from transformRef, which is exact here: with ratio 1 the
-                // proposed pan is just t.x + fingerDx, and updaters must stay
-                // side-effect-free (StrictMode runs them twice).
-                {
-                    const t0 = transformRef.current;
-                    const surface0 = surfaceRef.current;
-                    const v0 = videoRef.current;
-                    if (Math.abs(deltaScale - 1) < 0.02 && t0.scale > 1 && surface0 && v0) {
-                        const rect0 = surface0.getBoundingClientRect();
-                        const fdx = center.x - prev.center.x;
-                        const fdy = center.y - prev.center.y;
-                        const c0 = clampPan(v0, rect0, t0.scale, t0.x + fdx, t0.y + fdy);
-                        const { pushX, pushY } = hopPush(
-                            { w: rect0.width, h: rect0.height },
-                            pictureBox(v0.videoWidth, v0.videoHeight, rect0.width, rect0.height),
-                            t0.scale,
-                            { x: t0.x + fdx, y: t0.y + fdy }, { x: c0.x, y: c0.y },
-                            { x: fdx, y: fdy },
-                        );
-                        feedHopPressure(pushX, pushY);
-                    }
-                }
-
                 setTransform(t => {
                     const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, t.scale * deltaScale));
                     const ratio = newScale / t.scale;
@@ -2187,7 +2125,7 @@ export function DeviceStage() {
                 if (p) send({ t: 'move', x: p.x, y: p.y });
             }
         }
-    }, [send, isMobile, isMouseMode, gestures, fpsMode, fpsSens, session, feedHopPressure]);
+    }, [send, isMobile, isMouseMode, gestures, fpsMode, fpsSens, session]);
 
     const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
         // GAME MODE (desktop): handled entirely here — no pointer capture
@@ -2560,7 +2498,7 @@ export function DeviceStage() {
                         {clipboardBusy ? 'Sending…' : <><CopyIcon /> Send clipboard</>}
                     </button>
                     {clipboardNote && (
-                        <span className="device-stage-error">{clipboardNote}</span>
+                        <span className="device-stage-note">{clipboardNote}</span>
                     )}
                     {/* DISPLAY POWER (W4): minimal popover, three actions, no
                         confirm — undo is one click. The outcome (ack detail,
@@ -2615,7 +2553,7 @@ export function DeviceStage() {
                         )}
                     </span>}
                     {session.powerNotice && (
-                        <span className="device-stage-error" role="status">{session.powerNotice}</span>
+                        <span className="device-stage-note" role="status">{session.powerNotice}</span>
                     )}
                     <button
                         className="device-stage-btn"
@@ -2825,6 +2763,46 @@ export function DeviceStage() {
                         <CrosshairIcon /> Click the screen to capture your mouse · Esc releases it
                     </div>
                 )}
+                {/* MONITOR-HOP: you have panned to the end of this screen and
+                    there is another one that way. A chip, not a gesture —
+                    reading is panning to an edge, and the version that
+                    inferred intent from blocked pan travel switched screens
+                    constantly while someone was simply reading a line to its
+                    end. This does nothing until tapped, and says where it
+                    goes, which the gesture never could. */}
+                {edgeHops.map((hop: EdgeHop) => {
+                    const label = session.monitors.find(m => m.id === hop.neighbourId)?.label
+                        ?? `Screen ${hop.neighbourId}`;
+                    return (
+                        <button
+                            key={hop.dir}
+                            type="button"
+                            className={`device-stage-hop device-stage-hop-${hop.dir}`}
+                            aria-label={`Show ${label}`}
+                            // THE TAP IS FOR THE CHIP, NOT THE REMOTE MACHINE.
+                            // This sits inside the input surface, whose own
+                            // pointer handlers turn a single contact into a
+                            // move+down on the far desktop — so without
+                            // stopping the bubble, tapping "go next door" also
+                            // clicks whatever happens to be under the chip
+                            // over there. Measured, not theorised: with these
+                            // removed the test next door sees move/down/up go
+                            // out, which is what it is there to notice.
+                            onPointerDown={e => e.stopPropagation()}
+                            onPointerUp={e => e.stopPropagation()}
+                            onPointerMove={e => e.stopPropagation()}
+                            onClick={() => hopToNeighbour(hop)}
+                        >
+                            <span className="device-stage-hop-icon" aria-hidden="true">
+                                {hop.dir === 'up' ? <ChevronUpIcon />
+                                    : hop.dir === 'down' ? <ChevronDownIcon />
+                                        : <ChevronRightIcon />}
+                            </span>
+                            <span className="device-stage-hop-label">{label}</span>
+                        </button>
+                    );
+                })}
+
             </div>
 
             {!isMobile && (
@@ -2855,10 +2833,10 @@ export function DeviceStage() {
                 separate spans; the phone now does the same. */}
             {isMobile && (session.error || qualityError || clipboardNote || session.powerNotice) && (
                 <div className="device-stage-mobile-error" role="status">
-                    {qualityError && <span>{qualityError}</span>}
-                    {clipboardNote && <span>{clipboardNote}</span>}
-                    {session.powerNotice && <span>{session.powerNotice}</span>}
-                    {session.error && <span>{session.error}</span>}
+                    {qualityError && <span className="dse-bad">{qualityError}</span>}
+                    {clipboardNote && <span className="dse-note">{clipboardNote}</span>}
+                    {session.powerNotice && <span className="dse-note">{session.powerNotice}</span>}
+                    {session.error && <span className="dse-bad">{session.error}</span>}
                 </div>
             )}
             

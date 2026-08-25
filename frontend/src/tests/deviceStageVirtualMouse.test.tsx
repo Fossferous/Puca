@@ -140,3 +140,97 @@ describe('DeviceStageVirtualMouse', () => {
         expect(wheels).toEqual([120]);              // nothing after unmount
     });
 });
+
+describe('the two clusters are separate widgets, and stay separate', () => {
+    const cluster = (which: 'buttons' | 'scroll') =>
+        container.querySelector(`.vm-cluster-${which}`) as HTMLElement;
+
+    /** Drag a grip to (x, y). */
+    const dragGrip = (label: string, x: number, y: number) => {
+        const grip = el(label);
+        const at = (type: string, cx: number, cy: number) => act(() => {
+            const ev = new Event(type, { bubbles: true });
+            Object.defineProperty(ev, 'pointerId', { value: 1 });
+            Object.defineProperty(ev, 'clientX', { value: cx });
+            Object.defineProperty(ev, 'clientY', { value: cy });
+            grip.dispatchEvent(ev);
+        });
+        // The press starts at the origin so the grab offset is zero: jsdom
+        // reports every rect as all-zero, so pressing at (x, y) would read as
+        // "grabbed x px in from the left" and the drop would land back at 0.
+        at('pointerdown', 0, 0);
+        at('pointermove', x, y);
+        at('pointerup', x, y);
+    };
+
+    const BUTTONS_KEY = 'device-stage-virtual-mouse-buttons-pos';
+    const SCROLL_KEY = 'device-stage-virtual-mouse-scroll-pos';
+
+    // The suite's localStorage is a bare vi.fn() pair with no backing store
+    // (src/tests/setup.ts), so persistence is asserted on the CALLS and
+    // restoration is driven by stubbing the read.
+    beforeEach(() => {
+        vi.mocked(localStorage.getItem).mockReset();
+        vi.mocked(localStorage.setItem).mockReset();
+    });
+
+    it('renders both, each with its own grip', () => {
+        mount();
+        expect(cluster('buttons')).toBeTruthy();
+        expect(cluster('scroll')).toBeTruthy();
+        expect(el('Move the mouse buttons')).toBeTruthy();
+        expect(el('Move the scroll buttons')).toBeTruthy();
+        // The buttons live in one, the arrows in the other — the whole point
+        // of the split is that they can sit on opposite sides of the picture.
+        expect(cluster('buttons').contains(el('Left mouse button'))).toBe(true);
+        expect(cluster('buttons').contains(el('Scroll up'))).toBe(false);
+        expect(cluster('scroll').contains(el('Scroll up'))).toBe(true);
+    });
+
+    it('moving one does NOT move the other', () => {
+        mount();
+        dragGrip('Move the mouse buttons', 30, 400);
+        expect(cluster('buttons').style.left).toBe('30px');
+        // The scroll cluster must still be where the stylesheet put it —
+        // sharing one position was the whole complaint about the single bar.
+        expect(cluster('scroll').style.left).toBe('');
+        dragGrip('Move the scroll buttons', 250, 600);
+        expect(cluster('scroll').style.left).toBe('250px');
+        expect(cluster('buttons').style.left, 'the first must not have moved').toBe('30px');
+    });
+
+    it('each saves under its OWN key, and restores from it', () => {
+        mount();
+        dragGrip('Move the mouse buttons', 30, 400);
+        dragGrip('Move the scroll buttons', 250, 600);
+        expect(vi.mocked(localStorage.setItem).mock.calls).toEqual([
+            [BUTTONS_KEY, JSON.stringify({ left: 30, top: 400 })],
+            [SCROLL_KEY, JSON.stringify({ left: 250, top: 600 })],
+        ]);
+
+        // Next launch: each cluster reads its own entry back.
+        vi.mocked(localStorage.getItem).mockImplementation((k: string) =>
+            k === BUTTONS_KEY ? JSON.stringify({ left: 30, top: 400 })
+                : k === SCROLL_KEY ? JSON.stringify({ left: 250, top: 600 })
+                    : null);
+        act(() => root.unmount());
+        root = createRoot(container);
+        mount();
+        expect(cluster('buttons').style.top).toBe('400px');
+        expect(cluster('scroll').style.top).toBe('600px');
+        expect(cluster('buttons').style.left).toBe('30px');
+        expect(cluster('scroll').style.left).toBe('250px');
+    });
+
+    it('a held button survives dragging the OTHER cluster — one hand keeps working', () => {
+        mount();
+        fire(el('Left mouse button'), 'pointerdown', 1);
+        expect(buttons).toEqual([[0, true]]);
+        dragGrip('Move the scroll buttons', 200, 500);
+        // Still held: the press map is one hand's state, not one widget's, so
+        // re-rendering the other cluster must not touch it.
+        expect(buttons).toEqual([[0, true]]);
+        fire(el('Left mouse button'), 'pointerup', 1);
+        expect(buttons).toEqual([[0, true], [0, false]]);
+    });
+});

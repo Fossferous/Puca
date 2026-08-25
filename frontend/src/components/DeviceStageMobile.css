@@ -418,10 +418,13 @@
    below the mobile menus. Draggable by its grip; the inline style pins it
    wherever the user parked it. Fixed palette like the rest of the stage
    chrome — the stage is always a dark surface over video. */
+/* TWO CLUSTERS, not one bar. At ~290px the single bar was most of a phone's
+   width, so wherever it sat it laid a band across the remote screen — usually
+   over the line being read. Each half now parks in its own corner, and the
+   two straddle the content instead of crossing it. Defaults put buttons and
+   scroll under opposite thumbs; either can be dragged anywhere. */
 .device-stage-virtual-mouse {
     position: fixed;
-    left: 50%;
-    transform: translateX(-50%);
     bottom: 190px;
     display: flex;
     align-items: stretch;
@@ -473,11 +476,8 @@
     color: #fff;
 }
 
-.vm-sep {
-    width: 1px;
-    background: rgba(255, 255, 255, 0.12);
-    margin: 6px 2px;
-}
+.vm-cluster-buttons { left: 12px; }
+.vm-cluster-scroll { right: 12px; }
 
 .device-stage-minimized {
     position: fixed;

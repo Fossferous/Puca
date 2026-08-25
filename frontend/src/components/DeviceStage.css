@@ -83,6 +83,14 @@
     font-size: 13px;
 }
 
+/* The same slot in the bar, for something that WORKED. "Turned off 2 of 2
+   other display(s)" and "Ctrl+Alt+Del sent" used the danger colour, which
+   reads as a failure at a glance — the one thing a confirmation must not do. */
+.device-stage-note {
+    color: var(--text-muted, #b9bbbe);
+    font-size: 13px;
+}
+
 /* Why the last session ended, shown when there is no session left to attach it
    to. A banner rather than a full-screen state: the session is already over, so
    this must not block the app — it sits above the chat slot and gets out of the
@@ -124,13 +132,15 @@
 }
 
 .device-stage-bar > .device-stage-btn:first-of-type,
-.device-stage-error {
+.device-stage-error,
+.device-stage-note {
     margin-left: auto;
 }
 
 /* When an error IS shown it takes the push, so the button must not also claim
    it — otherwise the two would fight and the error would jump to the middle. */
-.device-stage-error ~ .device-stage-btn:first-of-type {
+.device-stage-error ~ .device-stage-btn:first-of-type,
+.device-stage-note ~ .device-stage-btn:first-of-type {
     margin-left: 0;
 }
 
@@ -228,29 +238,42 @@
     color: var(--text-secondary, #8e9297);
 }
 
-/* Failure feedback on phones, where the desktop toolbar that carries it is
-   not rendered at all. Above the mobile toolbar so it is not covered by it. */
+/* Host feedback on phones, where the desktop toolbar that carries it is not
+   rendered at all. Above the mobile toolbar so it is not covered by it.
+
+   THE COLOUR IS PER LINE, NOT PER BAND, and that is the point of the two
+   classes below. The band used to be one red alert box carrying everything —
+   so "Turned off 2 of 2 other display(s)" and "Ctrl+Alt+Del sent", both of
+   which mean IT WORKED, arrived looking exactly like a refusal. */
 .device-stage-mobile-error {
     position: absolute;
     left: 50%;
     bottom: 96px;
     transform: translateX(-50%);
     max-width: 90%;
-    padding: 8px 14px;
-    border-radius: 6px;
-    background: rgba(176, 0, 32, 0.92);
-    color: #fff;
-    font-size: 13px;
-    text-align: center;
     z-index: 460;
     /* One line per message (a note AND a host refusal can both be present). */
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 4px;
     /* Feedback, not a control: a band over the remote screen must not eat
        the touches that fall on it (its sibling overlays already say so). */
     pointer-events: none;
 }
+
+.device-stage-mobile-error > span {
+    padding: 8px 14px;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 13px;
+    text-align: center;
+}
+
+/* Something the host refused or could not do. */
+.device-stage-mobile-error > .dse-bad { background: rgba(176, 0, 32, 0.92); }
+/* Something the host DID. Same band, same place, not an alarm. */
+.device-stage-mobile-error > .dse-note { background: rgba(0, 0, 0, 0.78); }
 
 .device-stage-hint {
     flex: 0 0 auto;
@@ -322,3 +345,57 @@
     color: var(--text-normal, #dcddde);
     font-size: 13px;
 }
+
+/* MONITOR-HOP CHIPS — "there is another screen this way, tap to go".
+   Parked ON the edge the view has run out of, so the affordance is where the
+   pan stopped; a tap target of 44px on the short side, because this is a
+   phone control first. Deliberately NOT a gesture: the earlier version read
+   blocked pan travel as intent, and reading a line to its end is exactly that
+   gesture, so it switched screens under people constantly. */
+.device-stage-hop {
+    position: absolute;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 44px;
+    padding: 0 10px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.18));
+    border-radius: 22px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    /* The label can be a long monitor name; the chip must never grow into a
+       bar across the picture it is sitting on top of. */
+    max-width: 42%;
+}
+
+.device-stage-hop-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.device-stage-hop-icon {
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+}
+
+.device-stage-hop-icon svg { width: 16px; height: 16px; }
+
+/* One chevron glyph serves both horizontal directions — a left arrow IS a
+   right arrow turned round, and the icon set has no left chevron. */
+.device-stage-hop-left .device-stage-hop-icon { transform: rotate(180deg); }
+
+.device-stage-hop-left { left: 8px; top: 50%; transform: translateY(-50%); }
+.device-stage-hop-right { right: 8px; top: 50%; transform: translateY(-50%); flex-direction: row-reverse; }
+.device-stage-hop-up { top: 8px; left: 50%; transform: translateX(-50%); }
+.device-stage-hop-down { bottom: 8px; left: 50%; transform: translateX(-50%); flex-direction: row-reverse; }
+
+/* The bottom chip and the "paused" banner both want the bottom centre; the
+   banner is the more urgent message, so the chip steps up out of its way. */
+.device-stage-paused ~ .device-stage-hop-down { bottom: 60px; }
