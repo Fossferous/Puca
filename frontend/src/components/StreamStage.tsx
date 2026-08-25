@@ -71,7 +71,7 @@ interface StreamStageProps {
     onBackToChat: () => void;
     /** Which stream (if any) is popped out into the OS picture-in-picture
      *  window, and the toggle for it. Optional: absent → no control. */
-    poppedStream?: number | null;
+    poppedStreams?: number[];
     onTogglePopout?: (userId: number) => void;
 }
 
@@ -122,7 +122,7 @@ type StreamContextMenu = {
     isOwn: boolean;
 };
 
-export function StreamStage({ onBackToChat, poppedStream = null, onTogglePopout }: StreamStageProps) {
+export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }: StreamStageProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
     const [streamers, setStreamers] = useState<Array<{ userId: number; username: string; stream: MediaStream | null }>>([]);
     const { focusedStreamId: focusedStream, focusMode, setFocusedStream, setFocusMode } = useStreamStore();
@@ -793,9 +793,9 @@ export function StreamStage({ onBackToChat, poppedStream = null, onTogglePopout 
                                         Puca is tabbed out. Only where the API exists. */}
                                     {onTogglePopout && pipSupported() && (
                                         <button
-                                            className={`tile-btn ${poppedStream === userId ? 'active' : ''}`}
+                                            className={`tile-btn ${poppedStreams.includes(userId) ? 'active' : ''}`}
                                             onClick={(e) => { e.stopPropagation(); onTogglePopout(userId); }}
-                                            title={poppedStream === userId
+                                            title={poppedStreams.includes(userId)
                                                 ? 'Bring back from picture-in-picture'
                                                 : 'Pop out (stays on top when Puca is tabbed out)'}
                                         >

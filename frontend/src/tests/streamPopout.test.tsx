@@ -418,7 +418,7 @@ describe('the Pop out control', () => {
     it('appears on the in-app PiP only where PiP is supported, and toggles the primary stream', () => {
         const toggle = vi.fn();
         act(() => {
-            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStream={null} onTogglePopout={toggle} />);
+            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStreams={[]} onTogglePopout={toggle} />);
         });
         expect(popOutButtons()).toHaveLength(1);
         expect(popOutButtons()[0].title).toMatch(/Pop out/);
@@ -427,7 +427,7 @@ describe('the Pop out control', () => {
 
         // While popped, the same button reads "Bring back".
         act(() => {
-            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStream={1} onTogglePopout={toggle} />);
+            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={toggle} />);
         });
         expect(popOutButtons()[0].title).toMatch(/Bring back/);
         expect(popOutButtons()[0].className).toContain('active');
@@ -437,7 +437,7 @@ describe('the Pop out control', () => {
         removePipSurface();
         nativeMock.known = true;
         act(() => {
-            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStream={null} onTogglePopout={vi.fn()} />);
+            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStreams={[]} onTogglePopout={vi.fn()} />);
         });
         expect(popOutButtons()).toHaveLength(1);
     });
@@ -445,7 +445,7 @@ describe('the Pop out control', () => {
     it('is absent where PiP is unsupported (an old APK, Firefox), and when no toggle is wired', () => {
         pipEnabled = false;
         act(() => {
-            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStream={null} onTogglePopout={vi.fn()} />);
+            root.render(<StreamPip onExpand={() => {}} onClose={() => {}} poppedStreams={[]} onTogglePopout={vi.fn()} />);
         });
         expect(popOutButtons()).toHaveLength(0);
 

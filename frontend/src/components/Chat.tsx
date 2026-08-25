@@ -116,6 +116,8 @@ import { ChecklistBody } from './ChecklistBody';
 import { AllChecklistsView } from './AllChecklistsView';
 import { StreamPip } from './StreamPip';
 import { StreamPopout } from './StreamPopout';
+import { StreamDocPipWindow } from './StreamDocPipWindow';
+import { docPipSupported, popoutMode, togglePopped } from './streamDocPip';
 import { primePipSupport } from './streamPopout.utils';
 import {
     HomeIcon, ChannelsIcon, ChatIcon, MembersIcon, TasksIcon, MonitorIcon,
@@ -906,14 +908,26 @@ export function Chat({ onLogout }: ChatProps) {
     // OS-level picture-in-picture: which stream (if any) is popped out into
     // the system PiP window (StreamPopout). Pinned to the tile that was
     // clicked; toggling the same tile brings it back, another tile switches.
-    const [poppedStream, setPoppedStream] = useState<number | null>(null);
+    // W4: a LIST — the Doc-PiP grid holds any number of popped streams in one
+    // OS window; the legacy single-video engines keep exactly one (the newest
+    // pick replaces). `docPipFailed` latches when requestWindow rejects, so
+    // the rest of the session uses the engine that actually works.
+    const [poppedStreams, setPoppedStreams] = useState<number[]>([]);
+    const [docPipFailed, setDocPipFailed] = useState(false);
+    const usingDocPip = !docPipFailed && popoutMode() === 'docpip';
     const togglePopout = useCallback((userId: number) => {
-        setPoppedStream(prev => (prev === userId ? null : userId));
-    }, []);
+        setPoppedStreams(prev => togglePopped(prev, userId, !docPipFailed && popoutMode() === 'docpip'));
+    }, [docPipFailed]);
     // The Android APP's PiP is native and only knowable by asking the plugin;
     // ask once, here, so pipSupported() can answer at render time by the time
-    // any stream tile exists. A no-op on every other platform.
-    useEffect(() => { void primePipSupport(); }, []);
+    // any stream tile exists. A no-op on every other platform. The [doc-pip]
+    // line is the W4 spike's field answer: whether THIS embedder (WebView2 /
+    // a browser) implements documentPictureInPicture is not documented
+    // anywhere — the log on the real machine is the measurement.
+    useEffect(() => {
+        void primePipSupport();
+        console.info(`[doc-pip] documentPictureInPicture is ${docPipSupported() ? 'AVAILABLE' : 'absent'} in this runtime`);
+    }, []);
 
     // Mobile panel navigation state: 'chat' | 'servers' | 'channels' | 'members'
     type MobilePanel = 'chat' | 'servers' | 'channels' | 'members';
@@ -4715,7 +4729,7 @@ export function Chat({ onLogout }: ChatProps) {
                     ) : viewMode === 'stream' ? (
                         <StreamStage
                             onBackToChat={() => setViewMode('chat')}
-                            poppedStream={poppedStream}
+                            poppedStreams={poppedStreams}
                             onTogglePopout={togglePopout}
                         />
                     ) : viewMode === 'voice' && currentVoiceChannel ? (
@@ -5645,8 +5659,14 @@ export function Chat({ onLogout }: ChatProps) {
                         setViewMode('stream');
                     }}
                     onClose={() => setShowPip(false)}
-                    poppedStream={poppedStream}
+                    poppedStreams={poppedStreams}
                     onTogglePopout={togglePopout}
+                    // While the Doc-PiP grid is up the in-app float would be a
+                    // redundant SECOND copy of the same streams — but its
+                    // <video> is the chat-view AUDIO PATH, so it stays MOUNTED
+                    // and merely invisible. Unmounting it silences every
+                    // stream the moment the grid opens.
+                    hidden={usingDocPip && poppedStreams.length > 0}
                 />
             )}
 
@@ -5657,13 +5677,26 @@ export function Chat({ onLogout }: ChatProps) {
                 this host is what lets the popped-out stream survive chat ↔
                 stream ↔ DM navigation. Moving it inside a viewMode condition
                 would kill the window on every click. */}
-            {poppedStream !== null && (
-                <StreamPopout
-                    key={poppedStream}
-                    userId={poppedStream}
-                    onClose={() => setPoppedStream(null)}
+            {poppedStreams.length > 0 && (usingDocPip ? (
+                <StreamDocPipWindow
+                    userIds={poppedStreams}
+                    onCloseOne={id => setPoppedStreams(l => l.filter(x => x !== id))}
+                    onCloseAll={() => setPoppedStreams([])}
+                    onFallback={() => {
+                        // requestWindow rejected: latch to the legacy engine
+                        // and keep the FIRST pick (the one the user asked for
+                        // before anything could have failed).
+                        setDocPipFailed(true);
+                        setPoppedStreams(l => l.slice(0, 1));
+                    }}
                 />
-            )}
+            ) : (
+                <StreamPopout
+                    key={poppedStreams[0]}
+                    userId={poppedStreams[0]}
+                    onClose={() => setPoppedStreams([])}
+                />
+            ))}
 
             {/* Floating 'Watch Live' button - shows when there are streamers but user isn't watching */}
             {(() => {

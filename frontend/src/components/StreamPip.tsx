@@ -23,17 +23,22 @@ import {
 import './StreamPip.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
 import { pipSupported } from './streamPopout.utils';
+import { docPipSupported } from './streamDocPip';
 
 interface StreamPipProps {
     onExpand: () => void;
     onClose: () => void;
-    /** Which stream (if any) is popped out into the OS picture-in-picture
-     *  window, and the toggle for it. Optional: absent → no control. */
-    poppedStream?: number | null;
+    /** Which streams are popped out (Doc-PiP grid: several; legacy engines:
+     *  at most one), and the toggle. Optional: absent → no control. */
+    poppedStreams?: number[];
     onTogglePopout?: (userId: number) => void;
+    /** Keep the element (it is the chat-view AUDIO path) but show nothing —
+     *  the Doc-PiP grid is on screen and a second visible copy is noise.
+     *  visibility, not display: a display:none <video> can pause playback. */
+    hidden?: boolean;
 }
 
-export function StreamPip({ onExpand, onClose, poppedStream = null, onTogglePopout }: StreamPipProps) {
+export function StreamPip({ onExpand, onClose, poppedStreams = [], onTogglePopout, hidden = false }: StreamPipProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
     const [position, setPosition] = useState({ x: window.innerWidth - 420, y: window.innerHeight - 280 });
     const [size, setSize] = useState({ width: 400, height: 250 });
@@ -154,6 +159,7 @@ export function StreamPip({ onExpand, onClose, poppedStream = null, onTogglePopo
                 top: position.y,
                 width: size.width,
                 height: size.height,
+                ...(hidden ? { visibility: 'hidden' as const } : {}),
             }}
             onMouseDown={handleMouseDown}
         >
@@ -196,11 +202,11 @@ export function StreamPip({ onExpand, onClose, poppedStream = null, onTogglePopo
                     })()}
                     {/* OS-level picture-in-picture: stays on top when
                         Puca is tabbed out. Only where the API exists. */}
-                    {onTogglePopout && pipSupported() && (
+                    {onTogglePopout && (pipSupported() || docPipSupported()) && (
                         <button
-                            className={`pip-btn ${poppedStream === primaryUserId ? 'active' : ''}`}
+                            className={`pip-btn ${poppedStreams.includes(primaryUserId) ? 'active' : ''}`}
                             onClick={() => onTogglePopout(primaryUserId)}
-                            title={poppedStream === primaryUserId
+                            title={poppedStreams.includes(primaryUserId)
                                 ? 'Bring back from picture-in-picture'
                                 : 'Pop out (stays on top when Puca is tabbed out)'}
                         >
