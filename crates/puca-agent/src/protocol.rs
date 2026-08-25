@@ -41,7 +41,14 @@ pub const ALLOWED_FPS: [u32; 3] = [15, 30, 60];
 /// when the two lists drifted a quality the UI offered ("Ultra") was accepted
 /// at connect time and refused on every later change. The UI's kbps values are
 /// these divided by 1000 — the single conversion lives in hostAgent.ts.
-pub const ALLOWED_BITRATE_BPS: [u32; 4] = [1_000_000, 3_000_000, 6_000_000, 10_000_000];
+///
+/// 15M shipped RECEIVER-FIRST: the agent accepts it one release before any
+/// UI offers it, so same-version pairs always work and an updated controller
+/// against an old host gets the existing snap-back + stream-quality-error.
+/// The tier exists for text on the all-displays composite — 6M across a
+/// near-4K surface of text is why the default reads soft.
+pub const ALLOWED_BITRATE_BPS: [u32; 5] =
+    [1_000_000, 3_000_000, 6_000_000, 10_000_000, 15_000_000];
 
 /// One STUN or TURN server, in the shape `RTCIceServer` uses.
 ///

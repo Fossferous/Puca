@@ -67,6 +67,31 @@ impl Encoder {
             }
         }
     }
+
+    /// The frame size the encoder is negotiated at right now.
+    fn dims(&self) -> (u32, u32) {
+        match self {
+            #[cfg(windows)]
+            Encoder::H264(e) => e.dims(),
+            #[cfg(all(unix, feature = "vp8"))]
+            Encoder::Vp8(e) => e.dims(),
+        }
+    }
+
+    /// Reconfigure the RUNNING encoder for a new frame size. False means
+    /// "rebuild me" — VP8 has no live path, and an H.264 transform may refuse
+    /// (the caller then pays the full rebuild, exactly as before).
+    fn update_size(&mut self, width: u32, height: u32) -> bool {
+        match self {
+            #[cfg(windows)]
+            Encoder::H264(e) => e.update_size(width, height),
+            #[cfg(all(unix, feature = "vp8"))]
+            Encoder::Vp8(_) => {
+                let _ = (width, height);
+                false
+            }
+        }
+    }
 }
 
 use puca_rtc::VideoSender;
@@ -1045,6 +1070,11 @@ fn run(
     let (fs_done_tx, fs_done_rx) =
         std::sync::mpsc::channel::<(str0m::channel::ChannelId, Option<Vec<u8>>)>();
     let mut fs_inflight: usize = 0;
+
+    // When a monitor switch was committed, for the [switch] first-frame log —
+    // the number that says whether the encoder-reuse path actually shortened
+    // the freeze in the field.
+    let mut switch_started: Option<Instant> = None;
     {
         let scope_for_worker = Arc::clone(&file_scope);
         let _ = std::thread::Builder::new()
@@ -1167,8 +1197,17 @@ fn run(
                             if let Some(c) = capture.as_mut() {
                                 c.set_draw_cursor(draw_host_cursor);
                             }
-                            encoder = None;
+                            // The encoder is KEPT: pump_frame reconfigures it
+                            // in place when the new capture's size differs
+                            // (Encoder::update_size) — the full MFT rebuild
+                            // was the largest chunk of the "zoom to read text
+                            // is slow" switch freeze. A transform that
+                            // refuses falls back to exactly the old
+                            // drop-and-rebuild inside the pump; a same-size
+                            // switch (cloned monitors) now costs only an IDR.
                             want_keyframe = true;
+                            switch_started = Some(Instant::now());
+                            eprintln!("[switch] capture committed -> monitor {target_monitor}");
                             current_monitor = target_monitor;
                             // The SAME caret is a different fraction of a
                             // different screen. The generation is bumped
@@ -1485,17 +1524,18 @@ fn run(
                     // a grown display silently crops to it (both length and
                     // stride checks in encode_bgra still pass), so the picture
                     // the viewer decodes would be a corner of the surface these
-                    // fractions describe. Drop the encoder exactly as the
-                    // SetMonitor commit does — the next frame re-creates it at
-                    // the real size and picture and fractions agree again. An
-                    // origin-only change (a monitor moved in the layout) leaves
-                    // the picture alone.
+                    // fractions describe. No explicit drop any more: the
+                    // frame's size changes with the surface, and pump_frame's
+                    // dim check reconfigures (or, on refusal, rebuilds) the
+                    // encoder on the very next frame — same healing, without
+                    // paying a full MFT rebuild when the transform can take
+                    // the new size live. An origin-only change (a monitor
+                    // moved in the layout) leaves the picture alone.
                     let size_of = |s: Option<crate::session::CaptureSurface>| {
                         s.map(|s| { let (_, _, w, h) = s.covers(); (w, h) })
                     };
                     if size_of(fresh) != size_of(caret_surface) {
-                        eprintln!("[caret] surface size changed; re-creating the encoder");
-                        encoder = None;
+                        eprintln!("[caret] surface size changed; the encoder follows on the next frame");
                         want_keyframe = true;
                     }
                     caret_surface = fresh;
@@ -1562,6 +1602,14 @@ fn run(
                 Ok(sent) => {
                     frames_sent += u64::from(sent);
                     flushed_frame = sent;
+                    if sent {
+                        if let Some(t0) = switch_started.take() {
+                            eprintln!(
+                                "[switch] first frame sent {} ms after commit",
+                                t0.elapsed().as_millis()
+                            );
+                        }
+                    }
                     skipped = 0;
                     if blocked_since.take().is_some() {
                         if blocked_reported {
@@ -2304,10 +2352,32 @@ fn pump_frame(
 
     let capture_took = t_capture.elapsed();
 
+    let (w, h) = (fw & !1, fh & !1);
+    // The capture under a LIVE encoder can change size — a monitor switch, a
+    // display-mode change under a blocked-capture rebuild, a grown caret
+    // surface. Reconfigure the running transform when it can take the new
+    // size (update_size) — the full MFT rebuild was the largest chunk of the
+    // switch freeze — and fall back to exactly the old drop-and-rebuild when
+    // it refuses.
+    if let Some(e) = encoder.as_mut() {
+        if e.dims() != (w, h) {
+            let t0 = Instant::now();
+            if e.update_size(w, h) {
+                eprintln!(
+                    "[switch] encoder reconfigured to {w}x{h} in {} ms",
+                    t0.elapsed().as_millis()
+                );
+                *want_keyframe = true;
+            } else {
+                eprintln!("[switch] encoder refused {w}x{h} live; rebuilding");
+                *encoder = None;
+            }
+        }
+    }
+
     let enc = match encoder {
         Some(e) => e,
         None => {
-            let (w, h) = (fw & !1, fh & !1);
             // Build for the profile the PEER negotiated (Chromium offers
             // High, which is a straight quality win at the same bitrate);
             // Baseline stays the floor for anything that offered less. Read
@@ -2318,8 +2388,11 @@ fn pump_frame(
                 Some(0x4D) => puca_encode::H264Profile::Main,
                 _ => puca_encode::H264Profile::Baseline,
             };
+            let t0 = Instant::now();
             let created = Encoder::new(w, h, fps, bitrate, profile)
                 .map_err(|e| PumpError::Fatal(format!("encoder: {e}")))?;
+            // (The backend names itself in its own [encode] line.)
+            eprintln!("[switch] encoder built {w}x{h} in {} ms", t0.elapsed().as_millis());
             *encoder = Some(created);
             encoder.as_mut().expect("just set")
         }

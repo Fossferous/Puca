@@ -56,6 +56,89 @@ pub(crate) fn composite_geometry(union_w: u32, union_h: u32) -> (u32, u32, u32) 
     (step, out_w.max(2), out_h.max(2))
 }
 
+/// Paste one tile's frame onto the canvas at `(dst_l, dst_t)` canvas pixels,
+/// stepping the source down by `step`. Free and pure so the pixel bookkeeping
+/// is testable without DXGI.
+///
+/// `step == 1` is a straight row copy, clamped to the row — the canvas is one
+/// flat buffer, so a copy overrunning the right edge would land at the start
+/// of the next line rather than out of bounds; the surface is also rounded
+/// down to even, so a monitor can legitimately extend one pixel past it.
+///
+/// `step > 1` is a `step x step` BOX AVERAGE, not nearest-neighbour. Nearest
+/// sampling threw away three of every four pixels at step 2, which aliased
+/// small text on the all-displays view into unreadable speckle — the exact
+/// "can the composite ever be legible?" complaint. Averaging is the cheapest
+/// filter that keeps every source pixel's contribution; the last block on
+/// each axis may be partial and averages only what exists.
+fn paste_tile(
+    canvas: &mut [u8],
+    canvas_w: usize,
+    canvas_h: usize,
+    step: usize,
+    dst_l: usize,
+    dst_t: usize,
+    frame: &Frame,
+) {
+    let stride = canvas_w * 4;
+    let fw = frame.width as usize;
+    let fh = frame.height as usize;
+    for row in 0..(fh / step) {
+        let dst_y = dst_t + row;
+        if dst_y >= canvas_h {
+            break;
+        }
+        let dst_row = dst_y * stride + dst_l * 4;
+
+        if step == 1 {
+            let src_row = row * frame.stride;
+            let cols = fw.min(canvas_w.saturating_sub(dst_l));
+            let src_end = src_row + cols * 4;
+            if cols > 0 && src_end <= frame.bgra.len() && dst_row + cols * 4 <= canvas.len() {
+                canvas[dst_row..dst_row + cols * 4].copy_from_slice(&frame.bgra[src_row..src_end]);
+            }
+            continue;
+        }
+
+        for col in 0..(fw / step) {
+            let dst_x = dst_l + col;
+            if dst_x >= canvas_w {
+                break;
+            }
+            let dst = dst_row + col * 4;
+            if dst + 4 > canvas.len() {
+                continue;
+            }
+            let x0 = col * step;
+            let y0 = row * step;
+            let bw = step.min(fw - x0);
+            let bh = step.min(fh - y0);
+            let (mut b, mut g, mut r) = (0u32, 0u32, 0u32);
+            let mut n = 0u32;
+            for yy in 0..bh {
+                let src_row = (y0 + yy) * frame.stride + x0 * 4;
+                for xx in 0..bw {
+                    let Some(px) = frame.bgra.get(src_row + xx * 4..src_row + xx * 4 + 4) else {
+                        continue;
+                    };
+                    b += px[0] as u32;
+                    g += px[1] as u32;
+                    r += px[2] as u32;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                continue;
+            }
+            canvas[dst] = (b / n) as u8;
+            canvas[dst + 1] = (g / n) as u8;
+            canvas[dst + 2] = (r / n) as u8;
+            // Opaque: the composite never carries meaningful alpha.
+            canvas[dst + 3] = 255;
+        }
+    }
+}
+
 /// A failed build, carrying back the capture the caller lent us (if any) so it
 /// is never dropped on an error path.
 enum BuildError {
@@ -93,7 +176,19 @@ pub struct VirtualCapture {
     /// this picture must use these numbers, not that enumeration.
     min_left: i32,
     min_top: i32,
+    /// Which tile the NEXT empty-handed refresh blocks on — rotates per call
+    /// so every monitor gets its turn at the acquire budget (see refresh).
+    budget_cursor: usize,
     bgra: Vec<u8>,
+}
+
+/// The tile a blocking acquire should target: the cursor position, wrapped.
+/// Pure so the rotation is testable without DXGI.
+fn block_target(tile_count: usize, cursor: usize) -> Option<usize> {
+    if tile_count == 0 {
+        return None;
+    }
+    Some(cursor % tile_count)
 }
 
 impl VirtualCapture {
@@ -248,6 +343,7 @@ impl VirtualCapture {
             step,
             min_left,
             min_top,
+            budget_cursor: 0,
             bgra,
         })
     }
@@ -264,26 +360,42 @@ impl VirtualCapture {
         let mut some_access_lost = false;
         let mut fallback_failed = None;
 
-        let mut first = true;
-
+        // FAIR ACQUISITION, two passes. The old policy gave the FIRST tile
+        // the whole timeout and every other tile 0ms — so on a multi-monitor
+        // desktop the composite was paced by tile 0 alone: the budget was
+        // spent blocking on an idle first monitor while another tile's ready
+        // frame waited a whole pass, and non-first tiles only ever
+        // contributed when a frame HAPPENED to be ready at a zero-timeout
+        // poll. Pass 1 harvests every hot tile for free; pass 2 spends the
+        // budget blocking on ONE tile — rotating per call, so every monitor
+        // gets its turn — and only when pass 1 found nothing. Worst-case
+        // block per refresh stays one acquire, same as before.
+        let mut poll = |tile: &mut Tile, t: u32| match tile.capture.next_frame(t) {
+            Ok(frame) => {
+                tile.last_frame = Some(frame);
+                tile.dirty = true;
+                true
+            }
+            Err(CaptureError::Timeout) => false,
+            Err(CaptureError::AccessLost) => {
+                some_access_lost = true;
+                false
+            }
+            Err(e) => {
+                fallback_failed = Some(e);
+                false
+            }
+        };
         for tile in &mut self.captures {
-            // Give the first monitor the full timeout, others 0 so we don't block
-            // if they haven't changed.
-            let t = if first { timeout_ms } else { 0 };
-            first = false;
-
-            match tile.capture.next_frame(t) {
-                Ok(frame) => {
+            if poll(tile, 0) {
+                any_success = true;
+            }
+        }
+        if !any_success && timeout_ms > 0 {
+            if let Some(i) = block_target(self.captures.len(), self.budget_cursor) {
+                self.budget_cursor = self.budget_cursor.wrapping_add(1);
+                if poll(&mut self.captures[i], timeout_ms) {
                     any_success = true;
-                    tile.last_frame = Some(frame);
-                    tile.dirty = true;
-                }
-                Err(CaptureError::Timeout) => {}
-                Err(CaptureError::AccessLost) => {
-                    some_access_lost = true;
-                }
-                Err(e) => {
-                    fallback_failed = Some(e);
                 }
             }
         }
@@ -314,8 +426,8 @@ impl VirtualCapture {
 
         // Paste only what changed: the canvas is retained between calls, so
         // re-copying a monitor that produced no new frame is pure cost.
-        let stride = (self.width * 4) as usize;
         let step = self.step as usize;
+        let (canvas_w, canvas_h) = (self.width as usize, self.height as usize);
         for tile in &mut self.captures {
             if !tile.dirty {
                 continue;
@@ -323,51 +435,17 @@ impl VirtualCapture {
             let Some(frame) = &tile.last_frame else { continue };
             tile.dirty = false;
 
-            let fw = frame.width as usize;
-            let fh = frame.height as usize;
             // Destination is in COMPOSITED pixels, so the monitor's origin
             // steps down with everything else.
-            let l = tile.left as usize / step;
-            let t = tile.top as usize / step;
-
-            for row in 0..(fh / step) {
-                let dst_y = t + row;
-                if dst_y >= self.height as usize {
-                    break;
-                }
-                let src_row = row * step * frame.stride;
-                let dst_row = dst_y * stride + l * 4;
-
-                if step == 1 {
-                    // The common case: one contiguous copy per row — CLAMPED to
-                    // the row. The canvas is one flat buffer, so a copy that
-                    // overruns the right edge lands at the start of the next
-                    // line rather than out of bounds: the length check alone
-                    // permits a wrapped, skewed paste. The surface is also
-                    // rounded down to even, so a monitor can legitimately
-                    // extend one pixel past it.
-                    let cols = fw.min((self.width as usize).saturating_sub(l));
-                    let src_end = src_row + cols * 4;
-                    if cols > 0 && src_end <= frame.bgra.len() && dst_row + cols * 4 <= self.bgra.len() {
-                        self.bgra[dst_row..dst_row + cols * 4]
-                            .copy_from_slice(&frame.bgra[src_row..src_end]);
-                    }
-                    continue;
-                }
-
-                // Stepped: nearest-neighbour, sampling every `step`-th pixel.
-                for col in 0..(fw / step) {
-                    let dst_x = l + col;
-                    if dst_x >= self.width as usize {
-                        break;
-                    }
-                    let src = src_row + col * step * 4;
-                    let dst = dst_row + col * 4;
-                    if src + 4 <= frame.bgra.len() && dst + 4 <= self.bgra.len() {
-                        self.bgra[dst..dst + 4].copy_from_slice(&frame.bgra[src..src + 4]);
-                    }
-                }
-            }
+            paste_tile(
+                &mut self.bgra,
+                canvas_w,
+                canvas_h,
+                step,
+                tile.left as usize / step,
+                tile.top as usize / step,
+                frame,
+            );
         }
 
         Ok(())
@@ -493,6 +571,83 @@ mod tests {
         let outputs = vec![out(0, 0, 0, 1920, 1080), out(3, 1920, 0, 1920, 1080)];
         assert_eq!(union_box(&outputs), Some((0, 0, 3840, 1080)));
         assert_eq!(union_box(&[]), None);
+    }
+
+    fn test_frame(w: u32, h: u32, bgra: Vec<u8>) -> Frame {
+        Frame { width: w, height: h, stride: w as usize * 4, bgra }
+    }
+
+    #[test]
+    fn a_stepped_paste_averages_the_block_not_a_corner() {
+        // A 4x4 checkerboard of 0x00/0xFF greys at step 2: every 2x2 block
+        // holds two of each, so a BOX AVERAGE lands on mid-grey (127) in
+        // every output pixel — while nearest-neighbour, which sampled one
+        // corner, would produce pure 0x00 or 0xFF. This is the test that can
+        // fail.
+        let mut bgra = vec![0u8; 4 * 4 * 4];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let v = if (x + y) % 2 == 0 { 0x00 } else { 0xFF };
+                let at = (y * 4 + x) * 4;
+                bgra[at..at + 3].fill(v);
+                bgra[at + 3] = 255;
+            }
+        }
+        let frame = test_frame(4, 4, bgra);
+        let mut canvas = vec![0u8; 2 * 2 * 4];
+        paste_tile(&mut canvas, 2, 2, 2, 0, 0, &frame);
+        for px in canvas.chunks_exact(4) {
+            assert_eq!(&px[..3], &[127, 127, 127], "a stepped block must average, not sample");
+            assert_eq!(px[3], 255);
+        }
+    }
+
+    #[test]
+    fn a_partial_last_block_averages_only_what_exists() {
+        // 3x3 frame (uniform rows) at step 2: the first output pixel averages
+        // a full 2x2 block; the trailing partial source column produces NO
+        // output pixel (fw/step = 1, same emission rule as the old sampler) —
+        // pin both, so the partial-block clamps can never read out of bounds.
+        let mut bgra = vec![0u8; 3 * 3 * 4];
+        for y in 0..3usize {
+            for (x, v) in [10u8, 30, 200].into_iter().enumerate() {
+                let at = (y * 3 + x) * 4;
+                bgra[at..at + 3].fill(v);
+                bgra[at + 3] = 255;
+            }
+        }
+        let frame = test_frame(3, 3, bgra);
+        let mut canvas = vec![0u8; 2 * 4];
+        paste_tile(&mut canvas, 2, 1, 2, 0, 0, &frame);
+        assert_eq!(&canvas[0..3], &[20, 20, 20], "full block: (10+30+10+30)/4");
+        assert_eq!(&canvas[4..7], &[0, 0, 0], "no phantom second column");
+    }
+
+    #[test]
+    fn a_step_one_paste_is_a_straight_copy_with_the_edge_clamped() {
+        // Positive control that the fast path is untouched — including the
+        // right-edge clamp: a frame one pixel wider than the canvas must not
+        // wrap onto the next row.
+        let mut bgra = vec![0u8; 3 * 1 * 4];
+        for (i, v) in [1u8, 2, 3].into_iter().enumerate() {
+            bgra[i * 4..i * 4 + 3].fill(v);
+        }
+        let frame = test_frame(3, 1, bgra);
+        let mut canvas = vec![0u8; 2 * 2 * 4];
+        paste_tile(&mut canvas, 2, 2, 1, 0, 0, &frame);
+        assert_eq!(canvas[0], 1);
+        assert_eq!(canvas[4], 2);
+        assert_eq!(&canvas[8..12], &[0, 0, 0, 0], "the third pixel must clip, not wrap");
+    }
+
+    #[test]
+    fn the_block_target_rotates_through_every_tile_and_refuses_zero() {
+        assert_eq!(block_target(0, 5), None);
+        assert_eq!(block_target(3, 0), Some(0));
+        assert_eq!(block_target(3, 1), Some(1));
+        assert_eq!(block_target(3, 2), Some(2));
+        assert_eq!(block_target(3, 3), Some(0), "the cursor wraps");
+        assert_eq!(block_target(1, usize::MAX), Some(0));
     }
 
     #[test]

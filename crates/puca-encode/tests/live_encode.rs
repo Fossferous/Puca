@@ -402,3 +402,92 @@ fn forced_keyframes_actually_come_out_every_gop() {
         "keyframes arrive in PAIRS ({min_gap} ms apart) — the caller is pacing on delivery instead of on the request"
     );
 }
+
+/// `update_size` must reconfigure the LIVE transform (or refuse cleanly).
+/// Synthetic frames on purpose: the property under test is the transform
+/// surviving a media-type change, not capture — and skipping capture frees
+/// the test from DXGI exclusivity.
+#[test]
+#[ignore = "needs a working H.264 encoder; run with --ignored --test-threads=1"]
+fn update_size_reconfigures_without_a_rebuild() {
+    fn synth(w: u32, h: u32, seed: u8) -> (Vec<u8>, usize) {
+        let stride = w as usize * 4;
+        let mut b = vec![0u8; stride * h as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let at = y * stride + x * 4;
+                b[at] = (x as u8).wrapping_add(seed);
+                b[at + 1] = (y as u8).wrapping_mul(3);
+                b[at + 2] = seed;
+                b[at + 3] = 255;
+            }
+        }
+        (b, stride)
+    }
+    let mut enc = H264Encoder::new(1920, 1080, 30, 6_000_000).expect("create");
+    let (f1, s1) = synth(1920, 1080, 7);
+    let mut got = 0;
+    for i in 0..30 {
+        match enc.encode_bgra(&f1, s1, i == 0) {
+            Ok(_) => {
+                got += 1;
+                if got >= 3 {
+                    break;
+                }
+            }
+            Err(EncodeError::NeedMoreInput) => {}
+            Err(e) => panic!("warmup encode failed: {e}"),
+        }
+    }
+    assert!(got >= 1, "the encoder never produced output at the first size");
+
+    let t0 = std::time::Instant::now();
+    let ok = enc.update_size(2560, 1440);
+    println!("update_size(2560x1440) -> {ok} in {} ms", t0.elapsed().as_millis());
+
+    if ok {
+        assert_eq!(enc.dims(), (2560, 1440));
+        let (f2, s2) = synth(2560, 1440, 90);
+        let mut first = None;
+        for _ in 0..30 {
+            match enc.encode_bgra(&f2, s2, false) {
+                Ok(out) => {
+                    first = Some(out);
+                    break;
+                }
+                Err(EncodeError::NeedMoreInput) => {}
+                Err(e) => panic!("encode after update_size failed: {e}"),
+            }
+        }
+        let first = first.expect("no output after the size change");
+        assert!(
+            contains_idr(&first.data),
+            "the first frame at a new size must be an IDR — a viewer can only start decoding there"
+        );
+        assert!(first.keyframe);
+    } else {
+        println!("this transform refuses live resize — the caller rebuilds (the old path)");
+    }
+
+    // The refusal path's positive control: whatever an absurd size returns,
+    // a FRESH build must still work afterwards — the fallback the caller
+    // depends on when update_size says no.
+    let refused = !enc.update_size(16384, 16384);
+    println!("update_size(16384x16384) refused = {refused}");
+    drop(enc);
+    let mut fresh =
+        H264Encoder::new(1280, 720, 30, 3_000_000).expect("a fresh build after refusal must work");
+    let (f3, s3) = synth(1280, 720, 33);
+    let mut ok_any = false;
+    for i in 0..30 {
+        match fresh.encode_bgra(&f3, s3, i == 0) {
+            Ok(_) => {
+                ok_any = true;
+                break;
+            }
+            Err(EncodeError::NeedMoreInput) => {}
+            Err(e) => panic!("fresh encode failed: {e}"),
+        }
+    }
+    assert!(ok_any, "the rebuild path must still work after a refusal");
+}

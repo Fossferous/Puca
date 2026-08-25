@@ -72,6 +72,9 @@ pub struct H264Encoder {
     /// The bitrate currently asked of the transform, so an fps-only change can
     /// re-derive the HRD buffer without the caller having to resend it.
     bitrate: u32,
+    /// The profile the media types were negotiated with — kept so
+    /// `update_size` can rebuild the SAME types at a new size.
+    profile: H264Profile,
     /// `Some` for an asynchronous (hardware) MFT, `None` for the synchronous
     /// software one. This single field is what selects between the two entirely
     /// different ways of driving the transform.
@@ -554,6 +557,84 @@ impl H264Encoder {
     ///
     /// Everything below is common to both; the only fork is the async unlock
     /// and the first-frame check at the end.
+    /// The negotiated output+input media types, built ONE way. `build` and
+    /// `update_size` both call this so the two can never drift — a size
+    /// change reconfigures with exactly the types a fresh build would use.
+    unsafe fn negotiated_types(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        profile: H264Profile,
+    ) -> Result<(IMFMediaType, IMFMediaType), EncodeError> {
+        let out_type: IMFMediaType = MFCreateMediaType()
+            .map_err(|e| EncodeError::Failed(format!("MFCreateMediaType failed: {e}")))?;
+        out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).ok();
+        out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).ok();
+        out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate).ok();
+        out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack(width, height)).ok();
+        out_type.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1)).ok();
+        out_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).ok();
+        out_type
+            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+            .ok();
+        // The profile is the PEER'S choice, threaded in from what the SDP
+        // negotiated. High buys CABAC + 8x8 transforms — a real bitrate-
+        // efficiency win on text-heavy screen content — but only when the
+        // receiver advertised it; Baseline remains the floor for a peer
+        // that offered nothing better.
+        let mf_profile = match profile {
+            H264Profile::Baseline => eAVEncH264VProfile_Base,
+            H264Profile::Main => eAVEncH264VProfile_Main,
+            H264Profile::High => eAVEncH264VProfile_High,
+        };
+        out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, mf_profile.0 as u32).ok();
+
+        let in_type: IMFMediaType = MFCreateMediaType()
+            .map_err(|e| EncodeError::Failed(format!("MFCreateMediaType failed: {e}")))?;
+        in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).ok();
+        in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12).ok();
+        in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack(width, height)).ok();
+        in_type.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1)).ok();
+        in_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).ok();
+        in_type
+            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+            .ok();
+        Ok((out_type, in_type))
+    }
+
+    /// Wait for an async MFT's first `METransformNeedInput`. No frame has
+    /// been submitted when this runs, so that is the only event the
+    /// transform can raise. Returns the input credits gathered (0 for a
+    /// synchronous MFT).
+    unsafe fn probe_first_need_input(
+        events: &Option<IMFMediaEventGenerator>,
+    ) -> Result<u32, EncodeError> {
+        let mut need_input = 0u32;
+        if let Some(ev) = events {
+            let deadline = Instant::now() + FIRST_NEED_INPUT_WAIT;
+            loop {
+                match ev.GetEvent(MF_EVENT_FLAG_NO_WAIT) {
+                    Ok(event) => {
+                        if event.GetType().ok() == Some(METransformNeedInput.0 as u32) {
+                            need_input += 1;
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        if Instant::now() >= deadline {
+                            return Err(EncodeError::Failed(
+                                "async MFT never asked for a frame".into(),
+                            ));
+                        }
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
+        Ok(need_input)
+    }
+
     unsafe fn build(
         transform: IMFTransform,
         backend: String,
@@ -647,43 +728,13 @@ impl H264Encoder {
             }
 
             // OUTPUT FIRST — the reverse order fails type negotiation with an
-            // error that names neither type.
-            let out_type: IMFMediaType = MFCreateMediaType()
-                .map_err(|e| EncodeError::Failed(format!("MFCreateMediaType failed: {e}")))?;
-            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).ok();
-            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).ok();
-            out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate).ok();
-            out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack(width, height)).ok();
-            out_type.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1)).ok();
-            out_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).ok();
-            out_type
-                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-                .ok();
-            // The profile is the PEER'S choice, threaded in from what the SDP
-            // negotiated. High buys CABAC + 8x8 transforms — a real bitrate-
-            // efficiency win on text-heavy screen content — but only when the
-            // receiver advertised it; Baseline remains the floor for a peer
-            // that offered nothing better.
-            let mf_profile = match profile {
-                H264Profile::Baseline => eAVEncH264VProfile_Base,
-                H264Profile::Main => eAVEncH264VProfile_Main,
-                H264Profile::High => eAVEncH264VProfile_High,
-            };
-            out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, mf_profile.0 as u32).ok();
+            // error that names neither type. (Type construction is shared
+            // with update_size — see negotiated_types.)
+            let (out_type, in_type) =
+                Self::negotiated_types(width, height, fps, bitrate, profile)?;
             transform
                 .SetOutputType(0, &out_type, 0)
                 .map_err(|e| EncodeError::Failed(format!("SetOutputType failed: {e}")))?;
-
-            let in_type: IMFMediaType = MFCreateMediaType()
-                .map_err(|e| EncodeError::Failed(format!("MFCreateMediaType failed: {e}")))?;
-            in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).ok();
-            in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12).ok();
-            in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack(width, height)).ok();
-            in_type.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1)).ok();
-            in_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).ok();
-            in_type
-                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-                .ok();
             transform
                 .SetInputType(0, &in_type, 0)
                 .map_err(|e| EncodeError::Failed(format!("SetInputType failed: {e}")))?;
@@ -720,28 +771,7 @@ impl H264Encoder {
             // Probing on locals is also simpler than it looks: no frame has
             // been submitted yet, so the only event the transform can possibly
             // raise is `METransformNeedInput`. There is no output to collect.
-            let mut need_input = 0u32;
-            if let Some(ref ev) = events {
-                let deadline = Instant::now() + FIRST_NEED_INPUT_WAIT;
-                loop {
-                    match ev.GetEvent(MF_EVENT_FLAG_NO_WAIT) {
-                        Ok(event) => {
-                            if event.GetType().ok() == Some(METransformNeedInput.0 as u32) {
-                                need_input += 1;
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            if Instant::now() >= deadline {
-                                return Err(EncodeError::Failed(
-                                    "async MFT never asked for a frame".into(),
-                                ));
-                            }
-                            std::thread::yield_now();
-                        }
-                    }
-                }
-            }
+            let need_input = Self::probe_first_need_input(&events)?;
 
             Ok(Self {
                 transform,
@@ -752,6 +782,7 @@ impl H264Encoder {
                 fps: fps.max(1),
                 built_fps: fps.max(1),
                 bitrate,
+                profile,
                 events,
                 need_input,
                 ready: VecDeque::new(),
@@ -818,6 +849,83 @@ impl H264Encoder {
             // the shallow-but-not-starved sizing exists to avoid.
             let buffer = (self.bitrate / self.fps.max(1)).saturating_mul(2);
             let _ = codec.SetValue(&CODECAPI_AVEncCommonBufferSize, &VARIANT::from(buffer));
+        }
+        true
+    }
+
+    /// The frame size the media types are negotiated at right now.
+    pub fn dims(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Reconfigure the LIVE transform for a new frame size, keeping the MFT.
+    ///
+    /// Returns false when the transform refuses — the caller drops the
+    /// encoder and takes the full rebuild path, byte-identical to before this
+    /// existed. On refusal the TEST_ONLY probe runs FIRST, so a transform
+    /// that will not take the new size is left exactly as it was.
+    ///
+    /// Why: a monitor switch paid full `new()` — MFT enumeration, activation,
+    /// type negotiation, async NeedInput probe — the single largest chunk of
+    /// the "zoom to read text is slow" freeze on hardware encoders.
+    /// `update_rate` proved the transform survives live property changes; a
+    /// resolution change needs new MEDIA TYPES but not a new transform.
+    pub fn update_size(&mut self, width: u32, height: u32) -> bool {
+        if width == self.width && height == self.height {
+            return true;
+        }
+        if width == 0 || height == 0 {
+            return false;
+        }
+        unsafe {
+            // Retire the stream first so no frame straddles the type change.
+            // Pending outputs are for the OLD size — a caller that switched
+            // away no longer wants them.
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+            self.ready.clear();
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+
+            let Ok((out_type, in_type)) =
+                Self::negotiated_types(width, height, self.built_fps, self.bitrate, self.profile)
+            else {
+                return false;
+            };
+            // Probe before committing: a refusal here leaves the old types in
+            // force and the encoder untouched.
+            if self
+                .transform
+                .SetOutputType(0, &out_type, MFT_SET_TYPE_TEST_ONLY.0 as u32)
+                .is_err()
+            {
+                return false;
+            }
+            if self.transform.SetOutputType(0, &out_type, 0).is_err()
+                || self.transform.SetInputType(0, &in_type, 0).is_err()
+                || self
+                    .transform
+                    .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                    .is_err()
+                || self
+                    .transform
+                    .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                    .is_err()
+            {
+                // Past TEST_ONLY a partial failure leaves the transform in an
+                // indeterminate state — report it so the caller REBUILDS
+                // rather than feeding a half-reconfigured encoder.
+                return false;
+            }
+            let Ok(need_input) = Self::probe_first_need_input(&self.events) else {
+                return false;
+            };
+            self.need_input = need_input;
+            self.width = width;
+            self.height = height;
+            // Scratch is sized per frame; force a clean fill at the new size.
+            self.nv12 = Vec::new();
+            // `sample_time` stays monotonic across the change — rate control
+            // reads a backwards step as a clock fault.
+            self.owed_keyframe = true;
         }
         true
     }

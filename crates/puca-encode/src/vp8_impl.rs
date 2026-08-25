@@ -52,6 +52,11 @@ pub struct Vp8Encoder {
 }
 
 impl Vp8Encoder {
+    /// The frame size this encoder was built for.
+    pub fn dims(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     pub fn new(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> Result<Self, EncodeError> {
         if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
             // I420 is 4:2:0 — odd dimensions have no well-defined chroma plane.
