@@ -43,6 +43,11 @@ export interface DragReorderState {
     /** Key + group of the item being dragged, or null when idle. */
     dragging: { key: string; group: string } | null;
     indicator: DragIndicator | null;
+    /** Perpendicular travel quantized by `crossStepPx` (0 without it, or
+     *  idle). W4 drag-to-nest: a rightward step over a task row means "nest
+     *  under the row above", leftward "un-nest" — the VIEW decides what a
+     *  step means; the hook only measures. Unclamped: consumers clamp. */
+    crossSteps: number;
 }
 
 export interface DragDropEvent {
@@ -52,6 +57,10 @@ export interface DragDropEvent {
     order: string[];
     /** Index in `order` where the dragged item was dropped. */
     insertAt: number;
+    /** Raw perpendicular pointer travel at the drop, in px (axis 'y' →
+     *  horizontal travel, positive right). Tabs and other one-axis consumers
+     *  simply ignore it. */
+    crossDelta: number;
 }
 
 interface UseDragReorderOptions {
@@ -61,6 +70,10 @@ interface UseDragReorderOptions {
     handleSelector?: string;
     /** Touch only: hold-still time before the item lifts. 0 = threshold drag. */
     touchHoldMs?: number;
+    /** Quantum for `state.crossSteps` re-renders. Unset = perpendicular
+     *  travel never triggers a state update (the tab bar's behaviour,
+     *  unchanged). */
+    crossStepPx?: number;
     onDrop: (e: DragDropEvent) => void;
     enabled?: boolean;
 }
@@ -93,6 +106,8 @@ interface Session {
     fromIndex: number;
     /** Insertion index among the items EXCLUDING the dragged one. */
     insertAt: number;
+    /** Quantized perpendicular travel (see DragReorderState.crossSteps). */
+    crossSteps: number;
     scroller: HTMLElement;
     cleanup: (() => void)[];
 }
@@ -133,7 +148,7 @@ function unmarkDragLive() {
 
 export function useDragReorder(opts: UseDragReorderOptions) {
     const containerRef = useRef<HTMLDivElement | null>(null);
-    const [state, setState] = useState<DragReorderState>({ dragging: null, indicator: null });
+    const [state, setState] = useState<DragReorderState>({ dragging: null, indicator: null, crossSteps: 0 });
     const session = useRef<Session | null>(null);
     // Latest options without re-binding listeners mid-drag.
     const optsRef = useRef(opts);
@@ -171,11 +186,16 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         s.el.style.opacity = '';
         s.el.style.zIndex = '';
         if (s.dragging) unmarkDragLive();
-        setState({ dragging: null, indicator: null });
+        setState({ dragging: null, indicator: null, crossSteps: 0 });
 
-        if (commit && s.dragging && s.insertAt !== s.fromIndex) {
+        // An indent at the SAME slot is a real drop now (nest under the row
+        // above without moving), so crossSteps alone can commit.
+        if (commit && s.dragging && (s.insertAt !== s.fromIndex || s.crossSteps !== 0)) {
             const order = s.items.filter((_, i) => i !== s.fromIndex).map(it => it.key);
-            optsRef.current.onDrop({ key: s.key, group: s.group, order, insertAt: s.insertAt });
+            const cross = optsRef.current.axis === 'y'
+                ? s.lastClient.x - s.startClient.x
+                : s.lastClient.y - s.startClient.y;
+            optsRef.current.onDrop({ key: s.key, group: s.group, order, insertAt: s.insertAt, crossDelta: cross });
         }
         // The browser fires a click on the source element right after
         // pointerup; a drag released over a tab must not double as a tab
@@ -208,12 +228,13 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         s.fromIndex = s.items.findIndex(it => it.key === s.key);
         if (s.fromIndex < 0) return false;
         s.insertAt = s.fromIndex;
+        s.crossSteps = 0;
         s.startContent = toContent(s.lastClient);
         s.dragging = true;
         s.el.style.opacity = '0.45';
         s.el.style.zIndex = '5';
         markDragLive();
-        setState({ dragging: { key: s.key, group: s.group }, indicator: null });
+        setState({ dragging: { key: s.key, group: s.group }, indicator: null, crossSteps: 0 });
         return true;
     };
 
@@ -229,11 +250,18 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         const others = s.items.filter((_, i) => i !== s.fromIndex);
         let insertAt = 0;
         for (const it of others) if (it.mid < pointer) insertAt++;
-        if (insertAt !== s.insertAt) {
+        const step = optsRef.current.crossStepPx;
+        const crossNow = step
+            ? Math.trunc((axis === 'y'
+                ? s.lastClient.x - s.startClient.x
+                : s.lastClient.y - s.startClient.y) / step)
+            : 0;
+        if (insertAt !== s.insertAt || crossNow !== s.crossSteps) {
             s.insertAt = insertAt;
-            if (insertAt === s.fromIndex) {
-                // Back at its own slot — a drop here changes nothing.
-                setState({ dragging: { key: s.key, group: s.group }, indicator: null });
+            s.crossSteps = crossNow;
+            if (insertAt === s.fromIndex && crossNow === 0) {
+                // Back at its own slot with no indent — a drop changes nothing.
+                setState({ dragging: { key: s.key, group: s.group }, indicator: null, crossSteps: 0 });
             } else {
                 // Line position: before the item now at insertAt, or after the last.
                 const linePos = insertAt < others.length
@@ -242,7 +270,7 @@ export function useDragReorder(opts: UseDragReorderOptions) {
                 const indicator: DragIndicator = axis === 'x'
                     ? { x: linePos, y: 2, width: 2, height: Math.max(c.clientHeight - 4, 8) }
                     : { x: 4, y: linePos, width: Math.max(c.clientWidth - 8, 8), height: 2 };
-                setState({ dragging: { key: s.key, group: s.group }, indicator });
+                setState({ dragging: { key: s.key, group: s.group }, indicator, crossSteps: crossNow });
             }
         }
 
@@ -291,6 +319,7 @@ export function useDragReorder(opts: UseDragReorderOptions) {
             items: [],
             fromIndex: 0,
             insertAt: 0,
+            crossSteps: 0,
             scroller: findScroller(c, o.axis),
             cleanup: [],
         };

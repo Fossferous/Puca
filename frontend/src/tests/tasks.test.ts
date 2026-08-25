@@ -3,7 +3,7 @@
 // cascade, and the encrypt-to-self envelope used for personal lists.
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
-    buildTaskTree, applyToggle, applyMove, applyReorder, collectSubtreeIds,
+    buildTaskTree, applyToggle, applyMove, applyReorder, collectSubtreeIds, planDropTarget,
     parseTaskAttachments, serializeTaskAttachments, canEditTask, MAX_TASK_ATTACHMENTS,
     orderTaskTabs, isFavoriteTab, buildPrefsForOrder, toggleFavoritePrefs, taskTabKey,
     dueToLocalInput, localInputToIso, isTaskOverdue, formatDueShort,
@@ -490,5 +490,112 @@ describe('encrypt-to-self (personal lists)', () => {
         const a = await encryptSelf(me, 'same text');
         const b = await encryptSelf(me, 'same text');
         expect(a.ct).not.toBe(b.ct);
+    });
+});
+
+describe('planDropTarget — the indent gesture becomes a plan, or degrades to the plain drop', () => {
+    // Fixture: A(1), B(2) top level; C(3) under A. `order` is the drag
+    // hook's same-group visual order WITHOUT the moved task.
+    const fixture = () => [task(1), task(2), task(3, { parent_id: 1 })];
+
+    it('indent 0 is exactly the old plain plan', () => {
+        expect(planDropTarget(fixture(), task(2), [1], 1, 0))
+            .toEqual({ afterId: 1 });
+        expect(planDropTarget(fixture(), task(2), [1], 0, 0))
+            .toEqual({ afterId: null });
+    });
+
+    it('indent +1 nests under the row above, landing after its last active child', () => {
+        // B dropped after A with an indent: nest under A, after C.
+        expect(planDropTarget(fixture(), task(2), [1], 1, 1))
+            .toEqual({ afterId: 3, reparent: { parentId: 1 } });
+        // A childless target: first in the new group.
+        expect(planDropTarget([task(1), task(2)], task(2), [1], 1, 1))
+            .toEqual({ afterId: null, reparent: { parentId: 1 } });
+        // A COMPLETED child of the target is not in the moving task's group
+        // and must not be named as afterId (the server would 400).
+        const withDone = [task(1), task(2), task(3, { parent_id: 1, is_completed: true })];
+        expect(planDropTarget(withDone, task(2), [1], 1, 1))
+            .toEqual({ afterId: null, reparent: { parentId: 1 } });
+    });
+
+    it('indent -1 un-nests to the grandparent, landing after the old parent', () => {
+        // C (under A) dragged left: to top level, right after A.
+        expect(planDropTarget(fixture(), task(3, { parent_id: 1 }), [], 0, -1))
+            .toEqual({ afterId: 1, reparent: { parentId: null } });
+        // Two levels: D under C under A → un-nest lands under A, after C.
+        const deep = [task(1), task(3, { parent_id: 1 }), task(4, { parent_id: 3 })];
+        expect(planDropTarget(deep, task(4, { parent_id: 3 }), [], 0, -1))
+            .toEqual({ afterId: 3, reparent: { parentId: 1 } });
+        // A COMPLETED old parent is not in the group: land first instead.
+        const doneParent = [task(1, { is_completed: true }), task(3, { parent_id: 1 })];
+        expect(planDropTarget(doneParent, task(3, { parent_id: 1 }), [], 0, -1))
+            .toEqual({ afterId: null, reparent: { parentId: null } });
+    });
+
+    it('every impossible indent DEGRADES to the plain plan — never a dead drop', () => {
+        // Nest at the top slot: nothing above.
+        expect(planDropTarget(fixture(), task(2), [1], 0, 1))
+            .toEqual({ afterId: null });
+        // Nest under the task's CURRENT parent: means nothing.
+        const sibs = [task(1), task(3, { parent_id: 1 }), task(5, { parent_id: 1 })];
+        expect(planDropTarget(sibs, task(5, { parent_id: 1 }), [1], 1, 1))
+            .toEqual({ afterId: 1 });
+        // Cycle: nesting A under its own subtask's slot.
+        const cyc = [task(1), task(3, { parent_id: 1 })];
+        expect(planDropTarget(cyc, task(1), [3], 1, 1))
+            .toEqual({ afterId: 3 });
+        // Depth: a 2-high subtree onto a depth-4 parent busts MAX_TASK_DEPTH.
+        const chain = [
+            task(1), task(2, { parent_id: 1 }), task(3, { parent_id: 2 }),
+            task(4, { parent_id: 3 }), task(10), task(11, { parent_id: 10 }),
+        ];
+        // POSITIVE CONTROL first: the same subtree onto depth 3 is legal
+        // (3+2=5), landing after 3's existing child 4.
+        expect(planDropTarget(chain, task(10), [3], 1, 1))
+            .toEqual({ afterId: 4, reparent: { parentId: 3 } });
+        expect(planDropTarget(chain, task(10), [4], 1, 1))
+            .toEqual({ afterId: 4 }); // depth-4 target: 4+2=6 > 5 → plain
+        // Un-nest at top level: nowhere to go.
+        expect(planDropTarget(fixture(), task(2), [1], 1, -1))
+            .toEqual({ afterId: 1 });
+    });
+});
+
+describe('applyReorder with a reparent — mirrors the server: parent moves, NEW group renumbers', () => {
+    it('moves the task into the new group at the right slot with a fresh scope-max position', () => {
+        const tasks = [task(1), task(2), task(3, { parent_id: 1 })];
+        const next = applyReorder(tasks, task(2), 3, { parentId: 1 });
+        const moved = next.find(t => t.id === 2)!;
+        expect(moved.parent_id).toBe(1);
+        // C(3) then B(2) under A, renumbered above the old max (3).
+        const c = next.find(t => t.id === 3)!;
+        expect(c.position).toBeLessThan(moved.position);
+        expect(moved.position).toBeGreaterThan(3);
+    });
+
+    it('un-nest to top level after the old parent', () => {
+        const tasks = [task(1), task(2), task(3, { parent_id: 1 })];
+        const next = applyReorder(tasks, task(3, { parent_id: 1 }), 1, { parentId: null });
+        const moved = next.find(t => t.id === 3)!;
+        expect(moved.parent_id).toBeNull();
+        const a = next.find(t => t.id === 1)!;
+        const b = next.find(t => t.id === 2)!;
+        expect(a.position).toBeLessThan(moved.position);
+        expect(moved.position).toBeLessThan(b.position);
+    });
+
+    it('a stale afterId against the NEW group returns the input unchanged (the server would 400)', () => {
+        const tasks = [task(1), task(2), task(3, { parent_id: 1 })];
+        // 2 is not a child of 1 — not in the new group.
+        expect(applyReorder(tasks, task(3, { parent_id: 1 }), 2, { parentId: 1 })).toBe(tasks);
+    });
+
+    it('POSITIVE CONTROL: without reparent the old behaviour is untouched', () => {
+        const tasks = [task(1), task(2), task(3)];
+        const next = applyReorder(tasks, task(1), 3);
+        expect(next.find(t => t.id === 1)!.parent_id).toBeNull();
+        const order = next.filter(t => t.parent_id === null).sort((a, b) => a.position - b.position).map(t => t.id);
+        expect(order).toEqual([2, 3, 1]);
     });
 });

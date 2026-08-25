@@ -368,13 +368,23 @@ export function TasksView() {
         }
     };
 
-    const handleReorder = async (task: Task, afterId: number | null) => {
+    const handleReorder = async (
+        task: Task, afterId: number | null, reparent?: { parentId: number | null },
+    ) => {
         const original = tasks;
-        const next = applyReorder(tasks, task, afterId);
+        const next = applyReorder(tasks, task, afterId, reparent);
         if (next === tasks) return;
         setTasks(next);
         try {
-            await reorderTask(task.id, afterId);
+            await reorderTask(task.id, afterId, reparent);
+            // A reparent re-fetches from truth on success: a pre-S1 server
+            // silently plain-reorders the same frame (serde ignores unknown
+            // fields, 200), and trusting the optimistic parent would show a
+            // nest the server never made until the next unrelated refetch.
+            if (reparent && selected?.kind === 'list') {
+                const fetched = await listListTasks(selected.id);
+                setTasks(fetched);
+            }
         } catch (err) {
             console.error('Failed to reorder task:', err);
             setTasks(original);

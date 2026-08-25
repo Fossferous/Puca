@@ -172,9 +172,23 @@ export function moveTask(taskId: number, direction: 'up' | 'down'): Promise<void
 
 /** Drop a task at an arbitrary slot among its visible siblings: immediately
  *  after `afterId`, or first in the group when null. Backs drag-and-drop;
- *  `moveTask` (one-slot) remains for the coarse-pointer arrow buttons. */
-export function reorderTask(taskId: number, afterId: number | null): Promise<void> {
-    return apiClient.post(`/tasks/${taskId}/reorder`, { after_id: afterId });
+ *  `moveTask` (one-slot) remains for the coarse-pointer arrow buttons.
+ *
+ *  `reparent` (S1+) moves the task under a different parent in the same drop
+ *  (null = top level); field names copied from `ReorderTaskRequest`
+ *  (task_handlers.rs). Omitted entirely for a plain reorder, so the wire is
+ *  byte-identical to the pre-S1 frame. AGAINST A PRE-S1 SERVER a reparent
+ *  frame silently plain-reorders (serde ignores unknown fields) — callers
+ *  that reparent must re-fetch after success rather than trusting their
+ *  optimistic parent (see the handleReorder sites). */
+export function reorderTask(
+    taskId: number,
+    afterId: number | null,
+    reparent?: { parentId: number | null },
+): Promise<void> {
+    return apiClient.post(`/tasks/${taskId}/reorder`, reparent
+        ? { after_id: afterId, reparent: true, parent_id: reparent.parentId }
+        : { after_id: afterId });
 }
 
 // --- Tasks-view tab preferences (bar order + favourites) ---
@@ -474,10 +488,16 @@ export function applyMove(tasks: Task[], moved: Task, direction: 'up' | 'down'):
  * groups without touching their position. Returns the input array unchanged
  * when `afterId` is not a valid same-group sibling.
  */
-export function applyReorder(tasks: Task[], moved: Task, afterId: number | null): Task[] {
+export function applyReorder(
+    tasks: Task[], moved: Task, afterId: number | null,
+    reparent?: { parentId: number | null },
+): Task[] {
+    // The parent the task will HAVE — its current one, or the reparent target
+    // (mirroring the server: the parent UPDATE runs before the sibling read).
+    const parentId = reparent !== undefined ? reparent.parentId : moved.parent_id;
     const group = tasks
         .filter(t =>
-            t.parent_id === moved.parent_id &&
+            (t.id === moved.id ? parentId : t.parent_id) === parentId &&
             t.is_completed === moved.is_completed)
         .sort(byOrder)
         .map(t => t.id);
@@ -494,8 +514,106 @@ export function applyReorder(tasks: Task[], moved: Task, afterId: number | null)
     const posById = new Map(order.map((id, i) => [id, base + i + 1]));
     return tasks.map(t => {
         const pos = posById.get(t.id);
-        return pos !== undefined && pos !== t.position ? { ...t, position: pos } : t;
+        const withPos = pos !== undefined && pos !== t.position ? { ...t, position: pos } : t;
+        if (t.id === moved.id && parentId !== moved.parent_id) {
+            return { ...withPos, parent_id: parentId };
+        }
+        return withPos;
     });
+}
+
+// --- Drag-to-nest (W4): turn a drop's indent into a reorder/reparent plan ---
+
+/** What one drop should do. `reparent` absent = today's plain reorder. */
+export interface DropPlan {
+    afterId: number | null;
+    reparent?: { parentId: number | null };
+}
+
+/** 1-based depth of a task (top level = 1); 0 when the id is unknown.
+ *  Bounded by MAX_TASK_DEPTH + 1 so drifted data cannot loop it. */
+export function taskDepth(tasks: Task[], id: number): number {
+    const byId = new Map(tasks.map(t => [t.id, t]));
+    let depth = 0;
+    let cur = byId.get(id);
+    while (cur && depth <= MAX_TASK_DEPTH) {
+        depth++;
+        cur = cur.parent_id === null ? undefined : byId.get(cur.parent_id);
+    }
+    return depth;
+}
+
+/** 1-based height of a subtree (a leaf = 1), same bound. */
+export function subtreeHeight(tasks: Task[], rootId: number): number {
+    const childrenOf = new Map<number, number[]>();
+    for (const t of tasks) {
+        if (t.parent_id !== null) {
+            (childrenOf.get(t.parent_id) ?? childrenOf.set(t.parent_id, []).get(t.parent_id)!)
+                .push(t.id);
+        }
+    }
+    let height = 0;
+    let level = [rootId];
+    const seen = new Set<number>();
+    while (level.length > 0 && height <= MAX_TASK_DEPTH) {
+        height++;
+        const next: number[] = [];
+        for (const id of level) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            next.push(...(childrenOf.get(id) ?? []));
+        }
+        level = next;
+    }
+    return height;
+}
+
+/**
+ * Turn a drop (the drag hook's order/insertAt plus the horizontal indent
+ * gesture) into what should actually happen:
+ *
+ *  - indent 0: the plain reorder, exactly as before.
+ *  - indent +1: NEST under the row visually above the drop slot
+ *    (`order[insertAt-1]`), landing as its last same-completion child.
+ *  - indent -1: UN-NEST to the grandparent, landing right after the old
+ *    parent (or first in the group when the parent's completion state
+ *    differs — a completed parent is not in the moving task's group).
+ *
+ * Every impossible indent DEGRADES to the plain plan rather than dying: a
+ * nest at the top slot, under the current parent, into the moving subtree
+ * (cycle), or past MAX_TASK_DEPTH (the moving SUBTREE's height counts —
+ * pre-validating what the server's depth rule will refuse) all fall back to
+ * the drop the indicator line showed. A dead gesture teaches "drag is
+ * broken"; a drop that lands where the line was teaches "the indent didn't
+ * take", which is recoverable.
+ */
+export function planDropTarget(
+    tasks: Task[], moved: Task, order: number[], insertAt: number, indent: number,
+): DropPlan {
+    const plain: DropPlan = { afterId: insertAt === 0 ? null : order[insertAt - 1] ?? null };
+    if (indent > 0) {
+        if (insertAt === 0) return plain;
+        const parentCandidate = order[insertAt - 1];
+        if (parentCandidate === undefined || parentCandidate === moved.parent_id) return plain;
+        if (collectSubtreeIds(tasks, moved.id).has(parentCandidate)) return plain;
+        if (taskDepth(tasks, parentCandidate) + subtreeHeight(tasks, moved.id) > MAX_TASK_DEPTH) {
+            return plain;
+        }
+        const lastChild = tasks
+            .filter(t => t.parent_id === parentCandidate && t.is_completed === moved.is_completed
+                && t.id !== moved.id)
+            .sort(byOrder)
+            .at(-1);
+        return { afterId: lastChild?.id ?? null, reparent: { parentId: parentCandidate } };
+    }
+    if (indent < 0) {
+        if (moved.parent_id === null) return plain;
+        const parent = tasks.find(t => t.id === moved.parent_id);
+        if (!parent) return plain;
+        const afterId = parent.is_completed === moved.is_completed ? parent.id : null;
+        return { afterId, reparent: { parentId: parent.parent_id } };
+    }
+    return plain;
 }
 
 /** A bar tab: a personal list or a channel checklist. The Tasks view builds

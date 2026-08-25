@@ -12,9 +12,14 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import {
     type Task, type TaskNode, type TaskAttachmentRef,
     buildTaskTree, parseTaskAttachments, isAttachmentsLocked, canEditTask, collectSubtreeIds,
-    dueToLocalInput, localInputToIso, isTaskOverdue, formatDueShort,
+    dueToLocalInput, localInputToIso, isTaskOverdue, formatDueShort, planDropTarget,
     MAX_TASK_DEPTH, MAX_TASK_ATTACHMENTS,
 } from '../api/tasks';
+
+/** Horizontal travel per indent step while dragging a row — matches the
+ *  tree's own 24px per-level padding (TaskTree.css .tt-children), so the
+ *  gesture distance IS the visual indent it produces. */
+const INDENT_PX = 24;
 import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
 import { TaskAttachments } from './TaskAttachments';
@@ -156,8 +161,11 @@ interface TaskTreeProps {
     onMove: (task: Task, direction: 'up' | 'down') => void;
     /** Drag-drop reorder among visible siblings: land immediately after
      *  `afterId` (null = first). When provided, rows grow a grip handle; the
-     *  one-slot arrow buttons stay as the coarse-pointer fallback. */
-    onReorder?: (task: Task, afterId: number | null) => void;
+     *  one-slot arrow buttons stay as the coarse-pointer fallback.
+     *  `reparent` (W4 drag-to-nest, needs an S1 server): the drop also moves
+     *  the task under a different parent — the planDropTarget verdict from
+     *  the drag's horizontal indent. */
+    onReorder?: (task: Task, afterId: number | null, reparent?: { parentId: number | null }) => void;
     /** Set or clear a task's due time (ISO string; null clears). When
      *  provided, editable rows grow a clock action + due chip. */
     onSetDue?: (task: Task, dueAt: string | null) => void;
@@ -228,19 +236,28 @@ export function TaskTree({
     const completed = tree.filter(n => n.task.is_completed);
 
     // Drag-drop reorder among same-group siblings (same parent, same
-    // completion state — the same constraint the server enforces). Drags start
-    // from the grip handle only, so click-to-edit and scrolling stay intact.
-    // Destructured on purpose — see the setContainer note in useDragReorder.
+    // completion state — the same constraint the server enforces), plus the
+    // W4 horizontal indent: one INDENT_PX step right while dropping nests the
+    // task under the row above; one step left un-nests to the grandparent.
+    // planDropTarget turns the gesture into a plan (degrading every
+    // impossible indent to the plain drop), so this stays a thin wire. Drags
+    // start from the grip handle only, so click-to-edit and scrolling stay
+    // intact. Destructured on purpose — see the setContainer note in
+    // useDragReorder.
     const { state: dragState, setContainer: setDragContainer, onPointerDown: onDragPointerDown } = useDragReorder({
         axis: 'y',
         handleSelector: '.tt-grip',
         touchHoldMs: 0, // the grip has touch-action: none — no scroll to fight
+        crossStepPx: INDENT_PX,
         enabled: !!onReorder,
-        onDrop: ({ key, order, insertAt }) => {
+        onDrop: ({ key, order, insertAt, crossDelta }) => {
             const task = tasksRef.current.find(t => t.id === Number(key));
             if (!task || !onReorder) return;
-            const afterId = insertAt === 0 ? null : Number(order[insertAt - 1]);
-            onReorder(task, afterId);
+            const indent = Math.max(-1, Math.min(1, Math.trunc(crossDelta / INDENT_PX)));
+            const plan = planDropTarget(
+                tasksRef.current, task, order.map(Number), insertAt, indent,
+            );
+            onReorder(task, plan.afterId, plan.reparent);
         },
     });
 
@@ -615,17 +632,25 @@ export function TaskTree({
             ref={setDragContainer}
             onPointerDown={onDragPointerDown}
         >
-            {dragState.indicator && (
-                <div
-                    className="tt-drop-indicator"
-                    style={{
-                        left: dragState.indicator.x,
-                        top: dragState.indicator.y,
-                        width: dragState.indicator.width,
-                        height: dragState.indicator.height,
-                    }}
-                />
-            )}
+            {dragState.indicator && (() => {
+                // The indent gesture telegraphs on the drop line itself: one
+                // step right shifts (and shortens) the line by a level —
+                // "this will nest under the row above" — one step left the
+                // mirror. Clamped to the ±1 the drop actually honours.
+                const indent = Math.max(-1, Math.min(1, dragState.crossSteps));
+                const shift = indent > 0 ? INDENT_PX : 0;
+                return (
+                    <div
+                        className={`tt-drop-indicator ${indent > 0 ? 'tt-drop-nest' : indent < 0 ? 'tt-drop-unnest' : ''}`}
+                        style={{
+                            left: dragState.indicator.x + shift,
+                            top: dragState.indicator.y,
+                            width: Math.max(dragState.indicator.width - shift, 8),
+                            height: dragState.indicator.height,
+                        }}
+                    />
+                );
+            })()}
             <ul className="tt-list">{active.map(n => renderNode(n, 0))}</ul>
 
             {completed.length > 0 && (

@@ -110,6 +110,26 @@
     pointer-events: none;
     z-index: 6;
 }
+/* Drag-to-nest: the line itself telegraphs the indent verdict. A nest gets a
+   left cap (the "step in" mark) — the shifted/shortened geometry comes from
+   the component; an un-nest dashes the line to read as "stepping out". */
+.tt-drop-indicator.tt-drop-nest::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: -3px;
+    width: 4px;
+    height: 8px;
+    border-radius: 1px;
+    background: var(--accent-color, #5865f2);
+}
+.tt-drop-indicator.tt-drop-unnest {
+    background: repeating-linear-gradient(
+        90deg,
+        var(--accent-color, #5865f2) 0 6px,
+        transparent 6px 10px
+    );
+}
 .tt-drag-live .tt-item:hover { background: none; }
 body.drag-reorder-active {
     user-select: none;
