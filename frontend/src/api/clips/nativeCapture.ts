@@ -145,7 +145,34 @@ const RESUME_POLL_MS = 500;
 
 export interface NativeAudioHandle {
     track: MediaStreamTrack;
+    /** WASAPI's friendly name for the render device the loopback is ACTUALLY
+     *  listening to — what the Rust side opened, not what was asked for. */
+    deviceName: string | null;
     stop: () => Promise<void>;
+}
+
+/**
+ * The friendly name of the output device the user picked in Settings, or null
+ * for "default" (or when the id no longer resolves — an unplugged device must
+ * fall back to the default loopback, mirroring `applyOutputDevice`).
+ *
+ * Why a NAME crosses the process boundary and not the id: `outputDeviceId` is
+ * a browser `enumerateDevices` id, salted per origin — WASAPI has never heard
+ * of it. The label is the one spelling both sides share, and the Rust side
+ * matches it leniently (`pick_render_device`) because the two stacks
+ * sometimes decorate the same device differently.
+ */
+export async function preferredLoopbackDeviceName(): Promise<string | null> {
+    try {
+        const { loadSettings } = await import('../../components/settingsStore');
+        const id = loadSettings().outputDeviceId;
+        if (!id || id === 'default') return null;
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const label = devices.find(d => d.kind === 'audiooutput' && d.deviceId === id)?.label;
+        return label || null;
+    } catch {
+        return null;
+    }
 }
 
 /** Start native desktop (system) audio loopback and return it as a live
@@ -153,7 +180,10 @@ export interface NativeAudioHandle {
  *  `sysTrack` mixing slot exactly where getDisplayMedia's audio track goes
  *  today. `onError` fires for a capture that dies mid-stream (WASAPI error
  *  after a successful start); a failed START rejects the returned promise. */
-export async function startNativeSystemAudioTrack(onError?: (message: string) => void): Promise<NativeAudioHandle> {
+export async function startNativeSystemAudioTrack(
+    onError?: (message: string) => void,
+    deviceName?: string | null,
+): Promise<NativeAudioHandle> {
     if (!isTauri()) throw new Error('native capture is desktop only');
     const { invoke } = await import('@tauri-apps/api/core');
     const { listen } = await import('@tauri-apps/api/event');
@@ -211,8 +241,14 @@ export async function startNativeSystemAudioTrack(onError?: (message: string) =>
         ctx.close().catch(() => { /* already closed */ });
     };
 
+    let capturedName: string | null = null;
     try {
-        await invoke('start_clip_desktop_audio');
+        // An older shell ignores the extra arg and answers `null`-ish (its
+        // command returns unit) — `typeof` guards the name either way.
+        const reply = await invoke<unknown>('start_clip_desktop_audio', {
+            deviceName: deviceName ?? null,
+        });
+        capturedName = typeof reply === 'string' && reply ? reply : null;
     } catch (e) {
         await teardown();
         throw e instanceof Error ? e : new Error(String(e));
@@ -221,6 +257,7 @@ export async function startNativeSystemAudioTrack(onError?: (message: string) =>
     let stopped = false;
     return {
         track: dest.stream.getAudioTracks()[0],
+        deviceName: capturedName,
         stop: async () => { if (stopped) return; stopped = true; await teardown(); },
     };
 }

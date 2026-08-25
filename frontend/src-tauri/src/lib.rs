@@ -99,20 +99,29 @@ fn stop_clip_video_capture(state: tauri::State<'_, Arc<ClipCaptureState>>) {
 #[tauri::command]
 fn stop_clip_video_capture() {}
 
+/// `device_name` (JS: `deviceName`): capture the loopback of the render
+/// device whose friendly name best matches, instead of whatever the DEFAULT
+/// output happens to be — the user who picked a headset in Settings hears the
+/// game there, and a clip that recorded the (silent) speakers instead reads
+/// as "clip audio is broken". Returns the friendly name actually captured so
+/// the UI can say which device the clip is listening to.
 #[cfg(windows)]
 #[tauri::command]
 async fn start_clip_desktop_audio(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<ClipDesktopAudioState>>,
-) -> Result<(), String> {
+    device_name: Option<String>,
+) -> Result<String, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || clip_desktop_audio::start_capture(app_handle, state))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        clip_desktop_audio::start_capture(app_handle, state, device_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[cfg(not(windows))]
 #[tauri::command]
-async fn start_clip_desktop_audio() -> Result<(), String> {
+async fn start_clip_desktop_audio(_device_name: Option<String>) -> Result<String, String> {
     Err("native desktop audio capture is only supported on Windows".into())
 }
 

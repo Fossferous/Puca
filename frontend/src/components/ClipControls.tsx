@@ -13,7 +13,7 @@ import { createPortal } from 'react-dom';
 import { isTauri } from '../api/platform';
 import { loadSettings } from './settingsStore';
 import { registerPress, unregisterPress } from '../api/hotkeys';
-import { arm, armNative, disarm, seal, getReplayState, isClipCaptureSupported, discardSeal, type ReplayState } from '../api/clips/replayBuffer';
+import { arm, armNative, disarm, seal, getReplayState, isClipCaptureSupported, discardSeal, retrySystemAudio, type ReplayState } from '../api/clips/replayBuffer';
 import { isNativeCaptureSupported } from '../api/clips/nativeCapture';
 import { CLIPS_LOCAL_ONLY, NO_CLIP_POLICY, useReplayState, type ClipPolicy } from '../api/clips/clipsUiState';
 import { clipUiState, clipReasonCopy } from '../api/clips/clipsGate';
@@ -173,6 +173,7 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
 /** The status row under the control bar. Renders nothing while idle. */
 export function ClipStatusRow() {
     const r = useReplayState();
+    const [audioBusy, setAudioBusy] = useState(false);
     if (r.phase === 'idle' && !r.notice && !r.error) return null;
     const preset = clipPreset(r.presetId);
     let text = '';
@@ -194,11 +195,58 @@ export function ClipStatusRow() {
             <span role="status" aria-live="polite" className="voice-clip-status-live">
                 {r.phase === 'idle' || r.phase === 'error' ? 'Clip buffer off' : 'Clip buffer armed'}
             </span>
-            {text && <span aria-hidden="true" className="voice-clip-status-text">{text}</span>}
+            {text && (
+                <span
+                    aria-hidden="true"
+                    className="voice-clip-status-text"
+                    // The one place the ACTUAL loopback device is named — the
+                    // pill itself stays short. "Which output is the clip
+                    // listening to" is exactly the question when clip audio
+                    // sounds wrong.
+                    title={r.systemAudioDevice ? `System audio from: ${r.systemAudioDevice}` : undefined}
+                >{text}</span>
+            )}
             {showNoAudio && (
                 <span className="voice-clip-notice">
-                    <WarningIcon size={14} /> No system audio — this clip will only have your microphone.
-                    <button className="voice-clip-link" onClick={() => void arm({ repick: true })}>Pick again</button>
+                    <WarningIcon size={14} /> {r.systemAudioLost === 'died'
+                        ? 'System audio stopped — new footage has your microphone only.'
+                        : 'No system audio — this clip will only have your microphone.'}
+                    {/* Which recovery exists depends on how this session was
+                        armed. A NATIVE session (captureReason set) has no
+                        picker: retrySystemAudio splices a fresh WASAPI
+                        loopback into the live graph, keeping every second of
+                        footage — unless the session armed with no audio rail
+                        at all (no mic either), where only a restart can add
+                        one and the copy must say what that costs. A PICKER
+                        session keeps "Pick again": re-running the dialog is
+                        its one recovery, and always was. */}
+                    {r.captureReason === null ? (
+                        <button className="voice-clip-link" onClick={() => void arm({ repick: true })}>Pick again</button>
+                    ) : r.hasMic || r.hasSystemAudio ? (
+                        <button
+                            className="voice-clip-link"
+                            disabled={audioBusy}
+                            onClick={() => {
+                                setAudioBusy(true);
+                                retrySystemAudio()
+                                    .catch((e) => console.warn('[clips] system-audio retry failed:', e))
+                                    .finally(() => setAudioBusy(false));
+                            }}
+                        >{audioBusy ? 'Retrying…' : 'Retry system audio'}</button>
+                    ) : (
+                        <button
+                            className="voice-clip-link"
+                            disabled={audioBusy}
+                            title="This buffer was armed with no audio at all, so audio cannot be added to it in place."
+                            onClick={() => {
+                                setAudioBusy(true);
+                                disarm('audio-restart')
+                                    .then(() => armNative())
+                                    .catch((e) => console.warn('[clips] audio restart failed:', e))
+                                    .finally(() => setAudioBusy(false));
+                            }}
+                        >Restart buffer (clears current footage)</button>
+                    )}
                 </span>
             )}
             {r.phase === 'error' && (

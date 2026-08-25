@@ -16,7 +16,7 @@ import { hideCaptureBar, releaseCaptureBar } from '../captureBar';
 import { webrtcManager } from '../webrtc';
 import { loadSettings } from '../../components/settingsStore';
 import { clipPreset, maxRingBytesForBudget, memoryBudgetBytes, MIB } from './clipPresets';
-import { isNativeCaptureSupported, startNativeSystemAudioTrack, startNativeVideo, type NativeCaptureTarget } from './nativeCapture';
+import { isNativeCaptureSupported, preferredLoopbackDeviceName, startNativeSystemAudioTrack, startNativeVideo, type NativeCaptureTarget } from './nativeCapture';
 import type { ArmConfig, FromWorker, SealedInfo, ToWorker, WorkerStatus } from './clipTypes';
 
 export type ArmPhase = 'idle' | 'arming' | 'armed' | 'sealing' | 'sealed' | 'uploading' | 'error';
@@ -35,6 +35,16 @@ export interface ReplayState {
     /** A system-audio track is feeding the mix (getDisplayMedia's audio
      *  track, or the native WASAPI loopback for an auto arm). */
     hasSystemAudio: boolean;
+    /** Native sessions only: WHY there is no system audio, when there isn't.
+     *  'start-failed' = the loopback never opened; 'died' = it opened and
+     *  then a WASAPI error killed it mid-buffer (a device change, typically).
+     *  Drives the "Retry system audio" control — a plain notice string can't,
+     *  and before this existed the mid-buffer death left `hasSystemAudio`
+     *  TRUE, silently recording mic-only clips that claimed game audio. */
+    systemAudioLost: 'start-failed' | 'died' | null;
+    /** Native sessions: the render device the loopback is actually listening
+     *  to (WASAPI's friendly name), or null when unknown/not captured. */
+    systemAudioDevice: string | null;
     /** A mic track was available to tap. */
     hasMic: boolean;
     videoCodec: string | null;
@@ -55,7 +65,8 @@ export interface ReplayState {
 
 const initial = (): ReplayState => ({
     phase: 'idle', bufferedMs: 0, ringBytes: 0, droppedFrames: 0, fps: 0, kbps: 0, presetId: '1080p30',
-    width: 0, height: 0, hasSystemAudio: false, hasMic: false, videoCodec: null, audioCodec: null,
+    width: 0, height: 0, hasSystemAudio: false, systemAudioLost: null, systemAudioDevice: null,
+    hasMic: false, videoCodec: null, audioCodec: null,
     captureReason: null, notice: null, error: null, sealed: null, sealedAt: null, upload: null,
 });
 
@@ -124,8 +135,18 @@ interface Session {
     /** Sequence of the LATEST preview request; results tagged with an older seq are ignored. */
     previewSeq: number;
     /** Native (no-picker) session teardown - stops the Rust-side capture
-     *  threads. disarm() calls this before anything else if present. */
+     *  threads. disarm() calls this before anything else if present. Reads
+     *  `sysAudioStop` at CALL time, so a retried audio capture is the one
+     *  that gets stopped. */
     nativeStop: (() => Promise<void>) | null;
+    /** Native sessions: stop the CURRENT system-audio loopback (replaced
+     *  wholesale by retrySystemAudio — the Rust capture state is a process
+     *  singleton, so the old one must be fully stopped before a new one
+     *  starts, or the new start is refused as "already capturing"). */
+    sysAudioStop: (() => Promise<void>) | null;
+    /** The system-audio leg of the mix graph (source + gain), so a retry can
+     *  unhook the dead leg before splicing the fresh one into `dest`. */
+    sysSrc: MediaStreamAudioSourceNode | null;
 }
 let session: Session | null = null;
 let armGeneration = 0;
@@ -178,9 +199,9 @@ function buildMixedAudio(s: Session, sysTrack: MediaStreamTrack | null): { audio
     dest.channelCount = 2;
     s.dest = dest;
     if (sysTrack) {
-        const src = ctx.createMediaStreamSource(new MediaStream([sysTrack]));
+        s.sysSrc = ctx.createMediaStreamSource(new MediaStream([sysTrack]));
         s.sysGain = ctx.createGain(); s.sysGain.gain.value = 1;
-        src.connect(s.sysGain).connect(dest);
+        s.sysSrc.connect(s.sysGain).connect(dest);
     }
     buildMicSource(s);
     s.unMic = webrtcManager.onMicTrackSwapped(() => buildMicSource(s));
@@ -213,13 +234,24 @@ export async function armNative(): Promise<void> {
     const worker = new Worker(new URL('./replayWorker.ts', import.meta.url), { type: 'module' });
     const s: Session = {
         worker, stream: new MediaStream(), ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null,
-        unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0, nativeStop: null,
+        unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0,
+        nativeStop: null, sysAudioStop: null, sysSrc: null,
     };
     session = s;
     let target: NativeCaptureTarget;
     try {
         const onVideoError = (message: string) => { if (session === s) { void disarm('capture-error'); emit({ notice: `Screen capture ended: ${message}` }); } };
-        const onAudioError = (message: string) => { if (session === s) emit({ notice: `System audio capture ended: ${message}` }); };
+        // A mid-buffer WASAPI death (a device change, typically). The flags
+        // must flip WITH the notice: before this, `hasSystemAudio` stayed
+        // true and the session silently recorded mic-only clips that claimed
+        // game audio. 'died' is what puts the Retry control on screen.
+        const onAudioError = (message: string) => {
+            if (session !== s) return;
+            emit({
+                hasSystemAudio: false, systemAudioLost: 'died', systemAudioDevice: null,
+                notice: `System audio capture ended: ${message}`,
+            });
+        };
 
         // Chunks flow from the Rust capture the moment startNativeVideo
         // resolves, but the worker cannot ingest them until its 'arm' message
@@ -269,7 +301,7 @@ export async function armNative(): Promise<void> {
 
         let audio: Awaited<ReturnType<typeof startNativeSystemAudioTrack>> | null = null;
         try {
-            audio = await startNativeSystemAudioTrack(onAudioError);
+            audio = await startNativeSystemAudioTrack(onAudioError, await preferredLoopbackDeviceName());
         } catch (e) {
             // System audio is a nice-to-have here (unlike video, without which
             // there is nothing to clip) - arm mic-only rather than fail the
@@ -278,7 +310,10 @@ export async function armNative(): Promise<void> {
         }
         if (gen !== armGeneration) { await video.stop(); await audio?.stop(); return; }
 
-        s.nativeStop = async () => { await video.stop(); await audio?.stop(); };
+        s.sysAudioStop = audio ? audio.stop : null;
+        // `s.sysAudioStop` read at CALL time, not captured: retrySystemAudio
+        // replaces the audio leg, and teardown must stop the CURRENT one.
+        s.nativeStop = async () => { await video.stop(); await s.sysAudioStop?.(); };
         const { audioReadable, micTrack } = buildMixedAudio(s, audio?.track ?? null);
 
         const cfg: ArmConfig = {
@@ -301,6 +336,8 @@ export async function armNative(): Promise<void> {
         chunkQueue = null;
         emit({
             hasSystemAudio: !!audio, hasMic: !!micTrack, width: target.width, height: target.height,
+            systemAudioLost: audio ? null : 'start-failed',
+            systemAudioDevice: audio?.deviceName ?? null,
             notice: audio ? null : 'No system audio - the desktop loopback capture could not start; the clip will have your microphone only.',
         });
 
@@ -323,6 +360,49 @@ export async function armNative(): Promise<void> {
         await disarm('arm-failed');
         emit({ phase: 'idle', notice: `Could not arm: ${e instanceof Error ? e.message : String(e)}` });
     }
+}
+
+/**
+ * Rebuild the system-audio leg of a LIVE native session, in place — no
+ * footage is lost, unlike a full disarm/re-arm. For the two ways native
+ * system audio goes missing ('start-failed' and 'died'; the state carries
+ * which) after the user has, say, plugged the headset back in.
+ *
+ * Rejects with 're-arm required' when the live session has no audio graph at
+ * all (armed with neither system audio nor mic): the worker's audio rail is
+ * fixed at arm time, so there is nothing to splice into — the caller shows
+ * "Restart buffer" with honest footage-lost copy instead.
+ */
+export async function retrySystemAudio(): Promise<void> {
+    const s = session;
+    if (!s || !s.nativeStop) throw new Error('no native clip session is armed');
+    if (!s.ctx || !s.dest) throw new Error('re-arm required');
+
+    // The Rust capture state is a process singleton: the OLD leg must be
+    // fully stopped (its listeners, its context, its capture thread) before
+    // a new start, or that start is refused as "already capturing". Stopping
+    // an already-dead capture is a no-op.
+    await s.sysAudioStop?.().catch(() => { /* already dead */ });
+    s.sysAudioStop = null;
+    if (s.sysSrc) { try { s.sysSrc.disconnect(); } catch { /* already gone */ } s.sysSrc = null; }
+    if (s.sysGain) { try { s.sysGain.disconnect(); } catch { /* already gone */ } s.sysGain = null; }
+
+    const onAudioError = (message: string) => {
+        if (session !== s) return;
+        emit({
+            hasSystemAudio: false, systemAudioLost: 'died', systemAudioDevice: null,
+            notice: `System audio capture ended: ${message}`,
+        });
+    };
+    const audio = await startNativeSystemAudioTrack(onAudioError, await preferredLoopbackDeviceName());
+    if (session !== s) { await audio.stop(); return; }
+
+    s.sysAudioStop = audio.stop;
+    s.sysSrc = s.ctx.createMediaStreamSource(new MediaStream([audio.track]));
+    s.sysGain = s.ctx.createGain();
+    s.sysGain.gain.value = 1;
+    s.sysSrc.connect(s.sysGain).connect(s.dest);
+    emit({ hasSystemAudio: true, systemAudioLost: null, systemAudioDevice: audio.deviceName, notice: null });
 }
 
 function postNativeVideoChunk(s: Session, c: { keyframe: boolean; tsUs: number; durUs: number; bytes: ArrayBuffer; codec?: string; codedWidth?: number; codedHeight?: number }): void {
@@ -364,7 +444,7 @@ export async function arm(opts: { repick?: boolean } = {}): Promise<void> {
     const ringMs = Math.max(10_000, (settings.clipBufferSeconds ?? 300) * 1000);
 
     const worker = new Worker(new URL('./replayWorker.ts', import.meta.url), { type: 'module' });
-    const s: Session = { worker, stream, ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null, unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0, nativeStop: null };
+    const s: Session = { worker, stream, ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null, unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0, nativeStop: null, sysAudioStop: null, sysSrc: null };
     session = s;
     try {
         const { audioReadable, micTrack } = buildMixedAudio(s, sysTrack);
