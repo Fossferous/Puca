@@ -1,0 +1,71 @@
+# systemd unit for the Puca LAN waker.
+#
+# Install:
+#   deploy/ops/ship-waker.sh          (does all of this for you)
+#
+# This runs on the HOME LXC only, never on a public host. A waker in a
+# datacentre would still be online, verified and platform=linux — i.e. a
+# perfectly legitimate candidate for planWake — and would broadcast into the
+# datacentre's LAN while reporting success. ship-waker.sh is single-host for
+# exactly that reason, and is deliberately NOT a dual-ship.sh subcommand.
+
+[Unit]
+Description=Puca LAN waker (answers the Wake button with a magic packet)
+Documentation=file:///opt/puca-waker/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=svrn-waker
+Group=svrn-waker
+ExecStart=/opt/puca-waker/puca-waker run /etc/puca-waker/waker.json
+
+# ALWAYS, not on-failure. A clean exit for any reason at all must still come
+# back: this process exists to be reachable at an unpredictable moment, and
+# "it exited tidily three weeks ago" is indistinguishable from broken hardware
+# at the point the owner presses Wake.
+Restart=always
+RestartSec=5s
+
+# Small on purpose. One socket, one four-hour timer, one rare 102-byte
+# datagram. The box this shares runs Postgres, Caddy and coturn; if the waker
+# ever needs more than this, something is wrong and the ceiling should say so
+# rather than the machine quietly swapping.
+MemoryHigh=32M
+MemoryMax=48M
+TasksMax=32
+LimitNOFILE=256
+
+# It reads two files, opens one UDP socket and one TLS connection. Everything
+# below is a capability it has no use for, and each one is a thing an attacker
+# who lands inside it cannot then reach.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# The token file is rewritten on renewal, so this one path must stay writable
+# under ProtectSystem=strict.
+ReadWritePaths=/var/lib/puca-waker
+
+# AF_INET for the broadcast and the socket. No AF_INET6 (the wake path is IPv4
+# only) and no AF_NETLINK.
+RestrictAddressFamilies=AF_INET
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,844 @@
+/* Friends Dashboard - familiar 3-column chat-app layout */
+.friends-dashboard {
+    position: fixed;
+    top: 0;
+    left: 72px;
+    /* After server list */
+    right: 0;
+    bottom: 0;
+    display: flex;
+    background: var(--bg-primary);
+    z-index: 100;
+}
+
+/* Left Sidebar - DMs and Navigation */
+.friends-sidebar {
+    width: 240px;
+    min-width: 240px;
+    background: var(--bg-secondary);
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--bg-tertiary);
+}
+
+.sidebar-search {
+    padding: 0.75rem;
+}
+
+.sidebar-search input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    background: #11111b;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.85rem;
+}
+
+.sidebar-search input::placeholder {
+    color: var(--text-faint);
+}
+
+.sidebar-nav {
+    padding: 0.5rem 0.5rem 0;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: all 0.15s;
+}
+
+.nav-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal);
+}
+
+.nav-item.active {
+    background: rgba(137, 180, 250, 0.15);
+    color: var(--text-normal);
+}
+
+.nav-icon {
+    font-size: 1.25rem;
+}
+
+.nav-badge {
+    margin-left: auto;
+    background: #f38ba8;
+    color: var(--bg-primary);
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 8px;
+    font-weight: 700;
+}
+
+/* DM Section */
+.dm-section {
+    flex: 1;
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dm-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 1rem 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.dm-add-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0;
+}
+
+.dm-add-btn:hover {
+    color: var(--text-normal);
+}
+
+.dm-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 0.5rem;
+}
+
+.dm-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.dm-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.dm-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: var(--bg-primary);
+    font-size: 0.85rem;
+    overflow: hidden;
+}
+
+.dm-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.dm-username {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dm-empty {
+    color: var(--text-secondary, #949ba4);
+    font-size: 0.85rem;
+    padding: 1rem;
+    text-align: center;
+}
+
+/* Main Content - Friends List */
+.friends-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.friends-header-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--bg-tertiary);
+    background: var(--bg-primary);
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.header-icon {
+    font-size: 1.25rem;
+}
+
+.header-title {
+    color: var(--text-normal);
+    font-weight: 600;
+    font-size: 1rem;
+}
+
+.header-divider {
+    width: 1px;
+    height: 20px;
+    background: var(--bg-quaternary);
+    margin: 0 0.5rem;
+}
+
+.header-tab {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    padding: 0.375rem 0.5rem;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 0.875rem;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.header-tab:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal);
+}
+
+.header-tab.active {
+    color: var(--text-normal);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.header-tab.add-friend-btn {
+    background: var(--color-success);
+    color: white;
+}
+
+.header-tab.add-friend-btn:hover {
+    background: #359b52;
+}
+
+.header-tab.add-friend-btn.active {
+    background: transparent;
+    color: var(--color-success);
+    border: 1px solid var(--color-success);
+}
+
+.tab-badge {
+    background: #f38ba8;
+    color: var(--bg-primary);
+    font-size: 0.65rem;
+    padding: 1px 5px;
+    border-radius: 8px;
+    font-weight: 700;
+    margin-left: 2px;
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.close-btn:hover {
+    color: #f38ba8;
+}
+
+/* The cog + close pair on the overlay headers. The dashboards are fixed
+   overlays that cover the sidebar (and with it the app's only settings cog),
+   so each carries its own — see the onOpenSettings prop. */
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.header-cog:hover {
+    color: var(--text-primary, #fff);
+}
+
+/* Friends Content */
+.friends-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+}
+
+.search-bar {
+    margin-bottom: 1rem;
+}
+
+.search-bar input {
+    width: 100%;
+    padding: 0.625rem 1rem;
+    background: #11111b;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+.search-bar input::placeholder {
+    color: var(--text-faint);
+}
+
+.section-header {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    font-weight: 600;
+    padding: 0.5rem 0.5rem 0.75rem;
+}
+
+.loading,
+.empty-state {
+    text-align: center;
+    color: var(--text-secondary, #949ba4);
+    padding: 3rem 1rem;
+}
+
+.empty-state .hint {
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+}
+
+/* Friend Row */
+.friend-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 0.5rem;
+    border-radius: 8px;
+    transition: background 0.15s;
+    cursor: pointer;
+}
+
+.friend-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.friend-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: var(--bg-primary);
+    font-size: 1rem;
+    position: relative;
+}
+
+.friend-avatar.online .status-dot,
+.status-dot {
+    position: absolute;
+    bottom: -2px;
+    right: -2px;
+    width: 14px;
+    height: 14px;
+    background: var(--color-success);
+    border-radius: 50%;
+    border: 3px solid var(--bg-primary);
+}
+
+.friend-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.friend-name {
+    display: block;
+    color: var(--text-normal);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.friend-status {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-faint);
+}
+
+.friend-actions {
+    display: flex;
+    gap: 0.5rem;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.friend-row:hover .friend-actions {
+    opacity: 1;
+}
+
+.action-msg,
+.action-more,
+.action-accept,
+.action-reject {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+    transition: all 0.15s;
+}
+
+.action-msg:hover,
+.action-accept:hover {
+    background: var(--color-success);
+    color: white;
+}
+
+.action-more:hover,
+.action-reject:hover {
+    background: #f38ba8;
+    color: var(--bg-primary);
+}
+
+.pending-label {
+    color: var(--text-faint);
+    font-size: 0.85rem;
+}
+
+/* Add Friend Section */
+.add-friend-section {
+    max-width: 600px;
+    padding: 1rem;
+}
+
+.add-friend-section h3 {
+    color: var(--text-normal);
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+    text-transform: uppercase;
+}
+
+.add-friend-desc {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin: 0 0 1rem;
+}
+
+.add-friend-form {
+    display: flex;
+    gap: 0.5rem;
+    background: #11111b;
+    padding: 0.5rem;
+    border-radius: 8px;
+    border: 1px solid var(--bg-tertiary);
+}
+
+.add-friend-form input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-normal);
+    font-size: 0.95rem;
+    padding: 0.5rem;
+}
+
+.add-friend-form input::placeholder {
+    color: var(--text-faint);
+}
+
+.add-friend-form button {
+    background: #5865f2;
+    color: white;
+    border: none;
+    padding: 0.625rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.15s;
+}
+
+.add-friend-form button:hover:not(:disabled) {
+    background: #4752c4;
+}
+
+.add-friend-form button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.add-status {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.add-status.success {
+    background: rgba(59, 165, 93, 0.2);
+    color: var(--color-success);
+}
+
+.add-status.error {
+    background: rgba(237, 66, 69, 0.2);
+    color: var(--color-danger);
+}
+
+/* Active Now Sidebar */
+.active-now-sidebar {
+    width: 300px;
+    min-width: 300px;
+    background: var(--bg-secondary);
+    padding: 1rem;
+    border-left: 1px solid var(--bg-tertiary);
+    overflow-y: auto;
+}
+
+.active-now-sidebar h3 {
+    color: var(--text-normal);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin: 0 0 1rem;
+}
+
+.active-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.active-user {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.active-user:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.active-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: var(--bg-primary);
+    font-size: 1rem;
+    position: relative;
+}
+
+.status-indicator {
+    position: absolute;
+    bottom: -2px;
+    right: -2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 3px solid var(--bg-secondary);
+}
+
+.status-indicator.online {
+    background: var(--color-success);
+}
+
+.active-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.active-name {
+    display: block;
+    color: var(--text-normal);
+    font-weight: 500;
+    font-size: 0.95rem;
+}
+
+.active-status {
+    display: block;
+    color: var(--color-success);
+    font-size: 0.8rem;
+}
+
+.active-empty {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: var(--text-secondary, #949ba4);
+}
+
+.active-empty p {
+    margin: 0.25rem 0;
+}
+
+.active-empty .hint {
+    font-size: 0.8rem;
+    /* Was --bg-quaternary — a background shade as text, near-invisible. */
+    color: var(--text-faint);
+}
+
+/* Modal Overlay (kept for compatibility) */
+.friends-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 99;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+    .active-now-sidebar {
+        width: 220px;
+        min-width: 220px;
+    }
+}
+
+@media (max-width: 900px) {
+    .active-now-sidebar {
+        display: none;
+    }
+}
+
+/* Narrow-DESKTOP squeeze of the dashboard's 3-column layout only. Scoped to
+   .friends-dashboard + fine pointer: the same HomeSidebar also renders inside
+   the chat sidebar's home/DM view (a single 180-240px column) where a 60px
+   icon-rail collapse would hide every DM name; and on coarse-pointer mobile
+   the dashboard is a full-width stacked panel that must keep its labels. */
+@media (max-width: 700px) and (pointer: fine) {
+    .friends-dashboard .friends-sidebar {
+        width: 60px;
+        min-width: 60px;
+    }
+
+    .friends-dashboard .sidebar-search,
+    .friends-dashboard .dm-header span,
+    .friends-dashboard .dm-username,
+    .friends-dashboard .nav-item span:not(.nav-icon):not(.nav-badge) {
+        display: none;
+    }
+
+    .friends-dashboard .nav-item {
+        justify-content: center;
+    }
+}
+
+
+/* Keep the close button clear of the header tabs at narrow widths so the
+   "×" never overlaps the Add Friend tab. */
+.friends-header-bar .header-left {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.friends-header-bar .close-btn {
+    flex-shrink: 0;
+    margin-left: 8px;
+    position: relative;
+    z-index: 1;
+}
+
+/* Track the server-list rail when it shrinks at narrow desktop widths
+   (see ServerList.css). Fine-pointer only - on mobile the rail is a
+   slide-in overlay and stays 72px wide. */
+@media (max-width: 700px) and (pointer: fine) {
+    .friends-dashboard {
+        left: 56px;
+    }
+}
+
+/* ==========================================================================
+   Mobile (Capacitor / narrow touch) — integrate with the mobile.css panel
+   system instead of the desktop fixed-overlay layout above. The dashboard
+   tracks .chat-main's transform (mobile.css) so it shows in the "chat" slot
+   and slides away with the same panels, avoiding a z-index fight with the
+   tap-to-dismiss overlay.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .friends-dashboard {
+        left: 0;
+        top: var(--safe-area-top, 0px);
+        bottom: calc(var(--mobile-nav-height, 60px) + var(--safe-area-bottom, 0px));
+        z-index: 105;
+        flex-direction: column;
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .chat-container[data-mobile-panel="servers"] .friends-dashboard,
+    .chat-container[data-mobile-panel="channels"] .friends-dashboard {
+        transform: translateX(100%);
+    }
+
+    .chat-container[data-mobile-panel="members"] .friends-dashboard {
+        transform: translateX(-100%);
+    }
+
+    .friends-sidebar {
+        width: 100%;
+        min-width: 0;
+        max-height: 35%;
+        border-right: none;
+        border-bottom: 1px solid var(--bg-tertiary);
+    }
+
+    /* Tasks mode: the DM search box + conversation list are Friends-only
+       concerns and irrelevant here — collapse the sidebar down to just the
+       Friends/Tasks switcher so task lists get the vertical space instead
+       of being squeezed under a mostly-empty 35% panel (see nav-item below,
+       which stays visible so switching back to Friends still works). */
+    .friends-dashboard.tasks-active .friends-sidebar {
+        max-height: none;
+        flex: 0 0 auto;
+    }
+
+    .friends-dashboard.tasks-active .sidebar-search,
+    .friends-dashboard.tasks-active .dm-section {
+        display: none;
+    }
+
+    .friends-dashboard.tasks-active .sidebar-nav {
+        display: flex;
+        flex-direction: row;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem;
+    }
+
+    .friends-dashboard.tasks-active .nav-item {
+        flex: 1;
+        justify-content: center;
+    }
+
+    .friends-dashboard.tasks-active .friends-main {
+        flex: 1;
+        min-height: 0;
+    }
+
+    /* Undo the narrow-desktop icon-rail collapse above — on mobile the
+       dashboard is a full-width panel, not a squeezed sidebar. The nav-label
+       selector must repeat both :not()s: the 700px hide rule is specificity
+       0,3,1, so a weaker revert here would lose and leave bare icons. */
+    .sidebar-search,
+    .dm-header span,
+    .dm-username,
+    .nav-item span:not(.nav-icon):not(.nav-badge) {
+        display: revert;
+    }
+
+    .nav-item {
+        justify-content: flex-start;
+    }
+
+    /* Friends mode vertical economy: the stacked search + two nav rows were
+       eating the whole 35% sidebar cap, leaving .dm-list 0px tall — DM rows
+       painted under .friends-main and could not be tapped. Lay the nav
+       horizontally (like Tasks mode) and guarantee the DM list a real slice
+       so conversations stay visible and tappable; it scrolls internally
+       beyond that. Also applies to the same HomeSidebar rendered in the
+       chat sidebar's home/DM view, which is exactly the intent. */
+    .friends-dashboard .friends-sidebar {
+        max-height: 45%;
+    }
+
+    /* The chat sidebar's home/DM instance is the whole panel — no cap. */
+    .sidebar .friends-sidebar {
+        max-height: none;
+    }
+
+    .friends-sidebar .sidebar-nav {
+        display: flex;
+        flex-direction: row;
+        gap: 0.5rem;
+        padding: 0.5rem 0.75rem 0;
+    }
+
+    .friends-sidebar .sidebar-nav .nav-item {
+        flex: 1;
+        justify-content: center;
+    }
+
+    .friends-sidebar .dm-section {
+        min-height: 130px;
+    }
+
+    /* Tabs header: hide the title/divider and let the tab row scroll
+       horizontally instead of crushing every tab to its min-width. */
+    .header-title,
+    .header-divider {
+        display: none;
+    }
+
+    .friends-header-bar .header-left {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .header-tab {
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    /* Hover-revealed actions are invisible (but still tappable) with no
+       hover on touch — accepting/rejecting/messaging friends needs them
+       always on. */
+    .friend-actions {
+        opacity: 1;
+    }
+
+    .add-friend-form {
+        flex-direction: column;
+    }
+
+    .add-friend-form button {
+        width: 100%;
+    }
+
+    /* Below 16px, iOS auto-zooms the page on focus; the fixed full-screen
+       panel layout doesn't recover cleanly from that. .friends-sidebar covers
+       the HomeSidebar instance living in the chat sidebar's home/DM view. */
+    .friends-dashboard input,
+    .friends-sidebar input {
+        font-size: 16px;
+    }
+
+    /* No onClick handler — a dead control, hidden rather than left as a
+       tappable no-op. */
+    .dm-add-btn {
+        display: none;
+    }
+}

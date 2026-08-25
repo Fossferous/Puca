@@ -1,0 +1,270 @@
+/* VoiceStage — a familiar voice-channel view in the main content area.
+   Lives inside .chat-main / .messages-container, so it inherits the mobile
+   panel system for free (DESIGN_PHILOSOPHY §1 option 1). */
+.voice-stage {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--bg-primary, #18191c);
+}
+
+.voice-stage-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.35rem 0.75rem;
+    background: rgba(0, 0, 0, 0.35);
+    border-bottom: 1px solid var(--border-separator, #2a2b2f);
+    min-height: 40px;
+    flex-shrink: 0;
+}
+
+.voice-stage-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.voice-stage-icon {
+    font-size: 1rem;
+}
+
+.voice-stage-name {
+    font-weight: 600;
+    color: var(--text-normal, #dbdee1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.voice-stage-count {
+    color: var(--text-muted, #949ba4);
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.voice-stage-controls {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.voice-stage-btn {
+    padding: 0.3rem 0.75rem;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 500;
+    background: transparent;
+    color: var(--text-muted, #b5bac1);
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+@media (pointer: fine) {
+    .voice-stage-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #fff;
+    }
+}
+
+/* Scrollable tile area */
+.voice-stage-body {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    padding: 1rem;
+}
+
+.voice-stage-grid {
+    display: grid;
+    gap: 10px;
+    width: 100%;
+    max-width: 1100px;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+
+/* One or two people: big centered tiles like the reference layout */
+.voice-stage-grid[data-count="1"],
+.voice-stage-grid[data-count="2"] {
+    max-width: 640px;
+    grid-template-columns: 1fr;
+}
+
+.voice-stage-tile {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    min-height: 140px;
+    border-radius: 10px;
+    background:
+        radial-gradient(ellipse at 50% 0%, rgba(255, 255, 255, 0.05), transparent 60%),
+        var(--bg-nested, #0a0b0c);
+    border: 2px solid transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color 0.12s ease, background 0.15s ease;
+}
+
+@media (pointer: fine) {
+    .voice-stage-tile:hover {
+        background:
+            radial-gradient(ellipse at 50% 0%, rgba(255, 255, 255, 0.07), transparent 60%),
+            var(--bg-hover, #1e1f22);
+    }
+}
+
+.voice-stage-tile.speaking {
+    border-color: var(--text-positive, #23a55a);
+}
+
+/* Live camera feed filling the tile (avatar is the camera-off fallback).
+   Radius = tile's 10px minus the 2px border; cover crops, never letterboxes. */
+.vs-camera-video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 8px;
+}
+
+/* Mirror ONLY our own front camera — remote feeds must never be flipped. */
+.vs-camera-video.mirrored {
+    transform: scaleX(-1);
+}
+
+.vs-avatar {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--bg-quaternary, #232428);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--text-normal, #dbdee1);
+    box-shadow: 0 0 0 0 rgba(35, 165, 90, 0);
+    transition: box-shadow 0.12s ease;
+}
+
+.vs-avatar.speaking {
+    box-shadow: 0 0 0 3px var(--text-positive, #23a55a);
+}
+
+.vs-avatar img,
+.vs-avatar canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* Bottom-left name pill, like the reference screenshot */
+.vs-name-chip {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    max-width: calc(100% - 20px);
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.vs-chip-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vs-chip-icon {
+    flex-shrink: 0;
+}
+
+.vs-chip-icon.muted {
+    color: var(--text-danger, #f23f43);
+}
+
+.vs-chip-cam {
+    font-size: 0.8rem;
+}
+
+/* Media not yet reachable (join chime being held). Warning colour, no
+   animation — short-lived and reduced-motion-safe. */
+.vs-chip-connecting {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    width: 14px;
+    height: 14px;
+    color: var(--text-warning, #faa61a);
+}
+.vs-chip-connecting svg {
+    width: 14px;
+    height: 14px;
+}
+
+.vs-live-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: var(--text-danger, #f23f43);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 7px;
+    border-radius: 4px;
+}
+
+/* Always visible (no hover-only affordances — touch rule §5) */
+.vs-watch-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    background: rgba(88, 101, 242, 0.9);
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+@media (pointer: fine) {
+    .vs-watch-btn:hover {
+        background: #4752c4;
+    }
+}
+
+.voice-stage-solo {
+    text-align: center;
+    color: var(--text-muted, #949ba4);
+}
+
+.voice-stage-solo p {
+    margin-bottom: 0.75rem;
+}
+
+.voice-stage-solo .solo-invite {
+    background: var(--bg-quaternary, #232428);
+    color: var(--text-normal, #dbdee1);
+    padding: 0.5rem 1rem;
+}
+
+.vs-chip-icon.buffering { color: var(--text-warning, #faa61a); }

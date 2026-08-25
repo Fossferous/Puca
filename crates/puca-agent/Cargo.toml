@@ -1,0 +1,99 @@
+[package]
+name = "puca-agent"
+version = "0.8.21"
+edition = "2021"
+description = "Headless host agent for Puca device control — captures and injects without a webview"
+license = "AGPL-3.0-or-later"
+
+[[bin]]
+name = "puca-agent"
+path = "src/main.rs"
+
+# Windows VERSIONINFO — see build.rs for why a nameless binary is a liability
+# here. Gated on the HOST, because a build script runs on the host; build.rs
+# checks the TARGET separately so the non-Windows cross-compile guard still
+# builds. tauri-winres (over embed-resource) is the same stack tauri-build
+# already uses to stamp app.exe on this machine, so the resource compiler is
+# known to resolve — rc.exe ships in the Windows SDK but is not on PATH.
+[target.'cfg(windows)'.build-dependencies]
+tauri-winres = "0.3"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+puca-capture = { path = "../puca-capture" }
+puca-encode = { path = "../puca-encode" }
+# `caret` is off by default in puca-input because frontend/src-tauri
+# depends on that crate too and has no use for a caret — only this agent reports
+# one. Turned on HERE so the desktop app does not pay the Accessibility/COM
+# binding compile cost.
+puca-input = { path = "../puca-input", features = ["caret"] }
+# The authorisation gate moves down here with the key: sealing protects
+# confidentiality, and says nothing about whether the peer may type.
+puca-ua = { path = "../puca-ua" }
+puca-rtc = { path = "../puca-rtc" }
+# TURN long-term credentials: HMAC-SHA1 over the message, keyed by
+# MD5(username:realm:password). The same hmac/sha1 the SERVER already uses to
+# mint these REST credentials, so the two ends of the scheme agree by
+# construction rather than by two independent implementations of it.
+hmac = "0.12"
+# The device-control session key now lives in the agent rather than above it —
+# see src/control_key.rs for why. Versions match the root Cargo.toml so the two
+# implementations of the same wire format cannot drift apart.
+hkdf = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
+getrandom = "0.2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha1 = "0.10"
+md-5 = "0.10"
+# The agent owns the socket and the clock, so it drives str0m directly rather
+# than through puca-rtc — sans-IO means the event loop lives with whoever
+# has the socket.
+str0m = "0.21"
+base64 = "0.23.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    # BCryptGenRandom, for STUN transaction ids. Not decoration: a predictable
+    # transaction id lets anything that can reach this socket forge a Binding
+    # response, and the address in that response is what we advertise to the
+    # peer as our own.
+    "Win32_Security_Cryptography",
+    # OpenProcess/WaitForSingleObject, so the agent can die with the app that
+    # launched it. Without that an orphan holds puca-agent.exe open and the
+    # NEXT installer cannot replace it.
+    "Win32_System_Threading",
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    # SetStdHandle, to send the agent's diagnostics to a file. Since
+    # CREATE_NO_WINDOW the agent has no console, so every line it prints about
+    # why a session failed was going nowhere.
+    "Win32_System_Console",
+    # timeBeginPeriod/timeEndPeriod: the stream loop paces frames with socket
+    # read timeouts, which tick at the system timer's granularity — ~15.6ms by
+    # default, half a frame of scheduling slop at 30fps. See StreamTimingGuard.
+    "Win32_Media",
+] }
+
+# Pass-through so the agent can be built with the Linux VP8 encoder:
+#   cargo build --features vp8
+# Off by default: without it the agent still builds on a machine with no libvpx
+# and reports that it cannot be watched, rather than shipping a black screen.
+[features]
+vp8 = ["puca-encode/vp8"]
+
+[dev-dependencies]
+# Only to PLAY the controller in tests: sign a real unattended-access challenge
+# the way a peer would, so the authorisation gate is exercised end to end
+# rather than stubbed into always-true.
+ed25519-dalek = "2"

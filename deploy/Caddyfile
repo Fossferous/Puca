@@ -1,0 +1,34 @@
+# Caddy reverse-proxy config for the Puca backend.
+#
+# Replace chat.example.com with your domain (DNS A/AAAA record must point at
+# this server). Caddy obtains and renews Let's Encrypt certificates
+# automatically and handles WebSocket upgrades natively — no extra config.
+#
+# The entire origin is proxied to the backend: the API lives at the root
+# (e.g. /auth/login/step1, /servers, /ws, /files/:id). Build the desktop app
+# with VITE_API_URL=https://chat.example.com (no /api suffix).
+
+chat.example.com {
+	reverse_proxy 127.0.0.1:3000 {
+		# The backend rate limiter keys clients by X-Forwarded-For. Overwrite it
+		# with the real TCP peer ({remote_host}) so a client cannot inject a
+		# spoofed leftmost value and mint a fresh limiter bucket per request
+		# (which would defeat the 5/s auth and 50/s API limits entirely).
+		# If you later front this with Cloudflare/another proxy, switch to
+		# trusted_proxies + read CF-Connecting-IP instead.
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+	}
+
+	# Uploads are capped at 25 MB by the app (28 MB request limit incl. framing).
+	request_body {
+		max_size 32MB
+	}
+
+	encode gzip
+}

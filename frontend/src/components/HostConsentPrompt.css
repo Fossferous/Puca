@@ -1,0 +1,101 @@
+/* Host consent prompt — "let this device be controlled?".
+ *
+ * z-index 2100, the modal band, matching UnattendedPassphrasePrompt for the same
+ * reason: a session is normally started from Settings > Devices, so the settings
+ * modal (2000) is the surface most likely to be open. Below it this would render
+ * behind the screen that launched it.
+ *
+ * Sized for a coarse pointer as well as a mouse: this appears on a desktop, but
+ * the same component is what a tablet host would show, and the buttons are the
+ * only things standing between an incoming request and this machine's screen —
+ * a mis-tap on Allow is not an acceptable failure mode.
+ */
+.host-consent-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.host-consent {
+    width: 100%;
+    max-width: 440px;
+    padding: 20px;
+    border-radius: 8px;
+    background: var(--background-primary, #313338);
+    color: var(--text-normal, #dcddde);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.host-consent h2 {
+    margin: 0 0 10px;
+    font-size: 18px;
+}
+
+.host-consent-body {
+    margin: 0 0 14px;
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.host-consent-monitor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: var(--text-muted, #b9bbbe);
+}
+
+.host-consent-monitor select {
+    padding: 8px 10px;
+    border: 1px solid var(--background-tertiary, #202225);
+    border-radius: 4px;
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+    font-size: 14px;
+}
+
+.host-consent-hint {
+    margin: 0 0 16px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted, #b9bbbe);
+}
+
+.host-consent-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.host-consent-actions button {
+    /* 44px min target: the coarse-pointer floor from DESIGN_PHILOSOPHY.md. */
+    min-height: 44px;
+    padding: 0 18px;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.host-consent-deny {
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+}
+
+.host-consent-allow {
+    background: var(--brand, #5865f2);
+    color: #fff;
+}
+
+.host-consent-allow:focus-visible,
+.host-consent-deny:focus-visible {
+    outline: 2px solid var(--text-link, #00a8fc);
+    outline-offset: 2px;
+}

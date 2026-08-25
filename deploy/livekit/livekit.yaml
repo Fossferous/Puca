@@ -1,0 +1,75 @@
+# LiveKit SFU config template — copy to /opt/livekit/livekit.yaml
+# and substitute the __PLACEHOLDERS__ (see deploy/livekit/README.md).
+#
+# Port choices are deliberate — this site's router already forwards a LOT
+# (see deploy/turn/turnserver.conf): 3478/5349 (Matrix VM TURN), 3479 +
+# 49180-49220 (Puca coturn), 49152-49172 and 50000-60000 (Matrix).
+# LiveKit's DEFAULT ICE range is 50000-60000 — already taken by the Matrix
+# box at the router, so single-port UDP mux on 7882 is mandatory here, not a
+# preference. 7880-7882 collide with nothing.
+
+# HTTP/WS signaling. Local-only — Caddy terminates TLS (sfu.<domain>, orange-
+# clouded through Cloudflare; WS is proxyable). Media does NOT flow here.
+port: 7880
+
+rtc:
+  # Single-port UDP mux: ALL media arrives on one forwarded UDP port instead
+  # of the default 50000-60000 range (taken — see header).
+  udp_port: 7882
+  # ICE/TCP fallback for UDP-hostile networks.
+  tcp_port: 7881
+  # Behind the home NAT: STUN-discover the public IP and advertise it in ICE
+  # candidates. Same exposure class as the existing coturn (media endpoints
+  # reveal the origin IP to call participants; Cloudflare cannot proxy UDP).
+  # LAN CAVEAT: clients on the same LAN as the server need the router to
+  # support NAT hairpinning to reach the advertised public IP — verify with
+  # one in-house + one remote participant during rollout.
+  use_external_ip: true
+
+keys:
+  # Same key/secret pair as LIVEKIT_API_KEY / LIVEKIT_API_SECRET in
+  # /opt/puca/.env. Secret must be >=32 chars: openssl rand -hex 32
+  __LIVEKIT_API_KEY__: __LIVEKIT_API_SECRET__
+
+room:
+  # Auto-create is safe HERE because join tokens are the chokepoint: the
+  # backend mints them only for real sfu_mode voice channels (VIEW-gated +
+  # admission control), tokens carry roomCreate:false, and room names are
+  # deterministic (sfu_<channel id>) — there is no room-churn path around the
+  # egress budget. Keeping it on avoids a RoomService client in the backend.
+  auto_create: true
+  # Belt-and-braces participant ceiling behind the backend's own admission
+  # control. Keep >= SFU_ROOM_MAX_PARTICIPANTS (which also counts unjoined
+  # token reservations, so it is the binding limit in practice).
+  max_participants: 12
+  # Reclaim rooms promptly once the last participant leaves.
+  empty_timeout: 120
+
+# Feed the Puca backend's usage tracker (node-global egress admission).
+# Backend listens on localhost:3000; the webhook route verifies the signed
+# JWT + body hash itself.
+webhook:
+  api_key: __LIVEKIT_API_KEY__
+  urls:
+    - http://127.0.0.1:3000/livekit/webhook
+
+# Prometheus text metrics on GET :6789/metrics — scraped every 10s by the
+# Puca backend's egress sampler (src/sfu.rs spawn_egress_sampler), which
+# feeds the MEASURED branch of SFU admission. Not exposed off-box: ufw has no
+# allow rule for 6789 and the backend scrapes 127.0.0.1. If this line is
+# removed, admission silently degrades to the worst-case projection alone.
+prometheus_port: 6789
+
+# The embedded TURN server stays OFF: its defaults (3478/5349) collide with
+# the Matrix VM's TURN at this site, and the existing coturn covers the mesh
+# path. Revisit only if SFU-behind-strict-NAT users appear — and then put it
+# on non-default ports. (Note: as deployed, Puca's coturn cannot relay
+# TO this SFU anyway — its denied-peer-ip list includes the site's own public
+# IP — so TURN-for-SFU needs a deliberate config change, not an accident.)
+turn:
+  enabled: false
+
+logging:
+  level: info
+  # JSON logs land in journald via the systemd unit.
+  json: false

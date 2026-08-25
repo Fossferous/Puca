@@ -1,0 +1,337 @@
+/* User Profile Settings Modal */
+
+.profile-settings-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.profile-settings-modal {
+    background: var(--bg-primary);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 420px;
+    max-height: 85dvh;
+    padding: 24px;
+    position: relative;
+    overflow-y: auto;
+}
+
+.profile-close-btn {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 24px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.profile-close-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+}
+
+.profile-settings-modal h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin: 0 0 16px;
+}
+
+.profile-error {
+    background: rgba(243, 139, 168, 0.1);
+    border: 1px solid var(--color-danger);
+    color: var(--color-danger);
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+
+.profile-success {
+    background: rgba(166, 227, 161, 0.1);
+    border: 1px solid var(--color-success);
+    color: var(--color-success);
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+
+.profile-section {
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.profile-section h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin: 0 0 4px;
+}
+
+.profile-description {
+    font-size: 13px;
+    color: var(--text-faint);
+    margin: 0 0 16px;
+}
+
+/* Avatar Upload */
+.avatar-upload-area {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.avatar-preview {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.avatar-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.avatar-placeholder {
+    font-size: 32px;
+    font-weight: 600;
+    color: var(--bg-primary);
+}
+
+.avatar-info {
+    flex: 1;
+}
+
+.avatar-info .username {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin: 0 0 8px;
+}
+
+.avatar-upload-btn {
+    display: inline-block;
+    padding: 8px 16px;
+    background: var(--brand-primary);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.avatar-upload-btn:hover {
+    background: var(--brand-hover);
+}
+
+/* Avatar zoom/pan cropper */
+.avatar-crop-area {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+.avatar-crop-viewport {
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+    background: var(--bg-nested, #0a0b0c);
+    cursor: grab;
+    /* Panning must not scroll the modal on touch. */
+    touch-action: none;
+    flex-shrink: 0;
+}
+
+.avatar-crop-viewport:active {
+    cursor: grabbing;
+}
+
+.avatar-crop-viewport img {
+    position: absolute;
+    max-width: none;
+    /* The viewport owns all pointer handling. */
+    pointer-events: none;
+    user-select: none;
+}
+
+/* Dim everything outside the circular crop window. */
+.avatar-crop-mask {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.6);
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    pointer-events: none;
+}
+
+.avatar-crop-zoom {
+    width: 100%;
+    max-width: 256px;
+    accent-color: var(--brand-primary);
+}
+
+.avatar-crop-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.avatar-crop-cancel {
+    padding: 8px 16px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.avatar-crop-cancel:hover {
+    background: var(--bg-hover);
+}
+
+.avatar-crop-cancel:disabled,
+.avatar-upload-btn:has(> input:disabled) {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Display Name Field */
+.profile-section+.profile-section {
+    margin-top: 16px;
+}
+
+.display-name-field {
+    display: flex;
+    gap: 8px;
+}
+
+.display-name-field input {
+    flex: 1;
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 6px;
+    color: var(--text-normal);
+    font-size: 14px;
+}
+
+.display-name-field input:focus {
+    outline: none;
+    border-color: var(--brand-primary);
+}
+
+.display-name-field input::placeholder {
+    color: var(--text-faint);
+}
+
+.save-display-name-btn {
+    padding: 10px 16px;
+    background: var(--brand-primary);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.save-display-name-btn:hover {
+    background: var(--brand-hover);
+}
+
+.save-display-name-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Below 16px, iOS auto-zooms the page on focus; with the modal's keyboard
+   already tight on room, the zoom leaves Save unreachable. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .display-name-field input {
+        font-size: 16px;
+    }
+
+    /* Fat-finger-friendly zoom slider (§5 touch rule). */
+    .avatar-crop-zoom {
+        height: 44px;
+    }
+}
+
+
+/* --- Custom join/leave sound rows --------------------------------------- */
+
+.sound-upload-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+}
+
+.sound-label {
+    width: 48px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.sound-state {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-faint);
+}
+
+.sound-btn {
+    padding: 6px 12px;
+    background: var(--bg-tertiary, rgba(255, 255, 255, 0.08));
+    color: var(--text-primary);
+    border: 1px solid var(--border-color, transparent);
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.sound-btn:hover {
+    background: var(--brand-primary);
+    color: var(--bg-primary);
+}
+
+.sound-btn:disabled,
+.sound-btn.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* §5 touch rule: comfortable targets on coarse pointers. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .sound-btn {
+        padding: 10px 14px;
+        min-height: 44px;
+    }
+}

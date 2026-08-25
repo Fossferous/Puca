@@ -1,0 +1,293 @@
+/* Outer column: a Google-Tasks-style tab bar above the active list, which
+   takes all remaining height (no cramped list-picker split, esp. on mobile). */
+.tasks-view-outer {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+/* --- Tab bar: one tab per list (scrolls) + pinned New/Server actions --- */
+.tasks-tabbar {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    padding: 4px 6px 0;
+    border-bottom: 1px solid var(--border-color, #202225);
+    flex-shrink: 0;
+}
+
+.tasks-tab-scroll {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* Containing block for the drag-drop insertion line. */
+    position: relative;
+}
+.tasks-tab-scroll::-webkit-scrollbar { display: none; }
+
+.tasks-tab-drop-indicator {
+    position: absolute;
+    background: var(--accent-color, #5865f2);
+    border-radius: 1px;
+    pointer-events: none;
+    z-index: 6;
+}
+
+.tasks-tabbar-actions {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    flex-shrink: 0;
+    padding-left: 4px;
+    border-left: 1px solid var(--border-color, #202225);
+}
+
+/* A tab: title (+ small count), with a bottom active indicator like Google Tasks. */
+.tasks-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 220px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted, #72767d);
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.tasks-tab:hover {
+    color: var(--text-normal, #dcddde);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.tasks-tab.active {
+    color: var(--text-normal, #fff);
+    border-bottom-color: var(--accent-color, #5865f2);
+}
+
+.tasks-tab-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tasks-tab-count {
+    font-size: 0.72rem;
+    color: var(--text-muted, #72767d);
+    flex-shrink: 0;
+}
+.tasks-tab.active .tasks-tab-count { color: var(--text-secondary, #b9bbbe); }
+
+/* Favourite star (tabs + board-card headers): filled gold. */
+.tasks-tab-star {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    color: var(--text-warning, #f0b232);
+    fill: currentColor;
+}
+
+/* Kind glyph on channel tabs (and the pinned All tab). */
+.tasks-tab-kind {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    opacity: 0.8;
+}
+
+/* The pinned All-tasks tab reads apart from the reorderable tabs. */
+.tasks-tab-all {
+    flex-shrink: 0;
+    border-right: 1px solid var(--border-color, #202225);
+    margin-right: 4px;
+}
+
+/* --- All-tasks board cards --- */
+.tasks-card-sub {
+    margin-left: 8px;
+    font-weight: 400;
+    font-size: 12px;
+    color: var(--text-muted, #949ba4);
+}
+.checklist-card-header .tasks-tab-star { margin-left: 6px; }
+
+/* --- Channel checklist opened as a full tab --- */
+.tasks-editor-channel-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: default;
+}
+.tasks-editor-server {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-muted, #949ba4);
+}
+.tasks-editor > .checklist-body {
+    width: 100%;
+    max-width: 760px;
+    box-sizing: border-box;
+    padding: 0 12px;
+}
+
+.tasks-tab-icon {
+    font-size: 1.05rem;
+    padding: 10px 12px;
+}
+
+.tasks-tab-newform {
+    display: flex;
+    align-items: center;
+}
+.tasks-tab-newform input {
+    min-width: 130px;
+    padding: 6px 10px;
+    margin: 4px 0;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 14px;
+}
+.tasks-tab-newform input::placeholder { color: var(--text-muted, #72767d); }
+
+.tasks-tab-hint {
+    align-self: center;
+    padding: 0 10px;
+    color: var(--text-muted, #72767d);
+    font-size: 0.85rem;
+}
+
+/* --- Editor: the selected list, full remaining height --- */
+.tasks-editor {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+    min-height: 0;
+}
+
+/* Keep-style centered column so hover actions sit near the item text. */
+.tasks-editor-header,
+.tasks-add,
+.tasks-editor .task-tree {
+    width: 100%;
+    max-width: 760px;
+    box-sizing: border-box;
+}
+
+.tasks-editor-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 20px 8px;
+}
+
+.tasks-editor-title {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 20px;
+    color: var(--text-primary, #fff);
+    cursor: text;
+    word-break: break-word;
+}
+
+.tasks-editor-delete {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted, #72767d);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+.tasks-editor-delete:hover {
+    color: var(--danger-color, #ed4245);
+    background: var(--bg-hover, #36393f);
+}
+
+.tasks-title-input {
+    flex: 1;
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 20px;
+    font-weight: 700;
+    box-sizing: border-box;
+}
+
+.tasks-add {
+    display: flex;
+    gap: 8px;
+    padding: 8px 20px 12px;
+}
+
+.tasks-add input {
+    flex: 1;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 14px;
+}
+
+.tasks-add input::placeholder { color: var(--text-muted, #72767d); }
+
+.tasks-add button {
+    width: 38px;
+    border: none;
+    border-radius: 4px;
+    background: var(--accent-color, #5865f2);
+    color: #fff;
+    font-size: 18px;
+    cursor: pointer;
+}
+
+.tasks-add button:hover:not(:disabled) { background: var(--accent-hover, #4752c4); }
+.tasks-add button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.tasks-editor .task-tree { padding: 4px 8px; }
+
+.tasks-editor-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary, #949ba4);
+    gap: 8px;
+}
+
+.tasks-empty-icon { font-size: 40px; }
+
+.tasks-muted {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-secondary, #949ba4);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* Mobile: the tab bar scrolls horizontally so the list itself keeps the full
+   screen (the old rail ate ~40% of the height). Inputs clear the 16px iOS-zoom
+   threshold. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .tasks-tab { padding: 12px 12px; font-size: 0.95rem; }
+    .tasks-tab-newform input,
+    .tasks-add input,
+    .tasks-title-input { font-size: 16px; }
+}

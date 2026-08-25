@@ -1,0 +1,700 @@
+/* Unified Server Settings Modal */
+
+.server-settings-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.server-settings-container {
+    display: flex;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    width: 95%;
+    max-width: 900px;
+    height: 80vh;
+    max-height: 700px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* Sidebar */
+.server-settings-sidebar {
+    width: 220px;
+    background: var(--bg-secondary);
+    padding: 16px 8px;
+    flex-shrink: 0;
+    overflow-y: auto;
+}
+
+.sidebar-section-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    padding: 8px 12px;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.server-settings-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.server-settings-nav .nav-item {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    color: var(--header-secondary);
+    font-size: 15px;
+    text-align: left;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.1s;
+}
+
+.server-settings-nav .nav-item:hover {
+    background: rgba(79, 84, 92, 0.4);
+    color: #fff;
+}
+
+.server-settings-nav .nav-item.active {
+    background: rgba(79, 84, 92, 0.6);
+    color: #fff;
+}
+
+/* Content Area */
+.server-settings-content {
+    flex: 1;
+    padding: 40px;
+    overflow-y: auto;
+    position: relative;
+    background: var(--bg-tertiary);
+}
+
+.close-btn {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: var(--bg-quaternary);
+    color: var(--header-secondary);
+    font-size: 16px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.close-btn:hover {
+    background: var(--color-danger);
+    color: #fff;
+}
+
+/* Tab Content */
+.tab-content h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--header-primary);
+    margin: 0 0 20px;
+}
+
+/* Notices */
+.notice {
+    padding: 12px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+
+.notice.error {
+    background: rgba(237, 66, 69, 0.1);
+    border: 1px solid var(--color-danger);
+    color: var(--color-danger);
+}
+
+.notice.success {
+    background: rgba(59, 165, 92, 0.1);
+    border: 1px solid var(--color-success);
+    color: var(--color-success);
+}
+
+/* Form Styles */
+.form-row {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+.flex-1 {
+    flex: 1;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--header-secondary);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.form-group input[type="text"],
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    padding: 10px;
+    background: var(--bg-primary);
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 15px;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+    outline: 2px solid var(--brand-primary);
+}
+
+.form-group input:disabled,
+.form-group select:disabled,
+.form-group textarea:disabled {
+    opacity: 0.5;
+}
+
+.form-group textarea {
+    min-height: 80px;
+    resize: vertical;
+}
+
+/* The clip-length / target-channel pickers, which belong to the Allow-clips
+   toggle above them rather than standing on their own. */
+.clip-policy-fields {
+    margin-top: 12px;
+}
+
+.clip-policy-fields .form-group:last-child {
+    margin-bottom: 0;
+}
+
+.char-count {
+    font-size: 12px;
+    color: var(--text-faint);
+    text-align: right;
+    display: block;
+    margin-top: 4px;
+}
+
+.setting-help {
+    display: block;
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted, var(--text-faint));
+}
+
+/* Server Icon Edit */
+.server-icon-edit {
+    text-align: center;
+}
+
+.icon-preview-lg {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.icon-preview-lg img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.icon-preview-lg span {
+    font-size: 40px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.upload-btn-sm {
+    display: inline-block;
+    padding: 6px 12px;
+    background: var(--brand-primary);
+    color: #fff;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.upload-btn-sm:hover {
+    background: var(--brand-hover);
+}
+
+.upload-btn-sm input {
+    display: none;
+}
+
+/* Toggle */
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    font-size: 15px;
+    color: var(--text-normal);
+}
+
+.toggle-row input[type="checkbox"] {
+    display: none;
+}
+
+.toggle-switch {
+    width: 44px;
+    height: 24px;
+    background: var(--text-faint);
+    border-radius: 12px;
+    position: relative;
+    transition: background 0.2s;
+}
+
+.toggle-switch::after {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    background: #fff;
+    border-radius: 50%;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.2s;
+}
+
+.toggle-row input:checked+.toggle-switch {
+    background: var(--color-success);
+}
+
+.toggle-row input:checked+.toggle-switch::after {
+    transform: translateX(20px);
+}
+
+/* Buttons */
+.primary-btn {
+    padding: 10px 20px;
+    background: var(--brand-primary);
+    border: none;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.primary-btn:hover:not(:disabled) {
+    background: var(--brand-hover);
+}
+
+.primary-btn:disabled {
+    opacity: 0.5;
+}
+
+.danger-btn {
+    padding: 10px 20px;
+    background: transparent;
+    border: 1px solid var(--color-danger);
+    border-radius: 4px;
+    color: var(--color-danger);
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.danger-btn:hover {
+    background: var(--color-danger);
+    color: #fff;
+}
+
+/* Loading & Empty State */
+.loading,
+.empty-state {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-faint);
+    font-size: 14px;
+}
+
+/* === Roles Tab === */
+.roles-header,
+.invites-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.roles-layout {
+    display: flex;
+    gap: 20px;
+}
+
+.roles-list {
+    width: 200px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 8px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.role-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    color: var(--header-secondary);
+    font-size: 14px;
+    text-align: left;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.role-item:hover {
+    background: rgba(79, 84, 92, 0.4);
+}
+
+.role-item.active {
+    background: rgba(79, 84, 92, 0.6);
+    color: #fff;
+}
+
+.role-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.role-editor {
+    flex: 1;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 20px;
+}
+
+.color-picker {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.color-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+}
+
+.color-swatch.selected {
+    border-color: #fff;
+}
+
+.color-swatch:disabled {
+    opacity: 0.5;
+}
+
+.permissions-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.permission-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--header-secondary);
+    cursor: pointer;
+}
+
+.permission-item input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--brand-primary);
+}
+
+.role-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+}
+
+/* === Invites Tab === */
+.invites-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.invite-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+}
+
+.invite-info {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.invite-info code {
+    font-family: 'Consolas', monospace;
+    font-size: 14px;
+    color: var(--text-link);
+    background: var(--bg-primary);
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.invite-uses {
+    font-size: 13px;
+    color: var(--text-faint);
+}
+
+.invite-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.copy-btn {
+    padding: 6px 12px;
+    background: var(--brand-primary);
+    border: none;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.copy-btn:hover {
+    background: var(--brand-hover);
+}
+
+.copy-btn.copied {
+    background: var(--color-success);
+}
+
+.delete-btn {
+    padding: 6px 10px;
+    background: transparent;
+    border: 1px solid var(--text-faint);
+    border-radius: 4px;
+    color: var(--text-faint);
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.delete-btn:hover {
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+}
+
+
+
+/* --- Moderation tab --- */
+.mod-section-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.mod-tab {
+    background: var(--bg-tertiary, #2b2d31);
+    border: none;
+    color: var(--text-muted, #b5bac1);
+    padding: 6px 14px;
+    border-radius: 14px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+
+.mod-tab:hover { color: var(--text-normal, #dcddde); }
+
+.mod-tab.active {
+    background: var(--brand, #5865f2);
+    color: #fff;
+}
+
+.mod-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.mod-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--bg-tertiary, #2b2d31);
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+
+.mod-item-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.mod-item-title {
+    font-weight: 600;
+    font-size: 0.92rem;
+}
+
+.mod-item-sub {
+    font-size: 0.78rem;
+    color: var(--text-muted, #949ba4);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mod-item-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.report-badge,
+.audit-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    background: var(--bg-primary, #1e1f22);
+    color: var(--text-muted, #b5bac1);
+}
+
+.report-badge.spam { background: #f0b23233; color: #f0b232; }
+.report-badge.harassment { background: #da373c33; color: #f04747; }
+.report-badge.inappropriate { background: #eb459e33; color: #eb459e; }
+
+.audit-badge.ban { background: #da373c33; color: #f04747; }
+.audit-badge.kick { background: #f0b23233; color: #f0b232; }
+
+.report-status.pending { color: #f0b232; }
+.report-status.resolved { color: #23a55a; }
+.report-status.dismissed { color: var(--text-muted, #949ba4); }
+
+/* ==========================================================================
+   Mobile — the two-pane layout crushes content to a sliver at phone widths
+   (220px sidebar + 40px*2 padding leaves ~70px); go full-screen with the
+   nav as a horizontal tab strip. Roles gets its own stacked layout since it
+   nests a second two-pane list/editor split.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .server-settings-container {
+        width: 100vw;
+        max-width: none;
+        height: 100dvh;
+        max-height: none;
+        border-radius: 0;
+        flex-direction: column;
+    }
+
+    .server-settings-sidebar {
+        width: 100%;
+        flex-shrink: 0;
+        padding: calc(var(--safe-area-top, 0px) + 8px) 8px 8px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .sidebar-section-title {
+        display: none;
+    }
+
+    .server-settings-nav {
+        flex-direction: row;
+    }
+
+    .server-settings-nav .nav-item {
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    .server-settings-content {
+        padding: 16px;
+        padding-bottom: calc(16px + var(--safe-area-bottom, 0px));
+    }
+
+    /* The close button lives inside the scrolling content pane — pin it to
+       the viewport so it survives scrolling a long tab. */
+    .close-btn {
+        position: fixed;
+        top: calc(var(--safe-area-top, 0px) + 12px);
+        right: 12px;
+        z-index: 10;
+    }
+
+    .form-group input[type="text"],
+    .form-group select,
+    .form-group textarea {
+        font-size: 16px;
+    }
+
+    .roles-layout {
+        flex-direction: column;
+    }
+
+    .roles-list {
+        width: 100%;
+        max-height: 160px;
+    }
+
+    .permissions-grid {
+        grid-template-columns: 1fr;
+    }
+}

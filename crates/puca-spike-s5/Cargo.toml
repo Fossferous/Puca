@@ -1,0 +1,30 @@
+[package]
+name = "puca-spike-s5"
+version = "0.1.0"
+edition = "2021"
+description = "Spike S5: can a process follow the input desktop and drive UAC / the lock screen?"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "spike-s5"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+# THE SHIPPING PATHS, on purpose. The question this spike now answers is not
+# "can something capture the secure desktop" but "can OUR capture and OUR input
+# do it" — a hand-rolled probe could succeed where the real code fails and send
+# the whole design down the wrong road.
+puca-capture = { path = "../puca-capture" }
+puca-input = { path = "../puca-input" }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

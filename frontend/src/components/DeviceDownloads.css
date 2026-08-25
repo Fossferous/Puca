@@ -1,0 +1,123 @@
+/* Docked bottom-right on desktop; a full-width sheet above the nav on a phone,
+   matching where the chat transfer tray sits so the two never fight for the
+   same corner. Below the consent dialogs (2000+) — a question that needs
+   answering must never be covered by progress. Note the standalone file
+   browser (2050) covers this too: progress DURING browsing renders inside
+   that panel via .dd-strip, this tray takes over once it closes. Registered
+   in docs/DESIGN_PHILOSOPHY.md's z-index table.
+
+   Palette is deliberately FIXED, not themed: these rows also render inside
+   the file-browser panel, whose whole surface is the fixed dark palette
+   (.dfb-panel #1e1e1e) — themed colours here would follow a light theme into
+   an unreadable dark-on-dark/light-on-light mix inside that host. If the
+   device surfaces ever get themed, do them together. */
+.device-downloads {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 1500;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(360px, calc(100vw - 32px));
+}
+
+/* The same rows docked inside the file-browser panel: normal flow, full
+   width, pinned under the listing by the panel's own column layout. */
+.dd-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border-top: 1px solid #333;
+    background: #202021;
+    /* Several finished rows must not squeeze the file list out. */
+    max-height: 40%;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+.dd-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+        "text btn"
+        "track btn";
+    gap: 4px 10px;
+    align-items: center;
+    padding: 10px 12px;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    font-size: 13px;
+}
+
+/* Inside the strip the panel already provides the surface; a drop shadow per
+   row reads as floating cards where a list is meant. */
+.dd-strip .dd-row {
+    box-shadow: none;
+}
+
+.dd-text { grid-area: text; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+
+.dd-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dd-sub { color: #9aa0a6; font-size: 12px; }
+.dd-complete .dd-sub { color: #5cc48c; }
+.dd-failed .dd-sub { color: #ff8888; }
+
+/* The rate re-renders every chunk; tabular digits stop the line breathing. */
+.dd-speed { font-variant-numeric: tabular-nums; }
+
+.dd-track {
+    grid-area: track;
+    height: 4px;
+    background: #333;
+    border-radius: 99px;
+    overflow: hidden;
+}
+
+.dd-fill {
+    height: 100%;
+    background: #1e88e5;
+    border-radius: 99px;
+    transition: width 0.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dd-fill { transition: none; }
+}
+
+.dd-btn {
+    grid-area: btn;
+    background: transparent;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 7px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.dd-btn:hover { border-color: #1e88e5; color: #fff; }
+.dd-btn:focus-visible { outline: 2px solid #1e88e5; outline-offset: 2px; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .device-downloads {
+        left: 0;
+        right: 0;
+        bottom: 60px;
+        width: auto;
+        border-radius: 12px 12px 0 0;
+    }
+
+    /* Comfortable targets on the surface this matters most. */
+    .dd-btn { min-height: 44px; padding: 10px 16px; }
+}

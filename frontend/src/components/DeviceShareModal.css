@@ -1,0 +1,188 @@
+/* Sharing modal — follows the DevicesView.css conventions (dv-card palette,
+ * device-btn buttons) with the standard fixed-backdrop modal shell. Sized for
+ * the 390x844 coarse-pointer walk: full-width sheet under 480px, comfortable
+ * tap targets throughout. */
+
+.share-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1200;
+    padding: 16px;
+}
+
+.share-modal {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    width: min(560px, 100%);
+    max-height: min(85vh, 720px);
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.share-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.share-modal-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.share-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    line-height: 0;
+}
+
+.share-modal-close:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.share-modal-hint {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.share-modal-hint-warn {
+    color: var(--warning, #e0a030);
+}
+
+.share-modal-section h3 {
+    margin: 0 0 8px;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+}
+
+.share-modal-empty {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    padding: 8px 0;
+}
+
+.share-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+.share-row-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.share-row-caps {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.share-row-status {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.share-row-status-accepted-live {
+    color: var(--success, #43b581);
+}
+
+.share-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.share-form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.9rem;
+}
+
+.share-form-field select {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 0.95rem;
+}
+
+.share-form-radios {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 0;
+}
+
+.share-form-radios legend {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    padding: 0 4px;
+}
+
+.share-form-radios label,
+.share-form-check {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.share-form-radios input,
+.share-form-check input {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+
+@media (max-width: 480px) {
+    .share-modal-backdrop {
+        padding: 0;
+        align-items: flex-end;
+    }
+
+    .share-modal {
+        width: 100%;
+        max-height: 92vh;
+        border-radius: 12px 12px 0 0;
+        border-bottom: none;
+    }
+}
+
+.share-row-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}

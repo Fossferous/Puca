@@ -1,0 +1,159 @@
+/* A posted clip inside a message (ClipAttachment.tsx). Themed through the
+   same tokens as the rest of the message body; no fixed colours except the
+   plate, which is deliberately dark in every theme (it frames a video). */
+.clip-attachment {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-width: 480px;
+    margin: 4px 0;
+}
+
+.clip-attachment-plate {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 16 / 9;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 8px;
+    background: #101214;
+    color: rgba(255, 255, 255, 0.85);
+    overflow: hidden;
+}
+
+.clip-attachment-glyph {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    display: inline-flex;
+    opacity: 0.55;
+}
+
+.clip-attachment-play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    background: rgba(0, 0, 0, 0.35);
+    color: #fff;
+    cursor: pointer;
+}
+.clip-attachment-play:hover:not(:disabled) { background: rgba(255, 255, 255, 0.18); }
+.clip-attachment-play:focus-visible { outline: 2px solid var(--brand-experiment, #5865f2); outline-offset: 2px; }
+.clip-attachment-play:disabled { opacity: 0.35; cursor: not-allowed; }
+.clip-attachment-play svg { margin-left: 3px; }
+
+.clip-attachment-video {
+    width: 100%;
+    height: 100%;
+    background: #000;
+}
+
+.clip-attachment-overlay {
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    transform: translateX(-50%);
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    font-size: 12px;
+}
+
+.clip-attachment-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-muted, #949ba4);
+}
+
+.clip-attachment-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.clip-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(127, 127, 127, 0.15);
+    color: var(--text-normal, #dcddde);
+    font-size: 11px;
+    line-height: 16px;
+}
+
+.clip-attachment-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-positive, #23a559);
+}
+.clip-attachment-badge.solo { color: var(--text-muted, #949ba4); }
+.clip-attachment-badge.mismatch { color: var(--text-danger, #f23f43); }
+.clip-attachment.refused .clip-attachment-plate { opacity: 0.6; }
+
+.clip-attachment-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-warning, #f0b232);
+}
+.clip-attachment-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text-link, #00a8fc);
+    text-decoration: underline;
+    cursor: pointer;
+    font: inherit;
+}
+
+.clip-attachment-actions {
+    display: flex;
+    margin-top: 2px;
+}
+.clip-attachment-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    border-radius: 4px;
+    background: rgba(127, 127, 127, 0.1);
+    color: var(--text-normal, #dcddde);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+}
+.clip-attachment-download:hover:not(:disabled) { background: rgba(127, 127, 127, 0.2); }
+.clip-attachment-download:focus-visible { outline: 2px solid var(--brand-experiment, #5865f2); outline-offset: 2px; }
+.clip-attachment-download:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.clip-attachment-broken {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-warning, #f0b232);
+    font-size: 12px;
+}
+
+/* Phones / touch: the plate spans the bubble, the play target stays ≥ 48 px. */
+@media (pointer: coarse) {
+    .clip-attachment { max-width: 100%; }
+    .clip-attachment-play { width: 64px; height: 64px; }
+    .clip-attachment-meta { font-size: 13px; }
+    .clip-attachment-download { min-height: 44px; padding: 0 14px; font-size: 13px; }
+}
+.clip-attachment-saved { align-self: center; margin-left: 8px; font-size: 12px; color: var(--text-muted, #949ba4); }

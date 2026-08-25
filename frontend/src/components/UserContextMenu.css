@@ -1,0 +1,164 @@
+/* User Context Menu */
+.user-context-menu {
+    position: fixed;
+    min-width: 200px;
+    max-width: 280px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    z-index: 3000;
+    overflow: hidden;
+    padding: 6px;
+}
+
+.context-section {
+    padding: 4px 0;
+}
+
+.context-section:not(:last-child) {
+    border-bottom: 1px solid var(--bg-tertiary);
+    margin-bottom: 4px;
+    padding-bottom: 8px;
+}
+
+.context-section-header {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--text-faint);
+    padding: 4px 10px 6px;
+    letter-spacing: 0.02em;
+}
+
+.context-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-align: left;
+}
+
+.context-item:hover {
+    background: rgba(137, 180, 250, 0.15);
+}
+
+.context-item:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.context-item.active {
+    background: rgba(137, 180, 250, 0.2);
+}
+
+.context-item.success {
+    color: #a6e3a1;
+}
+
+.context-item.danger {
+    color: #f38ba8;
+}
+
+.context-item.danger:hover {
+    background: rgba(243, 139, 168, 0.15);
+}
+
+.context-icon {
+    font-size: 1.1rem;
+    width: 20px;
+    text-align: center;
+}
+
+/* Volume Control */
+.volume-control {
+    padding: 8px 10px;
+}
+
+.volume-control label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.volume-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.volume-slider-row input[type="range"] {
+    flex: 1;
+    height: 4px;
+    accent-color: var(--brand-primary);
+    cursor: pointer;
+}
+
+.volume-value {
+    font-size: 0.8rem;
+    color: var(--text-normal);
+    min-width: 40px;
+    text-align: right;
+}
+
+/* Submenu */
+.context-submenu-wrapper {
+    position: relative;
+}
+
+.context-item.has-submenu {
+    justify-content: flex-start;
+}
+
+.submenu-arrow {
+    margin-left: auto;
+    font-size: 0.8rem;
+    color: var(--text-faint);
+}
+
+.context-submenu {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    min-width: 180px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    padding: 8px;
+    margin-left: 4px;
+    z-index: 3001;
+}
+
+.role-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.role-checkbox:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.role-checkbox input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--brand-primary);
+    cursor: pointer;
+}
+
+.role-name {
+    font-size: 0.9rem;
+    font-weight: 500;
+}

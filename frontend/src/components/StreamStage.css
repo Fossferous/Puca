@@ -1,0 +1,854 @@
+/* StreamStage - Main stream viewing area */
+.stream-stage {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--bg-primary, #1a1a1d);
+    position: relative;
+}
+
+.stream-stage-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    background: var(--bg-primary, #1a1a1d);
+}
+
+.empty-message {
+    text-align: center;
+    color: var(--text-secondary, #8e9297);
+}
+
+.empty-icon {
+    font-size: 3rem;
+    display: block;
+    margin-bottom: 1rem;
+}
+
+.empty-message p {
+    margin-bottom: 1.5rem;
+    font-size: 1.1rem;
+}
+
+/* Header — slim, quiet strip; the stream is the star */
+.stream-stage-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.35rem 0.75rem;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    z-index: 10;
+    min-height: 40px;
+}
+
+.stream-stage-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.live-indicator {
+    font-size: 0.9rem;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
+
+.stream-count {
+    color: var(--text-secondary, #8e9297);
+    font-size: 0.9rem;
+}
+
+.stream-stage-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.toggle-view-btn,
+.back-to-chat-btn,
+.stop-watching-btn {
+    padding: 0.3rem 0.75rem;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 500;
+    transition: background 0.15s ease, color 0.15s ease;
+    background: transparent;
+    color: var(--text-secondary, #b5bac1);
+}
+
+.toggle-view-btn:hover,
+.back-to-chat-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+}
+
+.stop-watching-btn {
+    color: #ed4245;
+}
+
+.stop-watching-btn:hover {
+    background: rgba(237, 66, 69, 0.15);
+    color: #ff5f62;
+}
+
+/* Live control session: disengage + game-mode controls. These live in the
+   stage header rather than the tile's hover header because the input-capture
+   overlay covers the tile, which made the in-tile buttons unclickable. */
+.stop-controlling-btn {
+    padding: 0.3rem 0.75rem;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 600;
+    background: rgba(237, 66, 69, 0.18);
+    color: #ff6b6e;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.stop-controlling-btn:hover {
+    background: rgba(237, 66, 69, 0.3);
+    color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .stop-controlling-btn { transition: none; }
+}
+
+/* Stream Grid */
+.stream-grid {
+    flex: 1;
+    display: grid;
+    gap: 4px;
+    padding: 4px;
+    background: #0a0a0b;
+    overflow: hidden;
+}
+
+/* Grid layouts */
+.stream-grid.grid-1 {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+}
+
+.stream-grid.grid-2 {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: 1fr;
+}
+
+.stream-grid.grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+}
+
+.stream-grid.grid-3 .stream-tile:first-child {
+    grid-column: span 2;
+}
+
+.stream-grid.grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+}
+
+/* 5-8 tiles (SFU rooms): 3-wide, then 4x2. Odd counts leave a hole in the
+   last row rather than stretching one tile — keeps every tile 16:9-ish. */
+.stream-grid.grid-5,
+.stream-grid.grid-6 {
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+}
+
+.stream-grid.grid-7,
+.stream-grid.grid-8 {
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+}
+
+/* Focus mode: one big stage + a live filmstrip of the other watched tiles.
+   ─────────────────────────────────────────────────────────────────────────
+   These are the SAME elements as the grid — only their size and order change.
+   Flexbox is used rather than named grid areas precisely because `order` can
+   float the stage to the front while every tile stays exactly where it is in
+   the DOM: a <video> that gets moved between parents unmounts, pauses, and
+   paints a black frame over a live stream. Layout must never touch the tree. */
+.stream-grid.focus-mode {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    /* Centres the filmstrip when the thumbs don't fill the width. The stage is
+       alone on its own line and grows, so this never affects it. */
+    justify-content: center;
+    overflow-y: auto;
+}
+
+/* Non-focused tiles are the filmstrip.
+   The basis is deliberately SMALL with grow enabled, rather than a large basis
+   with shrink: flex-wrap breaks lines using the basis BEFORE any shrinking, so
+   a comfortable 176px basis wraps the strip onto a second row as soon as the
+   tiles no longer fit — pushing the stage into a scroll. Growing from 96px
+   instead keeps one row for a roomful of streamers and still fills the width
+   when only two people are sharing. */
+.stream-grid.focus-mode .stream-tile {
+    flex: 1 1 96px;
+    max-width: 176px;
+    height: 104px;
+}
+
+.stream-grid.focus-mode .stream-tile.is-stage {
+    order: -1;          /* visual only — the DOM node does not move */
+    flex: 1 1 100%;
+    min-width: 0;
+    /* Undo the thumbnail cap above, or the stage is clamped to thumb width and
+       drops onto the filmstrip row with everyone else. */
+    max-width: none;
+    height: 100%;
+}
+
+/* Watching more than one stream: reserve exactly one strip row under the stage
+   (thumb 104px + the 4px grid gap + 4px slack). */
+.stream-grid.focus-mode.has-strip .stream-tile.is-stage {
+    height: calc(100% - 112px);
+}
+
+/* The stage reads as selected; thumbs stay quiet until hovered. */
+.stream-grid.focus-mode .stream-tile.is-thumb {
+    opacity: 0.75;
+    transition: opacity 0.15s ease, outline-color 0.15s ease;
+    outline: 2px solid transparent;
+}
+
+.stream-grid.focus-mode .stream-tile.is-thumb:hover {
+    opacity: 1;
+    outline-color: rgba(88, 101, 242, 0.7);
+}
+
+/* A thumb is too small for the full hover overlay — keep the name, drop the
+   controls (they remain on the stage tile and in the right-click menu). */
+.stream-grid.focus-mode .stream-tile.is-thumb .stream-tile-controls {
+    display: none;
+}
+
+.stream-grid.focus-mode .stream-tile.is-thumb .streamer-name {
+    font-size: 0.7rem;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .stream-grid.focus-mode .stream-tile.is-thumb { transition: none; }
+}
+
+/* Stream Tile */
+.stream-tile {
+    position: relative;
+    background: #0d0d0e;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.stream-tile-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.7), transparent);
+    z-index: 5;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.stream-tile:hover .stream-tile-header {
+    opacity: 1;
+}
+
+.streamer-name {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.stream-tile-controls {
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+}
+
+.streamer-name .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ed4245;
+    margin-right: 4px;
+    animation: pulse 2s infinite;
+}
+
+/* Right-click stream menu (familiar chat-app context-menu style) */
+.stream-context-menu {
+    position: fixed;
+    z-index: 1000;
+    width: 240px;
+    background: #111214;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+}
+
+.scm-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #dbdee1;
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.scm-item:disabled {
+    opacity: 0.55;
+    cursor: default;
+    font-style: italic;
+}
+.scm-item:disabled:hover { background: none; }
+.scm-item:hover {
+    background: #4752c4;
+    color: #fff;
+}
+
+.scm-item.scm-danger {
+    color: #ed4245;
+}
+
+.scm-item.scm-danger:hover {
+    background: #ed4245;
+    color: #fff;
+}
+
+.scm-icon {
+    opacity: 0.8;
+    font-size: 0.8rem;
+}
+
+.scm-toggle input[type="checkbox"] {
+    accent-color: #5865f2;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.scm-desc {
+    display: block;
+    font-size: 0.7rem;
+    color: #949ba4;
+    margin-top: 2px;
+    line-height: 1.3;
+}
+
+.scm-toggle:hover .scm-desc {
+    color: #e6e8ea;
+}
+
+.scm-slider-block {
+    padding: 4px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.scm-label {
+    font-size: 0.8rem;
+    color: #dbdee1;
+}
+
+/* Standalone section heading inside the menu (e.g. "Give Control"). */
+.scm-section-label {
+    display: block;
+    padding: 6px 12px 2px;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #949ba4;
+}
+
+.scm-slider-block input[type="range"] {
+    width: 100%;
+    height: 4px;
+    accent-color: #5865f2;
+    cursor: pointer;
+}
+
+.scm-slider-block input[type="range"]:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.scm-separator {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 4px 8px;
+}
+
+.tile-btn {
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    transition: background 0.2s ease;
+}
+
+.tile-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.tile-btn.active {
+    background: rgba(88, 101, 242, 0.6);
+}
+
+.tile-btn.close:hover {
+    background: rgba(237, 66, 69, 0.6);
+}
+
+.stream-video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+}
+
+/* Transparent input-capture surface over the video while controlling a host. */
+.control-capture {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    cursor: crosshair;
+    outline: 2px solid #248046;
+    outline-offset: -2px;
+    touch-action: none; /* let us handle pointer + wheel gestures ourselves */
+}
+.control-capture:focus {
+    outline: 2px solid #2dc770;
+}
+
+.control-capture-hint {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 20, 15, 0.85);
+    color: #b8f5c8;
+    border: 1px solid #248046;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* FPS mode without the pointer lock: nothing is sent until the user clicks
+   to capture the mouse — so the prompt sits front and center. */
+.control-capture-hint.fps-lock-hint {
+    bottom: auto;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 13px;
+    padding: 8px 16px;
+}
+
+/* − 1.0x + sensitivity stepper next to the Game mode button (desktop-only,
+   FPS mode). */
+.fps-sens {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.fps-sens .tile-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.fps-sens-value {
+    min-width: 34px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    border-radius: 4px;
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+/* Mobile keyboard capture: near-invisible but focusable so the soft keyboard
+   pops; we read typed characters via onBeforeInput and never show the text. */
+.mobile-kb-capture {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    width: 2px;
+    height: 2px;
+    opacity: 0.01;
+    border: none;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    z-index: 6;
+}
+
+/* "Watch" card — someone live that you are not watching yet. Sits at the end of
+   the filmstrip and is sized as a thumbnail by the .focus-mode .stream-tile
+   rules above; only its surface differs, so the strip reads as one row of
+   people. Replaces the old focus-mode text sidebar. */
+.watch-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 1px dashed rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-secondary, #8e9297);
+    font: inherit;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.watch-card:hover {
+    background: rgba(88, 101, 242, 0.18);
+    border-color: rgba(88, 101, 242, 0.7);
+}
+
+.watch-card-name {
+    font-size: 0.72rem;
+    max-width: 92%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary, #dcddde);
+}
+
+.watch-card-cta {
+    font-size: 0.65rem;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(88, 101, 242, 0.6);
+    color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .watch-card { transition: none; }
+}
+
+.live-dot {
+    width: 8px;
+    height: 8px;
+    background: #ed4245;
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .stream-stage-header {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        padding: 0.5rem;
+    }
+
+    .stream-stage-controls {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    /* Always show controls on touch devices */
+    .stream-tile-header {
+        opacity: 1 !important;
+        background: linear-gradient(to bottom, rgba(0, 0, 0, 0.6), transparent);
+    }
+
+    /* Larger touch targets */
+    .tile-btn {
+        width: 36px;
+        height: 36px;
+        font-size: 1rem;
+    }
+
+    .toggle-view-btn,
+    .back-to-chat-btn,
+    .stop-watching-btn {
+        padding: 0.6rem 0.8rem;
+        font-size: 0.85rem;
+    }
+
+    /* Portrait orientation - stack streams vertically */
+    .stream-grid.grid-2 {
+        grid-template-columns: 1fr;
+        grid-template-rows: repeat(2, 1fr);
+    }
+
+    .stream-grid.grid-3,
+    .stream-grid.grid-4 {
+        grid-template-columns: 1fr;
+        grid-template-rows: repeat(auto-fit, minmax(200px, 1fr));
+    }
+
+    /* 5-8 tiles on a phone: two columns, scrollable — eight stacked rows of
+       16:9 video don't fit a portrait screen at a usable size. */
+    .stream-grid.grid-5,
+    .stream-grid.grid-6,
+    .stream-grid.grid-7,
+    .stream-grid.grid-8 {
+        grid-template-columns: repeat(2, 1fr);
+        grid-template-rows: none;
+        grid-auto-rows: minmax(140px, 1fr);
+        overflow-y: auto;
+    }
+
+    .stream-grid.grid-3 .stream-tile:first-child {
+        grid-column: 1;
+    }
+
+    /* Focus mode on a phone: the text sidebar is hidden down here, so the
+       filmstrip IS the stream switcher. Thumbs shrink so about four fit across
+       a 390px screen before the strip wraps. */
+    .stream-grid.focus-mode .stream-tile {
+        flex: 1 1 76px;
+        max-width: 120px;
+        height: 68px;
+    }
+
+    .stream-grid.focus-mode.has-strip .stream-tile.is-stage {
+        height: calc(100% - 76px);
+    }
+
+    /* Touch has no hover, so thumbs must be legible as-is. */
+    .stream-grid.focus-mode .stream-tile.is-thumb {
+        opacity: 1;
+    }
+
+}
+
+/* Very small screens (phones in portrait) */
+@media (max-width: 480px) {
+    .stream-stage-header {
+        padding: 0.4rem;
+    }
+
+    .stream-stage-title {
+        font-size: 0.8rem;
+    }
+
+    .live-indicator {
+        font-size: 0.75rem;
+    }
+
+    .stream-count {
+        font-size: 0.75rem;
+    }
+
+    .toggle-view-btn,
+    .back-to-chat-btn,
+    .stop-watching-btn {
+        padding: 0.5rem 0.6rem;
+        font-size: 0.75rem;
+    }
+
+    .streamer-name {
+        font-size: 0.8rem;
+    }
+
+    .tile-btn {
+        width: 32px;
+        height: 32px;
+    }
+}
+
+/* Landscape on mobile - optimize for video viewing */
+@media (max-height: 500px) and (orientation: landscape) {
+    .stream-stage-header {
+        padding: 0.3rem 0.5rem;
+    }
+
+    .stream-grid {
+        padding: 2px;
+        gap: 2px;
+    }
+
+    .stream-grid.grid-1 {
+        padding: 0;
+    }
+
+    .stream-tile-header {
+        padding: 0.3rem 0.5rem;
+    }
+}
+
+/* Camera preview styles */
+.camera-preview-container {
+    position: fixed;
+    bottom: 80px;
+    right: 16px;
+    width: 180px;
+    height: 135px;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    z-index: 100;
+    background: #0d0d0e;
+    border: 2px solid rgba(88, 101, 242, 0.5);
+}
+
+.camera-preview-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    /* Mirror effect for self-view */
+}
+
+.camera-preview-label {
+    position: absolute;
+    bottom: 4px;
+    left: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    color: white;
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+@media (max-width: 480px) {
+    .camera-preview-container {
+        width: 120px;
+        height: 90px;
+        bottom: 70px;
+        right: 8px;
+    }
+}
+
+/* Quality Menu */
+.quality-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.quality-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: #111214;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 140px;
+    z-index: 1000;
+}
+
+.quality-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.quality-section label {
+    font-size: 0.75rem;
+    color: #949ba4;
+    text-transform: uppercase;
+    font-weight: 600;
+    margin-left: 2px;
+}
+
+.quality-options {
+    display: flex;
+    gap: 4px;
+}
+
+.quality-opt {
+    flex: 1;
+    padding: 4px 0;
+    border: none;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #dbdee1;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.quality-opt:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.quality-opt.active {
+    background: #4752c4;
+    color: white;
+}
+
+.quality-opt.pending {
+    opacity: 0.5;
+    cursor: wait;
+    background-image: linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.1) 25%,
+        transparent 25%,
+        transparent 50%,
+        rgba(255, 255, 255, 0.1) 50%,
+        rgba(255, 255, 255, 0.1) 75%,
+        transparent 75%,
+        transparent
+    );
+    background-size: 1rem 1rem;
+    animation: progress-bar-stripes 1s linear infinite;
+}
+
+@keyframes progress-bar-stripes {
+    from { background-position: 1rem 0; }
+    to { background-position: 0 0; }
+}

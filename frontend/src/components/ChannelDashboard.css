@@ -1,0 +1,66 @@
+.channel-dashboard {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background-color: var(--bg-primary);
+}
+
+.dashboard-content {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.feed-child-section {
+    background-color: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 16px;
+    border: 1px solid var(--bg-tertiary);
+}
+
+.feed-child-header {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.feed-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.feed-message {
+    font-size: 0.9rem;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.feed-message:last-child {
+    border-bottom: none;
+}
+
+.feed-author {
+    font-weight: 600;
+    color: var(--text-normal);
+    margin-right: 8px;
+}
+
+.feed-time {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-right: 8px;
+}
+
+.feed-content {
+    color: var(--text-muted);
+    display: inline;
+}
+
+.feed-empty {
+    font-style: italic;
+    color: var(--text-subtle);
+    font-size: 0.85rem;
+}

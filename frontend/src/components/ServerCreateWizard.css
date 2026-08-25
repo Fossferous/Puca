@@ -1,0 +1,388 @@
+/* Server Create Wizard - a familiar multi-step chat-app modal */
+
+.wizard-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+.wizard-modal {
+    background: #313338;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 480px;
+    max-height: 90vh;
+    overflow-y: auto;
+    position: relative;
+    animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.wizard-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    color: #b5bac1;
+    font-size: 24px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+
+.wizard-close:hover {
+    background: #404249;
+    color: #fff;
+}
+
+/* Step container */
+.wizard-step {
+    padding: 24px;
+    text-align: center;
+}
+
+.wizard-step h2 {
+    font-size: 24px;
+    font-weight: 700;
+    color: #f2f3f5;
+    margin: 0 0 8px;
+}
+
+.wizard-subtitle {
+    color: #b5bac1;
+    font-size: 14px;
+    line-height: 1.4;
+    margin: 0 0 24px;
+    padding: 0 20px;
+}
+
+.wizard-back {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    background: none;
+    border: none;
+    color: #b5bac1;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.wizard-back:hover {
+    color: #fff;
+    background: #404249;
+}
+
+/* Template Selection */
+.template-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+
+.template-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: transparent;
+    border: 1px solid #3f4147;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+    color: #f2f3f5;
+}
+
+.template-card:hover {
+    background: #404249;
+    border-color: #5865f2;
+}
+
+.template-icon {
+    font-size: 24px;
+    width: 40px;
+    height: 40px;
+    background: #404249;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.template-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.template-name {
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.template-desc {
+    font-size: 12px;
+    color: #b5bac1;
+}
+
+.template-arrow {
+    color: #b5bac1;
+    font-size: 18px;
+}
+
+/* Footer */
+.wizard-footer {
+    padding-top: 16px;
+    border-top: 1px solid #3f4147;
+}
+
+.join-prompt {
+    color: #b5bac1;
+    font-size: 14px;
+    margin: 0 0 8px;
+}
+
+.join-link {
+    background: none;
+    border: none;
+    color: #00a8fc;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.join-link:hover {
+    text-decoration: underline;
+}
+
+/* Audience Selection */
+.audience-step {
+    padding-top: 48px;
+}
+
+.audience-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.audience-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 20px;
+    background: var(--bg-secondary);
+    border: 2px solid #3f4147;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: #f2f3f5;
+}
+
+.audience-card:hover {
+    background: #32353b;
+    border-color: #5865f2;
+}
+
+.audience-card.selected {
+    border-color: #5865f2;
+    background: rgba(88, 101, 242, 0.1);
+}
+
+.audience-icon {
+    font-size: 32px;
+}
+
+.audience-label {
+    font-weight: 600;
+    font-size: 16px;
+}
+
+.audience-desc {
+    font-size: 12px;
+    color: #b5bac1;
+}
+
+.skip-note {
+    color: #b5bac1;
+    font-size: 12px;
+    margin: 0 0 8px;
+}
+
+.skip-btn {
+    background: none;
+    border: none;
+    color: #b5bac1;
+    font-size: 13px;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.skip-btn:hover {
+    color: #fff;
+}
+
+/* Customization Step */
+.customize-step {
+    padding-top: 48px;
+}
+
+.server-icon-upload {
+    margin-bottom: 24px;
+}
+
+.icon-upload-label {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+    height: 80px;
+    border: 2px dashed #4e5058;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.15s;
+    overflow: hidden;
+}
+
+.icon-upload-label:hover {
+    border-color: #5865f2;
+    background: rgba(88, 101, 242, 0.1);
+}
+
+.icon-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    color: #b5bac1;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.camera-icon {
+    font-size: 20px;
+}
+
+.uploaded-icon {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.server-name-input {
+    text-align: left;
+    margin-bottom: 16px;
+}
+
+.server-name-input label {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: #b5bac1;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.server-name-input input {
+    width: 100%;
+    padding: 12px;
+    background: #1e1f22;
+    border: none;
+    border-radius: 4px;
+    color: #f2f3f5;
+    font-size: 16px;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.server-name-input input:focus {
+    box-shadow: 0 0 0 2px #5865f2;
+}
+
+.terms-note {
+    color: #b5bac1;
+    font-size: 12px;
+    margin: 0 0 16px;
+}
+
+.wizard-actions {
+    display: flex;
+    justify-content: space-between;
+    padding-top: 16px;
+    border-top: 1px solid #3f4147;
+}
+
+.back-btn {
+    background: none;
+    border: none;
+    color: #b5bac1;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 8px 16px;
+}
+
+.back-btn:hover {
+    color: #fff;
+}
+
+.wizard-actions .create-btn {
+    background: #5865f2;
+    border: none;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 12px 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.wizard-actions .create-btn:hover:not(:disabled) {
+    background: #4752c4;
+}
+
+.wizard-actions .create-btn:disabled {
+    background: #4752c4;
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+

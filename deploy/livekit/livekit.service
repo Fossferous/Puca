@@ -1,0 +1,40 @@
+# systemd unit for the LiveKit SFU (Tier-2 concurrent multi-streaming).
+#
+# Install:
+#   sudo cp deploy/livekit/livekit.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now livekit
+#
+# Assumes the binary at /opt/livekit/livekit-server and config at
+# /opt/livekit/livekit.yaml (see deploy/livekit/README.md).
+
+[Unit]
+Description=LiveKit SFU (Puca Tier-2 media)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=livekit
+Group=livekit
+WorkingDirectory=/opt/livekit
+ExecStart=/opt/livekit/livekit-server --config /opt/livekit/livekit.yaml
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the SFU forwards ciphertext and writes nothing.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# Resource ceilings, same rationale as puca.service: bounded failure +
+# restart instead of taking the 2 GB LXC down. Forwarding-only rooms of 6-8
+# need tens of MB; these caps leave headroom for bursts.
+LimitNOFILE=65536
+TasksMax=256
+MemoryHigh=512M
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target

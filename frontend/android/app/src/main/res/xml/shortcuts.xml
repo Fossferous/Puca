@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static launcher shortcuts: long-press the app icon.
+
+     Three, not four: launchers show 4-5 slots total and dynamic
+     recent-conversation shortcuts (SovereignAppPlugin.setConversationShortcuts)
+     share the pool, so every static entry here permanently costs a recent DM.
+
+     Every <intent> MUST carry android:action — a static shortcut intent
+     without one is silently dropped at parse time, the shortcut simply never
+     appears. The sovereign_nav extra is SovereignAppPlugin.EXTRA_NAV; the nav
+     targets are handled by Chat.tsx's applier ('dms' and 'notes' understand
+     both old and new bundles because they ship over OTA before this APK). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="dms"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_dms"
+        android:shortcutShortLabel="@string/shortcut_dms_short"
+        android:shortcutLongLabel="@string/shortcut_dms_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.sovereign.app"
+            android:targetClass="com.sovereign.app.MainActivity">
+            <extra android:name="sovereign_nav" android:value="dms" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="notes"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_tasks"
+        android:shortcutShortLabel="@string/shortcut_notes_short"
+        android:shortcutLongLabel="@string/shortcut_notes_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.sovereign.app"
+            android:targetClass="com.sovereign.app.MainActivity">
+            <extra android:name="sovereign_nav" android:value="notes" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="devices"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_devices"
+        android:shortcutShortLabel="@string/shortcut_devices_short"
+        android:shortcutLongLabel="@string/shortcut_devices_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.sovereign.app"
+            android:targetClass="com.sovereign.app.MainActivity">
+            <extra android:name="sovereign_nav" android:value="devices" />
+        </intent>
+    </shortcut>
+</shortcuts>

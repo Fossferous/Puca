@@ -1,0 +1,19 @@
+# SSH host keys for the boxes in hosts.conf, pinned so a deploy fails closed on
+# an unexpected key instead of trusting it silently.
+#
+# COPY THIS TO `known_hosts` AND SEED IT YOURSELF. The real file is gitignored:
+# it names your servers, which is infrastructure identity and does not belong in
+# a public repository.
+#
+#   ssh-keyscan -H <your-host> >> deploy/ops/known_hosts
+#
+# Seed it from keys you have ALREADY been deploying to successfully, rather than
+# from whatever answers next — the point is to pin what you have historically
+# trusted, not to re-trust an unknown.
+#
+# Refresh a line ONLY when you know why the key changed (a rebuild, a re-image).
+# An unexplained change is precisely the case this file exists to catch: stop and
+# find out why before you push a release through it.
+#
+# Format is standard known_hosts, one key per line:
+# <host> ssh-ed25519 AAAAC3Nza...

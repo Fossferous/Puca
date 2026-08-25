@@ -1,0 +1,19 @@
+[package]
+name = "puca-rtc"
+version = "0.1.0"
+edition = "2021"
+description = "WebRTC transport for the Puca host agent (spike S3)"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+puca-encode = { path = "../puca-encode" }
+
+# str0m is sans-IO: it owns the protocol state machine and hands back "send
+# these bytes / set this timer", while the caller owns the sockets. That suits
+# an agent that already has its own event loop, and it makes the whole thing
+# testable without a network — which is why the negotiation checks below need no
+# UDP at all.
+#
+# wincrypto rather than the default: it uses Windows' own crypto for DTLS, so
+# the agent does not carry an OpenSSL build or its redistribution question.
+str0m = "0.21"

@@ -1,0 +1,68 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Púca",
+  "version": "0.8.115",
+  "identifier": "com.sovereign.chat",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Puca",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "publisher": "Puca",
+    "copyright": "Copyright (c) 2026 Fossferous. Licensed AGPL-3.0-or-later.",
+    "shortDescription": "Self-hosted end-to-end encrypted chat, voice and remote device access",
+    "longDescription": "Puca is a self-hosted communication app: end-to-end encrypted messages, DMs, attachments and voice, plus remote access to your own devices. It talks only to the server you run.",
+    "category": "SocialNetworking",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
+    "externalBin": [
+      "binaries/puca-agent",
+      "binaries/puca-service"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ4MzkxODAzNUI2NzMyN0UKUldSK01tZGJBeGc1MkhXaDI1Q1hHQ01TRlNTTG9sVHlleW5uOXh3NmRVL0ZZbU9OQngzS1BoYTAK",
+      "endpoints": [
+        "https://download.example.com/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

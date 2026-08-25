@@ -1,0 +1,297 @@
+/* Controller-side remote-device view.
+   z-index 400 — the fullscreen-media band, alongside .stream-stage and
+   .camera-preview (see docs/DESIGN_PHILOSOPHY.md). It is a peer of those, not
+   a modal: it must sit above the chat slot and the panels, and below
+   settings/pickers so a dialog opened during a session is still reachable. */
+
+.device-stage {
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+    display: flex;
+    flex-direction: column;
+    background: #000;
+}
+
+.device-stage-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+}
+
+.device-stage-title {
+    font-weight: 600;
+}
+
+/* Forwarding chip. Sits next to the title (which no longer takes the free
+   space) so it reads as part of "what this session is doing", not as a control.
+   Deliberately understated but always present while a forward exists: port
+   forwarding is a lateral-movement primitive and must never run invisibly. */
+.device-stage-tunnels {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--background-tertiary, #1e1f22);
+    color: var(--text-muted, #949ba4);
+    white-space: nowrap;
+    cursor: default;
+}
+
+/* The zoom/pan surface: the picture and anything drawn ON the picture move
+   together. The transform lives here rather than on the <video> so the cursor
+   overlay inherits it — as a sibling of the video it stayed put while the
+   picture moved, and pointed at the wrong pixel the moment you zoomed. */
+.device-stage-canvas {
+    position: absolute;
+    inset: 0;
+}
+
+.device-stage-error {
+    color: var(--danger, #f04747);
+    font-size: 13px;
+}
+
+/* Why the last session ended, shown when there is no session left to attach it
+   to. A banner rather than a full-screen state: the session is already over, so
+   this must not block the app — it sits above the chat slot and gets out of the
+   way when dismissed or when a new attempt starts.
+
+   Bottom-anchored and centred so it lands in the same place on a phone as on a
+   desktop, and inset with max-width so a long reason wraps instead of running
+   under the mobile toolbar. */
+.device-stage-failure {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 400;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(560px, calc(100vw - 32px));
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--danger, #f04747);
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+    font-size: 13px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.device-stage-failure-text {
+    flex: 1 1 auto;
+}
+
+/* The Dismiss button must never SHRINK below its label. The banner is a flex
+   row capped at 560px and the reason text takes `flex: 1 1 auto`, so a long
+   reason (e.g. "could not connect to the device ...") squeezed the button until
+   "Dismiss" overflowed its box. Hold the button at its content width. */
+.device-stage-failure .device-stage-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.device-stage-bar > .device-stage-btn:first-of-type,
+.device-stage-error {
+    margin-left: auto;
+}
+
+/* When an error IS shown it takes the push, so the button must not also claim
+   it — otherwise the two would fight and the error would jump to the middle. */
+.device-stage-error ~ .device-stage-btn:first-of-type {
+    margin-left: 0;
+}
+
+.device-stage-btn {
+    min-height: 32px;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    background: var(--background-modifier-accent, rgba(255, 255, 255, 0.1));
+    color: var(--text-normal, #dcddde);
+}
+
+.device-stage-btn-danger {
+    background: var(--danger, #f04747);
+    color: #fff;
+}
+
+.device-stage-surface {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    /* The whole area is the input surface, so the cursor should read as
+       "this drives the other machine" rather than as a text/select region. */
+    cursor: crosshair;
+    touch-action: none; /* or a drag scrolls the page instead of moving the remote cursor */
+    user-select: none;
+    /* The zoomed canvas is a child scaled well past the surface; without this
+       it painted over the desktop toolbar above — visibly wrong at 5x and
+       worse now that the zoom ceiling is 40x. */
+    overflow: hidden;
+}
+
+.device-stage-video {
+    width: 100%;
+    height: 100%;
+    /* contain, NOT cover: cropping would make the coordinate mapping lie, and
+       clicks would land somewhere other than where the user aimed. */
+    object-fit: contain;
+    background: #000;
+    display: block;
+    pointer-events: none; /* the wrapper owns the events */
+}
+
+.device-stage-waiting,
+.device-stage-secure,
+.device-stage-paused {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 14px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 13px;
+    text-align: center;
+    max-width: 90%;
+}
+
+.device-stage-waiting { top: 50%; transform: translate(-50%, -50%); }
+.device-stage-paused { bottom: 16px; }
+
+/* PARKED AT THE TOP, and that is the whole point of it having its own class.
+   The centre is where Windows draws the thing this banner is talking about —
+   the lock screen's PIN box, a UAC consent dialog — so a centred notice sits
+   exactly on top of the control the user is trying to reach. Measured live
+   2026-08-18: the viewer was shown this text and could not see the PIN box
+   underneath it. The bottom is taken by the paused banner, so: top. */
+.device-stage-secure { top: 16px; }
+
+/* Game-mode "click to capture" hint — same treatment as the paused banner,
+   parked higher so the two can coexist. */
+.device-stage-fps-hint {
+    position: absolute;
+    left: 50%;
+    bottom: 56px;
+    transform: translateX(-50%);
+    padding: 8px 14px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 13px;
+    text-align: center;
+    max-width: 90%;
+    pointer-events: none;
+}
+
+/* Sensitivity stepper in the desktop toolbar. */
+.device-stage-fps-sens {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-secondary, #8e9297);
+}
+
+/* Failure feedback on phones, where the desktop toolbar that carries it is
+   not rendered at all. Above the mobile toolbar so it is not covered by it. */
+.device-stage-mobile-error {
+    position: absolute;
+    left: 50%;
+    bottom: 96px;
+    transform: translateX(-50%);
+    max-width: 90%;
+    padding: 8px 14px;
+    border-radius: 6px;
+    background: rgba(176, 0, 32, 0.92);
+    color: #fff;
+    font-size: 13px;
+    text-align: center;
+    z-index: 460;
+    /* One line per message (a note AND a host refusal can both be present). */
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    /* Feedback, not a control: a band over the remote screen must not eat
+       the touches that fall on it (its sibling overlays already say so). */
+    pointer-events: none;
+}
+
+.device-stage-hint {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+    background: var(--background-secondary, #2b2d31);
+}
+
+.device-stage-hint kbd {
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.12);
+    font-family: inherit;
+}
+
+/* Coarse pointer: 44px targets, and the Esc hint is meaningless without a
+   keyboard so it is replaced by the buttons already on the bar. */
+@media (max-width: 600px), (pointer: coarse) {
+    .device-stage-btn {
+        min-height: 44px;
+        flex: 1 1 auto;
+    }
+
+    .device-stage-title {
+        width: 100%;
+        margin-right: 0;
+    }
+
+    .device-stage-hint {
+        display: none;
+    }
+}
+
+/* Screen switcher in the stage bar.
+ *
+ * Only rendered when the host reported more than one display. Sits with the
+ * other bar controls rather than over the video: this is a session control, not
+ * something to hunt for on the picture, and on a phone in landscape the video
+ * fills everything below the bar. */
+.device-stage-monitor {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+}
+
+.device-stage-monitor-label {
+    /* Hidden on narrow screens: the dropdown's own contents say what it is, and
+     * the bar has to fit Pause control and Disconnect on a 390px phone. */
+    display: none;
+}
+
+@media (min-width: 560px) {
+    .device-stage-monitor-label {
+        display: inline;
+    }
+}
+
+.device-stage-monitor select {
+    /* 44px: the coarse-pointer floor from docs/DESIGN_PHILOSOPHY.md. */
+    min-height: 44px;
+    padding: 0 8px;
+    border: 1px solid var(--background-tertiary, #202225);
+    border-radius: 4px;
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+    font-size: 13px;
+}

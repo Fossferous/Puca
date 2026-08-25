@@ -1,0 +1,18 @@
+{
+    "version": "0.0.1",
+    "configurations": [
+        {
+            "name": "frontend-dev",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+            "port": 5173
+        },
+        {
+            "//": "Second instance on its own port, so an e2e run cannot collide with a dev server another session (or worktree) already has on 5173. Paths stay repo-relative.",
+            "name": "frontend-dev-alt",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5174", "--strictPort"],
+            "port": 5174
+        }
+    ]
+}

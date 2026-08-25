@@ -1,0 +1,77 @@
+# Hosts and deployment identity for the ship scripts.
+#
+# COPY THIS TO `hosts.conf` AND FILL IN YOUR OWN VALUES. The real file is
+# gitignored: server addresses, SSH targets and domain names are infrastructure
+# identity and do not belong in a public repository. Everything that ships or
+# verifies a release (dual-ship.sh, check-versions.sh, ship-waker.sh) sources
+# this file, so it is the single place your deployment is described.
+#
+# WHY EVERY NAME BELOW IS A VARIABLE, not a hardcoded string: this repo is a
+# generic project, but a real deployment already exists somewhere with its own
+# domains, install path, service name and system user — quite possibly chosen
+# before the project was named. Pointing these at whatever your servers ALREADY
+# run means you can deploy from this repo without renaming anything server-side
+# (no moving /opt, no new systemd unit, no database rename). Rename later if you
+# want to, deliberately, as its own change — not as a side effect of a release.
+
+# ---------------------------------------------------------------- hosts ----
+#
+# List EVERY host that must receive a release. If you keep an old box as a
+# rollback target — DNS can be repointed at it with no server-side action —
+# that is only a real rollback if it has kept receiving every release.
+# Otherwise "rolling back" silently downgrades users to whatever was last
+# pushed there. dual-ship.sh refuses to report success unless it verified all
+# of them. A single-host deployment is fine: list one line.
+#
+# format: "<label>:<ssh-target>"
+HOSTS=(
+	"primary:root@203.0.113.10"
+	# "rollback:root@192.168.1.10"
+)
+
+# Used to verify each host directly by IP with --resolve, bypassing whichever
+# one DNS currently points at. Keep in sync with the ssh targets above.
+declare -A HOST_IPS=(
+	[primary]="203.0.113.10"
+	# [rollback]="192.168.1.10"
+)
+
+# --------------------------------------------------------------- domains ---
+API_HOST="chat.example.com"        # API + WebSocket + the mobile OTA endpoint
+APP_HOST="app.example.com"         # the browser web app
+DOWNLOAD_HOST="download.example.com"  # installers, APKs, desktop latest.json
+
+# ----------------------------------------------- what the servers run ------
+#
+# Point these at what ALREADY exists on your boxes. They are only names.
+INSTALL_DIR="/opt/puca"     # holds the binary, webapp/, downloads/, .env
+SERVICE_NAME="puca"         # systemd unit: systemctl restart <this>
+SERVICE_USER="puca"         # owns INSTALL_DIR; files are chowned to it
+DB_NAME="puca"              # postgres DB, read for the migration-checksum preflight
+
+# The header your reverse proxy stamps so a response can be traced to the box
+# that served it ("which host actually answered?"). Set it in Caddy/nginx to
+# match; if you have not set one, dual-ship.sh reports <unknown> and carries on.
+HOST_HEADER="x-puca-host"
+
+# Release artefact names, as they are SERVED. These must match what your
+# download page links and what already-installed clients look for — changing
+# them strands existing installs on the old filename.
+INSTALLER_NAME="Puca-Setup.exe"     # desktop installer at DOWNLOAD_HOST/<this>
+MOBILE_BUNDLE_PREFIX="puca-web"     # OTA bundle: <prefix>-<version>.enc.zip
+APK_PREFIX="Puca"                   # Android build: <prefix>-<version>.apk
+
+# ------------------------------------------------------------------ ssh ----
+#
+# StrictHostKeyChecking=yes, NOT accept-new.
+#
+# These scripts push a release to production over SSH. `accept-new` records
+# whatever key answers on first contact, so the very first connection — the one
+# where a man in the middle is worth mounting — is trusted silently, and any
+# host rebuilt or re-imaged since is trusted again. Failing closed on an unknown
+# key costs one `ssh-keyscan` into deploy/ops/known_hosts; trusting it silently
+# costs a signed installer built from someone else's box.
+#
+# Seed that file yourself (it is gitignored, for the same reason as this one):
+#   ssh-keyscan -H <your-host> >> deploy/ops/known_hosts
+SSH_OPTS=(-i ~/.ssh/puca_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$(dirname "${BASH_SOURCE[0]}")/known_hosts" -o ConnectTimeout=15)

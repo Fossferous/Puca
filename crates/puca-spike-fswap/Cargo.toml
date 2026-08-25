@@ -1,0 +1,24 @@
+[package]
+name = "puca-spike-fswap"
+version = "0.1.0"
+edition = "2021"
+description = "Spike FSWAP: does a live Chrome WebRTC decoder survive a mid-stream frame-source swap (different process, different resolution, forced IDR) without a reset that looks like a reconnect?"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "fswap"
+path = "src/main.rs"
+
+[dependencies]
+# THE SHIPPING PATHS, on purpose — same reasoning as spike-s5. The question is
+# not "can some encoder feed str0m" but "does OUR VideoSender + OUR H264Encoder,
+# with a second process producing the post-swap frames, survive the swap on a
+# real Chrome decoder." A hand-rolled encoder or a bespoke RTP writer could
+# succeed where the real code fails and send the whole design down the wrong road.
+puca-rtc = { path = "../puca-rtc" }
+puca-encode = { path = "../puca-encode" }
+
+# Same major/minor as puca-agent and puca-rtc: the whole point is to
+# drive the SAME protocol state machine the agent ships.
+str0m = "0.21"

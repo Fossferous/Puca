@@ -1,0 +1,804 @@
+/* Settings Modal */
+.settings-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.settings-modal {
+    display: flex;
+    width: 90vw;
+    max-width: 1100px;
+    height: 85vh;
+    max-height: 700px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Settings Sidebar */
+.settings-sidebar {
+    width: 220px;
+    min-width: 220px;
+    background: var(--bg-secondary);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+.settings-nav {
+    padding: 60px 8px 20px;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+.settings-nav-section {
+    margin-bottom: 8px;
+}
+
+.settings-nav-header {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--text-faint);
+    padding: 6px 10px;
+    letter-spacing: 0.02em;
+}
+
+.settings-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+}
+
+.settings-nav-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal);
+}
+
+.settings-nav-item.active {
+    background: rgba(137, 180, 250, 0.15);
+    color: var(--text-normal);
+}
+
+.settings-nav-item .nav-icon {
+    font-size: 1.1rem;
+}
+
+.settings-nav-divider {
+    height: 1px;
+    background: var(--bg-tertiary);
+    margin: 8px 10px;
+}
+
+.settings-nav-item.logout {
+    color: var(--color-danger);
+}
+
+.settings-nav-item.logout:hover {
+    background: rgba(237, 66, 69, 0.15);
+}
+
+/* Settings Content */
+.settings-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--bg-tertiary);
+}
+
+.settings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 60px 40px 20px;
+    background: var(--bg-primary);
+}
+
+.settings-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.settings-close {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 6px 12px;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+
+.settings-close:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal);
+}
+
+.settings-close span {
+    padding: 2px 6px;
+    background: var(--bg-quaternary);
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.settings-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 40px 40px;
+    background: var(--bg-tertiary);
+}
+
+.settings-section {
+    max-width: 740px;
+}
+
+.settings-section h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin: 0 0 8px;
+}
+
+.settings-description {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin: 0 0 16px;
+}
+
+.settings-card {
+    background: var(--bg-primary);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.settings-card p {
+    color: var(--text-faint);
+    margin: 0;
+}
+
+.settings-option {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--bg-quaternary);
+}
+
+.settings-option:last-child {
+    border-bottom: none;
+}
+
+.settings-option label {
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+.settings-option select,
+.settings-option input[type="range"] {
+    min-width: 150px;
+    padding: 6px 10px;
+    background: var(--bg-quaternary);
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.85rem;
+}
+
+.settings-option input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--brand-primary);
+    cursor: pointer;
+}
+
+.settings-option input[type="range"] {
+    width: 150px;
+    accent-color: var(--brand-primary);
+}
+
+.settings-option input[type="text"],
+.settings-option input[type="email"] {
+    min-width: 200px;
+    padding: 8px 12px;
+    background: var(--bg-quaternary);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+/* Narrower than text: numeric limits are short (e.g. "100"), and the wide
+   min-width squeezed the option-info column on mobile. */
+.settings-option input[type="number"] {
+    width: 90px;
+    padding: 8px 12px;
+    background: var(--bg-quaternary);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+.settings-option input[type="text"]:focus,
+.settings-option input[type="email"]:focus,
+.settings-option input[type="number"]:focus {
+    outline: none;
+    border-color: var(--brand-primary);
+}
+
+.settings-option input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Option info with hint */
+.option-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.option-hint,
+.settings-hint {
+    font-size: 0.8rem;
+    color: var(--text-faint);
+}
+
+/* Android notification-health warning row: an ordinary option row with a
+   warning accent, so it reads as part of the section rather than an alert
+   stealing the modal. The icon inherits the label's colour. */
+.notif-health {
+    border-left: 3px solid var(--color-warning, #e8a33d);
+    padding-left: 12px;
+    /* At phone widths the fix button drops below the text instead of
+       crushing the option-info column against it. */
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.notif-health label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--color-warning, #e8a33d);
+}
+
+/* Slider row */
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.slider-row input[type="range"] {
+    flex: 1;
+    max-width: 180px;
+}
+
+.volume-value {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    min-width: 40px;
+}
+
+/* Buttons */
+.settings-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 12px;
+    margin-top: 8px;
+    border-top: 1px solid var(--bg-quaternary);
+}
+
+.save-btn {
+    padding: 8px 20px;
+    background: var(--brand-primary);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 4px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.save-btn:hover {
+    background: var(--brand-hover);
+}
+
+.save-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.danger-btn {
+    padding: 8px 20px;
+    background: transparent;
+    color: var(--color-danger);
+    border: 1px solid var(--color-danger);
+    border-radius: 4px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.danger-btn:hover {
+    background: rgba(243, 139, 168, 0.1);
+}
+
+.danger-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.secondary-btn {
+    padding: 8px 20px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    border: none;
+    border-radius: 4px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.secondary-btn:hover {
+    background: var(--bg-quaternary);
+}
+
+/* Theme picker — swatch grid. The row stacks (option-info above, swatches
+   below) because eight swatches never fit beside the label column. */
+.theme-picker-option {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+
+.theme-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.theme-swatch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    background: none;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.theme-swatch.selected {
+    border-color: var(--brand-primary);
+}
+
+.theme-swatch-chip {
+    /* 56×44: keeps the tap target at the 44px coarse-pointer minimum */
+    width: 56px;
+    height: 44px;
+    border-radius: 6px;
+    border: 1px solid var(--border-separator);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    font-size: 1rem;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.theme-swatch-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.theme-swatch.selected .theme-swatch-label {
+    color: var(--text-normal);
+}
+
+.keybind-btn {
+    padding: 6px 16px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 4px;
+    font-family: monospace;
+    cursor: pointer;
+    /* A one-glyph binding must not collapse the button to a sliver. */
+    min-width: 72px;
+}
+
+/* Binding button + its Reset, and the conflict notice when one is refused. */
+.keybind-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.keybind-conflict {
+    color: var(--text-danger, #ed4245);
+    font-size: 0.8rem;
+}
+
+.keybind-reset {
+    padding: 6px 10px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    /* Coarse-pointer target: the mobile walk requires 44px of tappable height. */
+    min-height: 44px;
+}
+
+.keybind-reset:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* Keybind list */
+.keybind-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--bg-quaternary);
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+.keybind-row:last-child {
+    border-bottom: none;
+}
+
+.keybind {
+    padding: 4px 10px;
+    background: var(--bg-quaternary);
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* Danger card */
+.settings-card.danger {
+    border: 1px solid rgba(243, 139, 168, 0.3);
+}
+
+.settings-section h3:not(:first-child) {
+    margin-top: 24px;
+}
+
+/* Theme variables - can be overridden */
+[data-theme="light"] .settings-modal {
+    background: #eff1f5;
+}
+
+[data-theme="light"] .settings-sidebar {
+    background: #e6e9ef;
+}
+
+[data-theme="light"] .settings-content {
+    background: #dce0e8;
+}
+
+[data-theme="light"] .settings-header {
+    background: #eff1f5;
+}
+
+[data-theme="light"] .settings-card {
+    background: #eff1f5;
+}
+
+[data-theme="light"] .settings-nav-item,
+[data-theme="light"] .settings-option label,
+[data-theme="light"] .settings-header h2,
+[data-theme="light"] .settings-section h3 {
+    color: #4c4f69;
+}
+
+[data-theme="amoled"] .settings-modal,
+[data-theme="amoled"] .settings-header,
+[data-theme="amoled"] .settings-card {
+    background: #000000;
+}
+
+[data-theme="amoled"] .settings-sidebar {
+    background: #0a0a0a;
+}
+
+[data-theme="amoled"] .settings-content {
+    background: #111111;
+}
+
+/* Mic Test */
+.mic-test-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.mic-level-container {
+    flex: 1;
+    height: 24px;
+    background: var(--bg-quaternary);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.mic-level-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--color-success) 0%, var(--color-warning) 50%, var(--color-danger) 100%);
+    border-radius: 4px;
+    transition: width 0.05s ease-out;
+}
+
+/* The take's playback position: a plain accent fill, not the level meter's
+   green→red loudness gradient (position is not loudness). */
+.mic-playback-progress .mic-level-bar {
+    background: var(--color-info);
+    transition: width 0.15s linear;
+}
+
+.mic-level-value {
+    min-width: 45px;
+    text-align: right;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-family: monospace;
+}
+
+.secondary-btn.active {
+    background: var(--color-danger);
+    color: var(--bg-primary);
+}
+
+/* App Info */
+.app-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+.app-version {
+    padding: 4px 10px;
+    background: var(--bg-quaternary);
+    border-radius: 4px;
+    font-family: monospace;
+    font-weight: 600;
+    color: var(--brand-primary);
+}
+
+/* ==========================================================================
+   Mobile — the two-pane layout crushes the content column to a sliver at
+   phone widths (220px sidebar + 40px*2 body padding leaves ~70px). Go
+   full-screen with the nav as a horizontally-scrolling tab strip on top.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .settings-modal {
+        width: 100vw;
+        height: 100dvh;
+        max-width: none;
+        max-height: none;
+        border-radius: 0;
+        flex-direction: column;
+    }
+
+    .settings-sidebar {
+        width: 100%;
+        min-width: 0;
+        flex-shrink: 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .settings-nav {
+        flex-direction: row;
+        align-items: center;
+        flex: none;
+        padding: calc(var(--safe-area-top, 0px) + 8px) 8px 8px;
+    }
+
+    .settings-nav-section {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 0;
+    }
+
+    .settings-nav-header {
+        display: none;
+    }
+
+    .settings-nav-item {
+        flex-shrink: 0;
+        width: auto;
+        white-space: nowrap;
+    }
+
+    .settings-nav-divider {
+        width: 1px;
+        height: 24px;
+        flex-shrink: 0;
+        margin: 0 4px;
+    }
+
+    .settings-header {
+        padding: 12px 16px;
+    }
+
+    /* Column-flex children default to min-height:auto, so .settings-content
+       grows to its full content height (measured 1191px inside a 664px modal)
+       and the modal's overflow:hidden clips it — .settings-body never becomes
+       the scroll container, so the page cannot scroll AT ALL on mobile.
+       min-height:0 hands the height constraint back down the chain. The row
+       layout on desktop is unaffected (height there is the stretched cross
+       axis). */
+    .settings-content,
+    .settings-body {
+        min-height: 0;
+    }
+
+    .settings-body {
+        padding: 16px;
+        padding-bottom: calc(16px + var(--safe-area-bottom, 0px));
+    }
+
+    .settings-option {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+    }
+
+    .settings-option select,
+    .settings-option input[type="range"],
+    .settings-option input[type="text"],
+    .settings-option input[type="email"] {
+        min-width: 0;
+        width: 100%;
+        font-size: 16px;
+    }
+}
+/* Delete-account confirm form */
+.delete-account-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.delete-account-form input {
+    padding: 8px 12px;
+    background: var(--bg-quaternary);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+}
+
+.delete-account-form input:focus {
+    outline: none;
+    border-color: var(--color-danger);
+}
+
+/* In-app password change form */
+.password-change-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+.password-change-form input {
+    padding: 8px 10px;
+    background: var(--bg-tertiary, #1e1f22);
+    border: 1px solid var(--border-separator, #2b2d31);
+    border-radius: 4px;
+    color: var(--text-normal, #dbdee1);
+    font-size: 14px;
+}
+.password-change-form button {
+    align-self: flex-start;
+    padding: 8px 16px;
+    background: var(--brand-primary, #5865f2);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+}
+.password-change-form button:disabled { opacity: 0.6; cursor: default; }
+.password-change-error {
+    color: #f38ba8;
+    font-size: 13px;
+}
+
+/* --- Keybind clear / inert-binding notice ---------------------------------
+   Bindings are unset by default and individually removable, so each row has a
+   trash control; and a push-to-talk/mute key does nothing unless the voice
+   input mode matches, which used to be invisible (the "push to mute doesn't
+   work" report). The notice says so and offers the one-click fix. */
+.keybind-clear {
+    background: transparent;
+    border: none;
+    color: var(--text-muted, #949ba4);
+    cursor: pointer;
+    font-size: 15px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    line-height: 1;
+}
+
+.keybind-clear:hover:not(:disabled) {
+    background: rgba(237, 66, 69, 0.12);
+    color: #ed4245;
+}
+
+.keybind-clear:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.keybind-inert {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-basis: 100%;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: #faa61a;
+}
+
+.keybind-activate {
+    background: var(--brand-primary, #5865f2);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.keybind-row {
+    flex-wrap: wrap;
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .keybind-clear { min-width: 44px; min-height: 44px; }
+    .keybind-activate { min-height: 40px; padding: 8px 14px; }
+}

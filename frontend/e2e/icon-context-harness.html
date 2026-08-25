@@ -1,0 +1,226 @@
+<!doctype html>
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<!-- Without this, a 390px emulated viewport still lays out at 980px and any
+     "no overflow at phone width" check silently proves nothing. -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Icon context harness</title>
+<!-- The REAL stylesheets, not copies. Every icon in the app is sized by the
+     font-size of the wrapper it was dropped into, so the only way to know an
+     icon landed at the right size is to put it inside that wrapper with the
+     rule that actually ships. See docs/ICON_LANGUAGE.md §3. -->
+<link rel="stylesheet" href="../src/styles/theme.css">
+<link rel="stylesheet" href="../src/components/Icons.css">
+<link rel="stylesheet" href="../src/components/ContextMenu.css">
+<link rel="stylesheet" href="../src/components/ServerList.css">
+<link rel="stylesheet" href="../src/components/UserContextMenu.css">
+<link rel="stylesheet" href="../src/components/SettingsModal.css">
+<link rel="stylesheet" href="../src/components/FriendsPanel.css">
+<link rel="stylesheet" href="../src/components/TaskTree.css">
+<link rel="stylesheet" href="../src/components/Chat.css">
+<link rel="stylesheet" href="../src/components/VoicePanel.css">
+<link rel="stylesheet" href="../src/components/Toast.css">
+<link rel="stylesheet" href="../src/components/FileTransfers.css">
+<style>
+  body { margin:0; padding:20px 24px 60px; background:var(--bg-primary);
+         color:var(--text-normal); font-family:var(--font-primary); }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+       color:var(--text-faint); margin:26px 0 8px; font-weight:600; }
+  .panes { display:flex; gap:22px; flex-wrap:wrap; align-items:flex-start; }
+  .pane { background:var(--bg-secondary); border:1px solid var(--border-separator);
+          border-radius:8px; padding:8px; min-width:230px; }
+  .pane.chat { background:var(--bg-primary); }
+  .controls { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  button.tb { font:inherit; font-size:12px; padding:5px 10px; border-radius:4px;
+              background:var(--bg-quaternary); color:var(--text-normal);
+              border:1px solid var(--border-faint); cursor:pointer; }
+  button.tb.on { background:var(--brand-primary); color:#fff; border-color:transparent; }
+  .row { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:4px;
+         color:var(--text-muted); font-size:14px; }
+  .closebar { display:flex; align-items:center; justify-content:space-between;
+              padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;
+              font-size:15px; color:var(--header-primary); font-weight:600; }
+  /* .tt-actions is opacity:0 until row hover (TaskTree.css). Force it here —
+     an affordance you cannot see is one you cannot check. */
+  #tasks .tt-actions { opacity:1 !important; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <span style="font-size:12px;color:var(--text-muted);align-self:center;margin-right:4px">theme</span>
+  <button class="tb on" data-t="dark">dark</button>
+  <button class="tb" data-t="light">light</button>
+  <button class="tb" data-t="amoled">amoled</button>
+  <button class="tb" data-t="green">green</button>
+  <button class="tb" data-t="orange">orange</button>
+  <button class="tb" data-t="pink">pink</button>
+  <span style="width:14px"></span>
+  <button class="tb" id="hc">high contrast</button>
+  <button class="tb" id="classic">classic icons</button>
+</div>
+
+<div class="panes">
+
+  <div>
+    <h2>Server rail — .server-icon-inner (48px)</h2>
+    <div class="pane" id="rail" style="min-width:auto;width:72px;display:flex;flex-direction:column;align-items:center;gap:8px"></div>
+  </div>
+
+  <div>
+    <h2>Context menu — .context-menu-icon (16px in a 20px box)</h2>
+    <div class="pane context-menu" id="ctx" style="position:static"></div>
+  </div>
+
+  <div>
+    <h2>Server menu — .menu-icon (16px in a 20px box)</h2>
+    <div class="pane" id="srvmenu"></div>
+  </div>
+
+  <div>
+    <h2>Settings nav — .nav-icon (1.1rem)</h2>
+    <div class="pane" id="setnav"></div>
+  </div>
+
+  <div>
+    <h2>Channel list — .hash / .voice-icon</h2>
+    <div class="pane chat" id="chans"></div>
+  </div>
+
+  <div>
+    <h2>Task row — .tt-btn cluster</h2>
+    <div class="pane chat" id="tasks" style="min-width:300px"></div>
+  </div>
+
+  <div>
+    <h2>Close buttons (modal header / toast)</h2>
+    <div class="pane" id="closers" style="min-width:280px"></div>
+  </div>
+
+  <div>
+    <h2>User context menu — .context-icon (1.1rem in 20px)</h2>
+    <div class="pane" id="usermenu"></div>
+  </div>
+
+</div>
+
+<script type="module">
+// Pull the real SVG bodies straight out of Icons.tsx so the harness can never
+// drift from the component set — a hand-copied path is a harness that passes
+// while the app is broken.
+//
+// Under `npm run dev` this fetches the source. Headless runs open the file
+// directly, where fetch() is blocked by the file:// origin, so the driver
+// injects the same map as window.__ICON_BODIES first.
+const src = window.__ICON_SRC ?? await (await fetch('../src/components/Icons.tsx')).text();
+const bodies = window.__ICON_BODIES ?? (() => {
+    const out = {};
+    for (const m of src.matchAll(/makeIcon\('(\w+)',\s*<>([\s\S]*?)<\/>\)/g)) {
+        out[m[1].replace(/Icon$/, '')] = m[2].trim();
+    }
+    return out;
+})();
+
+// The Classic style's glyphs, read from the same LEGACY_GLYPHS map the app uses.
+const legacy = (() => {
+    const block = /const LEGACY_GLYPHS: Record<string, string> = \{([\s\S]*?)\n\};/.exec(src);
+    const out = {};
+    if (block) {
+        for (const m of block[1].matchAll(/(\w+Icon):\s*'([^']+)'/g)) {
+            out[m[1].replace(/Icon$/, '')] = m[2];
+        }
+    }
+    return out;
+})();
+let classic = false;
+const icon = (name) => {
+    if (!bodies[name]) throw new Error('no such icon: ' + name);
+    // Mirrors Icons.tsx: an icon with no older glyph keeps drawing in Classic.
+    if (classic && legacy[name]) {
+        return `<span class="svrn-icon-legacy" aria-hidden="true">${legacy[name]}</span>`;
+    }
+    return `<svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true">${bodies[name]}</svg>`;
+};
+const iconAt = (name, px) => classic && legacy[name]
+    ? `<span class="svrn-icon-legacy" style="font-size:${px}px" aria-hidden="true">${legacy[name]}</span>`
+    : icon(name)
+        .replace('width="1.2em" height="1.2em"', `width="${px}" height="${px}"`)
+        .replace('stroke-width="1.75"', `stroke-width="${px <= 16 ? 2 : px >= 40 ? 1.4 : 1.75}"`);
+
+const set = (id, html) => { document.getElementById(id).innerHTML = html; };
+
+// Everything is redrawn on the Classic toggle, so each panel must be built
+// inside paint() — a one-shot render would show the old style forever.
+function paint() {
+set('rail', ['Message', 'Monitor', 'Note', 'Compass'].map(n =>
+    `<div class="server-icon"><div class="server-icon-inner">${iconAt(n, 26)}</div></div>`).join(''));
+
+set('ctx', [['copy','Copy Text'],['Reply','Reply'],['Forward','Forward'],['Pencil','Edit'],
+            ['Pin','Pin Message'],['EyeOff','Hide for Me'],['Trash','Delete']]
+    .map(([n, l]) => `<button class="context-menu-item${l === 'Delete' ? ' danger' : ''}">
+        <span class="context-menu-icon">${icon(n === 'copy' ? 'Copy' : n)}</span>
+        <span class="context-menu-label">${l}</span></button>`).join(''));
+
+set('srvmenu', [['MailOpen','Mark as Read'],['BellOff','Mute Server'],['UserAdd','Invite People'],
+                ['Settings','Server Settings'],['Copy','Copy Server ID'],['Logout','Leave Server'],
+                ['Disband','Disband Server']]
+    .map(([n, l]) => `<div class="row"><span class="menu-icon">${icon(n)}</span>${l}</div>`).join(''));
+
+set('setnav', [['User','My Account'],['Lock','Privacy & Safety'],['Palette','Appearance'],
+               ['Accessibility','Accessibility'],['Bell','Notifications'],['Mic','Voice & Video'],
+               ['Keyboard','Keybinds'],['Globe','Language'],['Settings','Advanced']]
+    .map(([n, l]) => `<div class="settings-nav-item"><span class="nav-icon">${icon(n)}</span>${l}</div>`).join(''));
+
+set('chans', [['Hash','general','hash'],['Checklist','shopping','hash'],['Folder','Projects','hash'],
+              ['Speaker','General Voice','voice-icon'],['Moon','AFK','voice-icon']]
+    .map(([n, l, cls]) => `<div class="row"><span class="${cls}">${icon(n)}</span>${l}</div>`).join(''));
+
+set('tasks', ['<div class="tt-item"><input type="checkbox">' +
+    '<span class="tt-description">Pick up the parcel before it closes</span>' +
+    '<span class="tt-byline">· Alex</span><div class="tt-actions">' +
+    `<button class="tt-btn">${icon('ChevronUp')}</button>` +
+    `<button class="tt-btn">${icon('ChevronDown')}</button>` +
+    `<button class="tt-btn">${icon('Plus')}</button>` +
+    `<button class="tt-btn">${icon('Trash')}</button>` +
+    `<button class="tt-btn">${icon('Paperclip')}</button></div></div>`].join(''));
+
+set('closers', `
+  <div class="closebar">Server Settings <button class="close-btn" aria-label="Close">${iconAt('Close', 18)}</button></div>
+  <div style="height:10px"></div>
+  <div class="app-toast"><span style="flex:1;font-size:13px">Message sent</span>
+    <button class="app-toast-close" aria-label="Dismiss">${icon('Close')}</button></div>
+  <div style="height:10px"></div>
+  <div class="row" style="justify-content:space-between">
+    <span>report.pdf — 2.3 MB</span>
+    <span class="xfer-icon">${icon('Inbox')}</span></div>`);
+
+set('usermenu', [['User','View Profile'],['Message','Send Message'],['UserAdd','Add Friend'],
+                 ['Gamepad','Request Control'],['SpeakerOff','Mute'],['Tag','Roles'],
+                 ['UserRemove','Kick'],['Gavel','Ban']]
+    .map(([n, l]) => `<div class="row"><span class="context-icon">${icon(n)}</span>${l}</div>`).join(''));
+}
+paint();
+
+const root = document.documentElement;
+document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => {
+    root.setAttribute('data-theme', b.dataset.t);
+    document.querySelectorAll('[data-t]').forEach(x => x.classList.toggle('on', x === b));
+});
+let hc = false;
+document.getElementById('hc').onclick = e => {
+    hc = !hc;
+    if (hc) root.setAttribute('data-contrast', 'high'); else root.removeAttribute('data-contrast');
+    e.target.classList.toggle('on', hc);
+};
+document.getElementById('classic').onclick = e => {
+    classic = !classic;
+    e.target.classList.toggle('on', classic);
+    paint();
+};
+window.__harnessReady = true;
+</script>
+</body>
+</html>

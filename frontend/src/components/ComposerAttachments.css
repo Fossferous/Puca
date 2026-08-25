@@ -1,0 +1,143 @@
+/* Pending-attachment chips above the composer. Horizontal scroll on narrow
+   widths rather than wrapping — the strip must never push the composer off
+   the bottom of a phone screen. */
+.composer-attachments {
+    display: flex;
+    gap: 8px;
+    padding: 8px 12px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.composer-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    max-width: 240px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: var(--bg-tertiary, #2b2d31);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 0.85rem;
+    color: var(--text-normal, #dbdee1);
+}
+
+.composer-chip-failed {
+    border-color: rgba(243, 139, 168, 0.6);
+}
+
+.composer-chip-thumb {
+    position: relative;
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg-primary, #1e1f22);
+}
+
+.composer-chip-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* A spoiler-marked image previews blurred — the strip must not spoil the
+   sender's own screen (someone may be looking over their shoulder at the
+   thing they are deliberately hiding). */
+.composer-chip-spoiler .composer-chip-thumb img {
+    filter: blur(6px);
+}
+
+.composer-chip-busy,
+.composer-chip-warn {
+    position: absolute;
+    inset: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.composer-chip-busy svg {
+    animation: composer-chip-spin 1.2s linear infinite;
+}
+
+@keyframes composer-chip-spin {
+    to { transform: rotate(360deg); }
+}
+
+.composer-chip-warn {
+    color: #f38ba8;
+}
+
+.composer-chip-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.composer-chip-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The reason an upload failed — visible text, because `title` tooltips do
+   not exist on touch and the quota case needs its explanation to be
+   actionable. Failed chips widen so the sentence fits. */
+.composer-chip-error {
+    font-size: 0.75rem;
+    color: #f38ba8;
+    white-space: normal;
+}
+
+.composer-chip-failed {
+    max-width: 340px;
+}
+
+.composer-chip-actions {
+    display: inline-flex;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.composer-chip-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted, #b9bbbe);
+    padding: 4px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.composer-chip-btn:hover {
+    background: var(--bg-quaternary, #383a40);
+    color: var(--text-primary, #fff);
+}
+
+.composer-chip-btn.active {
+    color: var(--accent, #5865f2);
+}
+
+/* Touch: bigger targets, same strip. */
+@media (pointer: coarse) {
+    .composer-chip {
+        padding: 8px 10px;
+    }
+    .composer-chip-thumb {
+        width: 44px;
+        height: 44px;
+    }
+    .composer-chip-btn {
+        padding: 8px;
+    }
+}

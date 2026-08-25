@@ -1,0 +1,111 @@
+.task-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.ta-item {
+    position: relative;
+}
+
+.ta-thumb {
+    display: block;
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: 6px;
+    background: var(--bg-tertiary, #40444b);
+    cursor: pointer;
+}
+
+.ta-pending {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.ta-video {
+    display: block;
+    max-width: min(240px, 100%);
+    max-height: 160px;
+    border-radius: 6px;
+    background: #000;
+}
+
+.ta-file,
+.ta-broken {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 240px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-secondary, #b9bbbe);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+/* Same reasoning as the message attachment: a button, not a link. */
+button.ta-file {
+    border: none;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    white-space: nowrap;
+}
+button.ta-file:disabled { opacity: 0.6; cursor: progress; }
+button.ta-file.saved { color: #7fd18b; }
+button.ta-file.error { color: #ffb4b4; }
+
+.ta-file:hover {
+    color: var(--text-primary, #fff);
+}
+
+.ta-broken {
+    color: var(--text-muted, #72767d);
+}
+
+/* Hover-revealed on fine pointers; the mobile block below pins it visible. */
+.ta-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    border: none;
+    border-radius: 50%;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+
+.ta-item:hover .ta-remove {
+    opacity: 1;
+}
+
+.ta-remove:hover {
+    background: var(--danger-color, #ed4245);
+}
+
+/* ==========================================================================
+   Mobile — no hover on touch, so the remove button is always visible at a
+   tappable size (DESIGN_PHILOSOPHY: coarse-pointer controls >= 30px).
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .ta-remove {
+        opacity: 1;
+        min-width: 30px;
+        min-height: 30px;
+        font-size: 13px;
+    }
+}

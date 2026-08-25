@@ -1,0 +1,243 @@
+/* EditChannelModal — tabbed (General / Permissions) channel editor.
+   Base modal chrome comes from Modal.css; this file adds the tab strip and
+   the per-role permission-overwrite grid. */
+
+.modal-content.edit-channel-modal {
+    width: min(640px, 92vw);
+    max-width: 640px;
+}
+
+/* Tab strip */
+.edit-channel-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--bg-tertiary, #40444b);
+}
+
+.edit-channel-tab {
+    padding: 8px 14px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary, #b9bbbe);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.edit-channel-tab.active {
+    color: var(--text-primary, #fff);
+    border-bottom-color: var(--accent-color, #5865f2);
+}
+
+/* Permissions tab — role list beside the tri-state grid */
+.channel-perms {
+    display: flex;
+    gap: 16px;
+    min-height: 260px;
+}
+
+.channel-perms-roles {
+    width: 170px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 340px;
+    overflow-y: auto;
+}
+
+.channel-perms-role {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    min-height: 34px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-primary, #dcddde);
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.channel-perms-role.active {
+    background: var(--bg-tertiary, #40444b);
+}
+
+.channel-perms-role-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.channel-perms-role-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.channel-perms-role-flag {
+    color: var(--accent-color, #5865f2);
+    font-size: 18px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.channel-perms-editor {
+    flex: 1;
+    min-width: 0;
+}
+
+.channel-perms-hint {
+    margin: 0 0 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted, #72767d);
+}
+
+.channel-perm-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.channel-perm-label {
+    font-size: 14px;
+    color: var(--text-primary, #dcddde);
+    overflow-wrap: anywhere;
+}
+
+.tri-state {
+    display: flex;
+    flex-shrink: 0;
+    border: 1px solid var(--bg-tertiary, #40444b);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.tri-btn {
+    width: 36px;
+    height: 32px;
+    border: none;
+    background: var(--bg-secondary, #2f3136);
+    color: var(--text-muted, #72767d);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.tri-btn + .tri-btn {
+    border-left: 1px solid var(--bg-tertiary, #40444b);
+}
+
+.tri-btn.tri-inherit.active {
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+}
+
+.tri-btn.tri-allow.active {
+    background: rgba(59, 165, 92, 0.25);
+    color: #3ba55c;
+}
+
+.tri-btn.tri-deny.active {
+    background: rgba(240, 71, 71, 0.25);
+    color: #f04747;
+}
+
+.channel-perms-loading {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted, #72767d);
+    font-size: 14px;
+}
+
+/* Hover affordances are desktop-only (design contract: no hover-only
+   affordances under coarse pointers). */
+@media (pointer: fine) {
+    .edit-channel-tab:hover {
+        color: var(--text-primary, #fff);
+    }
+
+    .channel-perms-role:hover {
+        background: var(--bg-tertiary, #40444b);
+    }
+
+    .tri-btn:hover {
+        color: var(--text-primary, #fff);
+    }
+}
+
+/* ==========================================================================
+   Mobile — the role list beside the grid leaves no room for labels at phone
+   widths; the role list becomes a horizontally-scrolling strip above the
+   grid (SettingsModal.css pattern), the modal caps at 85dvh with the close
+   button kept reachable, and tap targets grow to 40px.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .modal-content.edit-channel-modal {
+        width: 92vw;
+        max-height: 85dvh;
+    }
+
+    /* Header (with the close button) stays reachable while the body scrolls.
+       Sticky insets are measured from the scrollport's padding box, so a
+       negative top would pin the header 20px above the visible edge and clip
+       the title/close once scrolled. Instead stick at 0 and use negative
+       margins + own padding to counter the modal-content 20px padding. */
+    .edit-channel-modal .modal-header {
+        position: sticky;
+        top: 0;
+        margin: -20px -20px 0;
+        padding: 20px 20px 6px;
+        background: var(--bg-secondary, #2f3136);
+        z-index: 2;
+    }
+
+    .edit-channel-modal .form-group input,
+    .edit-channel-modal .form-group textarea,
+    .edit-channel-modal .form-group select {
+        font-size: 16px;
+    }
+
+    .channel-perms {
+        flex-direction: column;
+        gap: 12px;
+        min-height: 0;
+    }
+
+    .channel-perms-roles {
+        width: 100%;
+        flex-direction: row;
+        max-height: none;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        gap: 4px;
+        padding-bottom: 4px;
+    }
+
+    .channel-perms-role {
+        flex-shrink: 0;
+        min-height: 40px;
+    }
+
+    .channel-perm-label {
+        white-space: normal;
+    }
+
+    .tri-btn {
+        width: 40px;
+        height: 40px;
+        font-size: 16px;
+    }
+}

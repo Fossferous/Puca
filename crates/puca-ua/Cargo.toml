@@ -1,0 +1,20 @@
+[package]
+name = "puca-ua"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side unattended-access passphrase gate for Puca — Ed25519 challenge/verify, no passphrase ever stored"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# Ed25519 verification only. The host never derives the key from the passphrase
+# — the controller does that with Argon2id and signs — so nothing here needs a
+# password KDF. verify_strict rejects the malleability plain verify tolerates.
+ed25519-dalek = "2"
+serde = { version = "1", features = ["derive"] }
+# Just for the challenge nonce. No rand feature on ed25519-dalek: test keypairs
+# are built deterministically from fixed seeds.
+getrandom = "0.2"
+
+[dev-dependencies]
+serde_json = "1"

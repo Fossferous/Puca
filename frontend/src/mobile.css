@@ -1,0 +1,454 @@
+/**
+ * Mobile-Specific Styles for Puca
+ * A swipeable panel navigation pattern familiar from chat apps
+ *
+ * READ docs/DESIGN_PHILOSOPHY.md BEFORE adding any new panel, modal,
+ * overlay, or popup — it defines the panel-system integration contract,
+ * the z-index registry, and the touch rules this file enforces.
+ */
+
+/* ==========================================================================
+   CSS Variables & Safe Area
+   ========================================================================== */
+
+:root {
+    --safe-area-top: env(safe-area-inset-top, 0px);
+    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-left: env(safe-area-inset-left, 0px);
+    --safe-area-right: env(safe-area-inset-right, 0px);
+    --mobile-nav-height: 60px;
+    --mobile-header-height: 56px;
+}
+
+/* ==========================================================================
+   Mobile Detection - Only apply on small screens / touch
+   ========================================================================== */
+
+@media (pointer: coarse) and (max-width: 1024px) {
+
+    /* ==========================================================================
+       Main Container - Full screen panels
+       ========================================================================== */
+
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        position: fixed;
+        inset: 0;
+        padding-top: var(--safe-area-top);
+    }
+
+    /* ==========================================================================
+       Server List - Panel 0 (Left edge)
+       ========================================================================== */
+
+    .server-list-container,
+    [class*="server-list"] {
+        position: fixed;
+        left: 0;
+        top: var(--safe-area-top);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+        width: 72px;
+        z-index: 200;
+        transform: translateX(-100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        background: var(--bg-tertiary, #0f0f1a);
+    }
+
+    .chat-container[data-mobile-panel="servers"] .server-list-container,
+    .chat-container[data-mobile-panel="servers"] [class*="server-list"] {
+        transform: translateX(0);
+    }
+
+    /* ==========================================================================
+       Channel Sidebar - Panel 1 (Left side)
+       ========================================================================== */
+
+    .sidebar {
+        position: fixed;
+        left: 0;
+        top: var(--safe-area-top);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+        width: 85%;
+        max-width: 320px;
+        z-index: 150;
+        transform: translateX(-100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        background: var(--bg-secondary, #16213e);
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .chat-container[data-mobile-panel="channels"] .sidebar,
+    .chat-container[data-mobile-panel="servers"] .sidebar {
+        transform: translateX(72px);
+        /* Offset by server list width */
+    }
+
+    .chat-container[data-mobile-panel="channels"] .sidebar {
+        transform: translateX(0);
+    }
+
+    /* ==========================================================================
+       Chat Main - Panel 2 (Center, default visible)
+       ========================================================================== */
+
+    .chat-main {
+        position: fixed;
+        left: 0;
+        right: 0;
+        top: var(--safe-area-top);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+        width: 100% !important;
+        max-width: none !important;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        background: var(--bg-primary, #1a1a2e);
+    }
+
+    .chat-container[data-mobile-panel="servers"] .chat-main,
+    .chat-container[data-mobile-panel="channels"] .chat-main {
+        transform: translateX(100%);
+    }
+
+    .chat-container[data-mobile-panel="members"] .chat-main {
+        transform: translateX(-100%);
+    }
+
+    /* ==========================================================================
+       Members List - Panel 3 (Right side)
+       ========================================================================== */
+
+    .member-sidebar {
+        position: fixed;
+        right: 0;
+        top: var(--safe-area-top);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+        width: 85%;
+        max-width: 280px;
+        z-index: 150;
+        transform: translateX(100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        background: var(--bg-secondary, #16213e);
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .chat-container[data-mobile-panel="members"] .member-sidebar {
+        transform: translateX(0);
+    }
+
+    /* ==========================================================================
+       Mobile Bottom Navigation Bar
+       ========================================================================== */
+
+    .mobile-bottom-nav {
+        display: flex !important;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: var(--mobile-nav-height);
+        padding-bottom: var(--safe-area-bottom);
+        background: linear-gradient(180deg, rgba(22, 33, 62, 0.98), rgba(15, 15, 26, 1));
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        z-index: 300;
+        justify-content: space-around;
+        align-items: center;
+    }
+
+    .mobile-nav-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        /* Reclaim horizontal room + share width equally so SIX tabs
+           (Servers/Channels/Chat/Members/Devices/Tasks) fit even on ~320px
+           devices; the full 60px height keeps the touch target well above
+           44px. min-width: 0 lets an item shrink below its label — which is
+           why .nav-label below must clip, or a long label paints over its
+           neighbours at large Text Size settings. */
+        flex: 1;
+        min-width: 0;
+        padding: 8px 2px;
+        background: transparent;
+        border: none;
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 0.7rem;
+        cursor: pointer;
+        transition: color 0.2s ease;
+    }
+
+    .mobile-nav-btn.active {
+        color: #5865f2;
+    }
+
+    .mobile-nav-btn .nav-icon {
+        font-size: 1.4rem;
+    }
+
+    .mobile-nav-btn .nav-label {
+        font-size: 0.62rem;
+        text-transform: uppercase;
+        letter-spacing: 0.2px;
+        white-space: nowrap;
+        /* Six tabs share the row now: at 130% Text Size on a 360px screen the
+           longest labels outgrow their sixth and would overprint the
+           neighbouring tab without this clip. */
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* ==========================================================================
+       Overlay for panel transitions
+       ========================================================================== */
+
+    .mobile-panel-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 90;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+    }
+
+    .chat-container[data-mobile-panel="servers"] .mobile-panel-overlay,
+    .chat-container[data-mobile-panel="channels"] .mobile-panel-overlay,
+    .chat-container[data-mobile-panel="members"] .mobile-panel-overlay {
+        display: block;
+        opacity: 1;
+    }
+
+    /* ==========================================================================
+       Voice Panel - Fixed at bottom above nav
+       ========================================================================== */
+
+    .voice-panel-compact {
+        position: fixed !important;
+        left: 0;
+        right: 0;
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+        z-index: 250;
+        border-radius: 16px 16px 0 0;
+        padding: 12px 16px;
+        background: linear-gradient(135deg, rgba(30, 30, 45, 0.98), rgba(20, 20, 35, 0.99));
+        box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.3);
+    }
+
+    .voice-controls-compact {
+        display: flex;
+        justify-content: space-around;
+        gap: 8px;
+    }
+
+    .voice-btn {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        font-size: 1.3rem;
+    }
+
+    /* The voice panel is portaled to <body> (see Chat.tsx) so its fixed
+       position isn't trapped by .sidebar's transform, but that also means
+       it no longer shares a flex column with .chat-main — nothing reserves
+       its height, so it sits directly over the message form. Push the
+       message form up to clear it. */
+    body:has(.voice-panel-compact) .chat-main {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 172px);
+    }
+
+    /* Same reservation for the rail, channel sidebar, and checklist drawer —
+       their bottom-docked actions (Notes/Join/Create on the rail, the profile
+       bar in the sidebar) and long task lists are otherwise covered by the
+       z-250 voice panel and unreachable while voice is connected. */
+    body:has(.voice-panel-compact) .server-list-container,
+    body:has(.voice-panel-compact) [class*="server-list"],
+    body:has(.voice-panel-compact) .sidebar,
+    body:has(.voice-panel-compact) .checklist-panel {
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 172px);
+    }
+
+    /* ==========================================================================
+       Message Input - Stick above voice panel
+       ========================================================================== */
+
+    /* Message form with all icons visible - stick above voice panel */
+    .message-form {
+        flex-wrap: nowrap;
+        gap: 4px;
+        padding: 8px;
+        position: sticky;
+        bottom: 0;
+        background: inherit;
+    }
+
+    .message-form input,
+    .message-form textarea {
+        flex: 1;
+        min-width: 0;
+        /* Allow shrinking */
+        min-height: 44px;
+        font-size: 16px;
+        /* Prevents iOS zoom */
+        border-radius: 22px;
+        padding: 10px 16px;
+    }
+
+    /* Compact buttons on mobile */
+    .message-form button,
+    .message-form .file-upload-btn,
+    .message-form .advanced-toggle {
+        width: 36px;
+        height: 36px;
+        min-width: 36px;
+        min-height: 36px;
+        padding: 0;
+        flex-shrink: 0;
+    }
+
+    /* Icon-only send. The old version zeroed the font-size and drew a raw
+       U+27A4 arrowhead via ::before — a host-font glyph that ignored every
+       theme and [data-contrast="high"], exactly what DESIGN_PHILOSOPHY §5a
+       forbids. The button now carries a real <SendIcon/> (hidden on desktop)
+       and a .send-label span this swap hides. */
+    .message-form button[type="submit"] {
+        width: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .message-form button[type="submit"] .send-label {
+        display: none;
+    }
+
+    .message-form button[type="submit"] .send-icon {
+        display: block;
+        width: 20px;
+        height: 20px;
+    }
+
+    /* The composer's icon buttons sit on the same near-black as the form in
+       the dark themes (bg-tertiary == bg-secondary), so they read as loose
+       faint glyphs. The input-element shade gives them a visible resting
+       shape; :not(.active) keeps the task toggle's brand-coloured ON state
+       (equal specificity — this file loads last and would win otherwise). */
+    .message-form .file-upload-btn,
+    .message-form .task-mode-btn:not(.active),
+    .message-form .emoji-toggle {
+        background: var(--bg-quaternary);
+        color: var(--text-normal);
+    }
+
+    /* ==========================================================================
+       Hide desktop-only elements on mobile
+       ========================================================================== */
+
+    .desktop-only {
+        display: none !important;
+    }
+
+    /* ==========================================================================
+       Touch-friendly sizing
+       ========================================================================== */
+
+    button,
+    .btn,
+    [role="button"] {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    /* Disable hover effects on touch */
+    @media (hover: none) {
+
+        button:hover,
+        .btn:hover {
+            background-color: inherit;
+        }
+    }
+
+    /* Active states for touch feedback */
+    button:active,
+    .btn:active {
+        opacity: 0.8;
+        transform: scale(0.98);
+    }
+
+    /* ==========================================================================
+       Stream/Video - Fullscreen on mobile
+       ========================================================================== */
+
+    .stream-stage,
+    .camera-preview {
+        position: fixed;
+        inset: 0;
+        z-index: 400;
+        background: #000;
+    }
+
+    .camera-preview video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+
+    /* ==========================================================================
+       Performance optimizations
+       ========================================================================== */
+
+    .sidebar,
+    .chat-main,
+    .member-sidebar,
+    .server-list-container {
+        will-change: transform;
+        backface-visibility: hidden;
+        -webkit-backface-visibility: hidden;
+    }
+
+    /* Smooth scrolling */
+    .messages-container,
+    .channel-list {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
+
+    /* Hide scrollbars on mobile */
+    .messages-container::-webkit-scrollbar,
+    .channel-list::-webkit-scrollbar,
+    .sidebar::-webkit-scrollbar {
+        display: none;
+    }
+
+    .messages-container,
+    .channel-list,
+    .sidebar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+    }
+
+    /* ==========================================================================
+       Typography
+       ========================================================================== */
+
+    body {
+        font-size: 15px;
+        -webkit-text-size-adjust: 100%;
+    }
+
+    * {
+        -webkit-tap-highlight-color: rgba(88, 101, 242, 0.2);
+    }
+}
+
+/* Default: Hide mobile nav on desktop */
+.mobile-bottom-nav {
+    display: none;
+}

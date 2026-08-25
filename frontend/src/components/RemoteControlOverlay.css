@@ -1,0 +1,138 @@
+/* Remote-control host UI: approval prompt, "being controlled" banner, toast. */
+
+.rc-prompt-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+
+.rc-prompt {
+    width: min(440px, 92vw);
+    background: var(--bg-secondary, #2b2d31);
+    color: var(--text-primary, #f2f3f5);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 24px;
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.rc-prompt-icon {
+    font-size: 40px;
+    line-height: 1;
+    margin-bottom: 8px;
+}
+
+.rc-prompt h3 {
+    margin: 0 0 10px;
+    font-size: 20px;
+}
+
+.rc-prompt p {
+    margin: 0 0 10px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-secondary, #b5bac1);
+}
+
+.rc-prompt-warn {
+    font-size: 13px;
+    color: #f0b232;
+}
+
+.rc-prompt-note {
+    font-size: 12px !important;
+    opacity: 0.85;
+}
+
+.rc-prompt-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.rc-btn {
+    flex: 1;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.12s ease;
+}
+.rc-btn:hover { filter: brightness(1.1); }
+
+.rc-allow { background: #248046; color: #fff; }
+.rc-deny { background: rgba(255, 255, 255, 0.08); color: var(--text-primary, #f2f3f5); }
+.rc-stop { flex: none; background: #da373c; color: #fff; }
+
+/* Banner pinned top-center while a viewer is in control. */
+.rc-banner {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #3d1518;
+    border: 1px solid #da373c;
+    color: #fff;
+    padding: 8px 12px 8px 14px;
+    border-radius: 999px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    font-size: 14px;
+}
+
+.rc-banner-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #da373c;
+    animation: rc-pulse 1.3s ease-in-out infinite;
+}
+@keyframes rc-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+.rc-banner-text { white-space: nowrap; }
+
+/* Kill-switch reminder under the banner headline. */
+.rc-banner-hint {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    opacity: 0.75;
+    margin-top: 2px;
+    white-space: nowrap;
+}
+
+.rc-toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    max-width: min(520px, 92vw);
+    background: var(--bg-secondary, #2b2d31);
+    color: var(--text-primary, #f2f3f5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-left: 3px solid #f0b232;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+}
+
+@media (prefers-color-scheme: light) {
+    .rc-prompt, .rc-toast { background: #fff; color: #1a1a1a; }
+    .rc-deny { background: rgba(0, 0, 0, 0.06); color: #1a1a1a; }
+}

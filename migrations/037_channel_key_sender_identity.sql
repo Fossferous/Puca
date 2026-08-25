@@ -1,0 +1,26 @@
+-- Record WHICH USER wrapped each channel key, so the recipient can pin it.
+--
+-- Until now `channel_keys` stored only `sender_public_key` — the raw X25519 key
+-- the recipient unwraps with — and nothing tying it to an identity. The client
+-- therefore had no way to ask "is this really the key of a member I trust?", so
+-- it unwrapped from whatever the server handed back.
+--
+-- That made the channel receive path the one asymmetry in the E2EE design. The
+-- DM path resolves the peer through `resolvePinnedIdentityKey` and refuses to
+-- send when the served key changed, and the channel SEND path (mintEpoch) pins
+-- every member key before wrapping the group key for it (audit M6) — precisely
+-- so a substituted key never receives the CK. Only the RECEIVE side trusted the
+-- server. A server that generated its own keypair, wrapped a channel key it
+-- chose for every member, and reported it as the current epoch would have every
+-- client adopt it silently, yielding plaintext channel messages, checklists and
+-- (via deriveSfuMediaKey) live SFU media.
+--
+-- With the wrapper's user id recorded, the client runs `sender_public_key`
+-- through the SAME trust-on-first-use pin store used by DMs and by mintEpoch, so
+-- a substitution conflicts with the pin and fails closed.
+--
+-- NULLABLE on purpose: rows written before this migration have no wrapper
+-- identity and can never gain one. The client treats NULL as "legacy, cannot
+-- verify" and keeps unwrapping them, so existing history stays readable; every
+-- new epoch is verifiable. Making this NOT NULL would strand old epochs.
+ALTER TABLE channel_keys ADD COLUMN IF NOT EXISTS sender_user_id INTEGER;

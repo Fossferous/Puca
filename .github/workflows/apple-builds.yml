@@ -1,0 +1,135 @@
+# Apple builds — macOS desktop (Tauri) + iOS (Capacitor), on macOS runners.
+#
+# Trigger MANUALLY only: the repo is private and macOS runners bill minutes
+# at 10x, so this never runs on ordinary pushes. Fire it either from the
+# Actions tab (workflow_dispatch) or by pushing a tag starting with "apple-":
+#
+#   git tag apple-v0.5.49 && git push origin apple-v0.5.49
+#
+# Outputs (Actions run page → Artifacts):
+#   - Puca-macOS-dmg    : universal (Intel+Apple Silicon) .dmg, ad-hoc
+#                              signed — first launch needs right-click → Open.
+#   - Puca-macOS-app    : the .app bundle, tar'd to preserve permissions.
+#   - Puca-iOS-unsigned : compile-proof unsigned .ipa. NOT installable on
+#                              a device until re-signed with an Apple Developer
+#                              certificate (TestFlight/sideload comes later).
+name: Apple builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'apple-*'
+
+concurrency:
+  group: apple-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VITE_API_URL: https://chat.example.com
+
+jobs:
+  macos-desktop:
+    name: macOS desktop (.dmg, universal)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Rust (both Apple targets for a universal binary)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23 — bump periodically for new Rust releases
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: frontend/src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      # createUpdaterArtifacts is disabled here because the updater signing
+      # key only lives on the Windows build machine; the macOS auto-update
+      # channel can be wired up later the same way as Windows.
+      - name: Build universal macOS app
+        run: >
+          npm run tauri build -- --target universal-apple-darwin
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        working-directory: frontend
+
+      - name: Package .app (tar preserves exec bits + symlinks)
+        run: tar -czf Puca-macos-universal.app.tar.gz Sovereign.app
+        working-directory: frontend/src-tauri/target/universal-apple-darwin/release/bundle/macos
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Puca-macOS-dmg
+          path: frontend/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Puca-macOS-app
+          path: frontend/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error
+
+  ios-unsigned:
+    name: iOS (unsigned compile-proof)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build web assets + sync iOS project
+        run: |
+          npm run build
+          npx cap sync ios
+        working-directory: frontend
+
+      # cap sync regenerates CapApp-SPM/Package.swift with Capacitor's default
+      # iOS 15.0 floor, but @capgo/capacitor-updater requires 15.5 — so this
+      # must be patched AFTER every sync (the file is CLI-managed; edits to
+      # the committed copy get clobbered).
+      - name: Raise iOS platform floor to 15.5 (Capgo requirement)
+        run: sed -i '' 's/\.iOS(\.v15)/.iOS("15.5")/' ios/App/CapApp-SPM/Package.swift
+        working-directory: frontend
+
+      # Capacitor 8 uses SPM (CapApp-SPM) — xcodebuild resolves the local
+      # package against node_modules, which is why npm ci must run first.
+      - name: Build iOS app (signing disabled)
+        run: >
+          xcodebuild -project App.xcodeproj -scheme App -configuration Release
+          -destination 'generic/platform=iOS' -derivedDataPath build
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
+          build
+        working-directory: frontend/ios/App
+
+      - name: Package unsigned .ipa
+        run: |
+          mkdir Payload
+          cp -R App.app Payload/
+          zip -qry Puca-unsigned.ipa Payload
+        working-directory: frontend/ios/App/build/Build/Products/Release-iphoneos
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Puca-iOS-unsigned
+          path: frontend/ios/App/build/Build/Products/Release-iphoneos/Puca-unsigned.ipa
+          if-no-files-found: error

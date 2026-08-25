@@ -1,0 +1,66 @@
+# Shell scripts run on Linux (the server, deploy tooling) — they MUST stay LF, or a
+# checkout on a CRLF platform corrupts the shebang (`bad interpreter: bash^M`).
+*.sh    text eol=lf
+*.mjs   text eol=lf
+*.bash  text eol=lf
+# cron reads these on Linux; a CRLF checkout makes the command line end in .
+*.cron  text eol=lf
+
+# DO NOT add an eol rule for migrations/*.sql.
+#
+# sqlx checksums migration BYTES at compile time and compares them against the
+# _sqlx_migrations table at startup, so the on-disk encoding is load-bearing
+# FOREVER for every migration already applied in production. Production's
+# recorded checksums were computed from CRLF bytes (verified 2026-07-27:
+# _sqlx_migrations.checksum for version 1 == sha384 of the CRLF file).
+#
+# Adding `migrations/*.sql text eol=lf` here looks like a fix for the
+# local-worktree mismatch, but `git archive` applies gitattributes — so the
+# deploy tarball silently became LF, every checksum changed, and the backend
+# crash-looped on VersionMismatch(1) until rollback. Left unset, the files
+# travel as committed and keep matching prod.
+#
+# If these ever need renormalising, prod's _sqlx_migrations checksums must be
+# rewritten in the same controlled step — it is a data migration, not a
+# whitespace change.
+#
+# PRACTICAL RULE (learned the hard way THREE times, last on 2026-08-03):
+# prod's recorded byte history is MIXED — migrations 1-13 were applied from
+# CRLF bytes, 14+ from LF — so no rule of thumb about platform or line endings
+# is safe. The long-lived main checkout preserves that exact fossil record; a
+# FRESH checkout (clone OR `git worktree add`) re-materialises uniform CRLF
+# via `* text=auto` and mismatches every LF-recorded migration: shipping a
+# tarball from a fresh worktree crash-looped the primary on VersionMismatch(14)
+# until a binary rollback. The tarball must byte-match every host's
+# _sqlx_migrations checksums — dual-ship.sh backend now VERIFIES this against
+# each host's database before building and refuses to ship on any mismatch,
+# so the invariant is a hard gate rather than this comment.
+#
+# Symptom of the same mismatch locally: a dev DB that applied a migration
+# BEFORE git first normalised the file (e.g. a brand-new migration written,
+# run, and only then committed) records the LF checksum and then refuses to
+# start once the file is checked out as CRLF. Fix is dev-only —
+# `DELETE FROM _sqlx_migrations WHERE version = <n>;` and let it re-apply,
+# which is safe because every migration here is written idempotently.
+
+
+# Let git pick line endings normally for everything else.
+*       text=auto
+
+# Applied migrations are FROZEN BYTES, not text. `-text` disables normalisation
+# in both directions: git stores and checks out these files verbatim, so a fresh
+# clone on any platform reproduces production's recorded bytes exactly.
+#
+# This replaces relying on "do not add an eol rule" above, which protected the
+# long-lived checkout but NOT a fresh one — and a fresh clone is now the normal
+# way to get this repo. Measured before adding this: the long-lived checkout
+# matched all 51 recorded checksums; a fresh clone matched 20 and would have
+# crash-looped the backend on VersionMismatch.
+#
+# Content here is equally frozen. A rebrand pass rewrote comments in four
+# applied migrations and a trigger-function name in a fifth, which changes their
+# sha384 and blocks startup just as surely as a line ending does. Applied
+# migrations are an append-only ledger: to change one you rewrite production's
+# _sqlx_migrations rows in the same controlled step, which is a data migration,
+# not a rename. That is why "Sovereign" still appears in some of these files.
+migrations/*.sql -text

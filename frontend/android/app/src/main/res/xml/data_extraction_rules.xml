@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+ twin of backup_rules.xml — see the rationale there. Excluded from
+     BOTH cloud backup and device-to-device transfer: "device-local" means
+     THIS device, and a transfer target should re-earn its places (the JS
+     source of truth doesn't transfer either, so a copied fence store would
+     just be an orphan the user can't see or edit). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="sovereign_geofences.xml" />
+        <!-- The session JWT + the social-graph mirror (mutes/blocks). A restored
+             backup must not resurrect an authenticated session on another device. -->
+        <exclude domain="sharedpref" path="sovereign_push.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="sovereign_geofences.xml" />
+        <!-- The session JWT + the social-graph mirror (mutes/blocks). A restored
+             backup must not resurrect an authenticated session on another device. -->
+        <exclude domain="sharedpref" path="sovereign_push.xml" />
+    </device-transfer>
+</data-extraction-rules>

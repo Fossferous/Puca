@@ -1,0 +1,15 @@
+-- CREATE_CLIPS (1<<26 = 67108864) onto every @everyone role.
+--
+-- UNLIKE migration 046, this is a genuine new grant, not a behaviour-preserving
+-- backfill: nobody could clip before, because the feature did not exist. It is
+-- safe as a default only because servers.clips_enabled defaults FALSE (050) —
+-- the bit does nothing until an owner deliberately turns Clips on, and at that
+-- moment "everyone in this server can clip" is precisely the setting they are
+-- choosing. An owner who wants it narrower clears the bit from @everyone and
+-- grants a role instead. Newly created servers get it through
+-- Permissions::DEFAULT_MEMBER (create_server derives @everyone from it).
+--
+-- Scoped to is_default roles only. Idempotent — OR-ing a set bit is a no-op.
+-- Reversible: UPDATE server_roles SET permissions = permissions & ~67108864
+-- WHERE is_default = true; nobody held this bit before today.
+UPDATE server_roles SET permissions = permissions | 67108864 WHERE is_default = true;

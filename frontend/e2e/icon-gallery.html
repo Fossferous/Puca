@@ -1,0 +1,102 @@
+<!doctype html>
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Puca icon set</title>
+<!-- The whole set, at the sizes it actually ships at, in every theme.
+     Parses Icons.tsx at runtime so it can never go stale — a gallery that
+     drifts from the components is worse than no gallery. See
+     docs/ICON_LANGUAGE.md. Open it while `npm run dev` is running. -->
+<link rel="stylesheet" href="../src/styles/theme.css">
+<link rel="stylesheet" href="../src/components/Icons.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px 24px 64px; background:var(--bg-primary);
+         color:var(--text-normal); font-family:var(--font-primary); }
+  header { position:sticky; top:0; background:var(--bg-primary); padding:8px 0 14px;
+           z-index:5; border-bottom:1px solid var(--border-separator); margin-bottom:18px; }
+  h1 { font-size:17px; margin:0 0 3px; color:var(--header-primary); font-weight:600; }
+  p.sub { margin:0 0 11px; color:var(--text-muted); font-size:12.5px; }
+  .controls { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  button { font:inherit; font-size:12px; padding:5px 11px; border-radius:var(--radius-sm);
+           cursor:pointer; background:var(--bg-quaternary); color:var(--text-normal);
+           border:1px solid var(--border-faint); }
+  button.on { background:var(--brand-primary); color:#fff; border-color:transparent; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:4px; }
+  figure { margin:0; padding:12px 6px 9px; border-radius:var(--radius-md); text-align:center;
+           border:1px solid transparent; }
+  figure:hover { background:var(--bg-modifier-hover); border-color:var(--border-faint); }
+  .sizes { display:flex; align-items:flex-end; justify-content:center; gap:9px; min-height:44px; }
+  figcaption { margin-top:9px; font-size:10.5px; color:var(--text-muted);
+               word-break:break-word; line-height:1.35; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Puca icon set — <span id="count">…</span> icons</h1>
+  <p class="sub">Each at 14 / 16 / 24 / 40&nbsp;px, with the optical stroke that size gets.</p>
+  <div class="controls">
+    <span style="font-size:12px;color:var(--text-muted);margin-right:2px">theme</span>
+    <button class="t on" data-t="dark">dark</button>
+    <button class="t" data-t="light">light</button>
+    <button class="t" data-t="amoled">amoled</button>
+    <button class="t" data-t="pink">pink</button>
+    <button class="t" data-t="purple">purple</button>
+    <button class="t" data-t="green">green</button>
+    <button class="t" data-t="orange">orange</button>
+    <button class="t" data-t="yellow">yellow</button>
+    <span style="width:10px"></span>
+    <button id="hc">high contrast: off</button>
+    <button id="muted">as muted text</button>
+  </div>
+</header>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+// Headless drivers inject __ICON_BODIES because fetch() cannot cross file://.
+const bodies = window.__ICON_BODIES ?? await (async () => {
+    const src = await (await fetch('../src/components/Icons.tsx')).text();
+    const out = {};
+    for (const m of src.matchAll(/makeIcon\('(\w+)',\s*<>([\s\S]*?)<\/>\)/g)) out[m[1]] = m[2].trim();
+    return out;
+})();
+
+// Mirrors strokeFor() in Icons.tsx. Change it there, change it here — a gallery
+// drawing a weight the app never uses would hide exactly what it exists to show.
+const strokeFor = (px) => px <= 16 ? 2 : px >= 40 ? 1.4 : 1.75;
+const svg = (name, px) =>
+    `<svg class="svrn-icon" width="${px}" height="${px}" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="${strokeFor(px)}" stroke-linecap="round"
+      stroke-linejoin="round" aria-hidden="true">${bodies[name]}</svg>`;
+
+const names = Object.keys(bodies);
+document.getElementById('count').textContent = names.length;
+document.getElementById('grid').innerHTML = names.map(n => `
+  <figure>
+    <div class="sizes">${[14, 16, 24, 40].map(px => svg(n, px)).join('')}</div>
+    <figcaption>${n.replace(/Icon$/, '')}</figcaption>
+  </figure>`).join('');
+
+const root = document.documentElement;
+document.querySelectorAll('.t').forEach(b => b.onclick = () => {
+    root.setAttribute('data-theme', b.dataset.t);
+    document.querySelectorAll('.t').forEach(x => x.classList.toggle('on', x === b));
+});
+let hc = false;
+document.getElementById('hc').onclick = e => {
+    hc = !hc;
+    if (hc) root.setAttribute('data-contrast', 'high'); else root.removeAttribute('data-contrast');
+    e.target.textContent = 'high contrast: ' + (hc ? 'on' : 'off');
+    e.target.classList.toggle('on', hc);
+};
+let muted = false;
+document.getElementById('muted').onclick = e => {
+    muted = !muted;
+    document.body.style.color = muted ? 'var(--text-muted)' : 'var(--text-normal)';
+    e.target.classList.toggle('on', muted);
+};
+window.__galleryReady = true;
+</script>
+</body>
+</html>

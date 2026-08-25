@@ -1,0 +1,62 @@
+# CLA check on every pull request, via CLA Assistant Lite
+# (https://github.com/contributor-assistant/github-action).
+#
+# This is the self-hosted, free replacement for the original cla-assistant.io
+# hosted bot, which stopped accepting new projects. It works entirely inside
+# GitHub Actions: no external service, no OAuth app to install.
+#
+# WHAT STILL NEEDS DOING BY HAND (this file alone is not enough):
+#   1. Create a GitHub Personal Access Token with `repo` scope, belonging to
+#      an account that can comment on and label PRs in this repo (the
+#      maintainer's own account is simplest).
+#   2. Add it as a repository secret named PERSONAL_ACCESS_TOKEN:
+#      Settings -> Secrets and variables -> Actions -> New repository secret.
+#   3. That's it — this workflow reads CLA.md at the repo root and posts a
+#      comment on any PR from a contributor who hasn't signed, asking them to
+#      reply with the sentence configured below. Signatures are recorded in
+#      .github/cla-signatures.json on the branch configured below, which the
+#      action creates and commits to automatically.
+#
+# Nobody's GitHub OAuth needs to be granted to a third party for this to
+# work — the PAT above IS the only credential involved, and it stays inside
+# this repository's own secrets.
+
+name: "CLA Assistant Lite"
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant Lite"
+        if: (github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        # Pinned to the commit a version TAG can point anywhere it likes; a
+        # commit SHA cannot. This is not paranoia — this action has write
+        # access to the repo (contents: write) to commit signatures.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          path-to-signatures: '.github/cla-signatures.json'
+          path-to-document: 'https://raw.githubusercontent.com/Fossferous/Puca/main/CLA.md'
+          branch: 'cla-signatures'
+          allowlist: Fossferous
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          custom-notsigned-prcomment: >
+            Thanks for the contribution! Before this can be merged, please
+            confirm you've read and agree to the
+            [Contributor License Agreement](https://github.com/Fossferous/Puca/blob/main/CLA.md)
+            by replying to this comment with exactly:
+
+            > I have read the CLA Document and I hereby sign the CLA

@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Long-press-the-icon shortcuts. MUST sit on the activity that
+                 owns MAIN/LAUNCHER — on the application element or any other
+                 activity the launcher never registers them. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+
+        </activity>
+
+        <!-- The picture-in-picture window for a watched stream: a SECOND
+             activity, in its own task, that borrows the WebView for the
+             duration (PipActivity.java says why MainActivity must not be the
+             one that floats — dismissing a PiP window finishes its activity).
+             configChanges covers everything a PiP resize can throw, so the
+             activity is never recreated mid-float; excludeFromRecents keeps
+             the borrowed-window task out of the switcher. -->
+        <activity
+            android:name=".PipActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBar"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="${applicationId}.pip"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+
+        <!-- The wake doorbell (see SovereignWakeService): receives the
+             server's constant-payload FCM signal and connects the delivery
+             socket. Never posts a notification, never reads a payload — all
+             data flows over the native socket to our own server. -->
+        <service
+            android:name=".SovereignWakeService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Started only while a transfer is live, stopped with the last one.
+             Not exported: nothing outside the app has any business starting it. -->
+        <service
+            android:name=".TransferService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
+        <!-- Keeps the process (and the WebView's WebSocket/WebRTC) alive while
+             a remote-control session is active or the user opted into
+             background notification delivery. specialUse, NOT dataSync: both
+             reasons are open-ended, and dataSync's cumulative six-hour budget
+             on Android 15 is already spent by TransferService. -->
+        <service
+            android:name=".KeepAliveService"
+            android:foregroundServiceType="specialUse|location"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Self-hosted messenger: keeps an active remote-desktop control session and/or the message WebSocket connected while the app is backgrounded, at the user's request. The only external signal is a content-free wake ping; all data flows over this socket to the user's own server." />
+        </service>
+
+        <!-- Home-screen shortcuts (Friends / Tasks / Devices / Settings).
+             Exported because the launcher's APPWIDGET_UPDATE broadcast must
+             reach it; that action is a protected broadcast only the system
+             can send. -->
+        <receiver
+            android:name=".SovereignWidgetProvider"
+            android:label="@string/widget_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/puca_widget_info" />
+        </receiver>
+    </application>
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- "Browse this phone's files from the PC" (My Devices → Files). This is
+         the sideload-appropriate route to non-media files in shared storage
+         (Download, Documents, …) — the READ_MEDIA_* permissions cannot see a
+         PDF in Download at all, and SAF cannot serve the path-based wire
+         protocol. There is NO runtime dialog for this permission: the user
+         grants it on the system "All files access" Settings screen, reached
+         from Settings → Devices in the app, and every remote browse is still
+         gated behind a per-session consent prompt on this phone. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- REQUIRED ON ANDROID 11-12 EVEN THOUGH ALL-FILES ACCESS IS GRANTED.
+         @capacitor/filesystem gates every raw-path call on its own permission
+         check, which on SDK 30-32 asks for READ_EXTERNAL_STORAGE; a runtime
+         permission that is not DECLARED here is auto-denied with no dialog,
+         so every stat/readdir/read would fail on exactly the two versions the
+         feature advertises as its floor. SDK 33+ short-circuits that check,
+         which is why it works there without this line. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Keeping a file transfer running while the app is in the background.
+         Android freezes a cached process, which stalls the transfer; a
+         foreground service is the documented way to stay out of that, and its
+         notification is what tells the user why the app is still working.
+         WAKE_LOCK is not redundant: the service keeps the PROCESS alive but
+         not the CPU, so with the screen off the transfer would stall anyway.
+         POST_NOTIFICATIONS is runtime-requested on Android 13+; without it
+         the service still runs, the notification is simply not shown. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- KeepAliveService (control sessions + opted-in notification delivery);
+         see the service declaration and its subtype property above. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Background delivery is NativeDelivery's socket to the user's OWN
+         server. Data NEVER rides a relay: the first FCM design carried sender
+         names and was removed on principle; what returned (SovereignWakeService)
+         is a constant-payload DOORBELL that reconnects this socket through
+         Doze. With the doorbell configured, this exemption is a comfort rather
+         than a necessity (frames missed while dozing now wake the socket and
+         drain from the server-side queue); without it — de-Googled devices,
+         servers with no FCM — it remains what makes screen-off delivery
+         continuous. The user is asked via the system
+         dialog (SovereignAppPlugin.requestIgnoreBatteryOptimizations);
+         sideloaded, so Play's restriction on this permission does not apply. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Location-based task reminders (Settings → Notifications → "Location
+         reminders", OFF by default). Coordinates NEVER leave the device: the
+         fence set lives in app-private prefs ({taskId, lat, lon, r} — no
+         labels), evaluation is on-device in KeepAliveService, and no network
+         call anywhere touches a coordinate — this app has no Play Services,
+         so not even a fused-location vendor sees a fix. BACKGROUND_LOCATION
+         is what lets the fence fire after the user leaves the app (it is
+         requested as Android requires: foreground first, then a separate
+         "Allow all the time" step). FOREGROUND_SERVICE_LOCATION pairs with
+         the service's location type on 14+, without which fixes stop the
+         moment the app backgrounds. Declared-but-unused costs every user a
+         scary manifest line, which is why the FEATURE is opt-in per device
+         and the permissions are only ever requested from its toggle. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+</manifest>
+

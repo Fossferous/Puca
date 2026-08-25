@@ -1,0 +1,173 @@
+<!doctype html>
+<!--
+  Does the agent's video actually reach a browser?
+
+  This is the plan's S3 success criterion and the last open risk in Phase 6.
+  Everything up to here proved the PIECES: capture produces real pixels, the
+  encoder produces valid H.264 with a genuine IDR, str0m negotiates and answers
+  a browser-shaped offer with H.264 and a candidate. None of that proves a frame
+  survives ICE, DTLS, SRTP and the depacketiser into a decoder.
+
+  The assertion is deliberately on framesDecoded, not on connectionState.
+  "connected" would pass on a peer connection carrying nothing at all, which is
+  exactly the failure this is meant to catch.
+
+  RESULT ON THIS MACHINE (2026-07-28): 6/6 -- framesDecoded=1, 2560x1440,
+  pc=connected, ice=connected. Video from the native agent reaches Chromium.
+
+  Getting there took three real bugs, each of which this harness found and
+  nothing else would have:
+
+    1. ICE never paired. Chromium emits ONE host candidate and it is
+       mDNS-obfuscated (<uuid>.local), which str0m cannot resolve. Run the
+       browser with --disable-features=WebRtcHideLocalIpsWithMdns -- the same
+       flag this repo's mesh-voice e2e already needs. In production, TURN relay
+       candidates carry real addresses, so this is a same-machine test concern.
+
+    2. ICE paired, then DTLS failed with "decryption failed". str0m's wincrypto
+       backend was at fault; the default crypto provider works. That is why the
+       crate no longer pins wincrypto.
+
+    3. ICE and DTLS both fine, connection "connected", and still zero frames:
+       VideoSender::accept_offer never recorded the negotiated mid, so every
+       frame was silently dropped by send_frame. A connection that is healthy in
+       every observable way while showing a black screen -- now covered by a
+       unit test.
+
+  Run it with:
+    cargo build -p puca-agent
+    node bridge.mjs --pipe <name> --token <token>
+    python -m http.server 8791    (from this directory)
+    chrome --disable-features=WebRtcHideLocalIpsWithMdns --headless=new \n           http://127.0.0.1:8791/live-browser.html
+
+  Serve alongside bridge.mjs and open it.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Agent -> browser media check</title>
+    <style>
+        body { font: 14px system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 12px; }
+        #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
+        .pass { color: #4ade80; } .fail { color: #f87171; } .info { color: #93c5fd; }
+        video { width: 480px; background: #000; display: block; margin-top: 8px; border: 1px solid #333; }
+    </style>
+</head>
+<body>
+    <div id="log"></div>
+    <video id="v" autoplay playsinline muted></video>
+    <script type="module">
+        const BRIDGE = 'http://127.0.0.1:8790';
+        const logEl = document.getElementById('log');
+        const results = [];
+        const line = (cls, text) => {
+            const d = document.createElement('div');
+            d.className = cls;
+            d.textContent = text;
+            logEl.appendChild(d);
+        };
+        const check = (name, ok, detail) => {
+            results.push({ name, ok, detail: detail ? String(detail).slice(0, 300) : '' });
+            line(ok ? 'pass' : 'fail', `${ok ? 'PASS' : 'FAIL'}  ${name}${!ok && detail ? '  --  ' + detail : ''}`);
+        };
+        const info = t => line('info', t);
+
+        const agent = async (cmd) => {
+            const r = await fetch(BRIDGE, { method: 'POST', body: JSON.stringify(cmd) });
+            return r.json();
+        };
+
+        window.__mediaCheck = { done: false, results, summary: '' };
+
+        try {
+            const caps = await agent({ cmd: 'capabilities' });
+            check('agent reachable through the bridge', caps.ok === 'capabilities', JSON.stringify(caps));
+            check('agent reports unattended capture', caps.unattended === true, JSON.stringify(caps));
+
+            const pc = new RTCPeerConnection({ iceServers: [] });
+            // recvonly: the browser is the VIEWER. The agent streams a screen and
+            // takes input over a separate sealed channel, never over media.
+            pc.addTransceiver('video', { direction: 'recvonly' });
+
+            const stream = new MediaStream();
+            document.getElementById('v').srcObject = stream;
+            pc.ontrack = e => {
+                stream.addTrack(e.track);
+                info(`ontrack: ${e.track.kind} ${e.track.id}`);
+            };
+            pc.oniceconnectionstatechange = () => info(`ice: ${pc.iceConnectionState}`);
+            pc.onconnectionstatechange = () => info(`pc: ${pc.connectionState}`);
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            // Wait for ICE gathering so the offer carries candidates — the agent
+            // has no signalling channel for trickle in this harness.
+            await new Promise(res => {
+                if (pc.iceGatheringState === 'complete') return res();
+                const t = setTimeout(res, 3000);
+                pc.onicegatheringstatechange = () => {
+                    if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); }
+                };
+            });
+
+            const offerSdp = pc.localDescription.sdp;
+            check('the browser offer advertises H.264', /H264/i.test(offerSdp),
+                'Chromium did not offer H.264');
+
+            const started = await agent({
+                cmd: 'start_stream', session_id: 'live1', monitor: 0,
+                offer_sdp: offerSdp, fps: 15, bitrate: 3000000,
+            });
+            check('the agent answered the offer', started.ok === 'streaming', JSON.stringify(started));
+
+            if (started.ok === 'streaming') {
+                await pc.setRemoteDescription({ type: 'answer', sdp: started.answer_sdp });
+                info('answer applied, waiting for frames...');
+
+                let decoded = 0, width = 0, height = 0;
+                for (let i = 0; i < 40; i++) {
+                    await new Promise(r => setTimeout(r, 500));
+                    const stats = await pc.getStats();
+                    stats.forEach(s => {
+                        if (s.type === 'inbound-rtp' && s.kind === 'video') {
+                            decoded = s.framesDecoded ?? decoded;
+                            width = s.frameWidth ?? width;
+                            height = s.frameHeight ?? height;
+                        }
+                    });
+                    if (decoded > 0) break;
+                }
+
+                info(`framesDecoded=${decoded} size=${width}x${height} pc=${pc.connectionState}`);
+                // THE assertion. connectionState==='connected' would pass on a
+                // connection carrying nothing, which is the failure being hunted.
+                check('the browser DECODED real frames from the agent', decoded > 0,
+                    `framesDecoded=${decoded}, pc=${pc.connectionState}, ice=${pc.iceConnectionState}`);
+                check('the decoded video has real dimensions', width > 0 && height > 0,
+                    `${width}x${height}`);
+            }
+
+            await agent({ cmd: 'stop_stream', session_id: 'live1' }).catch(() => {});
+        } catch (e) {
+            check('harness ran without throwing', false, String(e));
+        }
+
+        const failed = results.filter(r => !r.ok).length;
+        window.__mediaCheck.summary =
+            `${results.length - failed}/${results.length} checks passed`;
+        window.__mediaCheck.done = true;
+        line(failed ? 'fail' : 'pass', `\n${window.__mediaCheck.summary}`);
+
+        // Report back THROUGH THE BRIDGE. Controlling a browser's mDNS flag
+        // means launching it ourselves, and that browser's devtools are not
+        // reachable from here — so the page has to say what happened over a
+        // channel we can already read.
+        try {
+            await fetch(BRIDGE, {
+                method: 'POST',
+                body: JSON.stringify({ cmd: 'report', results, summary: window.__mediaCheck.summary }),
+            });
+        } catch { /* the on-page log still has it */ }
+    </script>
+</body>
+</html>

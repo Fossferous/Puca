@@ -1,0 +1,38 @@
+-- Behaviour-preserving backfill of the everyday member permission bits onto
+-- every existing @everyone role, so those bits can start being ENFORCED
+-- without taking away anything anyone can do today.
+--
+-- Background. Two different "default member" sets had drifted apart:
+--
+--   Permissions::DEFAULT_MEMBER (src/permissions.rs) — the documented default,
+--     includes ATTACH_FILES, ADD_REACTIONS, VIDEO and USE_VOICE_ACTIVITY.
+--   create_server (src/server_handlers.rs) — what is ACTUALLY written to the
+--     @everyone role row: VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY
+--     | CONNECT | SPEAK | CREATE_TASKS | COMPLETE_TASKS, and none of those four.
+--
+-- Nothing enforced the missing bits, so every member could already attach
+-- files, react, use their camera, screen share and talk without push-to-talk —
+-- the bits were simply absent from the grant. That made the divergence
+-- invisible... right up until someone adds the missing enforcement, at which
+-- point every member of every existing server abruptly loses those abilities.
+--
+-- So: grant them first (here), enforce second. 35920 =
+--   ATTACH_FILES(1<<4) | ADD_REACTIONS(1<<6) | VIDEO(1<<10) | STREAM(1<<11)
+--   | USE_VOICE_ACTIVITY(1<<15)
+--
+-- STREAM is included deliberately. It is not in DEFAULT_MEMBER either, but
+-- screen sharing is unrestricted today, so granting it is behaviour-preserving
+-- in exactly the same way; leaving it out would mean enforcing STREAM silently
+-- removes screen share from everyone.
+--
+-- Scoped to is_default (@everyone) roles ONLY: a non-default role is a
+-- deliberate grant an admin authored, and OR-ing extra bits into it would be a
+-- privilege change nobody asked for. Idempotent (OR-ing a set bit is a no-op),
+-- so a re-run changes nothing.
+--
+-- Precedent: migration 033 did exactly this for the task bits
+-- ("Behavior-preserving backfill: grant the new task bits to every existing
+-- role") when CREATE_TASKS/COMPLETE_TASKS/MANAGE_TASKS were introduced.
+UPDATE server_roles
+SET permissions = permissions | 35920
+WHERE is_default = true;

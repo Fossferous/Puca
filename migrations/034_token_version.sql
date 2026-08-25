@@ -1,0 +1,12 @@
+-- Token/session revocation (M1).
+--
+-- A monotonically increasing counter per user. The value is stamped into every
+-- JWT at issuance (the `tv` claim). jwt_auth_middleware (and the WS auth check)
+-- rejects a token whose `tv` differs from the user's current token_version, so
+-- bumping this column instantly evicts every outstanding 24h bearer token for
+-- that account. Bumped on logout, password change, and E2EE recovery reset.
+--
+-- Default 0 matches the serde-default `tv` of pre-migration tokens, so existing
+-- sessions keep working across the deploy (no forced mass re-login) until one of
+-- the revocation events fires.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;

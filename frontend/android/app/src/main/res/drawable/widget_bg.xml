@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Matches the app shell's background (#1a1a2e), slightly translucent so the
+     wallpaper reads through, with the large corner radius launchers expect. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#F21A1A2E" />
+    <corners android:radius="24dp" />
+</shape>

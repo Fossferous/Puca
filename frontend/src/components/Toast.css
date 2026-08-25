@@ -1,0 +1,148 @@
+/* Transient message, portaled to <body>. See Toast.tsx. */
+.app-toast {
+    position: fixed;
+    /* Clear of the composer, which is the control most likely to be in use
+       when a toast appears. Desktop composer is ~88px tall. */
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    /* Above the context menu (10000) and the lightbox (4000): a copy can be
+       triggered from inside either, so a failure must not render underneath
+       the thing that triggered it. */
+    z-index: 10001;
+
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(520px, calc(100vw - 32px));
+
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #1e1f22;
+    border: 1px solid #3f4147;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+    color: #dbdee1;
+    font-size: 0.85rem;
+    line-height: 1.35;
+
+    animation: app-toast-in 140ms ease-out;
+}
+
+@keyframes app-toast-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .app-toast { animation: none; }
+}
+
+/* Mobile stacks TWO fixed bars below the toast, and 88px lands inside them.
+   The nav is 60px (mobile.css --mobile-nav-height) and .chat-main stops above
+   it, so the sticky .message-form (8px padding + 44px textarea + 8px = 60px)
+   occupies 60-120px from the bottom. At 88px the toast covered the upper half
+   of the textarea and swallowed taps meant for it. 128px clears both with a
+   small gap. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .app-toast {
+        bottom: calc(128px + env(safe-area-inset-bottom, 0px));
+    }
+}
+
+.app-toast-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.app-toast-close {
+    flex: none;
+    /* 32px keeps the dismiss target usable with a coarse pointer — the mobile
+       walk holds new controls to this. */
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: #b5bac1;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.app-toast-close:hover {
+    background: #2b2d31;
+    color: #f2f3f5;
+}
+
+/* --- Message shade stack (MessageToasts.tsx) ------------------------------ */
+
+.message-toasts {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 10001;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: min(360px, calc(100vw - 24px));
+}
+
+.message-toast {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #1e1f22;
+    border: 1px solid #3f4147;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    color: #dbdee1;
+    font-size: 0.85rem;
+    line-height: 1.35;
+    cursor: pointer;
+    animation: message-toast-in 140ms ease-out;
+}
+
+.message-toast:hover { border-color: #5865f2; }
+
+@keyframes message-toast-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .message-toast { animation: none; }
+}
+
+.message-toast-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.message-toast-title { font-weight: 600; }
+
+.message-toast-body {
+    color: #b5bac1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+/* On a phone the top edge is the safe place (the bottom is the composer). */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .message-toasts {
+        top: calc(8px + env(safe-area-inset-top, 0px));
+        right: 8px;
+        left: 8px;
+        max-width: none;
+    }
+}

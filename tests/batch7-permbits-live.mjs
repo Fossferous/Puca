@@ -1,0 +1,194 @@
+// Live acceptance for the Batch 7 permission-bit enforcement (2026-08-10 audit).
+//
+// The role editor offered 13 permission checkboxes that NO handler ever read.
+// This covers the ones with a real server-side chokepoint. Each check drives
+// BOTH halves: a member DENIED the bit is refused, and a member who HOLDS it
+// still succeeds — a gate that refused everyone would pass a one-sided test.
+//
+// Covers:
+//   READ_MESSAGE_HISTORY (1<<2)  get_messages
+//   ADD_REACTIONS        (1<<6)  add_reaction
+//   CONNECT              (1<<8)  WS JoinRoom on a voice room  (+ SFU token path)
+//   VIDEO                (1<<10) WS CameraStart
+//   STREAM               (1<<11) WS ScreenShareStart   (NOT StartStream — that
+//                                is voice presence, see the ws.rs comment)
+//
+// Prereqs: backend on :3000 against a THROWAWAY db (PGDB + PGPORT must match).
+// Usage: PGDB=puca_sec_test PGPORT=5433 node tests/batch7-permbits-live.mjs
+import { execFileSync } from 'node:child_process';
+import { createHmac, randomUUID } from 'node:crypto';
+
+const BASE = process.env.API || 'http://localhost:3000';
+const PGDB = process.env.PGDB || 'puca';
+const PGPORT = process.env.PGPORT || '5432';
+const PSQL = process.env.PSQL || 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
+const JWT_SECRET = 'puca_super_secret_key_change_in_production';
+
+let failures = 0;
+const check = (name, ok, extra = '') => {
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  ' + extra}`);
+    if (!ok) failures++;
+};
+const psql = (sql) => execFileSync(PSQL,
+    ['-U', 'postgres', '-h', 'localhost', '-p', PGPORT, '-d', PGDB, '-q', '-t', '-A', '-c', sql],
+    { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
+const psql1 = (sql) => psql(sql).split(/\r?\n/).filter(Boolean)[0] ?? '';
+
+const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+const mintJwt = (sub, username) => {
+    const head = b64u({ alg: 'HS256', typ: 'JWT' });
+    const body = b64u({ sub, username, tv: 0, exp: Math.floor(Date.now() / 1000) + 3600 });
+    const sig = createHmac('sha256', JWT_SECRET).update(`${head}.${body}`).digest('base64url');
+    return `${head}.${body}.${sig}`;
+};
+const api = async (method, path, body, token) => {
+    const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: (body === undefined || body === null || method === 'GET') ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let parsed; try { parsed = JSON.parse(text); } catch { parsed = text; }
+    return { status: res.status, body: parsed };
+};
+
+const P = {
+    VIEW_CHANNEL: 1 << 0, SEND_MESSAGES: 1 << 1, READ_MESSAGE_HISTORY: 1 << 2,
+    ADD_REACTIONS: 1 << 6, CONNECT: 1 << 8, SPEAK: 1 << 9,
+    VIDEO: 1 << 10, STREAM: 1 << 11,
+};
+const ALL_MEMBER = P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_MESSAGE_HISTORY
+    | P.ADD_REACTIONS | P.CONNECT | P.SPEAK | P.VIDEO | P.STREAM;
+
+const RUN = Math.random().toString(36).slice(2, 8);
+const mkUser = (name) => {
+    const u = `b7_${name}_${RUN}`;
+    const id = psql1(`INSERT INTO users (username, salt, verifier, key_version, token_version)
+                      VALUES ('${u}', '\\x00', '\\x00', 3, 0) RETURNING id`);
+    return { id: parseInt(id, 10), username: u, t: mintJwt(parseInt(id, 10), u) };
+};
+
+// One server, an @everyone role granting everything a member needs, and a
+// per-channel overwrite used to DENY one bit at a time to a specific role.
+const owner = mkUser('own');
+const srvId = randomUUID();
+psql(`INSERT INTO servers (id, name, owner_id) VALUES ('${srvId}', 'permbits-${RUN}', ${owner.id})`);
+psql(`INSERT INTO server_members (server_id, user_id) VALUES ('${srvId}', ${owner.id})`);
+const everyoneRole = parseInt(psql1(`INSERT INTO server_roles (server_id, name, color, permissions, position, is_default)
+    VALUES ('${srvId}', '@everyone', '#99AAB5', ${ALL_MEMBER}, 0, true) RETURNING id`), 10);
+const textCh = parseInt(psql1(`INSERT INTO channels (name, type, position, server_id)
+    VALUES ('general', 0, 0, '${srvId}') RETURNING id`), 10);
+const voiceCh = parseInt(psql1(`INSERT INTO channels (name, type, position, server_id)
+    VALUES ('voice', 1, 1, '${srvId}') RETURNING id`), 10);
+
+// "allowed" holds every bit; "denied" gets one bit stripped per test via a
+// role-scoped channel overwrite.
+const allowed = mkUser('allowed');
+const denied = mkUser('denied');
+for (const u of [allowed, denied]) psql(`INSERT INTO server_members (server_id, user_id) VALUES ('${srvId}', ${u.id})`);
+// A dedicated role for the denied user so a deny overwrite hits only them.
+const deniedRole = parseInt(psql1(`INSERT INTO server_roles (server_id, name, color, permissions, position, is_default)
+    VALUES ('${srvId}', 'denied-${RUN}', '#888888', 0, 1, false) RETURNING id`), 10);
+psql(`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ('${srvId}', ${denied.id}, ${deniedRole})`);
+
+const denyBit = (channelId, bit) =>
+    psql(`INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny)
+          VALUES (${channelId}, ${deniedRole}, 0, ${bit})
+          ON CONFLICT (channel_id, role_id) DO UPDATE SET deny = ${bit}, allow = 0`);
+const clearDeny = (channelId) =>
+    psql(`DELETE FROM channel_permission_overwrites WHERE channel_id = ${channelId} AND role_id = ${deniedRole}`);
+
+const wsJoin = (user, roomId, extraMsg) => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:3000/ws?token=${user.t}`);
+    let err = null, joined = false;
+    const done = () => { try { ws.close(); } catch { } resolve({ joined, err }); };
+    ws.addEventListener('message', (ev) => {
+        let m; try { m = JSON.parse(ev.data.toString()); } catch { return; }
+        if (m.type === 'Error') err = m.payload?.message ?? 'error';
+        if (m.type === 'RoomJoined' || m.type === 'UserJoined' || m.type === 'StreamStarted') joined = true;
+    });
+    ws.addEventListener('open', () => {
+        ws.send(JSON.stringify({ type: 'JoinRoom', payload: { room_id: roomId } }));
+        if (extraMsg) setTimeout(() => ws.send(JSON.stringify(extraMsg)), 400);
+        setTimeout(done, 1200);
+    });
+    ws.addEventListener('error', () => { err = 'socket error'; done(); });
+});
+
+console.log(`\n=== READ_MESSAGE_HISTORY (1<<2) — get_messages ===`);
+{
+    const msgId = randomUUID();
+    psql(`INSERT INTO messages (id, channel_id, user_id, content) VALUES ('${msgId}', ${textCh}, ${owner.id}, 'history-${RUN}')`);
+    const ok = await api('GET', `/channels/${textCh}/messages?limit=10`, null, allowed.t);
+    check('member WITH history can read messages', ok.status === 200 && Array.isArray(ok.body) && ok.body.length > 0,
+        `status=${ok.status} len=${Array.isArray(ok.body) ? ok.body.length : 'n/a'}`);
+
+    denyBit(textCh, P.READ_MESSAGE_HISTORY);
+    const no = await api('GET', `/channels/${textCh}/messages?limit=10`, null, denied.t);
+    check('member DENIED history is refused', no.status === 403, `status=${no.status}`);
+    check('refusal returns no message content', !(Array.isArray(no.body) && no.body.length > 0), JSON.stringify(no.body).slice(0, 80));
+    clearDeny(textCh);
+}
+
+console.log(`\n=== ADD_REACTIONS (1<<6) — add_reaction ===`);
+{
+    const msgId = randomUUID();
+    psql(`INSERT INTO messages (id, channel_id, user_id, content) VALUES ('${msgId}', ${textCh}, ${owner.id}, 'react-${RUN}')`);
+    const ok = await api('POST', `/messages/${msgId}/reactions`, { emoji: '👍' }, allowed.t);
+    check('member WITH add-reactions can react', ok.status < 300, `status=${ok.status}`);
+
+    denyBit(textCh, P.ADD_REACTIONS);
+    const no = await api('POST', `/messages/${msgId}/reactions`, { emoji: '🎉' }, denied.t);
+    check('member DENIED add-reactions is refused', no.status === 403, `status=${no.status}`);
+    const wrote = psql1(`SELECT count(*) FROM message_reactions WHERE message_id='${msgId}' AND user_id=${denied.id}`);
+    check('no reaction row written for the denied member', wrote === '0', `rows=${wrote}`);
+    clearDeny(textCh);
+}
+
+console.log(`\n=== CONNECT (1<<8) — voice JoinRoom + SFU token ===`);
+{
+    const room = `voice_${voiceCh}`;
+    const ok = await wsJoin(allowed, room);
+    check('member WITH connect joins the voice room', ok.joined && !ok.err, `err=${ok.err}`);
+
+    denyBit(voiceCh, P.CONNECT);
+    const no = await wsJoin(denied, room);
+    check('member DENIED connect cannot join voice', !no.joined, `joined=${no.joined} err=${no.err}`);
+
+    // SFU tier must enforce the same bit (both halves of the pair).
+    psql(`UPDATE channels SET sfu_mode = true WHERE id = ${voiceCh}`);
+    const tokNo = await api('GET', `/channels/${voiceCh}/sfu-token`, null, denied.t);
+    check('SFU token refused without connect', tokNo.status === 404 || tokNo.status === 403, `status=${tokNo.status}`);
+    clearDeny(voiceCh);
+    const tokOk = await api('GET', `/channels/${voiceCh}/sfu-token`, null, allowed.t);
+    check('SFU token still issued with connect', tokOk.status < 300 || tokOk.status === 503,
+        `status=${tokOk.status} body=${JSON.stringify(tokOk.body).slice(0, 80)}`);
+    psql(`UPDATE channels SET sfu_mode = false WHERE id = ${voiceCh}`);
+}
+
+console.log(`\n=== VIDEO (1<<10) — CameraStart ===`);
+{
+    const room = `voice_${voiceCh}`;
+    denyBit(voiceCh, P.VIDEO);
+    const no = await wsJoin(denied, room, { type: 'CameraStart', payload: { room_id: room } });
+    check('member DENIED video cannot start camera', no.err !== null, `err=${no.err}`);
+    check('but is still allowed into the voice room (only VIDEO was denied)', no.joined, `joined=${no.joined}`);
+    clearDeny(voiceCh);
+    const ok = await wsJoin(allowed, room, { type: 'CameraStart', payload: { room_id: room } });
+    check('member WITH video can start camera', ok.err === null, `err=${ok.err}`);
+}
+
+console.log(`\n=== STREAM (1<<11) — ScreenShareStart ===`);
+{
+    const room = `voice_${voiceCh}`;
+    denyBit(voiceCh, P.STREAM);
+    const no = await wsJoin(denied, room, { type: 'ScreenShareStart', payload: { room_id: room, stream_id: null } });
+    check('member DENIED stream cannot screen share', no.err !== null, `err=${no.err}`);
+    check('but voice presence still works (StartStream is NOT gated on STREAM)', no.joined, `joined=${no.joined}`);
+    clearDeny(voiceCh);
+    const ok = await wsJoin(allowed, room, { type: 'ScreenShareStart', payload: { room_id: room, stream_id: null } });
+    check('member WITH stream can screen share', ok.err === null, `err=${ok.err}`);
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);
+process.exit(failures === 0 ? 0 : 1);

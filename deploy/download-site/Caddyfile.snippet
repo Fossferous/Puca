@@ -1,0 +1,11 @@
+# Client installer download site — append to /etc/caddy/Caddyfile.
+# Serves deploy/download-site/index.html + the NSIS installer from
+# /opt/puca/downloads. Caddy auto-obtains the Let's Encrypt cert
+# (needs DNS A download.example.com -> public IP and ports 80/443 forwarded).
+download.example.com {
+	root * /opt/puca/downloads
+	file_server
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header /Puca-Setup.exe Content-Disposition "attachment; filename=\"Puca-Setup.exe\""
+	encode gzip
+}

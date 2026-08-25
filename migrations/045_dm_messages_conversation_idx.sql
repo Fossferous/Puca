@@ -1,0 +1,24 @@
+-- Index dm_messages by conversation.
+--
+-- dm_messages has carried only its PRIMARY KEY on `id` since migration 019, so
+-- every DM open and every conversation-list render was a SEQUENTIAL SCAN of the
+-- whole table. Both hot queries have the same shape:
+--
+--   get_dm_messages   (dm_handlers.rs)  WHERE conversation_id = $1
+--                                       ORDER BY created_at DESC LIMIT $2
+--   list_conversations lateral subquery  WHERE dm.conversation_id = c.id
+--                                       ORDER BY dm.created_at DESC LIMIT 1
+--
+-- so a composite (conversation_id, created_at) turns both into an index range
+-- scan; Postgres reads the btree backwards for the DESC order, and the LATERAL
+-- LIMIT 1 becomes a single index lookup instead of a scan per conversation.
+--
+-- NOT CONCURRENTLY: migrations run inside the startup transaction, where
+-- CREATE INDEX CONCURRENTLY is not allowed. A plain CREATE INDEX takes a brief
+-- write lock on dm_messages; at this deployment's table size that is
+-- milliseconds, and it happens during startup before the listener is up.
+--
+-- IF NOT EXISTS so a re-run (or a database that already had it hand-created)
+-- is a no-op rather than a boot-aborting error.
+CREATE INDEX IF NOT EXISTS idx_dm_messages_conversation
+    ON dm_messages (conversation_id, created_at);

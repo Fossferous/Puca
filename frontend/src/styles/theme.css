@@ -1,0 +1,415 @@
+/*
+ * Puca Design System
+ * Centralized CSS custom properties for consistent theming
+ */
+
+:root {
+    /* ==================== Familiar Dark Chat-App Theme Colors ==================== */
+
+    /* 
+     * TWO-TONE DARK Theme:
+     * DARK (server rail + channel list):  #0d0e10 (near black)
+     * MEDIUM (chat + member list):        #18191c
+     * Input elements:                     #232428
+     * Primary text:                       #DBDEE1
+     * Metadata text:                      #949BA4
+     */
+
+    /* Background layers - TWO distinct shades */
+    --bg-primary: #18191c;
+    /* Main chat view + member list */
+    --bg-secondary: #0d0e10;
+    /* Channel sidebar (same as server rail) */
+    --bg-tertiary: #0d0e10;
+    /* Server rail (same as channel list) */
+    --bg-quaternary: #232428;
+    /* Input elements, text boxes */
+
+    /* Floating/elevated surfaces */
+    --bg-floating: #0d0e10;
+    /* Popouts, modals */
+    --bg-nested: #0a0b0c;
+    /* Nested content areas */
+    --bg-hover: #1e1f22;
+    /* Hover states */
+
+    /* Element separator line */
+    --border-separator: #2a2b2f;
+
+    /* Background modifiers */
+    --bg-modifier-hover: rgba(79, 84, 92, 0.4);
+    --bg-modifier-active: rgba(79, 84, 92, 0.6);
+    --bg-modifier-selected: rgba(79, 84, 92, 0.6);
+    --bg-modifier-accent: rgba(79, 84, 92, 0.48);
+    --bg-overlay: rgba(0, 0, 0, 0.85);
+
+    /* Text colors - matching a familiar dark chat-app palette */
+    --text-normal: #dbdee1;
+    /* Primary text */
+    --text-muted: #949ba4;
+    /* Secondary text, timestamps */
+    --text-faint: #6d6f78;
+    /* Disabled, placeholder */
+    --text-link: #00a8fc;
+    /* Links */
+    --text-positive: #23a55a;
+    /* Success messages */
+    --text-warning: #f0b232;
+    /* Warning text */
+    --text-danger: #f23f43;
+    /* Error text */
+
+    /* Header text */
+    --header-primary: #f2f3f5;
+    /* White headers */
+    --header-secondary: #b5bac1;
+    /* Muted headers */
+
+    /* Brand colors - a blurple/indigo accent */
+    --brand-primary: #5865f2;
+    --brand-hover: #4752c4;
+    --brand-active: #3c45a5;
+
+    /* Status colors */
+    --status-online: #23a55a;
+    /* Green online dot */
+    --status-idle: #f0b232;
+    /* Yellow/orange idle */
+    --status-dnd: #f23f43;
+    /* Red DND */
+    --status-offline: #80848e;
+    /* Gray offline */
+    --status-streaming: #593695;
+    /* Purple streaming */
+
+    /* Semantic colors */
+    --color-success: #23a55a;
+    --color-success-bg: rgba(35, 165, 90, 0.1);
+    --color-warning: #f0b232;
+    --color-warning-bg: rgba(240, 178, 50, 0.1);
+    --color-danger: #f23f43;
+    --color-danger-bg: rgba(242, 63, 67, 0.1);
+    --color-info: #00a8fc;
+    --color-info-bg: rgba(0, 168, 252, 0.1);
+
+    /* Accent colors for avatars/roles */
+    --accent-purple: #5865f2;
+    /* Blurple */
+    --accent-pink: #eb459e;
+    /* Pink/Fuchsia */
+    --accent-green: #57f287;
+    /* Green */
+    --accent-yellow: #fee75c;
+    /* Yellow */
+    --accent-red: #ed4245;
+    /* Red */
+    --accent-orange: #f47b67;
+    /* Orange-ish */
+    --accent-lavender: #a78bfa;
+    /* Soft partner to --brand-primary in the composer/profile gradients.
+       Referenced by 14 gradient rules that silently rendered TRANSPARENT
+       for as long as this variable went undefined (an invalid var() kills
+       the whole background declaration) — the invisible Send button was
+       this line missing. */
+
+    /* Border/divider colors */
+    --border-subtle: rgba(79, 84, 92, 0.48);
+    --border-faint: rgba(79, 84, 92, 0.24);
+    --channeltextarea-background: #383a40;
+    /* Message input bg */
+
+    /* ==================== Typography ==================== */
+
+    --font-primary: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    --font-code: 'Consolas', 'Monaco', 'Andale Mono', monospace;
+
+    --font-size-xs: 0.7rem;
+    /* 11.2px */
+    --font-size-sm: 0.8rem;
+    /* 12.8px */
+    --font-size-md: 0.9rem;
+    /* 14.4px */
+    --font-size-base: 1rem;
+    /* 16px */
+    --font-size-lg: 1.125rem;
+    /* 18px */
+    --font-size-xl: 1.25rem;
+    /* 20px */
+    --font-size-2xl: 1.5rem;
+    /* 24px */
+
+    --font-weight-normal: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+    --font-weight-bold: 700;
+
+    --line-height-tight: 1.25;
+    --line-height-normal: 1.5;
+    --line-height-relaxed: 1.75;
+
+    /* ==================== Spacing ==================== */
+
+    --spacing-xs: 4px;
+    --spacing-sm: 8px;
+    --spacing-md: 12px;
+    --spacing-lg: 16px;
+    --spacing-xl: 20px;
+    --spacing-2xl: 24px;
+    --spacing-3xl: 32px;
+    --spacing-4xl: 40px;
+
+    /* ==================== Border Radius ==================== */
+
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+    --radius-full: 9999px;
+
+    /* ==================== Shadows ==================== */
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.24);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --shadow-xl: 0 8px 40px rgba(0, 0, 0, 0.5);
+
+    /* ==================== Transitions ==================== */
+
+    --transition-fast: 0.1s ease;
+    --transition-normal: 0.15s ease;
+    --transition-medium: 0.25s ease;
+    --transition-slow: 0.3s ease;
+
+    /* ==================== Z-Index Scale ==================== */
+
+    --z-dropdown: 100;
+    --z-sticky: 200;
+    --z-modal: 1000;
+    --z-popover: 1100;
+    --z-tooltip: 1200;
+    --z-toast: 1300;
+
+    /* ==================== Component Tokens ==================== */
+
+    /* Buttons */
+    --btn-padding-x: 16px;
+    --btn-padding-y: 8px;
+    --btn-radius: var(--radius-sm);
+
+    /* Inputs */
+    --input-bg: var(--bg-primary);
+    --input-border: var(--border-faint);
+    --input-focus: var(--brand-primary);
+    --input-radius: var(--radius-sm);
+    --input-padding: 10px;
+
+    /* Modal */
+    --modal-bg: var(--bg-tertiary);
+    --modal-radius: var(--radius-lg);
+    --modal-shadow: var(--shadow-xl);
+    --modal-width-sm: 400px;
+    --modal-width-md: 480px;
+    --modal-width-lg: 600px;
+    --modal-width-xl: 900px;
+
+    /* Sidebar */
+    --sidebar-width: 240px;
+    --sidebar-bg: var(--bg-secondary);
+
+    /* Avatar */
+    --avatar-sm: 24px;
+    --avatar-md: 32px;
+    --avatar-lg: 40px;
+    --avatar-xl: 80px;
+}
+
+/* ==================== Light Theme ==================== */
+[data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f2f3f5;
+    --bg-tertiary: #e3e5e8;
+    --bg-quaternary: #d4d7dc;
+
+    --bg-modifier-hover: rgba(116, 127, 141, 0.16);
+    --bg-modifier-active: rgba(116, 127, 141, 0.24);
+    --bg-modifier-selected: rgba(116, 127, 141, 0.24);
+    --bg-overlay: rgba(0, 0, 0, 0.7);
+
+    --text-normal: #313338;
+    --text-muted: #5c5e66;
+    --text-faint: #80848e;
+
+    --header-primary: #060607;
+    --header-secondary: #4e5058;
+
+    --border-subtle: rgba(0, 0, 0, 0.08);
+    --border-faint: rgba(0, 0, 0, 0.12);
+
+    --input-bg: #e3e5e8;
+}
+
+/* ==================== AMOLED Theme ==================== */
+[data-theme="amoled"] {
+    --bg-primary: #000000;
+    --bg-secondary: #0a0a0a;
+    --bg-tertiary: #111111;
+    --bg-quaternary: #1a1a1a;
+
+    --bg-modifier-hover: rgba(255, 255, 255, 0.08);
+    --bg-modifier-active: rgba(255, 255, 255, 0.12);
+    --bg-modifier-selected: rgba(255, 255, 255, 0.12);
+
+    --input-bg: #0a0a0a;
+}
+
+/* ==================== Colour Themes ==================== */
+/*
+ * Tinted-dark themes: the grey/black layers are re-derived from a single
+ * per-theme hue so every surface stays colour-coordinated, while the
+ * LIGHTNESS relationships of the dark theme (and therefore its text
+ * contrast) are preserved exactly. Each theme block below only picks the
+ * hue, a base saturation, and a brand triplet; the shared scaffold does
+ * the rest. Text colours are inherited from :root — near-white on these
+ * backgrounds keeps the same contrast as the stock dark theme.
+ */
+[data-theme="pink"],
+[data-theme="purple"],
+[data-theme="green"],
+[data-theme="orange"],
+[data-theme="yellow"] {
+    /* Background layers — same lightness ladder as dark, tinted */
+    --bg-primary: hsl(var(--theme-hue) var(--theme-sat) 11%);
+    --bg-secondary: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.2) 7%);
+    --bg-tertiary: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.2) 7%);
+    --bg-quaternary: hsl(var(--theme-hue) calc(var(--theme-sat) * 0.75) 16%);
+    --bg-floating: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.2) 7%);
+    --bg-nested: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.2) 5%);
+    --bg-hover: hsl(var(--theme-hue) calc(var(--theme-sat) * 0.75) 13%);
+
+    --border-separator: hsl(var(--theme-hue) calc(var(--theme-sat) * 0.6) 19%);
+    --channeltextarea-background: hsl(var(--theme-hue) calc(var(--theme-sat) * 0.55) 22%);
+
+    /* Hover/active washes — tinted equivalents of the grey rgba modifiers */
+    --bg-modifier-hover: hsl(var(--theme-hue) 30% 55% / 0.20);
+    --bg-modifier-active: hsl(var(--theme-hue) 30% 55% / 0.30);
+    --bg-modifier-selected: hsl(var(--theme-hue) 30% 55% / 0.30);
+    --bg-modifier-accent: hsl(var(--theme-hue) 30% 55% / 0.24);
+
+    --border-subtle: hsl(var(--theme-hue) 25% 55% / 0.28);
+    --border-faint: hsl(var(--theme-hue) 25% 55% / 0.14);
+
+    --input-bg: hsl(var(--theme-hue) var(--theme-sat) 11%);
+
+    /* Login splash — re-tint its gradient + accents (Login.css defaults to
+       the stock navy/cyan look when these are unset). */
+    --login-grad-1: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.1) 9%);
+    --login-grad-2: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.3) 13%);
+    --login-grad-3: hsl(var(--theme-hue) calc(var(--theme-sat) * 1.6) 20%);
+    --login-accent: var(--brand-primary);
+    --login-accent-2: var(--brand-hover);
+
+    /* Keep the composer/profile gradients on-hue: the :root lavender next to
+       a green or orange brand would clash, so re-derive it as a light tint of
+       the theme's own hue. */
+    --accent-lavender: hsl(var(--theme-hue) 60% 72%);
+}
+
+[data-theme="pink"] {
+    --theme-hue: 330;
+    --theme-sat: 26%;
+    --brand-primary: #d63384;
+    --brand-hover: #bf2d76;
+    --brand-active: #a62867;
+}
+
+[data-theme="purple"] {
+    --theme-hue: 265;
+    --theme-sat: 30%;
+    --brand-primary: #8b5cf6;
+    --brand-hover: #7a4ce0;
+    --brand-active: #6a41c4;
+}
+
+[data-theme="green"] {
+    --theme-hue: 150;
+    --theme-sat: 24%;
+    --brand-primary: #23a55a;
+    --brand-hover: #1f8f4e;
+    --brand-active: #1a7a43;
+}
+
+[data-theme="orange"] {
+    --theme-hue: 25;
+    --theme-sat: 26%;
+    --brand-primary: #e8590c;
+    --brand-hover: #cf4f0b;
+    --brand-active: #b4450a;
+}
+
+/* Yellow runs LOWER saturation than the others: high-sat yellow darks go
+   olive/brown, and the brand is a gold (not pure yellow) so white button
+   text keeps roughly the same contrast ratio as blurple-on-white. */
+[data-theme="yellow"] {
+    --theme-hue: 42;
+    --theme-sat: 20%;
+    --brand-primary: #c28e0e;
+    --brand-hover: #aa7c0c;
+    --brand-active: #926b0b;
+}
+
+/* ==================== High Contrast (Accessibility) ==================== */
+/* Boosts text and border contrast ON TOP of whichever theme is active —
+   the lightness ladder of the surfaces stays, text stops being grey. */
+[data-contrast="high"] {
+    --text-normal: #ffffff;
+    --text-muted: #d7dbe2;
+    --text-faint: #b9bdc9;
+    --header-secondary: #e2e5ea;
+    --border-separator: #6c6f78;
+    --border-subtle: rgba(255, 255, 255, 0.45);
+    --border-faint: rgba(255, 255, 255, 0.25);
+}
+
+[data-theme="light"][data-contrast="high"] {
+    --text-normal: #000000;
+    --text-muted: #26282d;
+    --text-faint: #43464e;
+    --header-secondary: #1a1c20;
+    --border-separator: #8a8d95;
+    --border-subtle: rgba(0, 0, 0, 0.45);
+    --border-faint: rgba(0, 0, 0, 0.25);
+}
+
+/* ==================== Utility Classes ==================== */
+
+/* Transitions */
+.transition-fast {
+    transition: all var(--transition-fast);
+}
+
+.transition-normal {
+    transition: all var(--transition-normal);
+}
+
+.transition-medium {
+    transition: all var(--transition-medium);
+}
+
+/* Focus visible */
+.focus-ring:focus-visible {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 2px;
+}
+
+/* Screen reader only */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+}

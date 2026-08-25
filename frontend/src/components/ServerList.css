@@ -1,0 +1,380 @@
+/* Server List - Left sidebar with server icons */
+.server-list {
+    width: 72px;
+    min-width: 72px;
+    max-width: 72px;
+    background: var(--bg-tertiary);
+    border-right: 1px solid var(--border-separator);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.75rem 0;
+    gap: 0.5rem;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Home/DM Button - familiar chat-app rail styling */
+.server-icon.home-button .server-icon-inner.home {
+    font-size: 1.5rem;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    color: white;
+}
+
+.server-icon.home-button:hover .server-icon-inner.home,
+.server-icon.home-button.active .server-icon-inner.home {
+    border-radius: 16px;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    color: white;
+}
+
+/* Separator between Home and Servers */
+.server-separator {
+    width: 32px;
+    height: 2px;
+    background: var(--bg-tertiary);
+    border-radius: 1px;
+    margin: 4px 0;
+}
+
+.server-icons {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.server-icon {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.server-icon-inner {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--bg-tertiary), var(--bg-quaternary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--text-normal);
+    transition: all 0.15s ease;
+    overflow: hidden;
+}
+
+.server-icon-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.server-icon:hover .server-icon-inner,
+.server-icon.active .server-icon-inner {
+    border-radius: 16px;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    color: var(--bg-primary);
+}
+
+/* Active server indicator (white bar on left) */
+.server-indicator {
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 32px;
+    background: var(--text-normal);
+    border-radius: 0 4px 4px 0;
+}
+
+/* Unread bubble on a server icon (bottom-right, familiar chat-app style). */
+.server-unread-bubble {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: #ed4245;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+    /* Ring so it reads over any icon colour. */
+    box-shadow: 0 0 0 3px var(--bg-tertiary, #1e1f22);
+    pointer-events: none;
+}
+
+/* Add server button */
+.server-add-wrapper {
+    margin-top: auto;
+    padding-top: 0.5rem;
+    border-top: 2px solid var(--bg-tertiary);
+    position: relative;
+}
+
+.server-icon.add-server .server-icon-inner.add {
+    font-size: 1.5rem;
+    color: var(--color-success);
+    background: rgba(35, 165, 90, 0.1);
+}
+
+.server-icon.add-server:hover .server-icon-inner.add {
+    background: var(--color-success);
+    color: white;
+}
+
+/* Devices — same spacing as its rail siblings. Added later than notes-self and
+   discover-server (both of which carry this margin), and the wrapper is a plain
+   block with no flex gap, so without this the Devices and Notes icons touched. */
+.server-icon.devices-button {
+    margin-bottom: 0.5rem;
+}
+
+/* Notes to self — global personal space, docked with the rail actions */
+.server-icon.notes-self {
+    margin-bottom: 0.5rem;
+}
+
+.server-icon.notes-self .server-icon-inner.notes {
+    font-size: 1.3rem;
+    background: rgba(249, 226, 175, 0.1);
+}
+
+.server-icon.notes-self:hover .server-icon-inner.notes,
+.server-icon.notes-self.active .server-icon-inner.notes {
+    background: rgba(249, 226, 175, 0.85);
+}
+
+/* Discover/Join server button */
+.server-icon.discover-server {
+    margin-bottom: 0.5rem;
+}
+
+.server-icon.discover-server .server-icon-inner.discover {
+    font-size: 1.3rem;
+    color: var(--brand-primary);
+    background: rgba(137, 180, 250, 0.1);
+}
+
+.server-icon.discover-server:hover .server-icon-inner.discover {
+    background: var(--brand-primary);
+    color: var(--bg-primary);
+}
+
+/* Add server dropdown menu */
+.server-add-menu {
+    position: absolute;
+    left: 60px;
+    bottom: 0;
+    width: 180px;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    z-index: 100;
+}
+
+.add-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    border: none;
+    background: transparent;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.15s;
+}
+
+.add-menu-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.add-menu-icon {
+    font-size: 1.1rem;
+}
+
+/* Server Context Menu */
+.server-context-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 200px;
+    background: #111214;
+    border-radius: 8px;
+    padding: 6px 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.1s ease;
+    color: var(--text-normal, #dcddde);
+    font-size: 14px;
+    position: relative;
+}
+
+.context-menu-item:hover {
+    background: rgba(88, 101, 242, 0.3);
+}
+
+.context-menu-item.danger {
+    color: #ed4245;
+}
+
+.context-menu-item.danger:hover {
+    background: rgba(237, 66, 69, 0.2);
+}
+
+.context-menu-separator {
+    height: 1px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 4px 0;
+}
+
+.menu-icon {
+    font-size: 16px;
+    width: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.menu-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.menu-subtitle {
+    font-size: 11px;
+    color: var(--text-muted, #72767d);
+}
+
+.submenu-arrow {
+    margin-left: auto;
+    color: var(--text-muted, #72767d);
+    font-size: 16px;
+}
+
+.menu-badge {
+    margin-left: auto;
+    background: var(--bg-tertiary, #2b2d31);
+    color: var(--text-muted, #72767d);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
+.has-toggle {
+    justify-content: flex-start;
+}
+
+.toggle-switch {
+    margin-left: auto;
+    width: 40px;
+    height: 22px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 11px;
+    position: relative;
+}
+
+.toggle-switch::after {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    background: white;
+    border-radius: 50%;
+    top: 2px;
+    left: 2px;
+    transition: transform 0.2s ease;
+}
+
+.toggle-switch.active {
+    background: #5865f2;
+}
+
+.toggle-switch.active::after {
+    transform: translateX(18px);
+}
+
+/* Drag and drop styles */
+.server-icon[draggable="true"] {
+    cursor: grab;
+}
+
+/* Inline expandable submenu (notification levels) */
+.context-submenu {
+    margin-left: 14px;
+    border-left: 2px solid var(--border-separator, #2a2b2f);
+}
+
+.context-submenu .context-menu-item {
+    padding-top: 6px;
+    padding-bottom: 6px;
+    font-size: 0.85rem;
+}
+
+.context-submenu .menu-icon {
+    width: 16px;
+    color: var(--brand-primary, #5865f2);
+}
+
+.server-icon[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+.server-icon.dragging {
+    opacity: 0.5;
+    transform: scale(0.95);
+    cursor: grabbing;
+}
+
+.server-icon.drag-over {
+    transform: scale(1.1);
+    border: 2px dashed var(--brand-primary);
+    border-radius: 16px;
+}
+
+/* Desktop-narrow: shrink the rail so the chat column keeps its room.
+   Fine-pointer only - the mobile panel layout in mobile.css assumes a
+   72px rail for its slide-in offsets. */
+@media (max-width: 700px) and (pointer: fine) {
+    .server-list {
+        width: 56px;
+        min-width: 56px;
+        max-width: 56px;
+    }
+
+    .server-icon,
+    .server-icon-inner {
+        width: 40px;
+        height: 40px;
+    }
+}
+/* Muted server: visibly dimmed in the rail. */
+.server-icon.muted .server-icon-inner {
+    filter: grayscale(0.9);
+    opacity: 0.55;
+}

@@ -1,0 +1,86 @@
+name: tests
+
+# Regression gate so breakages are caught without relying on manual local runs.
+# - frontend: typecheck + build + vitest (offline, always runs)
+# - backend:  cargo build + start server (which applies migrations) + cargo test
+#             + the feature-flows API regression, all against a Postgres service
+on:
+  push:
+    # main is the trunk. It was [feature/e2ee-security-and-chat, main] while all
+    # 309 commits of real work landed on feature/sfu-tier2, so CI never ran on
+    # anything that shipped. Also match work/** so a session's branch is tested
+    # BEFORE it is merged, which is the whole point of parallel branches.
+    branches: [main, 'work/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck + build
+        run: npm run build           # tsc -b && vite build
+      - name: Unit tests (vitest)
+        run: npm test                 # vitest run — offline, ~125 cases
+
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: puca
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      # Only DATABASE_URL is strictly required to boot; the rest have defaults.
+      # TEST_DATABASE_URL points the integration tests at the same CI DB so they
+      # actually run instead of self-skipping.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/puca
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/puca
+      JWT_SECRET: ci-test-secret-not-for-production
+      RUST_LOG: warn
+      # Keep registration open so the API sweep can create its own users.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23 — bump periodically for new Rust releases
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build backend
+        run: cargo build --release
+
+      - name: Start server (applies embedded migrations) + wait for health
+        run: |
+          ./target/release/puca &
+          echo $! > server.pid
+          for i in $(seq 1 40); do
+            if curl -sf -o /dev/null http://127.0.0.1:3000/; then echo "server up after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "server did not become healthy"; exit 1
+
+      - name: Rust unit + integration tests
+        run: cargo test --release -- --test-threads=1
+
+      - name: API regression sweep (feature-flows)
+        working-directory: frontend
+        run: |
+          npm ci
+          API=http://127.0.0.1:3000 node e2e/feature-flows.mjs
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true

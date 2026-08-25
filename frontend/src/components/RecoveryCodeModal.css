@@ -1,0 +1,117 @@
+.recovery-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 12000;
+    padding: 1rem;
+}
+
+.recovery-modal {
+    background: var(--bg-secondary, #2b2d31);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 1.75rem;
+    max-width: 520px;
+    width: 100%;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+.recovery-modal h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.25rem;
+    color: #fff;
+}
+
+.recovery-intro {
+    color: var(--text-secondary, #b5bac1);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1.25rem;
+}
+
+.recovery-intro strong {
+    color: #f0b232;
+}
+
+.recovery-words {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    background: #1e1f22;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 1rem;
+}
+
+.recovery-word {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9rem;
+    color: #e6e8ea;
+}
+
+.recovery-word-num {
+    color: #6d6f78;
+    font-size: 0.7rem;
+    min-width: 16px;
+    text-align: right;
+    user-select: none;
+}
+
+.recovery-copy-btn {
+    background: rgba(255, 255, 255, 0.06);
+    color: #dbdee1;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    margin-bottom: 1.25rem;
+}
+
+.recovery-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.recovery-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary, #b5bac1);
+    font-size: 0.88rem;
+    margin-bottom: 1rem;
+    cursor: pointer;
+}
+
+.recovery-confirm input {
+    width: 16px;
+    height: 16px;
+    accent-color: #5865f2;
+}
+
+.recovery-done-btn {
+    width: 100%;
+    background: #5865f2;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 11px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.recovery-done-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.recovery-done-btn:not(:disabled):hover {
+    background: #4752c4;
+}

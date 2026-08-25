@@ -1,0 +1,137 @@
+apply plugin: 'com.android.application'
+
+// Release signing lives OUTSIDE the repo (storeFile/storePassword/keyAlias/
+// keyPassword). Machines without it (CI, other checkouts) still build debug
+// and — only when explicitly asked — an unsigned release.
+//
+// BOTH names are accepted. An installation predating the rename holds
+// `sovereign-keystore.properties`, and it must keep being found: the release
+// APK has to be signed by the SAME key as the installed app or Android refuses
+// the upgrade outright, and the user's only way out is uninstall + reinstall,
+// which destroys their local data. This is the same reason applicationId below
+// is still com.sovereign.app.
+def keystorePropsFile = [
+    new File(System.getProperty('user.home'), '.android/puca-keystore.properties'),
+    new File(System.getProperty('user.home'), '.android/sovereign-keystore.properties'),
+].find { it.exists() }
+def keystoreProps = new Properties()
+if (keystorePropsFile != null) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+// A release build with no keystore silently produced an UNSIGNED APK. That is
+// not a build that needs a warning, it is a build that must not happen: an
+// unsigned APK cannot upgrade an installed app, and it looks like a successful
+// release right up until every user fails to update. Debug builds and CI are
+// unaffected; pass -PallowUnsignedRelease to opt in deliberately.
+gradle.taskGraph.whenReady { graph ->
+    def buildingRelease = graph.allTasks.any { t ->
+        t.name.toLowerCase().contains('release') &&
+            (t.name.startsWith('assemble') || t.name.startsWith('bundle') || t.name.startsWith('package'))
+    }
+    if (buildingRelease && keystorePropsFile == null && !project.hasProperty('allowUnsignedRelease')) {
+        throw new GradleException(
+            "No release keystore found. Looked for ~/.android/puca-keystore.properties " +
+            "and ~/.android/sovereign-keystore.properties.\n" +
+            "An unsigned release APK cannot upgrade an installed app. Provide the " +
+            "keystore, or pass -PallowUnsignedRelease if you genuinely want an " +
+            "unsigned build.")
+    }
+}
+
+android {
+    namespace = "com.sovereign.app"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.sovereign.app"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 80104
+        versionName "0.8.104"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            if (keystorePropsFile != null) {
+                storeFile new File(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (keystorePropsFile != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    // Data NEVER rides Firebase — the first FCM design carried sender names
+    // and conversation ids and was removed on principle. What returned is the
+    // DOORBELL ONLY: firebase-messaging receives a constant-payload wake
+    // signal (SovereignWakeService) that connects NativeDelivery's OkHttp
+    // socket to the user's OWN server, which carries everything. The server
+    // pins the entire wake wire surface in a test asserting the full body.
+    implementation platform('com.google.firebase:firebase-bom:34.4.0')
+    implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    testImplementation "junit:junit:$junitVersion"
+    // Real org.json on the unit-test classpath: the android.jar stubs throw,
+    // and PushFrames/PushPrefs parse JSON. Overrides the stub for tests only.
+    testImplementation 'org.json:json:20240303'
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+// google-services.json is gitignored (it is per-project Firebase config), so a
+// fresh checkout does not have it and must copy it in before building.
+//
+// Without it the plugin is not applied and the FCM wake doorbell is dead: the
+// app still builds, still installs, still works while it is in the foreground,
+// and simply never wakes through Doze. That is invisible in every test and
+// reads as "push is broken on Android" months later. A debug build may go
+// without; a RELEASE may not, unless you say so.
+def servicesJSON = file('google-services.json')
+if (servicesJSON.exists() && servicesJSON.length() > 0) {
+    apply plugin: 'com.google.gms.google-services'
+} else {
+    gradle.taskGraph.whenReady { graph ->
+        def buildingRelease = graph.allTasks.any { t ->
+            t.name.toLowerCase().contains('release') &&
+                (t.name.startsWith('assemble') || t.name.startsWith('bundle') || t.name.startsWith('package'))
+        }
+        if (buildingRelease && !project.hasProperty('allowNoFirebase')) {
+            throw new GradleException(
+                "frontend/android/app/google-services.json is missing.\n" +
+                "The release APK would ship with no FCM wake doorbell: notifications " +
+                "would silently stop working through Doze. Copy the file in, or pass " +
+                "-PallowNoFirebase if you deliberately want a build without push.")
+        }
+    }
+    logger.lifecycle("google-services.json not found — push disabled for this build")
+}

@@ -1,0 +1,107 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Spike S1 — unattended getDisplayMedia</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; background: #1e1f22; color: #dcddde; }
+  h1 { font-size: 18px; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  button { min-height: 44px; padding: 10px 18px; font-size: 15px; margin-right: 8px; }
+  .k { color: #43b581; } .b { color: #faa61a; } .e { color: #f04747; }
+</style>
+
+<h1>Spike S1 — can this webview capture with no user gesture?</h1>
+<p>
+  Arm B runs automatically 3 seconds after load. Arm A needs a click, and is the
+  <b>control</b>: if A also hangs, the flag is the problem, not activation.
+</p>
+<button id="a">Run arm A (with gesture)</button>
+<button id="stop">Stop heartbeat</button>
+<div id="log"></div>
+
+<script>
+// Every step is reported to the collector AND rendered, so a result survives
+// even if one channel is broken.
+const SINK = 'http://127.0.0.1:8791/log';
+const logEl = document.getElementById('log');
+
+function report(kind, msg, note) {
+  const line = `[${kind}] ${msg}`;
+  if (kind !== 'heartbeat') {
+    const div = document.createElement('div');
+    div.textContent = line;
+    div.className = kind === 'result' ? 'k' : kind === 'error' ? 'e' : 'b';
+    logEl.appendChild(div);
+  }
+  // keepalive so a report still lands if the page is torn down right after.
+  fetch(SINK, {
+    method: 'POST',
+    body: JSON.stringify({ kind, msg, note }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+// THE THING THE LAST ATTEMPT LACKED. If these keep arriving while a capture
+// promise says nothing, the page is alive and the promise is genuinely pending —
+// which is a different diagnosis from "the page wedged".
+let beating = true;
+let beats = 0;
+setInterval(() => {
+  if (!beating) return;
+  beats++;
+  report('heartbeat', `beat ${beats}`, `ua=${navigator.userAgent.slice(-24)}`);
+}, 1000);
+document.getElementById('stop').onclick = () => { beating = false; };
+
+/** Race the capture against a timeout so "pending" is never mistaken for "hung". */
+async function attempt(label, timeoutMs) {
+  report('info', `${label}: calling getDisplayMedia; userActivation.isActive=${navigator.userActivation?.isActive}`);
+  const started = performance.now();
+  let settled = false;
+
+  const capture = navigator.mediaDevices
+    .getDisplayMedia({ video: true })
+    .then((stream) => {
+      settled = true;
+      const track = stream.getVideoTracks()[0];
+      const s = track?.getSettings?.() ?? {};
+      report('result', `${label}: RESOLVED after ${Math.round(performance.now() - started)}ms — ` +
+        `label="${track?.label}" ${s.width}x${s.height} surface=${s.displaySurface}`);
+      stream.getTracks().forEach((t) => t.stop());
+      return 'resolved';
+    })
+    .catch((e) => {
+      settled = true;
+      report('error', `${label}: REJECTED after ${Math.round(performance.now() - started)}ms — ` +
+        `${e.name}: ${e.message}`);
+      return 'rejected';
+    });
+
+  const timeout = new Promise((r) =>
+    setTimeout(() => r(settled ? 'settled' : 'timeout'), timeoutMs));
+
+  const outcome = await Promise.race([capture, timeout]);
+  if (outcome === 'timeout') {
+    // The decisive observation: neither resolved nor rejected, while the page is
+    // demonstrably still running (see heartbeats).
+    report('info', `${label}: STILL PENDING after ${timeoutMs}ms — not resolved, not rejected`);
+  }
+  return outcome;
+}
+
+// Arm B: no gesture at all. This is the question S1 exists to answer.
+setTimeout(async () => {
+  report('info', 'arm B starting (NO gesture, 3s after load)');
+  await attempt('B/no-gesture', 20000);
+  report('info', 'arm B finished');
+}, 3000);
+
+// Arm A: a real click. The control.
+document.getElementById('a').onclick = async () => {
+  report('info', 'arm A starting (WITH gesture)');
+  await attempt('A/gesture', 20000);
+  report('info', 'arm A finished');
+};
+
+report('info', `harness loaded; ua=${navigator.userAgent}`);
+report('info', `mediaDevices=${!!navigator.mediaDevices} getDisplayMedia=${typeof navigator.mediaDevices?.getDisplayMedia}`);
+</script>

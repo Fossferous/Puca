@@ -1,0 +1,11 @@
+# Puca: nightly DB backup + 5-min health check  ->  /etc/cron.d/puca
+#
+# These paths must match where you installed the scripts. They assume a fresh
+# install (/opt/puca). If your deployment lives somewhere else, edit both lines
+# — cron cannot detect it, though the scripts themselves resolve their OWN names
+# and will abort loudly (exit 78, which cron mails to you) rather than quietly
+# back up or monitor nothing. See names.sh.
+#
+# names.sh must sit beside them: the scripts source it from their own directory.
+0 3 * * * root /opt/puca/backup.sh
+*/5 * * * * root /opt/puca/healthcheck.sh

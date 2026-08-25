@@ -1,0 +1,86 @@
+[package]
+name = "puca-service"
+version = "0.1.0"
+edition = "2021"
+description = "Puca unattended-access SYSTEM service — agent lifecycle across session changes, and the token launch that reaches the interactive/secure desktop"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# The library carries the reusable pieces; the binary is the installed service.
+[dependencies]
+# The machine identity: its own device keypair, kept where no other account
+# can read it. Versions match the root Cargo.toml so two implementations of one
+# wire format cannot drift.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = "2"
+sha2 = "0.10"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Launch tokens come from the OS RNG: two agents started in the same millisecond
+# (a fast-user-switch) must not share a secret.
+getrandom = "0.2"
+# The unattended-access record: the machine-scope copy the agent is armed from.
+puca-ua = { path = "../puca-ua" }
+
+# THE SOCKET. Versions and TLS backend are copied EXACTLY from
+# `puca-waker`, which has held this same connection in production since
+# 0.8.69 — two headless processes speaking one protocol should not be running
+# different WebSocket or TLS stacks, because the failures that matter (a
+# handshake a proxy rejects, a certificate chain one accepts and the other does
+# not) would then reproduce on only one of them.
+#
+# `current_thread`: one socket, one timer, one rare datagram.
+tokio = { version = "1", features = ["rt", "macros", "net", "time", "io-util", "sync"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Shares the TLS stack with tokio-tungstenite's native-tls rather than pulling
+# in a second one.
+reqwest = { version = "0.11", default-features = false, features = ["json", "native-tls"] }
+
+[lib]
+name = "puca_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "puca-service"
+path = "src/main.rs"
+
+# Windows VERSIONINFO — see build.rs. This is the binary that registers the
+# LocalSystem service, so its name is what a user sees in services.msc and in
+# every autoruns-style tool, for ever. Host-gated for the same reason as the
+# agent's; build.rs checks the target.
+[target.'cfg(windows)'.build-dependencies]
+tauri-winres = "0.3"
+
+# The supervisor is pure and portable; the launch layer and the service binary
+# are Windows-only. Building on other platforms yields just the state machine,
+# which is exactly what its tests need.
+[target.'cfg(windows)'.dependencies]
+# SCM boilerplate (StartServiceCtrlDispatcher, the control handler, the status
+# state machine, SESSION_CHANGE plumbing) is fiddly and cannot be unit-tested
+# without installing — so it is delegated to the established windows-service
+# crate rather than hand-rolled in raw windows-rs.
+windows-service = "0.7"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security_Authorization",
+    "Win32_System_Environment",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemServices",
+    # SoftwareSASGeneration — the machine policy without which SendSAS is a
+    # silent no-op, and the marker recording whether we were the ones who set
+    # it. See src/sas.rs.
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_LibraryLoader",
+    # GetAdaptersAddresses, for the wake responder's adapter discovery.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }

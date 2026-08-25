@@ -1,0 +1,42 @@
+# systemd unit for the Puca backend.
+#
+# Install:
+#   sudo cp deploy/puca.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now puca
+#
+# Assumes the release binary and .env live in /opt/puca (see deploy/README.md).
+
+[Unit]
+Description=Puca chat backend
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=puca
+Group=puca
+WorkingDirectory=/opt/puca
+# All configuration comes from the env file (DATABASE_URL, JWT_SECRET, APP_ENV=production, ...).
+EnvironmentFile=/opt/puca/.env
+ExecStart=/opt/puca/puca
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the service only needs to write uploads/ and releases/.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/puca/uploads /opt/puca/releases
+
+# Resource ceilings: turn a resource-exhaustion attack (connection/fd/memory
+# flood) into a bounded failure + auto-restart instead of an OOM that takes the
+# whole LXC down. TUNE MemoryMax/MemoryHigh to this container's RAM (~70-80%).
+LimitNOFILE=65536
+TasksMax=512
+MemoryHigh=768M
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

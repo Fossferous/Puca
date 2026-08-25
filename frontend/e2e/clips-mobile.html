@@ -1,0 +1,166 @@
+<!doctype html>
+<!--
+  390x844 coarse-pointer harness for the Clips consent UI (docs/CLIPS.md).
+
+  Mounts, against fixtures and a stubbed network, the three surfaces a PHONE
+  sees: the approval prompt (ClipApprovalPrompt), a posted clip inside a
+  message (ClipAttachment, with and without a consent stamp), and the owner's
+  Server Settings block. jsdom has no box model, so tap-target size, the
+  Decline-nearest-the-thumb order, horizontal overflow and the sticky action
+  bar can only be checked here, at the real width, with the real CSS.
+
+  Serve with the dev server and open /e2e/clips-mobile.html?view=prompt|clip|settings
+  (default: prompt). e2e/clips-mobile-walk.mjs drives it headless and reads
+  `window.__clipsHarness()`.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clips — 390x844 harness</title>
+    <style>
+        html, body { margin: 0; background: #313338; color: #dcddde; font-family: system-ui, sans-serif; }
+        #root { width: 100%; max-width: 100vw; box-sizing: border-box; }
+        /* Mimic a chat bubble column so the attachment is measured against the real constraint
+           (own class name — App.css owns .chat-main and would lay it out as the app column). */
+        .harness-bubble { max-width: 390px; padding: 12px; box-sizing: border-box; }
+        .message-content { font-size: 15px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        const view = new URLSearchParams(location.search).get('view') || 'prompt';
+
+        // A syntactically valid JWT so getToken()/currentUserId() resolve; never sent (fetch is stubbed).
+        const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        localStorage.setItem('auth_token', `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u({ sub: 42, username: 'harness', exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`);
+
+        const PENDING = {
+            proposals: [{
+                clip_id: 'aaaaaaaa-1111-4111-8111-111111111111', proposer: { id: 7, username: 'Annabelle-with-a-long-name' },
+                server_id: 's1', voice_channel_id: 5, voice_channel_name: 'General Voice', target_channel_id: 9, target_channel_name: 'clips',
+                duration_ms: 64_000, ended_ago_ms: 120_000, expires_in_ms: 28 * 60_000, approver_count: 3, approved_count: 0,
+                solo: false, resolved: false, approved: false, my_vote: 'pending',
+                you: { had_camera: true, had_share: true, still_in_call: false },
+            }, {
+                clip_id: 'bbbbbbbb-2222-4222-8222-222222222222', proposer: { id: 8, username: 'bob' },
+                server_id: 's1', voice_channel_id: 5, voice_channel_name: 'General Voice', target_channel_id: 9, target_channel_name: 'clips',
+                duration_ms: 30_000, ended_ago_ms: 5_000, expires_in_ms: 29 * 60_000, approver_count: 2, approved_count: 0,
+                solo: false, resolved: false, approved: false, my_vote: 'pending',
+                you: { had_camera: false, had_share: false, still_in_call: true },
+            }],
+        };
+        const CHANNELS = [
+            { id: 9, name: 'clips', channel_type: 0, server_id: 's1' },
+            { id: 10, name: 'general', channel_type: 0, server_id: 's1' },
+            { id: 5, name: 'General Voice', channel_type: 1, server_id: 's1' },
+        ];
+        const realFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+            const url = typeof input === 'string' ? input : input.url;
+            const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
+            if (url.includes('/clips/pending')) return json(PENDING);
+            if (url.includes('/vote')) {
+                // Record what the prompt actually SENT (the walk asserts Escape ⇒ approve:false).
+                (window.__votes ||= []).push({ url, body: init && init.body ? JSON.parse(init.body) : null });
+                return json({ clip_id: 'x', state: 'declined', approved_count: 0, total: 3 });
+            }
+            if (url.includes('/clips/')) return json(PENDING.proposals[0]);
+            if (url.includes('/channels') && url.includes('/servers/')) return json(CHANNELS);
+            if (url.includes('/invites') || url.includes('/bans') || url.includes('/reports') || url.includes('/audit')) return json([]);
+            if (url.includes('/roles')) return json([]);
+            if (url.includes('/files/')) return new Response('', { status: 404 });
+            return realFetch(input, init);
+        };
+
+        // Bare specifiers: vite rewrites them in this inline module to the SAME
+        // pre-bundled React the components use (a /node_modules/... path would
+        // load a second copy and the hooks would render nothing).
+        const [{ createRoot }, React] = await Promise.all([
+            import('react-dom/client'),
+            import('react'),
+            // The app's global stylesheets (theme tokens, mobile rules) — the
+            // components are measured with the CSS they really ship under.
+            import('/src/index.css'),
+            import('/src/App.css'),
+            import('/src/mobile.css'),
+        ]);
+        const root = createRoot(document.getElementById('root'));
+
+        if (view === 'prompt') {
+            const [{ ClipApprovalPrompt }, proposals] = await Promise.all([
+                import('/src/components/ClipApprovalPrompt.tsx'),
+                import('/src/api/clips/clipProposals.ts'),
+            ]);
+            // The REAL reconciliation path populates the store from the stubbed
+            // /clips/pending; mount after it so the first render sees the state
+            // (in the app the prompt is mounted long before any doorbell).
+            await proposals.refreshPendingClips();
+            root.render(React.createElement(ClipApprovalPrompt));
+        } else if (view === 'clip') {
+            const [{ MessageContent }, { encodeClipRef }] = await Promise.all([
+                import('/src/components/MessageContent.tsx'),
+                import('/src/api/clips/clipRef.ts'),
+            ]);
+            const parts = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333'];
+            const href = encodeClipRef({
+                key: new Uint8Array(32).fill(1), noncePrefix: new Uint8Array(8).fill(2), clipId: '0f5b4b1a-6a1c-4d5e-8f2b-1c3d4e5f6a7b',
+                videoCodec: 'avc1.640029', audioCodec: 'mp4a.40.2', durationMs: 124_000, width: 1920, height: 1080,
+                totalCipherBytes: 184 * 1024 * 1024, parts, partDurMs: [0, 62_000, 62_000],
+            });
+            const consent = { proposal_id: 'p1', approver_count: 3, part_file_ids: parts, solo: false };
+            const solo = { proposal_id: 'p2', approver_count: 0, part_file_ids: parts, solo: true };
+            const bad = { proposal_id: 'p3', approver_count: 2, part_file_ids: [parts[0]], solo: false };
+            const bubble = (label, node) => React.createElement('div', { className: 'harness-bubble' },
+                React.createElement('div', { style: { color: '#b9bbbe', fontSize: 12, marginBottom: 4 } }, label),
+                React.createElement('div', { className: 'message-content' }, node));
+            root.render(React.createElement(React.Fragment, null,
+                bubble('approved (3)', React.createElement(MessageContent, { content: `[Clip 2:04](${href})`, members: [], clipConsent: consent })),
+                bubble('solo', React.createElement(MessageContent, { content: `[Clip 2:04](${href})`, members: [], clipConsent: solo })),
+                bubble('no stamp (forwarded / pasted)', React.createElement(MessageContent, { content: `[Clip 2:04](${href})`, members: [] })),
+                bubble('mismatch (refused)', React.createElement(MessageContent, { content: `[Clip 2:04](${href})`, members: [], clipConsent: bad })),
+                bubble('scrubbed (Copy Text / Quote)', React.createElement(MessageContent, { content: '[Clip 2:04](sovereign-clip:v1)', members: [] })),
+            ));
+        } else if (view === 'settings') {
+            const { ServerSettingsModal } = await import('/src/components/ServerSettingsModal.tsx');
+            root.render(React.createElement(ServerSettingsModal, {
+                isOpen: true, onClose: () => {}, serverId: 's1', serverName: 'Harness Server', isOwner: true,
+                initialIsPublic: false, initialDescription: '', initialIconFileId: null, initialRequireMediaE2ee: false,
+                clipsSupported: true, initialClipsEnabled: true, initialClipMaxSeconds: 120, initialClipChannelId: null,
+            }));
+        }
+
+        window.__clipsHarness = () => {
+            const all = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null || getComputedStyle(b).position === 'fixed' || b.getBoundingClientRect().height > 0);
+            const small = all
+                .map(b => ({ label: (b.textContent || b.getAttribute('aria-label') || '').trim(), h: Math.round(b.getBoundingClientRect().height), w: Math.round(b.getBoundingClientRect().width) }))
+                .filter(b => b.h > 0 && (b.h < 44 || b.w < 44));
+            const rect = (sel) => { const e = document.querySelector(sel); return e ? e.getBoundingClientRect() : null; };
+            const decline = rect('.clip-approval-decline'), approve = rect('.clip-approval-approve');
+            const widest = Math.max(0, ...[...document.querySelectorAll('#root *, .clip-approval *')].map(e => Math.round(e.getBoundingClientRect().right)));
+            return {
+                view,
+                bodyScrollsHorizontally: document.documentElement.scrollWidth > window.innerWidth,
+                widestElement: widest,
+                viewportWidth: window.innerWidth,
+                buttonsUnder44px: small,
+                promptShown: !!document.querySelector('.clip-approval'),
+                queueChip: document.querySelector('.clip-approval-queue')?.textContent ?? null,
+                declineBelowApprove: decline && approve ? decline.top > approve.top : null,
+                declineIsBottomMost: decline ? decline.bottom >= Math.max(...[...document.querySelectorAll('.clip-approval button')].map(b => b.getBoundingClientRect().bottom)) - 1 : null,
+                declineInsideViewport: decline ? decline.bottom <= window.innerHeight && decline.top >= 0 : null,
+                activeIsDecline: document.activeElement?.classList.contains('clip-approval-decline') ?? false,
+                bodyFontPx: (() => { const p = document.querySelector('.clip-approval-body p'); return p ? parseFloat(getComputedStyle(p).fontSize) : null; })(),
+                clipPlates: document.querySelectorAll('.clip-attachment').length,
+                clipBadges: [...document.querySelectorAll('.clip-attachment-badge')].map(b => b.textContent.trim()),
+                clipRefusedPlay: [...document.querySelectorAll('.clip-attachment-play')].filter(b => b.disabled).length,
+                clipLinks: document.querySelectorAll('a[href^="sovereign-clip"]').length,
+                clipDownloadButtons: document.querySelectorAll('.clip-attachment-download').length,
+                clipRefusedDownload: [...document.querySelectorAll('.clip-attachment-download')].filter(b => b.disabled).length,
+                settingsClipsBlock: !!document.querySelector('#clip-max-seconds'),
+            };
+        };
+    </script>
+</body>
+</html>

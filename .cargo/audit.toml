@@ -1,0 +1,14 @@
+# cargo-audit configuration (https://github.com/rustsec/rustsec/tree/main/cargo-audit).
+# Advisories listed here have been explicitly reviewed and accepted with a rationale.
+# Everything else still fails `cargo audit`.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack": timing sidechannel in the `rsa` crate.
+    # Pulled in transitively by `jsonwebtoken`, which supports RSA-signed JWTs.
+    # This service signs and verifies JWTs with HS256 (HMAC-SHA256) ONLY and never
+    # performs any RSA private-key operation, so the vulnerable code path is never
+    # reached. No fixed `rsa` release exists upstream. Re-evaluate immediately if we
+    # ever adopt RS256/RS384/RS512 tokens.
+    "RUSTSEC-2023-0071",
+]

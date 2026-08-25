@@ -1,0 +1,29 @@
+{
+  "note": "Known-answer fixture for the FROZEN e2ee wire format. Generated once from the shipped implementation; NEVER regenerate to make a test pass. See e2eeWireFormat.test.ts.",
+  "seedA_b64": "AQgPFh0kKzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09o=",
+  "seedB_b64": "BRIfLDlGU2BteoeUoa67yNXi7/wJFiMwPUpXZHF+i5g=",
+  "pubA": "x25519:yP7Kgb4ZbN8sreq/E8SQPXYy3OSVWqaLbl2a3vVOJhY=",
+  "pubB": "x25519:wl6LhDeLIQcdYD384/lHsWK25xUkA0TbChjZklmm3iM=",
+  "channelKey_b64": "Cw4RFBcaHSAjJiksLzI1ODs+QURHSk1QU1ZZXF9iZWg=",
+  "dm": {
+    "envelope": {
+      "v": 2,
+      "t": "dm",
+      "ct": "2JwEmUDVp+9NlMMT4k3tZSK0vTEmCBQO2YNlUEa8wSZUSmnh95OrqQwZ1S5wJocJ13UNOgUQ7iw0QBpFUQvF+gnUKAN4Mw=="
+    },
+    "plaintext": "the DM plaintext that must keep decrypting"
+  },
+  "self": {
+    "envelope": {
+      "v": 2,
+      "t": "self",
+      "ct": "wS+OeiOxCsmCV3pCLm5vdxmooFzRr4NC1ICuMjCR+Wam+q+D2F2NF7oFc5znocAtnHSSJz2PcLTkCmyqa3S2k1DDb6Q1RQB7nrM="
+    },
+    "plaintext": "the self-stored note that must keep decrypting"
+  },
+  "wrappedChannelKey": {
+    "recipientId": 42,
+    "wrappedKey": "2BJ/9gaEToshdqPQjxHap34WZVKeAkURrTMqMu59ii4JadxJ3DXdKV0tGWldlXk6QBzSbldqO81WYwXVWQvTFe1N5uNAzAzl",
+    "senderPublicKey": "x25519:yP7Kgb4ZbN8sreq/E8SQPXYy3OSVWqaLbl2a3vVOJhY="
+  }
+}

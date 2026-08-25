@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>StreamStage layout harness</title>
+<!-- The REAL stylesheet, not a copy — this harness exists to check geometry
+     that jsdom cannot compute. -->
+<link rel="stylesheet" href="../src/components/StreamStage.css">
+<style>
+  body { margin: 0; background: #111; color: #ddd; font-family: system-ui, sans-serif; }
+  h2 { font-size: 13px; margin: 12px 8px 4px; color: #9aa; font-weight: 600; }
+  .frame { height: 380px; border: 1px solid #333; margin: 0 8px 12px; }
+  /* Stand in for the real <video> so tiles have visible content. */
+  .stream-video { background: repeating-linear-gradient(45deg, #24406b, #24406b 12px, #1b3153 12px, #1b3153 24px); }
+  .readout { font: 12px/1.5 ui-monospace, monospace; margin: 0 8px 16px; white-space: pre; color: #7fd18b; }
+</style>
+</head>
+<body>
+
+<h2>1 — GRID, 3 streams (.stream-grid.grid-3)</h2>
+<div class="frame"><div class="stream-stage"><div class="stream-grid grid-3" id="g1">
+  <div class="stream-tile"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> alice</span></div><video class="stream-video"></video></div>
+  <div class="stream-tile"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> bob</span></div><video class="stream-video"></video></div>
+  <div class="stream-tile"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> carol</span></div><video class="stream-video"></video></div>
+</div></div></div>
+
+<h2>2 — FOCUS, 3 streams: stage + filmstrip (.focus-mode.has-strip)</h2>
+<div class="frame"><div class="stream-stage"><div class="stream-grid focus-mode has-strip" id="g2">
+  <div class="stream-tile is-thumb"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> alice</span></div><video class="stream-video"></video></div>
+  <div class="stream-tile focused is-stage"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> bob</span></div><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> carol</span></div><video class="stream-video"></video></div>
+</div></div></div>
+
+<h2>3 — FOCUS, single stream: no strip reserved (.focus-mode)</h2>
+<div class="frame"><div class="stream-stage"><div class="stream-grid focus-mode" id="g3">
+  <div class="stream-tile focused is-stage"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> alice</span></div><video class="stream-video"></video></div>
+</div></div></div>
+
+<h2>4 — FOCUS, 8 streams (strip saturation)</h2>
+<div class="frame"><div class="stream-stage"><div class="stream-grid focus-mode has-strip" id="g4">
+  <div class="stream-tile focused is-stage"><div class="stream-tile-header"><span class="streamer-name">stage</span></div><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><video class="stream-video"></video></div>
+</div></div></div>
+
+<h2>5 — FOCUS, 2 watched + 2 "Watch" cards in the strip</h2>
+<div class="frame"><div class="stream-stage"><div class="stream-grid focus-mode has-strip" id="g5">
+  <div class="stream-tile focused is-stage"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> bob</span></div><video class="stream-video"></video></div>
+  <div class="stream-tile is-thumb"><div class="stream-tile-header"><span class="streamer-name"><span class="live-dot"></span> alice</span></div><video class="stream-video"></video></div>
+  <button class="stream-tile watch-card"><span class="live-dot"></span><span class="watch-card-name">dave</span><span class="watch-card-cta">Watch</span></button>
+  <button class="stream-tile watch-card"><span class="live-dot"></span><span class="watch-card-name">erin</span><span class="watch-card-cta">Watch</span></button>
+</div></div></div>
+
+<div class="readout" id="out">measuring…</div>
+
+<script>
+function measure(id, label) {
+  const g = document.getElementById(id);
+  const box = g.getBoundingClientRect();
+  const stage = g.querySelector('.is-stage');
+  const thumbs = [...g.querySelectorAll('.is-thumb')];
+  const tiles = [...g.querySelectorAll('.stream-tile')];
+  const lines = [];
+  lines.push(label + '  container ' + Math.round(box.width) + 'x' + Math.round(box.height));
+  if (stage) {
+    const s = stage.getBoundingClientRect();
+    lines.push('   stage  ' + Math.round(s.width) + 'x' + Math.round(s.height) +
+               '   top=' + Math.round(s.top - box.top));
+  }
+  if (thumbs.length) {
+    const rows = new Set(thumbs.map(t => Math.round(t.getBoundingClientRect().top)));
+    const t0 = thumbs[0].getBoundingClientRect();
+    lines.push('   thumbs ' + thumbs.length + ' @ ' + Math.round(t0.width) + 'x' + Math.round(t0.height) +
+               '   rows=' + rows.size);
+  }
+  // Did anything spill outside the container? (the real failure mode)
+  const overflow = tiles.filter(t => {
+    const r = t.getBoundingClientRect();
+    return r.bottom > box.bottom + 1 || r.right > box.right + 1;
+  }).length;
+  lines.push('   tiles overflowing container: ' + overflow);
+  // Stage must be visually FIRST despite being 2nd in the DOM (order: -1).
+  if (stage && thumbs.length) {
+    const stageTop = stage.getBoundingClientRect().top;
+    const firstThumbTop = Math.min(...thumbs.map(t => t.getBoundingClientRect().top));
+    lines.push('   stage above strip: ' + (stageTop < firstThumbTop));
+  }
+  return lines.join('\n');
+}
+document.getElementById('out').textContent = [
+  measure('g1', '[1] grid-3   '),
+  measure('g2', '[2] focus+3  '),
+  measure('g3', '[3] focus solo'),
+  measure('g4', '[4] focus+8  '),
+  'viewport ' + window.innerWidth + 'x' + window.innerHeight,
+].join('\n');
+</script>
+</body>
+</html>

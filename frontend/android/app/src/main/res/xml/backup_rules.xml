@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Auto Backup rules (API 30 and below; 31+ uses data_extraction_rules.xml).
+     Exclude-only, so everything else keeps the exact pre-existing backup
+     behaviour. The geofence store holds task-place COORDINATES, and the
+     feature's contract is "coordinates never leave the device" — a Google
+     cloud backup is leaving the device. (The webview's localStorage copy is
+     not under any backed-up domain, so this one file is the whole exposure.) -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="sovereign_geofences.xml" />
+        <!-- The session JWT + the social-graph mirror (mutes/blocks). A restored
+             backup must not resurrect an authenticated session on another device. -->
+        <exclude domain="sharedpref" path="sovereign_push.xml" />
+</full-backup-content>

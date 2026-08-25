@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download Puca</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #2a1a4a 0%, #0e0b1a 60%, #07060f 100%);
+    color: #e8e6f0;
+  }
+  .card {
+    width: min(92vw, 480px); text-align: center; padding: 48px 36px;
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px; backdrop-filter: blur(8px);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+  }
+  .logo { font-size: 44px; font-weight: 800; letter-spacing: -0.02em;
+    background: linear-gradient(90deg,#a970ff,#4cc4ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .tag { color: #9a95b4; margin: 6px 0 32px; font-size: 15px; }
+  .downloads { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+  .btn {
+    display: inline-block; text-decoration: none; font-weight: 700; font-size: 17px;
+    color: #fff; padding: 16px 34px; border-radius: 12px; width: 100%; max-width: 300px;
+    background: linear-gradient(90deg,#7b4dff,#4cc4ff);
+    box-shadow: 0 8px 24px rgba(94,74,255,0.4); transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(94,74,255,0.55); }
+  .btn.secondary {
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14);
+    box-shadow: none;
+  }
+  .btn.secondary:hover { background: rgba(255,255,255,0.1); box-shadow: 0 8px 20px rgba(0,0,0,0.35); }
+  .meta { margin-top: 18px; color: #7d7897; font-size: 13px; }
+  .steps { margin-top: 34px; text-align: left; color: #b7b2cf; font-size: 14px; line-height: 1.7; }
+  .steps b { color: #e8e6f0; }
+  code { background: rgba(255,255,255,0.07); padding: 2px 7px; border-radius: 6px; font-size: 13px; }
+  a.link { color: #7fb8ff; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Puca</div>
+    <div class="tag">Self-hosted, end-to-end encrypted chat</div>
+    <div class="downloads">
+      <!-- These two filenames must match INSTALLER_NAME and APK_PREFIX in
+           deploy/ops/hosts.conf: they are what dual-ship.sh uploads. The APK
+           link is checked at ship time and refuses to publish on a mismatch;
+           the installer link is not, so keep it in step by hand. -->
+      <a class="btn" href="/Puca-Setup.exe" download>Download for Windows</a>
+      <a class="btn secondary" href="/mobile/Puca-0.8.104.apk" download>Download for Android (.apk)</a>
+    </div>
+    <div class="meta">v0.8.104 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; iOS via TestFlight</div>
+    <div class="steps">
+      <b>Getting started</b><br>
+      1. Download and run the installer (Windows) or the .apk (Android).<br>
+      2. Open <b>Puca</b>.<br>
+      3. Click <b>Register</b>, enter your invite code, choose a username &amp; password, and you're in.<br>
+      <br>
+      <span style="opacity:.8">Registration is invite-only — ask the server owner for a code.</span><br>
+      <br>
+      The app connects to <a class="link" href="https://chat.example.com">chat.example.com</a>.
+      Windows SmartScreen may warn on first run (unsigned app) &mdash; choose
+      <b>More info &rarr; Run anyway</b>. On Android, allow install from your browser
+      and accept the app's own signature.<br>
+      <br>
+      <span style="opacity:.8">Antivirus may also quarantine the remote-access
+      components (a generic detection such as <b>Trojan:Win32/Bearfoos.B!ml</b>).
+      It's a false positive, but an understandable one: those files capture the
+      screen, inject input and can install a system service &mdash; what every
+      remote-desktop tool does, and what a trojan does too. Unsigned, that's enough
+      for a heuristic to act. Remote access is opt-in; chat and voice work without
+      it.</span>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,97 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = "AGPL-3.0-or-later"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0" # required by tauri::generate_context! macro expansion
+log = "0.4"
+tauri = { version = "2.9.4", features = ["devtools", "tray-icon", "image-png"] }
+tauri-plugin-log = "2"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-notification = "2"
+# In-place auto-update: banner click downloads the signed installer and
+# relaunches (no manual reinstall). Manifest at https://download.example.com/latest.json.
+tauri-plugin-updater = "2"
+# Remember window size/position/maximized across launches (standard desktop-app behavior).
+tauri-plugin-window-state = "2"
+# Start with the OS, so a device can be reachable without someone launching the
+# app first. Writes HKCU\...\Run on Windows (no admin) / ~/.config/autostart.
+tauri-plugin-autostart = "2"
+# ONE process per machine. Without it, autostart plus a user double-click gives
+# two processes, two WebSocket connections and two attestations for one device —
+# and on Windows the second window gets NO WEBVIEW AT ALL, because WebView2 locks
+# its user-data folder. That failure is completely silent: a blank window, an
+# empty title, nothing in any log. It cost most of a debugging session.
+tauri-plugin-single-instance = "2"
+# Opens the release download page in the system browser (open_external command)
+opener = "0.7"
+
+# Verifies a RESUMED transfer: the receiver never saw the bytes written by the
+# earlier attempt, so the only way to know the finished file is the file that was
+# offered is to hash it at rest.
+sha2 = "0.10"
+
+# Input injection, shared with the native host agent (crates/puca-input).
+# A plain PATH dependency, deliberately NOT a Cargo workspace: a workspace moves
+# target/ and would break the container build path documented in CLAUDE.md.
+puca-input = { path = "../../crates/puca-input" }
+
+# Clips auto-arm (clip_capture.rs): the SAME DXGI-duplication capture and MFT
+# H.264 encoder the native remote-desktop agent uses for unattended, no-picker
+# capture — reused here for a LOCAL sink instead of a WebRTC peer.
+puca-capture = { path = "../../crates/puca-capture" }
+puca-encode = { path = "../../crates/puca-encode" }
+
+# The unattended-access gate. Host side only: it VERIFIES a controller's
+# signature and never derives anything from a passphrase, so no Argon2id here.
+puca-ua = { path = "../../crates/puca-ua" }
+
+# Per-device identity ("My Devices"). The device private keys live ONLY on the
+# Rust side and are never handed to JS — that is what lets the future native
+# host agent take ownership of them without a rewrite, and what stops a webview
+# XSS from walking off with a machine's identity.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
+image = { version = "0.24", features = ["png"], default-features = false }
+
+[dependencies.base64]
+# audio_capture.rs encodes PCM chunks for the 'audio-data' event
+version = "0.22"
+
+# Windows-only: per-app audio capture (audio_capture.rs, WASAPI process
+# loopback) + the Win32 shim hiding WebView2's screen-capture bar (capture_bar.rs)
+[target.'cfg(windows)'.dependencies]
+# Reused for its install/status logic, so the app and the elevated helper cannot
+# end up disagreeing about what "installed" means.
+puca-service = { path = "../../crates/puca-service" }
+# Clipboard for device sessions. navigator.clipboard.readText() needs document
+# focus and a permission grant, so it cannot serve a background HOST — which is
+# exactly when a device session needs it.
+clipboard-win = "5"
+wasapi = "0.22"
+sysinfo = "0.32"
+# Win32_UI_Shell is for SHGetFileInfoW in audio_capture.rs (app icons for the
+# share picker). Without it the crate does not compile at all — and NO gate
+# catches that: this crate is not in the root workspace, so `cargo test` at the
+# repo root never touches it, and the frontend gates are TypeScript only. It is
+# only ever built by `npm run tauri:build`, i.e. at release time.
+windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+
+

@@ -1,0 +1,1247 @@
+/* Compact Voice Panel - familiar chat-app voice UI */
+.voice-panel-compact {
+    background: var(--bg-tertiary);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 0;
+}
+
+.voice-join-btn-compact {
+    width: 100%;
+    padding: 10px 12px;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+}
+
+.voice-join-btn-compact:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal);
+}
+
+.voice-join-btn-compact:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Connection Info */
+.voice-connection-info {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.voice-status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.voice-connected-icon {
+    font-size: 1rem;
+    color: #43b581;
+}
+
+.voice-connection-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.voice-connected-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #43b581;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.voice-channel-name {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Compact Controls */
+.voice-controls-compact {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.voice-btn {
+    flex: 1;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.voice-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.voice-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.voice-btn.active {
+    background: rgba(240, 71, 71, 0.2);
+}
+
+/* Push-to-talk at rest: the mic is genuinely closed (nothing transmits until
+   the bind is held), but it is not "muted by choice" — dimmed, not red. */
+.voice-btn.ptt-idle {
+    opacity: 0.6;
+}
+
+/* Listen-only: no capture device at all. Reads as UNAVAILABLE rather than
+   "muted by choice" (which would imply a click could unmute). */
+.voice-btn.no-mic {
+    background: rgba(255, 255, 255, 0.04);
+    opacity: 0.55;
+}
+
+.listen-only-help {
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    font-size: 0.85em;
+    cursor: pointer;
+}
+
+.listen-only-help:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.voice-btn.disconnect {
+    background: rgba(237, 66, 69, 0.9);
+    color: #fff;
+    flex-basis: 100%; /* always on its own row so it's never clipped */
+}
+
+.voice-btn.disconnect:hover:not(:disabled) {
+    background: rgba(237, 66, 69, 1);
+}
+
+.voice-btn.screen-share.active {
+    background: rgba(67, 181, 129, 0.2);
+}
+
+/* Clip replay buffer (components/ClipControls.tsx). The bar already wraps
+   (mute, deafen, an 80px select, camera, share) — the two clip buttons take
+   only their own width so they do not force a third row at real sidebar
+   widths. Warning colour, not danger: an armed buffer is a NOTICE. */
+.voice-btn.voice-clip-arm,
+.voice-btn.voice-clip-save {
+    flex: 0 0 auto;
+    min-width: 36px;
+}
+.voice-btn.voice-clip-arm.active {
+    background: rgba(250, 166, 26, 0.18);
+    color: var(--text-warning, #faa61a);
+}
+.voice-btn.voice-clip-arm.pending { opacity: 0.6; }
+/* "Prompt me to arm when I join" — a soft pulse for a few seconds after joining. */
+.voice-btn.voice-clip-arm.nudge { animation: clip-arm-nudge 1.4s ease-in-out infinite; }
+@keyframes clip-arm-nudge {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(250, 166, 26, 0); }
+    50% { box-shadow: 0 0 0 4px rgba(250, 166, 26, 0.45); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .voice-btn.voice-clip-arm.nudge { animation: none; box-shadow: 0 0 0 2px rgba(250, 166, 26, 0.6); }
+}
+.voice-btn.voice-clip-save.ready { color: var(--color-danger, #ed4245); }
+
+.voice-clip-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 4px 8px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    background: rgba(0, 0, 0, 0.2);
+}
+.voice-clip-status.warn { color: var(--text-warning, #faa61a); }
+.voice-clip-status.error { color: var(--color-danger, #ed4245); }
+/* The screen-reader text is the state; the ticking counter is aria-hidden. */
+.voice-clip-status-live {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+.voice-clip-notice { display: inline-flex; align-items: center; gap: 4px; }
+.voice-clip-link {
+    border: none;
+    background: transparent;
+    color: var(--text-link, #00aff4);
+    font: inherit;
+    cursor: pointer;
+    padding: 0 2px;
+    text-decoration: underline;
+}
+
+/* Noise suppression dropdown */
+.voice-dropdown {
+    padding: 6px 8px;
+    background: rgba(255, 255, 255, 0.06);
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal, #dcddde);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    min-width: 80px;
+}
+
+.voice-dropdown:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.voice-dropdown:focus {
+    outline: none;
+    background: rgba(88, 101, 242, 0.2);
+}
+
+.voice-dropdown option {
+    background: var(--bg-secondary, #2f3136);
+    color: var(--text-normal, #dcddde);
+}
+
+/* Mini self-preview */
+.self-preview-mini {
+    position: relative;
+    width: 60px;
+    height: 40px;
+    margin: 4px 8px 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid #ed4245;
+}
+
+.self-preview-mini video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.live-dot-mini {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 6px;
+    height: 6px;
+    background: #ed4245;
+    border-radius: 50%;
+    animation: live-dot-pulse 1s infinite;
+}
+
+/* Camera Preview Box */
+.camera-preview-mini {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    overflow: hidden;
+    border: 2px solid #43b581;
+    margin-top: 8px;
+}
+
+.camera-preview-mini video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    /* Mirror for front camera */
+}
+
+.camera-dot-mini {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    font-size: 12px;
+}
+
+.camera-label {
+    position: absolute;
+    bottom: 4px;
+    left: 4px;
+    font-size: 10px;
+    color: white;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+/* (Remote camera feeds moved into the voice-stage tiles — see VoiceStage.css
+   .vs-camera-video. The floating .remote-cameras-grid is gone.) */
+
+.voice-error-mini {
+    padding: 4px 8px;
+    background: rgba(237, 66, 69, 0.2);
+    color: #ed4245;
+    font-size: 0.7rem;
+}
+
+/* Stream viewer overlay */
+.stream-viewer-overlay {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1000;
+    max-width: 90vw;
+    max-height: 80vh;
+}
+
+.close-stream-btn {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 1rem;
+}
+
+.close-stream-btn:hover {
+    color: white;
+}
+
+/* Legacy styles below for compatibility */
+.voice-panel {
+    background: linear-gradient(135deg, rgba(30, 30, 45, 0.95), rgba(20, 20, 35, 0.98));
+    border-radius: 12px;
+    padding: 16px;
+    margin-top: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.voice-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.voice-icon {
+    font-size: 1.2em;
+}
+
+.voice-header h4 {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-normal);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.voice-error {
+    background: rgba(220, 53, 69, 0.2);
+    color: var(--color-danger);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    margin-bottom: 12px;
+    border: 1px solid rgba(220, 53, 69, 0.3);
+}
+
+.voice-join-btn {
+    width: 100%;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, var(--brand-primary), var(--brand-hover));
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.voice-join-btn:hover:not(:disabled) {
+    background: linear-gradient(135deg, var(--brand-primary), var(--brand-primary));
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(88, 101, 242, 0.4);
+}
+
+.voice-join-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.voice-users {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.voice-user {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+
+.voice-user.speaking {
+    background: rgba(67, 181, 129, 0.15);
+    box-shadow: 0 0 0 2px rgba(67, 181, 129, 0.4);
+}
+
+.voice-user.deafened {
+    opacity: 0.6;
+}
+
+.voice-user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: white;
+    flex-shrink: 0;
+    position: relative;
+    border: 2px solid transparent;
+    transition: all 0.2s ease;
+    overflow: hidden;
+}
+
+.voice-avatar-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+/* Speaking state with green glowing ring */
+.voice-user-avatar.speaking {
+    border-color: #43b581;
+    box-shadow: 0 0 0 3px rgba(67, 181, 129, 0.4), 0 0 12px rgba(67, 181, 129, 0.6);
+    animation: speaking-ring 1s infinite;
+}
+
+@keyframes speaking-ring {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 3px rgba(67, 181, 129, 0.4), 0 0 12px rgba(67, 181, 129, 0.6);
+    }
+
+    50% {
+        box-shadow: 0 0 0 4px rgba(67, 181, 129, 0.6), 0 0 20px rgba(67, 181, 129, 0.8);
+    }
+}
+
+/* Keep the pulse animation for the whole user row */
+.voice-user.speaking {
+    background: rgba(67, 181, 129, 0.1);
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.02);
+    }
+}
+
+.voice-user-name {
+    flex: 1;
+    font-size: 0.85rem;
+    color: var(--text-normal);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.voice-user-status {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.status-icon {
+    font-size: 0.85em;
+    opacity: 0.8;
+}
+
+.status-icon.mute {
+    color: var(--color-danger);
+    position: relative;
+}
+
+.status-icon.mute::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--color-danger);
+    transform: rotate(-45deg);
+}
+
+.status-icon.deafen {
+    color: var(--color-danger);
+}
+
+.connecting-icon {
+    font-size: 0.8em;
+    opacity: 0.6;
+    animation: blink 1s infinite;
+}
+
+@keyframes blink {
+
+    0%,
+    100% {
+        opacity: 0.6;
+    }
+
+    50% {
+        opacity: 0.2;
+    }
+}
+
+.voice-controls {
+    display: flex;
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.voice-control-btn {
+    flex: 1;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    font-size: 1.1em;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.voice-control-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    transform: translateY(-1px);
+}
+
+.voice-control-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.voice-control-btn.active {
+    background: rgba(240, 71, 71, 0.2);
+    border-color: rgba(240, 71, 71, 0.4);
+}
+
+.voice-control-btn.leave {
+    background: rgba(220, 53, 69, 0.15);
+    border-color: rgba(220, 53, 69, 0.3);
+    flex: 0 0 auto;
+    padding: 10px 16px;
+}
+
+.voice-control-btn.leave:hover {
+    background: rgba(220, 53, 69, 0.3);
+}
+
+/* Screen Share Viewer */
+.screen-share-viewer {
+    margin-bottom: 12px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-primary);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.screen-share-header {
+    padding: 8px 12px;
+    background: rgba(88, 101, 242, 0.2);
+    color: var(--text-normal);
+    font-size: 0.8rem;
+    font-weight: 500;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.screen-share-video {
+    width: 100%;
+    max-height: 300px;
+    object-fit: contain;
+    background: #000;
+    display: block;
+}
+
+.screen-share-video:fullscreen {
+    max-height: none;
+}
+
+/* Stream Selector */
+.stream-selector {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    padding: 8px;
+    margin-bottom: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.stream-selector-header {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-danger);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stream-selector-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--text-normal);
+}
+
+.stream-selector-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.stream-selector-item input[type="checkbox"] {
+    accent-color: var(--brand-primary);
+}
+
+.live-badge {
+    background: var(--color-danger);
+    color: white;
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+    margin-left: auto;
+    animation: pulse-live 1.5s infinite;
+}
+
+@keyframes pulse-live {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.6;
+    }
+}
+
+/* Multi-Stream Grid */
+.screen-share-grid {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.screen-share-grid.streams-1 {
+    grid-template-columns: 1fr;
+}
+
+.screen-share-grid.streams-2 {
+    grid-template-columns: 1fr 1fr;
+}
+
+.screen-share-grid.streams-3,
+.screen-share-grid.streams-4 {
+    grid-template-columns: 1fr 1fr;
+}
+
+.screen-share-grid .screen-share-viewer {
+    margin-bottom: 0;
+}
+
+.screen-share-grid .screen-share-video {
+    max-height: 200px;
+}
+
+/* Context Menu */
+.stream-context-menu {
+    position: fixed;
+    background: var(--bg-secondary);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    padding: 4px;
+    z-index: 1000;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    min-width: 140px;
+}
+
+.stream-context-menu button {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-normal);
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.stream-context-menu button:hover {
+    background: rgba(88, 101, 242, 0.3);
+}
+
+.context-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 999;
+}
+
+/* LIVE indicator next to username */
+.live-indicator {
+    display: inline-flex;
+    align-items: center;
+    background: linear-gradient(135deg, #ed4245, #ff6b6b);
+    color: white;
+    font-size: 0.6rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    animation: live-pulse 1.5s infinite;
+    box-shadow: 0 0 8px rgba(237, 66, 69, 0.5);
+}
+
+@keyframes live-pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 8px rgba(237, 66, 69, 0.5);
+    }
+
+    50% {
+        box-shadow: 0 0 16px rgba(237, 66, 69, 0.8);
+    }
+}
+
+/* Watch Stream button */
+.watch-stream-btn {
+    padding: 4px 10px;
+    background: linear-gradient(135deg, var(--brand-primary), var(--brand-hover));
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.watch-stream-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 2px 8px rgba(88, 101, 242, 0.4);
+}
+
+/* Self Preview when sharing */
+.self-preview {
+    background: rgba(0, 0, 0, 0.4);
+    border: 2px solid #ed4245;
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    box-shadow: 0 4px 16px rgba(237, 66, 69, 0.3);
+}
+
+.self-preview-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(237, 66, 69, 0.2);
+    color: white;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.live-dot {
+    width: 8px;
+    height: 8px;
+    background: #ed4245;
+    border-radius: 50%;
+    animation: live-dot-pulse 1s infinite;
+}
+
+@keyframes live-dot-pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.5;
+        transform: scale(0.8);
+    }
+}
+
+.self-preview-video {
+    width: 100%;
+    max-height: 150px;
+    object-fit: contain;
+    background: #000;
+    display: block;
+}
+
+/* Mobile-specific styles for voice panel */
+@media (max-width: 768px),
+(hover: none) and (pointer: coarse) {
+    .voice-controls-compact {
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 4px;
+    }
+
+    .voice-btn {
+        flex: 0 0 auto;
+        padding: 8px 10px;
+        min-width: 36px;
+        font-size: 0.9rem;
+    }
+
+    /* A Windows touch laptop running the desktop shell hits this block too. */
+    .voice-btn.voice-clip-arm,
+    .voice-btn.voice-clip-save { min-width: 44px; min-height: 44px; }
+    .voice-clip-status { font-size: 0.75rem; }
+
+    .voice-dropdown {
+        flex: 0 0 auto;
+        min-width: 60px;
+        padding: 4px 6px;
+        font-size: 0.7rem;
+    }
+
+    /* Single camera preview on mobile - larger and more prominent */
+    .camera-preview-mini {
+        width: 100%;
+        max-width: 200px;
+        aspect-ratio: 4/3;
+        margin: 8px auto;
+        border-radius: 8px;
+        border-width: 3px;
+    }
+
+    .camera-label {
+        font-size: 12px;
+        padding: 4px 10px;
+    }
+}
+
+/* Draggable PiP styles */
+.camera-preview-mini.pip-draggable {
+    width: 120px;
+    height: 160px;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    border: 2px solid rgba(67, 181, 129, 0.8);
+    cursor: grab;
+    user-select: none;
+    transition: transform 0.1s ease, box-shadow 0.2s ease;
+}
+
+.camera-preview-mini.pip-draggable.dragging {
+    cursor: grabbing;
+    transform: scale(1.05);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+
+.camera-preview-mini.pip-draggable video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 10px;
+    transform: scaleX(-1);
+    /* Mirror for selfie view */
+}
+
+.camera-preview-mini.pip-draggable .camera-label {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+/* PiP Options Overlay */
+.pip-options-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 10px;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+.pip-option-btn {
+    background: rgba(255, 255, 255, 0.15);
+    border: none;
+    color: white;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    transition: background 0.2s ease;
+    width: 80%;
+    text-align: center;
+}
+
+.pip-option-btn:active {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+.pip-option-btn.close-btn {
+    background: rgba(237, 66, 69, 0.5);
+}
+
+.pip-option-btn.close-btn:active {
+    background: rgba(237, 66, 69, 0.7);
+}
+
+/* Fullscreen Camera View */
+.camera-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.camera-fullscreen video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    /* Mirror for selfie view */
+}
+
+.camera-fullscreen-controls {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    padding: 20px;
+    padding-bottom: calc(20px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.8), transparent);
+}
+
+.fullscreen-btn {
+    background: rgba(255, 255, 255, 0.15);
+    border: none;
+    color: white;
+    padding: 12px 20px;
+    border-radius: 12px;
+    font-size: 14px;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    transition: background 0.2s ease, transform 0.1s ease;
+}
+
+.fullscreen-btn:active {
+    transform: scale(0.95);
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.fullscreen-btn.exit-btn {
+    background: rgba(88, 101, 242, 0.5);
+}
+
+.fullscreen-btn.close-btn {
+    background: rgba(237, 66, 69, 0.5);
+}
+
+/* Permission Help Modal */
+.permission-help-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+}
+
+.permission-help-modal {
+    background: var(--bg-secondary, #2f3136);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 420px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.permission-help-modal h3 {
+    margin: 0 0 12px;
+    color: #fff;
+    font-size: 1.2rem;
+}
+
+.permission-help-modal>p {
+    color: var(--text-muted, #b9bbbe);
+    margin: 0 0 16px;
+    font-size: 0.9rem;
+}
+
+.permission-instructions {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+.permission-instructions p {
+    margin: 0 0 8px;
+    color: #fff;
+    font-size: 0.9rem;
+}
+
+.permission-instructions ol {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-muted, #b9bbbe);
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+
+.permission-instructions li {
+    margin-bottom: 6px;
+}
+
+.icon-hint {
+    display: inline-block;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.permission-help-buttons {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.permission-retry-btn {
+    background: linear-gradient(135deg, #7c3aed 0%, #00d9ff 100%);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.permission-retry-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4);
+}
+
+.permission-dismiss-btn {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-muted, #b9bbbe);
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.permission-dismiss-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+}
+
+.permission-reset-btn {
+    background: linear-gradient(135deg, #ed4245 0%, #ff6b6b 100%);
+    color: #fff;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.permission-reset-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(237, 66, 69, 0.4);
+}
+/* Media-E2EE status badge in the voice status row */
+.voice-e2ee {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 999px;
+    white-space: nowrap;
+    /* Never let the flex row squash the pill (the label text was getting
+       cut at the sidebar edge in tight rows). */
+    flex-shrink: 0;
+    cursor: help;
+    outline: none;
+}
+.voice-e2ee.on { color: #b8f5c8; background: rgba(36, 128, 70, 0.18); }
+.voice-e2ee.partial { color: #ffe0a3; background: rgba(191, 149, 60, 0.18); }
+.voice-e2ee.off { color: #ffc4c4; background: rgba(191, 60, 60, 0.15); }
+.voice-e2ee { display: inline-flex; align-items: center; gap: 5px; }
+.voice-e2ee:focus-visible { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35); }
+
+/* (i) affordance — a hint that the badge explains itself on hover/focus. */
+.e2ee-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    font-size: 10px;
+    font-weight: 700;
+    opacity: 0.85;
+    background: rgba(255, 255, 255, 0.14);
+    color: inherit;
+}
+.voice-e2ee:hover .e2ee-info, .voice-e2ee:focus-visible .e2ee-info { opacity: 1; background: rgba(255, 255, 255, 0.24); }
+
+.e2ee-tooltip {
+    /* Portaled to <body> with a measured, viewport-clamped position: the
+       sidebar is ~240px wide with overflow:hidden (load-bearing layout), so
+       the old in-place absolute tooltip was clipped to a strip. */
+    position: fixed;
+    z-index: 3000; /* match the reaction-picker layer */
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-sizing: border-box; /* or the padding pushes it past the measured width */
+    width: 260px;
+    max-width: calc(100vw - 16px);
+    /* Never taller than the screen: the downgrade states run to several
+       paragraphs, and an unbounded box ran off the bottom with no way to read
+       the rest. */
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    /* Downgrade lines embed a raw username. A long space-free one could not
+       wrap inside the fixed 260px box and ran outside the panel — which reads
+       exactly as "the text is cut off". */
+    overflow-wrap: anywhere;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-floating, #16171b);
+    border: 1px solid var(--border-separator, rgba(255, 255, 255, 0.12));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    color: var(--text-normal, #e3e5e8);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.45;
+    white-space: normal;
+    text-align: left;
+    cursor: default;
+    /* The tooltip must never steal the hover from the badge (it sits outside
+       the badge now, so entering it would fire the badge's mouseleave). */
+    pointer-events: none;
+}
+.e2ee-tooltip strong { font-size: 12px; font-weight: 700; color: var(--header-primary, #fff); }
+.e2ee-tooltip-line { color: var(--text-normal, #d6d8db); }
+.e2ee-tooltip-foot {
+    margin-top: 2px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border-separator, rgba(255, 255, 255, 0.1));
+    color: var(--text-muted, #9aa0a6);
+    font-size: 11px;
+}
+/* (Arrow tail removed: placement is dynamic now — above or below the badge —
+   so a fixed-direction arrow would point the wrong way half the time.) */

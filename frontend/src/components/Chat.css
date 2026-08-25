@@ -1,0 +1,2766 @@
+.chat-container {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    background: var(--bg-primary);
+    color: var(--text-normal);
+    overflow: hidden;
+    /* Prevent anything from pushing elements off screen */
+}
+
+/* Left Sidebar - Channels */
+.sidebar {
+    width: 240px;
+    min-width: 240px;
+    max-width: 240px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-separator);
+    display: flex;
+    flex-direction: column;
+    /* The column itself never scrolls: .sidebar-scroll (channels/DMs) is the
+       scroll region, so the voice panel + profile bar stay pinned and visible
+       at any window height instead of scrolling out below the fold. */
+    overflow: hidden;
+    overflow-x: hidden;
+}
+
+/* Scrollable middle of the sidebar (channel + DM sections). min-height: 0 is
+   what actually lets a flex child shrink below its content height. */
+.sidebar-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* The chrome below the scroll region must never be squeezed out. */
+.sidebar > .voice-panel-compact,
+.sidebar > .user-profile-bar {
+    flex-shrink: 0;
+}
+
+/* Home/DM view: the shared HomeSidebar (FriendsPanel's left column) renders
+   inside this sidebar when no server is selected. It brings its own fixed
+   240px width, background and border from FriendsPanel.css — neutralize
+   those here so it simply fills the column it's already in. */
+.sidebar .friends-sidebar {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    background: transparent;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* Server Header with Actions */
+.server-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--bg-tertiary);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.server-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--header-primary);
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.server-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.server-action-btn {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+
+.server-action-btn:hover {
+    background: var(--bg-tertiary);
+}
+
+.server-settings-btn {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+
+.server-settings-btn:hover {
+    background: var(--bg-tertiary);
+}
+
+/* Main Chat Area - takes up remaining space */
+.chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    /* Critical: allows flex item to shrink below content size */
+    overflow: hidden;
+    /* Prevent content from expanding */
+}
+
+.sidebar-section {
+    padding: 1rem;
+}
+
+.sidebar-spacer {
+    flex: 1;
+}
+
+.voice-icon {
+    font-size: 1rem;
+    margin-right: 0.25rem;
+}
+
+.voice-channel.active {
+    background: rgba(137, 180, 250, 0.2);
+}
+
+/* AFK channel — pinned last and visually parked: greyed out so it reads as
+   a holding pen, not a place to hang out. */
+.voice-channel.afk {
+    opacity: 0.55;
+    color: var(--text-muted, #72767d);
+    font-style: italic;
+}
+
+.voice-channel.afk:hover {
+    opacity: 0.8;
+}
+
+/* Voice channel with users list */
+.voice-channel-container {
+    list-style: none;
+}
+
+.voice-users-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 0.5rem 0;
+}
+
+.voice-user {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem 0.25rem 2rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.voice-user:hover {
+    background: rgba(49, 50, 68, 0.5);
+}
+
+.voice-user-avatar {
+    width: 20px;
+    height: 20px;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--bg-primary);
+    flex-shrink: 0;
+}
+
+.voice-user-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.voice-status-icon {
+    font-size: 0.75rem;
+    opacity: 0.8;
+}
+
+.sidebar-section h3 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    margin: 0;
+    font-weight: 600;
+}
+
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+}
+
+.add-channel-btn {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 1.1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+
+.add-channel-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+}
+
+/* DM Sidebar Section */
+.dm-section {
+    border-top: 1px solid var(--bg-tertiary);
+    margin-top: 8px;
+    padding-top: 8px;
+}
+
+.dm-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.dm-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    margin: 2px 0;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.dm-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.dm-item.active {
+    background: rgba(137, 180, 250, 0.15);
+}
+
+.dm-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--bg-primary);
+    flex-shrink: 0;
+}
+
+.dm-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.dm-username {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-normal);
+}
+
+.dm-preview {
+    font-size: 12px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Modal Styles */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal {
+    background: var(--bg-primary);
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 400px;
+    max-width: 90vw;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.modal h3 {
+    margin: 0 0 1.5rem;
+    font-size: 1.2rem;
+    color: var(--text-normal);
+}
+
+.form-group {
+    margin-bottom: 1.25rem;
+}
+
+.form-group label {
+    display: block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 6px;
+    color: var(--text-normal);
+    font-size: 0.95rem;
+}
+
+.form-group input:focus {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: -2px;
+}
+
+.form-group input::placeholder {
+    color: var(--text-faint);
+}
+
+.channel-type-selector {
+    /* 2×2 grid — four buttons ("Text/Checklist/Collection/Voice") never fit in
+       one nowrap flex row inside the 400px modal, so the last one (Voice)
+       overflowed past the right edge. A grid keeps them inside at any width. */
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+}
+
+.type-btn {
+    /* min-width:0 lets the grid track cap the button — without it the label's
+       intrinsic width could still push past the track and overflow. */
+    min-width: 0;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border: 2px solid transparent;
+    border-radius: 8px;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    transition: all 0.15s;
+}
+
+.type-btn:hover {
+    background: var(--bg-quaternary);
+}
+
+.type-btn.active {
+    border-color: var(--brand-primary);
+    background: rgba(137, 180, 250, 0.1);
+    color: var(--text-normal);
+}
+
+.type-btn .icon {
+    font-size: 1.1rem;
+}
+
+.modal-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.cancel-btn {
+    padding: 0.65rem 1rem;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.cancel-btn:hover {
+    background: var(--bg-tertiary);
+}
+
+.create-btn {
+    padding: 0.65rem 1.25rem;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    border: none;
+    border-radius: 6px;
+    color: #ffffff;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: opacity 0.15s;
+}
+
+.create-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.create-btn:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+.channel-list,
+.user-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.channel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-muted);
+    position: relative;
+}
+
+.channel.active {
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+}
+
+.hash {
+    color: var(--text-faint);
+    font-weight: 600;
+}
+
+/* Channel name takes up remaining space */
+.channel-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Unread channel styling — bright white text + left-edge pill */
+.channel.has-unread {
+    color: var(--text-normal, #f2f3f5);
+    font-weight: 600;
+}
+
+.channel.has-unread::before {
+    content: "";
+    position: absolute;
+    left: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 8px;
+    border-radius: 0 4px 4px 0;
+    background: var(--text-normal, #ffffff);
+}
+
+.channel.has-unread.active::before {
+    height: 20px;
+}
+
+.channel.has-unread .hash {
+    color: var(--text-normal, #f2f3f5);
+}
+
+/* Unread count badge */
+.unread-badge {
+    background: var(--color-danger);
+    color: var(--bg-primary);
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    min-width: 18px;
+    text-align: center;
+}
+
+/* Drag handle for channel reordering */
+.drag-handle {
+    color: var(--bg-quaternary);
+    font-size: 0.7rem;
+    cursor: grab;
+    opacity: 0;
+    transition: opacity 0.15s;
+    margin-right: -2px;
+    user-select: none;
+}
+
+.channel:hover .drag-handle {
+    opacity: 1;
+}
+
+.drag-handle:active {
+    cursor: grabbing;
+}
+
+/* Dragging state */
+.channel.dragging {
+    opacity: 0.5;
+    background: rgba(137, 180, 250, 0.2);
+}
+
+.user-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0;
+}
+
+.user-avatar {
+    width: 28px;
+    height: 28px;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--bg-primary);
+}
+
+/* Main Chat */
+.chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.chat-header h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Channel description */
+.channel-description {
+    color: var(--text-faint);
+    font-size: 0.85rem;
+    padding-left: 0.75rem;
+    border-left: 1px solid var(--bg-quaternary);
+    margin-left: 0.5rem;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* DM Header */
+.dm-icon {
+    font-size: 1.2rem;
+}
+
+.back-to-server-btn {
+    margin-left: auto;
+    padding: 0.4rem 0.8rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.back-to-server-btn:hover {
+    background: var(--bg-quaternary);
+}
+
+/* Search Bar */
+.search-bar {
+    margin-left: auto;
+    position: relative;
+}
+
+.search-bar input {
+    padding: 6px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    color: var(--text-normal);
+    font-size: 0.85rem;
+    width: 200px;
+    max-width: 30vw;
+    transition: all 0.2s;
+}
+
+.search-bar input:focus {
+    outline: none;
+    border-color: var(--brand-primary);
+    width: 280px;
+}
+
+.search-bar input::placeholder {
+    color: var(--text-faint);
+}
+
+.search-spinner {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: translateY(-50%) rotate(0deg);
+    }
+
+    to {
+        transform: translateY(-50%) rotate(360deg);
+    }
+}
+
+.search-results {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    width: 350px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    margin-top: 8px;
+    z-index: 100;
+}
+
+.search-results-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.search-results-header button {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.search-results-header button:hover {
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+}
+
+.search-result-item {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--bg-tertiary);
+    cursor: pointer;
+}
+
+.search-result-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.search-result-item strong {
+    color: var(--brand-primary);
+    margin-right: 8px;
+}
+
+.search-result-item span {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.search-no-results {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-faint);
+}
+
+/* Messages */
+.messages-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem 1.25rem;
+}
+
+/* "Jump to latest" pill — a zero-height sticky anchor pinned to the bottom of
+   the scrollport, so the pill floats OVER the list and appearing costs no
+   layout shift. Deliberately needs no position:relative on any ancestor:
+   .chat-main's containing-block chain is load-bearing for the message hover
+   toolbar and the portaled pickers. */
+.jump-latest-anchor {
+    position: sticky;
+    bottom: 0;
+    height: 0;
+    z-index: 5;
+    pointer-events: none;
+}
+
+.jump-latest-pill {
+    position: absolute;
+    right: 0;
+    bottom: 12px;
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #7c3aed 0%, #4cc4ff 100%);
+    color: #fff;
+    font-size: 0.85em;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+    transition: filter 0.15s ease;
+}
+
+.jump-latest-pill:hover {
+    filter: brightness(1.1);
+}
+
+.jump-latest-arrow {
+    font-size: 0.9em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .jump-latest-pill { transition: none; }
+}
+
+/* Collection view - channel headers between message groups */
+.collection-channel-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 0 0.5rem;
+    margin-top: 1rem;
+    border-top: 1px solid var(--bg-tertiary);
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.collection-channel-header:first-child {
+    margin-top: 0;
+    border-top: none;
+}
+
+.collection-channel-header .hash {
+    color: var(--text-tertiary);
+    font-weight: 500;
+}
+
+.collection-channel-header .channel-name {
+    color: var(--brand-primary);
+}
+
+.message {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+}
+
+.message:hover {
+    background: rgba(49, 50, 68, 0.3);
+    margin: 0 -1.25rem;
+    padding: 0.5rem 1.25rem;
+}
+
+/* Edit Server Profile (per-server nickname) modal */
+.nick-edit-modal {
+    background: var(--bg-floating);
+    border: 1px solid var(--border-separator);
+    border-radius: 8px;
+    padding: 20px;
+    width: min(360px, 90vw);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.nick-edit-modal h3 {
+    margin: 0;
+    color: var(--header-primary);
+    font-size: 1rem;
+}
+
+.nick-edit-modal input {
+    padding: 10px 12px;
+    background: var(--bg-quaternary);
+    border: 1px solid var(--bg-quaternary);
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.95rem;
+}
+
+.nick-edit-modal input:focus {
+    outline: none;
+    border-color: var(--brand-primary);
+}
+
+.nick-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* Appearance → Compact Mode: tighter vertical rhythm, same layout. */
+[data-compact="true"] .message {
+    gap: 0.6rem;
+    padding: 0.15rem 0;
+}
+
+[data-compact="true"] .message:hover {
+    padding: 0.15rem 1.25rem;
+}
+
+[data-compact="true"] .message.grouped {
+    margin-top: -3px;
+}
+
+.message-avatar {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, var(--accent-pink), var(--accent-green));
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: var(--bg-primary);
+    flex-shrink: 0;
+    overflow: hidden;
+}
+
+.message-avatar img,
+.message-avatar canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.message-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.message-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.message-author {
+    font-weight: 600;
+    color: var(--brand-primary);
+}
+
+.message-time {
+    font-size: 0.7rem;
+    color: var(--text-faint);
+}
+
+.message-content {
+    margin: 0.25rem 0 0;
+    line-height: 1.4;
+    word-wrap: break-word;
+    /* Preserve the line breaks and runs of spaces the sender typed/pasted
+       (the familiar chat-app convention). Without this the browser collapses
+       every newline to a single space, flattening pasted multi-line text
+       into one paragraph.
+       Code blocks keep their own `white-space: pre` via .code-block code. */
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+/* Mentions */
+.mention {
+    background: rgba(88, 101, 242, 0.3);
+    color: var(--text-normal);
+    padding: 0 4px;
+    border-radius: 4px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.mention:hover {
+    background: rgba(88, 101, 242, 0.5);
+}
+
+.mention.everyone {
+    background: rgba(250, 180, 30, 0.3);
+    color: var(--color-warning);
+}
+
+/* Message Images */
+.message-image {
+    margin-top: 8px;
+}
+
+/* E2EE attachment states (decrypting / failed / non-image download link) */
+.message-attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #cfd5dd;
+    font-size: 13px;
+    text-decoration: none;
+}
+/* The download control is a BUTTON, not a link (a blob: URL must never be
+   middle-clickable — see api/saveAttachment). Reset the button chrome so it
+   still reads as the same chip. */
+button.message-attachment {
+    border: none;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+}
+a.message-attachment:hover,
+button.message-attachment:hover { background: rgba(255, 255, 255, 0.12); }
+button.message-attachment:disabled { opacity: 0.6; cursor: progress; }
+button.message-attachment.saved { color: #7fd18b; }
+button.message-attachment.error { color: #ffb4b4; }
+.attachment-saved { opacity: 0.75; font-size: 12px; }
+.message-attachment.loading { opacity: 0.7; }
+.message-attachment.failed { color: #ffb4b4; }
+.attachment-retry {
+    margin-left: 6px;
+    padding: 1px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-primary, #dcddde);
+    font-size: 0.8em;
+    cursor: pointer;
+}
+.attachment-retry:hover { background: rgba(255, 255, 255, 0.1); }
+
+.message-image img {
+    max-width: 400px;
+    max-height: 300px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.message-image img:hover {
+    opacity: 0.9;
+}
+
+/* Inline video attachments — same footprint rules as images. The height cap
+   keeps one portrait clip from filling the channel; width also caps at the
+   viewport so a 400px player cannot overflow a 390px phone. */
+.message-video {
+    display: block;
+    margin-top: 8px;
+}
+
+.message-video video {
+    display: block;
+    max-width: min(400px, 100%);
+    max-height: 300px;
+    border-radius: 8px;
+    background: #000;
+}
+
+/* The save-to-disk chip stays available under the player. */
+.message-video .message-attachment {
+    margin-top: 4px;
+}
+
+/* ==== Spoilered media ====
+   Text spoilers hide by painting the glyphs out (color: transparent below);
+   an embedded image or video needs a REAL cover — before this, media inside
+   an unrevealed spoiler rendered fully visible (pre-existing for images,
+   surfaced by the 0811 video-embed review). */
+
+/* An unrevealed spoiler must reveal on first click, not zoom the image or
+   scrub the video — media must not see the tap at all. */
+.spoiler:not(.revealed) .message-image,
+.spoiler:not(.revealed) .message-video {
+    pointer-events: none;
+}
+
+/* The cover: blur + dim. For video the whole block (the download chip's
+   filename can be a spoiler too); for images the IMG itself — the
+   .message-image span is a non-replaced inline, which CSS Transforms
+   silently refuses to transform, so the anti-fringe scale must sit on the
+   replaced element. The slight scale hides the transparent fringe a blur
+   leaves at its own edges; the spoiler's overflow:hidden (below) crops it. */
+.spoiler:not(.revealed) .message-image img,
+.spoiler:not(.revealed) .message-video {
+    filter: blur(32px) brightness(0.6);
+    transform: scale(1.08);
+}
+
+/* A media-bearing spoiler becomes a positioned, clipped block so the cover
+   stays inside rounded corners and the chip can centre over it. Engines
+   without :has() (none we ship to) still get the blur+dim above — only the
+   chip and the tidier box degrade.
+   - min sizes keep the SPOILER pill (~95x27px) from being cropped by the
+     overflow clip on sticker-sized media, and meet the 44px touch floor.
+   - A spoiler holding text AND media renders as one atomic box by design
+     (same as the block treatment everywhere else); vertical-align keeps
+     the overflow:hidden inline-block from adopting its odd bottom-edge
+     baseline against surrounding text. */
+.spoiler:has(.message-image, .message-video) {
+    display: inline-block;
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+    padding: 0;
+    min-width: 112px;
+    min-height: 44px;
+    max-width: 100%;
+    vertical-align: bottom;
+}
+
+/* The always-visible label (design §5: no hover-gated affordance). Plain
+   text, not a glyph — the icon gate stays clean. */
+.spoiler:has(.message-image, .message-video):not(.revealed)::after {
+    content: 'SPOILER';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    pointer-events: none;
+}
+
+/* Message Links */
+.message-link {
+    color: var(--brand-primary);
+    text-decoration: none;
+}
+
+.message-link:hover {
+    text-decoration: underline;
+}
+
+/* Spoiler Text */
+.spoiler {
+    background: var(--bg-primary);
+    color: transparent;
+    padding: 0 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+}
+
+.spoiler:hover:not(.revealed) {
+    background: var(--bg-tertiary);
+}
+
+.spoiler.revealed {
+    background: rgba(88, 101, 242, 0.2);
+    color: var(--text-normal);
+}
+
+/* Inline Code */
+.inline-code {
+    background: var(--bg-tertiary);
+    color: var(--color-danger);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'Fira Code', 'Consolas', monospace;
+    font-size: 0.9em;
+}
+
+/* Fenced Code Block */
+.code-block {
+    background: var(--bg-tertiary, #1e1f22);
+    border: 1px solid var(--bg-primary, #111);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 4px 0;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+.code-block code {
+    font-family: 'Fira Code', 'Consolas', monospace;
+    font-size: 0.875em;
+    color: var(--text-normal);
+    white-space: pre;
+}
+
+/* Blockquote */
+.message-quote {
+    border-left: 3px solid var(--bg-tertiary, #4f545c);
+    padding: 0 8px;
+    margin: 2px 0;
+    color: var(--text-muted, #b5bac1);
+}
+
+/* Channel mention — inline clickable chip */
+.mention.channel {
+    display: inline;
+    background: rgba(88, 101, 242, 0.15);
+    white-space: nowrap;
+    cursor: pointer;
+}
+.mention.channel:hover {
+    background: rgba(88, 101, 242, 0.45);
+}
+
+/* Settings from the chat header — the always-reachable cog (the sidebar's is
+   covered by the overlay views on desktop and off-canvas on mobile). Pushed
+   to the far right; the search bar sits before it. */
+.chat-header-cog {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted, #b9bbbe);
+    font-size: 1.05em; padding: 4px 8px; border-radius: 4px;
+    /* No auto margin: .search-bar (rendered just before this) already
+       carries margin-left auto, and a second one would split the free space
+       and drag the search bar to the middle of the header. */
+    flex-shrink: 0;
+    display: inline-flex; align-items: center;
+}
+.chat-header-cog:hover { background: var(--bg-tertiary, #2b2d31); color: var(--text-primary, #fff); }
+
+/* Narrow phones: the header already holds hash + title + checklist + pins +
+   search, all effectively non-shrinkable, and mobile.css inflates every
+   button to 44px — the cog's width came straight out of the channel title
+   (three characters left at 375px). The Friends/Tasks/Devices headers carry
+   their own cog and the sidebar cog is one Channels-tab tap away, so the
+   phone chat header gives this one up. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .chat-header-cog {
+        display: none;
+    }
+}
+
+/* Pinned messages panel */
+.pins-wrapper { position: relative; display: inline-block; }
+.pins-toggle-btn {
+    background: none; border: none; cursor: pointer;
+    font-size: 1.05em; padding: 4px 8px; border-radius: 4px;
+}
+.pins-toggle-btn:hover { background: var(--bg-tertiary, #2b2d31); }
+.pins-panel {
+    /* Anchored LEFT so the panel grows INTO the chat column. The pins button
+       sits near the left of the header, and .chat-main clips at overflow:
+       hidden — a right:0 anchor pushed half the 340px box out of the column,
+       where the channel sidebar covered it. */
+    position: absolute; left: 0; right: auto; top: calc(100% + 6px); width: 340px;
+    max-height: 420px; overflow-y: auto; z-index: 200;
+    background: var(--bg-secondary, #2b2d31);
+    border: 1px solid var(--bg-primary, #1e1f22);
+    border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+/* Narrow chat column (member list + checklist open, or a small window): the
+   340px panel can overflow the RIGHT edge instead, so pin it to the viewport
+   — same clamp shape as .emoji-picker-anchor below. */
+@media (max-width: 900px) {
+    .pins-panel {
+        position: fixed; left: 8px; right: 8px; width: auto; top: 96px;
+        z-index: 200;
+    }
+}
+.pins-panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 12px; font-weight: 600;
+    border-bottom: 1px solid var(--bg-primary, #1e1f22);
+}
+.pins-panel-header button { background: none; border: none; cursor: pointer; color: var(--text-muted, #b5bac1); }
+.pins-empty { padding: 18px; text-align: center; color: var(--text-muted, #b5bac1); }
+.pin-item {
+    display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--bg-primary, #1e1f22);
+}
+.pin-item-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 0.9em; }
+.pin-item-body span { color: var(--text-normal, #dbdee1); word-break: break-word; }
+.pin-unpin-btn { background: none; border: none; cursor: pointer; color: var(--text-muted, #b5bac1); }
+.pin-unpin-btn:hover { color: var(--color-danger, #f23f43); }
+
+/* Load older messages */
+.load-older-btn {
+    display: block;
+    margin: 8px auto;
+    padding: 6px 16px;
+    background: var(--bg-tertiary, #2b2d31);
+    color: var(--text-muted, #b5bac1);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+.load-older-btn:hover:not(:disabled) {
+    background: var(--brand-primary, #5865f2);
+    color: #fff;
+}
+
+.load-older-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* Message Actions */
+.message {
+    position: relative;
+}
+
+.message-actions {
+    position: absolute;
+    right: 12px;
+    top: -18px;
+    display: none;
+    gap: 2px;
+    background: var(--bg-secondary, #2b2d31);
+    border: 1px solid var(--border-color, rgba(0, 0, 0, 0.2));
+    border-radius: 8px;
+    padding: 2px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    z-index: 5;
+}
+
+.message:hover .message-actions {
+    display: flex;
+}
+
+.msg-action-btn {
+    background: transparent;
+    border: none;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 5px;
+    font-size: 0.9rem;
+    opacity: 0.85;
+    transition: background 0.12s, opacity 0.12s;
+}
+
+.msg-action-btn:hover {
+    opacity: 1;
+    background: var(--bg-tertiary);
+}
+
+.msg-action-btn.delete:hover {
+    opacity: 1;
+    background: var(--color-danger, #da373c);
+}
+
+/* Optimistic local_ messages: actions that need a server-side id are
+   disabled (title "Sending…") until the real id arrives. */
+.msg-action-btn:disabled,
+.msg-action-btn:disabled:hover {
+    opacity: 0.35;
+    background: transparent;
+    cursor: default;
+}
+
+/* Emoji Picker */
+.emoji-picker-wrapper {
+    position: relative;
+}
+
+/* Anchors the full EmojiPicker component above the composer's toggle
+   button. */
+.emoji-picker-anchor {
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 8px;
+    z-index: 1000;
+}
+
+.emoji-picker-popup {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 8px;
+    gap: 4px;
+    flex-wrap: wrap;
+    width: 200px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.emoji-picker-wrapper:hover .emoji-picker-popup {
+    display: flex;
+}
+
+.emoji-pick {
+    background: transparent;
+    border: none;
+    padding: 4px;
+    font-size: 1.2rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+
+.emoji-pick:hover {
+    background: var(--bg-tertiary);
+}
+
+/* (The Paste Preview Modal is gone: a pasted image becomes a pending-
+   attachment chip — see ComposerAttachments.css.) */
+
+/* Typing Indicator */
+.typing-indicator {
+    padding: 4px 16px 8px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+}
+
+.typing-dots {
+    display: inline-block;
+    margin-right: 6px;
+    animation: typing-bounce 1.2s infinite;
+    color: var(--brand-primary);
+    font-weight: bold;
+}
+
+@keyframes typing-bounce {
+
+    0%,
+    60%,
+    100% {
+        opacity: 0.3;
+    }
+
+    30% {
+        opacity: 1;
+    }
+}
+
+/* Message Input */
+.message-form {
+    display: flex;
+    gap: 0.5rem;
+    padding: 1rem 1.25rem;
+    background: var(--bg-secondary);
+}
+
+.file-upload-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.2rem;
+    transition: background 0.15s;
+    /* Explicit, not inherited: the paperclip must track the theme's text
+       colour even if an ancestor ever sets its own. */
+    color: var(--text-normal);
+}
+
+.file-upload-btn:hover {
+    background: var(--bg-quaternary);
+}
+
+/* Task mode toggle button */
+.task-mode-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.2rem;
+    transition: all 0.15s;
+    color: var(--text-muted);
+}
+
+.task-mode-btn:hover {
+    background: var(--bg-quaternary);
+}
+
+.task-mode-btn.active {
+    background: var(--brand-primary);
+    color: #ffffff;
+}
+
+/* Task checkbox in messages */
+.task-checkbox {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: var(--text-muted);
+    margin-right: 0.5rem;
+    transition: all 0.15s;
+    user-select: none;
+}
+
+.task-checkbox:hover {
+    color: var(--brand-primary);
+    transform: scale(1.1);
+}
+
+.task-checkbox.completed {
+    color: var(--brand-primary);
+}
+
+/* Caller lacks COMPLETE_TASKS/MANAGE_TASKS on the channel: still readable,
+   visibly inert. */
+.task-checkbox.no-perm {
+    cursor: default;
+    opacity: 0.45;
+}
+.task-checkbox.no-perm:hover {
+    color: var(--text-muted);
+    transform: none;
+}
+
+/* Strikethrough for completed task content */
+.message-content.task-completed {
+    text-decoration: line-through;
+    opacity: 0.6;
+}
+
+.message-form input {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 8px;
+    color: var(--text-normal);
+    font-size: 0.95rem;
+}
+
+.message-form input:focus {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: -2px;
+}
+
+.message-form input::placeholder,
+.message-form textarea::placeholder {
+    color: var(--text-faint);
+}
+
+/* Input wrapper for advanced mode */
+.input-wrapper {
+    flex: 1;
+    display: flex;
+    min-width: 0;
+}
+
+.input-wrapper input,
+.input-wrapper textarea {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 8px;
+    color: var(--text-normal);
+    font-size: 0.95rem;
+    font-family: inherit;
+    resize: none;
+}
+
+.input-wrapper textarea {
+    min-height: 44px;   /* ~one line; grows with content via JS up to max */
+    max-height: 200px;
+    line-height: 1.4;
+    overflow-y: auto;
+}
+
+.input-wrapper input:focus,
+.input-wrapper textarea:focus {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: -2px;
+}
+
+/* Advanced mode toggle */
+.advanced-toggle {
+    padding: 0.5rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: all 0.15s;
+}
+
+.advanced-toggle:hover {
+    background: var(--bg-quaternary);
+}
+
+.advanced-toggle.active {
+    background: var(--brand-primary);
+    color: var(--bg-primary);
+}
+
+/* Format Context Menu */
+.format-menu {
+    position: fixed;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 4px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.format-menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-normal);
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    text-align: left;
+}
+
+.format-menu button:hover {
+    background: var(--bg-tertiary);
+}
+
+/* SUBMIT ONLY. This was `.message-form button`, whose 0-1-1 specificity beat
+   the 0-1-0 class rules of every other button in the form — the emoji and
+   task toggles were silently wearing the send gradient and its
+   `color: var(--bg-primary)` (near-black on dark themes) instead of their own
+   muted-icon styling. White text, not var(--bg-primary): the gradient is
+   mid-luminance in every theme, and in the dark family bg-primary is
+   near-black on it. */
+.message-form button[type="submit"] {
+    padding: 0.75rem 1.25rem;
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    border: none;
+    border-radius: 8px;
+    color: #ffffff;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.15s;
+}
+
+.message-form button[type="submit"]:hover {
+    transform: translateY(-1px);
+}
+
+/* Disabled OUTSIDE the read-only-channel case too (attachment uploading):
+   without this the blocked button kept its full gradient and hover lift and
+   looked perfectly enabled while doing nothing. */
+.message-form button[type="submit"]:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Desktop keeps the text label; the icon is the mobile affordance
+   (mobile.css swaps them). */
+.message-form .send-icon {
+    display: none;
+}
+
+/* Composer with SEND_MESSAGES denied on this channel: every control is
+   disabled; the attach <label> needs the treatment explicitly (labels have no
+   :disabled state of their own). */
+.message-form.composer-disabled .file-upload-btn,
+.message-form.composer-disabled button:disabled {
+    opacity: 0.45;
+    pointer-events: none;
+    cursor: not-allowed;
+}
+
+.message-form.composer-disabled textarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Right Sidebar - Member List */
+.member-sidebar {
+    width: 240px;
+    min-width: 240px;
+    max-width: 240px;
+    background: var(--bg-primary);
+    border-left: 1px solid var(--border-separator);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 1rem 0.5rem;
+}
+
+.member-section {
+    margin-bottom: 1.5rem;
+}
+
+.member-section-title {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    margin: 0 0.5rem 0.75rem;
+    font-weight: 600;
+}
+
+.member-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.member-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.member-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.member-item.clickable {
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.member-item.clickable:hover {
+    background: var(--bg-quaternary);
+}
+
+.member-item.offline {
+    opacity: 0.5;
+}
+
+.member-avatar {
+    width: 32px;
+    height: 32px;
+    background: linear-gradient(135deg, var(--bg-quaternary), var(--bg-quaternary));
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-normal);
+    position: relative;
+    flex-shrink: 0;
+    /* NO overflow: hidden here — it clipped the status dot to a sliver
+       trapped inside the circle. The img rounds itself instead. */
+}
+
+.member-avatar img,
+.member-avatar canvas {
+    /* Overlay the fallback initial; if the file 404s the img is hidden
+       and the initial shows through. */
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+.member-item.online .member-avatar {
+    background: linear-gradient(135deg, var(--accent-lavender), var(--brand-primary));
+    color: var(--bg-primary);
+}
+
+/* Scoped to .member-avatar (beats FriendsPanel.css's bare .status-dot
+   regardless of bundle order). Sized/offset so the dot clearly pokes OUT of
+   the avatar circle — it used to be clipped inside it and near-invisible. */
+.member-avatar .status-dot {
+    position: absolute;
+    bottom: -3px;
+    right: -3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2.5px solid var(--bg-primary);
+}
+
+.status-dot.online {
+    background: var(--color-success);
+}
+
+.status-dot.offline {
+    background: var(--text-faint);
+}
+
+.member-name {
+    font-size: 0.9rem;
+    color: var(--text-normal);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.member-item.offline .member-name {
+    color: var(--text-faint);
+}
+
+/* Loading and Error States */
+.chat-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    background: var(--bg-primary);
+    color: var(--text-normal);
+}
+
+.chat-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    background: var(--bg-primary);
+    color: var(--text-normal);
+    text-align: center;
+    padding: 2rem;
+}
+
+/* Role badge next to member name */
+.member-role-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: #fff;
+    margin-left: auto;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+/* Owner crown emoji */
+.owner-crown {
+    font-size: 12px;
+    margin-right: 4px;
+}
+
+/* Role-colored avatar border */
+.member-avatar {
+    border: 2px solid transparent;
+}
+
+/* Message Reply Reference */
+.message-reply-ref {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    background: rgba(137, 180, 250, 0.1);
+    border-left: 2px solid var(--brand-primary);
+    border-radius: 0 4px 4px 0;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.message-reply-ref:hover {
+    background: rgba(137, 180, 250, 0.2);
+}
+
+.message-reply-ref .reply-icon {
+    color: var(--brand-primary);
+    font-size: 0.9rem;
+}
+
+.message-reply-ref .reply-author {
+    color: var(--brand-primary);
+    font-weight: 500;
+}
+
+.message-reply-ref .reply-preview {
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Reply Preview Banner (above input) */
+.reply-preview-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--bg-tertiary);
+    border-top: 1px solid var(--bg-quaternary);
+    font-size: 0.85rem;
+}
+
+.reply-preview-banner .reply-icon {
+    color: var(--brand-primary);
+    font-size: 1rem;
+}
+
+.reply-preview-banner .replying-to {
+    color: var(--text-muted);
+}
+
+.reply-preview-banner .replying-to strong {
+    color: var(--brand-primary);
+}
+
+.reply-preview-banner .reply-content-preview {
+    color: var(--text-faint);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.reply-preview-banner .cancel-reply-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    transition: all 0.15s;
+}
+
+.reply-preview-banner .cancel-reply-btn:hover {
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+}
+
+/* Message Highlight Animation (when scrolling to replied message) */
+.message.highlight {
+    animation: message-highlight 2s ease-out;
+}
+
+@keyframes message-highlight {
+
+    0%,
+    15% {
+        background: rgba(137, 180, 250, 0.3);
+    }
+
+    100% {
+        background: transparent;
+    }
+}
+
+/* User Profile Bar at Bottom of Sidebar */
+.user-profile-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--bg-tertiary);
+    flex-shrink: 0;
+}
+
+.user-profile-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+
+.user-profile-info:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.user-profile-bar .user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: var(--bg-primary);
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+.user-details {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.user-profile-bar .user-username {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-normal);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.user-profile-bar .user-status {
+    font-size: 0.7rem;
+    color: var(--color-success);
+}
+
+.user-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.user-action-btn {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    transition: background 0.15s;
+}
+
+.user-action-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.user-action-btn.logout:hover {
+    background: rgba(237, 66, 69, 0.2);
+}
+
+/* Profile Popup */
+.profile-popup-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 998;
+}
+
+.profile-popup {
+    position: absolute;
+    bottom: 100%;
+    left: 8px;
+    right: 8px;
+    margin-bottom: 8px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+    z-index: 999;
+    overflow: hidden;
+}
+
+.profile-popup-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    /* `var(--x)33` never worked: var() substitutes TOKENS, so the 33 stays a
+       separate number and invalidates the declaration. rgba first for engines
+       without color-mix; color-mix wins where supported and re-tints with the
+       theme. */
+    background: linear-gradient(135deg, rgba(88, 101, 242, 0.2), rgba(167, 139, 250, 0.2));
+    background: linear-gradient(135deg,
+            color-mix(in srgb, var(--brand-primary) 20%, transparent),
+            color-mix(in srgb, var(--accent-lavender) 20%, transparent));
+    border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.profile-popup-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-lavender));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.5rem;
+    color: var(--bg-primary);
+    overflow: hidden;
+    border: 3px solid var(--bg-primary);
+}
+
+.profile-popup-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.profile-popup-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.profile-popup-name {
+    display: block;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.profile-popup-status {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.profile-popup-menu {
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+}
+
+.profile-popup-menu button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-align: left;
+}
+
+.profile-popup-menu button:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.profile-popup-menu button.logout-btn {
+    color: var(--color-danger);
+}
+
+.profile-popup-menu button.logout-btn:hover {
+    background: rgba(237, 66, 69, 0.15);
+}
+
+.profile-popup-menu .menu-icon {
+    font-size: 1.1rem;
+}
+
+/* User Profile Bar - Avatar with image */
+.user-profile-bar .user-avatar img,
+.user-profile-bar .user-avatar canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+/* Emoji Toggle Button in Chat Input */
+.emoji-toggle {
+    padding: 0.5rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: all 0.15s;
+}
+
+.emoji-toggle:hover {
+    background: var(--bg-quaternary);
+}
+
+/* Voice Channel User List in Sidebar */
+.voice-users-list {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 0 8px;
+}
+
+.voice-user-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    margin: 2px 0;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.voice-user-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.voice-user-avatar-small {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-primary), var(--accent-purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: white;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+
+.voice-user-avatar-small img,
+.voice-user-avatar-small canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.voice-user-item .voice-user-name {
+    flex: 1;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.voice-user-indicators {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.voice-status-icon {
+    font-size: 0.7rem;
+    opacity: 0.7;
+}
+
+.voice-status-icon.muted {
+    color: var(--color-danger);
+}
+
+.voice-status-icon.deafened {
+    color: var(--color-danger);
+}
+
+/* Media not yet reachable (join chime being held) — dim the name, warn on the icon */
+/* Warning, not danger: a buffer is a NOTICE, like .connecting — the other
+   "you should know this" state in the row. */
+.voice-status-icon.buffering { color: var(--text-warning, #faa61a); opacity: 1; }
+.voice-status-icon.connecting {
+    color: var(--text-warning, #faa61a);
+}
+.voice-user-item.connecting .voice-user-name {
+    opacity: 0.6;
+}
+
+/* Speaking state for sidebar voice users */
+.voice-user-item.speaking {
+    background: rgba(67, 181, 129, 0.1);
+}
+
+.voice-user-avatar-small.speaking {
+    border: 2px solid #43b581;
+    box-shadow: 0 0 0 2px rgba(67, 181, 129, 0.3), 0 0 8px rgba(67, 181, 129, 0.5);
+    animation: speaking-pulse 1s infinite;
+}
+
+@keyframes speaking-pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 2px rgba(67, 181, 129, 0.3), 0 0 8px rgba(67, 181, 129, 0.5);
+    }
+
+    50% {
+        box-shadow: 0 0 0 3px rgba(67, 181, 129, 0.5), 0 0 12px rgba(67, 181, 129, 0.7);
+    }
+}
+
+/* LIVE badge for streaming users in sidebar */
+.live-badge-mini {
+    display: inline-flex;
+    align-items: center;
+    background: #ed4245;
+    color: white;
+    font-size: 0.55rem;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    animation: live-pulse-mini 1.5s infinite;
+}
+
+@keyframes live-pulse-mini {
+
+    0%,
+    100% {
+        box-shadow: 0 0 4px rgba(237, 66, 69, 0.4);
+    }
+
+    50% {
+        box-shadow: 0 0 8px rgba(237, 66, 69, 0.7);
+    }
+}
+
+/* Camera badge for users with camera on in sidebar */
+.camera-badge-mini {
+    font-size: 0.7rem;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+
+/* Watch Streams Button in Header */
+.watch-streams-btn {
+    background: linear-gradient(135deg, #ed4245, #dc3545);
+    color: white;
+    border: none;
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-left: auto;
+    margin-right: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    animation: live-pulse-mini 1.5s infinite;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.watch-streams-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 2px 8px rgba(237, 66, 69, 0.5);
+}
+
+/* Floating Watch Live Button */
+.watch-live-floating {
+    position: fixed;
+    bottom: 80px;
+    right: 30px;
+    z-index: 1000;
+    animation: float-in 0.3s ease-out;
+}
+
+@keyframes float-in {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.watch-live-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background: linear-gradient(135deg, #ed4245, #dc3545);
+    color: white;
+    border: none;
+    border-radius: 24px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(237, 66, 69, 0.4);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    animation: live-pulse-mini 1.5s infinite;
+}
+
+.watch-live-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 6px 24px rgba(237, 66, 69, 0.5);
+}
+
+.watch-live-btn .live-indicator-dot {
+    width: 8px;
+    height: 8px;
+    background: white;
+    border-radius: 50%;
+    animation: live-dot-pulse 1s infinite;
+}
+
+@keyframes live-dot-pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
+}
+
+/* Nested Channels */
+.channel.subchannel {
+    padding-left: 24px;
+    font-size: 0.95em;
+}
+
+.channel.collection-parent {
+    font-weight: 600;
+}
+
+.sub-icon {
+    display: inline-block;
+    width: 16px;
+    opacity: 0.6;
+    margin-right: 4px;
+}
+
+/* Parent Channel Select */
+.parent-channel-select {
+    width: 100%;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border: none;
+    border-radius: 6px;
+    color: var(--text-normal);
+    font-size: 0.95rem;
+    cursor: pointer;
+}
+
+.parent-channel-select:focus {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: -2px;
+}
+
+/* Channel Dragging - only when draggable is set (owner/permission) */
+.channel[draggable="true"] {
+    cursor: grab;
+}
+
+.channel[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+.channel.dragging,
+.channel.subchannel.dragging {
+    opacity: 0.5;
+    background: rgba(137, 180, 250, 0.1);
+    cursor: grabbing;
+}
+
+.channel.drag-over {
+    background: rgba(137, 180, 250, 0.3);
+    border: 2px dashed var(--brand-primary);
+    border-radius: 4px;
+}
+
+/* ---- Moderator drag: moving a MEMBER between voice channels ----
+   Distinct from .drag-over above, which is the channel-REORDER drag. Declared
+   after the second .voice-user-item block so it wins on source order without
+   needing a specificity bump. */
+.voice-user-item.voice-dragging {
+    background: rgba(137, 180, 250, 0.18);
+}
+
+/* The whole channel block highlights — name row AND the occupant list under
+   it — because the whole block is the drop target. */
+.voice-channel-container.voice-drop-target {
+    background: rgba(67, 181, 129, 0.18);
+    outline: 2px dashed #43b581;
+    outline-offset: -2px;
+    border-radius: 4px;
+}
+
+/* A drop target that is the AFK channel still has to read as a legal target:
+   the name row's own .afk opacity would otherwise mute the highlight into
+   near-invisibility, on the one destination people use most. */
+.voice-channel-container.voice-drop-target .voice-channel.afk {
+    opacity: 1;
+}
+
+/* While a member drag is live, nothing under the pointer should light up as if
+   it were clickable — the hit-test owns the pointer until release. */
+body.voice-drag-active .voice-user-item:hover,
+body.voice-drag-active .channel:hover {
+    background: inherit;
+}
+
+body.voice-drag-active {
+    cursor: grabbing;
+    user-select: none;
+}
+/* ---- Message grouping & dividers (the familiar chat-app pattern) ---- */
+.message:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+}
+.message.grouped {
+    padding-top: 1px;
+    padding-bottom: 1px;
+    /* Pull same-author runs tight: cancels most of the previous message's
+       0.5rem bottom padding, leaving ~2px between lines (compact grouping). */
+    margin-top: -7px;
+}
+
+/* No header row on grouped messages — drop the content's top margin too,
+   or the text still sits 4px lower than the compact look wants. */
+.message.grouped .message-content {
+    margin-top: 0;
+}
+.message-gutter-time {
+    width: 36px;            /* matches avatar width so bodies align */
+    flex-shrink: 0;
+    align-self: center;
+    text-align: center;
+    font-size: 0.62rem;
+    color: var(--text-faint, #8a8f98);
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.08s;
+}
+.message.grouped:hover .message-gutter-time {
+    opacity: 1;
+}
+
+.date-divider {
+    display: flex;
+    align-items: center;
+    margin: 14px 10px 6px;
+    color: var(--text-muted, #949ba4);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: none;
+}
+.date-divider::before,
+.date-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--bg-tertiary, #3a3c42);
+}
+.date-divider span {
+    padding: 0 10px;
+}
+
+.edited-tag {
+    font-size: 0.625rem;
+    color: var(--text-faint, #8a8f98);
+    margin-left: 5px;
+    user-select: none;
+    vertical-align: baseline;
+}
+
+/* "Not encrypted" badge: shown on a message the server delivered as plaintext
+   (encState 'legacy'). Everything else in the app is E2EE, so this warns that
+   THIS message was not — audit H-1. Uses the theme's warning/danger token so it
+   reads as a caution in all eight themes and high-contrast. */
+.not-encrypted-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.625rem;
+    font-weight: 600;
+    color: var(--text-warning, #f0b232);
+    margin-left: 6px;
+    user-select: none;
+    vertical-align: baseline;
+    white-space: nowrap;
+}
+.not-encrypted-tag svg {
+    width: 0.75em;
+    height: 0.75em;
+    flex: 0 0 auto;
+}
+/* MEASURED: the shared --text-warning amber (#f0b232) scores ~10:1 on every
+   dark theme but only 1.7:1 on `light`'s #f2f3f5 surface — the warning was
+   effectively invisible in exactly one of the eight themes. No existing token
+   clears AA there (--text-danger is 3.4:1), so light gets a darkened amber:
+   5.34:1, passes WCAG AA for normal text. A security affordance nobody can
+   read is not an affordance. */
+[data-theme="light"] .not-encrypted-tag {
+    color: #8a5a00;
+}
+
+/* ---- Composer autocomplete (@members / #channels) ---- */
+.input-wrapper { position: relative; }
+.composer-autocomplete {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--bg-secondary, #2b2d31);
+    border: 1px solid var(--bg-primary, #1e1f22);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    z-index: 300;
+    padding: 6px;
+}
+.autocomplete-header {
+    font-size: 0.62rem;
+    font-weight: 700;
+    color: var(--text-muted, #949ba4);
+    padding: 4px 8px 6px;
+    letter-spacing: 0.03em;
+}
+.autocomplete-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+.autocomplete-item.active {
+    background: var(--brand-primary, #5865f2);
+    color: #fff;
+}
+.ac-avatar {
+    width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem; font-weight: 600; color: #fff;
+    background: var(--brand-primary, #5865f2); flex-shrink: 0;
+}
+.ac-hash { color: var(--text-muted, #949ba4); font-weight: 700; width: 22px; text-align: center; flex-shrink: 0; }
+.ac-name { font-weight: 500; }
+.ac-sub { color: var(--text-faint, #8a8f98); font-size: 0.8rem; margin-left: auto; }
+.autocomplete-item.active .ac-sub { color: rgba(255, 255, 255, 0.75); }
+
+/* ---- Empty channel welcome ---- */
+.channel-welcome {
+    padding: 24px 16px 8px;
+    margin-top: auto;
+}
+.channel-welcome-icon {
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    background: var(--bg-tertiary, #3a3c42);
+    color: var(--text-normal, #f2f3f5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.4rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.channel-welcome h2 {
+    margin: 6px 0 4px;
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--text-normal, #f2f3f5);
+}
+.channel-welcome p {
+    margin: 0;
+    color: var(--text-muted, #949ba4);
+    font-size: 0.95rem;
+}
+
+/* ---- Message that @mentions you (highlighted, the familiar chat-app pattern) ---- */
+.message.mentioned {
+    background: rgba(250, 166, 26, 0.10);
+    box-shadow: inset 2px 0 0 var(--color-warning, #faa61a);
+    border-radius: 2px;
+}
+.message.mentioned:hover {
+    background: rgba(250, 166, 26, 0.15);
+}
+
+/* Desktop-narrow breakpoints: let the chrome columns yield before the chat
+   column collapses. Guarded to fine pointers so the mobile (coarse-pointer)
+   panel layout in mobile.css is never overridden - this file loads after
+   mobile.css, so unguarded rules here would win the cascade on phones. */
+@media (max-width: 1100px) and (pointer: fine) {
+    .member-sidebar { width: 200px; min-width: 200px; }
+    .channel-description { display: none; }
+}
+@media (max-width: 950px) and (pointer: fine) {
+    .member-sidebar { display: none; }
+    .search-bar input { width: 140px; }
+    .search-bar input:focus { width: 200px; }
+}
+@media (max-width: 820px) and (pointer: fine) {
+    .sidebar { width: 200px; min-width: 200px; }
+    .checklist-panel { width: 240px; }
+}
+@media (max-width: 700px) and (pointer: fine) {
+    .sidebar { width: 180px; min-width: 180px; }
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* The composer's toggle button sits close to the right edge — even a
+       narrower picker still overflows off-screen from there. Pin it within
+       the viewport, above the message form, instead of anchoring to the
+       button. */
+    .emoji-picker-anchor {
+        position: fixed;
+        left: 8px;
+        right: 8px;
+        bottom: calc(var(--mobile-nav-height, 60px) + var(--safe-area-bottom, 0px) + 70px);
+        margin-bottom: 0;
+    }
+
+    .emoji-picker-anchor .emoji-picker {
+        width: 100%;
+    }
+
+    /* Sticky-hover on tap otherwise floats the toolbar above the message,
+       overlapping the previous message's text. Keep it inside the
+       message's own bounds instead. The unified toolbar is up to 7 buttons
+       wide now — wrap within the viewport instead of running off the left
+       edge (buttons keep their 30px touch size). */
+    .message-actions {
+        top: 4px;
+        right: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        max-width: calc(100vw - 60px);
+    }
+
+    /* Keep the toolbar buttons at their 30px design size (the max-width above
+       assumes it). Without this, mobile.css's blanket button{min-width:44px}
+       inflates each to 44px, so the 7-button own-message row overflows the cap
+       and wraps onto a second row covering the tapped message. Scoped size
+       exception per DESIGN_PHILOSOPHY §5 (mirrors .tt-btn in TaskTree.css). */
+    .msg-action-btn {
+        min-width: 30px;
+        min-height: 30px;
+    }
+
+    .search-bar input {
+        width: 120px;
+        max-width: 30vw;
+        font-size: 16px;
+    }
+
+    .search-bar input:focus {
+        position: absolute;
+        right: 0;
+        width: calc(100vw - 24px);
+        max-width: none;
+        z-index: 10;
+        background: var(--bg-tertiary);
+    }
+}
+
+/* Collapsed stand-in for a run of messages from a blocked user. */
+.blocked-message-stub {
+    padding: 4px 16px;
+    font-size: 12px;
+    font-style: italic;
+    color: var(--text-faint);
+    opacity: 0.7;
+    user-select: none;
+}
+
+/* Search footer: the real numbers. "No results" means something different
+   over 40 messages than over 4000, and content that could not be decrypted
+   was never searched at all — saying so beats implying a complete search. */
+.search-footer {
+    padding: 6px 10px;
+    border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+    font-size: 0.72rem;
+    color: var(--text-muted, #949ba4);
+}
+
+/* Shown when a hit lies outside the loaded history. The result rows have
+   always had cursor:pointer; before this they had no click handler at all,
+   so the affordance was a lie. */
+.search-jump-notice {
+    padding: 6px 10px;
+    font-size: 0.74rem;
+    color: #faa61a;
+}

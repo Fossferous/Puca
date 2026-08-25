@@ -1,0 +1,546 @@
+.role-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+.role-modal {
+    background: #2f3136;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 900px;
+    height: 80%;
+    max-height: 700px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    animation: slideIn 0.2s ease;
+    overflow: hidden;
+}
+
+@keyframes slideIn {
+    from {
+        transform: scale(0.95);
+        opacity: 0;
+    }
+
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.role-modal-close {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    background: none;
+    border: none;
+    color: #b9bbbe;
+    font-size: 24px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    z-index: 10;
+    transition: all 0.15s ease;
+}
+
+.role-modal-close:hover {
+    background: #40444b;
+    color: #fff;
+}
+
+.role-modal-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid #202225;
+}
+
+.role-modal-header h2 {
+    margin: 0;
+    color: #fff;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.role-error {
+    background: #f04747;
+    color: #fff;
+    padding: 10px 20px;
+    font-size: 14px;
+}
+
+.role-modal-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* Left Panel - Role List */
+.role-list-panel {
+    width: 250px;
+    background: #2f3136;
+    border-right: 1px solid #202225;
+    display: flex;
+    flex-direction: column;
+}
+
+.role-list-header {
+    padding: 12px 16px;
+    color: #8e9297;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.role-loading {
+    padding: 20px;
+    color: #8e9297;
+    text-align: center;
+}
+
+.role-list {
+    list-style: none;
+    margin: 0;
+    padding: 0 8px;
+    flex: 1;
+    overflow-y: auto;
+}
+
+.role-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    margin-bottom: 2px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #dcddde;
+    border-left: 3px solid var(--role-color, #99AAB5);
+    background: transparent;
+    transition: all 0.15s ease;
+}
+
+.role-item:hover {
+    background: #36393f;
+}
+
+.role-item.selected {
+    background: #42464d;
+}
+
+.role-color-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.role-name {
+    flex: 1;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.role-badge {
+    background: var(--brand-primary);
+    color: #fff;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+}
+
+.role-badge.owner {
+    background: #f5a623;
+}
+
+.create-role-btn {
+    margin: 12px;
+    padding: 10px 16px;
+    background: var(--brand-primary);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background 0.15s ease;
+}
+
+.create-role-btn:hover {
+    background: var(--brand-hover);
+}
+
+/* Right Panel - Role Editor */
+.role-editor-panel {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+    background: #36393f;
+}
+
+.role-editor-section {
+    margin-bottom: 24px;
+}
+
+.role-editor-section h3 {
+    color: #b9bbbe;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    margin: 0 0 8px 0;
+}
+
+.role-name-input {
+    width: 100%;
+    max-width: 300px;
+    padding: 10px 12px;
+    background: #202225;
+    border: none;
+    border-radius: 4px;
+    color: #dcddde;
+    font-size: 16px;
+}
+
+.role-name-input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--brand-primary);
+}
+
+.role-name-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.role-hint {
+    color: var(--text-faint);
+    font-size: 12px;
+    margin-top: 6px;
+}
+
+/* Color Picker */
+.color-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.color-swatch {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.color-swatch:hover {
+    transform: scale(1.1);
+}
+
+.color-swatch.selected {
+    border-color: #fff;
+    box-shadow: 0 0 0 2px var(--brand-primary);
+}
+
+.color-swatch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.color-custom {
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    background: none;
+}
+
+.color-custom::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+.color-custom::-webkit-color-swatch {
+    border: 2px solid var(--text-faint);
+    border-radius: 4px;
+}
+
+/* Permissions Section */
+.permissions-section {
+    border-top: 1px solid #40444b;
+    padding-top: 20px;
+}
+
+.permission-category {
+    margin-bottom: 20px;
+}
+
+.permission-category h4 {
+    color: #8e9297;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 12px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #40444b;
+}
+
+.permission-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.permission-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px;
+    background: #2f3136;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.permission-item:hover {
+    background: #40444b;
+}
+
+.permission-item input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--brand-primary);
+    flex-shrink: 0;
+}
+
+.permission-item input[type="checkbox"]:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.permission-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.permission-label {
+    color: #dcddde;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.permission-desc {
+    color: var(--text-faint);
+    font-size: 12px;
+}
+
+/* Actions */
+.role-editor-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid #40444b;
+}
+
+.save-role-btn {
+    padding: 12px 24px;
+    background: var(--brand-primary);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background 0.15s ease;
+}
+
+.save-role-btn:hover {
+    background: var(--brand-hover);
+}
+
+.save-role-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.delete-role-btn {
+    padding: 12px 24px;
+    background: transparent;
+    color: #f04747;
+    border: 1px solid #f04747;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.15s ease;
+}
+
+.delete-role-btn:hover {
+    background: #f04747;
+    color: #fff;
+}
+
+/* Delete Confirmation */
+.delete-confirm {
+    margin-top: 16px;
+    padding: 16px;
+    background: #40444b;
+    border-radius: 4px;
+    border-left: 4px solid #f04747;
+}
+
+.delete-confirm p {
+    color: #dcddde;
+    margin: 0 0 12px 0;
+    font-size: 14px;
+}
+
+.delete-confirm-actions {
+    display: flex;
+    gap: 12px;
+}
+
+.cancel-btn {
+    padding: 8px 16px;
+    background: #4f545c;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 0.15s ease;
+}
+
+.cancel-btn:hover {
+    background: #5d6269;
+}
+
+.confirm-delete-btn {
+    padding: 8px 16px;
+    background: #f04747;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background 0.15s ease;
+}
+
+.confirm-delete-btn:hover {
+    background: #d43a3a;
+}
+
+/* No Role Selected */
+.no-role-selected {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+}
+
+.no-role-selected p {
+    color: var(--text-faint);
+    font-size: 16px;
+}
+
+/* Scrollbar Styling */
+.role-list::-webkit-scrollbar,
+.role-editor-panel::-webkit-scrollbar {
+    width: 8px;
+}
+
+.role-list::-webkit-scrollbar-track,
+.role-editor-panel::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.role-list::-webkit-scrollbar-thumb,
+.role-editor-panel::-webkit-scrollbar-thumb {
+    background: #202225;
+    border-radius: 4px;
+}
+
+.role-list::-webkit-scrollbar-thumb:hover,
+.role-editor-panel::-webkit-scrollbar-thumb:hover {
+    background: #2f3136;
+}
+
+/* ==========================================================================
+   Mobile — the 250px role list beside the editor leaves almost nothing for
+   the editor at phone widths; go full-screen and stack list above editor.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .role-modal {
+        width: 100vw;
+        max-width: none;
+        height: 100dvh;
+        max-height: none;
+        border-radius: 0;
+    }
+
+    .role-modal-header {
+        padding-top: calc(var(--safe-area-top, 0px) + 16px);
+    }
+
+    .role-modal-content {
+        flex-direction: column;
+    }
+
+    .role-list-panel {
+        width: 100%;
+        max-height: 30%;
+        border-right: none;
+        border-bottom: 1px solid #202225;
+    }
+
+    .permission-item {
+        padding: 10px;
+    }
+}
+
+
+/* Embedded inside ServerSettingsModal's Roles tab: fill the tab, keep the
+   two-panel layout scrollable. */
+.role-editor-embedded {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.role-editor-embedded .role-modal-content {
+    flex: 1;
+    min-height: 0;
+}

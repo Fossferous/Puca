@@ -1,0 +1,110 @@
+<!doctype html>
+<!--
+  390x844 coarse-pointer harness for Settings ▸ Devices.
+
+  docs/DESIGN_PHILOSOPHY.md requires new UI to survive the mobile walk, and a
+  jsdom test cannot see layout at all — it has no box model, so a row that
+  overflows the panel or a 20px tap target both pass there. This mounts the real
+  component in a real browser at the real width, against fixture data, so the
+  CSS is what is being checked rather than the markup.
+
+  This is a LAYOUT check only. Every row renders as "could not verify" because
+  the fixtures are not really signed — there is no account seed here. That is
+  the harness, not a defect; signature behaviour is covered by
+  src/tests/deviceIdentity.test.ts and e2e/device-attest.mjs.
+
+  Serve with the dev server, then open /e2e/devices-mobile.html and evaluate
+  `window.__devicesHarness()`. Expected: bodyScrollsHorizontally false,
+  widestElement <= viewportWidth, buttonsUnder44px empty.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Devices — 390x844 harness</title>
+    <style>
+        html, body { margin: 0; background: #313338; color: #dcddde;
+            font-family: system-ui, sans-serif; }
+        /* Mimic the settings panel's content column so overflow is measured
+           against the real constraint, not against an unbounded body. */
+        #root { width: 100%; max-width: 390px; padding: 12px; box-sizing: border-box; }
+        .settings-card { background: #2b2d31; border-radius: 8px; padding: 12px; }
+        .settings-description { color: #b9bbbe; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        // Stub the network BEFORE the component module loads, so its first
+        // effect sees fixtures rather than a failed request.
+        const DEVICES = [
+            {
+                id: 'thisDev', device_pub: 'x25519:AAA', sign_pub: 'ed25519:BBB',
+                name: 'Zeus-PC', platform: 'windows', auth_record: '{}', auth_sig: 's',
+                host_enabled: false, host_policy: null, host_sig: null, lan_info: null,
+                created_at: '2026-07-28T00:00:00Z', last_seen_at: null, online: true,
+            },
+            {
+                id: 'phone1', device_pub: 'x25519:CCC', sign_pub: 'ed25519:DDD',
+                // A deliberately long name — the row must not push the panel wider.
+                name: 'Oppo Find X8 Pro belonging to Zeus, in the living room',
+                platform: 'android', auth_record: '{}', auth_sig: 's',
+                host_enabled: false, host_policy: null, host_sig: null, lan_info: null,
+                created_at: '2026-07-28T00:00:00Z',
+                last_seen_at: '2026-07-28T09:00:00Z', online: false,
+            },
+            {
+                id: 'unknown1', device_pub: 'x25519:EEE', sign_pub: 'ed25519:FFF',
+                name: 'Unrecognised device', platform: 'linux',
+                auth_record: '{}', auth_sig: 'bad',
+                host_enabled: false, host_policy: null, host_sig: null, lan_info: null,
+                created_at: '2026-07-28T00:00:00Z', last_seen_at: null, online: false,
+            },
+        ];
+
+        const realFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+            const url = typeof input === 'string' ? input : input.url;
+            if (url.includes('/devices')) {
+                return new Response(JSON.stringify({ devices: DEVICES }), {
+                    status: 200, headers: { 'content-type': 'application/json' },
+                });
+            }
+            return realFetch(input, init);
+        };
+
+        // A syntactically valid JWT so currentUserId() resolves; never sent
+        // anywhere (fetch is stubbed above).
+        const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        localStorage.setItem('auth_token', `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u({
+            sub: 42, username: 'harness', exp: Math.floor(Date.now() / 1000) + 3600,
+        })}.sig`);
+
+        const [{ createRoot }, React, { DevicesSettings }] = await Promise.all([
+            import('/node_modules/react-dom/client.js').catch(() => import('react-dom/client')),
+            import('react'),
+            import('/src/components/DevicesSettings.tsx'),
+        ]);
+
+        createRoot(document.getElementById('root')).render(React.createElement(DevicesSettings));
+
+        // Report the two things the walk actually cares about, so a checker can
+        // read them without pixel-peeping.
+        window.__devicesHarness = () => {
+            const root = document.getElementById('root');
+            const small = [...root.querySelectorAll('button')]
+                .map(b => ({ label: b.textContent.trim(), h: Math.round(b.getBoundingClientRect().height) }))
+                .filter(b => b.h < 44);
+            return {
+                bodyScrollsHorizontally: document.documentElement.scrollWidth > window.innerWidth,
+                widestElement: Math.max(...[...root.querySelectorAll('*')]
+                    .map(e => Math.round(e.getBoundingClientRect().right))),
+                viewportWidth: window.innerWidth,
+                buttonsUnder44px: small,
+                unverifiedFlagged: !!root.querySelector('.device-row-unverified'),
+                deviceRows: root.querySelectorAll('.device-row').length,
+            };
+        };
+    </script>
+</body>
+</html>

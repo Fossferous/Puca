@@ -1,0 +1,193 @@
+/* Drag-and-drop file upload styles */
+
+.drop-zone-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(88, 101, 242, 0.2);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    animation: drop-zone-fade-in 0.2s ease;
+}
+
+@keyframes drop-zone-fade-in {
+    from {
+        opacity: 0;
+        background: rgba(88, 101, 242, 0);
+    }
+
+    to {
+        opacity: 1;
+        background: rgba(88, 101, 242, 0.2);
+    }
+}
+
+.drop-zone-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    padding: 2rem 3rem;
+    background: var(--bg-secondary);
+    border: 3px dashed var(--brand-primary);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.drop-zone-icon {
+    font-size: 48px;
+}
+
+.drop-zone-text {
+    font-size: 1.2rem;
+    color: var(--text-normal);
+    font-weight: 600;
+}
+
+.drop-zone-hint {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+/* Enhanced voice activity indicator - more prominent pulse */
+.voice-user-avatar.speaking {
+    border: 3px solid #43b581 !important;
+    box-shadow:
+        0 0 0 4px rgba(67, 181, 129, 0.3),
+        0 0 16px rgba(67, 181, 129, 0.6),
+        0 0 32px rgba(67, 181, 129, 0.3) !important;
+    animation: enhanced-speaking-pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes enhanced-speaking-pulse {
+
+    0%,
+    100% {
+        box-shadow:
+            0 0 0 4px rgba(67, 181, 129, 0.3),
+            0 0 16px rgba(67, 181, 129, 0.6),
+            0 0 32px rgba(67, 181, 129, 0.3);
+    }
+
+    50% {
+        box-shadow:
+            0 0 0 6px rgba(67, 181, 129, 0.5),
+            0 0 24px rgba(67, 181, 129, 0.8),
+            0 0 48px rgba(67, 181, 129, 0.5);
+    }
+}
+
+/* Speaking indicator wave bars */
+.speaking-indicator {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 16px;
+}
+
+.speaking-bar {
+    width: 3px;
+    background: #43b581;
+    border-radius: 1.5px;
+    animation: speaking-wave 0.5s ease-in-out infinite;
+}
+
+.speaking-bar:nth-child(1) {
+    animation-delay: 0s;
+    height: 40%;
+}
+
+.speaking-bar:nth-child(2) {
+    animation-delay: 0.1s;
+    height: 70%;
+}
+
+.speaking-bar:nth-child(3) {
+    animation-delay: 0.2s;
+    height: 100%;
+}
+
+.speaking-bar:nth-child(4) {
+    animation-delay: 0.1s;
+    height: 70%;
+}
+
+.speaking-bar:nth-child(5) {
+    animation-delay: 0s;
+    height: 40%;
+}
+
+@keyframes speaking-wave {
+
+    0%,
+    100% {
+        transform: scaleY(0.4);
+    }
+
+    50% {
+        transform: scaleY(1);
+    }
+}
+
+/* File upload progress indicator */
+.upload-progress {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--brand-primary), var(--accent-lavender));
+    border-radius: 0 0 4px 4px;
+    transition: width 0.15s ease;
+}
+
+/* Enhanced file preview tooltip */
+.file-preview {
+    position: relative;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    border: 1px solid var(--bg-quaternary);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.file-preview-icon {
+    font-size: 1.5rem;
+}
+
+.file-preview-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.file-preview-name {
+    color: var(--text-normal);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-preview-size {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+.file-preview-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+
+.file-preview-close:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-normal);
+}

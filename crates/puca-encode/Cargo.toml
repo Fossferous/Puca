@@ -1,0 +1,43 @@
+[package]
+name = "puca-encode"
+version = "0.1.0"
+edition = "2021"
+description = "H.264 encoding for the Puca host agent"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+puca-capture = { path = "../puca-capture" }
+
+# Media Foundation's H.264 encoder MFTs. Picked over bundling x264/openh264
+# because they are present on every supported Windows, reach the GPU encoder
+# where there is one, and add no redistribution or licensing question —
+# openh264's binary is fetched at runtime under Cisco's terms, which is a poor
+# fit for a self-hosted app that has to work offline.
+#
+# "Reach the GPU" is not free and this comment used to claim it was: the
+# software MFT has a fixed CLSID and the hardware ones must be enumerated and
+# driven asynchronously. See the header of src/windows_impl.rs.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+# VP8 for the Linux host, OFF by default.
+#
+# There is no pure-Rust VP8 encoder, so this necessarily breaks the no-C-headers
+# preference the capture crate documents. Making it optional is the mitigation:
+# without the feature the agent still builds anywhere and honestly reports that
+# it cannot be watched, which is a real (drive-but-not-view) product rather than
+# a black screen.
+#
+# BUILD NEEDS libvpx <= 1.13.0 -- env-libvpx-sys ships pre-generated bindings per
+# version and PANICS on anything newer (Ubuntu 24.04 ships 1.14, Fedora 41 ships
+# 1.15). Its `generate` feature escapes that but wants libclang.
+[features]
+vp8 = ["dep:vpx-sys"]
+
+[target.'cfg(unix)'.dependencies]
+vpx-sys = { package = "env-libvpx-sys", version = "5.1", optional = true }

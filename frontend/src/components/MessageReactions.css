@@ -1,0 +1,233 @@
+/* Message Reactions */
+.message-reactions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+}
+
+/* No reactions yet → reserve NO height under the message (the invisible
+   add-button was padding every message by ~28px, defeating the compact
+   grouped layout). On fine pointers the hover toolbar's React button owns
+   "add reaction"; on touch, long-press → "Add Reaction" in the context menu
+   owns it (field report 2026-08-11: the always-visible + square under every
+   message was noise). So the empty strip never shows anywhere — a deliberate,
+   documented exception to design §5's "reveal, don't hover-gate" rule,
+   because the revealed control was the complaint. */
+.message-reactions.empty {
+    display: none;
+}
+
+.reactions-list {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.reaction-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: rgba(88, 101, 242, 0.15);
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.reaction-badge:hover {
+    background: rgba(88, 101, 242, 0.25);
+}
+
+.reaction-badge.active {
+    background: rgba(88, 101, 242, 0.3);
+    border-color: #5865f2;
+}
+
+.reaction-emoji {
+    font-size: 14px;
+}
+
+.reaction-count {
+    font-size: 12px;
+    color: var(--text-normal);
+    font-weight: 500;
+}
+
+/* Add Reaction Button */
+.add-reaction-wrapper {
+    position: relative;
+}
+
+.add-reaction-btn {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px dashed var(--text-faint);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 10px;
+    /* Hover-only, like the rest of the message toolbar (touch devices
+       keep it always visible via the media query below). */
+    opacity: 0;
+    transition: all 0.15s;
+}
+
+.message:hover .add-reaction-btn,
+.add-reaction-btn:hover {
+    opacity: 1;
+    border-color: var(--brand-primary);
+}
+
+/* Reaction Picker — a thin positioning wrapper around the full EmojiPicker
+   (352px wide). No max-width: a 280px clamp used to clip the picker down to
+   ~6 visible emojis. */
+.reaction-picker {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    margin-bottom: 4px;
+    background: var(--bg-primary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    z-index: 100;
+    width: max-content;
+}
+
+.emoji-section {
+    display: grid;
+    /* Fill whatever width the container ends up with — fixed track counts
+       rendered sparse 3-wide grids when the picker was narrower than
+       designed. */
+    grid-template-columns: repeat(auto-fill, minmax(32px, 1fr));
+    gap: 4px;
+}
+
+.emoji-section.custom {
+    grid-template-columns: repeat(6, 1fr);
+}
+
+.emoji-divider {
+    height: 1px;
+    background: var(--bg-tertiary);
+    margin: 8px 0;
+}
+
+.emoji-section-label {
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.picker-emoji {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background 0.1s;
+}
+
+.picker-emoji:hover {
+    background: var(--bg-tertiary);
+}
+
+.picker-emoji.custom img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+}
+
+.custom-emoji-img {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    vertical-align: middle;
+}
+
+/* Mobile-friendly touch styles */
+@media (hover: none) and (pointer: coarse) {
+
+    /* Disable hover states on touch devices - use active instead */
+    .reaction-badge:hover {
+        background: rgba(88, 101, 242, 0.15);
+    }
+
+    .reaction-badge:active {
+        background: rgba(88, 101, 242, 0.35);
+        transform: scale(0.95);
+    }
+
+    .picker-emoji:hover {
+        background: transparent;
+    }
+
+    .picker-emoji:active {
+        background: var(--bg-tertiary);
+        transform: scale(0.9);
+    }
+
+    /* Larger touch targets on mobile */
+    .picker-emoji {
+        width: 40px;
+        height: 40px;
+        font-size: 22px;
+    }
+
+    .reaction-picker {
+        /* Small screens: cap to the viewport and let the picker's own
+           scrolling handle overflow instead of clipping emojis. */
+        max-width: calc(100vw - 24px);
+        overflow-x: auto;
+    }
+
+    .emoji-section {
+        grid-template-columns: repeat(6, 1fr);
+        gap: 6px;
+    }
+
+    /* Touch has no hover to reveal the + button, and keeping it always-on
+       put a square under every message (the 2026-08-11 complaint). Reactions
+       are reached by tap-and-hold instead: the WebView synthesises a
+       contextmenu event, and the message menu's "Add Reaction" opens this
+       component's picker via the openRequest prop. display:none (not
+       opacity) so the wrapper reserves no width next to the chips. The
+       portaled picker itself is unaffected — portals don't inherit display. */
+    .add-reaction-wrapper {
+        display: none;
+    }
+}
+/* Custom server emoji row above the standard reaction picker.
+   The embedded EmojiPicker renders a full-viewport backdrop inside a
+   z-index:1000 stacking context to catch outside clicks; without its own
+   stacking, this sibling row paints UNDER that backdrop and its buttons
+   swallow clicks (the picker just closes). Lift it above. */
+.reaction-custom-row {
+    position: relative;
+    z-index: 1001;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 6px;
+    border-bottom: 1px solid var(--bg-primary, #1e1f22);
+    max-width: 320px;
+}
+.reaction-custom-row .picker-emoji.custom img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+}

@@ -1,0 +1,226 @@
+.device-file-manager {
+    position: absolute;
+    top: 50px;
+    right: 20px;
+    width: 350px;
+    height: 500px;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    z-index: 1000;
+    overflow: hidden;
+}
+
+/* On a phone the fixed 350x500 desktop panel overhung a 390px screen and its
+   6px rows were unhittable. Full screen, above the toolbar (500) and the
+   menus (501), with touch-sized rows. */
+@media (pointer: coarse) {
+    .device-file-manager {
+        position: fixed;
+        inset: 0;
+        width: auto;
+        height: auto;
+        border: none;
+        border-radius: 0;
+        z-index: 1100;
+        padding-top: env(safe-area-inset-top, 0px);
+    }
+
+    /* Height comes inline from the TSX (DFM_ROW_H_COARSE) — see the base
+       .dfm-entry rule. Only the type size changes here. */
+    .dfm-entry {
+        font-size: 15px;
+    }
+
+    .dfm-close {
+        font-size: 28px;
+        padding: 4px 8px;
+    }
+
+    .dfm-toolbar button {
+        padding: 10px 12px;
+        font-size: 14px;
+    }
+
+    .dfm-download {
+        padding: 8px 10px;
+        font-size: 18px;
+    }
+}
+
+.dfm-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background: #252526;
+    border-bottom: 1px solid #333;
+}
+
+.dfm-header h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dfm-close {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.dfm-close:hover {
+    color: #fff;
+}
+
+.dfm-toolbar {
+    display: flex;
+    gap: 8px;
+    padding: 10px 15px;
+    background: #1e1e1e;
+    border-bottom: 1px solid #333;
+}
+
+.dfm-toolbar button {
+    background: #333;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.dfm-toolbar button:hover:not(:disabled) {
+    background: #444;
+    color: #fff;
+}
+
+.dfm-toolbar button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.dfm-error {
+    background: #4a1919;
+    color: #ff8888;
+    padding: 8px 15px;
+    font-size: 12px;
+    border-bottom: 1px solid #333;
+}
+
+.dfm-loading {
+    padding: 10px 15px;
+    font-size: 13px;
+    color: #888;
+}
+
+.dfm-empty {
+    padding: 10px 15px;
+    font-size: 13px;
+    color: #888;
+    font-style: italic;
+}
+
+.dfm-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 5px 0;
+}
+
+/* NO height here — the row height is set INLINE by DeviceFileManager.tsx from
+   the same DFM_ROW_H_* constant its window math multiplies by (a CSS height
+   was silently lost to the cascade once; see the TSX comment). Keep the
+   single-line ellipsis on .dfm-name — a wrapping name would fight the fixed
+   height. */
+.dfm-entry {
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
+    padding: 0 15px;
+    cursor: pointer;
+    font-size: 13px;
+    overflow: hidden;
+}
+
+.dfm-entry:hover {
+    background: #2a2d2e;
+}
+
+.dfm-icon {
+    margin-right: 10px;
+    font-size: 16px;
+}
+
+.dfm-name {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dfm-download {
+    background: none;
+    border: none;
+    color: #007acc;
+    cursor: pointer;
+    padding: 0 5px;
+    font-size: 14px;
+}
+
+.dfm-download:hover {
+    color: #3399ff;
+}
+
+/* Shown until the person at the other computer approves a folder. File access
+   is asked for separately from screen sharing, so this is the normal starting
+   state, not an error. */
+.dfm-gate {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.dfm-gate p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.45;
+    opacity: 0.85;
+}
+
+.dfm-gate button {
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.dfm-gate button:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* Shown when the host capped a very large directory (MAX_LIST_ENTRIES). A
+   partial folder must announce itself rather than look complete. */
+.dfm-truncated {
+    padding: 6px 10px;
+    margin: 0 0 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted, #b9bbbe);
+    background: rgba(249, 226, 175, 0.10);
+    border: 1px solid rgba(249, 226, 175, 0.35);
+    border-radius: 4px;
+}

@@ -1,0 +1,423 @@
+.task-tree {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* Containing block for the drag-drop insertion line. */
+    position: relative;
+}
+
+/* Positioned so the inline z-index the drag applies to a lifted group takes
+   effect (z-index is inert on a static element). */
+.tt-group {
+    position: relative;
+}
+
+.tt-list {
+    list-style: none;
+    margin: 0;
+    padding: 8px 0;
+}
+
+.tt-list.completed {
+    padding-top: 0;
+}
+
+.tt-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    transition: background 0.1s;
+}
+
+.tt-item:hover {
+    background: var(--bg-hover, #36393f);
+}
+
+/* Indent comes from the nesting container (cumulative per level), not a
+   fixed subtask offset — tasks can nest several levels deep. */
+.tt-nest {
+    padding-left: 24px;
+}
+
+.tt-item input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    cursor: pointer;
+    accent-color: var(--accent-color, #5865f2);
+}
+
+/* COMPLETE_TASKS denied: the checkbox stays visible (the list must still read
+   as a checklist) but is inert; its title explains why. */
+.tt-item input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.tt-description {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--text-primary, #dcddde);
+    word-break: break-word;
+    cursor: text;
+}
+
+.tt-item.completed .tt-description {
+    text-decoration: line-through;
+    color: var(--text-muted, #72767d);
+}
+
+.tt-edit-input {
+    flex: 1;
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 13px;
+}
+
+/* Drag handle: the only place an item drag can start, so click-to-edit and
+   list scrolling never fight it. touch-action: none lets the drag begin
+   immediately on touch (no scroll claim to race). */
+.tt-grip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    flex-shrink: 0;
+    color: var(--text-muted, #72767d);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    opacity: 0;
+}
+.tt-item:hover .tt-grip { opacity: 1; }
+.tt-grip svg { width: 14px; height: 14px; }
+.tt-grip-ghost { visibility: hidden; cursor: default; }
+
+/* While a drag is live: the insertion line, and hover styling quiets down so
+   the moving row + line are the only signals. */
+.tt-drop-indicator {
+    position: absolute;
+    background: var(--accent-color, #5865f2);
+    border-radius: 1px;
+    pointer-events: none;
+    z-index: 6;
+}
+.tt-drag-live .tt-item:hover { background: none; }
+body.drag-reorder-active {
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: grabbing;
+}
+
+/* Fine pointers reorder by dragging the grip; the one-slot arrows would be
+   dead weight there. Coarse pointers keep them as the fallback. */
+@media (pointer: fine) {
+    .tt-can-drag .tt-move { display: none; }
+}
+
+/* Due-time chip: quiet until the deadline passes on an open task. Shrinkable
+   like the byline, so it must also TRUNCATE like the byline — in the 280px
+   ChecklistPanel it is the row's only shrinkable badge, and nowrap text with
+   nothing to clip it would bleed over its neighbours. */
+.tt-due {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 11em;
+    font-size: 11px;
+    color: var(--text-muted, #72767d);
+    white-space: nowrap;
+    user-select: none;
+}
+.tt-due svg { width: 0.9em; height: 0.9em; flex-shrink: 0; }
+.tt-due-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tt-due.overdue {
+    color: var(--danger-color, #ed4245);
+    font-weight: 600;
+}
+
+/* Place chip (Android location reminders): same shrink/truncate contract as
+   the due chip — it shares narrow rows with it. */
+.tt-place {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 9em;
+    font-size: 11px;
+    color: var(--text-muted, #72767d);
+    white-space: nowrap;
+    user-select: none;
+}
+.tt-place svg { width: 0.9em; height: 0.9em; flex-shrink: 0; }
+
+/* Inline due editor, aligned with the item text like the attach strip. */
+.tt-due-edit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 12px 6px 36px;
+}
+.tt-due-edit input {
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 13px;
+    color-scheme: dark;
+}
+[data-theme="light"] .tt-due-edit input { color-scheme: light; }
+.tt-due-set { font-size: 12px; }
+
+/* Inline place picker, same alignment contract as the due editor. Wraps:
+   the new-place flow adds a label input + radius select to the row. */
+.tt-place-edit {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 2px 12px 6px 36px;
+}
+.tt-place-edit select,
+.tt-place-edit input {
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 13px;
+    max-width: 100%;
+}
+.tt-place-label { flex: 1 1 10em; min-width: 8em; }
+.tt-place-error {
+    flex-basis: 100%;
+    font-size: 11px;
+    color: var(--danger-color, #ed4245);
+}
+
+.tt-actions {
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    /* The action buttons must survive narrow rows — long text truncates
+       instead of crushing them to zero width. */
+    flex-shrink: 0;
+}
+
+.tt-item:hover .tt-actions {
+    opacity: 1;
+}
+
+.tt-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary, #b9bbbe);
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.tt-btn:hover {
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+}
+
+.tt-delete:hover {
+    color: var(--danger-color, #ed4245);
+}
+
+.tt-subtask-add {
+    /* Lives inside .tt-nest, which already supplies the level indent. */
+    padding: 4px 12px 4px 12px;
+}
+
+.tt-subtask-add input {
+    width: 100%;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 13px;
+    box-sizing: border-box;
+}
+
+.tt-subtask-add input::placeholder {
+    color: var(--text-muted, #72767d);
+}
+
+.tt-completed-section {
+    border-top: 1px solid var(--border-color, #202225);
+    margin-top: 8px;
+}
+
+.tt-toggle-completed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    color: var(--text-secondary, #b9bbbe);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 8px 12px;
+    width: 100%;
+    text-align: left;
+}
+
+.tt-toggle-completed:hover {
+    color: var(--text-primary, #fff);
+}
+
+.tt-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-secondary, #949ba4);
+    font-size: 13px;
+}
+
+/* Attachment strip sits under its row, aligned with the item text
+   (12px row padding + 16px checkbox + 8px gap). Nesting indent comes from
+   the surrounding .tt-nest, same as subtask rows. */
+.tt-attach-row {
+    padding: 0 12px 6px 36px;
+}
+
+/* Sidecar that didn't decrypt (key unavailable / identity locked): show a
+   placeholder rather than nothing, so a member can't mistake it for empty and
+   overwrite refs they simply can't read yet. */
+.tt-attach-locked {
+    font-size: 12px;
+    color: var(--text-muted, #949ba4);
+    font-style: italic;
+}
+
+/* ==========================================================================
+   Mobile — hover-revealed actions are invisible (but still tappable, and
+   inflated to 44x44 by mobile.css's blanket button rule) with no hover on
+   touch. Make them always visible and cap their size so up to four buttons
+   still fit a narrow row.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .tt-actions {
+        opacity: 1;
+    }
+
+    /* THE TASK TEXT MUST WIN THE ROW.
+       Everything else in a .tt-item is unshrinkable — the checkbox, and the
+       action cluster at flex-shrink: 0 — while the byline becomes visible on
+       touch. That left .tt-description as the only thing able to give, so
+       inside an "All servers" board card (~300px, less 16px per nesting level)
+       it collapsed to a handful of characters and wrapped mid-word down a
+       narrow column. Measured at 390px before this rule: 13 characters per
+       line at the top level, 7 once nested twice.
+
+       Wrapping the row fixes it at every depth: the description keeps a
+       readable measure and the byline plus actions drop to their own line
+       rather than competing for the same one. */
+    .tt-item {
+        flex-wrap: wrap;
+    }
+
+    .tt-description {
+        min-width: 60%;
+    }
+
+    /* When they do wrap, keep the cluster to the right where it belongs. */
+    .tt-actions {
+        margin-left: auto;
+    }
+
+    .tt-btn {
+        min-width: 30px;
+        min-height: 30px;
+        padding: 4px;
+    }
+
+    /* Touch: the grip is always visible and grown to a usable target. */
+    .tt-grip {
+        opacity: 0.6;
+        width: 26px;
+        min-height: 30px;
+    }
+    .tt-grip svg { width: 16px; height: 16px; }
+
+    .tt-edit-input,
+    .tt-subtask-add input,
+    .tt-due-edit input,
+    .tt-place-edit input,
+    .tt-place-edit select {
+        font-size: 16px;
+    }
+
+    /* Five levels of indent must still leave text room at 390px. */
+    .tt-nest {
+        padding-left: 16px;
+    }
+}
+
+/* ==========================================================================
+   Attribution byline ("· <name>" after the description). Fine pointers keep
+   the hover title only; coarse pointers have no hover, so the byline renders
+   inline instead.
+   ========================================================================== */
+.tt-byline {
+    display: none;
+    /* Shrinkable: every sibling in a .tt-item row is unshrinkable (checkbox,
+       action cluster), so an unshrinkable byline overflows 320px board cards
+       at 390px. The byline is the informational extra — it gives way first. */
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 9em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--text-muted, #72767d);
+}
+
+@media (pointer: coarse) {
+    .tt-byline {
+        display: inline-block;
+    }
+}
+
+/* "Not encrypted" flag on a checklist item stored as plaintext (audit H-1). */
+.tt-not-encrypted {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-warning, #f0b232);
+    white-space: nowrap;
+    user-select: none;
+}
+.tt-not-encrypted svg {
+    width: 0.85em;
+    height: 0.85em;
+}
+/* Same measured light-theme contrast fix as .not-encrypted-tag in Chat.css:
+   --text-warning is 1.7:1 on light's surface, this darkened amber is 5.34:1. */
+[data-theme="light"] .tt-not-encrypted {
+    color: #8a5a00;
+}

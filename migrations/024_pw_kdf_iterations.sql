@@ -1,0 +1,16 @@
+-- Versioned password-wrap KDF strength.
+--
+-- The identity seed is wrapped under a PBKDF2-SHA256 key derived from the login
+-- password (see v3 custody, migration 021). This column records how many
+-- iterations that KEK used, so the count can be raised over time without
+-- locking out blobs wrapped at the old strength: login unwraps at the stored
+-- count, then transparently re-wraps at the current target.
+--
+-- NULL ⇒ the legacy 210,000 iterations used before this column existed.
+-- New/upgraded password wraps record their actual count (600,000, the OWASP
+-- 2026 floor for PBKDF2-SHA256).
+--
+-- Only the PASSWORD wrap is versioned. The recovery-code KEK stays at the
+-- legacy count on purpose: its input is a 128-bit BIP39 phrase, so additional
+-- iterations add no meaningful protection against brute force.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pw_kdf_iterations INT;

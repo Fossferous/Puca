@@ -1,0 +1,149 @@
+/* The standalone file browser: a modal surface with no screen behind it.
+   DeviceFileManager was written as a floating panel over the video stage
+   (position:absolute, fixed 350x500), so inside this dialog it is un-pinned and
+   told to fill the panel instead. */
+
+/* z-index 2050: ABOVE the settings modal (2000), below the unattended
+   passphrase prompt (2100).
+
+   Not a free choice. Devices is a first-class view now (DevicesView, z 100),
+   but a Files session can be started while ANY modal is open — including the
+   settings modal — and none of them close when a session starts. At any z
+   below 2000 this can render behind a modal and the user sees nothing happen.
+   That is exactly the reasoning already recorded for .ua-prompt-backdrop in
+   docs/DESIGN_PHILOSOPHY.md, and it stays UNDER that one because connecting to
+   an armed device raises the passphrase prompt on top of this. Registered in
+   the z-index table in that doc. */
+.device-file-browser {
+    position: fixed;
+    inset: 0;
+    z-index: 2050;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.dfb-panel {
+    display: flex;
+    flex-direction: column;
+    width: min(560px, 100%);
+    height: min(680px, 100%);
+    background: #1e1e1e;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+
+.dfb-peer {
+    padding: 10px 15px;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: #9aa0a6;
+    background: #202021;
+    border-bottom: 1px solid #333;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dfb-error {
+    background: #4a1919;
+    color: #ff8888;
+    padding: 8px 15px;
+    font-size: 12px;
+}
+
+/* Un-pin the manager: it is the panel's content here, not a floating overlay. */
+.device-file-browser .device-file-manager {
+    position: static;
+    top: auto;
+    right: auto;
+    width: 100%;
+    height: auto;
+    flex: 1;
+    min-height: 0;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    z-index: auto;
+}
+
+/* Phones and anything else driven by a finger.
+
+   The manager's own rules were written for a mouse on a desktop stage: 6px rows
+   and a bare glyph for download are fine to click and far too small to tap. The
+   coarse-pointer walk asserts 44px, so everything interactive grows to it here
+   and the dialog goes edge to edge — a 24px inset on a 390px screen wastes a
+   ninth of the width for a border nobody needs. */
+@media (max-width: 640px), (pointer: coarse) {
+    .device-file-browser {
+        padding: 0;
+    }
+
+    /* Full-screen per DESIGN_PHILOSOPHY section 4, and dvh rather than vh
+       because the mobile URL bar makes 100vh taller than the visible viewport,
+       which pushes the bottom of the list under the chrome. Safe-area padding
+       keeps the header out of the notch and the last row above the home bar —
+       this modal covers the bottom nav (that is what a modal does), so nothing
+       else is reserving that space for it. */
+    .dfb-panel {
+        width: 100vw;
+        height: 100dvh;
+        max-height: none;
+        border: none;
+        border-radius: 0;
+        padding-top: var(--safe-area-top);
+        padding-bottom: var(--safe-area-bottom);
+        box-sizing: border-box;
+    }
+
+    /* No min-height / vertical padding: the row height is set inline by
+       DeviceFileManager.tsx (DFM_ROW_H_COARSE) and its window math breaks if
+       any rule re-inflates the rows. */
+    .device-file-browser .dfm-entry {
+        padding: 0 16px;
+        font-size: 15px;
+    }
+
+    .device-file-browser .dfm-download {
+        min-width: 44px;
+        min-height: 44px;
+        font-size: 18px;
+    }
+
+    .device-file-browser .dfm-toolbar {
+        gap: 10px;
+    }
+
+    .device-file-browser .dfm-toolbar button {
+        flex: 1;
+        min-height: 44px;
+        font-size: 14px;
+    }
+
+    .device-file-browser .dfm-close {
+        min-width: 44px;
+        min-height: 44px;
+        font-size: 26px;
+    }
+
+    .device-file-browser .dfm-gate button {
+        min-height: 44px;
+        width: 100%;
+    }
+
+    /* Hover states stick on touch: a tapped row stays highlighted afterwards,
+       which reads as selected when nothing is. */
+    .device-file-browser .dfm-entry:hover {
+        background: none;
+    }
+
+    .device-file-browser .dfm-entry:active {
+        background: #2a2d2e;
+    }
+}

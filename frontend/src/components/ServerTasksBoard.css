@@ -1,0 +1,102 @@
+/* ServerTasksBoard — cross-server checklist board inside the Tasks dashboard.
+   Card/grid/empty styles come from AllChecklistsView.css; this file adds the
+   sub-tab strip and per-server sections. */
+
+.server-tasks-board {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+}
+
+.server-tasks-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px 0;
+    overflow-x: auto;
+    flex-shrink: 0;
+    scrollbar-width: thin;
+}
+
+/* Same idiom as the Friends header tabs. */
+.server-tasks-tab {
+    background: none;
+    border: none;
+    color: var(--text-muted, #72767d);
+    padding: 0.375rem 0.5rem;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 0.875rem;
+    transition: all 0.15s;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.server-tasks-tab:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal, #dcddde);
+}
+
+.server-tasks-tab.active {
+    color: var(--text-normal, #fff);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.server-tasks-count {
+    background: rgba(137, 180, 250, 0.25);
+    color: var(--text-normal, #dcddde);
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-weight: 700;
+}
+
+.server-tasks-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.server-tasks-section {
+    padding: 4px 0 8px;
+}
+
+.server-tasks-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 12px 20px 0;
+    font-size: 15px;
+    color: var(--text-primary, #fff);
+}
+
+.server-tasks-sub {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-muted, #72767d);
+}
+
+/* The shared grid is the scroller in AllChecklistsView; here the outer
+   .server-tasks-scroll scrolls the whole stack of sections instead. */
+.server-tasks-grid {
+    flex: none;
+    overflow-y: visible;
+    min-height: auto;
+}
+
+/* ==========================================================================
+   Mobile — sub-tabs stay one scrollable row; grid collapses naturally via
+   its auto-fill minmax. Inputs inside cards already get 16px from the
+   checklist coarse-pointer rules.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .server-tasks-tab {
+        padding: 10px 12px;
+        flex-shrink: 0;
+    }
+}

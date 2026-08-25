@@ -1,0 +1,759 @@
+/* Devices — first-class view (replaces DevicesModal + DevicesSettings).
+ *
+ * Desktop: the FriendsPanel pattern — a fixed overlay filling everything right
+ * of the 72px server rail. Mobile: a panel-system citizen per
+ * docs/DESIGN_PHILOSOPHY.md §1 — full width, safe-area top, bottom-nav bottom,
+ * z-band 105 (shares the chat slot with .friends-dashboard), and it tracks the
+ * panel transforms so the bottom nav keeps working while it is open.
+ *
+ * Class vocabulary note: .device-row / .device-option / .option-hint /
+ * .device-error / .device-btn / #device-forwarding are load-bearing — the
+ * devices test suite selects on them. Keep them when restyling.
+ */
+
+.devices-dashboard {
+    position: fixed;
+    top: 0;
+    left: 72px; /* after the server rail */
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    z-index: 100;
+}
+
+/* --- Header bar ---------------------------------------------------------- */
+
+.devices-header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--bg-tertiary);
+    background: var(--bg-primary);
+    flex-shrink: 0;
+}
+
+.devices-title {
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--text-normal, #dcddde);
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.devices-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    min-width: 0;
+    /* Takes the slack on desktop so the close button stays hard right. */
+    flex: 1 1 auto;
+}
+
+.devices-tab {
+    border: none;
+    background: transparent;
+    color: var(--text-muted, #b9bbbe);
+    font-size: 0.9rem;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.devices-tab:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-normal, #dcddde);
+}
+
+.devices-tab.active {
+    background: var(--background-modifier-accent, rgba(255, 255, 255, 0.1));
+    color: var(--text-normal, #dcddde);
+}
+
+.devices-close {
+    border: none;
+    background: transparent;
+    color: var(--text-muted, #b9bbbe);
+    font-size: 1rem;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.devices-close:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-normal, #dcddde);
+}
+
+/* Refresh by hand. Same footprint as the close button beside it; the glyph
+   spins while a manual refresh is in flight so a fast one is still seen. */
+.devices-refresh {
+    border: none;
+    background: transparent;
+    color: var(--text-muted, #b9bbbe);
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+}
+
+.devices-refresh:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-normal, #dcddde);
+}
+
+.devices-refresh:disabled {
+    cursor: default;
+}
+
+.devices-refresh-glyph {
+    display: inline-flex;
+    line-height: 0;
+}
+
+.devices-refresh-busy .devices-refresh-glyph {
+    animation: devices-spin 0.9s linear infinite;
+}
+
+@keyframes devices-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* --- Main scroll area ---------------------------------------------------- */
+
+.devices-main {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* Pull-to-refresh draws its own pull; the browser's overscroll glow or
+       native reload must not run underneath it. */
+    overscroll-behavior-y: contain;
+    padding: 20px 24px 32px;
+    /* A dashboard, not a wall: cap the line length like a settings page. */
+    width: 100%;
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+/* The pull. Height is set inline from the gesture; everything else here.
+   Clipped, so the label rises into view as the pull grows rather than
+   sitting visible at zero height. */
+.devices-pull {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 8px;
+    /* Clips its own content so a zero-height idle spacer shows NOTHING —
+       and no padding on this box, or border-box would floor its height at
+       the padding and it would eat the list's top spacing even when idle.
+       The breathing room lives on the children, which the clip hides at
+       height 0 and reveals as the pull grows. */
+    overflow: hidden;
+    min-height: 0;
+    font-size: 13px;
+    color: var(--text-muted, #b9bbbe);
+    /* Snaps back on release and settles onto the spinner height. */
+    transition: height 0.18s ease-out;
+    /* Negative margin eats the container's top padding so the spacer starts
+       at the very top edge, where a pull begins. */
+    margin-top: -20px;
+}
+
+.devices-pull-glyph,
+.devices-pull-text {
+    margin-bottom: 10px;
+}
+
+/* While the finger is down the height follows it on every move; a transition
+   there would trail the finger. */
+.devices-pull-live {
+    transition: none;
+}
+
+.devices-pull-glyph {
+    display: inline-flex;
+    line-height: 0;
+    transition: transform 0.15s ease-out;
+}
+
+.devices-pull-armed .devices-pull-glyph {
+    transform: rotate(180deg);
+    color: var(--text-normal, #dcddde);
+}
+
+.devices-pull-refreshing .devices-pull-glyph {
+    animation: devices-spin 0.9s linear infinite;
+}
+
+/* --- Card grid (My devices tab) ------------------------------------------ */
+
+.devices-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+}
+
+.device-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 14px;
+    min-width: 0;
+}
+
+/* The unverified flag re-uses the settings row accent so the meaning reads
+   the same in both generations of the UI. */
+.device-card.device-row-unverified {
+    border-left: 3px solid var(--danger, #f04747);
+}
+
+.device-card-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.device-icon {
+    font-size: 26px;
+    line-height: 1.2;
+    flex: 0 0 auto;
+}
+
+.device-main {
+    flex: 1 1 auto;
+    min-width: 0; /* lets long device names ellipsize instead of widening the card */
+}
+
+.device-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-weight: 600;
+    color: var(--text-normal, #dcddde);
+    overflow-wrap: anywhere;
+}
+
+.device-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--background-modifier-accent, rgba(255, 255, 255, 0.1));
+    color: var(--text-muted, #b9bbbe);
+}
+
+.device-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+    margin-top: 3px;
+}
+
+/* Presence as a dot beside the text, not a badge: the badge said "Online" in
+   green while offline devices said nothing, so scanning the grid meant
+   reading. A grey/green dot is legible at a glance. */
+.device-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint, #72767d);
+    flex: 0 0 auto;
+}
+
+.device-dot-on {
+    background: var(--online, #3ba55d);
+}
+
+.device-warning {
+    font-size: 12px;
+    color: var(--danger, #f04747);
+}
+
+.device-warning-standalone {
+    margin-top: 2px;
+}
+
+.device-wake-note {
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+/* Live wake progress, and the (long) explanation when it fails. Wraps rather
+   than truncating: every one of these messages is something the user can only
+   learn by reading it — a magic packet acknowledges nothing. */
+.device-wake-status {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted, #b9bbbe);
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+.device-wake-status-failed {
+    color: var(--danger, #f04747);
+    background: rgba(240, 71, 71, 0.08);
+}
+
+.device-wake-countdown {
+    opacity: 0.75;
+}
+
+/* Coarse pointers get the same text at a comfortable size — this block is
+   frequently the longest thing on the card and is read, not tapped. */
+@media (pointer: coarse) {
+    .device-wake-status {
+        font-size: 13px;
+        padding: 8px 10px;
+    }
+}
+
+.device-error {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--danger, #f04747);
+}
+
+.device-empty {
+    font-size: 13px;
+    color: var(--text-muted, #b9bbbe);
+    padding: 8px 0;
+}
+
+.devices-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+    color: var(--text-muted, #b9bbbe);
+    padding: 48px 16px;
+}
+
+.devices-empty-state .devices-empty-icon {
+    font-size: 40px;
+}
+
+.devices-empty-state p {
+    margin: 0;
+    max-width: 420px;
+    font-size: 13px;
+}
+
+.device-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: auto; /* pin to the card bottom so grids of mixed height align */
+}
+
+.device-btn {
+    min-height: 32px;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    background: var(--background-modifier-accent, rgba(255, 255, 255, 0.1));
+    color: var(--text-normal, #dcddde);
+}
+
+.device-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.device-btn-danger {
+    background: var(--danger, #f04747);
+    color: #fff;
+}
+
+/* The icon-only revoke button: square, glyph-sized. Keeps .device-btn-danger's
+   fill so "destructive" stays a colour the themes control, not the icon's. */
+.device-btn-icon {
+    flex: 0 0 auto;
+    width: 32px;
+    padding: 6px 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.device-btn-icon-glyph {
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+}
+
+.device-btn-primary {
+    background: var(--brand, #5865f2);
+    color: #fff;
+}
+
+.device-name-input {
+    width: 100%;
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--background-modifier-accent, rgba(255, 255, 255, 0.2));
+    background: var(--input-background, rgba(0, 0, 0, 0.3));
+    color: var(--text-normal, #dcddde);
+    font-size: 14px;
+}
+
+/* --- This-device tab ------------------------------------------------------ */
+
+.devices-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 720px;
+}
+
+/* Standalone card chrome. DevicesSettings borrowed .settings-card from
+   SettingsModal.css; a first-class view must not depend on a modal's
+   stylesheet, so the card idiom is restated here. */
+.dv-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 14px;
+}
+
+.dv-card .option-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.dv-card .option-info label {
+    font-weight: 600;
+    color: var(--text-normal, #dcddde);
+    font-size: 0.95rem;
+}
+
+.dv-card .option-hint {
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+    line-height: 1.45;
+}
+
+.option-hint-dim {
+    opacity: 0.75;
+}
+
+.device-custody {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text-muted, #b9bbbe);
+}
+
+.device-custody-icon {
+    font-size: 16px;
+    flex: 0 0 auto;
+}
+
+.device-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.device-option .option-info {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* A device-option whose control is a FORM rather than a checkbox.
+   .device-option is a row, which is right when the control is a 20px checkbox
+   and wrong when it is a password field and two buttons — at 390px those wrap
+   into a column two characters wide beside a paragraph of text. Stacking also
+   puts the "there is no way to recover it" warning ABOVE the field, which is
+   the order it needs to be read in. */
+.device-option-stacked {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+/* Unattended access. Stacked rather than a right-aligned control row: the
+   irreversibility warning has to be readable BEFORE the button is pressed, not
+   squeezed beside it. */
+.device-unattended {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.device-unattended .option-info {
+    flex: 1 1 260px;
+    min-width: 0;
+}
+
+/* The no-recovery line is the one sentence people regret not reading. */
+.device-unattended-warning {
+    display: block;
+    margin-top: 6px;
+    color: var(--danger, #f04747);
+}
+
+.device-unattended-form {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.device-unattended-form input {
+    min-height: 32px;
+    min-width: 180px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--background-tertiary, #1e1f22);
+    background: var(--background-primary, #313338);
+    color: var(--text-normal, #dcddde);
+}
+
+/* The "this device was signed out" banner.
+ *
+ * Same card shape as the custody notice, so it reads as part of the section
+ * rather than an error overlay — but with the danger accent, because it is a
+ * state the user has to act on deliberately. Nothing recovers on its own, and
+ * that is the security property, not an oversight. */
+.device-signed-out {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    border-left: 3px solid var(--danger, #e5534b);
+    margin-bottom: 12px;
+    color: var(--text-normal, #dcddde);
+}
+
+.device-signed-out p {
+    margin: 0.35rem 0 0;
+}
+
+.device-signed-out button {
+    margin-top: 0.65rem;
+}
+
+/* --- Narrow desktop ------------------------------------------------------- */
+
+/* Track the server-list rail when it shrinks at narrow desktop widths
+   (see ServerList.css). Fine-pointer only — on mobile the rail is a
+   slide-in overlay and this view goes full width below. */
+@media (max-width: 700px) and (pointer: fine) {
+    .devices-dashboard {
+        left: 56px;
+    }
+
+    .devices-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ==========================================================================
+   Mobile (Capacitor / narrow touch) — integrate with the mobile.css panel
+   system instead of the desktop fixed-overlay layout above. Mirrors
+   FriendsPanel.css: the view shows in the "chat" slot and slides away with
+   the same panels, so the bottom nav never fights it.
+   ========================================================================== */
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* BESIDE THE RAIL, not over it. The rail is a 72px slide-in panel at
+       z-200 that mobile.css only reveals for data-mobile-panel="servers", and
+       Devices opens INTO that slot (see Chat.tsx onOpenDevices) precisely so
+       the rail stays on screen — Devices is the only destination reachable
+       solely from the rail, so covering it was a dead end.
+
+       Hence left: 72px and NO transform on "servers": that pair is what makes
+       the two visible together. The rail sits above at z-200, so the 72px
+       gutter is the rail itself, not empty space. */
+    .devices-dashboard {
+        left: 72px;
+        top: var(--safe-area-top, 0px);
+        bottom: calc(var(--mobile-nav-height, 60px) + var(--safe-area-bottom, 0px));
+        z-index: 105;
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* THE CHANNEL LIST MUST GET OUT OF THE WAY.
+       The "servers" slot shows the rail AND the channel sidebar together
+       (mobile.css puts .sidebar at translateX(72px) for this panel), and that
+       sidebar is z-150 against this view's z-105 — so opening Devices painted
+       the channel list straight over it. Sliding it away is right rather than
+       raising this view above it: a sidebar hidden behind an opaque panel is
+       still there to be half-tapped at the edges.
+
+       Scoped with :has() so it costs no extra state — the same idiom
+       mobile.css already uses for body:has(.voice-panel-compact) — and it
+       applies ONLY while the view is actually mounted and only in this slot,
+       so tapping Channels still gets you a normal channel list. */
+    .chat-container:has(.devices-dashboard)[data-mobile-panel="servers"] .sidebar {
+        transform: translateX(-100%);
+    }
+
+    /* Slide away with the other panels, exactly like .chat-main, so the bottom
+       nav keeps working while the view is open. "servers" is deliberately
+       absent — that is the state the view is meant to be seen in. */
+    .chat-container[data-mobile-panel="channels"] .devices-dashboard {
+        transform: translateX(100%);
+    }
+
+    .chat-container[data-mobile-panel="members"] .devices-dashboard {
+        transform: translateX(-100%);
+    }
+
+    .devices-main {
+        padding: 12px 12px 24px;
+    }
+
+    .devices-pull {
+        margin-top: -12px;
+        font-size: 14px;
+    }
+
+    /* One column of cards; actions get honest 44px touch targets (§5). */
+    .devices-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .device-btn {
+        min-height: 44px;
+        flex: 1 1 auto;
+    }
+
+    /* The icon revoke button stays square-ish: an honest 44px target without
+       stretching to fill the row like the labelled buttons do. */
+    .device-btn-icon {
+        flex: 0 0 auto;
+        min-width: 44px;
+        width: auto;
+    }
+
+    /* iOS zooms on focus below 16px, and the fixed panel layout does not
+       recover from that zoom (§5). */
+    .device-name-input,
+    .device-unattended-form input {
+        font-size: 16px;
+    }
+
+    .device-unattended-form input {
+        min-height: 44px;
+        flex: 1 1 auto;
+    }
+
+    .devices-tab {
+        min-height: 44px;
+    }
+
+    .devices-close {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    /* At 390px the title + both tabs + close do not fit on one line, and the
+       second tab ended up half-hidden behind the close button — a control
+       that reads as broken rather than scrollable. Title and close keep the
+       first row; the tabs take the second, splitting it evenly. `order` is
+       why the three are siblings in the markup. */
+    .devices-header-bar {
+        flex-wrap: wrap;
+        row-gap: 8px;
+    }
+
+    .devices-title {
+        order: 1;
+        flex: 1 1 auto;
+    }
+
+    /* Refresh and close share the first row's right end, in source order
+       (same `order` -> DOM order decides): refresh, then close. Both honest
+       44px targets. */
+    .devices-refresh,
+    .devices-close {
+        order: 2;
+        min-height: 44px;
+        min-width: 44px;
+        justify-content: center;
+    }
+
+    .devices-tabs {
+        order: 3;
+        flex: 1 1 100%;
+    }
+
+    .devices-tab {
+        flex: 1 1 0;
+        text-align: center;
+    }
+}
+
+/* "Shared with me" — friends' devices this account may reach. Same grid as
+ * the account's own devices; the heading is what separates whose is whose. */
+.devices-shared-heading {
+    margin: 20px 0 10px;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+}
+
+/* --- always-on waker pairing -------------------------------------------- */
+/* The paste box takes terminal output, so it is monospace and does not wrap:
+   a soft-wrapped base64 key is indistinguishable from one with a stray newline
+   in it, and the parser would then reject a paste that looked correct. */
+.waker-paste {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.82rem;
+    white-space: pre;
+    overflow-x: auto;
+    background: var(--input-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px;
+    resize: vertical;
+}
+
+/* The generated files. Scroll rather than wrap for the same reason, and never
+   let a long token push the card wider than its column. */
+.waker-blob {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.78rem;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px;
+    margin: 6px 0;
+    /* A session token is readable by anyone looking at the screen. Selectable
+       because it has to be copied, but capped so it cannot fill the view. */
+    max-height: 9rem;
+    overflow-y: auto;
+}

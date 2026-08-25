@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task row width harness</title>
+<!-- The REAL stylesheets, not copies. Measures how much width the task
+     DESCRIPTION actually gets inside an "All servers" board card at phone
+     width, where the row also carries a byline and an action cluster. -->
+<link rel="stylesheet" href="../src/components/Icons.css">
+<link rel="stylesheet" href="../src/mobile.css">
+<link rel="stylesheet" href="../src/components/AllChecklistsView.css">
+<link rel="stylesheet" href="../src/components/ServerTasksBoard.css">
+<link rel="stylesheet" href="../src/components/TaskTree.css">
+<style>
+  body { margin: 0; background: #1a1a1d; color: #ddd; font-family: system-ui, sans-serif; }
+  h2 { font-size: 12px; margin: 10px 8px 4px; color: #9aa; }
+  .readout { font: 12px/1.5 ui-monospace, monospace; margin: 8px; white-space: pre; color: #7fd18b; }
+</style>
+</head>
+<body>
+
+<h2>"All servers" board card, nested one level (as on a phone)</h2>
+<div class="server-tasks-board">
+  <div class="server-tasks-scroll">
+    <section class="server-tasks-section">
+      <div class="all-checklists-grid server-tasks-grid">
+        <section class="checklist-card">
+          <header class="checklist-card-header"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.25 6.5 1.75 1.75 3-3" /> <path d="m3.25 15.5 1.75 1.75 3-3" /> <path d="M11.25 7h9.5" /> <path d="M11.25 16h9.5" /></svg> shopping</header>
+          <div class="task-tree">
+            <ul class="tt-list">
+              <li>
+                <div class="tt-item" id="row-top">
+                  <input type="checkbox">
+                  <span class="tt-description" id="desc-top">Pick up the parcel from the post office before it closes</span>
+                  <span class="tt-byline">· Alex</span>
+                  <div class="tt-actions">
+                    <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.75 14.75 6.25-6.25 6.25 6.25" /></svg></button>
+                    <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.75 9.25 6.25 6.25 6.25-6.25" /></svg></button>
+                    <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.75v14.5" /> <path d="M4.75 12h14.5" /></svg></button>
+                    <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.75 6.5h16.5" /> <path d="M8.75 6.5V4.75a1.5 1.5 0 0 1 1.5-1.5h3.5a1.5 1.5 0 0 1 1.5 1.5V6.5" /> <path d="M5.75 6.5v12.75a1.5 1.5 0 0 0 1.5 1.5h9.5a1.5 1.5 0 0 0 1.5-1.5V6.5" /> <path d="M10 10.75v6" /> <path d="M14 10.75v6" /></svg></button>
+                  </div>
+                </div>
+                <ul class="tt-list tt-nest">
+                  <li>
+                    <div class="tt-item" id="row-nested">
+                      <input type="checkbox">
+                      <span class="tt-description" id="desc-nested">Remember the collection card and some ID</span>
+                      <span class="tt-byline">· Alex</span>
+                      <div class="tt-actions">
+                        <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.75 14.75 6.25-6.25 6.25 6.25" /></svg></button>
+                        <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.75 9.25 6.25 6.25 6.25-6.25" /></svg></button>
+                        <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.75v14.5" /> <path d="M4.75 12h14.5" /></svg></button>
+                        <button class="tt-btn"><svg class="svrn-icon" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.75 6.5h16.5" /> <path d="M8.75 6.5V4.75a1.5 1.5 0 0 1 1.5-1.5h3.5a1.5 1.5 0 0 1 1.5 1.5V6.5" /> <path d="M5.75 6.5v12.75a1.5 1.5 0 0 0 1.5 1.5h9.5a1.5 1.5 0 0 0 1.5-1.5V6.5" /> <path d="M10 10.75v6" /> <path d="M14 10.75v6" /></svg></button>
+                      </div>
+                    </div>
+                  </li>
+                  <ul class="tt-list tt-nest">
+                    <li>
+                      <div class="tt-item" id="row-deep">
+                        <input type="checkbox">
+                        <span class="tt-description" id="desc-deep">Ask about the redelivery slot</span>
+                        <span class="tt-byline">· Sam</span>
+                        <div class="tt-actions">
+                          <button class="tt-btn">&#9650;</button>
+                          <button class="tt-btn">&#9660;</button>
+                          <button class="tt-btn">+</button>
+                          <button class="tt-btn">D</button>
+                        </div>
+                      </div>
+                    </li>
+                  </ul>
+                </ul>
+              </li>
+            </ul>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="readout" id="out">measuring…</div>
+
+<script>
+function measure(id, label) {
+  const el = document.getElementById(id);
+  const w = el.getBoundingClientRect().width;
+  // Rough characters per line at the row's font size.
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-size:13px';
+  probe.textContent = 'abcdefghijklmnopqrstuvwxyz';
+  document.body.appendChild(probe);
+  const perChar = probe.getBoundingClientRect().width / 26;
+  probe.remove();
+  const row = el.closest('.tt-item').getBoundingClientRect().width;
+  return `${label}\n   row ${Math.round(row)}px  description ${Math.round(w)}px  ~${Math.floor(w / perChar)} chars/line`;
+}
+document.getElementById('out').textContent = [
+  measure('desc-top', '[top level]'),
+  measure('desc-nested', '[nested x1]'),
+  measure('desc-deep', '[nested x2]'),
+  `viewport ${window.innerWidth}px`,
+].join('\n');
+</script>
+</body>
+</html>

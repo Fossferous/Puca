@@ -1,0 +1,79 @@
+/* Unattended passphrase prompt.
+ *
+ * z-index 2100 — the modal band (docs/DESIGN_PHILOSOPHY.md: 1000+ is
+ * modals/pickers, settings is 2000). Above the settings modal specifically, and
+ * not by accident: a connection is normally started FROM Settings > Devices, so
+ * the settings modal is the surface most likely to be open when this appears. At
+ * 2000 or below it would render behind the very screen that launched it.
+ */
+.ua-prompt-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.ua-prompt {
+    width: 100%;
+    max-width: 420px;
+    padding: 20px;
+    border-radius: 8px;
+    background: var(--background-primary, #313338);
+    color: var(--text-normal, #dcddde);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.ua-prompt h2 {
+    margin: 0 0 8px;
+    font-size: 18px;
+}
+
+.ua-prompt-body {
+    margin: 0 0 16px;
+    font-size: 14px;
+    color: var(--text-muted, #949ba4);
+}
+
+.ua-prompt input {
+    width: 100%;
+    box-sizing: border-box;
+    /* 44px: the coarse-pointer minimum target the mobile walk asserts. */
+    min-height: 44px;
+    padding: 10px 12px;
+    border-radius: 4px;
+    border: 1px solid var(--background-tertiary, #1e1f22);
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+    font-size: 16px; /* 16px stops iOS Safari zooming the viewport on focus. */
+}
+
+.ua-prompt-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.ua-prompt-btn {
+    min-height: 44px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: var(--background-tertiary, #1e1f22);
+    color: var(--text-normal, #dcddde);
+}
+
+.ua-prompt-btn-primary {
+    background: var(--brand, #5865f2);
+    color: #fff;
+}
+
+.ua-prompt-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

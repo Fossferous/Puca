@@ -1,0 +1,256 @@
+/* Peer-to-peer transfer cards. Visually distinct from message attachments on
+   purpose: a transfer is a live handshake, not something stored in history. */
+.file-transfers {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 12px;
+}
+
+.xfer-card {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-left: 3px solid var(--accent, #5865f2);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 8px 10px;
+    font-size: 0.85rem;
+    color: var(--text-primary, #dcddde);
+}
+
+.xfer-complete { border-left-color: #3ba55d; }
+.xfer-failed,
+.xfer-cancelled { border-left-color: #ed4245; }
+
+.xfer-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.xfer-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+.xfer-size,
+.xfer-line {
+    color: var(--text-secondary, #8e9297);
+    font-size: 0.78rem;
+}
+
+.xfer-line { margin-top: 2px; }
+.xfer-ok { color: #3ba55d; }
+.xfer-bad { color: #ed4245; }
+
+.xfer-bar {
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.1);
+    margin-top: 6px;
+    overflow: hidden;
+}
+
+.xfer-fill {
+    height: 100%;
+    background: var(--accent, #5865f2);
+    transition: width 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .xfer-fill { transition: none; }
+}
+
+.xfer-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.xfer-actions:empty { margin-top: 0; }
+
+.xfer-btn {
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-primary, #dcddde);
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.xfer-btn:hover { background: rgba(255, 255, 255, 0.08); }
+
+/* Compact per-card dismiss button: cancel while live, dismiss once finished. */
+.xfer-x {
+    flex: 0 0 auto;
+    padding: 2px 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted, #949ba4);
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.xfer-x:hover { color: var(--text-primary, #dcddde); }
+
+.xfer-accept {
+    background: var(--accent, #5865f2);
+    border-color: transparent;
+    color: #fff;
+}
+
+.xfer-accept:hover { background: #4752c4; }
+
+/* Touch targets on a phone. A phone can now both send and receive (capped, and
+   only while the app stays foregrounded — see transferSinks.ts). */
+@media (max-width: 768px) {
+    .xfer-btn {
+        padding: 8px 14px;
+        font-size: 0.85rem;
+    }
+
+    .xfer-x {
+        min-width: 44px;
+        min-height: 44px;
+    }
+}
+
+/* Per-transfer throughput cap. A transfer otherwise saturates the slower of
+   the two links, degrading calls and everything else sharing the connection. */
+.xfer-speed {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--text-muted, #949ba4);
+}
+
+.xfer-speed input[type="range"] {
+    flex: 1;
+    min-width: 80px;
+    accent-color: #5865f2;
+    cursor: pointer;
+}
+
+/* Fixed width so dragging the slider doesn't make the row jitter as the
+   label text changes length. */
+.xfer-speed-value {
+    min-width: 72px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-normal, #dbdee1);
+}
+
+.xfer-speed-label { white-space: nowrap; }
+
+@media (max-width: 768px) {
+    /* A 44px-tall thumb target; the default range thumb is far too small for
+       a finger (docs/DESIGN_PHILOSOPHY.md coarse-pointer rule). */
+    .xfer-speed input[type="range"] { height: 44px; }
+    .xfer-speed-label { display: none; }
+}
+
+/* Progress bar with the live rate beside it. */
+.xfer-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.xfer-bar-row .xfer-bar { flex: 1; }
+
+/* Fixed width and tabular figures so a changing rate never shifts the bar. */
+.xfer-speed-now {
+    min-width: 68px;
+    text-align: right;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted, #949ba4);
+}
+
+/* "Keep the app open" caveat. A transfer has no server-side copy, so closing
+   the app really does lose it — worth stating plainly rather than burying. */
+.xfer-warning {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: rgba(250, 166, 26, 0.1);
+    border-left: 3px solid #faa61a;
+    color: var(--text-normal, #dbdee1);
+    font-size: 0.75rem;
+    line-height: 1.35;
+}
+
+/* --- App-wide transfer tray -------------------------------------------------
+
+   The offer UI used to live inside the open DM, which meant an incoming file
+   was unanswerable from anywhere else in the app. The tray is the fix: one
+   surface, mounted at the root, independent of the current view.
+
+   Desktop docks it bottom-right like a download manager. Mobile gets a
+   full-width sheet instead — at 390px a floating card either covers the
+   composer or is too narrow to hold the Accept/Decline pair at a usable size.
+*/
+.file-transfers-tray {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 900;          /* above content, below modals (1000+) */
+    width: 340px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--bg-secondary, #2b2d31);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.xfer-tray-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted, #949ba4);
+    padding: 2px 4px 8px;
+}
+
+.xfer-clear-finished {
+    border: none;
+    background: transparent;
+    color: var(--text-muted, #949ba4);
+    font: inherit;
+    text-transform: none;
+    letter-spacing: normal;
+    cursor: pointer;
+    padding: 2px 4px;
+}
+
+.xfer-clear-finished:hover { color: var(--text-primary, #dcddde); }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .file-transfers-tray {
+        left: 0;
+        right: 0;
+        /* Clear of the bottom nav, which owns the very bottom of the screen. */
+        bottom: 60px;
+        width: auto;
+        max-height: 45vh;
+        border-radius: 12px 12px 0 0;
+        padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+    }
+
+    /* §5 touch rule: Accept/Decline must be comfortable targets. */
+    .file-transfers-tray .xfer-btn {
+        min-height: 44px;
+        padding: 10px 16px;
+    }
+}

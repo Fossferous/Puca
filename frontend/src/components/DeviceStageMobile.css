@@ -1,0 +1,500 @@
+/* Mobile Toolbar for DeviceStage */
+/* How much vertical room the control bar takes, including the phone's own
+   home-indicator inset. Everything that has to sit ABOVE the bar derives its
+   offset from this, so shrinking the bar cannot leave a menu floating in a
+   gap — those offsets were hardcoded to 64px and silently coupled to the old
+   button metrics. */
+:root {
+    --device-toolbar-h: calc(41px + env(safe-area-inset-bottom, 0px));
+}
+
+.device-stage-mobile-toolbar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: #1e88e5; /* accent blue */
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    /* Was a flat 8px around 48px buttons — a ~64px band of someone's desktop
+       hidden behind chrome, on the screen where the picture IS the product.
+       The bottom inset is new: at bottom:0 with no reserve, the row sat under
+       the iPhone home indicator. */
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom, 0px));
+    z-index: 500;
+    color: white;
+    transition: transform 0.2s ease-out;
+}
+
+.device-stage-mobile-toolbar.collapsed {
+    transform: translateY(100%);
+}
+
+.device-stage-mobile-toolbar-toggle {
+    position: fixed;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    right: 16px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background-color: #1e88e5;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    z-index: 499;
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.2s ease-out;
+}
+
+/* A DENSE ICON ROW, which is the scoped exception DESIGN_PHILOSOPHY §5 allows
+   over the blanket 44px target — seven controls sharing a phone's width on top
+   of the remote picture. Still ~33px, comfortably above the ~30px floor that
+   section sets, and each icon keeps its own generous horizontal hit area.
+
+   min-height is set EXPLICITLY, like .tt-btn: mobile.css's coarse-pointer
+   `button { min-height: 44px }` applies to any button that does not say
+   otherwise, and this one did not — so the "33px" row was really 52px, the
+   stylesheet's --device-toolbar-h (41px) was wrong, and the bar hid an extra
+   11px of the remote screen for nothing. The stage also MEASURES the bar
+   (onHeight) rather than trusting this number, which is why the var is
+   overridden from the measurement while the bar is up. */
+.device-stage-mobile-btn {
+    background: transparent;
+    border: none;
+    color: white;
+    font-size: 19px;
+    line-height: 1;
+    padding: 7px 10px;
+    min-width: 34px;
+    min-height: 33px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Floating Menus (Monitor, Mouse, More) */
+.device-stage-mobile-menu {
+    position: fixed;
+    bottom: calc(var(--device-toolbar-h) + 4px); /* Above the toolbar — derived, not hardcoded */
+    right: 8px;
+    width: 280px;
+    max-height: 70vh;
+    overflow-y: auto;
+    background-color: #2b2d31;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    z-index: 501;
+    color: #dcddde;
+    display: flex;
+    flex-direction: column;
+}
+
+.device-stage-mobile-menu.menu-center {
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90%;
+    max-width: 400px;
+    bottom: calc(var(--device-toolbar-h) + 4px);
+}
+
+/* Invisible full-screen catcher behind an open menu: a tap outside the menu
+   closes it INSTEAD of reaching .device-stage-surface, which would forward
+   the tap to the host as a real click. z-index 499 is deliberate — above the
+   surface, below the toolbar (500) and the menus (501), so tapping a
+   different toolbar button still switches menus in one tap. (It shares 499
+   with .device-stage-mobile-toolbar-toggle, but that only renders while the
+   toolbar is collapsed, which never coexists with an open menu.) */
+.device-stage-mobile-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 499;
+    background: transparent;
+    /* The surface sets this too; keeps a drag from scrolling the page. */
+    touch-action: none;
+}
+
+.device-stage-mobile-menu-item {
+    display: flex;
+    align-items: center;
+    padding: 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    cursor: pointer;
+}
+
+.device-stage-mobile-menu-item:last-child {
+    border-bottom: none;
+}
+
+.device-stage-mobile-menu-item .label {
+    flex: 1;
+    font-size: 15px;
+}
+
+.device-stage-mobile-menu-item .icon {
+    font-size: 18px;
+    color: #1e88e5;
+    margin-left: 12px;
+}
+
+/* Destructive entries (Shut down…) read as such before they are tapped. */
+.device-stage-mobile-menu-item.danger .label,
+.device-stage-mobile-menu-item.danger .icon {
+    color: var(--color-danger, #ed4245);
+}
+
+/* The in-place confirmation the More menu becomes for Shut down. Same box,
+   two buttons — 44px targets, the destructive one on the right. */
+.device-stage-mobile-confirm {
+    padding: 16px;
+}
+.device-stage-mobile-confirm-text {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+    font-size: 14px;
+    line-height: 1.35;
+}
+.device-stage-mobile-confirm-text strong {
+    font-size: 15px;
+}
+.device-stage-mobile-confirm-actions {
+    display: flex;
+    gap: 10px;
+}
+.device-stage-mobile-confirm-btn {
+    flex: 1;
+    min-height: 44px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.08);
+    color: inherit;
+    font: inherit;
+    font-size: 15px;
+    cursor: pointer;
+}
+.device-stage-mobile-confirm-btn.danger {
+    background: var(--color-danger, #ed4245);
+    color: #fff;
+    font-weight: 600;
+}
+
+/* SCROLLS rather than squeezes. Three screens plus "All" cannot fit across a
+   390px phone at any font size worth reading, and `flex: 1` on each tab meant
+   they compressed until the labels were unreadable instead. */
+.device-stage-mobile-menu-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.device-stage-mobile-menu-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.device-stage-mobile-menu-tab {
+    flex: 0 0 auto;
+    padding: 12px 14px;
+    text-align: center;
+    background: transparent;
+    border: none;
+    color: #949ba4;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.device-stage-mobile-menu-tab.active {
+    color: white;
+    border-bottom: 2px solid #1e88e5;
+}
+
+.device-stage-mobile-menu-radio {
+    margin-right: 12px;
+    accent-color: #1e88e5;
+    width: 18px;
+    height: 18px;
+}
+
+.device-stage-mobile-menu-checkbox {
+    margin-left: 12px;
+    accent-color: #1e88e5;
+    width: 18px;
+    height: 18px;
+}
+
+/* Mouse Mode Panel */
+.mouse-mode-selector {
+    display: flex;
+    margin: 16px;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.mouse-mode-btn {
+    flex: 1;
+    padding: 12px;
+    text-align: center;
+    border: none;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.mouse-mode-btn.active {
+    background-color: #1e88e5;
+    color: white;
+}
+.mouse-mode-btn.inactive {
+    background-color: #4f545c;
+    color: #b9bbbe;
+}
+
+.mouse-gesture-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    padding: 16px;
+    text-align: center;
+}
+
+.mouse-gesture-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 11px;
+    color: #b9bbbe;
+}
+
+.mouse-gesture-item .icon {
+    font-size: 32px;
+    color: #1e88e5;
+    margin-bottom: 8px;
+}
+
+.mouse-gesture-item .title {
+    font-size: 13px;
+    color: white;
+    margin-top: 4px;
+}
+
+/* Extended Keyboard Overlay.
+
+   Anchored to the TOP of the screen, not the bottom: `position: fixed`
+   resolves against the layout viewport, which neither Android Chrome nor iOS
+   Safari shrinks when the soft keyboard opens — so a bottom-anchored bar sat
+   exactly underneath the keyboard it was meant to accompany, hidden at the
+   only moment it was needed. */
+.device-stage-keyboard-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background-color: rgba(0,0,0,0.8);
+    backdrop-filter: blur(5px);
+    z-index: 500;
+    /* It now sits at the very top of the screen, so clear the notch. */
+    padding: calc(3px + env(safe-area-inset-top, 0px)) 3px 3px;
+}
+
+/* The field the soft keyboard actually types into.
+   Invisible but REAL: it needs a layout box and a non-zero size, because a
+   `display:none` or `visibility:hidden` input cannot take focus and Android
+   only raises the keyboard for a focused, focusable field. Kept at the
+   overlay's own position so focusing it never scrolls the page. */
+.device-stage-keyboard-capture {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    /* Never let it swallow a tap meant for the buttons on top of it. */
+    pointer-events: none;
+    /* 16px stops iOS Safari zooming the whole page on focus. */
+    font-size: 16px;
+}
+
+.keyboard-btn-type {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+/* The fold control. Never grows: it must stay in the same place in both
+   states, so the expand affordance does not move out from under the finger
+   that just collapsed the bar. */
+.keyboard-btn-fold {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    background: rgba(255, 255, 255, 0.16);
+}
+
+.keyboard-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 2px;
+    gap: 2px;
+}
+
+.keyboard-row:last-child {
+    margin-bottom: 0;
+}
+
+.keyboard-row.scrollable {
+    overflow-x: auto;
+    justify-content: flex-start;
+}
+
+/* Deliberately compact — well under the usual 44px touch target. This bar
+   shares a phone screen with the soft keyboard AND the remote picture, and
+   the picture is the thing being worked on; every extra pixel here is a
+   pixel of someone's desktop hidden. These are occasional chord keys, not a
+   typing surface. Tightened again after the bar was reported as still taking
+   too much room: the rows also merged 5 into 4, and the whole set folds away
+   (see .keyboard-btn-fold).
+
+   min-height is set EXPLICITLY — the same fix as .device-stage-mobile-btn.
+   Without it mobile.css's coarse-pointer `button { min-height: 44px }` won,
+   every row was 44px and the "compact" bar measured ~190px unfolded (the
+   number the stage's keyBarH comment records). That was a 190px overlay;
+   now that the stage RESERVES the bar's height out of the picture, it would
+   be 190px of remote screen gone. 30px is DESIGN_PHILOSOPHY §5's floor for a
+   dense row — four rows come to ~135px, the folded bar ~36px. */
+.keyboard-btn {
+    flex: 1 1 auto;
+    background: rgba(255, 255, 255, 0.07);
+    color: white;
+    border: none;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 3px 5px;
+    border-radius: 3px;
+    min-width: 26px;
+    min-height: 30px;
+    line-height: 1.25;
+    cursor: pointer;
+}
+
+.keyboard-btn:active {
+    background: rgba(255,255,255,0.2);
+}
+
+.keyboard-btn-icon {
+    color: #1e88e5;
+}
+
+/* OUR pointer, drawn client-side while the host has handed the cursor over.
+   Positioned by its TIP (transform-origin top left, no centring translate) —
+   an arrow's hotspot is its point, and centring it aims half a glyph away
+   from where the click lands.
+
+   The class name must match the element exactly: an earlier version of this
+   rule was named `.virtual-cursor` against an element called
+   `device-stage-virtual-cursor`, so it matched nothing and the cursor was
+   invisible for as long as it existed. */
+.device-stage-virtual-cursor {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    pointer-events: none;
+    z-index: 450;
+    transform-origin: top left;
+    /* Legible over both a white document and a dark desktop: the glyph
+       carries its own black outline, this lifts it off busy wallpaper. */
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+
+/* The virtual mouse pad: L / M / R plus scroll, floating above the picture,
+   below the mobile menus. Draggable by its grip; the inline style pins it
+   wherever the user parked it. Fixed palette like the rest of the stage
+   chrome — the stage is always a dark surface over video. */
+.device-stage-virtual-mouse {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 190px;
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    padding: 6px;
+    background: rgba(28, 30, 34, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 14px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    z-index: 460;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.vm-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    color: #9aa0a6;
+    cursor: grab;
+    touch-action: none;
+}
+
+.vm-btn {
+    min-width: 46px;
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid transparent;
+    border-radius: 10px;
+    color: #e0e0e0;
+    font-size: 14px;
+    font-weight: 600;
+    touch-action: none;
+    cursor: pointer;
+    padding: 0;
+}
+
+/* :active alone is not enough: with pointer capture a finger sliding off the
+   button keeps the press, and the paint must keep saying so. */
+.vm-btn.vm-held,
+.vm-btn:active {
+    background: rgba(30, 136, 229, 0.45);
+    border-color: #1e88e5;
+    color: #fff;
+}
+
+.vm-sep {
+    width: 1px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 6px 2px;
+}
+
+.device-stage-minimized {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #007aff;
+    color: white;
+    padding: 12px 20px;
+    border-radius: 30px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    z-index: 10000;
+    cursor: pointer;
+    font-weight: 600;
+    animation: pulse 2s infinite;
+}
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.7); }
+    70% { box-shadow: 0 0 0 10px rgba(0, 122, 255, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0); }
+}

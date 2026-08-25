@@ -1,0 +1,44 @@
+/*
+ * Base rules for every icon in the set. See docs/ICON_LANGUAGE.md.
+ *
+ * Icons are typographic: the default box is 1.2em, so they take the font-size
+ * of whatever wrapper they sit in. That is what let the emoji migration land
+ * without rewriting ~40 CSS files — the wrappers (.menu-icon, .nav-icon,
+ * .context-icon, …) already sized their emoji with font-size, and those rules
+ * keep working untouched.
+ */
+
+.svrn-icon {
+    /* Emoji were inline text; icons must not become block-level and break the
+       rows they were dropped into. */
+    display: inline-block;
+
+    /* A 1.2em box hangs below the baseline by roughly this much when its
+       optical centre is aligned with the text's. Only matters outside flex
+       containers — most call sites use align-items: center and ignore it. */
+    vertical-align: -0.22em;
+
+    /* An icon in a flex row must never be squeezed into an ellipse by a long
+       label next to it. Emoji could not be squeezed; an <svg> can. */
+    flex-shrink: 0;
+}
+
+/*
+ * Icons inherit colour from their wrapper (stroke="currentColor"), so a
+ * .danger menu row now tints its icon as well as its label — something emoji
+ * could never do. Nothing to declare here; this comment exists so nobody
+ * "fixes" the absence of a colour rule.
+ */
+
+/*
+ * The `classic` icon style (Settings → Appearance) renders the emoji each icon
+ * replaced. Deliberately NOT .svrn-icon: that class carries a -0.22em baseline
+ * nudge calibrated for a 1.2em SVG box, and an emoji already sits on the
+ * baseline like the text it is — applying the nudge would drop it.
+ */
+.svrn-icon-legacy {
+    display: inline-block;
+    flex-shrink: 0;
+    line-height: 1;
+    font-style: normal;
+}

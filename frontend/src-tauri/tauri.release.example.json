@@ -1,0 +1,12 @@
+{
+  "//": "COPY TO tauri.release.json (gitignored) AND SET YOUR OWN DOWNLOAD HOST. Merged over tauri.conf.json at build time by scripts/tauri-build.mjs. This is where the DESKTOP UPDATER looks for latest.json — an installed app checks exactly this URL forever, so it must be a host you control and do not intend to rename. Only the keys you override need to be here; everything else comes from tauri.conf.json.",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://download.example.com/latest.json"
+      ]
+    }
+  },
+  "//productName": "USUALLY YOU DO NOT NEED THIS KEY AT ALL. On Windows, productName is not a label: NSIS derives the install directory, the Add/Remove-Programs registry key and the autostart Run value from it, and finds an existing install by looking up that uninstall key -- so a build whose productName differs from what a user already has does not find their install and puts a SECOND one beside it. frontend/src-tauri/installer-hooks.nsh solves this by detecting the OLD name's registry entry and migrating it in place before the new files are written -- tested against two real prior installs on 2026-08-25, app data and identity confirmed byte-identical before and after. If your users installed under a name other than \"Sovereign\", add it to the MigrateRenamedInstall call in that file rather than pinning productName here; the hook is the thing that actually gets you a real upgrade instead of a name that merely stays the same forever. Only set productName here as a manual fallback if you do not want to touch the NSIS hook -- it fully prevents the parallel-install problem but does not clean up the old one, so your users keep two copies until they remove the first by hand.",
+  "productName": "TheNameYourUsersAlreadyHaveInstalled"
+}

@@ -1,0 +1,163 @@
+/* Update Banner Styles */
+
+.update-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(135deg, #5865f2 0%, #7289da 100%);
+    color: white;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    z-index: 10000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    animation: slideDown 0.3s ease-out;
+}
+
+@keyframes slideDown {
+    from {
+        transform: translateY(-100%);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.update-banner-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.update-icon {
+    font-size: 24px;
+}
+
+.update-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.update-text strong {
+    font-size: 14px;
+}
+
+.update-text span {
+    font-size: 12px;
+    opacity: 0.9;
+}
+
+.update-notes {
+    opacity: 0.7;
+    font-style: italic;
+}
+
+.update-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.update-error {
+    color: #faa61a;
+    font-size: 12px;
+}
+
+.update-later-btn {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    color: white;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.update-later-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.8);
+}
+
+.update-now-btn {
+    background: white;
+    color: #5865f2;
+    border: none;
+    padding: 8px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.update-now-btn:hover:not(:disabled) {
+    background: #f0f0f0;
+    transform: translateY(-1px);
+}
+
+.update-now-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+/* Adjust app layout when banner is visible */
+body:has(.update-banner) .app {
+    padding-top: 52px;
+}
+
+/* The sign-in-screen SERVICE banner (ServiceUpdateBanner.tsx) shares this
+   look. When both are up — app update deferred with "Later" AND the service
+   behind — the service one sits under the app one, and the app makes room
+   for both. A different colour, so two stacked bars read as two things.
+
+   OFFSETS ARE THE MEASURED HEIGHT, not the shorter historical 52px. Each bar
+   renders ~65px at desktop widths (a 14px title + one 12px line at the app's
+   1.5 line-height + 12px padding top and bottom); the old 52px sat the second
+   bar 13px INTO the first and left the app's own content 13px under the stack.
+   66px clears one bar with a hair to spare; 132px clears two. Tuned for the
+   typical desktop widths this desktop-only banner runs at; below ~850px the
+   body wraps an extra line and overlaps, the same fixed-padding limit the
+   app-update banner has always had. */
+.service-update-banner {
+    background: linear-gradient(135deg, #3b6ea5 0%, #4f8bc9 100%);
+    animation: none;
+}
+
+body:has(.update-banner:not(.service-update-banner)) .service-update-banner {
+    top: 66px;
+}
+
+body:has(.update-banner:not(.service-update-banner)):has(.service-update-banner) .app {
+    padding-top: 132px;
+}
+
+/* Service banner ALONE (no app-update banner above it): the shared
+   `body:has(.update-banner)` rule above is tuned to the shorter historical
+   banner's 52px and would leave this one covering content, so clear its real
+   height here. Higher specificity than that rule, so it wins. */
+body:has(.service-update-banner):not(:has(.update-banner:not(.service-update-banner))) .app {
+    padding-top: 66px;
+}
+/* Why an update failed.
+ *
+ * Full-width under the banner text rather than inline: the message names a
+ * cause and an action, and truncating it into the button row would leave the
+ * user with "it failed" and nothing to do — which is the state this whole row
+ * exists to end. */
+.update-failure {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    width: 100%;
+    margin-top: 8px;
+    font-size: 13px;
+    line-height: 1.4;
+}

@@ -1,0 +1,151 @@
+/* Clip approval prompt — "X wants to post a clip of this call".
+ *
+ * z-index 2090 (docs/DESIGN_PHILOSOPHY.md z-registry): above the clip composer
+ * (2060) and Settings (2000) — a request can arrive while either is open — and
+ * below the remote-control consent pair (2100), which guards this machine's
+ * screen and outranks a question about a recording.
+ *
+ * Decline is the safe answer, so it is the calmer of the two buttons and the
+ * one that gets focus; both are ≥ 44 px (coarse-pointer floor). On phones the
+ * dialog is full-screen with the actions pinned to the thumb edge, Decline
+ * nearest.
+ */
+.clip-approval-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2090;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.6);
+}
+
+.clip-approval {
+    width: 100%;
+    max-width: 480px;
+    max-height: 90dvh;
+    overflow-y: auto;
+    padding: 20px;
+    border-radius: 8px;
+    background: var(--background-primary, #313338);
+    color: var(--text-normal, #dcddde);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.clip-approval-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+.clip-approval-header h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.3;
+}
+.clip-approval-icon { display: inline-flex; color: var(--text-warning, #f0b232); flex: 0 0 auto; }
+.clip-approval-queue {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-muted, #b9bbbe);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.clip-approval-body p {
+    margin: 0 0 10px;
+    font-size: 14px;
+    line-height: 1.45;
+}
+.clip-approval-standing {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    color: var(--text-muted, #b9bbbe);
+    font-size: 13px;
+}
+.clip-approval-standing svg { flex: 0 0 auto; margin-top: 2px; }
+.clip-approval-details {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: var(--text-muted, #b9bbbe);
+}
+.clip-approval-details summary { cursor: pointer; }
+.clip-approval-details p { margin: 6px 0 0; font-size: 13px; }
+.clip-approval-expiry {
+    font-size: 12px;
+    color: var(--text-muted, #b9bbbe);
+}
+.clip-approval-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-warning, #f0b232);
+    font-size: 13px;
+}
+
+.clip-approval-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 6px;
+}
+.clip-approval-actions button {
+    min-height: 44px;
+    min-width: 96px;
+    padding: 0 18px;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+}
+.clip-approval-actions button:disabled { opacity: 0.55; cursor: default; }
+.clip-approval-decline {
+    background: var(--background-secondary, #2b2d31);
+    color: var(--text-normal, #dcddde);
+}
+.clip-approval-approve {
+    background: var(--brand, #5865f2);
+    color: #fff;
+}
+.clip-approval-approve:focus-visible,
+.clip-approval-decline:focus-visible {
+    outline: 2px solid var(--text-link, #00a8fc);
+    outline-offset: 2px;
+}
+
+/* Phones (390×844 walk): full-screen, larger body, actions pinned bottom with
+   Decline nearest the thumb (column-reverse puts the FIRST child at the bottom). */
+@media (pointer: coarse) and (max-width: 700px) {
+    .clip-approval-backdrop { padding: 0; align-items: stretch; }
+    .clip-approval {
+        max-width: none;
+        max-height: none;
+        height: 100dvh;
+        box-sizing: border-box; /* padding INSIDE the 100dvh, or the actions overflow the bottom edge */
+        border-radius: 0;
+        display: flex;
+        flex-direction: column;
+        padding: max(16px, env(safe-area-inset-top)) 18px max(16px, env(safe-area-inset-bottom));
+    }
+    .clip-approval-body { flex: 1 1 auto; overflow-y: auto; }
+    .clip-approval-body p { font-size: 16px; }
+    .clip-approval-details, .clip-approval-details p, .clip-approval-standing { font-size: 15px; }
+    .clip-approval-actions {
+        position: sticky;
+        bottom: 0;
+        flex-direction: column-reverse;
+        gap: 10px;
+        padding-top: 10px;
+        background: var(--background-primary, #313338);
+    }
+    .clip-approval-actions button { min-height: 48px; width: 100%; font-size: 16px; }
+}

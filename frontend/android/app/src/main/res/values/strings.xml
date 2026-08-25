@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Púca</string>
+    <string name="title_activity_main">Puca</string>
+    <string name="package_name">com.sovereign.app</string>
+    <string name="custom_url_scheme">com.sovereign.app</string>
+    <string name="widget_label">Puca shortcuts</string>
+    <string name="widget_description">One-tap shortcuts to Friends, Tasks, Devices and Settings.</string>
+    <string name="widget_friends">Friends</string>
+    <string name="widget_tasks">Tasks</string>
+    <string name="widget_devices">Devices</string>
+    <string name="widget_settings">Settings</string>
+    <string name="shortcut_dms_short">Messages</string>
+    <string name="shortcut_dms_long">Open direct messages</string>
+    <string name="shortcut_notes_short">Notes</string>
+    <string name="shortcut_notes_long">Open notes and tasks</string>
+    <string name="shortcut_devices_short">My Devices</string>
+    <string name="shortcut_devices_long">Open My Devices</string>
+</resources>

@@ -1,0 +1,346 @@
+.stream-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+    backdrop-filter: blur(4px);
+    animation: fadeIn 0.15s ease-out;
+}
+
+.stream-modal {
+    background: #1e1f22;
+    width: 440px;
+    max-width: 92vw;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: scaleIn 0.15s ease-out;
+}
+
+.stream-modal-header {
+    padding: 24px 24px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.stream-modal-header h3 {
+    margin: 0;
+    color: #f2f3f5;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.stream-modal-close {
+    background: none;
+    border: none;
+    color: #b5bac1;
+    font-size: 28px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0;
+    transition: color 0.2s;
+}
+
+.stream-modal-close:hover {
+    color: #f2f3f5;
+}
+
+.stream-modal-content {
+    padding: 0 24px;
+}
+
+.stream-setting-group {
+    margin-bottom: 24px;
+}
+
+.stream-setting-group label {
+    display: block;
+    color: #b5bac1;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
+}
+
+.stream-options-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 8px;
+}
+
+.stream-option {
+    background: #2b2d31;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 10px;
+    color: #dbdee1;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.stream-option:hover {
+    background: #404249;
+}
+
+.stream-option.selected {
+    background: #5865F2;
+    /* brand accent blurple/indigo */
+    color: white;
+    border-color: #5865F2;
+}
+
+.stream-quality-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #2b2d31;
+    padding: 10px;
+    border-radius: 4px;
+    color: #949ba4;
+    font-size: 12px;
+    margin-top: 8px;
+}
+
+.stream-quality-hint .info-icon {
+    font-size: 14px;
+}
+
+.stream-modal-footer {
+    background: #2b2d31;
+    padding: 16px 24px;
+    margin-top: 24px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+}
+
+.stream-btn-secondary {
+    background: transparent;
+    color: #f2f3f5;
+    border: none;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: text-decoration 0.2s;
+}
+
+.stream-btn-secondary:hover {
+    text-decoration: underline;
+}
+
+.stream-btn-primary {
+    background: #5865F2;
+    color: white;
+    border: none;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 500;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.stream-btn-primary:hover {
+    background: #4752c4;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes scaleIn {
+    from {
+        transform: scale(0.95);
+        opacity: 0;
+    }
+
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* Audio source options */
+.audio-options {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+/* App picker */
+.app-picker {
+    display: flex;
+    gap: 8px;
+}
+
+.app-select {
+    flex: 1;
+    background: #2b2d31;
+    border: 1px solid #1e1f22;
+    border-radius: 4px;
+    padding: 10px 12px;
+    color: #dbdee1;
+    font-size: 14px;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23b5bac1' d='M6 8L2 4h8z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+}
+
+.app-select:hover {
+    border-color: #404249;
+}
+
+.app-select:focus {
+    outline: none;
+    border-color: #5865F2;
+}
+
+/* Secondary label above the manual "which app's audio?" picker */
+.app-picker-label {
+    display: block;
+    margin-top: 12px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #b5bac1;
+}
+
+/* Stack the two selects in the audio step */
+.stream-setting-group .app-select {
+    width: 100%;
+}
+
+.refresh-apps-btn {
+    background: #2b2d31;
+    border: 1px solid #1e1f22;
+    border-radius: 4px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background 0.2s;
+}
+
+.refresh-apps-btn:hover {
+    background: #404249;
+}
+
+.app-loading {
+    color: #949ba4;
+    font-size: 14px;
+    padding: 10px;
+    text-align: center;
+}
+
+.app-audio-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(88, 101, 242, 0.1);
+    border: 1px solid rgba(88, 101, 242, 0.3);
+    padding: 10px;
+    border-radius: 4px;
+    color: #949ba4;
+    font-size: 12px;
+    margin-top: 12px;
+}
+
+.stream-btn-primary:disabled {
+    background: #4e4f54;
+    color: #72767d;
+    cursor: not-allowed;
+}
+/* ---- Multi-app audio mixer (the "Selected apps" step) ---- */
+.app-mixer-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid #3f4147;
+    border-radius: 4px;
+    padding: 6px;
+    background: #1e1f22;
+}
+
+.app-mixer-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    color: #949ba4;
+}
+
+.app-mixer-row.on {
+    background: rgba(88, 101, 242, 0.08);
+    color: #dbdee1;
+}
+
+.app-mixer-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.app-mixer-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.app-mixer-icon {
+    width: 24px;
+    height: 24px;
+    object-fit: contain;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.app-mixer-icon-placeholder {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+}
+
+.app-mixer-slider {
+    width: 110px;
+    flex-shrink: 0;
+    accent-color: #5865f2;
+}
+
+.app-mixer-slider:disabled {
+    opacity: 0.35;
+}
+
+.app-mixer-volume {
+    width: 42px;
+    flex-shrink: 0;
+    text-align: right;
+    font-size: 12px;
+    color: #949ba4;
+    font-variant-numeric: tabular-nums;
+}

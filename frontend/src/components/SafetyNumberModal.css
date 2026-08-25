@@ -1,0 +1,99 @@
+.safety-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3000;
+}
+
+.safety-modal {
+    width: min(440px, 92vw);
+    background: #1e2128;
+    border: 1px solid #333842;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    color: #e3e6ea;
+    overflow: hidden;
+}
+
+.safety-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid #333842;
+}
+
+.safety-header h3 { margin: 0; font-size: 16px; }
+
+.safety-close {
+    background: none;
+    border: none;
+    color: #9aa3af;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+}
+.safety-close:hover { color: #fff; }
+
+.safety-body { padding: 18px; }
+
+.safety-intro {
+    font-size: 13px;
+    line-height: 1.5;
+    color: #b6bdc7;
+    margin: 0 0 14px;
+}
+
+.safety-number {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    background: #14171c;
+    border: 1px solid #2a2f38;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 16px;
+}
+
+.safety-group {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 17px;
+    letter-spacing: 1px;
+    text-align: center;
+    color: #dfe4ea;
+}
+
+.safety-badge {
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.4;
+    margin-bottom: 14px;
+}
+.safety-badge.verified { background: rgba(36, 128, 70, 0.18); border: 1px solid #248046; color: #b8f5c8; }
+.safety-badge.changed { background: rgba(191, 60, 60, 0.18); border: 1px solid #a33; color: #ffc4c4; }
+
+.safety-error { color: #ffb4b4; font-size: 13px; }
+
+.safety-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+.safety-btn {
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.safety-btn.primary { background: #3b7d3b; color: #fff; }
+.safety-btn.primary:hover { background: #46944a; }
+.safety-btn.primary:disabled { opacity: 0.5; cursor: default; }
+.safety-btn.ghost { background: #2a2f38; color: #cfd5dd; }
+.safety-btn.ghost:hover { background: #333a44; }

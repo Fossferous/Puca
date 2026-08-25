@@ -1,0 +1,39 @@
+/* Above the app, below the consent dialogs: visible from every view, never
+   covering a question that needs answering. */
+.host-files-indicator {
+    position: fixed;
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1900;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    border-radius: 20px;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    font-size: 13px;
+    max-width: min(92vw, 480px);
+}
+
+.host-files-indicator-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.host-files-indicator-stop {
+    flex: 0 0 auto;
+    background: var(--danger, #f04747);
+    color: #fff;
+    border: none;
+    border-radius: 14px;
+    padding: 6px 14px;
+    font-weight: 600;
+    cursor: pointer;
+    /* Touch target on the surface this exists for. */
+    min-height: 32px;
+}

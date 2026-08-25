@@ -1,0 +1,115 @@
+/**
+ * Platform detection and abstraction layer
+ *
+ * This module provides unified APIs that work across:
+ * - Web browser
+ * - Tauri (desktop)
+ * - Capacitor (iOS/Android)
+ */
+
+import { Capacitor } from '@capacitor/core';
+
+type Platform = 'web' | 'ios' | 'android' | 'tauri';
+
+/**
+ * Whether we're running inside the Tauri desktop app.
+ *
+ * IMPORTANT: check `__TAURI_INTERNALS__`, which Tauri v2 always injects.
+ * `window.__TAURI__` only exists with `app.withGlobalTauri: true` in
+ * tauri.conf.json (which we don't set) — guards checking only `__TAURI__`
+ * silently fail in the installed app.
+ */
+export function isTauri(): boolean {
+    return typeof window !== 'undefined' &&
+        ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+}
+
+/** Whether we're running as the Capacitor mobile app (iOS/Android). */
+export function isMobile(): boolean {
+    return Capacitor.isNativePlatform();
+}
+
+/**
+ * The Capacitor ANDROID app specifically. iOS is a native platform too
+ * (isMobile() is true there) but carries none of the SovereignApp plugin's
+ * features — notifications, keep-alive, the widget — so UI for those must
+ * gate on this, not on isMobile(), or iOS renders controls wired to nothing.
+ */
+export function isAndroidApp(): boolean {
+    return Capacitor.getPlatform() === 'android';
+}
+
+/**
+ * Is the user actually looking at the app right now?
+ *
+ * The answer to "should I raise an OS notification" is the NEGATION of this, so
+ * getting it wrong in the true direction silences every notification.
+ *
+ * On DESKTOP the question is window focus: the app can be fully visible behind
+ * another window, and a notification there is wanted.
+ *
+ * On MOBILE `document.hasFocus()` is the wrong question and answers it wrongly.
+ * It reports DOM focus WITHIN the document, and an Android WebView keeps that
+ * while its Activity is paused — so a backgrounded Capacitor app reports
+ * `hasFocus() === true` and every message notification is suppressed as
+ * "you're already looking at it". That was the 0813 report: task reminders
+ * arrived (they have no focus gate) while messages never did, from the same
+ * WebView, the same setting and the same native plugin. There is no window
+ * manager on a phone — the app is either foregrounded or it is not, and
+ * `visibilityState` is the signal that actually tracks it.
+ */
+export function appIsForeground(): boolean {
+    if (typeof document === 'undefined') return false;
+    if (isMobile()) return document.visibilityState === 'visible';
+    return document.hasFocus();
+}
+
+/**
+ * Detect the current platform
+ */
+function getPlatform(): Platform {
+    // Check for Capacitor native platforms first
+    if (Capacitor.isNativePlatform()) {
+        const platform = Capacitor.getPlatform();
+        if (platform === 'ios') return 'ios';
+        if (platform === 'android') return 'android';
+    }
+
+    // Check for Tauri (desktop)
+    if (isTauri()) {
+        return 'tauri';
+    }
+
+    // Default to web
+    return 'web';
+}
+
+/**
+ * Get the appropriate API base URL for the current platform
+ *
+ * On mobile, we need to use the actual server URL since
+ * localhost doesn't work on physical devices.
+ */
+export function getApiBaseUrl(): string {
+    const platform = getPlatform();
+
+    // In development, you may want to use your local IP
+    // For production, use your deployed server URL
+    if (platform === 'ios' || platform === 'android') {
+        // TODO: Replace with your production server URL
+        // For local development, use your machine's IP address
+        // Example: return 'http://192.168.1.100:3000';
+        return import.meta.env.VITE_API_URL || 'http://localhost:3000';
+    }
+
+    // Tauri desktop and web can use localhost
+    return import.meta.env.VITE_API_URL || 'http://localhost:3000';
+}
+
+/**
+ * Get WebSocket URL for the current platform
+ */
+export function getWebSocketUrl(): string {
+    const baseUrl = getApiBaseUrl();
+    return baseUrl.replace(/^http/, 'ws');
+}

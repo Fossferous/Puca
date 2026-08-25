@@ -1,0 +1,180 @@
+/* Forward Modal — pick a channel or DM conversation to forward a message to */
+
+.forward-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.forward-modal {
+    background: var(--bg-primary, #313338);
+    border-radius: 8px;
+    width: 100%;
+    max-width: 440px;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    position: relative;
+}
+
+.forward-modal h2 {
+    margin: 0 0 12px;
+    padding-right: 36px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-normal, #f2f3f5);
+}
+
+.forward-modal-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted, #b5bac1);
+    font-size: 22px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.forward-modal-close:hover {
+    background: var(--bg-tertiary, #404249);
+    color: #fff;
+}
+
+.forward-filter {
+    width: 100%;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    /* 16px everywhere: under a coarse pointer anything smaller triggers
+       focus-zoom (mobile contract). */
+    font-size: 16px;
+    color: var(--text-normal, #f2f3f5);
+    background: var(--bg-tertiary, #1e1f22);
+    border: 1px solid var(--border-color, rgba(0, 0, 0, 0.2));
+    border-radius: 6px;
+    outline: none;
+}
+
+.forward-filter:focus {
+    border-color: var(--brand-primary, #5865f2);
+}
+
+.forward-error {
+    background: rgba(237, 66, 69, 0.1);
+    border: 1px solid var(--color-danger, #f23f43);
+    color: var(--color-danger, #f23f43);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin-bottom: 8px;
+}
+
+.forward-target-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.forward-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-faint, #8a8f98);
+    margin: 8px 4px 2px;
+}
+
+.forward-target {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-normal, #dbdee1);
+    font-size: 14px;
+    text-align: left;
+}
+
+.forward-target:hover:not(:disabled) {
+    background: var(--bg-tertiary, #404249);
+}
+
+.forward-target:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.forward-target .ft-hash {
+    color: var(--text-muted, #949ba4);
+    font-weight: 700;
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.forward-target .ft-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--brand-primary, #5865f2);
+    flex-shrink: 0;
+}
+
+.forward-target .ft-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forward-target .ft-sending {
+    margin-left: auto;
+    color: var(--text-faint, #8a8f98);
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.forward-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-muted, #949ba4);
+    font-size: 14px;
+}
+
+/* ---- Mobile (coarse pointer) ---- */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .forward-modal-overlay {
+        padding: 8px;
+    }
+
+    /* Full-screen-ish per the mobile contract: the list scrolls inside the
+       modal, close button and filter stay reachable. */
+    .forward-modal {
+        max-width: none;
+        max-height: 85dvh;
+    }
+
+    .forward-target {
+        min-height: 44px;
+    }
+}
