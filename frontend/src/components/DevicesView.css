@@ -757,3 +757,12 @@
     max-height: 9rem;
     overflow-y: auto;
 }
+
+/* USER DECISION (2026-08-25): no settings cog on touch — the phone keeps its
+   pre-0.8.115 chrome ("remove the global cog on phone, leave it as it was").
+   The cog is a desktop-overlay affordance only. */
+@media (pointer: coarse) {
+    .devices-settings-cog {
+        display: none;
+    }
+}

@@ -842,3 +842,11 @@
         display: none;
     }
 }
+
+/* USER DECISION (2026-08-25): no settings cog on touch — the phone keeps its
+   pre-0.8.115 chrome. Desktop overlays keep theirs. */
+@media (pointer: coarse) {
+    .header-cog {
+        display: none;
+    }
+}

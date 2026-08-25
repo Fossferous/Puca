@@ -1199,13 +1199,12 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 .chat-header-cog:hover { background: var(--bg-tertiary, #2b2d31); color: var(--text-primary, #fff); }
 
-/* Narrow phones: the header already holds hash + title + checklist + pins +
-   search, all effectively non-shrinkable, and mobile.css inflates every
-   button to 44px — the cog's width came straight out of the channel title
-   (three characters left at 375px). The Friends/Tasks/Devices headers carry
-   their own cog and the sidebar cog is one Channels-tab tap away, so the
-   phone chat header gives this one up. */
-@media (pointer: coarse) and (max-width: 1024px) {
+/* USER DECISION (2026-08-25): no settings cog anywhere on touch — the phone
+   keeps its pre-0.8.115 chrome ("remove the global cog on phone, leave it as
+   it was"). The cogs are a desktop affordance; on touch the sidebar cog is
+   one Channels-tab tap away. (Was width-gated to 1024px for the crowding
+   reason; the user decision widened it to every coarse pointer.) */
+@media (pointer: coarse) {
     .chat-header-cog {
         display: none;
     }

@@ -963,7 +963,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                 {onOpenSettings && (
                     <button
                         type="button"
-                        className="devices-refresh"
+                        className="devices-refresh devices-settings-cog"
                         onClick={onOpenSettings}
                         aria-label="Open settings"
                         title="Settings"
