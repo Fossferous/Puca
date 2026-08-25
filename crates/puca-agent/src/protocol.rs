@@ -274,6 +274,16 @@ pub enum Request {
         static_shared: String,
         /// The controller's ephemeral public key, `x25519:`-prefixed.
         peer_eph_pub: String,
+        /// R4: may this session INJECT? The app verified the grant (a
+        /// cross-user share without `control` establishes an ordinary
+        /// sealed session for signalling and media, and must not be able to
+        /// type). Absent = REFUSED: an app that predates the field has not
+        /// said yes, and silence is not consent on an authorisation
+        /// question. Only the direct `input` data channel consults it — the
+        /// pipe's InjectSealed is still reached only through the app, which
+        /// applies its own view-only gate before forwarding.
+        #[serde(default)]
+        input_granted: bool,
             /// TURN/STUN for the stream this session will negotiate.
         ///
         /// CARRIED HERE rather than on the sealed offer, because the offer is
@@ -283,7 +293,7 @@ pub enum Request {
         /// caller is expected to have fetched `GET /ice-config` first.
         #[serde(default)]
         ice_servers: Vec<IceServer>,
-},
+    },
 
     /// Inject one input event that ARRIVED SEALED and is opened here.
     ///

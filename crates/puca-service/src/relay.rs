@@ -145,6 +145,14 @@ pub fn open_on_agent(
             &base64::engine::general_purpose::STANDARD, static_shared),
         "peer_eph_pub": peer_eph_pub,
         "ice_servers": ice_servers,
+        // R4: this session MAY inject. Safe to assert unconditionally here
+        // because `check_connect` above refuses a cross-user share outright
+        // (Refusal::CrossUserShare) — every session that reaches this call is
+        // the owner's own account, and a view-only grant cannot exist for it.
+        // The agent defaults to REFUSED when the field is absent, so a future
+        // path that forgets to say this gets no input rather than silent
+        // permission.
+        "input_granted": true,
     });
     let reply = agent.call(&req).map_err(Refusal::Agent)?;
     if let Some(e) = error_of(&reply) {

@@ -436,6 +436,17 @@ interface Internal extends DeviceControlSession {
     /** CONTROLLER: a cursor-ownership request made before this session could
      *  send one, replayed on activation. null = nothing owed. */
     pendingCursorOwner: boolean | null;
+    /** CONTROLLER: the 'input' data channel to an AGENT host, or null until
+     *  it opens (R4). When open, sealed input frames go straight to the
+     *  agent — no relay, no host webview, no Tauri IPC, no named pipe (the
+     *  hop that wedged for 46s in the field). Null at any moment means the
+     *  next frame takes the relay. */
+    inputChannel: RTCDataChannel | null;
+    /** CONTROLLER: sequence namespace for the input CHANNEL — separate from
+     *  `sendSeq` (the relay's), because the agent tracks the two separately
+     *  and a shared counter would let a channel frame invalidate a relayed
+     *  one still in flight. */
+    inputDcSeq: number;
     /** CONTROLLER: the viewer-opened 'caret' data channel, or null until it
      *  opens.
      *
@@ -1407,6 +1418,23 @@ async function buildControllerPc(s: Internal): Promise<RTCPeerConnection> {
     // ChannelOpen and drops every byte; a JS host ignores an unknown label. Both
     // are silence, and silence is handled by the viewer's own fallback timer,
     // never by waiting on channel state.
+    // P2P INPUT (R4). RELIABLE + ORDERED, and one lane only — unlike the mesh
+    // pair (rtc/controlDc.ts), where absolute moves ride an unreliable lane.
+    // The unreliable split is deferred here on purpose: this channel shares
+    // an SCTP association with `files`, `caret` and the tunnel, and a
+    // mishandled channel type can fault the whole association in str0m — a
+    // latency nicety is not worth risking the file transfer that is running
+    // over it. Measure the pump first (R4.5).
+    //
+    // Created at pc construction like every other channel: adding one later
+    // renegotiates. AN OPEN CHANNEL IS NOT A CAPABILITY here either — the
+    // agent refuses input on a session it was not told holds a control
+    // grant (input_wire::InputArm), and this end falls back to the relay
+    // whenever the channel is not open.
+    const inputDc = pc.createDataChannel('input', { negotiated: false });
+    inputDc.onopen = () => { s.inputChannel = inputDc; };
+    inputDc.onclose = () => { if (s.inputChannel === inputDc) s.inputChannel = null; };
+
     const caretDc = pc.createDataChannel('caret', { negotiated: false });
     caretDc.onopen = () => {
         s.caretChannel = caretDc;
@@ -2602,6 +2630,7 @@ export async function connectToDevice(
         agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, monitors: [], activeMonitor: null,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
         filesChannel: null,
+        inputChannel: null, inputDcSeq: 0,
         caretChannel: null, caretTracking: false, caretCapable: false,
         caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
         fileRoot: null,
@@ -2737,10 +2766,37 @@ function sendCoalescer(s: Internal): InputCoalescer {
 async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
     return await s.inQueue.run(async () => {
         if (!s.key) return false;
+        // P2P FIRST (R4): straight to the agent when its channel is open,
+        // else the relay — which stays the permanent fallback and the only
+        // path that always exists (a webview host has no agent at all). The
+        // transport picks the SEQUENCE NAMESPACE with it.
+        const dc = s.inputChannel;
+        const viaDc = !!dc && dc.readyState === 'open';
         try {
-            const sealed = await sealControl(s.key, JSON.stringify({ s: s.sendSeq++, e: event }));
+            if (viaDc) {
+                const sealed = await sealControl(
+                    s.key, JSON.stringify({ s: s.inputDcSeq, e: event }),
+                );
+                try {
+                    dc!.send(JSON.stringify({ sid: s.id, payload: sealed }));
+                    s.inputDcSeq++;
+                    s.inputRate.tick();
+                    return true;
+                } catch {
+                    // The channel died between the check and the send: fall
+                    // through to the relay rather than dropping the event —
+                    // but RE-SEAL for it. The frame just built carries the
+                    // CHANNEL's sequence number, and replaying that onto the
+                    // relay (whose counter is separate and behind) would be
+                    // refused by the host as stale. The DC's number is not
+                    // consumed, so its namespace stays gap-free.
+                }
+            }
+            const relaySealed = await sealControl(
+                s.key, JSON.stringify({ s: s.sendSeq++, e: event }),
+            );
             s.inputRate.tick();
-            wsClient.send({ type: 'DeviceInput', payload: { session_id: s.id, event: sealed } });
+            wsClient.send({ type: 'DeviceInput', payload: { session_id: s.id, event: relaySealed } });
             return true;
         } catch {
             // A crypto failure must not degrade to sending plaintext.
@@ -3010,7 +3066,8 @@ export function installDeviceSessions(): void {
                 agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, monitors: [], activeMonitor: null,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
                 filesChannel: null,
-                caretChannel: null, caretTracking: false, caretCapable: false,
+                inputChannel: null, inputDcSeq: 0,
+        caretChannel: null, caretTracking: false, caretCapable: false,
                 caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
                 fileRoot: null,
         fileScopeKind: null,

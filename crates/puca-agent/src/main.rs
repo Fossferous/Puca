@@ -32,6 +32,7 @@ mod composite;
 mod caret_wire;
 mod privacy;
 mod file_transfer;
+mod input_wire;
 mod file_log;
 
 #[cfg(windows)]

@@ -576,6 +576,11 @@ pub fn start(
     stream_events_tx: std::sync::mpsc::Sender<StreamEvent>,
     session_id: String,
     generation: u64,
+    // R4: the sealed session's key + grant, when the caller has one. Some =
+    // this stream may serve the direct `input` channel; None = it cannot
+    // (an attended session, whose key lives in the APP — the agent is
+    // deliberately not a second client) and input keeps its existing path.
+    input_channel: Option<std::sync::Arc<crate::input_wire::InputChannel>>,
 ) -> Result<Stream, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("could not bind a socket: {e}"))?;
     let local_addr = socket
@@ -688,7 +693,7 @@ pub fn start(
                 stream_events_tx: stream_events_tx_clone,
                 reason: Arc::clone(&reason_cell),
             };
-            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, mode, stop_thread, command_rx, generation, file_scope_thread, audit, stream_events_run, session_id_run) {
+            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, mode, stop_thread, command_rx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel) {
                 eprintln!("[stream] ended: {e}");
                 if let Ok(mut r) = reason_cell.lock() {
                     *r = e;
@@ -853,6 +858,8 @@ fn run(
     audit: Option<crate::file_log::FileAudit>,
     events_tx: std::sync::mpsc::Sender<StreamEvent>,
     session_id: String,
+    // R4: Some = this stream may serve the direct input channel (see start()).
+    input_channel: Option<std::sync::Arc<crate::input_wire::InputChannel>>,
 ) -> Result<(), String> {
     // VIDEO ONLY. The justification — frame pacing rides socket read timeouts,
     // which tick at the ~15.6ms default — does not apply to a DataOnly session:
@@ -874,6 +881,8 @@ fn run(
     // it must never reach the filesystem handler, and file bytes must never
     // start a sampler.
     let mut caret_channel: Option<str0m::channel::ChannelId> = None;
+    // R4: the controller's direct input channel, learned from ChannelOpen.
+    let mut input_channel_id: Option<str0m::channel::ChannelId> = None;
     // `Some` = a viewer has asked for caret reports. Dropping the tracker
     // releases this session's claim on the process-wide sampler; it is a local
     // in `run()`, so a returning stream releases it with no teardown step.
@@ -1395,6 +1404,18 @@ fn run(
                             files_channel = Some(*cid);
                         } else if name == crate::caret_wire::CHANNEL_NAME {
                             caret_channel = Some(*cid);
+                        } else if name == crate::input_wire::CHANNEL_NAME {
+                            // Recorded whether or not this stream can serve
+                            // it: an unarmed stream logs the refusal once
+                            // rather than silently ignoring the label, which
+                            // is the failure mode caret_wire warns about.
+                            input_channel_id = Some(*cid);
+                            if input_channel.is_none() {
+                                eprintln!(
+                                    "[stream] input channel opened but this session has no \
+                                     agent-held key — input keeps its existing path"
+                                );
+                            }
                         }
                     }
                     str0m::Event::ChannelClose(cid) => {
@@ -1425,7 +1446,7 @@ fn run(
                         // never start a sampler. An unknown channel still falls
                         // through to nothing at all.
                         let (req, req_id) = match route_channel_data(
-                            classify_channel(data.id, files_channel, caret_channel),
+                            classify_channel(data.id, files_channel, caret_channel, input_channel_id),
                             &data.data,
                         ) {
                             Route::Track(on) => {
@@ -1461,6 +1482,43 @@ fn run(
                                     eprintln!(
                                         "[caret] tracking on (mon={current_monitor} surf={caret_surf} surface={caret_surface:?})"
                                     );
+                                }
+                                continue;
+                            }
+                            Route::Input(frame) => {
+                                // R4: opened and injected HERE — no webview,
+                                // no Tauri IPC, no named pipe. The arm is the
+                                // authorisation (view-only sessions are
+                                // refused before anything is decrypted); a
+                                // stream without one never reaches this arm
+                                // because the channel is not classified.
+                                match input_channel.as_ref() {
+                                    None => eprintln!(
+                                        "[stream] input frame on a session with no agent-held key"
+                                    ),
+                                    Some(ch) => match crate::input_wire::accept_frame(
+                                        ch, &frame,
+                                        |k, p| crate::control_key::open(k, p),
+                                    ) {
+                                        Ok(event_json) => {
+                                            match serde_json::from_str::<puca_input::ControlInput>(
+                                                &event_json,
+                                            ) {
+                                                Ok(ev) => {
+                                                    if let Err(e) = crate::session::dispatch_input_public(ev) {
+                                                        eprintln!("[stream] input inject failed: {e}");
+                                                    }
+                                                }
+                                                Err(_) => eprintln!(
+                                                    "[stream] input frame refused: {}",
+                                                    crate::input_wire::InputReject::NotAnEvent.describe()
+                                                ),
+                                            }
+                                        }
+                                        Err(why) => eprintln!(
+                                            "[stream] input frame refused: {}", why.describe()
+                                        ),
+                                    },
                                 }
                                 continue;
                             }
@@ -2111,6 +2169,8 @@ fn caret_sampling_allowed(mode: StreamMode, has_capture: bool, track_on: bool) -
 enum ChannelRole {
     Files,
     Caret,
+    /// R4: the controller's direct sealed-input channel.
+    Input,
     Other,
 }
 
@@ -2128,12 +2188,16 @@ fn classify_channel<T: PartialEq + Copy>(
     id: T,
     files: Option<T>,
     caret: Option<T>,
+    input: Option<T>,
 ) -> ChannelRole {
     if files == Some(id) {
         return ChannelRole::Files;
     }
     if caret == Some(id) {
         return ChannelRole::Caret;
+    }
+    if input == Some(id) {
+        return ChannelRole::Input;
     }
     ChannelRole::Other
 }
@@ -2146,6 +2210,7 @@ enum IgnoreReason {
     NotOurChannel,
     UnparseableFs,
     UnparseableCaret,
+    UnparseableInput,
 }
 
 impl IgnoreReason {
@@ -2154,6 +2219,7 @@ impl IgnoreReason {
             Self::NotOurChannel => "data on a channel this agent does not serve",
             Self::UnparseableFs => "unparseable fs request",
             Self::UnparseableCaret => "unparseable caret request",
+            Self::UnparseableInput => "unparseable input frame",
         }
     }
 }
@@ -2165,12 +2231,18 @@ impl IgnoreReason {
 enum Route {
     Fs { req: crate::file_transfer::FsRequest, id: Option<u64> },
     Track(bool),
+    /// R4: a sealed input frame for the direct channel.
+    Input(crate::input_wire::InputFrame),
     Ignore(IgnoreReason),
 }
 
 fn route_channel_data(role: ChannelRole, bytes: &[u8]) -> Route {
     match role {
         ChannelRole::Other => Route::Ignore(IgnoreReason::NotOurChannel),
+        ChannelRole::Input => match crate::input_wire::parse_frame(bytes) {
+            Some(f) => Route::Input(f),
+            None => Route::Ignore(IgnoreReason::UnparseableInput),
+        },
         ChannelRole::Caret => match serde_json::from_slice::<crate::caret_wire::CaretRequest>(bytes)
         {
             Ok(crate::caret_wire::CaretRequest::Track { on }) => Route::Track(on),
@@ -2518,16 +2590,16 @@ mod tests {
     /// case spelled out.
     #[test]
     fn a_channel_is_classified_by_id_and_files_wins_a_tie() {
-        assert_eq!(classify_channel(7u32, Some(7), Some(8)), ChannelRole::Files);
-        assert_eq!(classify_channel(8u32, Some(7), Some(8)), ChannelRole::Caret);
-        assert_eq!(classify_channel(9u32, Some(7), Some(8)), ChannelRole::Other);
+        assert_eq!(classify_channel(7u32, Some(7), Some(8), None), ChannelRole::Files);
+        assert_eq!(classify_channel(8u32, Some(7), Some(8), None), ChannelRole::Caret);
+        assert_eq!(classify_channel(9u32, Some(7), Some(8), None), ChannelRole::Other);
         // Nothing learned yet: every byte is on a channel we do not serve.
-        assert_eq!(classify_channel(7u32, None, None), ChannelRole::Other);
-        assert_eq!(classify_channel(7u32, None, Some(8)), ChannelRole::Other);
+        assert_eq!(classify_channel(7u32, None, None, None), ChannelRole::Other);
+        assert_eq!(classify_channel(7u32, None, Some(8), None), ChannelRole::Other);
         // FAIL CLOSED. If the two ids were ever equal, the bytes must go to the
         // handler that has a jail and a grant check — not to the one that starts
         // reading other processes' accessibility trees.
-        assert_eq!(classify_channel(7u32, Some(7), Some(7)), ChannelRole::Files);
+        assert_eq!(classify_channel(7u32, Some(7), Some(7), None), ChannelRole::Files);
     }
 
     #[test]
@@ -2839,7 +2911,7 @@ mod tests {
     #[test]
     fn a_malformed_offer_does_not_start_a_thread() {
         let (tx, _rx) = std::sync::mpsc::channel();
-        assert!(start("not an sdp", 0, 30, 2_000_000, StreamMode::Video, &[], tx, "s".into(), 1).is_err());
+        assert!(start("not an sdp", 0, 30, 2_000_000, StreamMode::Video, &[], tx, "s".into(), 1, None).is_err());
     }
 
     struct DropTrackedResource {

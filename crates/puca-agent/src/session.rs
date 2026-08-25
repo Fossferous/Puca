@@ -38,6 +38,15 @@ fn b64(bytes: &[u8]) -> String {
 /// unreachable from `SendInput` by design (see `ControlInput::Sas`). Letting it
 /// fall through would produce a correct-but-useless refusal where a working
 /// feature is available one process away.
+/// The stream thread's entry to the SAME dispatch the pipe path uses (R4).
+/// Public wrapper rather than making `dispatch_input` public: the Sas
+/// interception and the test seam below must apply to both callers, and two
+/// entry points into OS input is exactly how one of them ends up bypassing a
+/// gate the other has.
+pub fn dispatch_input_public(event: puca_input::ControlInput) -> Result<(), String> {
+    dispatch_input(event)
+}
+
 fn dispatch_input(event: puca_input::ControlInput) -> Result<(), String> {
     match event {
         puca_input::ControlInput::Sas => dispatch_sas(),
@@ -409,6 +418,21 @@ struct SealedSession {
     /// a captured frame unreplayable — the JS host enforces the same rule at
     /// session.ts:2690, and the two must agree or input stalls.
     recv_seq: i64,
+    /// R4: may this session inject through the DIRECT input channel?
+    ///
+    /// Stated by the app at open time from the verified grant. The pipe's
+    /// `InjectSealed` does NOT consult this — that path only exists because
+    /// the app forwarded it, and the app applies the view-only rule itself
+    /// — but the data channel bypasses the app entirely, so without this a
+    /// view-only share could type. See input_wire::InputArm.
+    input_arm: crate::input_wire::InputArm,
+    /// Highest `s` seen on the DIRECT input channel.
+    ///
+    /// ITS OWN NAMESPACE, like recv_sig_seq is for signalling: the
+    /// controller numbers the transports independently, so sharing
+    /// `recv_seq` with the relay path would make a fast channel frame
+    /// invalidate a relayed one still in flight.
+    dc_recv_seq: i64,
     /// Has this session answered the unattended-access challenge?
     ///
     /// Per session, not per gate: proving once must not authorise a DIFFERENT
@@ -984,6 +1008,16 @@ impl Agent {
                     self.monitor_reservations.insert(*k, stream_key.clone());
                 }
 
+                // R4: hand the stream this session's key ONLY when the
+                // agent actually holds one (a sealed session opened through
+                // the service). An attended session's key lives in the app,
+                // so its stream gets None and input keeps the pipe path —
+                // the agent is deliberately not a second client.
+                let input_channel = self.sealed.get(&session_id).map(|s| {
+                    std::sync::Arc::new(crate::input_wire::InputChannel::new(
+                        session_id.clone(), s.key, s.input_arm,
+                    ))
+                });
                 match crate::stream::start(
                     &offer_sdp,
                     target_monitor,
@@ -998,6 +1032,7 @@ impl Agent {
                     self.stream_events.0.clone(),
                     session_id.clone(),
                     generation,
+                    input_channel,
                 ) {
                     Ok(stream) => {
                         let answer_sdp = stream.answer_sdp.clone();
@@ -1262,7 +1297,9 @@ impl Agent {
                 }
             }
 
-            Request::OpenSession { session_id, static_shared, peer_eph_pub, ice_servers } => {
+            Request::OpenSession {
+                session_id, static_shared, peer_eph_pub, ice_servers, input_granted,
+            } => {
                 if let Some(r) = self.gate(crate::flavour::Capability::Input) {
                     return r;
                 }
@@ -1311,6 +1348,12 @@ impl Agent {
                     SealedSession {
                         key,
                         recv_seq: -1,
+                        input_arm: if input_granted {
+                            crate::input_wire::InputArm::allowed()
+                        } else {
+                            crate::input_wire::InputArm::refused()
+                        },
+                        dc_recv_seq: -1,
                         ua_ok: !ua_required,
                         recv_sig_seq: -1,
                         send_seq: 0,
@@ -2798,6 +2841,7 @@ mod tests {
             session_id: id.into(),
             static_shared: b64(&shared),
             peer_eph_pub: ctl_pub,
+            input_granted: true,
         });
         let agent_eph = match resp {
             Response::SessionOpened { eph_pub } => eph_pub,
