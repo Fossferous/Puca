@@ -251,10 +251,16 @@ export function forgetSfuControl(peerId: number): void {
     sfuHello.delete(peerId);
 }
 
-/** Test seam: drop every registration (a fresh module state per test). */
+/**
+ * Test seam: drop every registration and both capability sets.
+ *
+ * The frame HANDLER is deliberately left installed — it belongs to
+ * remoteControl (which installs it once, behind its own `wired` latch), not
+ * to the channel registry, so clearing it here would silently disable
+ * inbound frames for the rest of the process with no way to reinstall.
+ */
 export function resetControlChannels(): void {
     byPeer.clear();
-    handler = null;
     sfuSend = null;
     sfuHello.clear();
 }
