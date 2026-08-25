@@ -78,5 +78,16 @@
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
-  !insertmacro MigrateRenamedInstall "Sovereign"
+  ; SELF-GUARDING against the pinned-name build. A deployment may pin
+  ; productName "Sovereign" in tauri.release.json (keeping the old install
+  ; identity instead of renaming). In that build, OLD_NAME equals the CURRENT
+  ; name — so this migration would find OUR OWN install on every routine
+  ; update and turn an in-place upgrade into kill + full uninstall +
+  ; reinstall (and delete the autostart value until the next launch). The
+  ; guard is compile-time: the migration only exists in builds that actually
+  ; rename. Flipping the real rename on is therefore exactly one overlay
+  ; change (remove the productName pin) — the hook is already waiting.
+  !if "${PRODUCTNAME}" != "Sovereign"
+    !insertmacro MigrateRenamedInstall "Sovereign"
+  !endif
 !macroend
