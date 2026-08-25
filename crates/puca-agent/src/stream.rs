@@ -1644,6 +1644,15 @@ fn run(
                                     now.duration_since(start)
                                 );
                                 capture = Some(fresh);
+                                // A fresh capture is born drawing the host
+                                // pointer (and seeded with its shape). If a
+                                // controller OWNS the cursor, the rebuild
+                                // would silently put a second pointer on
+                                // screen — re-apply ownership exactly as the
+                                // monitor switch does.
+                                if let Some(c) = capture.as_mut() {
+                                    c.set_draw_cursor(draw_host_cursor);
+                                }
                                 // The encoder goes with it — same pattern as a
                                 // monitor switch. It was sized from the first
                                 // frame and never re-checked, and a blockage
@@ -2960,6 +2969,26 @@ mod tests {
             Some(t0 + Duration::from_secs(5)),
             t0 + Duration::from_secs(10),
         ));
+    }
+
+    #[test]
+    fn the_blocked_capture_rebuild_reapplies_cursor_ownership() {
+        // A rebuilt capture is born drawing the host pointer (and seeded with
+        // its shape). On a session where the CONTROLLER owns the cursor, a
+        // rebuild without re-applying ownership silently paints a second
+        // pointer — the monitor-switch arm learned this already; this pins
+        // that the rebuild arm keeps the same re-apply. Scoped to the arm's
+        // own text so this test's source cannot satisfy the assertion.
+        let src = include_str!("stream.rs");
+        let arm = src
+            .split("should_rebuild_capture(start, last_rebuild, now)")
+            .nth(1)
+            .expect("the rebuild arm exists");
+        let arm = arm.split("Err(e) => eprintln!").next().unwrap();
+        assert!(
+            arm.contains("set_draw_cursor(draw_host_cursor)"),
+            "the rebuild arm must re-apply cursor ownership to the fresh capture"
+        );
     }
 
     #[test]

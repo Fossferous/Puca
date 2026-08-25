@@ -254,7 +254,12 @@ impl ScreenCapture {
             monitor,
             rotation,
             staging: None,
-            cursor: CursorState::default(),
+            // SEEDED, not empty: DXGI only reports the shape on CHANGE, so an
+            // empty start meant no pointer in any frame until the host's own
+            // mouse moved — "invisible but still working" after every capture
+            // rebuild (file browser detour, lock/unlock, monitor switch).
+            // Failure falls back to the old empty state.
+            cursor: seed_cursor(monitor),
             // ON unless a controller takes ownership: every other consumer of
             // a captured frame (a viewer that draws no cursor of its own, a
             // still grab) expects to see the pointer.
@@ -641,6 +646,202 @@ pub(crate) fn rotate_to_desktop(frame: Frame, rotation: Rotation) -> Frame {
     Frame { width: dw as u32, height: dh as u32, stride: dst_stride, bgra: out }
 }
 
+/// A top-down device-independent bitmap pulled out of a GDI cursor.
+struct CursorDib {
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    pitch: u32,
+}
+
+/// Convert GDI cursor bitmaps into the CursorState `draw_cursor` consumes.
+/// Pure, so the format translation is testable without Win32.
+///
+/// Why this exists: DXGI reports the pointer SHAPE only when it CHANGES, so a
+/// freshly opened capture (session start, blocked-capture rebuild, monitor
+/// switch) drew no pointer at all until the host's own mouse produced a
+/// delta — reported as "the cursor is invisible but still works" after using
+/// the file browser, and after lock/unlock. Seeding from GDI at open fixes
+/// the blank start.
+///
+/// GDI and DXGI agree byte-for-byte on the two shapes involved when the DIB
+/// rows are top-down:
+///  * a colour cursor's 32bpp BGRA DIB is DXGI COLOR — except legacy cursors
+///    whose alpha plane is all zero, where opacity lives in the AND mask
+///    (mask bit 0 = opaque), the same derivation DXGI performs;
+///  * a monochrome cursor's hbmMask is the SAME double-height AND-over-XOR
+///    layout as DXGI's MONOCHROME shape, DWORD-aligned rows and MSB-first
+///    bits included.
+///
+/// Position: DXGI reports the shape's top-left in output-relative,
+/// desktop-upright coordinates with the hotspot already subtracted; a
+/// CURSORINFO point is desktop coordinates with no hotspot subtraction, so
+/// both corrections are applied here. The shape is stored UNCONDITIONALLY;
+/// `visible` is true only when the point lies inside this output's rect —
+/// mirroring DXGI's per-output Visible semantics, so a pointer that wanders
+/// onto this screen later has a shape waiting for it.
+fn dib_to_cursor_state(
+    color: Option<CursorDib>,
+    mask: CursorDib,
+    hotspot: (i32, i32),
+    point: (i32, i32),
+    showing: bool,
+    rect: (i32, i32, i32, i32), // left, top, width, height
+) -> CursorState {
+    let (left, top, w, h) = rect;
+    let inside = point.0 >= left && point.0 < left + w && point.1 >= top && point.1 < top + h;
+    let (shape, width, height, pitch, kind) = match color {
+        Some(mut c) => {
+            // Legacy colour cursors carry an all-zero alpha plane; opacity
+            // lives in the AND mask. A real alpha plane is left untouched.
+            if c.bytes.chunks_exact(4).all(|px| px[3] == 0) {
+                for row in 0..c.height.min(mask.height) as usize {
+                    for col in 0..c.width as usize {
+                        let mbyte = row * mask.pitch as usize + col / 8;
+                        let Some(&m) = mask.bytes.get(mbyte) else { continue };
+                        let opaque = (m >> (7 - (col % 8))) & 1 == 0;
+                        let at = row * c.pitch as usize + col * 4 + 3;
+                        if let Some(a) = c.bytes.get_mut(at) {
+                            *a = if opaque { 255 } else { 0 };
+                        }
+                    }
+                }
+            }
+            (
+                c.bytes,
+                c.width,
+                c.height,
+                c.pitch,
+                DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32,
+            )
+        }
+        None => (
+            mask.bytes,
+            mask.width,
+            mask.height,
+            mask.pitch,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32,
+        ),
+    };
+    CursorState {
+        shape,
+        width,
+        height,
+        pitch,
+        kind,
+        x: point.0 - hotspot.0 - left,
+        y: point.1 - hotspot.1 - top,
+        visible: showing && inside,
+    }
+}
+
+/// Read the CURRENT cursor via GDI, for seeding a fresh capture. Any failure
+/// yields the empty state — exactly the old behaviour (no pointer until the
+/// first DXGI delta), never an error.
+fn seed_cursor(monitor: usize) -> CursorState {
+    use windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ, RGBQUAD,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, ICONINFO,
+    };
+
+    let Some(out) = outputs().into_iter().find(|o| o.index == monitor) else {
+        return CursorState::default();
+    };
+
+    unsafe {
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetCursorInfo(&mut ci).is_err() || ci.hCursor.is_invalid() {
+            return CursorState::default();
+        }
+        let showing = (ci.flags.0 & CURSOR_SHOWING.0) != 0;
+        let mut ii = ICONINFO::default();
+        if GetIconInfo(ci.hCursor, &mut ii).is_err() {
+            return CursorState::default();
+        }
+        // From here BOTH bitmaps must be deleted on every path — GetIconInfo
+        // hands out copies the caller owns, and a leak here is per capture
+        // open, which the blocked-capture path retries every 5 seconds.
+        let hdc = GetDC(None);
+        let read_dib = |hbm: HBITMAP, bpp: u16| -> Option<CursorDib> {
+            if hbm.is_invalid() {
+                return None;
+            }
+            let mut bm = BITMAP::default();
+            if GetObjectW(
+                HGDIOBJ(hbm.0),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bm as *mut _ as *mut _),
+            ) == 0
+            {
+                return None;
+            }
+            let width = bm.bmWidth as u32;
+            let height = bm.bmHeight as u32;
+            if width == 0 || height == 0 {
+                return None;
+            }
+            // 32bpp rows are naturally aligned; 1bpp rows are DWORD-aligned —
+            // the same padding DXGI's MONOCHROME pitch carries.
+            let pitch = if bpp == 32 { width * 4 } else { width.div_ceil(32) * 4 };
+            // A 1bpp DIB needs a 2-entry palette after the header.
+            #[repr(C)]
+            struct Bmi {
+                header: BITMAPINFOHEADER,
+                _colors: [RGBQUAD; 2],
+            }
+            let mut bmi = Bmi {
+                header: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: bm.bmWidth,
+                    // NEGATIVE height = top-down rows — the order both
+                    // draw_cursor and DXGI use.
+                    biHeight: -bm.bmHeight,
+                    biPlanes: 1,
+                    biBitCount: bpp,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                _colors: [RGBQUAD::default(); 2],
+            };
+            let mut bytes = vec![0u8; (pitch * height) as usize];
+            let rows = GetDIBits(
+                hdc,
+                hbm,
+                0,
+                height,
+                Some(bytes.as_mut_ptr() as *mut _),
+                &mut bmi as *mut _ as *mut BITMAPINFO,
+                DIB_RGB_COLORS,
+            );
+            (rows as u32 == height).then_some(CursorDib { bytes, width, height, pitch })
+        };
+
+        let color = read_dib(ii.hbmColor, 32);
+        let mask = read_dib(ii.hbmMask, 1);
+        let _ = DeleteObject(HGDIOBJ(ii.hbmColor.0));
+        let _ = DeleteObject(HGDIOBJ(ii.hbmMask.0));
+        let _ = ReleaseDC(None, hdc);
+
+        let Some(mask) = mask else {
+            return CursorState::default();
+        };
+        dib_to_cursor_state(
+            color,
+            mask,
+            (ii.xHotspot as i32, ii.yHotspot as i32),
+            (ci.ptScreenPos.x, ci.ptScreenPos.y),
+            showing,
+            (out.left, out.top, out.width, out.height),
+        )
+    }
+}
+
 #[cfg(test)]
 mod cursor_tests {
     use super::*;
@@ -968,6 +1169,84 @@ mod cursor_tests {
         draw_cursor(&mut f, &colour_cursor(), -1, -1);
         assert_eq!(px(&f, 0, 0)[0], BR, "the visible corner of the cursor was not drawn");
         assert_eq!(px(&f, 1, 1), [0, 0, 0], "it drew more than the part that fits");
+    }
+
+    // ---- seeding (dib_to_cursor_state) -------------------------------------
+
+    fn dib(bytes: Vec<u8>, width: u32, height: u32, pitch: u32) -> CursorDib {
+        CursorDib { bytes, width, height, pitch }
+    }
+
+    /// The seeded state must be DRAWABLE by draw_cursor, not merely populated —
+    /// so these tests go through the same fixture geometry the drawing tests
+    /// use and assert on pixels, which is what the user actually sees.
+    #[test]
+    fn a_seeded_colour_cursor_with_real_alpha_draws_as_is() {
+        // 1x1 opaque red BGRA pixel, real alpha — must be left untouched.
+        let colour = dib(vec![0, 0, 255, 255], 1, 1, 4);
+        let mask = dib(vec![0x00, 0, 0, 0], 1, 1, 4); // AND bit 0 (opaque) — must be IGNORED
+        let s = dib_to_cursor_state(Some(colour), mask, (0, 0), (10, 10), true, (8, 8, 16, 16));
+        assert_eq!(s.kind, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32);
+        assert_eq!((s.x, s.y), (2, 2), "output-relative, hotspot-corrected");
+        assert!(s.visible);
+        let mut f = frame(4, 4, 0);
+        draw_cursor(&mut f, &s, 1, 1);
+        assert_eq!(px(&f, 1, 1), [0, 0, 255], "the seeded pixel must draw");
+    }
+
+    #[test]
+    fn a_seeded_legacy_colour_cursor_derives_alpha_from_the_and_mask() {
+        // 2x1: both pixels alpha ZERO (legacy); AND mask bit 0 for col 0
+        // (opaque), 1 for col 1 (transparent) -> only col 0 draws.
+        let colour = dib(vec![0, 255, 0, 0, 255, 0, 0, 0], 2, 1, 8);
+        let mask = dib(vec![0b0100_0000, 0, 0, 0], 2, 1, 4);
+        let s = dib_to_cursor_state(Some(colour), mask, (0, 0), (0, 0), true, (0, 0, 16, 16));
+        let mut f = frame(4, 4, 0);
+        draw_cursor(&mut f, &s, 0, 0);
+        assert_eq!(px(&f, 0, 0), [0, 255, 0], "the mask-opaque pixel must draw");
+        assert_eq!(px(&f, 1, 0), [0, 0, 0], "the mask-transparent pixel must not");
+    }
+
+    #[test]
+    fn a_seeded_monochrome_cursor_keeps_the_double_height_and_xor_layout() {
+        // 1x1 mono cursor: GDI's mask is 2 rows (AND over XOR), DWORD-aligned.
+        // AND 0 + XOR 1 = white, per draw_cursor's own decode table.
+        let mask = dib(vec![0x00, 0, 0, 0, 0x80, 0, 0, 0], 1, 2, 4);
+        let s = dib_to_cursor_state(None, mask, (0, 0), (0, 0), true, (0, 0, 16, 16));
+        assert_eq!(s.kind, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32);
+        assert_eq!(s.height, 2, "height stays DOUBLED — draw_cursor halves it");
+        let mut f = frame(2, 2, 7);
+        draw_cursor(&mut f, &s, 0, 0);
+        assert_eq!(px(&f, 0, 0), [255, 255, 255], "AND 0 + XOR 1 must draw white");
+    }
+
+    #[test]
+    fn a_seeded_pointer_on_another_output_keeps_its_shape_but_is_not_visible() {
+        // The point sits OUTSIDE this output's rect: DXGI's per-output
+        // Visible semantics say not visible — but the shape must be retained
+        // so a later position-only delta can light it up.
+        let colour = dib(vec![0, 0, 255, 255], 1, 1, 4);
+        let mask = dib(vec![0, 0, 0, 0], 1, 1, 4);
+        let s = dib_to_cursor_state(Some(colour), mask, (0, 0), (100, 100), true, (0, 0, 16, 16));
+        assert!(!s.visible);
+        assert!(!s.shape.is_empty(), "the shape must survive for a later delta");
+        // Positive control: the same point inside the rect IS visible.
+        let colour = dib(vec![0, 0, 255, 255], 1, 1, 4);
+        let mask = dib(vec![0, 0, 0, 0], 1, 1, 4);
+        let s = dib_to_cursor_state(Some(colour), mask, (0, 0), (5, 5), true, (0, 0, 16, 16));
+        assert!(s.visible);
+    }
+
+    /// LIVE: a real machine with a visible cursor must seed a non-empty
+    /// shape at capture open. `--ignored` because it needs a display.
+    #[test]
+    #[ignore = "needs a real display and a visible cursor"]
+    fn live_a_fresh_capture_is_born_with_a_cursor_shape() {
+        let seeded = seed_cursor(0);
+        assert!(
+            !seeded.shape.is_empty(),
+            "seed_cursor(0) produced no shape on a machine with a live cursor"
+        );
     }
 
     #[test]
