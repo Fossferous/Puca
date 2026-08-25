@@ -46,8 +46,8 @@ android {
         applicationId "com.sovereign.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 80104
-        versionName "0.8.104"
+        versionCode 80117
+        versionName "0.8.117"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

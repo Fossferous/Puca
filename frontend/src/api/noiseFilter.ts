@@ -787,7 +787,7 @@ if (typeof window !== 'undefined') {
             // The web path starts a browser download from the URL and returns
             // at once; revoking immediately can abort it. Give it a minute.
             setTimeout(() => URL.revokeObjectURL(url), 60_000);
-            out[name] = await saveAttachment(url, `sovereign-deepfilter-${stamp}-${name}.wav`);
+            out[name] = await saveAttachment(url, `puca-deepfilter-${stamp}-${name}.wav`);
         }
         return out;
     };

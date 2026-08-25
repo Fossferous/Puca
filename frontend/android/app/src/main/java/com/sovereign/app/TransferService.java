@@ -75,7 +75,7 @@ public class TransferService extends Service {
         createChannel();
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Sovereign:transfer");
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Puca:transfer");
             wakeLock.setReferenceCounted(false);
             // Bounded so a bug can never hold the CPU indefinitely; the six-hour
             // service cap below is the real ceiling.

@@ -1,4 +1,4 @@
-//! Input injection and display geometry for Sovereign.
+//! Input injection and display geometry for Puca.
 //!
 //! Extracted from the Tauri app so the desktop shell AND the native host agent
 //! consume ONE implementation. Duplicating it would mean two copies of the

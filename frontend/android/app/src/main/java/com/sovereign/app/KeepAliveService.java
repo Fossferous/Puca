@@ -318,7 +318,7 @@ public class KeepAliveService extends Service {
         } else if (wanted && wakeLock == null) {
             PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
             if (pm != null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Sovereign:control");
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Puca:control");
                 wakeLock.setReferenceCounted(false);
                 // Bounded so a bug can never hold the CPU indefinitely. A
                 // marathon session survives expiry — the process stays alive,
