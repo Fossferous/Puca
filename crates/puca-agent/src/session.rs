@@ -426,13 +426,6 @@ struct SealedSession {
     /// — but the data channel bypasses the app entirely, so without this a
     /// view-only share could type. See input_wire::InputArm.
     input_arm: crate::input_wire::InputArm,
-    /// Highest `s` seen on the DIRECT input channel.
-    ///
-    /// ITS OWN NAMESPACE, like recv_sig_seq is for signalling: the
-    /// controller numbers the transports independently, so sharing
-    /// `recv_seq` with the relay path would make a fast channel frame
-    /// invalidate a relayed one still in flight.
-    dc_recv_seq: i64,
     /// Has this session answered the unattended-access challenge?
     ///
     /// Per session, not per gate: proving once must not authorise a DIFFERENT
@@ -1013,9 +1006,11 @@ impl Agent {
                 // the service). An attended session's key lives in the app,
                 // so its stream gets None and input keeps the pipe path —
                 // the agent is deliberately not a second client.
+                let flavour_allows_input =
+                    self.flavour.refusal(crate::flavour::Capability::Input).is_none();
                 let input_channel = self.sealed.get(&session_id).map(|s| {
                     std::sync::Arc::new(crate::input_wire::InputChannel::new(
-                        session_id.clone(), s.key, s.input_arm,
+                        session_id.clone(), s.key, s.input_arm, s.ua_ok, flavour_allows_input,
                     ))
                 });
                 match crate::stream::start(
@@ -1353,7 +1348,6 @@ impl Agent {
                         } else {
                             crate::input_wire::InputArm::refused()
                         },
-                        dc_recv_seq: -1,
                         ua_ok: !ua_required,
                         recv_sig_seq: -1,
                         send_seq: 0,

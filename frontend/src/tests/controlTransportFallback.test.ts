@@ -60,6 +60,8 @@ function fakeDc() {
         label: 'sov-ctl-s',
         readyState: 'open' as RTCDataChannelState,
         binaryType: 'blob',
+        bufferedAmount: 0,
+        onopen: null as (() => void) | null,
         onmessage: null as ((ev: MessageEvent) => void) | null,
         onclose: null as (() => void) | null,
         send: (b: ArrayBuffer) => { frames.push(new Uint8Array(b)); },
@@ -130,7 +132,7 @@ describe('the transport the viewer actually uses', () => {
         const key = await activeViewer();
         const rc = await import('../api/remoteControl');
         const { dc, frames } = fakeDc();
-        registerControlChannel(HOST, 'state', dc);
+        registerControlChannel(HOST, dc);
         rc.sendControlEvent({ t: 'down', button: 0 });
         await settle();
         expect(sent.filter(m => m.type === 'ControlInput'), 'still the relay').toHaveLength(1);
@@ -143,7 +145,7 @@ describe('the transport the viewer actually uses', () => {
         const key = await activeViewer();
         const rc = await import('../api/remoteControl');
         const { dc, frames, raw } = fakeDc();
-        registerControlChannel(HOST, 'state', dc);
+        registerControlChannel(HOST, dc);
         // The host's sealed hello arrives on the channel.
         const hello = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
         const wire = new Uint8Array(hello.length + 1);
@@ -169,7 +171,7 @@ describe('the transport the viewer actually uses', () => {
         const key = await activeViewer();
         const rc = await import('../api/remoteControl');
         const { dc, raw } = fakeDc();
-        registerControlChannel(HOST, 'state', dc);
+        registerControlChannel(HOST, dc);
         const hello = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
         const wire = new Uint8Array(hello.length + 1);
         wire[0] = FRAME_HELLO;
@@ -214,5 +216,93 @@ describe('the transport the viewer actually uses', () => {
         const inputs = published.filter(p => decodeFrame(p.frame)!.kind === FRAME_SEALED_INPUT);
         expect(inputs).toHaveLength(1);
         expect(inputs[0].user).toBe(HOST);
+    });
+});
+
+describe('the in-flight fallback — the branch a clean close never reaches', () => {
+    /** A channel that ACCEPTS the hello, then throws on the next send: the
+     *  race where readyState still said "open" and the SCTP association was
+     *  already gone. The clean-close test above never reaches this branch,
+     *  which is how it shipped with the bug below. */
+    function dyingDc() {
+        const h = fakeDc();
+        let armed = false;
+        (h.raw as unknown as { send: (b: ArrayBuffer) => void }).send = (b: ArrayBuffer) => {
+            if (armed) throw new Error('closing');
+            h.frames.push(new Uint8Array(b));
+        };
+        return { ...h, arm: () => { armed = true; } };
+    }
+
+    async function provedDying(key: Uint8Array) {
+        const dying = dyingDc();
+        registerControlChannel(HOST, dying.dc);
+        const hello = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
+        const wire = new Uint8Array(hello.length + 1);
+        wire[0] = FRAME_HELLO;
+        wire.set(hello, 1);
+        dying.raw.onmessage!({ data: wire.buffer.slice(0) } as MessageEvent);
+        await settle();
+        return dying;
+    }
+
+    it('re-seals for the relay with the RELAY sequence, not the channel’s', async () => {
+        const key = await activeViewer();
+        const rc = await import('../api/remoteControl');
+        const dying = await provedDying(key);
+
+        // Two frames over the channel first, so its counter runs ahead of the
+        // relay's — the condition that made this bug fatal rather than cosmetic.
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        rc.sendControlEvent({ t: 'up', button: 0 });
+        await settle();
+        sent.length = 0;
+        dying.arm();
+
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        const inputs = sent.filter(m => m.type === 'ControlInput');
+        expect(inputs, 'the event must reach the host, not be dropped').toHaveLength(1);
+        const plain = await openControl(key, inputs[0].payload!.event as string);
+        // s: 1 — the RELAY's first frame. Before the fix this carried the
+        // CHANNEL's number (3): the host set its relay counter to 3, and every
+        // later relay frame — numbered from 1 — was refused as a replay. A
+        // dead pointer, over a session still showing as active.
+        expect(JSON.parse(plain!)).toMatchObject({ s: 1, e: { t: 'down', button: 0 } });
+    });
+
+    it('LATCHES to the relay afterwards — two transports must not interleave', async () => {
+        const key = await activeViewer();
+        const rc = await import('../api/remoteControl');
+        const dying = await provedDying(key);
+        dying.arm();
+
+        rc.sendControlEvent({ t: 'down', button: 0 });   // fails over
+        await settle();
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'up', button: 0 });     // must NOT retry the channel
+        await settle();
+        const inputs = sent.filter(m => m.type === 'ControlInput');
+        expect(inputs, 'a down on the slow path and an up on the fast one can invert — '
+            + 'and an inverted pair leaves a button held down on someone else’s desktop')
+            .toHaveLength(1);
+        const plain = await openControl(key, inputs[0].payload!.event as string);
+        expect(JSON.parse(plain!)).toMatchObject({ s: 2, e: { t: 'up', button: 0 } });
+    });
+
+    it('an SFU room that RECONNECTS announces again instead of latching to the relay', async () => {
+        const key = await activeViewer();
+        const published: Array<{ user: number; frame: Uint8Array }> = [];
+        // The room comes up AFTER the session key exists — the ordering that
+        // used to leave the capability unannounced forever, because the only
+        // announce iterated a set the same function had just emptied.
+        setSfuControlSender((user, frame) => { published.push({ user, frame }); return true; });
+        await settle();
+        const hellos = published.filter(p => decodeFrame(p.frame)!.kind === FRAME_HELLO);
+        expect(hellos, 'the room must be told this client speaks control frames').toHaveLength(1);
+        expect(hellos[0].user).toBe(HOST);
+        // And it is a real sealed hello, not a bare marker byte.
+        expect(await openControlBytes(key, decodeFrame(hellos[0].frame)!.payload)).toBe('{"hello":1}');
     });
 });

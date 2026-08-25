@@ -12,8 +12,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-    CTL_MOTION_LABEL, CTL_STATE_LABEL, FRAME_HELLO, FRAME_SEALED_INPUT,
-    controlDcReady, decodeFrame, encodeFrame, forgetControlChannels, laneFor,
+    CTL_HIGH_WATER_BYTES, CTL_STATE_LABEL, FRAME_HELLO, FRAME_SEALED_INPUT,
+    controlChannels, controlDcReady, decodeFrame, encodeFrame, forgetControlChannels,
     markHelloSeen, markSfuHelloSeen, registerControlChannel, resetControlChannels,
     deliverSfuControlFrame, forgetSfuControl, sendControlFrame, sendSfuControlFrame,
     setControlFrameHandler, setSfuControlSender, sfuControlReady,
@@ -27,7 +27,9 @@ function fakeDc(label: string, readyState: RTCDataChannelState = 'open') {
         label,
         readyState,
         binaryType: 'blob',
+        bufferedAmount: 0,
         onmessage: null as ((ev: MessageEvent) => void) | null,
+        onopen: null as (() => void) | null,
         onclose: null as (() => void) | null,
         send: (b: ArrayBuffer) => { sent.push(b); },
         close: () => { (dc as { readyState: RTCDataChannelState }).readyState = 'closed'; dc.onclose?.(); },
@@ -49,14 +51,20 @@ describe('framing', () => {
     });
 });
 
-describe('laneFor — only absolute moves may be dropped', () => {
-    it('absolute moves take MOTION; everything else takes STATE', () => {
-        expect(laneFor('move')).toBe('motion');
-        // rmove deltas are CUMULATIVE — losing one loses aim distance, so
-        // they ride the reliable lane with the clicks they position.
-        for (const t of ['rmove', 'down', 'up', 'key', 'wheel', 'sas']) {
-            expect(laneFor(t), t).toBe('state');
-        }
+describe('one lane, deliberately', () => {
+    it('there is no unreliable lane to put a positioning move on', () => {
+        // Two SCTP streams have no relative ordering, and the unreliable one
+        // could drop the move that positions a click for good — the exact
+        // click-teleport `sendControlEvent`'s flush-before-click block
+        // exists to prevent. The label list is the contract: one channel.
+        expect(CTL_STATE_LABEL).toBe('sov-ctl-s');
+        // The registry holds ONE channel slot per peer. A second lane would
+        // have to widen this shape, and widening it means revisiting the
+        // ordering argument in the module header — which is the point.
+        const { dc } = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, dc);
+        markHelloSeen(7);
+        expect(Object.keys(controlChannels(7)!).sort()).toEqual(['helloSeen', 'state']);
     });
 });
 
@@ -64,17 +72,17 @@ describe('the registry', () => {
     it('keeps ONE channel per lane and closes the loser (both sides create)', () => {
         const mine = fakeDc(CTL_STATE_LABEL);
         const theirs = fakeDc(CTL_STATE_LABEL);
-        registerControlChannel(7, 'state', mine.dc);
-        registerControlChannel(7, 'state', theirs.dc);
+        registerControlChannel(7, mine.dc);
+        registerControlChannel(7, theirs.dc);
         expect(theirs.raw.readyState, 'the second claim is closed, not stored').toBe('closed');
         markHelloSeen(7);
-        expect(sendControlFrame(7, 'state', FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(true);
+        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(true);
         expect(mine.sent).toHaveLength(1);
     });
 
     it('an OPEN channel is not a capability: the hello is', () => {
         const { dc } = fakeDc(CTL_STATE_LABEL);
-        registerControlChannel(7, 'state', dc);
+        registerControlChannel(7, dc);
         expect(controlDcReady(7), 'open but unproved — the relay keeps it').toBe(false);
         markHelloSeen(7);
         expect(controlDcReady(7)).toBe(true);
@@ -82,54 +90,72 @@ describe('the registry', () => {
 
     it('losing the state lane drops the peer back to the relay', () => {
         const state = fakeDc(CTL_STATE_LABEL);
-        registerControlChannel(7, 'state', state.dc);
+        registerControlChannel(7, state.dc);
         markHelloSeen(7);
         expect(controlDcReady(7)).toBe(true);
         state.raw.close();
         expect(controlDcReady(7), 'a dead lane must not read as capable').toBe(false);
         // And a send over it answers false so the caller falls back.
-        expect(sendControlFrame(7, 'state', FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
     });
 
     it('a throwing send answers false instead of exploding an input path', () => {
         const { dc } = fakeDc(CTL_STATE_LABEL);
         (dc as unknown as { send: () => void }).send = () => { throw new Error('closing'); };
-        registerControlChannel(7, 'state', dc);
+        registerControlChannel(7, dc);
         markHelloSeen(7);
-        expect(sendControlFrame(7, 'state', FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
     });
 
-    it('motion falls back to the state lane when no motion channel exists', () => {
+    it('forgetting a peer closes its channel and disarms the capability', () => {
         const state = fakeDc(CTL_STATE_LABEL);
-        registerControlChannel(7, 'state', state.dc);
-        markHelloSeen(7);
-        expect(controlDcReady(7, 'motion')).toBe(true);
-        expect(sendControlFrame(7, 'motion', FRAME_SEALED_INPUT, new Uint8Array([2]))).toBe(true);
-        expect(state.sent).toHaveLength(1);
-    });
-
-    it('forgetting a peer closes its channels and disarms the capability', () => {
-        const state = fakeDc(CTL_STATE_LABEL);
-        const motion = fakeDc(CTL_MOTION_LABEL);
-        registerControlChannel(7, 'state', state.dc);
-        registerControlChannel(7, 'motion', motion.dc);
+        registerControlChannel(7, state.dc);
         markHelloSeen(7);
         forgetControlChannels(7);
         expect(state.raw.readyState).toBe('closed');
-        expect(motion.raw.readyState).toBe('closed');
         expect(controlDcReady(7)).toBe(false);
     });
 
-    it('inbound frames reach the handler with their peer and lane; text is ignored', () => {
-        const seen: Array<{ peer: number; lane: string; kind: number }> = [];
-        setControlFrameHandler((peer, lane, frame) => seen.push({ peer, lane, kind: frame.kind }));
+    it('inbound frames reach the handler with their peer; text is ignored', () => {
+        const seen: Array<{ peer: number; kind: number }> = [];
+        setControlFrameHandler((peer, frame) => seen.push({ peer, kind: frame.kind }));
         const { dc, raw } = fakeDc(CTL_STATE_LABEL);
-        registerControlChannel(7, 'state', dc);
-        expect(raw.binaryType, 'binary lane').toBe('arraybuffer');
+        registerControlChannel(7, dc);
+        expect(raw.binaryType, 'binary channel').toBe('arraybuffer');
         const frame = encodeFrame(FRAME_HELLO, new Uint8Array([1]));
         raw.onmessage!({ data: frame.buffer.slice(0) } as MessageEvent);
         raw.onmessage!({ data: 'not binary' } as unknown as MessageEvent);
-        expect(seen).toEqual([{ peer: 7, lane: 'state', kind: FRAME_HELLO }]);
+        expect(seen).toEqual([{ peer: 7, kind: FRAME_HELLO }]);
+    });
+
+    it('a CONGESTED channel is not ready — the relay has the valve', () => {
+        const { dc, raw } = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, dc);
+        markHelloSeen(7);
+        expect(controlDcReady(7)).toBe(true);
+        raw.bufferedAmount = CTL_HIGH_WATER_BYTES + 1;
+        expect(
+            controlDcReady(7),
+            'queueing behind a stalled association grows until the send buffer throws',
+        ).toBe(false);
+        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+        // POSITIVE CONTROL: back under the mark and it flows again.
+        raw.bufferedAmount = 0;
+        expect(controlDcReady(7)).toBe(true);
+    });
+
+    it('a REBUILT channel starts unproved — a hello belongs to its connection', () => {
+        const first = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, first.dc);
+        markHelloSeen(7);
+        expect(controlDcReady(7)).toBe(true);
+        first.raw.close();
+        const rebuilt = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, rebuilt.dc);
+        expect(
+            controlDcReady(7),
+            'the new connection\'s far end has not answered on it',
+        ).toBe(false);
     });
 });
 
@@ -196,7 +222,7 @@ describe('the SFU transport (R3) — same frames, a different pipe', () => {
 
     it('delivered frames reach the handler flagged as NOT mesh', () => {
         const seen: Array<{ peer: number; kind: number; viaMesh: boolean }> = [];
-        setControlFrameHandler((peer, _lane, frame, viaMesh) => seen.push({ peer, kind: frame.kind, viaMesh }));
+        setControlFrameHandler((peer, frame, viaMesh) => seen.push({ peer, kind: frame.kind, viaMesh }));
         deliverSfuControlFrame(7, encodeFrame(FRAME_HELLO, new Uint8Array([1])));
         // The flag is what makes a hello arm the pipe it ARRIVED on: a mesh
         // hello says nothing about an SFU room, and vice versa.

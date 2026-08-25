@@ -2790,6 +2790,15 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                     // relay (whose counter is separate and behind) would be
                     // refused by the host as stale. The DC's number is not
                     // consumed, so its namespace stays gap-free.
+                    //
+                    // AND STAY ON THE RELAY for the rest of the session. Two
+                    // transports carrying one input stream have no relative
+                    // ordering: a `down` still travelling the slow path
+                    // (relay → service → pipe) while an `up` takes the direct
+                    // channel lands INVERTED, and an inverted pair leaves a
+                    // mouse button held down on the far machine. One
+                    // transport at a time; a fallback is one-way.
+                    s.inputChannel = null;
                 }
             }
             const relaySealed = await sealControl(

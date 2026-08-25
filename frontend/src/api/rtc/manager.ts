@@ -1,7 +1,7 @@
 import { wsClient } from '../websocket';
 import { getRtcConfigAsync } from './config';
 import {
-    CTL_MOTION_LABEL, CTL_STATE_LABEL, forgetControlChannels, registerControlChannel,
+    CTL_STATE_LABEL, forgetControlChannels, registerControlChannel,
 } from './controlDc';
 import { loadSettings } from '../../components/settingsStore';
 import { MediaManager } from './media';
@@ -863,6 +863,13 @@ export class WebRTCManager {
                     console.warn(`[WebRTC] ICE-failure reconnect ${attempts} for ${userId} — rebuilding pc`);
                     oldPeer.connection.close();
                     this.peers.delete(userId);
+                    // This path does NOT go through closePeer, and
+                    // pc.close() closes data channels WITHOUT firing their
+                    // close events — so without this the registry kept a
+                    // channel from the dead connection with its capability
+                    // still armed, and the rebuilt pc inherited a hello its
+                    // far end never sent.
+                    forgetControlChannels(userId);
                 }
                 await this.callUser(userId);
             } catch {
@@ -905,18 +912,14 @@ export class WebRTCManager {
         // open — an open channel proves SCTP, not that the peer understands
         // the frames.
         try {
-            registerControlChannel(userId, 'state', pc.createDataChannel(CTL_STATE_LABEL, { ordered: true }));
-            registerControlChannel(userId, 'motion', pc.createDataChannel(CTL_MOTION_LABEL, {
-                ordered: false, maxRetransmits: 2,
-            }));
+            registerControlChannel(userId, pc.createDataChannel(CTL_STATE_LABEL, { ordered: true }));
         } catch (e) {
             // A runtime without data channels keeps the relay path — the
             // permanent fallback, not a degraded mode.
             console.warn('[WebRTC] control data channels unavailable:', e);
         }
         pc.ondatachannel = (ev) => {
-            if (ev.channel.label === CTL_STATE_LABEL) registerControlChannel(userId, 'state', ev.channel);
-            else if (ev.channel.label === CTL_MOTION_LABEL) registerControlChannel(userId, 'motion', ev.channel);
+            if (ev.channel.label === CTL_STATE_LABEL) registerControlChannel(userId, ev.channel);
         };
 
         pc.onicecandidate = (event) => {

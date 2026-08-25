@@ -131,6 +131,21 @@ pub struct InputChannel {
     pub session_id: String,
     pub key: [u8; 32],
     pub arm: InputArm,
+    /// Had this session proved unattended access when the stream started?
+    ///
+    /// `InjectSealed` checks `ua_ok` on every frame and this path must too,
+    /// or the module's own promise ("independently of the flavour gate and
+    /// of ua_ok, both of which still apply") is false — which it was until
+    /// review caught it, with `InputReject::NotProved` defined, described,
+    /// iterated in a test, and UNREACHABLE. A snapshot is sound because
+    /// nothing ever sets `ua_ok` back to false; if that changes, this must
+    /// become shared state, and the test below is what will notice.
+    pub ua_ok: bool,
+    /// Does this agent's FLAVOUR allow input at all? StartStream gates on
+    /// Capture, not Input, so a future flavour with capture-but-not-input
+    /// would otherwise reach this path — the exact hole the exhaustive
+    /// capability match exists to prevent.
+    pub flavour_allows_input: bool,
     /// Highest `s` accepted on THIS transport — its own namespace, separate
     /// from the relayed path's (`SealedSession::recv_seq`). The controller
     /// numbers them independently.
@@ -138,8 +153,21 @@ pub struct InputChannel {
 }
 
 impl InputChannel {
-    pub fn new(session_id: String, key: [u8; 32], arm: InputArm) -> Self {
-        Self { session_id, key, arm, dc_recv_seq: std::sync::atomic::AtomicI64::new(-1) }
+    pub fn new(
+        session_id: String,
+        key: [u8; 32],
+        arm: InputArm,
+        ua_ok: bool,
+        flavour_allows_input: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            key,
+            arm,
+            ua_ok,
+            flavour_allows_input,
+            dc_recv_seq: std::sync::atomic::AtomicI64::new(-1),
+        }
     }
 }
 
@@ -163,9 +191,17 @@ where
     // AUTHORISATION BEFORE DECRYPTION, the same order InjectSealed states:
     // a peer who may not inject must not get the agent to decrypt
     // attacker-chosen bytes, and the timing difference between "opened then
-    // refused" and "refused" is itself a signal.
+    // refused" and "refused" is itself a signal. All three gates sit on this
+    // side of the line — the grant, the flavour, and the passphrase — which
+    // is what makes this path's authorisation equal to InjectSealed's.
+    if !ch.flavour_allows_input {
+        return Err(InputReject::NotGranted);
+    }
     if !ch.arm.granted {
         return Err(InputReject::NotGranted);
+    }
+    if !ch.ua_ok {
+        return Err(InputReject::NotProved);
     }
     let Some(plain) = open(&ch.key, &frame.payload) else {
         return Err(InputReject::Unopenable);
@@ -242,7 +278,11 @@ mod tests {
     }
 
     fn arm(granted: bool) -> InputChannel {
-        InputChannel::new("s1".into(), [7u8; 32], if granted { InputArm::allowed() } else { InputArm::refused() })
+        InputChannel::new(
+            "s1".into(), [7u8; 32],
+            if granted { InputArm::allowed() } else { InputArm::refused() },
+            true, true,
+        )
     }
     /// Stand-in opener: echoes the payload as if it decrypted.
     fn opens_to(json: &'static str) -> impl FnOnce(&[u8; 32], &str) -> Option<String> {
@@ -258,6 +298,31 @@ mod tests {
         assert_eq!(r, Err(InputReject::NotGranted));
         assert!(!opened, "authorisation must come BEFORE decryption");
         // POSITIVE CONTROL: the same frame on a granted session gets that far.
+        let ok = arm(true);
+        assert!(accept_frame(&ok, &f, opens_to(r#"{"s":1,"e":{"t":"down","button":0}}"#)).is_ok());
+    }
+
+    #[test]
+    fn an_unproved_session_and_a_flavour_without_input_are_both_refused_undecrypted() {
+        let f = InputFrame { sid: "s1".into(), payload: "x".into() };
+        // Passphrase not proved: the same gate InjectSealed applies, which
+        // this path silently lacked until review — NotProved was defined,
+        // described, and unreachable.
+        let unproved = InputChannel::new("s1".into(), [7u8; 32], InputArm::allowed(), false, true);
+        let mut opened = false;
+        assert_eq!(
+            accept_frame(&unproved, &f, |_k, _p| { opened = true; Some("{}".into()) }),
+            Err(InputReject::NotProved)
+        );
+        assert!(!opened, "authorisation must come BEFORE decryption");
+        // A flavour that may capture but not inject (StartStream gates on
+        // Capture, so such a session CAN reach this path).
+        let no_input = InputChannel::new("s1".into(), [7u8; 32], InputArm::allowed(), true, false);
+        assert_eq!(
+            accept_frame(&no_input, &f, |_k, _p| Some("{}".into())),
+            Err(InputReject::NotGranted)
+        );
+        // POSITIVE CONTROL: all three satisfied and the frame lands.
         let ok = arm(true);
         assert!(accept_frame(&ok, &f, opens_to(r#"{"s":1,"e":{"t":"down","button":0}}"#)).is_ok());
     }

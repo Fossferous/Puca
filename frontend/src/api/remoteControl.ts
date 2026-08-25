@@ -30,8 +30,8 @@ import {
 } from './e2ee';
 import {
     FRAME_HELLO, FRAME_SEALED_INPUT, controlDcReady, forgetControlChannels, forgetSfuControl,
-    laneFor, markHelloSeen, markSfuHelloSeen, sendControlFrame, sendHello, sendSfuControlFrame,
-    setControlFrameHandler, sfuControlReady, type CtlLane,
+    markHelloSeen, markSfuHelloSeen, sendControlFrame, sendHello, sendSfuControlFrame,
+    setControlFrameHandler, setControlHelloProvider, sfuControlReady,
 } from './rtc/controlDc';
 import { getCachedPublicKey } from './dms';
 
@@ -681,25 +681,48 @@ function rawSend(event: ControlEvent) {
     // it at all. Both P2P pipes share one SEQUENCE NAMESPACE (they are never
     // both live for one peer — a call is mesh or SFU) and the relay keeps
     // its own; see the crypto state comment.
-    const lane: CtlLane = laneFor(event.t);
-    const viaDc = controlDcReady(targetId, lane);
+    const viaDc = controlDcReady(targetId);
     const viaSfu = !viaDc && sfuControlReady(targetId);
-    const seq = viaDc || viaSfu ? ++cc.dcSeq : ++cc.seq;
-    const payload = JSON.stringify({ s: seq, e: event });
     sendChain = sendChain
         .then(async () => {
             if (viewerCrypto !== cc) return; // session torn down mid-flight
             if (viaDc || viaSfu) {
-                const bytes = await sealControlBytes(cc.key, payload);
-                if (viaDc && sendControlFrame(targetId, lane, FRAME_SEALED_INPUT, bytes)) return;
-                if (viaSfu && sendSfuControlFrame(targetId, FRAME_SEALED_INPUT, bytes)) return;
-                // The pipe died between the check and the send: fall back in
-                // place rather than dropping the event. Its P2P sequence
-                // number is spent — harmless, the namespaces are separate and
-                // the host only requires STRICTLY INCREASING within each.
+                const bytes = await sealControlBytes(
+                    cc.key, JSON.stringify({ s: cc.dcSeq + 1, e: event }),
+                );
+                if (viaDc && sendControlFrame(targetId, FRAME_SEALED_INPUT, bytes)) {
+                    cc.dcSeq++;
+                    return;
+                }
+                if (viaSfu && sendSfuControlFrame(targetId, FRAME_SEALED_INPUT, bytes)) {
+                    cc.dcSeq++;
+                    return;
+                }
+                // The pipe died between the check and the send. Two rules,
+                // both learned the hard way:
+                //
+                // 1. RE-SEAL for the relay. The frame just built carries the
+                //    P2P namespace's number, which after a minute of mouse
+                //    movement is thousands ahead of the relay's. Replaying it
+                //    onto the relay used to set the host's relay counter to
+                //    that value, and EVERY later relay frame — numbered from
+                //    1 — was then dropped as a replay: the pointer died with
+                //    the session still showing active. The DC's number is not
+                //    consumed either, so its namespace stays gap-free.
+                // 2. STAY ON THE RELAY for the rest of this session. Two
+                //    transports carrying one input stream have no relative
+                //    ordering, so a `down` in flight on the slow path and an
+                //    `up` on the fast one can land inverted — and an inverted
+                //    pair leaves a mouse button held down on someone else's
+                //    desktop. One transport at a time, and a fallback is
+                //    one-way.
                 dcFellBack(targetId, viaDc ? 'data channel send failed' : 'SFU publish failed');
+                forgetControlChannels(targetId);
+                forgetSfuControl(targetId);
             }
-            const sealed = await sealControl(cc.key, payload);
+            const sealed = await sealControl(
+                cc.key, JSON.stringify({ s: ++cc.seq, e: event }),
+            );
             wsClient.send({ type: 'ControlInput', payload: { target_user: targetId, event: sealed } });
         })
         .catch(() => { /* drop on any seal/send error */ });
@@ -731,18 +754,46 @@ async function sendControlHello(peerId: number, key: Uint8Array): Promise<void> 
 
 /** Install the single inbound-frame consumer. Idempotent. */
 function wireControlDc(): void {
-    setControlFrameHandler((peerId, lane, frame, viaMesh) => {
+    // Announce capability whenever a channel becomes usable — not just when
+    // a session key first appears. The one-shot version made every
+    // legitimate channel loss (renegotiation glare, an ICE rebuild, an SFU
+    // reconnect) a one-way door back to the relay for the rest of the
+    // session, with nothing to say so.
+    setControlHelloProvider(peerId => {
+        // `null` = a pipe that serves every peer at once came up (an SFU room
+        // reconnecting), so announce on BOTH sessions this client can hold —
+        // it can be host to one peer while a viewer of another.
+        if (peerId === null) {
+            if (hostCrypto) void sendControlHello(hostCrypto.peerId, hostCrypto.key);
+            if (viewerCrypto) void sendControlHello(viewerCrypto.peerId, viewerCrypto.key);
+            return;
+        }
+        const key = (hostCrypto?.peerId === peerId ? hostCrypto.key : null)
+            ?? (viewerCrypto?.peerId === peerId ? viewerCrypto.key : null);
+        if (key) void sendControlHello(peerId, key);
+    });
+    setControlFrameHandler((peerId, frame, viaMesh) => {
         // Which side am I for THIS peer? A user can be host to one peer and
         // viewer to another at the same time.
         const asHost = hostCrypto && hostCrypto.peerId === peerId ? hostCrypto : null;
         const asViewer = viewerCrypto && viewerCrypto.peerId === peerId ? viewerCrypto : null;
-        const key = asHost?.key ?? asViewer?.key;
-        if (!key) return;
+        if (!asHost && !asViewer) return;
         if (frame.kind === FRAME_HELLO) {
             recvChain = recvChain.then(async () => {
-                // A hello must OPEN under the session key: an unsealed or
+                // A hello must OPEN under a session key: an unsealed or
                 // forged one proves nothing and must not arm the transport.
-                const plain = await openControlBytes(key, frame.payload);
+                //
+                // BOTH keys are tried, in order, because one user can host a
+                // peer WHILE that peer hosts them (A controls B, B controls
+                // A). Those are two sessions with two different keys on one
+                // peer connection, and taking only the host key left the
+                // other direction permanently on the relay.
+                let plain: string | null = null;
+                for (const k of [asHost?.key, asViewer?.key]) {
+                    if (!k) continue;
+                    plain = await openControlBytes(k, frame.payload);
+                    if (plain !== null) break;
+                }
                 if (plain === null) return;
                 // Arm the pipe it ARRIVED ON. A mesh hello says nothing about
                 // an SFU room and the reverse, and arming the wrong one would
@@ -756,7 +807,9 @@ function wireControlDc(): void {
         if (frame.kind !== FRAME_SEALED_INPUT) return;
         // Only the HOST injects, and only from the viewer it granted — the
         // same rule the relay path applies, restated here because this
-        // transport does not pass through that handler.
+        // transport does not pass through that handler. `hostCrypto` is
+        // nulled by every path that clears `state.controlledBy` (they all
+        // run endHostSession), so this is that check.
         if (!asHost) return;
         const cc = asHost;
         recvChain = recvChain
@@ -772,10 +825,12 @@ function wireControlDc(): void {
                 cc.dcRecvSeq = obj.s;
                 if (!validEvent(obj.e)) return;
                 armInactivity();
+                // The SAME entry the relay handler uses — it carries the
+                // MAX_EVENTS_PER_SEC cap and the coalescing, so both
+                // transports spend one budget rather than two.
                 handleIncomingInput(obj.e);
             })
             .catch(() => { /* drop on any open/parse error */ });
-        void lane;
     });
 }
 
@@ -945,6 +1000,7 @@ function endHostSession() {
     // Forget the P2P lanes with the key: capability is per SESSION, and a
     // hello from the last one must not arm the next.
     if (hostCrypto) { forgetControlChannels(hostCrypto.peerId); forgetSfuControl(hostCrypto.peerId); }
+    if (viewerCrypto) { forgetControlChannels(viewerCrypto.peerId); forgetSfuControl(viewerCrypto.peerId); }
     hostCrypto = null;      // no key ⇒ any further ControlInput is dropped
     pendingViewerEph = null;
     void stopGuard();       // stops the LL hook AND releases held input natively
