@@ -1528,13 +1528,33 @@ fn run(
                             Route::Input(frame) => {
                                 // R4: opened and injected HERE — no webview,
                                 // no Tauri IPC, no named pipe. The arm is the
-                                // authorisation (view-only sessions are
-                                // refused before anything is decrypted); a
-                                // stream without one never reaches this arm
-                                // because the channel is not classified.
+                                // authorisation: view-only sessions are
+                                // refused before anything is decrypted.
+                                //
+                                // A STREAM WITHOUT A KEY REACHES THIS ARM, and
+                                // the `None` branch below is not defensive
+                                // padding — it is the ORDINARY case for every
+                                // attended session, whose key lives in the app
+                                // (see session.rs's `sealed`). `classify_channel`
+                                // keys purely off the channel id recorded at
+                                // ChannelOpen, which is set whether or not this
+                                // stream can serve it, so classification says
+                                // nothing about capability.
+                                //
+                                // This comment previously claimed the opposite
+                                // — "a stream without one never reaches this
+                                // arm because the channel is not classified" —
+                                // three lines above the branch that proves it
+                                // wrong. That claim is why the controller was
+                                // allowed to switch to this channel on
+                                // `readyState` alone, and it cost every
+                                // attended session ALL of its input in 0.8.121.
+                                // The controller now waits for the sealed hello
+                                // this stream only sends when it can serve.
                                 match input_channel.as_ref() {
                                     None => eprintln!(
-                                        "[stream] input frame on a session with no agent-held key"
+                                        "[stream] input frame on a session with no agent-held key \
+                                         — dropped; the controller should still be on the relay"
                                     ),
                                     Some(ch) => match crate::input_wire::accept_frame(
                                         ch, &frame,
