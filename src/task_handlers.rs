@@ -106,6 +106,18 @@ pub struct MoveTaskRequest {
 pub struct ReorderTaskRequest {
     /// Sibling to land immediately after; None = first in the sibling group.
     pub after_id: Option<i64>,
+    /// S1: also move to a DIFFERENT parent in the same drop (drag-to-nest).
+    /// `false` — the serde default, and what every pre-S1 client's absent
+    /// field decodes to — keeps the old semantics exactly: parent untouched,
+    /// `after_id` judged against the CURRENT parent's siblings.
+    #[serde(default)]
+    pub reparent: bool,
+    /// The new parent when `reparent`; None = move to top level. Ignored
+    /// (deliberately, not an error) when `reparent` is false, so an old
+    /// server receiving a new client's frame and a new server receiving an
+    /// old client's frame both do something sensible.
+    #[serde(default)]
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -852,7 +864,130 @@ pub async fn reorder_task(
         }
     };
 
-    // Current group order (includes the moving task itself).
+    // S1: the optional reparent, INSIDE the same advisory-locked transaction
+    // as the renumber — a nest and its sibling placement are one drop, and a
+    // concurrent reorder observing the half-applied pair would renumber a
+    // group the task is no longer in. Every check errs explicitly rather
+    // than through unwrap_or: swallowing a query error into "no cycle" is a
+    // fail-open on the one invariant (acyclic, depth-bounded) the tree has.
+    let target_parent: Option<i64> = if payload.reparent { payload.parent_id } else { parent_id };
+    if payload.reparent && target_parent != parent_id {
+        if let Some(new_pid) = target_parent {
+            if new_pid == task_id {
+                let _ = tx.rollback().await;
+                return (StatusCode::BAD_REQUEST, "A task cannot be its own parent").into_response();
+            }
+            // Same scope — a parent in another checklist would quietly teleport
+            // the subtree across channels.
+            let np: Result<Option<(Option<i64>, Option<i64>)>, _> =
+                sqlx::query_as("SELECT channel_id, list_id FROM channel_tasks WHERE id = $1")
+                    .bind(new_pid)
+                    .fetch_optional(&mut *tx)
+                    .await;
+            match np {
+                Ok(Some((pc, pl))) if pc == channel_id && pl == list_id => {}
+                Ok(Some(_)) => {
+                    let _ = tx.rollback().await;
+                    return (StatusCode::BAD_REQUEST, "Parent task is in a different checklist").into_response();
+                }
+                Ok(None) => {
+                    let _ = tx.rollback().await;
+                    return (StatusCode::BAD_REQUEST, "Parent task not found").into_response();
+                }
+                Err(e) => {
+                    tracing::error!("reorder_task: reparent scope lookup failed: {e:?}");
+                    let _ = tx.rollback().await;
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
+                }
+            }
+            // No cycles: the new parent must not be the task or anything under
+            // it. The depth bound keeps the recursion finite even against
+            // drifted data; a cycle cannot exist yet — this is what prevents
+            // creating the first one.
+            let cyc: Result<Option<(i64,)>, _> = sqlx::query_as(
+                "WITH RECURSIVE sub AS ( \
+                     SELECT id, 1::bigint AS depth FROM channel_tasks WHERE id = $1 \
+                     UNION ALL \
+                     SELECT c.id, s.depth + 1 FROM channel_tasks c \
+                     JOIN sub s ON c.parent_id = s.id WHERE s.depth < $2 \
+                 ) SELECT 1::bigint FROM sub WHERE id = $3 LIMIT 1",
+            )
+            .bind(task_id)
+            .bind(MAX_TASK_DEPTH)
+            .bind(new_pid)
+            .fetch_optional(&mut *tx)
+            .await;
+            match cyc {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    let _ = tx.rollback().await;
+                    return (StatusCode::BAD_REQUEST, "A task cannot be nested under its own subtask").into_response();
+                }
+                Err(e) => {
+                    tracing::error!("reorder_task: cycle check failed: {e:?}");
+                    let _ = tx.rollback().await;
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
+                }
+            }
+            // Depth: the new parent's ancestor-chain depth plus the MOVING
+            // SUBTREE's height must fit — validate_parent's leaf-child rule
+            // is not enough, because a drop can carry children with it.
+            let chain: Result<Option<(Option<i64>,)>, _> = sqlx::query_as(
+                "WITH RECURSIVE chain AS ( \
+                     SELECT id, parent_id, 1::bigint AS depth FROM channel_tasks WHERE id = $1 \
+                     UNION ALL \
+                     SELECT t.id, t.parent_id, c.depth + 1 FROM channel_tasks t \
+                     JOIN chain c ON t.id = c.parent_id WHERE c.depth < $2 + 1 \
+                 ) SELECT MAX(depth) FROM chain",
+            )
+            .bind(new_pid)
+            .bind(MAX_TASK_DEPTH)
+            .fetch_optional(&mut *tx)
+            .await;
+            let height: Result<Option<(Option<i64>,)>, _> = sqlx::query_as(
+                "WITH RECURSIVE sub AS ( \
+                     SELECT id, 1::bigint AS depth FROM channel_tasks WHERE id = $1 \
+                     UNION ALL \
+                     SELECT c.id, s.depth + 1 FROM channel_tasks c \
+                     JOIN sub s ON c.parent_id = s.id WHERE s.depth < $2 \
+                 ) SELECT MAX(depth) FROM sub",
+            )
+            .bind(task_id)
+            .bind(MAX_TASK_DEPTH)
+            .fetch_optional(&mut *tx)
+            .await;
+            match (chain, height) {
+                (Ok(Some((Some(c),))), Ok(Some((Some(h),)))) => {
+                    if c + h > MAX_TASK_DEPTH {
+                        let _ = tx.rollback().await;
+                        return (StatusCode::BAD_REQUEST, "Tasks can only nest 5 levels deep").into_response();
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::error!("reorder_task: depth check failed: {e:?}");
+                    let _ = tx.rollback().await;
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
+                }
+                _ => {
+                    let _ = tx.rollback().await;
+                    return (StatusCode::BAD_REQUEST, "Parent task not found").into_response();
+                }
+            }
+        }
+        if let Err(e) = sqlx::query("UPDATE channel_tasks SET parent_id = $1 WHERE id = $2")
+            .bind(target_parent)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::error!("reorder_task: reparent update failed: {e:?}");
+            let _ = tx.rollback().await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to move task").into_response();
+        }
+    }
+
+    // Current group order (includes the moving task itself) — judged against
+    // the parent the task now HAS (the new one after a reparent).
     let siblings: Result<Vec<(i64,)>, _> = sqlx::query_as(
         "SELECT id FROM channel_tasks \
          WHERE channel_id IS NOT DISTINCT FROM $1 AND list_id IS NOT DISTINCT FROM $2 \
@@ -861,7 +996,7 @@ pub async fn reorder_task(
     )
     .bind(channel_id)
     .bind(list_id)
-    .bind(parent_id)
+    .bind(target_parent)
     .bind(is_completed)
     .fetch_all(&mut *tx)
     .await;

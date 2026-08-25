@@ -865,6 +865,42 @@ pub async fn update_server_settings(
         }
     }
 
+    // REQUIRED PIN (S1): refuse to CREATE the clips-enabled-with-no-channel
+    // state — members can only experience it as breakage (the composer's
+    // "no clips channel yet" dead end, propose_clip's 409). Judged on the
+    // EFFECTIVE state (payload where given, else the current row), and
+    // scoped to TRANSITIONS: a server already in the legacy state (configured
+    // under the old "let the clipper choose" default) may keep re-saving it,
+    // or the rule would hold every unrelated Overview save hostage — the
+    // 0.8.118 client always sends all three clip fields, so a legacy owner's
+    // rename would 400 here forever. Mirrors the client-side guard exactly.
+    if payload.clips_enabled.is_some() || clip_channel_bind.is_some() {
+        let current: Option<(bool, Option<i32>)> = match sqlx::query_as(
+            "SELECT clips_enabled, clip_channel_id FROM servers WHERE id = $1",
+        )
+        .bind(&server_id)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("update_server_settings: clips state lookup failed: {e:?}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify the clip settings").into_response();
+            }
+        };
+        let (cur_enabled, cur_pin) = current.unwrap_or((false, None));
+        let eff_enabled = payload.clips_enabled.unwrap_or(cur_enabled);
+        let eff_pin = clip_channel_bind.map_or(cur_pin, |b| b);
+        let already_broken = cur_enabled && cur_pin.is_none();
+        if eff_enabled && eff_pin.is_none() && !already_broken {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Choose a clips channel before turning clips on — members cannot post clips until one is pinned",
+            )
+                .into_response();
+        }
+    }
+
     // Build a fully parameterized UPDATE — every value is bound, never
     // interpolated into the SQL string (removes the fragile manual quote-doubling
     // that was here and any SQL-injection risk it carried).

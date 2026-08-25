@@ -137,6 +137,43 @@ pub async fn remove_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) -> b
 /// This has to be client-driven rather than a server-side sweep: an attachment's
 /// file id lives INSIDE the E2EE ciphertext (`sovereign-enc:<id>?k=…`), so the
 /// server cannot tell which blobs are still referenced. Only the client can.
+/// `GET /clips/usage` — how much of this account's clip storage is used.
+///
+/// Wire shape `{used_bytes, quota_bytes}` — snake_case, PINNED by the client
+/// (frontend/src/api/clips/clipUpload.ts `getClipUsage`, which renders
+/// nothing on any non-2xx so it shipped a release before this route). The
+/// SUM matches the quota gate in `upload_file` byte-for-byte: same
+/// `kind = 'clip'` filter over the same table, so the readout can never
+/// disagree with what the gate will actually refuse.
+///
+/// ROUTE ORDER IS LOAD-BEARING: registered BEFORE `/clips/:clip_id` in
+/// main.rs (same rule as `/clips/pending`) or axum matches "usage" as a
+/// clip id and this handler is shadowed forever.
+pub async fn clip_usage(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+) -> impl IntoResponse {
+    let used: (i64,) = match sqlx::query_as(
+        "SELECT COALESCE(SUM(size_bytes) FILTER (WHERE kind = 'clip'), 0)::bigint \
+         FROM uploaded_files WHERE uploader_id = $1",
+    )
+    .bind(claims.sub as i32)
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("clip_usage: sum failed: {e:?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not read clip usage").into_response();
+        }
+    };
+    axum::Json(serde_json::json!({
+        "used_bytes": used.0,
+        "quota_bytes": clip_quota_bytes(),
+    }))
+    .into_response()
+}
+
 pub async fn delete_file(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,

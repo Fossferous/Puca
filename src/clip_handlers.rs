@@ -326,10 +326,21 @@ pub async fn propose_clip(
     // could matter); padding the end would name people who arrived after the
     // clip ended.
     let start_ms = end_ms - duration_ms - PresenceLog::PAD_MS;
-    // 5. Pinned channel + target channel checks.
-    if let Some(pin) = pinned {
-        if pin as i64 != req.target_channel_id { return plain(StatusCode::FORBIDDEN, "This server pins clips to one channel"); }
-    }
+    // 5. Pinned channel + target channel checks. REQUIRED PIN (S1): a
+    // clips-enabled server with no pinned channel predates the rule — new
+    // clients (0.8.118+) already refuse to compose against it, and this 409
+    // is the gate for OLD clients, whose per-clip picker would otherwise
+    // post anywhere the proposer can send: the approval prompt names a
+    // destination, and an unpinned server let the clipper change it after
+    // everyone agreed. 409 rather than 400: the request is well-formed; the
+    // SERVER's configuration is what cannot accept it yet.
+    let Some(pin) = pinned else {
+        return plain(
+            StatusCode::CONFLICT,
+            "This server has no clips channel yet — the owner needs to pick one in Server Settings before clips can be posted",
+        );
+    };
+    if pin as i64 != req.target_channel_id { return plain(StatusCode::FORBIDDEN, "This server pins clips to one channel"); }
     let target_ok = match get_user_channel_permissions(&state.pool, req.target_channel_id, user).await {
         ChannelPermAccess::Allowed { server_id: tsid, perms: tperms } => {
             if !tperms.has(Permissions::VIEW_CHANNEL) { return plain(StatusCode::NOT_FOUND, "Target channel not found"); }

@@ -585,9 +585,12 @@ async fn main() -> anyhow::Result<()> {
             post(task_handlers::create_list_task),
         )
         // Clips consent protocol (clip_handlers.rs, docs/CLIPS.md). /clips/pending
-        // MUST precede /clips/:clip_id (same rule as /users/search).
+        // and /clips/usage MUST precede /clips/:clip_id (same rule as
+        // /users/search) — registered after it, axum matches the static
+        // segment as a clip id and the handler is shadowed forever.
         .route("/channels/:channel_id/clips", post(clip_handlers::propose_clip))
         .route("/clips/pending", get(clip_handlers::list_pending_clips))
+        .route("/clips/usage", get(upload_handlers::clip_usage))
         .route("/clips/:clip_id", get(clip_handlers::get_clip).delete(clip_handlers::cancel_clip))
         .route("/clips/:clip_id/vote", post(clip_handlers::vote_clip))
         .route(
