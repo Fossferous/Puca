@@ -577,6 +577,27 @@ pub async fn delete_channel(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_CHANNELS permission").into_response();
     }
 
+    // Deleting the server's PINNED CLIPS CHANNEL turns clips off with it.
+    // The FK is ON DELETE SET NULL (050_clips.sql), so without this a
+    // moderator with MANAGE_CHANNELS — who cannot touch server settings —
+    // would leave the server clips-enabled with no pin: the exact state
+    // update_server_settings refuses to create (S1), members 409ing on every
+    // propose until the owner notices, and the settings guard reading it as
+    // "legacy" forever after. Disabling is the honest outcome: the feature
+    // cannot work without its one channel, and re-enabling makes the owner
+    // pick a new one. Best-effort ordering with the DELETE below (no tx):
+    // if only this UPDATE lands the pin moves nowhere; if only the DELETE
+    // lands we are back to the FK gap, which the settings guard tolerates.
+    let _ = sqlx::query(
+        "UPDATE servers SET clips_enabled = false WHERE id = $1 AND clip_channel_id = $2",
+    )
+    .bind(&server_id)
+    // i32, matching the INTEGER column — an i64 bind against INT4 is the
+    // intermittent 22P03 the cold-boot fix documents (sqlx caches by SQL text).
+    .bind(channel_id as i32)
+    .execute(&state.pool)
+    .await;
+
     let _ = sqlx::query("DELETE FROM channels WHERE id = $1")
         .bind(channel_id)
         .execute(&state.pool)

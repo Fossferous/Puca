@@ -584,10 +584,12 @@ async fn main() -> anyhow::Result<()> {
             "/task-lists/:list_id/tasks",
             post(task_handlers::create_list_task),
         )
-        // Clips consent protocol (clip_handlers.rs, docs/CLIPS.md). /clips/pending
-        // and /clips/usage MUST precede /clips/:clip_id (same rule as
-        // /users/search) — registered after it, axum matches the static
-        // segment as a clip id and the handler is shadowed forever.
+        // Clips consent protocol (clip_handlers.rs, docs/CLIPS.md). The static
+        // /clips/pending and /clips/usage are kept ahead of /clips/:clip_id
+        // for the reader; matchit gives static segments priority over :param
+        // whatever the registration order, so this is convention, not load-
+        // bearing (verified against axum 0.7 — the older comment's "MUST
+        // precede" overstated it).
         .route("/channels/:channel_id/clips", post(clip_handlers::propose_clip))
         .route("/clips/pending", get(clip_handlers::list_pending_clips))
         .route("/clips/usage", get(upload_handlers::clip_usage))

@@ -147,9 +147,8 @@ export interface ClipUsage {
  * clip_id "usage", whose proposal lookup 404s — but every non-2xx lands in
  * the same null, so the readout renders nothing rather than an error and
  * this ships order-independently of the server release that adds the
- * endpoint. S1 NOTE: register `/clips/usage` BEFORE `/clips/:clip_id`
- * (exactly like the existing `/clips/pending` note in main.rs) or the
- * static segment is shadowed forever and this stays null on new servers too.
+ * endpoint. (Server side: axum's router gives the static segment priority
+ * over `/clips/:clip_id` regardless of registration order.)
  */
 export async function getClipUsage(
     o: Pick<UploadOptions, 'baseUrl' | 'token' | 'fetchImpl'>,

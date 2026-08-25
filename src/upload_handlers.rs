@@ -125,18 +125,6 @@ pub async fn remove_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) -> b
     }
 }
 
-/// `DELETE /files/:file_id` — let a user reclaim their own upload quota.
-///
-/// The quota (`MAX_USER_STORAGE_BYTES`) is computed by summing `uploaded_files`
-/// for the uploader, and until this route existed NOTHING could remove a row
-/// except avatar replacement. So the quota was a one-way ratchet: ~21 max-size
-/// attachments and every upload path for that account — attachment, avatar,
-/// emoji, server icon — failed permanently with a message telling the user to
-/// try again, which could never succeed. Deleting the messages did not help.
-///
-/// This has to be client-driven rather than a server-side sweep: an attachment's
-/// file id lives INSIDE the E2EE ciphertext (`sovereign-enc:<id>?k=…`), so the
-/// server cannot tell which blobs are still referenced. Only the client can.
 /// `GET /clips/usage` — how much of this account's clip storage is used.
 ///
 /// Wire shape `{used_bytes, quota_bytes}` — snake_case, PINNED by the client
@@ -146,9 +134,10 @@ pub async fn remove_file(pool: &sqlx::PgPool, file_id: &str, owner_id: i64) -> b
 /// `kind = 'clip'` filter over the same table, so the readout can never
 /// disagree with what the gate will actually refuse.
 ///
-/// ROUTE ORDER IS LOAD-BEARING: registered BEFORE `/clips/:clip_id` in
-/// main.rs (same rule as `/clips/pending`) or axum matches "usage" as a
-/// clip id and this handler is shadowed forever.
+/// Registered beside `/clips/pending`, before `/clips/:clip_id`. With this
+/// axum (0.7/matchit) a static segment outranks `:param` regardless of
+/// registration order — the placement is convention for the reader, not a
+/// correctness requirement.
 pub async fn clip_usage(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -174,6 +163,18 @@ pub async fn clip_usage(
     .into_response()
 }
 
+/// `DELETE /files/:file_id` — let a user reclaim their own upload quota.
+///
+/// The quota (`MAX_USER_STORAGE_BYTES`) is computed by summing `uploaded_files`
+/// for the uploader, and until this route existed NOTHING could remove a row
+/// except avatar replacement. So the quota was a one-way ratchet: ~21 max-size
+/// attachments and every upload path for that account — attachment, avatar,
+/// emoji, server icon — failed permanently with a message telling the user to
+/// try again, which could never succeed. Deleting the messages did not help.
+///
+/// This has to be client-driven rather than a server-side sweep: an attachment's
+/// file id lives INSIDE the E2EE ciphertext (`sovereign-enc:<id>?k=…`), so the
+/// server cannot tell which blobs are still referenced. Only the client can.
 pub async fn delete_file(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,

@@ -874,12 +874,24 @@ pub async fn update_server_settings(
     // or the rule would hold every unrelated Overview save hostage — the
     // 0.8.118 client always sends all three clip fields, so a legacy owner's
     // rename would 400 here forever. Mirrors the client-side guard exactly.
+    // One transaction from the guard's read to the UPDATE, with the row
+    // locked: two concurrent owner PATCHes could otherwise each pass the
+    // guard against the other's before-state and commit the combination the
+    // guard exists to refuse (review finding F2 — A enables while pinned, B
+    // clears the pin while disabled, both land).
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("update_server_settings: begin failed: {e:?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save settings").into_response();
+        }
+    };
     if payload.clips_enabled.is_some() || clip_channel_bind.is_some() {
         let current: Option<(bool, Option<i32>)> = match sqlx::query_as(
-            "SELECT clips_enabled, clip_channel_id FROM servers WHERE id = $1",
+            "SELECT clips_enabled, clip_channel_id FROM servers WHERE id = $1 FOR UPDATE",
         )
         .bind(&server_id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await
         {
             Ok(v) => v,
@@ -981,11 +993,19 @@ pub async fn update_server_settings(
 
     qb.push(" WHERE id = ").push_bind(&server_id);
 
-    match qb.build().execute(&state.pool).await {
-        Ok(r) => {
+    let updated = match qb.build().execute(&mut *tx).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to update server settings: {:?}", e);
+            let _ = tx.rollback().await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save settings").into_response();
+        }
+    };
+    match tx.commit().await {
+        Ok(()) => {
             tracing::info!(
                 "update_server_settings: rows_affected={}",
-                r.rows_affected()
+                updated.rows_affected()
             );
             if let (Some((Some(old),)), Some(new)) = (&old_icon, &payload.icon_file_id) {
                 if old != new {

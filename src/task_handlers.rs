@@ -782,10 +782,13 @@ pub async fn move_task(
     }
 }
 
-/// Drop a task at an arbitrary slot among its visible siblings (same scope,
-/// same parent, same completion state): immediately after `after_id`, or
-/// first in the group when `after_id` is null. Backs drag-and-drop reorder;
-/// the one-slot `/move` endpoint stays for older clients.
+/// Drop a task at an arbitrary slot among its visible siblings — and, since
+/// S1, optionally under a DIFFERENT parent in the same drop (`reparent` +
+/// `parent_id`, cycle- and depth-checked inside the same transaction). The
+/// sibling group is (same scope, the target parent, same completion state):
+/// the task lands immediately after `after_id`, or first in the group when
+/// `after_id` is null. Backs drag-and-drop reorder; the one-slot `/move`
+/// endpoint stays for older clients.
 ///
 /// The whole sibling group is renumbered under the same per-checklist
 /// advisory lock `/move` takes, so the two endpoints serialize against each
