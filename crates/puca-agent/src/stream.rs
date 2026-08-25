@@ -375,6 +375,39 @@ fn encode_fs_reply(resp: &crate::file_transfer::FsResponse, req_id: Option<u64>)
     serde_json::to_vec(&v).ok()
 }
 
+/// The file-request worker: answers `FsRequest`s OFF the stream thread.
+///
+/// A directory listing is `read_dir` plus a stat per entry plus one big JSON
+/// serialisation, and it used to run INLINE in the stream loop — a large
+/// folder froze video, ICE and every command for as long as that took ("it
+/// takes very long to load" while the picture stands still). One worker,
+/// FIFO in and FIFO out, so the id-less order contract holds by
+/// construction; completions are `None` when a reply could not even be
+/// encoded, so the loop's in-flight accounting never drifts.
+///
+/// The scope is re-read PER REQUEST in here, exactly as the inline code did —
+/// that is what keeps revocation instant: a `Write` dequeued before the
+/// revocation still completes (same as before), the next request refuses.
+fn run_fs_worker<C: Copy + Send + 'static>(
+    rx: std::sync::mpsc::Receiver<(C, crate::file_transfer::FsRequest, Option<u64>)>,
+    file_scope: Arc<Mutex<Option<crate::file_transfer::FileScope>>>,
+    audit: Option<crate::file_log::FileAudit>,
+    tx: std::sync::mpsc::Sender<(C, Option<Vec<u8>>)>,
+) {
+    while let Ok((cid, req, req_id)) = rx.recv() {
+        let granted = file_scope.lock().ok().and_then(|g| g.clone());
+        let resp = match granted {
+            Some(scope) => crate::file_transfer::handle_request(req, &scope, audit.as_ref()),
+            None => crate::file_transfer::FsResponse::error(
+                "file access has not been allowed on that computer",
+            ),
+        };
+        if tx.send((cid, encode_fs_reply(&resp, req_id))).is_err() {
+            return; // the stream loop is gone; so is anyone to answer
+        }
+    }
+}
+
 /// The gate every stream command passes before any work happens. Order
 /// matters: a command from a stale generation is refused first, so it can
 /// never be mistaken for one that was merely cancelled or late; then caller
@@ -1002,7 +1035,39 @@ fn run(
     let mut pending_fs_replies: std::collections::VecDeque<(str0m::channel::ChannelId, Vec<u8>)> =
         std::collections::VecDeque::new();
 
+    // File requests answered OFF this thread — see run_fs_worker. `audit`
+    // moves in with the worker; the Fs arm below was its only user.
+    let (fs_req_tx, fs_req_rx) = std::sync::mpsc::channel::<(
+        str0m::channel::ChannelId,
+        crate::file_transfer::FsRequest,
+        Option<u64>,
+    )>();
+    let (fs_done_tx, fs_done_rx) =
+        std::sync::mpsc::channel::<(str0m::channel::ChannelId, Option<Vec<u8>>)>();
+    let mut fs_inflight: usize = 0;
+    {
+        let scope_for_worker = Arc::clone(&file_scope);
+        let _ = std::thread::Builder::new()
+            .name("fs-worker".into())
+            .spawn(move || run_fs_worker(fs_req_rx, scope_for_worker, audit, fs_done_tx));
+    }
+
     while !stop.load(Ordering::Relaxed) {
+        // Harvest finished file replies into the FIFO the flush below owns.
+        // A `None` body could not be encoded; it still retires its in-flight
+        // slot so the accounting never drifts.
+        while let Ok((cid, bytes)) = fs_done_rx.try_recv() {
+            fs_inflight = fs_inflight.saturating_sub(1);
+            if let Some(bytes) = bytes {
+                if pending_fs_replies.len() >= MAX_PENDING_FS_REPLIES {
+                    eprintln!(
+                        "[stream] fs reply queue full ({MAX_PENDING_FS_REPLIES}); dropping a reply"
+                    );
+                } else {
+                    pending_fs_replies.push_back((cid, bytes));
+                }
+            }
+        }
         // Flush queued file replies BEFORE the poll_output drain, so anything
         // accepted here is packetised and transmitted in the same pass. The
         // budget these were refused against frees on the peer's SACK, and a
@@ -1370,50 +1435,25 @@ fn run(
                             // before.
                             Route::Fs { req, id } => (req, id),
                         };
-                        // Re-read the scope on EVERY request rather than
-                        // caching it. That is what makes revocation instant:
-                        // setting it back to None takes effect on the next
-                        // request, with no reconnect and no teardown.
-                        let granted = file_scope.lock().ok().and_then(|g| g.clone());
-                        let resp = match granted {
-                            Some(scope) => crate::file_transfer::handle_request(
-                                req,
-                                &scope,
-                                audit.as_ref(),
-                            ),
-                            None => crate::file_transfer::FsResponse::error(
-                                "file access has not been allowed on that computer",
-                            ),
-                        };
-                        let Some(resp_bytes) = encode_fs_reply(&resp, req_id) else { continue };
-                        // Order is part of the protocol for id-less clients, so
-                        // while anything is queued a new reply joins the queue
-                        // rather than jumping it.
-                        if !pending_fs_replies.is_empty() {
-                            if pending_fs_replies.len() >= MAX_PENDING_FS_REPLIES {
-                                eprintln!(
-                                    "[stream] fs reply queue full ({MAX_PENDING_FS_REPLIES}); dropping a reply"
-                                );
-                            } else {
-                                pending_fs_replies.push_back((data.id, resp_bytes));
-                            }
-                        } else if let Some(mut c) = sender.rtc_mut().channel(data.id) {
-                            // `false` = UTF-8 text. Sent as binary the browser
-                            // hands the client a Blob and its JSON.parse throws
-                            // on every single reply.
-                            match c.write(false, &resp_bytes) {
-                                // Ok(false) means the SCTP send budget is full
-                                // until the peer's SACK frees it — NOT failure.
-                                // This used to be a silent drop with only an
-                                // eprintln, which killed every real download
-                                // the moment two replies overlapped in flight:
-                                // the client timed out 15s later with "the
-                                // other computer did not answer". Queue it and
-                                // retry each loop pass instead.
-                                Ok(false) => pending_fs_replies.push_back((data.id, resp_bytes)),
-                                Err(e) => eprintln!("[stream] fs reply failed: {e}"),
-                                Ok(true) => {}
-                            }
+                        // Answered OFF this thread (run_fs_worker) — the
+                        // scope re-read lives there, so revocation is as
+                        // instant as it ever was. The reply lands in
+                        // `pending_fs_replies` via the harvest at the top of
+                        // the loop and is written under the same budget and
+                        // FIFO rules as before; the single worker preserves
+                        // completion order, so id-less clients still match by
+                        // order. Bound the in-flight window like the reply
+                        // queue: the serialised client keeps at most a couple
+                        // outstanding, so hitting the cap means a hostile or
+                        // broken peer — logged, never silent.
+                        if fs_inflight >= MAX_PENDING_FS_REPLIES {
+                            eprintln!(
+                                "[stream] fs request queue full ({MAX_PENDING_FS_REPLIES}); dropping a request"
+                            );
+                        } else if fs_req_tx.send((data.id, req, req_id)).is_ok() {
+                            fs_inflight += 1;
+                        } else {
+                            eprintln!("[stream] the fs worker is gone; dropping a file request");
                         }
                     }
                     _ => {}
@@ -1731,6 +1771,12 @@ fn run(
             Some(_) => wait.min(next_frame.saturating_duration_since(Instant::now())),
             None => wait,
         };
+        // A file answer in flight must not be parked behind a long idle wait:
+        // a FILES-ONLY session has no frame cadence, so its str0m timeout can
+        // be seconds — and a listing the worker finished instantly would sit
+        // unharvested for all of them. 10ms keeps the harvest prompt without
+        // busy-spinning while nothing is pending.
+        let wait = if fs_inflight > 0 { wait.min(Duration::from_millis(10)) } else { wait };
         let wait = wait.max(Duration::from_millis(1));
         let _ = socket.set_read_timeout(Some(wait));
 
@@ -2969,6 +3015,87 @@ mod tests {
             Some(t0 + Duration::from_secs(5)),
             t0 + Duration::from_secs(10),
         ));
+    }
+
+    #[test]
+    fn the_fs_worker_answers_in_request_order_with_ids_echoed() {
+        // Order IS the protocol for id-less clients, so the worker being a
+        // single thread is load-bearing — this pins that N requests come back
+        // as N completions, in order, with each carried id echoed.
+        let dir = std::env::temp_dir().join(format!("puca-fsworker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hello").unwrap();
+
+        let scope = Arc::new(Mutex::new(Some(crate::file_transfer::FileScope::Jailed(
+            dir.clone(),
+        ))));
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<(u32, Option<Vec<u8>>)>();
+        let worker = std::thread::spawn({
+            let scope = Arc::clone(&scope);
+            move || run_fs_worker(req_rx, scope, None, done_tx)
+        });
+
+        for (i, req) in [
+            crate::file_transfer::FsRequest::ListRoots,
+            crate::file_transfer::FsRequest::List { path: dir.to_string_lossy().into_owned() },
+            crate::file_transfer::FsRequest::ListRoots,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            req_tx.send((7u32, req, Some(100 + i as u64))).unwrap();
+        }
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let (cid, bytes) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert_eq!(cid, 7);
+            let v: serde_json::Value =
+                serde_json::from_slice(&bytes.expect("every reply must encode")).unwrap();
+            got.push(v["id"].as_u64().unwrap());
+            assert_ne!(v["ok"], "error", "a granted request must not refuse: {v}");
+        }
+        assert_eq!(got, vec![100, 101, 102], "completions must keep request order");
+
+        drop(req_tx);
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fs_worker_reads_the_scope_per_request_so_revocation_is_instant() {
+        let dir = std::env::temp_dir().join(format!("puca-fsworker-rev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let scope = Arc::new(Mutex::new(Some(crate::file_transfer::FileScope::Jailed(
+            dir.clone(),
+        ))));
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<(u32, Option<Vec<u8>>)>();
+        let worker = std::thread::spawn({
+            let scope = Arc::clone(&scope);
+            move || run_fs_worker(req_rx, scope, None, done_tx)
+        });
+
+        // POSITIVE CONTROL first: with the grant in place the request works.
+        req_tx.send((1u32, crate::file_transfer::FsRequest::ListRoots, None)).unwrap();
+        let (_, bytes) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+        assert_ne!(v["ok"], "error", "the rig must be able to see a grant work: {v}");
+
+        // Revoke — the NEXT request must refuse, no reconnect needed.
+        *scope.lock().unwrap() = None;
+        req_tx.send((1u32, crate::file_transfer::FsRequest::ListRoots, None)).unwrap();
+        let (_, bytes) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+        assert_eq!(v["ok"], "error");
+        assert!(
+            v["message"].as_str().unwrap_or("").contains("not been allowed"),
+            "the refusal must be the grant refusal: {v}"
+        );
+
+        drop(req_tx);
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
