@@ -113,6 +113,23 @@ pub struct InputFrame {
     pub payload: String,
 }
 
+/// What the agent seals and sends back on the channel to say "I will serve
+/// this". The controller keeps using the RELAY until it opens under the
+/// session key — see session.ts's `inputProved`.
+///
+/// A CONSTANT, and sealed rather than bare, because this frame's only job is
+/// to move a controller OFF a working transport. Anything that could write on
+/// the channel without the key could otherwise strand input on a dead one.
+pub const HELLO_PLAINTEXT: &str = r#"{"hello":1}"#;
+
+/// The agent's hello, as it goes on the wire. `sealed` is
+/// `control_key::seal(key, HELLO_PLAINTEXT)`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputHello {
+    pub sid: String,
+    pub hello: String,
+}
+
 /// Parse one channel message. `None` for anything that is not an input
 /// frame — the channel accepts exactly one shape, like `caret` does.
 pub fn parse_frame(bytes: &[u8]) -> Option<InputFrame> {
@@ -153,6 +170,20 @@ pub struct InputChannel {
 }
 
 impl InputChannel {
+    /// Will this channel actually serve frames — every AUTHORISATION gate
+    /// satisfied, so the only remaining ways to refuse are per-frame (a bad
+    /// seal, a stale sequence)?
+    ///
+    /// THE HELLO ASSERTS EXACTLY THIS, and that is why it is a method rather
+    /// than three checks copied into the sender. A hello that promised more
+    /// than `accept_frame` grants would put the controller back in the hole
+    /// this whole mechanism exists to close: off the relay, onto a channel
+    /// that silently drops everything. The test below pins the two together,
+    /// so adding a gate to `accept_frame` without adding it here fails.
+    pub fn serves(&self) -> bool {
+        self.flavour_allows_input && self.arm.granted && self.ua_ok
+    }
+
     pub fn new(
         session_id: String,
         key: [u8; 32],
@@ -203,6 +234,9 @@ where
     if !ch.ua_ok {
         return Err(InputReject::NotProved);
     }
+    // Anything added above this line must also be in `serves()`, or the
+    // controller is told this channel works and then loses every event.
+    debug_assert!(ch.serves(), "serves() and accept_frame's gates have drifted");
     let Some(plain) = open(&ch.key, &frame.payload) else {
         return Err(InputReject::Unopenable);
     };
@@ -325,6 +359,65 @@ mod tests {
         // POSITIVE CONTROL: all three satisfied and the frame lands.
         let ok = arm(true);
         assert!(accept_frame(&ok, &f, opens_to(r#"{"s":1,"e":{"t":"down","button":0}}"#)).is_ok());
+    }
+
+    #[test]
+    fn serves_and_accept_frame_agree_on_every_combination() {
+        // THE DRIFT PIN. `serves()` is what makes the agent send a hello, and
+        // the hello is what takes the controller OFF the relay. If it ever
+        // says yes where `accept_frame` says no on authorisation, input goes
+        // to a channel that drops it and the session looks dead — the exact
+        // 0.8.121 field failure this pair exists to prevent.
+        let f = InputFrame { sid: "s1".into(), payload: "x".into() };
+        for flavour in [false, true] {
+            for granted in [false, true] {
+                for ua in [false, true] {
+                    let ch = InputChannel::new(
+                        "s1".into(),
+                        [7u8; 32],
+                        if granted { InputArm::allowed() } else { InputArm::refused() },
+                        ua,
+                        flavour,
+                    );
+                    let accepted = accept_frame(
+                        &ch,
+                        &f,
+                        opens_to(r#"{"s":1,"e":{"t":"down","button":0}}"#),
+                    )
+                    .is_ok();
+                    assert_eq!(
+                        ch.serves(),
+                        accepted,
+                        "serves()={} but accept_frame accepted={} for                          flavour={flavour} granted={granted} ua_ok={ua}",
+                        ch.serves(),
+                        accepted
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hello_says_what_the_controller_is_looking_for() {
+        // A second wire contract compiled twice, and it fails as silently as
+        // the label does: a controller that cannot recognise the hello simply
+        // stays on the relay for ever, with input still working, which is why
+        // nothing would ever report it.
+        let client = include_str!("../../../frontend/src/api/devices/session.ts");
+        assert!(
+            client.len() > 100_000,
+            "that is not the real session.ts ({} bytes) — this test is checking nothing",
+            client.len()
+        );
+        // The agent seals exactly this; the controller opens it and checks the
+        // `hello` member is 1.
+        assert_eq!(HELLO_PLAINTEXT, r#"{"hello":1}"#);
+        assert!(
+            client.contains("hello?: unknown }).hello === 1"),
+            "session.ts no longer recognises the agent's input hello; the              controller would silently stay on the relay for ever"
+        );
+        // And the envelope field names it reads.
+        assert!(client.contains("sid?: unknown; hello?: unknown"));
     }
 
     #[test]

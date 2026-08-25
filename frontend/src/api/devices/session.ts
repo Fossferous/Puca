@@ -442,6 +442,23 @@ interface Internal extends DeviceControlSession {
      *  hop that wedged for 46s in the field). Null at any moment means the
      *  next frame takes the relay. */
     inputChannel: RTCDataChannel | null;
+    /** CONTROLLER: has the agent PROVED it will serve the input channel?
+     *
+     *  AN OPEN CHANNEL IS NOT A CAPABILITY, and this field is what finally
+     *  makes that true here rather than merely asserted in a comment. str0m
+     *  opens a data channel by label whatever the far end intends to do with
+     *  it, so `onopen` fires against every host: one that predates R4, a
+     *  webview host with no agent at all, and — the case that broke the field
+     *  in 0.8.121 — an agent whose session has no agent-held key, which logs
+     *  "input keeps its existing path" and drops every frame. The controller
+     *  had already LEFT that path, so all input died silently while the
+     *  cursor kept moving locally.
+     *
+     *  The proof is a HELLO sealed under the session key, which only the
+     *  agent holding that key can produce, sent only once it has an armed
+     *  InputChannel. Until it arrives every frame takes the relay — exactly
+     *  what shipped and worked before R4. */
+    inputProved: boolean;
     /** CONTROLLER: sequence namespace for the input CHANNEL — separate from
      *  `sendSeq` (the relay's), because the agent tracks the two separately
      *  and a shared counter would let a channel frame invalidate a relayed
@@ -1427,13 +1444,34 @@ async function buildControllerPc(s: Internal): Promise<RTCPeerConnection> {
     // over it. Measure the pump first (R4.5).
     //
     // Created at pc construction like every other channel: adding one later
-    // renegotiates. AN OPEN CHANNEL IS NOT A CAPABILITY here either — the
-    // agent refuses input on a session it was not told holds a control
-    // grant (input_wire::InputArm), and this end falls back to the relay
-    // whenever the channel is not open.
+    // renegotiates.
+    //
+    // AN OPEN CHANNEL IS NOT A CAPABILITY — and unlike the first cut of this,
+    // that is now enforced rather than asserted. The old comment here reasoned
+    // that the agent "refuses input on a session it was not told holds a
+    // control grant", and treated that refusal as sufficient. It is sufficient
+    // for SAFETY and useless for LIVENESS: the agent's refusal is silent, so a
+    // controller that had already switched to this channel simply lost every
+    // event. In the field (0.8.121) that was total — cursor moving on the
+    // phone, nothing happening on the PC — because an ordinary session's key
+    // lives in the app, not the agent, and the agent logs exactly that before
+    // dropping the frame.
+    //
+    // So the channel starts UNPROVED and input keeps taking the relay until
+    // the agent sends a hello sealed under the session key. No hello, no
+    // change in behaviour from before R4 existed.
     const inputDc = pc.createDataChannel('input', { negotiated: false });
-    inputDc.onopen = () => { s.inputChannel = inputDc; };
-    inputDc.onclose = () => { if (s.inputChannel === inputDc) s.inputChannel = null; };
+    inputDc.onopen = () => { s.inputChannel = inputDc; s.inputProved = false; };
+    inputDc.onmessage = e => { void handleInputHello(s, inputDc, e.data); };
+    inputDc.onclose = () => {
+        if (s.inputChannel === inputDc) {
+            s.inputChannel = null;
+            // The proof belonged to THAT channel. A rebuilt one has to earn
+            // it again, or a reconnect would inherit a capability its new far
+            // end never claimed.
+            s.inputProved = false;
+        }
+    };
 
     const caretDc = pc.createDataChannel('caret', { negotiated: false });
     caretDc.onopen = () => {
@@ -2132,6 +2170,57 @@ export function subscribeCaret(sessionId: string, cb: (r: CaretReport) => void):
     };
 }
 
+/**
+ * The agent's HELLO on the input channel — the only thing that lets input
+ * leave the relay (R4).
+ *
+ * SEALED UNDER THE SESSION KEY, and that is the whole security argument: the
+ * channel carries input to a machine, so "this end will serve you" must come
+ * from the holder of the key and from nobody else. A bare marker byte would
+ * let anything that can write on the channel — a compromised relay steering a
+ * peer connection, a host that opens the label for other reasons — talk this
+ * controller off a working transport onto a dead one, which is a denial of
+ * service against the one feature the session exists for.
+ *
+ * Anything unparseable, wrongly sealed, or for another session is IGNORED
+ * rather than treated as a refusal: staying on the relay is already the safe
+ * state, so there is nothing a bad frame can win here.
+ */
+async function handleInputHello(s: Internal, dc: RTCDataChannel, raw: unknown): Promise<void> {
+    if (s.inputChannel !== dc || !s.key) return;
+    if (typeof raw !== 'string') return;
+    let sid: unknown;
+    let hello: unknown;
+    try {
+        const parsed = JSON.parse(raw) as { sid?: unknown; hello?: unknown };
+        sid = parsed.sid;
+        hello = parsed.hello;
+    } catch {
+        return;
+    }
+    if (sid !== s.id || typeof hello !== 'string') return;
+    let plain: string | null = null;
+    try {
+        plain = await openControl(s.key, hello);
+    } catch {
+        return;
+    }
+    if (plain === null) return;
+    let ok = false;
+    try {
+        ok = (JSON.parse(plain) as { hello?: unknown }).hello === 1;
+    } catch {
+        return;
+    }
+    if (!ok) return;
+    // The session may have been torn down or the channel rebuilt while the
+    // open was in flight; proving a channel this end no longer holds would
+    // arm a transport nobody is listening on.
+    if (s.inputChannel !== dc) return;
+    s.inputProved = true;
+    console.info(`[p2p-input] session ${s.id}: the agent serves the input channel`);
+}
+
 function handleCaretMessage(s: Internal, raw: unknown): void {
     const r = parseCaretFrame(raw);
     if (!r) {
@@ -2630,7 +2719,7 @@ export async function connectToDevice(
         agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, monitors: [], activeMonitor: null,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
         filesChannel: null,
-        inputChannel: null, inputDcSeq: 0,
+        inputChannel: null, inputProved: false, inputDcSeq: 0,
         caretChannel: null, caretTracking: false, caretCapable: false,
         caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
         fileRoot: null,
@@ -2771,7 +2860,10 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
         // path that always exists (a webview host has no agent at all). The
         // transport picks the SEQUENCE NAMESPACE with it.
         const dc = s.inputChannel;
-        const viaDc = !!dc && dc.readyState === 'open';
+        // PROVED, not merely open — see `inputProved`. This is the one line
+        // that decides whether input reaches the machine at all against a
+        // host that opens the channel and ignores it.
+        const viaDc = !!dc && dc.readyState === 'open' && s.inputProved;
         try {
             if (viaDc) {
                 const sealed = await sealControl(
@@ -2799,6 +2891,7 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                     // mouse button held down on the far machine. One
                     // transport at a time; a fallback is one-way.
                     s.inputChannel = null;
+                    s.inputProved = false;
                 }
             }
             const relaySealed = await sealControl(
@@ -3075,7 +3168,7 @@ export function installDeviceSessions(): void {
                 agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, monitors: [], activeMonitor: null,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
                 filesChannel: null,
-                inputChannel: null, inputDcSeq: 0,
+                inputChannel: null, inputProved: false, inputDcSeq: 0,
         caretChannel: null, caretTracking: false, caretCapable: false,
                 caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
                 fileRoot: null,

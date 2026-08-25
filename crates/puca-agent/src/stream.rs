@@ -1410,11 +1410,51 @@ fn run(
                             // rather than silently ignoring the label, which
                             // is the failure mode caret_wire warns about.
                             input_channel_id = Some(*cid);
-                            if input_channel.is_none() {
-                                eprintln!(
-                                    "[stream] input channel opened but this session has no \
-                                     agent-held key — input keeps its existing path"
-                                );
+                            // AND TELL THE CONTROLLER, which is the half that
+                            // was missing. Opening the channel proves nothing
+                            // — str0m opens any label — so a controller that
+                            // switched to it on `onopen` alone lost every
+                            // event against exactly the sessions the else-arm
+                            // below logs. The hello is sealed under the
+                            // session key and sent ONLY when every
+                            // authorisation gate is already satisfied, so
+                            // "proved" and "will actually inject" are one
+                            // statement rather than two that can drift.
+                            let serving = input_channel
+                                .as_ref()
+                                .filter(|ch| ch.serves())
+                                .and_then(|ch| {
+                                    crate::control_key::seal(
+                                        &ch.key,
+                                        crate::input_wire::HELLO_PLAINTEXT,
+                                    )
+                                    .map(|sealed| crate::input_wire::InputHello {
+                                        sid: ch.session_id.clone(),
+                                        hello: sealed,
+                                    })
+                                });
+                            match serving {
+                                Some(hello) => {
+                                    let bytes =
+                                        serde_json::to_vec(&hello).unwrap_or_default();
+                                    match sender.rtc_mut().channel(*cid) {
+                                        Some(mut c) => match c.write(false, &bytes) {
+                                            Ok(_) => eprintln!(
+                                                "[stream] input channel armed for session {}",
+                                                hello.sid
+                                            ),
+                                            Err(e) => eprintln!(
+                                                "[stream] input hello failed to send ({e}); the controller stays on the relay"
+                                            ),
+                                        },
+                                        None => eprintln!(
+                                            "[stream] the input channel vanished before its hello"
+                                        ),
+                                    }
+                                }
+                                None => eprintln!(
+                                    "[stream] input channel opened but this session cannot serve it — no hello sent, so the controller keeps input on its existing path"
+                                ),
                             }
                         }
                     }
