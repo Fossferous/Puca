@@ -22,8 +22,11 @@ export interface StreamQualityPreset {
     fps: number;
 }
 
-/** Mirrors ALLOWED_BITRATE_BPS in the agent, expressed in kbps. */
-export const ALLOWED_BITRATE_KBPS = [1000, 3000, 6000, 10000] as const;
+/** Mirrors ALLOWED_BITRATE_BPS in the agent, expressed in kbps. 15M landed
+ *  in the agent one release BEFORE this preset (receiver-first), so a
+ *  same-version pair always works; this preset against a v0.8.116- host gets
+ *  the existing snap-back + stream-quality-error, which is honest. */
+export const ALLOWED_BITRATE_KBPS = [1000, 3000, 6000, 10000, 15000] as const;
 
 /** Mirrors ALLOWED_FPS in the agent. */
 export const ALLOWED_FPS = [15, 30, 60] as const;
@@ -33,10 +36,14 @@ export const STREAM_QUALITY_PRESETS: StreamQualityPreset[] = [
     { label: 'Medium (3Mbps, 30fps)', bitrateKbps: 3000, fps: 30 },
     { label: 'High (6Mbps, 30fps)', bitrateKbps: 6000, fps: 30 },
     { label: 'Ultra (10Mbps, 60fps)', bitrateKbps: 10000, fps: 60 },
+    // The tier that exists for TEXT on the all-displays composite: 6-10M
+    // across a near-4K surface of text is why the default reads soft.
+    { label: 'Max (15Mbps, 60fps)', bitrateKbps: 15000, fps: 60 },
 ];
 
 /** Shorter wording for the mobile menu, same values. */
 export const MOBILE_PRESET_LABELS: Record<number, string> = {
+    15000: 'Best image quality',
     10000: 'Good image quality',
     6000: 'Balanced',
     3000: 'Optimize reaction time',
