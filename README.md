@@ -328,10 +328,17 @@ GitHub account, not once per PR).
 
 ## License
 
-**AGPL-3.0-or-later** — see [`LICENSE`](LICENSE).
+**AGPL-3.0-or-later** — see [`LICENSE`](LICENSE). Free for everyone,
+individuals and companies alike, under the AGPL's conditions — the important
+one being that a modified Púca offered over a network must offer its users
+the corresponding source.
+
+**Commercial licenses are available** for uses that don't fit the AGPL —
+closed-source products, hosted services that keep their modifications
+private, AGPL-incompatible codebases, or contractual support. See
+[`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md).
 
 Contributions are accepted under the terms in [`CLA.md`](CLA.md), which
-grants the maintainer the right to relicense the project in the future
-(including under different terms for a potential commercial offering)
-without affecting your own rights to your own contribution. Read it before
-your first PR — it's short.
+grants the maintainer the right to relicense the project — including under
+the commercial terms above — without affecting your own rights to your own
+contribution. Read it before your first PR — it's short.
