@@ -164,11 +164,19 @@ export function ChecklistBody({
         setTasks(next);
         try {
             await reorderTask(task.id, afterId, reparent);
-            // A reparent re-fetches from truth on success: a pre-S1 server
-            // silently plain-reorders the same frame (serde ignores unknown
-            // fields, 200), and trusting the optimistic parent would show a
-            // nest the server never made until the next unrelated refetch.
-            if (reparent) await loadTasks();
+            // A reparent re-fetches from truth on success — QUIETLY, not via
+            // loadTasks: its isLoading flag swaps the tree for "Loading…",
+            // flashing the list and resetting collapse/edit state on every
+            // nest (review W4-F5). The one old-server frame that 200s (a
+            // completed-parent un-nest, moved to the front of its unchanged
+            // group) is also healed by this read; the rest 400 into the
+            // catch below and revert.
+            if (reparent) {
+                const fresh = isChannel
+                    ? await listTasks(channelId!)
+                    : await listListTasks(listId!);
+                setTasks(fresh);
+            }
         } catch (err) {
             console.error('Failed to reorder task:', err);
             setTasks(original);

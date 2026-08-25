@@ -148,21 +148,27 @@ mod imp {
 /// Resolves with an optional human DETAIL line (today only keep_primary's
 /// per-monitor honesty; None for everything else) that the host relays in
 /// its power-ack.
+/// ASYNC + spawn_blocking, the same rule as every other blocking command in
+/// this file's neighbours (lib.rs): the display arms do DDC/CI I²C round
+/// trips per monitor and an HWND_BROADCAST, and a sync command would run
+/// them on the webview main thread — parking the whole window while a slow
+/// panel thinks (review W4-N2).
 #[tauri::command]
-pub fn power_action(
+pub async fn power_action(
     state: tauri::State<'_, std::sync::Arc<crate::display_power::DisplayPower>>,
     action: PowerAction,
 ) -> Result<Option<String>, String> {
-    match action {
+    let dp = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match action {
         PowerAction::Lock | PowerAction::Shutdown => {
             imp::perform(action).map_err(|e| e.to_string()).map(|()| None)
         }
-        PowerAction::DisplaysOff => state.inner().displays_off().map(|()| None),
-        PowerAction::DisplaysOffKeepPrimary => {
-            state.inner().displays_off_keep_primary().map(Some)
-        }
-        PowerAction::DisplaysOn => state.inner().displays_on().map(|()| None),
-    }
+        PowerAction::DisplaysOff => dp.displays_off().map(|()| None),
+        PowerAction::DisplaysOffKeepPrimary => dp.displays_off_keep_primary().map(Some),
+        PowerAction::DisplaysOn => dp.displays_on().map(|()| None),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Session teardown hook: stay-as-set (stop the keep-off ticker, relight

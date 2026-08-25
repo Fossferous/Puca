@@ -178,9 +178,13 @@ export function moveTask(taskId: number, direction: 'up' | 'down'): Promise<void
  *  (null = top level); field names copied from `ReorderTaskRequest`
  *  (task_handlers.rs). Omitted entirely for a plain reorder, so the wire is
  *  byte-identical to the pre-S1 frame. AGAINST A PRE-S1 SERVER a reparent
- *  frame silently plain-reorders (serde ignores unknown fields) — callers
- *  that reparent must re-fetch after success rather than trusting their
- *  optimistic parent (see the handleReorder sites). */
+ *  frame MOSTLY 400s ("after_id is not a sibling"): the old handler ignores
+ *  the unknown fields and then validates after_id against the CURRENT
+ *  parent's group, which a nest/un-nest afterId is not in — the optimistic
+ *  state reverts through the ordinary catch (safe, a silent snap-back). The
+ *  one frame an old server 200s is the completed-parent un-nest (afterId
+ *  null → moved to the front of its UNCHANGED group), which is why callers
+ *  re-fetch after success rather than trusting the optimistic parent. */
 export function reorderTask(
     taskId: number,
     afterId: number | null,
@@ -580,17 +584,31 @@ export function subtreeHeight(tasks: Task[], rootId: number): number {
  *    differs — a completed parent is not in the moving task's group).
  *
  * Every impossible indent DEGRADES to the plain plan rather than dying: a
- * nest at the top slot, under the current parent, into the moving subtree
- * (cycle), or past MAX_TASK_DEPTH (the moving SUBTREE's height counts —
- * pre-validating what the server's depth rule will refuse) all fall back to
- * the drop the indicator line showed. A dead gesture teaches "drag is
- * broken"; a drop that lands where the line was teaches "the indent didn't
- * take", which is recoverable.
+ * nest at the top slot, into the moving subtree (cycle), or past
+ * MAX_TASK_DEPTH (the moving SUBTREE's height counts — pre-validating what
+ * the server's depth rule will refuse) all fall back to the drop the
+ * indicator line showed — and when that degraded drop is the task's own
+ * slot (`sameSlot`), to NULL: nothing to do, send nothing. TaskTree runs
+ * this same function for the live indicator, so the line only ever shows an
+ * indent the drop will honour.
+ *
+ * KNOWN NARROWNESS: `order` holds only DRAGGABLE rows (editable, active), so
+ * in a mixed-permission channel checklist "the row above" is the nearest
+ * draggable row above, which can differ from the visually-adjacent
+ * non-editable one — the indicator is positioned against the same rows, so
+ * line and target at least agree with each other.
  */
 export function planDropTarget(
     tasks: Task[], moved: Task, order: number[], insertAt: number, indent: number,
-): DropPlan {
-    const plain: DropPlan = { afterId: insertAt === 0 ? null : order[insertAt - 1] ?? null };
+    sameSlot = false,
+): DropPlan | null {
+    const plain: DropPlan | null = sameSlot
+        // A drop back at the task's own slot only committed because an indent
+        // was engaged; if that indent degrades, there is NOTHING to do — the
+        // plain plan here would renumber the whole group and broadcast a
+        // change nobody made (review W4-F3/8).
+        ? null
+        : { afterId: insertAt === 0 ? null : order[insertAt - 1] ?? null };
     if (indent > 0) {
         if (insertAt === 0) return plain;
         const parentCandidate = order[insertAt - 1];

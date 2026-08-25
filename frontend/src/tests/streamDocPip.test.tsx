@@ -6,7 +6,7 @@
  */
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 vi.mock('../components/voiceState', () => ({
@@ -123,6 +123,29 @@ describe('StreamDocPipWindow', () => {
         expect(onCloseAll).toHaveBeenCalled();
     });
 
+    it('StrictMode double-mount issues ONE requestWindow and never falls back', async () => {
+        // Review W4-UI-1: dev StrictMode runs effect → cleanup → effect; a
+        // second requestWindow there rejects (activation consumed) and used
+        // to latch docPipFailed for the whole session on the FIRST pop-out.
+        const { win, doc } = fakePipWindow();
+        const requestWindow = vi.fn(async () => win);
+        (window as AnyWindow).documentPictureInPicture = { requestWindow };
+        const onFallback = vi.fn();
+        await act(async () => {
+            root.render(
+                <StrictMode>
+                    <StreamDocPipWindow userIds={[7]} onCloseOne={() => {}} onCloseAll={() => {}} onFallback={onFallback} />
+                </StrictMode>,
+            );
+        });
+        expect(requestWindow).toHaveBeenCalledTimes(1);
+        expect(onFallback).not.toHaveBeenCalled();
+        expect(doc.querySelectorAll('.doc-pip-tile')).toHaveLength(1);
+        // The simulated unmount's deferred close must have been vetoed.
+        await act(async () => { await Promise.resolve(); });
+        expect(win.close).not.toHaveBeenCalled();
+    });
+
     it('a rejected requestWindow falls back instead of rendering nothing forever', async () => {
         (window as AnyWindow).documentPictureInPicture = {
             requestWindow: vi.fn(async () => { throw new Error('no activation'); }),
@@ -145,6 +168,9 @@ describe('StreamDocPipWindow', () => {
             );
         });
         act(() => root.unmount());
+        // The close is DEFERRED one microtask so StrictMode's simulated
+        // unmount can veto it — flush before asserting.
+        await act(async () => { await Promise.resolve(); });
         expect(win.close).toHaveBeenCalled();
     });
 });

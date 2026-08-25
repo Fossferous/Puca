@@ -1195,9 +1195,12 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     if (s.powerNoticeTimer) { clearTimeout(s.powerNoticeTimer); s.powerNoticeTimer = null; }
     // Display power STAYS AS SET (user decision, display_power.rs): the host
     // only stops the keep-off ticker so the next physical input at the
-    // machine wakes its panels — no relight rides the teardown. Best-effort:
-    // a webview host has no shell command and the import path answers that.
-    if (s.role === 'host') {
+    // machine wakes its panels — no relight rides the teardown. `owns`, like
+    // every other host-side effect here: the ticker is PROCESS-global, and a
+    // superseded session's late teardown must not disengage the ticker the
+    // live session is holding (review W4-N3). Best-effort: on a phone the
+    // invoke does not exist and the catch answers it.
+    if (s.role === 'host' && owns) {
         void import('./hostBackend')
             .then(m => m.shellDisplayPowerSessionEnd())
             .catch(() => undefined);
@@ -4589,11 +4592,17 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'power-ack') {
             if (s.role !== 'controller') return;
+            // ONLY display acks mean anything here: an ack for any other
+            // action must not cancel a display action's pending deadline or
+            // blank the notice with a null (review W4-N-nit — a stray
+            // {action:'lock'} ack used to silently cancel the "did not
+            // respond" warning).
+            if (typeof data.action !== 'string'
+                || !(DISPLAY_POWER_ACTIONS as readonly string[]).includes(data.action)) return;
             if (s.pendingPowerAckTimer) { clearTimeout(s.pendingPowerAckTimer); s.pendingPowerAckTimer = null; }
             const friendly = data.action === 'displays_off' ? 'Displays turned off'
                 : data.action === 'displays_on' ? 'Displays turned on'
-                : data.action === 'displays_off_keep_primary' ? 'Other displays turned off'
-                : null;
+                : 'Other displays turned off';
             const detail = typeof data.detail === 'string' ? data.detail.slice(0, MAX_REASON_LEN) : null;
             // The detail (per-monitor DDC honesty) beats the generic line.
             setPowerNotice(s, detail ?? friendly);

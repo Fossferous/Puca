@@ -101,6 +101,10 @@ export function TasksView() {
     // Right-click / long-press menu on the tabs and board cards.
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const currentUserId = tokenUserId();
+    // Read at async completion time (the reparent refetch guard) — the load
+    // effect uses a per-run `cancelled` flag for the same stale-reply hole.
+    const selectedRef = useRef<Selected>(null);
+    useEffect(() => { selectedRef.current = selected; }, [selected]);
 
     // --- Server checklist channels (same cache keys the main app populates) ---
     const { data: servers = [] } = useServers();
@@ -377,13 +381,17 @@ export function TasksView() {
         setTasks(next);
         try {
             await reorderTask(task.id, afterId, reparent);
-            // A reparent re-fetches from truth on success: a pre-S1 server
-            // silently plain-reorders the same frame (serde ignores unknown
-            // fields, 200), and trusting the optimistic parent would show a
-            // nest the server never made until the next unrelated refetch.
+            // A reparent re-fetches from truth on success (the load effect's
+            // job, done inline; see ChecklistBody for the old-server story).
+            // GUARDED like that effect: switch lists mid-round-trip and the
+            // stale reply must not land in the new list's editor.
             if (reparent && selected?.kind === 'list') {
-                const fetched = await listListTasks(selected.id);
-                setTasks(fetched);
+                const forList = selected.id;
+                const fetched = await listListTasks(forList);
+                setTasks(prev =>
+                    selectedRef.current?.kind === 'list' && selectedRef.current.id === forList
+                        ? fetched
+                        : prev);
             }
         } catch (err) {
             console.error('Failed to reorder task:', err);

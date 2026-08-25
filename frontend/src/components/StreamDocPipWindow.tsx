@@ -74,18 +74,32 @@ export function StreamDocPipWindow({ userIds, onCloseOne, onCloseAll, onFallback
     const cbRef = useRef({ onCloseAll, onFallback });
     useEffect(() => { cbRef.current = { onCloseAll, onFallback }; });
 
+    // ONE requestWindow per mounted component, StrictMode included. Dev
+    // StrictMode runs effect → cleanup → effect synchronously; a second
+    // requestWindow call there either rejects (transient activation is
+    // CONSUMED by the first) or replaces the window — and the rejection used
+    // to latch docPipFailed for the whole session, in dev, on the very first
+    // pop-out (review W4-UI-1). Refs survive the double-invoke: the second
+    // run reuses the first's promise.
+    const winPromiseRef = useRef<Promise<Window> | null>(null);
+    // Whether the component is REALLY mounted — StrictMode's simulated
+    // unmount flips this false and immediately back; the deferred check in
+    // the close effect sees true again and leaves the window alone.
+    const aliveRef = useRef(true);
+
     useEffect(() => {
         let cancelled = false;
-        let opened: Window | null = null;
         const api = (window as DocPipWindowApi).documentPictureInPicture;
         if (!api?.requestWindow) {
             cbRef.current.onFallback();
             return;
         }
-        api.requestWindow({ width: 520, height: 340 })
+        if (!winPromiseRef.current) {
+            winPromiseRef.current = api.requestWindow({ width: 520, height: 340 });
+        }
+        winPromiseRef.current
             .then(w => {
-                if (cancelled) { w.close(); return; }
-                opened = w;
+                if (cancelled) return;
                 copyStyleSheetsInto(w.document);
                 w.document.body.classList.add('doc-pip-body');
                 // The USER closing the window is "close every tile" — the
@@ -97,9 +111,21 @@ export function StreamDocPipWindow({ userIds, onCloseOne, onCloseAll, onFallback
             .catch(() => {
                 if (!cancelled) cbRef.current.onFallback();
             });
+        return () => { cancelled = true; };
+    }, []);
+
+    useEffect(() => {
+        aliveRef.current = true;
         return () => {
-            cancelled = true;
-            opened?.close();
+            aliveRef.current = false;
+            // Deferred so StrictMode's synchronous remount can veto: by the
+            // microtask, aliveRef is true again for a simulated unmount and
+            // still false for a real one.
+            queueMicrotask(() => {
+                if (!aliveRef.current) {
+                    winPromiseRef.current?.then(w => w.close()).catch(() => undefined);
+                }
+            });
         };
     }, []);
 

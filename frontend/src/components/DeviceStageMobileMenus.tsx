@@ -129,6 +129,7 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
             input: true,
             action: () => {
                 if (!sendPowerAction(session.id, 'displays_off')) onNotice('Not connected — displays unchanged');
+                else onNotice('Turning displays off…');
                 onClose();
             }
         },
@@ -138,6 +139,7 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
             input: true,
             action: () => {
                 if (!sendPowerAction(session.id, 'displays_off_keep_primary')) onNotice('Not connected — displays unchanged');
+                else onNotice('Turning other displays off…');
                 onClose();
             }
         },
@@ -147,6 +149,7 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
             input: true,
             action: () => {
                 if (!sendPowerAction(session.id, 'displays_on')) onNotice('Not connected — displays unchanged');
+                else onNotice('Turning displays on…');
                 onClose();
             }
         },

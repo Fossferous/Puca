@@ -46,6 +46,7 @@ import {
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
 import { pipSupported } from './streamPopout.utils';
+import { docPipSupported } from './streamDocPip';
 import './StreamStage.css';
 import {
     FPS_SENS_MAX, FPS_SENS_MIN, FPS_SENS_STEP,
@@ -791,7 +792,7 @@ export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }
                                     })()}
                                     {/* OS-level picture-in-picture: stays on top when
                                         Puca is tabbed out. Only where the API exists. */}
-                                    {onTogglePopout && pipSupported() && (
+                                    {onTogglePopout && (pipSupported() || docPipSupported()) && (
                                         <button
                                             className={`tile-btn ${poppedStreams.includes(userId) ? 'active' : ''}`}
                                             onClick={(e) => { e.stopPropagation(); onTogglePopout(userId); }}

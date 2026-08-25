@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, isUserSpeaking, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getAllStreamers, selectStream, upsertVoiceUser } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, isUserSpeaking, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, upsertVoiceUser } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus } from './voiceState';
 import './FileUpload.css';
@@ -928,6 +928,16 @@ export function Chat({ onLogout }: ChatProps) {
         void primePipSupport();
         console.info(`[doc-pip] documentPictureInPicture is ${docPipSupported() ? 'AVAILABLE' : 'absent'} in this runtime`);
     }, []);
+    // A stream that ENDS must leave the popped set: nothing else clears it,
+    // and the always-on-top window otherwise sits holding frozen tiles for
+    // streams that no longer exist (review W4-UI-4 — the single-stream
+    // popout had the same hole; the grid multiplied it).
+    useEffect(() => subscribeToStreamState(() => {
+        setPoppedStreams(prev => {
+            const next = prev.filter(id => !!getStreamData(id)?.stream);
+            return next.length === prev.length ? prev : next;
+        });
+    }), []);
 
     // Mobile panel navigation state: 'chat' | 'servers' | 'channels' | 'members'
     type MobilePanel = 'chat' | 'servers' | 'channels' | 'members';
@@ -5684,10 +5694,15 @@ export function Chat({ onLogout }: ChatProps) {
                     onCloseAll={() => setPoppedStreams([])}
                     onFallback={() => {
                         // requestWindow rejected: latch to the legacy engine
-                        // and keep the FIRST pick (the one the user asked for
-                        // before anything could have failed).
+                        // and keep the NEWEST pick — the single-engine rule
+                        // is "the newest pick replaces" and the last click is
+                        // the live intent (review W4-UI-3). NOTE the legacy
+                        // element-PiP also needs transient activation, which
+                        // the failed requestWindow may have consumed — the
+                        // fallback then quietly un-pops, which is the honest
+                        // floor, not a bug to chase.
                         setDocPipFailed(true);
-                        setPoppedStreams(l => l.slice(0, 1));
+                        setPoppedStreams(l => l.slice(-1));
                     }}
                 />
             ) : (

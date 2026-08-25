@@ -2566,15 +2566,32 @@ export function DeviceStage() {
                         confirm — undo is one click. The outcome (ack detail,
                         refusal, or the 5s old-host timeout) renders through
                         session.powerNotice below. */}
-                    <span className="device-stage-displays">
+                    {!session.viewOnly && <span className="device-stage-displays">
                         <button
                             className="device-stage-btn"
                             aria-expanded={showDisplaysMenu}
+                            aria-haspopup="menu"
                             onClick={() => setShowDisplaysMenu(v => !v)}
                             title="Turn the controlled device's displays off or on"
                         >
                             <MonitorIcon /> Displays
                         </button>
+                        {showDisplaysMenu && (
+                            // The backdrop, same reasoning as the mobile menus'
+                            // (see their comment): the stage forwards every
+                            // pointer event as REAL input, so a forgotten
+                            // popover must close on the first outside tap
+                            // rather than letting it click the remote desktop.
+                            <span
+                                className="device-stage-displays-backdrop"
+                                onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }}
+                                onPointerUp={e => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setShowDisplaysMenu(false);
+                                }}
+                            />
+                        )}
                         {showDisplaysMenu && (
                             <span className="device-stage-displays-menu" role="menu">
                                 {([
@@ -2596,7 +2613,7 @@ export function DeviceStage() {
                                 ))}
                             </span>
                         )}
-                    </span>
+                    </span>}
                     {session.powerNotice && (
                         <span className="device-stage-error" role="status">{session.powerNotice}</span>
                     )}

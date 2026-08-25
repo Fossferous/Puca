@@ -25,6 +25,12 @@
 }
 
 /* Displays popover (W4): anchored to its button, above the stage. */
+.device-stage-displays-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: transparent;
+}
 .device-stage-displays {
     position: relative;
     display: inline-flex;

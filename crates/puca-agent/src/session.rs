@@ -1585,13 +1585,19 @@ impl Agent {
                             // Display actions are ACKED: the controller arms a
                             // 5s wait for exactly these, and silence must keep
                             // meaning "old host" rather than "success".
-                            Ok(())
-                                if matches!(
-                                    action,
-                                    crate::power::PowerAction::DisplaysOff
-                                        | crate::power::PowerAction::DisplaysOn
-                                ) =>
-                            {
+                            Ok(()) if action == crate::power::PowerAction::DisplaysOff => {
+                                // Honest caveat: SC_MONITORPOWER sleep ends on
+                                // ANY input — including keys this very session
+                                // injects to sign in. Off-until-you-type is
+                                // still what the ask means at a lock screen,
+                                // but the ack must not oversell it.
+                                self.power_ack(
+                                    &session_id,
+                                    &requested,
+                                    Some("Displays sleep until the next input — typing here wakes them"),
+                                )
+                            }
+                            Ok(()) if action == crate::power::PowerAction::DisplaysOn => {
                                 self.power_ack(&session_id, &requested, None)
                             }
                             Ok(()) => Response::SealedSignals { payloads: vec![] },

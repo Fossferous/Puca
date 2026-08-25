@@ -48,6 +48,10 @@ export interface DragReorderState {
      *  under the row above", leftward "un-nest" — the VIEW decides what a
      *  step means; the hook only measures. Unclamped: consumers clamp. */
     crossSteps: number;
+    /** The live order/insertAt behind `indicator`, so a consumer can run the
+     *  SAME drop plan for the preview it will run for the drop. Empty/0 idle. */
+    order: string[];
+    insertAt: number;
 }
 
 export interface DragDropEvent {
@@ -61,6 +65,11 @@ export interface DragDropEvent {
      *  horizontal travel, positive right). Tabs and other one-axis consumers
      *  simply ignore it. */
     crossDelta: number;
+    /** The drop landed back at the item's own slot — only an engaged indent
+     *  made it commit. A consumer whose indent then degrades to nothing must
+     *  SKIP the drop: at the same slot the plain plan is a no-op that would
+     *  still renumber the whole group and broadcast (review W4-F3/8). */
+    sameSlot: boolean;
 }
 
 interface UseDragReorderOptions {
@@ -148,7 +157,7 @@ function unmarkDragLive() {
 
 export function useDragReorder(opts: UseDragReorderOptions) {
     const containerRef = useRef<HTMLDivElement | null>(null);
-    const [state, setState] = useState<DragReorderState>({ dragging: null, indicator: null, crossSteps: 0 });
+    const [state, setState] = useState<DragReorderState>({ dragging: null, indicator: null, crossSteps: 0, order: [], insertAt: 0 });
     const session = useRef<Session | null>(null);
     // Latest options without re-binding listeners mid-drag.
     const optsRef = useRef(opts);
@@ -186,16 +195,20 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         s.el.style.opacity = '';
         s.el.style.zIndex = '';
         if (s.dragging) unmarkDragLive();
-        setState({ dragging: null, indicator: null, crossSteps: 0 });
+        setState({ dragging: null, indicator: null, crossSteps: 0, order: [], insertAt: 0 });
 
         // An indent at the SAME slot is a real drop now (nest under the row
-        // above without moving), so crossSteps alone can commit.
+        // above without moving), so crossSteps alone can commit — flagged as
+        // sameSlot so a degraded indent can be skipped by the consumer.
         if (commit && s.dragging && (s.insertAt !== s.fromIndex || s.crossSteps !== 0)) {
             const order = s.items.filter((_, i) => i !== s.fromIndex).map(it => it.key);
             const cross = optsRef.current.axis === 'y'
                 ? s.lastClient.x - s.startClient.x
                 : s.lastClient.y - s.startClient.y;
-            optsRef.current.onDrop({ key: s.key, group: s.group, order, insertAt: s.insertAt, crossDelta: cross });
+            optsRef.current.onDrop({
+                key: s.key, group: s.group, order, insertAt: s.insertAt,
+                crossDelta: cross, sameSlot: s.insertAt === s.fromIndex,
+            });
         }
         // The browser fires a click on the source element right after
         // pointerup; a drag released over a tab must not double as a tab
@@ -215,7 +228,13 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         const rect = c.getBoundingClientRect();
         const nodes = Array.from(c.querySelectorAll<HTMLElement>('[data-drag-key]'))
             .filter(el => (el.dataset.dragGroup ?? '') === s.group);
-        if (nodes.length < 2) return false;
+        // A single-item group cannot REORDER — but with a cross axis it can
+        // still INDENT, and refusing the lift made un-nesting an only child
+        // impossible: nest B under A and B's group has one row forever, with
+        // drag-left the only outdent affordance (review W4-F1, the one-way
+        // trip). Without a cross axis the old rule stands.
+        if (nodes.length < (optsRef.current.crossStepPx ? 1 : 2)) return false;
+        if (nodes.length === 0) return false;
         const axis = optsRef.current.axis;
         s.items = nodes.map(el => {
             const r = el.getBoundingClientRect();
@@ -234,7 +253,7 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         s.el.style.opacity = '0.45';
         s.el.style.zIndex = '5';
         markDragLive();
-        setState({ dragging: { key: s.key, group: s.group }, indicator: null, crossSteps: 0 });
+        setState({ dragging: { key: s.key, group: s.group }, indicator: null, crossSteps: 0, order: s.items.filter((_, i) => i !== s.fromIndex).map(it => it.key), insertAt: s.insertAt });
         return true;
     };
 
@@ -259,9 +278,12 @@ export function useDragReorder(opts: UseDragReorderOptions) {
         if (insertAt !== s.insertAt || crossNow !== s.crossSteps) {
             s.insertAt = insertAt;
             s.crossSteps = crossNow;
-            if (insertAt === s.fromIndex && crossNow === 0) {
-                // Back at its own slot with no indent — a drop changes nothing.
-                setState({ dragging: { key: s.key, group: s.group }, indicator: null, crossSteps: 0 });
+            if ((insertAt === s.fromIndex && crossNow === 0) || others.length === 0) {
+                // Back at its own slot with no indent — a drop changes
+                // nothing. A SOLO item (others empty, cross-axis lift) has no
+                // slot line to draw either; its indent cue is the row's own
+                // transform plus the consumer's styling.
+                setState({ dragging: { key: s.key, group: s.group }, indicator: null, crossSteps: crossNow, order: others.map(it => it.key), insertAt });
             } else {
                 // Line position: before the item now at insertAt, or after the last.
                 const linePos = insertAt < others.length
@@ -270,7 +292,7 @@ export function useDragReorder(opts: UseDragReorderOptions) {
                 const indicator: DragIndicator = axis === 'x'
                     ? { x: linePos, y: 2, width: 2, height: Math.max(c.clientHeight - 4, 8) }
                     : { x: 4, y: linePos, width: Math.max(c.clientWidth - 8, 8), height: 2 };
-                setState({ dragging: { key: s.key, group: s.group }, indicator, crossSteps: crossNow });
+                setState({ dragging: { key: s.key, group: s.group }, indicator, crossSteps: crossNow, order: others.map(it => it.key), insertAt });
             }
         }
 

@@ -250,14 +250,16 @@ export function TaskTree({
         touchHoldMs: 0, // the grip has touch-action: none — no scroll to fight
         crossStepPx: INDENT_PX,
         enabled: !!onReorder,
-        onDrop: ({ key, order, insertAt, crossDelta }) => {
+        onDrop: ({ key, order, insertAt, crossDelta, sameSlot }) => {
             const task = tasksRef.current.find(t => t.id === Number(key));
             if (!task || !onReorder) return;
             const indent = Math.max(-1, Math.min(1, Math.trunc(crossDelta / INDENT_PX)));
             const plan = planDropTarget(
-                tasksRef.current, task, order.map(Number), insertAt, indent,
+                tasksRef.current, task, order.map(Number), insertAt, indent, sameSlot,
             );
-            onReorder(task, plan.afterId, plan.reparent);
+            // null = a same-slot drop whose indent degraded: nothing to do,
+            // and the plain plan would renumber + broadcast a non-change.
+            if (plan) onReorder(task, plan.afterId, plan.reparent);
         },
     });
 
@@ -633,15 +635,30 @@ export function TaskTree({
             onPointerDown={onDragPointerDown}
         >
             {dragState.indicator && (() => {
-                // The indent gesture telegraphs on the drop line itself: one
-                // step right shifts (and shortens) the line by a level —
-                // "this will nest under the row above" — one step left the
-                // mirror. Clamped to the ±1 the drop actually honours.
+                // The indent gesture telegraphs on the drop line itself: a
+                // nest shifts (and shortens) the line one level with a cap
+                // mark; an un-nest dashes it. Derived from the SAME
+                // planDropTarget the drop will run — the raw crossSteps
+                // promised indents the plan then refused (top slot, depth,
+                // cycle), and a line asserting an indent that will not take
+                // is worse than no cue (review W4-F2).
                 const indent = Math.max(-1, Math.min(1, dragState.crossSteps));
-                const shift = indent > 0 ? INDENT_PX : 0;
+                // The PROP, not tasksRef: refs may not be read in render,
+                // and during a live drag the prop is equally current.
+                const draggedTask = indent !== 0 && dragState.dragging
+                    ? tasks.find(t => t.id === Number(dragState.dragging!.key))
+                    : undefined;
+                const plan = draggedTask
+                    ? planDropTarget(
+                        tasks, draggedTask,
+                        dragState.order.map(Number), dragState.insertAt, indent, false,
+                    )
+                    : null;
+                const effective = plan?.reparent ? indent : 0;
+                const shift = effective > 0 ? INDENT_PX : 0;
                 return (
                     <div
-                        className={`tt-drop-indicator ${indent > 0 ? 'tt-drop-nest' : indent < 0 ? 'tt-drop-unnest' : ''}`}
+                        className={`tt-drop-indicator ${effective > 0 ? 'tt-drop-nest' : effective < 0 ? 'tt-drop-unnest' : ''}`}
                         style={{
                             left: dragState.indicator.x + shift,
                             top: dragState.indicator.y,

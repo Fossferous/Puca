@@ -59,6 +59,11 @@ pub struct DisplayPower {
     /// displays were since turned back on (the one-way-latch class).
     generation: AtomicU64,
     keep_off: AtomicBool,
+    /// Serializes the three public operations against each other now that
+    /// the command runs on the blocking pool (two clicks can overlap). The
+    /// ticker deliberately does NOT take it — it reads atomics only, so a
+    /// slow DDC pass can never park the re-assert.
+    op_lock: std::sync::Mutex<()>,
 }
 
 impl DisplayPower {
@@ -76,7 +81,8 @@ impl DisplayPower {
     }
 
     pub fn displays_off(self: &Arc<Self>) -> Result<(), String> {
-        backend::monitor_power_off();
+        let _g = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
+        backend::monitor_power_off()?;
         let my_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.keep_off.store(true, Ordering::SeqCst);
         let me = Arc::clone(self);
@@ -87,18 +93,32 @@ impl DisplayPower {
                 if !me.ticker_should_fire(my_gen) {
                     break;
                 }
-                backend::monitor_power_off();
+                let _ = backend::monitor_power_off();
             })
-            .map_err(|e| format!("could not start the keep-off ticker: {e}"))?;
+            // Honest about what actually happened: the panels ARE off — only
+            // the re-assert is missing, so injected input will wake them.
+            .map_err(|e| {
+                format!(
+                    "displays turned off, but the keep-off ticker could not start ({e}) —                      remote input will wake them"
+                )
+            })?;
         Ok(())
     }
 
     /// Returns the honest per-monitor detail ("Turned off 2 of 3; DELL U2720Q
     /// did not respond"), or Err when nothing could be turned off.
     pub fn displays_off_keep_primary(&self) -> Result<String, String> {
-        // Any prior all-off ticker would fight this (it re-blanks the primary
-        // too); the DDC state replaces it.
+        let _g = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // A prior ALL-off leaves the OS-level sleep in force on every panel —
+        // stopping the ticker alone left the PRIMARY dark while the ack said
+        // "keeping it" (review W4-N1). Wake the OS sleep first, then DDC the
+        // others down; on a machine that was never all-off the wake is a
+        // no-op broadcast.
+        let was_all_off = self.keep_off.load(Ordering::SeqCst);
         self.disengage();
+        if was_all_off {
+            let _ = backend::monitor_power_on();
+        }
         let (off, failed, total) = backend::ddc_standby_non_primary()?;
         if total == 0 {
             return Ok("This machine has only one display — nothing to turn off.".into());
@@ -117,13 +137,14 @@ impl DisplayPower {
     }
 
     pub fn displays_on(&self) -> Result<(), String> {
+        let _g = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.disengage();
         // DDC wake first (panels in 0xD6 standby ignore the broadcast), then
         // the OS-level wake, then a 1px input nudge — the same belt and
         // braces a stream start uses, because a machine that LOOKS dead after
         // "displays on" reads as a worse failure than either knob alone.
         backend::ddc_wake_all();
-        backend::monitor_power_on();
+        backend::monitor_power_on()?;
         backend::input_nudge();
         Ok(())
     }
@@ -150,7 +171,8 @@ mod backend {
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        SendMessageW, HWND_BROADCAST, SC_MONITORPOWER, WM_SYSCOMMAND,
+        SendMessageTimeoutW, HWND_BROADCAST, MONITORINFOF_PRIMARY, SC_MONITORPOWER,
+        SMTO_ABORTIFHUNG, WM_SYSCOMMAND,
     };
 
     /// VCP 0xD6 "power mode": 0x01 on, 0x04 standby (NOT 0x05 — see header).
@@ -158,24 +180,33 @@ mod backend {
     const VCP_POWER_ON: u32 = 0x01;
     const VCP_POWER_STANDBY: u32 = 0x04;
 
-    fn monitor_power(level: isize) {
+    fn monitor_power(level: isize) -> Result<(), String> {
         unsafe {
             // Broadcast — the message is handled desktop-wide; a per-window
-            // send does nothing. The return is the target's reply, not a
-            // success flag: delivered is all that can be known.
-            SendMessageW(
+            // send does nothing. TIMED, unlike the plain SendMessageW the
+            // privacy screen uses: HWND_BROADCAST blocks until every
+            // top-level window pumps, and one hung window would park this
+            // thread — including the 2s keep-off ticker — forever
+            // (review W4-N2). ABORTIFHUNG skips the hung ones; the reply is
+            // still not a success flag, so delivered-or-timed-out is all
+            // that can be known.
+            SendMessageTimeoutW(
                 HWND_BROADCAST,
                 WM_SYSCOMMAND,
                 WPARAM(SC_MONITORPOWER as usize),
                 LPARAM(level),
+                SMTO_ABORTIFHUNG,
+                2_000,
+                None,
             );
         }
+        Ok(())
     }
-    pub fn monitor_power_off() {
-        monitor_power(2);
+    pub fn monitor_power_off() -> Result<(), String> {
+        monitor_power(2)
     }
-    pub fn monitor_power_on() {
-        monitor_power(-1);
+    pub fn monitor_power_on() -> Result<(), String> {
+        monitor_power(-1)
     }
 
     struct MonitorEntry {
@@ -196,7 +227,7 @@ mod backend {
                 ..Default::default()
             };
             let primary = GetMonitorInfoW(hmon, &mut info).as_bool()
-                && (info.dwFlags & 1) != 0; // MONITORINFOF_PRIMARY
+                && (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
             list.push(MonitorEntry { hmonitor: hmon, primary });
             BOOL(1)
         }
@@ -230,7 +261,7 @@ mod backend {
                 // touching it — a reference into it is UB (E0793).
                 let desc = { p.szPhysicalMonitorDescription };
                 let name = String::from_utf16_lossy(
-                    &desc[..desc.iter().position(|&c| c == 0).unwrap_or(0)],
+                    &desc[..desc.iter().position(|&c| c == 0).unwrap_or(desc.len())],
                 );
                 let name = if name.trim().is_empty() { "display".to_string() } else { name.trim().to_string() };
                 let ok = SetVCPFeature(p.hPhysicalMonitor, VCP_POWER_MODE, value) != 0;
@@ -301,8 +332,15 @@ mod backend {
 
 #[cfg(all(not(windows), not(test)))]
 mod backend {
-    pub fn monitor_power_off() {}
-    pub fn monitor_power_on() {}
+    //! Hard errors, not silent no-ops: an acked "Displays turned off" over
+    //! panels that never dimmed is actively misleading — the privacy
+    //! screen's documented rule, applied here (review W4-N4).
+    pub fn monitor_power_off() -> Result<(), String> {
+        Err("display power is only implemented on Windows".into())
+    }
+    pub fn monitor_power_on() -> Result<(), String> {
+        Err("display power is only implemented on Windows".into())
+    }
     pub fn ddc_standby_non_primary() -> Result<(usize, Vec<String>, usize), String> {
         Err("display power is only implemented on Windows".into())
     }
@@ -322,11 +360,13 @@ pub(crate) mod backend {
     pub fn take() -> Vec<&'static str> {
         std::mem::take(&mut *CALLS.lock().unwrap())
     }
-    pub fn monitor_power_off() {
+    pub fn monitor_power_off() -> Result<(), String> {
         rec("off");
+        Ok(())
     }
-    pub fn monitor_power_on() {
+    pub fn monitor_power_on() -> Result<(), String> {
         rec("on");
+        Ok(())
     }
     pub fn ddc_standby_non_primary() -> Result<(usize, Vec<String>, usize), String> {
         rec("ddc-standby");
@@ -350,7 +390,7 @@ mod tests {
 
     #[test]
     fn the_ticker_dies_with_its_generation_and_never_relights_a_later_state() {
-        let _g = LOCK.lock().unwrap();
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dp = Arc::new(DisplayPower::default());
         // Engage: the ticker born here fires while nothing changed…
         dp.displays_off().unwrap();
@@ -372,7 +412,7 @@ mod tests {
 
     #[test]
     fn the_ticker_actually_rebroadcasts_until_disengaged() {
-        let _g = LOCK.lock().unwrap();
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         TEST_TICK_MS.store(10, Ordering::SeqCst);
         let dp = Arc::new(DisplayPower::default());
         let _ = backend::take();
@@ -394,7 +434,7 @@ mod tests {
 
     #[test]
     fn displays_on_wakes_ddc_then_os_then_nudges_and_kills_the_ticker() {
-        let _g = LOCK.lock().unwrap();
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dp = Arc::new(DisplayPower::default());
         dp.displays_off().unwrap();
         let _ = backend::take();
@@ -406,15 +446,23 @@ mod tests {
 
     #[test]
     fn keep_primary_reports_honestly_and_replaces_a_running_ticker() {
-        let _g = LOCK.lock().unwrap();
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dp = Arc::new(DisplayPower::default());
         dp.displays_off().unwrap();
         let born = dp.generation.load(Ordering::SeqCst);
+        let _ = backend::take();
         let detail = dp.displays_off_keep_primary().unwrap();
         // The recorder answers "1 of 2, Fake HDMI failed".
         assert!(detail.contains("1 of 2"), "{detail}");
         assert!(detail.contains("Fake HDMI"), "{detail}");
         assert!(!dp.ticker_should_fire(born), "the all-off ticker must not fight keep-primary");
-        let _ = backend::take();
+        // THE PRIMARY MUST COME BACK: keep-primary after all-off inherits the
+        // OS-level sleep, and stopping the ticker alone left every panel dark
+        // while the ack said otherwise (review W4-N1).
+        let calls = backend::take();
+        assert!(
+            calls.contains(&"on"),
+            "keep-primary after all-off must wake the OS sleep first: {calls:?}"
+        );
     }
 }

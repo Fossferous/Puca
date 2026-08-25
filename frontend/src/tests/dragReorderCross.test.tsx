@@ -13,14 +13,14 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { useDragReorder, type DragDropEvent } from '../hooks/useDragReorder';
 
-function Rig({ onDrop, step }: { onDrop: (e: DragDropEvent) => void; step?: number }) {
+function Rig({ onDrop, step, solo }: { onDrop: (e: DragDropEvent) => void; step?: number; solo?: boolean }) {
     const { setContainer, onPointerDown, state } = useDragReorder({
         axis: 'y', handleSelector: '.grip', touchHoldMs: 0, crossStepPx: step, onDrop,
     });
     return (
         <div ref={setContainer} onPointerDown={onPointerDown} data-testid="c" data-cross={state.crossSteps}>
             <div data-drag-key="1" data-drag-group="root"><span className="grip">::</span>one</div>
-            <div data-drag-key="2" data-drag-group="root"><span className="grip">::</span>two</div>
+            {!solo && <div data-drag-key="2" data-drag-group="root"><span className="grip">::</span>two</div>}
         </div>
     );
 }
@@ -34,13 +34,13 @@ function stubRect(el: Element, x: number, y: number, w: number, h: number) {
         ({ left: x, top: y, width: w, height: h, right: x + w, bottom: y + h, x, y, toJSON() {} }) as DOMRect;
 }
 
-function mount(step?: number) {
-    act(() => root.render(<Rig onDrop={e => drops.push(e)} step={step} />));
+function mount(step?: number, solo = false) {
+    act(() => root.render(<Rig onDrop={e => drops.push(e)} step={step} solo={solo} />));
     const c = container.querySelector<HTMLElement>('[data-testid="c"]')!;
     const rows = [...container.querySelectorAll<HTMLElement>('[data-drag-key]')];
     stubRect(c, 0, 0, 300, 100);
     stubRect(rows[0], 0, 0, 300, 40);
-    stubRect(rows[1], 0, 40, 300, 40);
+    if (rows[1]) stubRect(rows[1], 0, 40, 300, 40);
     return { c, rows };
 }
 
@@ -84,6 +84,35 @@ describe('useDragReorder crossDelta', () => {
         fire(window, 'pointerup', 36, 58);
         expect(drops).toHaveLength(1);
         expect(drops[0]).toMatchObject({ key: '2', insertAt: 1, crossDelta: 26 });
+    });
+
+    it('a SOLO row lifts when a cross axis exists — un-nesting an only child must be possible', () => {
+        // Review W4-F1: nest B under A and B is alone in its group; the old
+        // two-item minimum made that nest a one-way trip.
+        mount(24, true);
+        const grip = container.querySelectorAll('.grip')[0]!;
+        fire(grip, 'pointerdown', 40, 10);
+        fire(window, 'pointermove', 10, 18); // 30px LEFT: one negative step
+        fire(window, 'pointerup', 10, 18);
+        expect(drops).toHaveLength(1);
+        expect(drops[0]).toMatchObject({ key: '1', order: [], insertAt: 0, crossDelta: -30, sameSlot: true });
+    });
+
+    it('the drop flags a same-slot commit so a degraded indent can be skipped', () => {
+        mount(24);
+        const grip = container.querySelectorAll('.grip')[1]!;
+        fire(grip, 'pointerdown', 10, 50);
+        fire(window, 'pointermove', 40, 58); // indent engaged, slot unchanged
+        fire(window, 'pointerup', 40, 58);
+        expect(drops).toHaveLength(1);
+        expect(drops[0].sameSlot).toBe(true);
+        // And a real slot change reports false.
+        drops.length = 0;
+        const grip0 = container.querySelectorAll('.grip')[0]!;
+        fire(grip0, 'pointerdown', 10, 10);
+        fire(window, 'pointermove', 10, 70);
+        fire(window, 'pointerup', 10, 70);
+        expect(drops[0].sameSlot).toBe(false);
     });
 
     it('POSITIVE CONTROL of the old contract: no step configured, same-slot drop commits nothing', () => {

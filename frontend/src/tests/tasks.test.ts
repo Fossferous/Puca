@@ -505,6 +505,19 @@ describe('planDropTarget — the indent gesture becomes a plan, or degrades to t
             .toEqual({ afterId: null });
     });
 
+    it('a SAME-SLOT drop whose indent degrades plans NOTHING — not a renumbering no-op', () => {
+        // Review W4-F3/8: the same-slot commit exists only for a live indent;
+        // when the indent degrades, the plain plan would renumber the whole
+        // group and broadcast a change nobody made.
+        expect(planDropTarget(fixture(), task(2), [1], 0, 1, true)).toBeNull();
+        // POSITIVE CONTROL: the same drop with a WORKING indent still plans.
+        expect(planDropTarget(fixture(), task(2), [1], 1, 1, true))
+            .toEqual({ afterId: 3, reparent: { parentId: 1 } });
+        // And a same-slot un-nest (the solo-child case) still plans too.
+        expect(planDropTarget(fixture(), task(3, { parent_id: 1 }), [], 0, -1, true))
+            .toEqual({ afterId: 1, reparent: { parentId: null } });
+    });
+
     it('indent +1 nests under the row above, landing after its last active child', () => {
         // B dropped after A with an indent: nest under A, after C.
         expect(planDropTarget(fixture(), task(2), [1], 1, 1))
@@ -537,7 +550,10 @@ describe('planDropTarget — the indent gesture becomes a plan, or degrades to t
         // Nest at the top slot: nothing above.
         expect(planDropTarget(fixture(), task(2), [1], 0, 1))
             .toEqual({ afterId: null });
-        // Nest under the task's CURRENT parent: means nothing.
+        // Nest under the task's CURRENT parent: means nothing. DEFENSIVE
+        // ONLY — the drag path cannot produce this input (order holds
+        // same-parent siblings, never the parent itself); the guard exists
+        // for other callers and drifted data.
         const sibs = [task(1), task(3, { parent_id: 1 }), task(5, { parent_id: 1 })];
         expect(planDropTarget(sibs, task(5, { parent_id: 1 }), [1], 1, 1))
             .toEqual({ afterId: 1 });
