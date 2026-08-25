@@ -229,17 +229,149 @@ fn connect(_pipe_name: &str, _token: &str, _attempts: u32) -> Result<Connection,
     Err("the host agent is only implemented on Windows".to_string())
 }
 
+/// Ceiling on ONE pipe exchange (write + read_line). FIELD-CONFIRMED
+/// 2026-08-25: agent.log carried `[inject-slow] agent_request round trip
+/// 46397ms` — one wedged exchange holding the CONN mutex parks every input
+/// event behind it, which the controller experiences as "the session froze".
+/// The pipe read had NO deadline at all (the file's own history at
+/// `agent_request` notes capabilities()/startSession as unbounded awaits —
+/// this bounds the whole class). 15s is far above any healthy exchange
+/// (inject <1ms, capabilities ~100ms, start_session a few seconds under AV
+/// scanning); past it, the read is cancelled, the caller's error path drops
+/// the connection, and the next request reconnects in ~1.5s instead of
+/// waiting forever.
+#[cfg(windows)]
+const REPLY_DEADLINE_MS: u64 = 15_000;
+
+/// Threads currently blocked inside `exchange`, with their deadlines. In
+/// production the CONN mutex serialises exchanges so this holds at most one
+/// entry — but that is an invariant of TODAY's callers, not of this
+/// mechanism, so it is a list rather than a slot (concurrent tests already
+/// proved a single slot silently drops an arm). The isize is a DUPLICATED
+/// real thread handle (a pseudo-handle means "current thread" to whoever
+/// uses it, so the watchdog cannot use one). Handle lifetime contract: a
+/// handle is closed ONLY after its entry is removed under this mutex, and
+/// the watchdog cancels ONLY while holding it — so a cancel can never land
+/// on a closed (possibly recycled) handle.
+#[cfg(windows)]
+static PENDING_EXCHANGE: Mutex<Vec<(isize, std::time::Instant)>> = Mutex::new(Vec::new());
+
+#[cfg(windows)]
+fn ensure_exchange_watchdog() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let Ok(guard) = PENDING_EXCHANGE.lock() else { continue };
+            let now = std::time::Instant::now();
+            for (handle, deadline) in guard.iter() {
+                if now >= *deadline {
+                    // SAFETY: the entry is still armed, so the handle is
+                    // still open (see the lifetime contract above), and
+                    // cancelling a thread's synchronous I/O is exactly what
+                    // this API is for. If the target thread has not entered
+                    // the syscall yet the cancel finds nothing
+                    // (ERROR_NOT_FOUND) — the entry stays armed and the next
+                    // tick retries until `exchange` removes it.
+                    unsafe {
+                        let _ = windows::Win32::System::IO::CancelSynchronousIo(
+                            windows::Win32::Foundation::HANDLE(*handle as _),
+                        );
+                    }
+                }
+            }
+        });
+    });
+}
+
 #[cfg(windows)]
 fn exchange(conn: &mut Connection, request: &str) -> Result<String, String> {
+    exchange_with_deadline(conn, request, REPLY_DEADLINE_MS)
+}
+
+#[cfg(windows)]
+fn exchange_with_deadline(
+    conn: &mut Connection,
+    request: &str,
+    deadline_ms: u64,
+) -> Result<String, String> {
+    use windows::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
+
+    ensure_exchange_watchdog();
+
+    /// Removes this exchange's watchdog entry and closes the duplicated
+    /// handle on EVERY exit path — the ordering (remove under the mutex,
+    /// THEN close) is what keeps the watchdog's cancel from ever touching a
+    /// recycled handle.
+    struct Armed(Option<isize>);
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                if let Ok(mut g) = PENDING_EXCHANGE.lock() {
+                    g.retain(|(handle, _)| *handle != h);
+                }
+                // SAFETY: h is the handle this exchange duplicated and still
+                // owns; its entry is gone, so the watchdog will not use it.
+                unsafe {
+                    let _ = CloseHandle(HANDLE(h as _));
+                }
+            }
+        }
+    }
+
+    // Arm the deadline. Best-effort: if the duplication fails (it should
+    // not), the exchange simply runs unbounded, exactly as it always did.
+    let mut real = HANDLE::default();
+    // SAFETY: standard pseudo-to-real handle duplication within our own
+    // process; the result is owned by `Armed` below.
+    let dup_ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            GetCurrentThread(),
+            GetCurrentProcess(),
+            &mut real,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+        .is_ok()
+    };
+    let _armed = if dup_ok {
+        if let Ok(mut g) = PENDING_EXCHANGE.lock() {
+            g.push((
+                real.0 as isize,
+                std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms),
+            ));
+        }
+        Armed(Some(real.0 as isize))
+    } else {
+        Armed(None)
+    };
+
+    let timed_out = |e: &std::io::Error| {
+        // ERROR_OPERATION_ABORTED: our own watchdog cancelled the I/O.
+        e.raw_os_error() == Some(995)
+    };
     conn.writer
         .write_all(format!("{request}\n").as_bytes())
-        .map_err(|e| format!("could not write to the agent: {e}"))?;
+        .map_err(|e| {
+            if timed_out(&e) {
+                format!("the agent did not accept a request within {}s — dropping the connection to reconnect", deadline_ms / 1000)
+            } else {
+                format!("could not write to the agent: {e}")
+            }
+        })?;
     conn.writer.flush().ok();
 
     let mut line = String::new();
-    conn.reader
-        .read_line(&mut line)
-        .map_err(|e| format!("could not read from the agent: {e}"))?;
+    conn.reader.read_line(&mut line).map_err(|e| {
+        if timed_out(&e) {
+            format!("the agent did not answer within {}s — dropping the connection to reconnect", deadline_ms / 1000)
+        } else {
+            format!("could not read from the agent: {e}")
+        }
+    })?;
     if line.trim().is_empty() {
         return Err("the agent closed the connection".to_string());
     }
@@ -569,5 +701,107 @@ mod tests {
             src.contains("if guard.as_ref().is_some_and(|c| c.child.is_none())"),
             "the reaper must gate on the exact same field, read the exact same way"
         );
+    }
+
+    /// A minimal named-pipe server for the deadline tests: accepts one
+    /// client, reads its request, and either echoes one JSON line back or
+    /// goes silent for longer than the test deadline.
+    fn spawn_pipe_server(name: String, echo: bool) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::Storage::FileSystem::{
+                ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
+            };
+            use windows::Win32::System::Pipes::{
+                ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+                PIPE_WAIT,
+            };
+            let handle = CreateNamedPipeW(
+                &HSTRING::from(name.as_str()),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                None,
+            );
+            if handle.is_invalid() {
+                return;
+            }
+            let _ = ConnectNamedPipe(handle, None);
+            let mut buf = [0u8; 4096];
+            let mut read = 0u32;
+            let _ = ReadFile(handle, Some(&mut buf), Some(&mut read), None);
+            if echo {
+                let mut written = 0u32;
+                let _ = WriteFile(handle, Some(b"{\"ok\":\"pong\"}\n"), Some(&mut written), None);
+                // Give the client time to read before the server end closes.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            } else {
+                // The wedge: connected, request consumed, no reply — the
+                // exact shape of the field's 46s agent_request round trip.
+                std::thread::sleep(std::time::Duration::from_secs(8));
+            }
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        })
+    }
+
+    fn connect_test_pipe(name: &str) -> Connection {
+        // The pipe may not exist for an instant after the server thread
+        // starts; retry briefly like the real connect() does.
+        for _ in 0..50 {
+            if let Ok(handle) = std::fs::OpenOptions::new().read(true).write(true).open(name) {
+                let writer = handle.try_clone().expect("clone pipe handle");
+                return Connection {
+                    reader: BufReader::new(handle),
+                    writer,
+                    child: None,
+                    pipe_name: name.to_string(),
+                };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("test pipe server never came up at {name}");
+    }
+
+    #[test]
+    fn a_wedged_agent_read_is_cancelled_at_the_deadline_not_never() {
+        // FIELD BUG (2026-08-25): one 46s agent_request round trip froze the
+        // whole session — the pipe read had no deadline and every input event
+        // queued behind the CONN mutex. This pins the fix: a server that
+        // never answers must produce an error within deadline + one watchdog
+        // tick + slack, not block forever.
+        let name = format!(r"\\.\pipe\puca-test-deadline-{}", std::process::id());
+        let server = spawn_pipe_server(name.clone(), false);
+        let mut conn = connect_test_pipe(&name);
+
+        let t0 = std::time::Instant::now();
+        let out = exchange_with_deadline(&mut conn, "{\"cmd\":\"ping\"}", 1_500);
+        let elapsed = t0.elapsed();
+
+        let err = out.expect_err("a never-answering agent must not look like a reply");
+        assert!(
+            err.contains("did not answer within"),
+            "the error must name the deadline, not a generic I/O failure: {err}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(6),
+            "cancel must fire near the 1.5s deadline; took {elapsed:?}"
+        );
+        let _ = server.join();
+    }
+
+    #[test]
+    fn positive_control_a_healthy_exchange_completes_under_the_same_deadline() {
+        // Without this, the test above could pass because exchange broke for
+        // every pipe, deadline or not.
+        let name = format!(r"\\.\pipe\puca-test-echo-{}", std::process::id());
+        let server = spawn_pipe_server(name.clone(), true);
+        let mut conn = connect_test_pipe(&name);
+
+        let out = exchange_with_deadline(&mut conn, "{\"cmd\":\"ping\"}", 5_000);
+        assert_eq!(out.expect("an answering agent must succeed"), "{\"ok\":\"pong\"}");
+        let _ = server.join();
     }
 }
