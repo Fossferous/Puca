@@ -206,6 +206,94 @@ pub(crate) fn current_target() -> Option<TargetMonitor> {
     TARGET.lock().ok().and_then(|t| *t)
 }
 
+/// One axis-aligned rectangle in the same pixel space `TargetMonitor` uses
+/// (left/top inclusive, right/bottom exclusive — the Win32 RECT convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl ClipRect {
+    pub fn intersects(&self, other: &ClipRect) -> bool {
+        self.left < other.right
+            && other.left < self.right
+            && self.top < other.bottom
+            && other.top < self.bottom
+    }
+}
+
+/// Does a cursor clip make the CONTROLLED monitor unreachable?
+///
+/// The failure this names: a fullscreen game on one screen calls `ClipCursor`
+/// around its own window, and every injected absolute move onto a DIFFERENT
+/// screen gets clamped back inside the game — the viewer's clicks land in the
+/// game, or nowhere, with no error anywhere. `SendInput` reports success; the
+/// OS applies the clamp after the fact.
+///
+/// The rule is deliberately narrow, in the safe direction:
+/// - `clip == virt` is Windows' way of saying "no clip in force"
+///   (`GetClipCursor` hands back the whole virtual screen) — never a conflict.
+/// - A clip that OVERLAPS the watched monitor at all is not flagged: a game
+///   clipping to its own window ON the controlled screen still lets the
+///   pointer reach (part of) what the viewer is looking at, and flagging it
+///   would put a scary banner over every fullscreen game someone remotes into
+///   deliberately. Only a clip entirely elsewhere — pointer provably unable to
+///   reach any pixel the viewer can see — is a conflict.
+///
+/// Pure and OS-free so it can be table-tested; `cursor_clip_conflict` is the
+/// thin OS shim that feeds it.
+pub fn monitor_unreachable_under_clip(clip: ClipRect, monitor: ClipRect, virt: ClipRect) -> bool {
+    if clip == virt {
+        return false;
+    }
+    !clip.intersects(&monitor)
+}
+
+/// Read the live clip state against the CURRENT target monitor.
+///
+/// `false` on every unknowable path (no target yet, the OS call failing):
+/// this feeds a banner asserting the machine is unreachable, and a probe
+/// hiccup must not paste that over a working session. All three rectangles
+/// come from the SAME process's GDI coordinate space — the target was built
+/// from this process's own `list_monitors` — so DPI virtualization cancels
+/// out instead of mattering.
+///
+/// Cheap enough for its caller's cadence (the app's 1 Hz `session_status`
+/// poll): one `user32` read, no allocation. Do not call it per input event.
+#[cfg(windows)]
+pub fn cursor_clip_conflict() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetClipCursor;
+    let Some(t) = current_target() else { return false };
+    let mut r = windows::Win32::Foundation::RECT::default();
+    if unsafe { GetClipCursor(&mut r) }.is_err() {
+        return false;
+    }
+    let clip = ClipRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    let monitor = ClipRect {
+        left: t.left,
+        top: t.top,
+        right: t.left.saturating_add(t.width),
+        bottom: t.top.saturating_add(t.height),
+    };
+    let virt = ClipRect {
+        left: t.virt_left,
+        top: t.virt_top,
+        right: t.virt_left.saturating_add(t.virt_width),
+        bottom: t.virt_top.saturating_add(t.virt_height),
+    };
+    monitor_unreachable_under_clip(clip, monitor, virt)
+}
+
+#[cfg(not(windows))]
+pub fn cursor_clip_conflict() -> bool {
+    // No ClipCursor equivalent is read on other platforms; "no conflict" is
+    // the honest default, matching how session_status answers elsewhere.
+    false
+}
+
 #[cfg(windows)]
 mod win {
     use super::TargetMonitor;
@@ -1037,6 +1125,47 @@ mod tests {
         assert!(
             !arm.contains("win::send_many(&batch) {"),
             "must not call send_many directly and skip the retry: {arm}"
+        );
+    }
+
+    /// The clip-conflict rule, one row per way it can be wrong. Geometry: a
+    /// two-monitor desktop, primary 0..1920 x 0..1080, secondary to its right
+    /// at 1920..3840 x 0..1080, virtual desktop spanning both.
+    #[test]
+    fn a_clip_is_a_conflict_only_when_the_watched_monitor_is_entirely_outside_it() {
+        let virt = ClipRect { left: 0, top: 0, right: 3840, bottom: 1080 };
+        let primary = ClipRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let secondary = ClipRect { left: 1920, top: 0, right: 3840, bottom: 1080 };
+        // A game window on the primary, clipping the cursor to itself.
+        let game_on_primary = ClipRect { left: 100, top: 100, right: 1820, bottom: 980 };
+
+        assert!(
+            !monitor_unreachable_under_clip(virt, secondary, virt),
+            "no clip in force (clip == virtual desktop) is the normal state"
+        );
+        assert!(
+            monitor_unreachable_under_clip(game_on_primary, secondary, virt),
+            "the viewer watches the secondary; a game holding the pointer on \
+             the primary makes every click there impossible — THE conflict"
+        );
+        assert!(
+            !monitor_unreachable_under_clip(game_on_primary, primary, virt),
+            "the same game, viewer watching the SAME screen: the pointer can \
+             still reach what they see, so no banner — the overlap control"
+        );
+        // Straddling the shared edge: part of the secondary is reachable.
+        let straddle = ClipRect { left: 1800, top: 0, right: 2100, bottom: 1080 };
+        assert!(
+            !monitor_unreachable_under_clip(straddle, secondary, virt),
+            "partial overlap keeps the monitor reachable"
+        );
+        // Edge-touching without overlap: RECT right/bottom are EXCLUSIVE, so a
+        // clip ending exactly at the boundary shares zero pixels.
+        let flush_left = ClipRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        assert!(
+            monitor_unreachable_under_clip(flush_left, secondary, virt),
+            "a clip flush against the boundary shares no pixel with the \
+             secondary — still a conflict"
         );
     }
 

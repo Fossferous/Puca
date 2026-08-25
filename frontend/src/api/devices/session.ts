@@ -288,6 +288,14 @@ export interface DeviceControlSession {
      *  no frames arrive while a secure desktop is up, and restarting the media
      *  transport cannot fix that. */
     secureDesktop: boolean;
+    /** A ClipCursor region on the host — a fullscreen game, typically — is
+     *  holding the pointer entirely off the streamed monitor, so injected
+     *  clicks get clamped somewhere the viewer cannot see, with no error from
+     *  the injection itself. Same trust rule as `secureDesktop`: HOST polled
+     *  from the agent, CONTROLLER only ever told by the host's
+     *  `cursor-clipped` notice, never guessed. Absent machinery (webview host,
+     *  old agent) leaves it false — the pre-feature behaviour. */
+    cursorClipped: boolean;
 }
 
 interface Internal extends DeviceControlSession {
@@ -404,6 +412,10 @@ interface Internal extends DeviceControlSession {
      *  a working picture for the rest of the session. Reset to `null` on any
      *  relay interruption so the next tick re-asserts whatever is true then. */
     secureDesktopSent: boolean | null;
+    /** HOST: what the controller was last successfully TOLD about the cursor
+     *  clip — the exact `secureDesktopSent` pattern, for the exact same
+     *  one-way-latch reason. Reset to `null` on any relay interruption. */
+    cursorClippedSent: boolean | null;
     /** CONTROLLER: when `secureDesktop` last became true (Date.now()), null
      *  while it is false. The locked-follow poller needs an AGE, not a flag:
      *  it deliberately waits out the host-side unsolicited-lock handover
@@ -618,6 +630,7 @@ function emit(): void {
         awaitingMedia: s.awaitingMedia,
         mediaRestarting: s.mediaRestarting,
         secureDesktop: s.secureDesktop,
+        cursorClipped: s.cursorClipped,
         shareUser: s.share ? { id: s.share.peerUser, username: s.share.peerUsername } : null,
         viewOnly: s.share ? !s.share.capabilities.includes('control') : false,
         unattended: s.unattended,
@@ -1716,11 +1729,15 @@ async function pollSecureDesktop(): Promise<void> {
             // see `secureDesktopSent`. Skip, forget, re-assert on recovery.
             if (s.transportDown || s.peerReconnecting) {
                 s.secureDesktopSent = null;
+                s.cursorClippedSent = null;
                 continue;
             }
             let up = false;
+            let clipped = false;
             try {
-                ({ secureDesktop: up } = await backend.sessionStatus(s.id));
+                const status = await backend.sessionStatus(s.id);
+                up = status.secureDesktop;
+                clipped = status.cursorClipped === true;
             } catch {
                 // sessionStatus swallows its own errors; this is belt and
                 // braces so one bad tick can never reach the caller.
@@ -1730,11 +1747,20 @@ async function pollSecureDesktop(): Promise<void> {
                 s.secureDesktop = up;
                 emit();
             }
+            if (clipped !== s.cursorClipped) {
+                s.cursorClipped = clipped;
+                emit();
+            }
             // Compared against what the CONTROLLER was told, not against what
             // is true here, so a notice lost to a dropped relay is re-sent.
-            if (up === s.secureDesktopSent) continue;
-            s.secureDesktopSent = up;
-            void sendSignal(s, { kind: 'secure-desktop', up }).catch(() => undefined);
+            if (up !== s.secureDesktopSent) {
+                s.secureDesktopSent = up;
+                void sendSignal(s, { kind: 'secure-desktop', up }).catch(() => undefined);
+            }
+            if (clipped !== s.cursorClippedSent) {
+                s.cursorClippedSent = clipped;
+                void sendSignal(s, { kind: 'cursor-clipped', clipped }).catch(() => undefined);
+            }
         }
     } finally {
         secureDesktopPollBusy = false;
@@ -2513,6 +2539,8 @@ export async function connectToDevice(
         secureDesktop: false,
         secureDesktopSince: null,
         secureDesktopSent: null,
+        cursorClipped: false,
+        cursorClippedSent: null,
     };
     sessions.set(id, s);
     emit();
@@ -2918,6 +2946,8 @@ export function installDeviceSessions(): void {
                 secureDesktop: false,
                 secureDesktopSince: null,
                 secureDesktopSent: null,
+                cursorClipped: false,
+                cursorClippedSent: null,
             };
             sessions.set(s.id, s);
             emit();
@@ -3954,6 +3984,10 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
          *  (true) or gave it back (false). Validated with typeof at the
          *  handler, like `owned`. */
         up?: boolean;
+        /** cursor-clipped: a ClipCursor region on the host is holding the
+         *  pointer entirely off the streamed monitor (true), or released it
+         *  (false). Validated with typeof at the handler, like `up`. */
+        clipped?: boolean;
     } | null;
     if (!data) return;
 
@@ -4351,6 +4385,16 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             if (data.up && !s.secureDesktop) s.secureDesktopSince = Date.now();
             if (!data.up) s.secureDesktopSince = null;
             s.secureDesktop = data.up;
+            emit();
+            return;
+        }
+        if (data.kind === 'cursor-clipped') {
+            if (s.role !== 'controller') return;
+            // typeof, not truthiness — same lesson as secure-desktop: a
+            // malformed frame must not paste a "your clicks aren't landing"
+            // banner over a working session.
+            if (typeof data.clipped !== 'boolean') return;
+            s.cursorClipped = data.clipped;
             emit();
             return;
         }

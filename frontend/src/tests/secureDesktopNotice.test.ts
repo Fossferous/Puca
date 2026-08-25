@@ -184,3 +184,44 @@ describe('the controller is told a security screen took the display', () => {
         ).toBe(false);
     });
 });
+
+describe('the controller is told a cursor clip took the pointer', () => {
+    // The same safety property as the secure-desktop notice, for the same
+    // reason: `cursorClipped` is only ever true because a HOST said so, and a
+    // malformed frame must not paste a "your clicks aren't landing" banner
+    // over a working session.
+    it('POSITIVE CONTROL: the host notice raises the flag, and clearing it lowers it', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        expect(
+            sessionById(activeSessions(), id)?.cursorClipped,
+            'a fresh session is not clip-blocked',
+        ).toBe(false);
+
+        await hostSignal(id, key, { kind: 'cursor-clipped', clipped: true });
+        expect(
+            sessionById(activeSessions(), id)?.cursorClipped,
+            'the host said a clip holds the pointer off the streamed screen',
+        ).toBe(true);
+
+        // The down transition is the control — a flag wired to a constant
+        // would leave the banner stuck after the game released the clip.
+        await hostSignal(id, key, { kind: 'cursor-clipped', clipped: false });
+        expect(
+            sessionById(activeSessions(), id)?.cursorClipped,
+            'the clip released, so the banner must go',
+        ).toBe(false);
+    });
+
+    it('a malformed notice changes nothing', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        await hostSignal(id, key, { kind: 'cursor-clipped', clipped: 'yes' });
+        expect(
+            sessionById(activeSessions(), id)?.cursorClipped,
+            'the banner must need a real boolean behind it',
+        ).toBe(false);
+    });
+});

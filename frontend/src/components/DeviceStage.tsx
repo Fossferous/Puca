@@ -2597,6 +2597,23 @@ export function DeviceStage() {
                         menu.
                     </div>
                 )}
+                {/* A ClipCursor conflict: a fullscreen app on ANOTHER screen is
+                    holding the host's pointer, so injected clicks here get
+                    clamped back into it — SendInput reports success and the
+                    click lands in the game. Host-asserted only (the
+                    `cursor-clipped` notice off the 1Hz status poll), same
+                    trust rule as the secure banner above, and yielding to it:
+                    a security screen is the bigger story and the clip usually
+                    dies with it. Same parked-at-top styling — the centre of
+                    the stage is the picture the viewer is trying to use. */}
+                {session.cursorClipped && !session.secureDesktop && !session.reconnecting && (
+                    <div className="device-stage-secure">
+                        A fullscreen app on another screen is holding that
+                        computer&rsquo;s mouse pointer, so clicks here may land in it
+                        instead. Switch to that screen, or close the app on the
+                        controlled computer.
+                    </div>
+                )}
                 {(session.awaitingMedia || !session.stream) && !session.secureDesktop && (
                     <div className="device-stage-waiting">
                         {session.mediaRestarting

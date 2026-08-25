@@ -418,7 +418,19 @@ pub enum Response {
     /// display for this session and this agent cannot follow it there, so the
     /// picture is frozen until the SYSTEM bridge takes over (or the prompt
     /// closes). `false` is the ordinary case.
-    SessionState { secure_desktop: bool },
+    ///
+    /// `cursor_clipped: true` means a `ClipCursor` region (a fullscreen game,
+    /// typically) is holding the pointer entirely OFF the monitor this agent is
+    /// injecting onto, so absolute moves get clamped back into the clip and
+    /// clicks land in the wrong place with no error from `SendInput`
+    /// (puca-input `cursor_clip_conflict`). ADDITIVE, both directions of skew
+    /// safe: an old app never reads it, and an old agent never writes it —
+    /// the app's `=== true` check reads absence as false (pinned on the TS
+    /// side, secureDesktopStatus.test.ts).
+    SessionState {
+        secure_desktop: bool,
+        cursor_clipped: bool,
+    },
     /// Nothing changed since the last frame. NOT an error — the caller repeats
     /// the previous frame. A still desktop produces these constantly.
     NoChange,
@@ -466,12 +478,24 @@ mod tests {
     #[test]
     fn session_state_serialises_to_what_the_app_reads() {
         assert_eq!(
-            serde_json::to_string(&Response::SessionState { secure_desktop: true }).unwrap(),
-            r#"{"ok":"session_state","secure_desktop":true}"#,
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: true,
+                cursor_clipped: false,
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":true,"cursor_clipped":false}"#,
         );
         assert_eq!(
-            serde_json::to_string(&Response::SessionState { secure_desktop: false }).unwrap(),
-            r#"{"ok":"session_state","secure_desktop":false}"#,
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: true,
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":true}"#,
         );
+        // The skew direction this side cannot test: an OLD agent omitting
+        // `cursor_clipped` entirely. Response is Serialize-only here — the one
+        // parser is the app, whose test (secureDesktopStatus.test.ts) pins
+        // that absence reads as false.
     }
 }

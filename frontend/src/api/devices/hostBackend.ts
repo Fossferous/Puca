@@ -125,8 +125,16 @@ export interface HostBackend {
      *  way to know (it is handed a stream, not a desktop), and a phone has no
      *  such concept. `undefined` means "cannot tell", which the caller treats as
      *  "no" — the behaviour every build had before this existed. Never throws
-     *  for an older agent; it answers false. */
-    sessionStatus?(sessionId: string): Promise<{ secureDesktop: boolean }>;
+     *  for an older agent; it answers false.
+     *
+     *  `cursorClipped` rides the same poll: a ClipCursor region (a fullscreen
+     *  game) is holding the pointer entirely off the streamed monitor, so
+     *  injected clicks get clamped somewhere the viewer cannot see. Optional
+     *  for the same skew reason — an implementation predating it reads as
+     *  "not clipped". */
+    sessionStatus?(
+        sessionId: string,
+    ): Promise<{ secureDesktop: boolean; cursorClipped?: boolean }>;
     /** Blank this machine's screen behind an overlay while it is controlled.
      *
      *  Only the agent can do this; the webview has no way to cover the desktop.

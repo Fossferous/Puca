@@ -44,6 +44,10 @@ interface AgentReply {
     /** `session_state`: a Windows security screen owns the display and this
      *  agent cannot follow it there. See `sessionStatus` below. */
     secure_desktop?: boolean;
+    /** `session_state`: a ClipCursor region (a fullscreen game) is holding the
+     *  pointer entirely off the streamed monitor, so injected clicks get
+     *  clamped elsewhere. Absent on agents older than this field. */
+    cursor_clipped?: boolean;
 }
 
 /**
@@ -394,14 +398,21 @@ export function agentHostBackend(): HostBackend {
          *  second would be a session-killing error storm. "Could not ask" reads
          *  as false — which is exactly the behaviour every build had before this
          *  existed: the picture freezes and nothing explains it. */
-        async sessionStatus(sessionId: string): Promise<{ secureDesktop: boolean }> {
+        async sessionStatus(
+            sessionId: string,
+        ): Promise<{ secureDesktop: boolean; cursorClipped: boolean }> {
             try {
                 const reply = await request({ cmd: 'session_status', session_id: sessionId });
-                // typeof, not truthiness — a malformed reply must not be able to
-                // put a "security prompt is open" banner over a working session.
-                return { secureDesktop: reply.secure_desktop === true };
+                // `=== true`, not truthiness — a malformed reply must not be
+                // able to put a "security prompt is open" banner over a working
+                // session, and an OLD agent that never writes `cursor_clipped`
+                // must read as "not clipped" rather than anything louder.
+                return {
+                    secureDesktop: reply.secure_desktop === true,
+                    cursorClipped: reply.cursor_clipped === true,
+                };
             } catch {
-                return { secureDesktop: false };
+                return { secureDesktop: false, cursorClipped: false };
             }
         },
     };
