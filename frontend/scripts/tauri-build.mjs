@@ -20,7 +20,8 @@
  * update server to point at. It just says so, loudly, rather than pretending.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -81,8 +82,31 @@ function reportProductName(name, source) {
     console.log('[tauri-build]   productName in tauri.release.json as a manual fallback.');
 }
 
+/**
+ * Drop every key that starts with `//`, recursively.
+ *
+ * The overlay is where the operator documents WHY a value is pinned, and
+ * `"//"`-style comment keys are the only comments JSON allows — but tauri's
+ * config schema rejects unknown properties, so the raw overlay fails the
+ * build with "Additional properties are not allowed" (found the first time a
+ * real release was built from the fork). The comments stay in the overlay;
+ * tauri gets a sanitised copy.
+ */
+function stripCommentKeys(value) {
+    if (Array.isArray(value)) return value.map(stripCommentKeys);
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value)
+                .filter(([k]) => !k.startsWith('//'))
+                .map(([k, v]) => [k, stripCommentKeys(v)]),
+        );
+    }
+    return value;
+}
+
 const args = process.argv.slice(2);
 const hasOverlay = existsSync(overlay);
+let mergedDir = null;
 
 if (hasOverlay) {
     const eps = endpointsOf(overlay);
@@ -93,7 +117,10 @@ if (hasOverlay) {
         pinned ?? productNameOf(baseConf) ?? '(unset)',
         pinned ? 'pinned by the overlay' : 'from the tracked config — overlay does not pin it',
     );
-    args.unshift('--config', overlay);
+    mergedDir = mkdtempSync(join(tmpdir(), 'tauri-overlay-'));
+    const sanitised = join(mergedDir, 'tauri.release.json');
+    writeFileSync(sanitised, JSON.stringify(stripCommentKeys(JSON.parse(readFileSync(overlay, 'utf8'))), null, 2));
+    args.unshift('--config', sanitised);
 } else {
     const eps = endpointsOf(baseConf);
     console.log('[tauri-build] no src-tauri/tauri.release.json — building with the tracked defaults.');
@@ -108,4 +135,7 @@ if (hasOverlay) {
 // PATH when npm runs this script but NOT when someone runs it directly. Using
 // npx makes both work instead of failing confusingly in the second case.
 const r = spawnSync('npx', ['tauri', 'build', ...args], { stdio: 'inherit', shell: true });
+if (mergedDir) {
+    try { rmSync(mergedDir, { recursive: true, force: true }); } catch { /* best effort */ }
+}
 process.exit(r.status ?? 1);
