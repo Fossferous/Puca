@@ -29,6 +29,12 @@ pub const SHUTDOWN_REASON: &str = "the device is shutting down";
 pub enum PowerAction {
     Lock,
     Shutdown,
+    /// W4 display power. The sign-in agent only ever broadcasts — no ticker
+    /// (nothing injects a stream of input into a locked console) and no
+    /// DDC/CI (keep-primary is a signed-in convenience; see `plan`).
+    DisplaysOff,
+    DisplaysOffKeepPrimary,
+    DisplaysOn,
 }
 
 impl PowerAction {
@@ -36,6 +42,9 @@ impl PowerAction {
         match s {
             "lock" => Some(Self::Lock),
             "shutdown" => Some(Self::Shutdown),
+            "displays_off" => Some(Self::DisplaysOff),
+            "displays_off_keep_primary" => Some(Self::DisplaysOffKeepPrimary),
+            "displays_on" => Some(Self::DisplaysOn),
             _ => None,
         }
     }
@@ -48,13 +57,33 @@ pub enum Plan {
     NoOp,
     /// Enable SeShutdownPrivilege and ExitWindowsEx(shutdown|poweroff).
     Shutdown,
+    /// SC_MONITORPOWER broadcast, off. No keep-off ticker at the sign-in
+    /// screen: the controller watching a lock screen is not streaming input,
+    /// and physical input waking the panels is what someone at the machine
+    /// would want anyway.
+    DisplaysOff,
+    /// SC_MONITORPOWER broadcast, on.
+    DisplaysOn,
+    /// Answered as a power-failed with this pinned reason, never attempted.
+    Refuse(&'static str),
 }
+
+/// The refusal wording for keep-primary before sign-in — pinned by a test so
+/// the controller-facing copy cannot drift silently.
+pub const KEEP_PRIMARY_REFUSAL: &str =
+    "turning off only some displays is not available before sign-in";
 
 /// Pure: the sign-in-screen host is by definition on a locked console.
 pub fn plan(action: PowerAction) -> Plan {
     match action {
         PowerAction::Lock => Plan::NoOp,
         PowerAction::Shutdown => Plan::Shutdown,
+        PowerAction::DisplaysOff => Plan::DisplaysOff,
+        PowerAction::DisplaysOn => Plan::DisplaysOn,
+        // DDC/CI at the sign-in screen would be a SYSTEM process poking
+        // monitor firmware for a machine nobody has signed into — the
+        // narrow value does not carry the surface. Honest refusal instead.
+        PowerAction::DisplaysOffKeepPrimary => Plan::Refuse(KEEP_PRIMARY_REFUSAL),
     }
 }
 
@@ -63,6 +92,9 @@ pub fn perform(p: Plan) -> Result<(), String> {
     match p {
         Plan::NoOp => Ok(()),
         Plan::Shutdown => imp::shutdown(),
+        Plan::DisplaysOff => imp::monitor_power(true),
+        Plan::DisplaysOn => imp::monitor_power(false),
+        Plan::Refuse(reason) => Err(reason.to_string()),
     }
 }
 
@@ -108,6 +140,24 @@ mod imp {
         }
     }
 
+    pub fn monitor_power(off: bool) -> Result<(), String> {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SendMessageW, HWND_BROADCAST, SC_MONITORPOWER, WM_SYSCOMMAND,
+        };
+        unsafe {
+            // Broadcast, desktop-wide; the return is the target's reply, not
+            // a success flag — same as the attended shell's copy.
+            SendMessageW(
+                HWND_BROADCAST,
+                WM_SYSCOMMAND,
+                WPARAM(SC_MONITORPOWER as usize),
+                LPARAM(if off { 2 } else { -1 }),
+            );
+        }
+        Ok(())
+    }
+
     pub fn shutdown() -> Result<(), String> {
         enable_privilege("SeShutdownPrivilege")?;
         unsafe {
@@ -125,6 +175,9 @@ mod imp {
     pub fn shutdown() -> Result<(), String> {
         Err("power actions are only implemented on Windows".to_string())
     }
+    pub fn monitor_power(_off: bool) -> Result<(), String> {
+        Err("power actions are only implemented on Windows".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -138,9 +191,35 @@ mod tests {
         // never guessed.
         assert_eq!(PowerAction::parse("lock"), Some(PowerAction::Lock));
         assert_eq!(PowerAction::parse("shutdown"), Some(PowerAction::Shutdown));
+        assert_eq!(PowerAction::parse("displays_off"), Some(PowerAction::DisplaysOff));
+        assert_eq!(
+            PowerAction::parse("displays_off_keep_primary"),
+            Some(PowerAction::DisplaysOffKeepPrimary)
+        );
+        assert_eq!(PowerAction::parse("displays_on"), Some(PowerAction::DisplaysOn));
         assert_eq!(PowerAction::parse("Lock"), None);
         assert_eq!(PowerAction::parse("restart"), None);
+        assert_eq!(PowerAction::parse("displaysoff"), None);
         assert_eq!(PowerAction::parse(""), None);
+    }
+
+    #[test]
+    fn display_plans_broadcast_or_refuse_and_the_refusal_wording_is_pinned() {
+        assert_eq!(plan(PowerAction::DisplaysOff), Plan::DisplaysOff);
+        assert_eq!(plan(PowerAction::DisplaysOn), Plan::DisplaysOn);
+        assert_eq!(
+            plan(PowerAction::DisplaysOffKeepPrimary),
+            Plan::Refuse(KEEP_PRIMARY_REFUSAL)
+        );
+        // The refusal never touches the OS and carries the pinned copy.
+        assert_eq!(
+            perform(Plan::Refuse(KEEP_PRIMARY_REFUSAL)),
+            Err(KEEP_PRIMARY_REFUSAL.to_string())
+        );
+        assert_eq!(
+            KEEP_PRIMARY_REFUSAL,
+            "turning off only some displays is not available before sign-in"
+        );
     }
 
     #[test]

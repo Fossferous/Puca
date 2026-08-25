@@ -15,8 +15,15 @@
 //! action so the controller can say why it lost the machine.
 
 /// What the controller asked for.
+///
+/// `snake_case`, NOT the old `lowercase`: identical bytes for the two
+/// original single-word variants ("lock"/"shutdown" — the pin test proves
+/// it), and the wire spelling the display actions were specified with
+/// ("displays_off" …). W4 adds the three display variants; the receiving
+/// ends (this file, the agent's parse, session.ts) all spell them the same,
+/// pinned on each side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum PowerAction {
     /// `LockWorkStation`: the console locks; the user-flavour host can no
     /// longer capture (secure desktop), so the controller follows the machine
@@ -27,6 +34,12 @@ pub enum PowerAction {
     /// get their WM_QUERYENDSESSION and only HUNG ones are forced — the safer
     /// of the two force flags (plain EWX_FORCE discards unsaved work outright).
     Shutdown,
+    /// All panels dark + the keep-off ticker (display_power.rs).
+    DisplaysOff,
+    /// Every panel BUT the primary dark, via DDC/CI. Honest per-monitor.
+    DisplaysOffKeepPrimary,
+    /// Ticker off, DDC wake, OS wake, input nudge.
+    DisplaysOn,
 }
 
 /// Why a power action could not be performed.
@@ -96,6 +109,13 @@ mod imp {
 
     pub fn perform(action: PowerAction) -> Result<(), PowerError> {
         match action {
+            // Routed to display_power by the command layer before this is
+            // ever called; reaching here is a routing bug, not an OS state.
+            PowerAction::DisplaysOff
+            | PowerAction::DisplaysOffKeepPrimary
+            | PowerAction::DisplaysOn => Err(PowerError::Failed(
+                "display actions are routed to display_power, not perform()".into(),
+            )),
             PowerAction::Lock => unsafe {
                 LockWorkStation().map_err(|e| PowerError::Failed(format!("LockWorkStation failed: {e}")))
             },
@@ -121,12 +141,37 @@ mod imp {
     }
 }
 
-/// Lock the console or shut the machine down. Called by the device-session
-/// host handler after the controller's sealed `power` signal has passed the
-/// same unattended-access gate as input.
+/// Lock the console, shut the machine down, or change display power. Called
+/// by the device-session host handler after the controller's sealed `power`
+/// signal has passed the same unattended-access gate as input.
+///
+/// Resolves with an optional human DETAIL line (today only keep_primary's
+/// per-monitor honesty; None for everything else) that the host relays in
+/// its power-ack.
 #[tauri::command]
-pub fn power_action(action: PowerAction) -> Result<(), String> {
-    imp::perform(action).map_err(|e| e.to_string())
+pub fn power_action(
+    state: tauri::State<'_, std::sync::Arc<crate::display_power::DisplayPower>>,
+    action: PowerAction,
+) -> Result<Option<String>, String> {
+    match action {
+        PowerAction::Lock | PowerAction::Shutdown => {
+            imp::perform(action).map_err(|e| e.to_string()).map(|()| None)
+        }
+        PowerAction::DisplaysOff => state.inner().displays_off().map(|()| None),
+        PowerAction::DisplaysOffKeepPrimary => {
+            state.inner().displays_off_keep_primary().map(Some)
+        }
+        PowerAction::DisplaysOn => state.inner().displays_on().map(|()| None),
+    }
+}
+
+/// Session teardown hook: stay-as-set (stop the keep-off ticker, relight
+/// nothing) — the user decision display_power.rs documents.
+#[tauri::command]
+pub fn display_power_session_end(
+    state: tauri::State<'_, std::sync::Arc<crate::display_power::DisplayPower>>,
+) {
+    state.inner().on_session_end();
 }
 
 // There is deliberately NO `power_supported` probe. The controller cannot ask
@@ -149,9 +194,24 @@ mod tests {
     /// this crate — run it in frontend/src-tauri (CLAUDE.md, gates).
     #[test]
     fn actions_deserialize_from_the_controller_spelling() {
+        // THE ORIGINAL TWO MUST SURVIVE the rename_all switch byte-for-byte —
+        // every deployed controller spells them exactly this way.
         assert_eq!(serde_json::from_str::<PowerAction>("\"lock\"").unwrap(), PowerAction::Lock);
         assert_eq!(serde_json::from_str::<PowerAction>("\"shutdown\"").unwrap(), PowerAction::Shutdown);
+        assert_eq!(
+            serde_json::from_str::<PowerAction>("\"displays_off\"").unwrap(),
+            PowerAction::DisplaysOff
+        );
+        assert_eq!(
+            serde_json::from_str::<PowerAction>("\"displays_off_keep_primary\"").unwrap(),
+            PowerAction::DisplaysOffKeepPrimary
+        );
+        assert_eq!(
+            serde_json::from_str::<PowerAction>("\"displays_on\"").unwrap(),
+            PowerAction::DisplaysOn
+        );
         assert!(serde_json::from_str::<PowerAction>("\"restart\"").is_err());
         assert!(serde_json::from_str::<PowerAction>("\"Lock\"").is_err());
+        assert!(serde_json::from_str::<PowerAction>("\"displaysoff\"").is_err());
     }
 }

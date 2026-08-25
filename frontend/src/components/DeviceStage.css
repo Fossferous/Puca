@@ -24,6 +24,27 @@
     flex-wrap: wrap;
 }
 
+/* Displays popover (W4): anchored to its button, above the stage. */
+.device-stage-displays {
+    position: relative;
+    display: inline-flex;
+}
+.device-stage-displays-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    background: var(--background-floating, #232428);
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    white-space: nowrap;
+}
+
 .device-stage-title {
     font-weight: 600;
 }

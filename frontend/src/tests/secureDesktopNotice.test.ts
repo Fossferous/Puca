@@ -225,3 +225,59 @@ describe('the controller is told a cursor clip took the pointer', () => {
         ).toBe(false);
     });
 });
+
+/**
+ * DISPLAY POWER, controller side (W4): the outcome line. An ack's DETAIL
+ * beats the generic copy; a display refusal is a notice, never a session
+ * error; and silence for 5s becomes the honest "old host" message — with an
+ * ack in time cancelling it (the positive control).
+ */
+describe('the controller narrates display power outcomes', () => {
+    it('an ack with detail shows the detail; without, the friendly line', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        await hostSignal(id, key, { kind: 'power-ack', action: 'displays_off_keep_primary', detail: 'Turned off 2 of 3; DELL did not respond' });
+        expect(sessionById(activeSessions(), id)?.powerNotice)
+            .toBe('Turned off 2 of 3; DELL did not respond');
+
+        await hostSignal(id, key, { kind: 'power-ack', action: 'displays_on' });
+        expect(sessionById(activeSessions(), id)?.powerNotice).toBe('Displays turned on');
+    });
+
+    it('a display refusal is a NOTICE — the session error stays clean', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        await hostSignal(id, key, { kind: 'power-failed', action: 'displays_off_keep_primary', reason: 'no DDC/CI' });
+        const s = sessionById(activeSessions(), id);
+        expect(s?.powerNotice).toContain('no DDC/CI');
+        expect(s?.error, 'a monitor ignoring DDC must not paint the red session banner').toBeNull();
+    });
+
+    it('5s of silence after a display action says "did not respond"; an ack in time prevents it', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            const { id, key } = await activeController();
+            const { activeSessions, sendPowerAction, POWER_ACK_TIMEOUT_MS } = await import('../api/devices/session');
+
+            // Silence: the timeout fires with the honest old-host message.
+            expect(sendPowerAction(id, 'displays_off')).toBe(true);
+            await vi.advanceTimersByTimeAsync(POWER_ACK_TIMEOUT_MS + 250);
+            expect(sessionById(activeSessions(), id)?.powerNotice)
+                .toContain('did not respond');
+
+            // POSITIVE CONTROL: an ack inside the window cancels the timeout.
+            expect(sendPowerAction(id, 'displays_on')).toBe(true);
+            await hostSignal(id, key, { kind: 'power-ack', action: 'displays_on' });
+            expect(sessionById(activeSessions(), id)?.powerNotice).toBe('Displays turned on');
+            await vi.advanceTimersByTimeAsync(POWER_ACK_TIMEOUT_MS + 250);
+            expect(
+                sessionById(activeSessions(), id)?.powerNotice,
+                'the acked action must not later claim the host did not respond',
+            ).not.toContain('did not respond');
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});

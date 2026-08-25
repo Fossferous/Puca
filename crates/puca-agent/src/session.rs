@@ -716,6 +716,32 @@ impl Agent {
         Response::SealedSignals { payloads: vec![sealed] }
     }
 
+    /// The success twin of `power_failed`, for actions the controller WAITS
+    /// on (the display power set): without an ack it cannot distinguish "the
+    /// panels went dark" from "an old host ignored an action it never heard
+    /// of", and its 5s timeout would blame a healthy host. `detail` is the
+    /// optional human line (per-monitor DDC honesty on the attended host;
+    /// None here — broadcasts have nothing to itemise).
+    fn power_ack(&mut self, session_id: &str, action: &str, detail: Option<&str>) -> Response {
+        let Some(s) = self.sealed.get_mut(session_id) else {
+            return Response::error("no sealed session with that id");
+        };
+        let mut obj = serde_json::json!({
+            "kind": "power-ack",
+            "action": action,
+            "sid": session_id,
+            "n": s.send_seq,
+        });
+        if let Some(d) = detail {
+            obj["detail"] = serde_json::Value::String(d.to_string());
+        }
+        let Some(sealed) = crate::control_key::seal(&s.key, &obj.to_string()) else {
+            return Response::error("could not seal the ack");
+        };
+        s.send_seq += 1;
+        Response::SealedSignals { payloads: vec![sealed] }
+    }
+
     pub fn handle(&mut self, req: Request) -> Response {
         // Drain ALL pending stream events, matching each — a `while let Ok(Term…)`
         // would stop at the first SecureDesktop event and leave the rest (and the
@@ -1555,6 +1581,18 @@ impl Agent {
                         match dispatch_power(crate::power::plan(action)) {
                             Ok(()) if action == crate::power::PowerAction::Shutdown => {
                                 Response::error(crate::power::SHUTDOWN_REASON)
+                            }
+                            // Display actions are ACKED: the controller arms a
+                            // 5s wait for exactly these, and silence must keep
+                            // meaning "old host" rather than "success".
+                            Ok(())
+                                if matches!(
+                                    action,
+                                    crate::power::PowerAction::DisplaysOff
+                                        | crate::power::PowerAction::DisplaysOn
+                                ) =>
+                            {
+                                self.power_ack(&session_id, &requested, None)
                             }
                             Ok(()) => Response::SealedSignals { payloads: vec![] },
                             Err(e) => self.power_failed(&session_id, &requested, &e),

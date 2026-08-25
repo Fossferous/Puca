@@ -1105,3 +1105,82 @@ describe('power actions', () => {
         expect(powerAction).not.toHaveBeenCalled();
     });
 });
+
+/**
+ * DISPLAY POWER (W4) — the session arm. Same gates as lock/shutdown (UA,
+ * view-only), but the OPPOSITE lifecycle: the session continues over dark
+ * panels, and success is ACKED because it produces no other visible signal —
+ * silence must keep meaning "old host ignored it".
+ */
+describe('display power actions', () => {
+    /** Frames the host sent since `from`, unsealed to full objects. */
+    async function sentFrames(key: Uint8Array, from: number): Promise<Record<string, unknown>[]> {
+        const { openControl } = await import('../api/e2ee');
+        const out: Record<string, unknown>[] = [];
+        for (const m of sent.slice(from)) {
+            const blob = m.payload?.payload;
+            if (!blob) continue;
+            const plain = await openControl(key, blob);
+            if (plain) out.push(JSON.parse(plain) as Record<string, unknown>);
+        }
+        return out;
+    }
+    const deviceEnds = () => sent.filter(m => m.type === 'DeviceEnd');
+
+    it('displays_off runs the shell action, ACKS, and the session STAYS UP', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        const before = sent.length;
+        const endsBefore = deviceEnds().length;
+        await signal(key, { kind: 'power', action: 'displays_off' });
+        expect(powerAction).toHaveBeenCalledWith('displays_off');
+        const frames = await sentFrames(key, before);
+        const ack = frames.find(f => f.kind === 'power-ack');
+        expect(ack, 'success must be acked — silence means "old host"').toBeTruthy();
+        expect(ack!.action).toBe('displays_off');
+        expect(deviceEnds().length, 'dark panels are not a goodbye').toBe(endsBefore);
+    });
+
+    it('keep_primary relays the shell’s per-monitor DETAIL in the ack', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        powerAction.mockResolvedValueOnce('Turned off 1 of 2 other display(s); DELL U2720Q did not respond');
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: 'displays_off_keep_primary' });
+        expect(powerAction).toHaveBeenCalledWith('displays_off_keep_primary');
+        const frames = await sentFrames(key, before);
+        const ack = frames.find(f => f.kind === 'power-ack');
+        expect(ack?.detail).toBe('Turned off 1 of 2 other display(s); DELL U2720Q did not respond');
+    });
+
+    it('a shell refusal becomes power-failed, never a dead session', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockRejectedValueOnce(new Error('None of the 2 other display(s) responded to the power command'));
+        const before = sent.length;
+        const endsBefore = deviceEnds().length;
+        await signal(key, { kind: 'power', action: 'displays_on' });
+        expect(await sentKinds(key, before)).toContain('power-failed');
+        expect(deviceEnds().length).toBe(endsBefore);
+    });
+
+    it('the UA gate holds: an ARMED host with an unproved peer does nothing', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        await signal(key, { kind: 'power', action: 'displays_off' });
+        await signal(key, { kind: 'power', action: 'displays_on' });
+        expect(powerAction, 'the same gate as input and lock').not.toHaveBeenCalled();
+    });
+
+    it('a VIEW-ONLY share may not touch the owner’s displays', async () => {
+        armed = false;
+        shareCaps = ['view_only'];
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        await signal(key, { kind: 'power', action: 'displays_off' });
+        expect(powerAction).not.toHaveBeenCalled();
+    });
+});

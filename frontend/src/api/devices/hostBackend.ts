@@ -154,7 +154,7 @@ export interface HostBackend {
      *  and the session's power arm reports that back rather than pretending.
      *  Rejects on failure — never resolves over a machine that is still
      *  unlocked / still up. */
-    powerAction?(action: 'lock' | 'shutdown'): Promise<void>;
+    powerAction?(action: import('./session').PowerAction): Promise<string | void>;
     /** Let the peer reach files on this machine, or revoke with null.
      *
      *  Separate from the session itself on purpose: agreeing to share a screen
@@ -220,9 +220,22 @@ function nullBackend(limitation: string): HostBackend {
  * Shut down with "this host cannot lock or shut down from here" — false for
  * that machine, whose shell could do both all along.
  */
-export async function shellPowerAction(action: 'lock' | 'shutdown'): Promise<void> {
+export async function shellPowerAction(
+    action: import('./session').PowerAction,
+): Promise<string | void> {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('power_action', { action });
+    // The reply is the optional human DETAIL line (keep_primary's
+    // per-monitor honesty); lock/shutdown/off/on answer null.
+    const detail = await invoke<string | null>('power_action', { action });
+    return typeof detail === 'string' && detail ? detail : undefined;
+}
+
+/** Session teardown: stop the display keep-off ticker, relight NOTHING —
+ *  the stay-as-set rule (display_power.rs). No-op on a shell without the
+ *  command (webview host, pre-W4 installer): the catch answers it. */
+export async function shellDisplayPowerSessionEnd(): Promise<void> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('display_power_session_end').catch(() => undefined);
 }
 
 let cached: HostBackend | null = null;

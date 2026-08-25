@@ -296,6 +296,10 @@ export interface DeviceControlSession {
      *  `cursor-clipped` notice, never guessed. Absent machinery (webview host,
      *  old agent) leaves it false — the pre-feature behaviour. */
     cursorClipped: boolean;
+    /** CONTROLLER: transient display-power outcome line ("Turned off 2 of
+     *  3; ...", the no-response timeout, a DDC refusal). Auto-clears; never
+     *  a session error. */
+    powerNotice: string | null;
 }
 
 interface Internal extends DeviceControlSession {
@@ -425,6 +429,10 @@ interface Internal extends DeviceControlSession {
     secureDesktopSince: number | null;
     /** CONTROLLER: bounds phase 'connecting' — see CONNECT_DEADLINE_MS. */
     connectTimer: ReturnType<typeof setTimeout> | null;
+    /** CONTROLLER: the display-power ack wait (POWER_ACK_TIMEOUT_MS). */
+    pendingPowerAckTimer: ReturnType<typeof setTimeout> | null;
+    /** Auto-clear for `powerNotice`. */
+    powerNoticeTimer: ReturnType<typeof setTimeout> | null;
     /** CONTROLLER: a cursor-ownership request made before this session could
      *  send one, replayed on activation. null = nothing owed. */
     pendingCursorOwner: boolean | null;
@@ -631,6 +639,7 @@ function emit(): void {
         mediaRestarting: s.mediaRestarting,
         secureDesktop: s.secureDesktop,
         cursorClipped: s.cursorClipped,
+        powerNotice: s.powerNotice,
         shareUser: s.share ? { id: s.share.peerUser, username: s.share.peerUsername } : null,
         viewOnly: s.share ? !s.share.capabilities.includes('control') : false,
         unattended: s.unattended,
@@ -1181,6 +1190,17 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     if (s.transportGraceTimer) {
         clearTimeout(s.transportGraceTimer);
         s.transportGraceTimer = null;
+    }
+    if (s.pendingPowerAckTimer) { clearTimeout(s.pendingPowerAckTimer); s.pendingPowerAckTimer = null; }
+    if (s.powerNoticeTimer) { clearTimeout(s.powerNoticeTimer); s.powerNoticeTimer = null; }
+    // Display power STAYS AS SET (user decision, display_power.rs): the host
+    // only stops the keep-off ticker so the next physical input at the
+    // machine wakes its panels — no relight rides the teardown. Best-effort:
+    // a webview host has no shell command and the import path answers that.
+    if (s.role === 'host') {
+        void import('./hostBackend')
+            .then(m => m.shellDisplayPowerSessionEnd())
+            .catch(() => undefined);
     }
     clearConnectDeadline(s);
     if (s.pcDisconnectTimer) {
@@ -1857,14 +1877,47 @@ export function setPrivacyMode(sessionId: string, enabled: boolean): void {
     void sendSignal(s, { kind: 'set-privacy', enabled });
 }
 
-/** What a controller may ask the host to do to the machine itself. */
-export type PowerAction = 'lock' | 'shutdown';
+/** What a controller may ask the host to do to the machine itself. The
+ *  display trio (W4) spells snake_case on the wire — pinned on both Rust
+ *  receiving ends (power.rs serde test, agent parse test). */
+export type PowerAction =
+    | 'lock' | 'shutdown'
+    | 'displays_off' | 'displays_off_keep_primary' | 'displays_on';
+
+export const DISPLAY_POWER_ACTIONS: readonly PowerAction[] =
+    ['displays_off', 'displays_off_keep_primary', 'displays_on'];
+
+/** How long a display action may go unanswered before the controller says
+ *  so. Display actions are the one power set the controller WAITS on: lock
+ *  and shutdown announce themselves through the session ending, but panels
+ *  going dark on a machine you cannot see produce no signal at all — and an
+ *  old host ignores unknown actions silently, which without this deadline
+ *  would be indistinguishable from success. */
+export const POWER_ACK_TIMEOUT_MS = 5_000;
+
+/** Auto-clear for the transient power notice line. */
+const POWER_NOTICE_MS = 6_000;
+
+function setPowerNotice(s: Internal, text: string | null): void {
+    if (s.powerNoticeTimer) { clearTimeout(s.powerNoticeTimer); s.powerNoticeTimer = null; }
+    s.powerNotice = text;
+    emit();
+    if (text !== null) {
+        s.powerNoticeTimer = setTimeout(() => {
+            if (sessions.get(s.id) !== s) return;
+            s.powerNoticeTimer = null;
+            s.powerNotice = null;
+            emit();
+        }, POWER_NOTICE_MS);
+    }
+}
 
 /**
- * Ask the host to lock its console or shut the machine down. Sealed like every
- * other signal; the host applies the same unattended-access gate as input, and
- * the CONTROLLER UI puts a confirmation in front of shutdown. Returns false
- * when there is no active controller session to send on (the UI says so).
+ * Ask the host to lock its console, shut the machine down, or change display
+ * power. Sealed like every other signal; the host applies the same
+ * unattended-access gate as input, and the CONTROLLER UI puts a confirmation
+ * in front of shutdown. Returns false when there is no active controller
+ * session to send on (the UI says so).
  */
 export function sendPowerAction(sessionId: string, action: PowerAction): boolean {
     const s = sessions.get(sessionId);
@@ -1874,6 +1927,16 @@ export function sendPowerAction(sessionId: string, action: PowerAction): boolean
     if (s.share && !s.share.capabilities.includes('control')) return false;
     if (s.transportDown) return false;
     void sendSignal(s, { kind: 'power', action });
+    if (DISPLAY_POWER_ACTIONS.includes(action)) {
+        if (s.pendingPowerAckTimer) clearTimeout(s.pendingPowerAckTimer);
+        s.pendingPowerAckTimer = setTimeout(() => {
+            if (sessions.get(s.id) !== s) return;
+            s.pendingPowerAckTimer = null;
+            // Honest about the likeliest cause: an old host drops unknown
+            // power kinds on the floor by design.
+            setPowerNotice(s, 'That device did not respond to the display request — it may need updating.');
+        }, POWER_ACK_TIMEOUT_MS);
+    }
     return true;
 }
 
@@ -2549,6 +2612,7 @@ export async function connectToDevice(
         secureDesktopSent: null,
         cursorClipped: false,
         cursorClippedSent: null,
+        powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
     };
     sessions.set(id, s);
     emit();
@@ -2956,6 +3020,7 @@ export function installDeviceSessions(): void {
                 secureDesktopSent: null,
                 cursorClipped: false,
                 cursorClippedSent: null,
+                powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
             };
             sessions.set(s.id, s);
             emit();
@@ -3983,8 +4048,10 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
          *  separate set-privacy frame could be lost to the same network event
          *  that caused the restart. */
         privacy?: boolean;
-        /** power: 'lock' | 'shutdown' — validated at the host, not assumed. */
+        /** power: the PowerAction spelling — validated at the host, not assumed. */
         action?: string;
+        /** power-ack: optional human detail (per-monitor DDC honesty). */
+        detail?: string;
         /** input-failed: which input kind the host could not perform (only
          *  'sas' is ever reported — everything else is fire-and-forget). */
         t?: string;
@@ -4302,13 +4369,29 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // — the same gate as the input injector below, for the same
             // reason: this host is the last and authoritative gate on itself.
             if (s.share && !s.share.capabilities.includes('control')) return;
-            const action = data.action === 'lock' || data.action === 'shutdown' ? data.action : null;
+            const action = data.action === 'lock' || data.action === 'shutdown'
+                || (typeof data.action === 'string' && (DISPLAY_POWER_ACTIONS as readonly string[]).includes(data.action))
+                ? data.action as PowerAction : null;
             if (!action) return;
             void (async () => {
                 try {
                     const backend = await getHostBackend();
                     if (!backend.powerAction) {
                         throw new Error('this host cannot lock or shut down from here');
+                    }
+                    if (DISPLAY_POWER_ACTIONS.includes(action)) {
+                        // Display power: no teardown — the session continues
+                        // over dark panels (DXGI keeps serving; whether the
+                        // picture freezes is a panel question the controller
+                        // can see for itself). ACKED, because the controller
+                        // waits 5s to distinguish "done" from "old host
+                        // ignored it": success produces no other signal.
+                        const detail = await backend.powerAction(action);
+                        await sendSignal(s, {
+                            kind: 'power-ack', action,
+                            ...(typeof detail === 'string' && detail ? { detail } : {}),
+                        });
+                        return;
                     }
                     if (action === 'shutdown') {
                         // The OS call FIRST, the goodbye second. ExitWindowsEx
@@ -4489,10 +4572,31 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'power-failed') {
             if (s.role !== 'controller') return;
-            const what = data.action === 'shutdown' ? 'shut down' : 'lock';
             const why = typeof data.reason === 'string' ? data.reason.slice(0, MAX_REASON_LEN) : 'the host refused';
+            if (typeof data.action === 'string' && (DISPLAY_POWER_ACTIONS as readonly string[]).includes(data.action)) {
+                // A refused display action is a NOTICE, not a session error:
+                // the session is fine — the red banner is for a machine that
+                // could not be locked or shut down, not for a monitor that
+                // ignored DDC.
+                if (s.pendingPowerAckTimer) { clearTimeout(s.pendingPowerAckTimer); s.pendingPowerAckTimer = null; }
+                setPowerNotice(s, `Displays: ${why}`);
+                return;
+            }
+            const what = data.action === 'shutdown' ? 'shut down' : 'lock';
             s.error = `could not ${what} that device: ${why}`;
             emit();
+            return;
+        }
+        if (data.kind === 'power-ack') {
+            if (s.role !== 'controller') return;
+            if (s.pendingPowerAckTimer) { clearTimeout(s.pendingPowerAckTimer); s.pendingPowerAckTimer = null; }
+            const friendly = data.action === 'displays_off' ? 'Displays turned off'
+                : data.action === 'displays_on' ? 'Displays turned on'
+                : data.action === 'displays_off_keep_primary' ? 'Other displays turned off'
+                : null;
+            const detail = typeof data.detail === 'string' ? data.detail.slice(0, MAX_REASON_LEN) : null;
+            // The detail (per-monitor DDC honesty) beats the generic line.
+            setPowerNotice(s, detail ?? friendly);
             return;
         }
         if (data.kind === 'query_stream_quality') {

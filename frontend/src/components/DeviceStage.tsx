@@ -25,6 +25,7 @@ import {
     requestMonitor,
     sendClipboard,
     sendInput,
+    sendPowerAction,
     sendStreamQuality,
     subscribeCaret,
     subscribeSessions,
@@ -68,7 +69,8 @@ import { MobileToolbar, MobileToolbarToggle } from './DeviceStageMobileToolbar';
 import { MoreMenu, MonitorMenu, MouseMenu } from './DeviceStageMobileMenus';
 import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
-import { CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon } from './Icons';
+import {
+    MonitorIcon, CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon } from './Icons';
 import './DeviceStageMobile.css';
 
 
@@ -376,6 +378,7 @@ export function DeviceStage() {
     const surfaceRef = useRef<HTMLDivElement | null>(null);
     const [tunnels, setTunnels] = useState<TunnelStatus | null>(null);
     const [showFiles, setShowFiles] = useState(false);
+    const [showDisplaysMenu, setShowDisplaysMenu] = useState(false);
 
     // GAME MODE (desktop only): relative mouse via pointer lock, for games
     // that read raw-input deltas. Absolute {t:'move'} teleports the OS cursor
@@ -2559,6 +2562,44 @@ export function DeviceStage() {
                     {clipboardNote && (
                         <span className="device-stage-error">{clipboardNote}</span>
                     )}
+                    {/* DISPLAY POWER (W4): minimal popover, three actions, no
+                        confirm — undo is one click. The outcome (ack detail,
+                        refusal, or the 5s old-host timeout) renders through
+                        session.powerNotice below. */}
+                    <span className="device-stage-displays">
+                        <button
+                            className="device-stage-btn"
+                            aria-expanded={showDisplaysMenu}
+                            onClick={() => setShowDisplaysMenu(v => !v)}
+                            title="Turn the controlled device's displays off or on"
+                        >
+                            <MonitorIcon /> Displays
+                        </button>
+                        {showDisplaysMenu && (
+                            <span className="device-stage-displays-menu" role="menu">
+                                {([
+                                    ['displays_off', 'Turn displays off'],
+                                    ['displays_off_keep_primary', 'Off, keep primary'],
+                                    ['displays_on', 'Turn displays on'],
+                                ] as const).map(([action, label]) => (
+                                    <button
+                                        key={action}
+                                        className="device-stage-btn"
+                                        role="menuitem"
+                                        onClick={() => {
+                                            setShowDisplaysMenu(false);
+                                            if (!sendPowerAction(session.id, action)) {
+                                                setClipboardNote('Not connected — displays unchanged');
+                                            }
+                                        }}
+                                    >{label}</button>
+                                ))}
+                            </span>
+                        )}
+                    </span>
+                    {session.powerNotice && (
+                        <span className="device-stage-error" role="status">{session.powerNotice}</span>
+                    )}
                     <button
                         className="device-stage-btn"
                         onClick={() => setShowFiles(v => !v)}
@@ -2795,10 +2836,11 @@ export function DeviceStage() {
                 failure, all written to session.error) sat permanently behind
                 "Ctrl+Alt+Del sent". The desktop bar shows all three as
                 separate spans; the phone now does the same. */}
-            {isMobile && (session.error || qualityError || clipboardNote) && (
+            {isMobile && (session.error || qualityError || clipboardNote || session.powerNotice) && (
                 <div className="device-stage-mobile-error" role="status">
                     {qualityError && <span>{qualityError}</span>}
                     {clipboardNote && <span>{clipboardNote}</span>}
+                    {session.powerNotice && <span>{session.powerNotice}</span>}
                     {session.error && <span>{session.error}</span>}
                 </div>
             )}

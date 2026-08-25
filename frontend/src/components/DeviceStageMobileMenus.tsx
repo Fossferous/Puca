@@ -119,6 +119,38 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
             }
         },
         {
+            // DISPLAY POWER (W4). No confirmation on any of the three — undo
+            // is one tap away and nothing is lost. The outcome arrives as the
+            // host's power-ack / power-failed and renders through the stage's
+            // powerNotice line (with per-monitor DDC honesty for
+            // keep-primary), or as the 5s "did not respond" for an old host.
+            label: 'Turn displays off',
+            icon: 'monitor',
+            input: true,
+            action: () => {
+                if (!sendPowerAction(session.id, 'displays_off')) onNotice('Not connected — displays unchanged');
+                onClose();
+            }
+        },
+        {
+            label: 'Displays off, keep primary',
+            icon: 'monitor',
+            input: true,
+            action: () => {
+                if (!sendPowerAction(session.id, 'displays_off_keep_primary')) onNotice('Not connected — displays unchanged');
+                onClose();
+            }
+        },
+        {
+            label: 'Turn displays on',
+            icon: 'monitor',
+            input: true,
+            action: () => {
+                if (!sendPowerAction(session.id, 'displays_on')) onNotice('Not connected — displays unchanged');
+                onClose();
+            }
+        },
+        {
             // No confirmation: nothing is lost by a lock, and on a machine
             // with sign-in-screen access the session simply follows it there.
             // Without that access the follow gives up with a message saying

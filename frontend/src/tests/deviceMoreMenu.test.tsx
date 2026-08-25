@@ -76,7 +76,9 @@ describe('More menu', () => {
     it('lists every entry, and only entries that do something', async () => {
         await mount();
         expect(labels()).toEqual([
-            'Browse files', 'Send clipboard', 'Insert Ctrl + Alt + Del', 'Alt + Tab', 'Alt + F4', 'Lock', 'Shut down…',
+            'Browse files', 'Send clipboard', 'Insert Ctrl + Alt + Del', 'Alt + Tab', 'Alt + F4',
+            'Turn displays off', 'Displays off, keep primary', 'Turn displays on',
+            'Lock', 'Shut down…',
         ]);
     });
 

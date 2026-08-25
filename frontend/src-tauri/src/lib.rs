@@ -3,6 +3,7 @@ mod audio_capture;
 mod capture_bar;
 mod clip_capture;
 mod clip_desktop_audio;
+mod display_power;
 mod device_key;
 mod file_transfer;
 mod hotkeys;
@@ -924,6 +925,7 @@ pub fn run() {
             app.manage(Arc::new(ClipCaptureState::default()));
             #[cfg(windows)]
             app.manage(Arc::new(ClipDesktopAudioState::default()));
+            app.manage(Arc::new(display_power::DisplayPower::default()));
 
             // Suspend / session-lock feed (session_events.rs): lets in-memory
             // features such as the clip replay buffer wipe themselves before a
@@ -1106,6 +1108,7 @@ pub fn run() {
             privacy_screen::privacy_screen_supported,
             privacy_screen::privacy_screen_lock_would_blind,
             power::power_action,
+            power::display_power_session_end,
             stream_boost::set_stream_boost,
             log_stream_diag,
             agent_ipc::agent_probe,
