@@ -24,8 +24,14 @@ import {
     deriveControlSessionKey,
     sealControl,
     openControl,
+    sealControlBytes,
+    openControlBytes,
     type ControlEphemeral,
 } from './e2ee';
+import {
+    FRAME_HELLO, FRAME_SEALED_INPUT, controlDcReady, forgetControlChannels, laneFor,
+    markHelloSeen, sendControlFrame, sendHello, setControlFrameHandler, type CtlLane,
+} from './rtc/controlDc';
 import { getCachedPublicKey } from './dms';
 
 // End a control session that receives no input for this long (stuck/abandoned).
@@ -139,8 +145,13 @@ let offerTimer: ReturnType<typeof setTimeout> | null = null;
 // not). Keyed by ROLE because one user can be host and viewer at once (A controls
 // B while C controls A). A monotonic seq inside each sealed payload stops
 // intra-session replay/reorder.
-let viewerCrypto: { peerId: number; key: Uint8Array; seq: number } | null = null;
-let hostCrypto: { peerId: number; key: Uint8Array; recvSeq: number } | null = null;
+// `seq`/`recvSeq` are the WS relay's namespace; `dcSeq`/`dcRecvSeq` are the
+// data channel's. SEPARATE ON PURPOSE (W5/R2): one counter across two
+// transports means a fast DC move can bump the sequence past a WS click
+// still in flight, and the host drops the click — the exact bug the P2P
+// path exists to avoid creating.
+let viewerCrypto: { peerId: number; key: Uint8Array; seq: number; dcSeq: number } | null = null;
+let hostCrypto: { peerId: number; key: Uint8Array; recvSeq: number; dcRecvSeq: number } | null = null;
 // My ephemeral as viewer (kept from request until the host's response arrives).
 let viewerEph: ControlEphemeral | null = null;
 // HOST: the viewer's ephemeral public key from their request, until I grant.
@@ -190,7 +201,8 @@ async function startViewerCrypto(hostId: number, hostEphPub: string): Promise<bo
     if (!id || !hostStatic || !viewerEph) { viewerCrypto = null; return false; }
     const key = deriveControlSessionKey(id.privateKey, hostStatic, viewerEph.priv, hostEphPub);
     if (!key) { viewerCrypto = null; return false; }
-    viewerCrypto = { peerId: hostId, key, seq: 0 };
+    viewerCrypto = { peerId: hostId, key, seq: 0, dcSeq: 0 };
+    void sendControlHello(hostId, key);
     return true;
 }
 
@@ -204,7 +216,11 @@ async function startHostCrypto(viewerId: number, viewerEphPub: string, myEph: Co
     if (!id || !viewerStatic) { hostCrypto = null; return false; }
     const key = deriveControlSessionKey(id.privateKey, viewerStatic, myEph.priv, viewerEphPub);
     if (!key) { hostCrypto = null; return false; }
-    hostCrypto = { peerId: viewerId, key, recvSeq: 0 };
+    hostCrypto = { peerId: viewerId, key, recvSeq: 0, dcRecvSeq: 0 };
+    // Announce the P2P lane now that a key exists to seal with. The peer's
+    // own hello (or this one echoed back) is what opens it in each
+    // direction; until then everything rides the relay.
+    void sendControlHello(viewerId, key);
     return true;
 }
 
@@ -505,6 +521,8 @@ export function stopControlling() {
     if (!target) return;
     wsClient.send({ type: 'ControlEnd', payload: { target_user: target.userId } });
     state.controlling = null;
+    // Capability is per session on this side too — see endHostSession.
+    forgetControlChannels(target.userId);
     viewerCrypto = null;
     viewerEph = null;
     controlHostCapture = null;
@@ -653,16 +671,97 @@ function rawSend(event: ControlEvent) {
     const cc = viewerCrypto;
     // Fail closed: without a pairwise key we do NOT fall back to plaintext.
     if (!cc || cc.peerId !== target.userId) return;
-    const seq = ++cc.seq;
     const targetId = target.userId;
+    // P2P FIRST (W5/R2): the DC when the peer has proved it understands
+    // these frames, else the relay — which stays the permanent fallback and
+    // the only path that always exists. The transport decides the SEQUENCE
+    // NAMESPACE too (see the crypto state comment).
+    const lane: CtlLane = laneFor(event.t);
+    const viaDc = controlDcReady(targetId, lane);
+    const seq = viaDc ? ++cc.dcSeq : ++cc.seq;
     const payload = JSON.stringify({ s: seq, e: event });
     sendChain = sendChain
         .then(async () => {
             if (viewerCrypto !== cc) return; // session torn down mid-flight
+            if (viaDc) {
+                const bytes = await sealControlBytes(cc.key, payload);
+                if (sendControlFrame(targetId, lane, FRAME_SEALED_INPUT, bytes)) return;
+                // The channel died between the check and the send: fall back
+                // in place rather than dropping the event. Its DC sequence
+                // number is spent — harmless, the namespaces are separate and
+                // the host only requires STRICTLY INCREASING within each.
+                dcFellBack(targetId, 'send failed');
+            }
             const sealed = await sealControl(cc.key, payload);
             wsClient.send({ type: 'ControlInput', payload: { target_user: targetId, event: sealed } });
         })
         .catch(() => { /* drop on any seal/send error */ });
+}
+
+/** One place logs every fall-back so the field can tell "the DC never came
+ *  up" from "it came up and died" — the P2P work's whole diagnostic. */
+function dcFellBack(peerId: number, why: string): void {
+    console.info(`[p2p-input] peer ${peerId}: using the relay (${why})`);
+}
+
+// --- P2P input transport (W5/R2) ---
+//
+// The hello is a SEALED frame under the session key: only a peer holding it
+// can produce one, so the capability cannot be announced by the server or a
+// bystander. Both roles send one when their session key exists, and either
+// direction's arrival opens the lane.
+
+async function sendControlHello(peerId: number, key: Uint8Array): Promise<void> {
+    try {
+        const bytes = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
+        sendHello(peerId, bytes);
+    } catch { /* the relay keeps working */ }
+}
+
+/** Install the single inbound-frame consumer. Idempotent. */
+function wireControlDc(): void {
+    setControlFrameHandler((peerId, lane, frame) => {
+        // Which side am I for THIS peer? A user can be host to one peer and
+        // viewer to another at the same time.
+        const asHost = hostCrypto && hostCrypto.peerId === peerId ? hostCrypto : null;
+        const asViewer = viewerCrypto && viewerCrypto.peerId === peerId ? viewerCrypto : null;
+        const key = asHost?.key ?? asViewer?.key;
+        if (!key) return;
+        if (frame.kind === FRAME_HELLO) {
+            recvChain = recvChain.then(async () => {
+                // A hello must OPEN under the session key: an unsealed or
+                // forged one proves nothing and must not arm the transport.
+                const plain = await openControlBytes(key, frame.payload);
+                if (plain === null) return;
+                markHelloSeen(peerId);
+                console.info(`[p2p-input] peer ${peerId}: control data channel ready`);
+            }).catch(() => undefined);
+            return;
+        }
+        if (frame.kind !== FRAME_SEALED_INPUT) return;
+        // Only the HOST injects, and only from the viewer it granted — the
+        // same rule the relay path applies, restated here because this
+        // transport does not pass through that handler.
+        if (!asHost) return;
+        const cc = asHost;
+        recvChain = recvChain
+            .then(async () => {
+                if (hostCrypto !== cc) return; // torn down mid-flight
+                const plain = await openControlBytes(cc.key, frame.payload);
+                if (plain == null) return;
+                let parsed: unknown;
+                try { parsed = JSON.parse(plain); } catch { return; }
+                const obj = parsed as { s?: unknown; e?: unknown };
+                // The DC's OWN namespace — never the relay's counter.
+                if (typeof obj.s !== 'number' || !Number.isInteger(obj.s) || obj.s <= cc.dcRecvSeq) return;
+                cc.dcRecvSeq = obj.s;
+                if (!validEvent(obj.e)) return;
+                armInactivity();
+                handleIncomingInput(obj.e);
+            })
+            .catch(() => { /* drop on any open/parse error */ });
+        void lane;
+    });
 }
 
 // Keep every SENT rmove within one native injection step. The current host
@@ -828,6 +927,9 @@ export function revokeControl() {
 /** Tear down all host-side control machinery (guard, held input, monitor, timers). */
 function endHostSession() {
     clearInactivity();
+    // Forget the P2P lanes with the key: capability is per SESSION, and a
+    // hello from the last one must not arm the next.
+    if (hostCrypto) forgetControlChannels(hostCrypto.peerId);
     hostCrypto = null;      // no key ⇒ any further ControlInput is dropped
     pendingViewerEph = null;
     void stopGuard();       // stops the LL hook AND releases held input natively
@@ -875,6 +977,7 @@ export function offerControl(viewerUserId: number, viewerUsername: string) {
 export function initRemoteControl() {
     if (wired) return;
     wired = true;
+    wireControlDc();
 
     // HOST: a viewer wants control of my screen.
     wsClient.on('ControlRequested', async (msg: ServerMessage) => {

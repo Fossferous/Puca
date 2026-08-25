@@ -1,5 +1,8 @@
 import { wsClient } from '../websocket';
 import { getRtcConfigAsync } from './config';
+import {
+    CTL_MOTION_LABEL, CTL_STATE_LABEL, forgetControlChannels, registerControlChannel,
+} from './controlDc';
 import { loadSettings } from '../../components/settingsStore';
 import { MediaManager } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
@@ -893,6 +896,29 @@ export class WebRTCManager {
                 : effectiveConfig,
         );
 
+        // P2P INPUT LANES (W5/R2 — see rtc/controlDc.ts). Created AT
+        // CONSTRUCTION, before any offer: a channel added later renegotiates
+        // the pc, and these must cost zero extra ICE (max-bundle means they
+        // share the existing transport). Both sides create; the registry
+        // keeps one channel per lane and closes the loser. remoteControl
+        // gates real input on a sealed app-level HELLO, never on these being
+        // open — an open channel proves SCTP, not that the peer understands
+        // the frames.
+        try {
+            registerControlChannel(userId, 'state', pc.createDataChannel(CTL_STATE_LABEL, { ordered: true }));
+            registerControlChannel(userId, 'motion', pc.createDataChannel(CTL_MOTION_LABEL, {
+                ordered: false, maxRetransmits: 2,
+            }));
+        } catch (e) {
+            // A runtime without data channels keeps the relay path — the
+            // permanent fallback, not a degraded mode.
+            console.warn('[WebRTC] control data channels unavailable:', e);
+        }
+        pc.ondatachannel = (ev) => {
+            if (ev.channel.label === CTL_STATE_LABEL) registerControlChannel(userId, 'state', ev.channel);
+            else if (ev.channel.label === CTL_MOTION_LABEL) registerControlChannel(userId, 'motion', ev.channel);
+        };
+
         pc.onicecandidate = (event) => {
             if (event.candidate) {
                 wsClient.sendIceCandidate(userId, JSON.stringify(event.candidate));
@@ -1423,6 +1449,10 @@ export class WebRTCManager {
             peer.connection.close();
             this.peers.delete(userId);
         }
+        // The control lanes die with the pc; forget them so a rebuilt peer
+        // starts from "no capability" rather than inheriting a hello that
+        // belonged to a connection that no longer exists.
+        forgetControlChannels(userId);
         if (!keepSignalingChain) this.signalingChains.delete(userId);
         this.pendingCandidates.delete(userId);
         this.peerCreation.delete(userId);

@@ -686,6 +686,36 @@ export async function openControl(sessionKey: Uint8Array, blobB64: string): Prom
     }
 }
 
+// RAW (unbase64'd) twins of the pair above, for the P2P input data channels
+// (rtc/controlDc.ts): the DC is binary, and base64 would cost a third of
+// every mouse move for nothing. SAME construction — AES-256-GCM,
+// nonce(12)||ct — so a frame sealed either way opens either way; the
+// equivalence is pinned by test.
+
+/** AES-256-GCM seal → raw nonce||ct bytes. */
+export async function sealControlBytes(sessionKey: Uint8Array, plaintext: string): Promise<Uint8Array> {
+    const key = await importAesKey(sessionKey);
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, utf8(plaintext) as BufferSource);
+    return concat(nonce, new Uint8Array(ct));
+}
+
+/** Open raw nonce||ct bytes; null on any failure (bad key / forged tag). */
+export async function openControlBytes(sessionKey: Uint8Array, blob: Uint8Array): Promise<string | null> {
+    try {
+        if (blob.length <= 12) return null;
+        const key = await importAesKey(sessionKey);
+        const pt = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: blob.slice(0, 12) },
+            key,
+            blob.slice(12) as BufferSource,
+        );
+        return new TextDecoder().decode(pt);
+    } catch {
+        return null;
+    }
+}
+
 // --- v3 recoverable key custody ---
 //
 // The identity seed is decoupled from the password: it's a random 32 bytes,

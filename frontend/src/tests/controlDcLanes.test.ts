@@ -1,0 +1,158 @@
+/**
+ * P2P INPUT (W5/R2) — the transport's own rules, tested without a browser
+ * peer connection: framing, lane assignment, the registry's one-channel-per-
+ * lane claim, the capability gate that is NOT readyState, and the raw
+ * seal/open pair's equivalence with the base64 one the relay uses.
+ *
+ * The ordering property this exists to protect (a fast DC move must never
+ * invalidate a WS click still in flight) lives in the SEQUENCE NAMESPACES,
+ * which the sender picks by transport — pinned here through laneFor + the
+ * gate, and end-to-end in remoteControl's own suite.
+ */
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+    CTL_MOTION_LABEL, CTL_STATE_LABEL, FRAME_HELLO, FRAME_SEALED_INPUT,
+    controlDcReady, decodeFrame, encodeFrame, forgetControlChannels, laneFor,
+    markHelloSeen, registerControlChannel, resetControlChannels, sendControlFrame,
+    setControlFrameHandler,
+} from '../api/rtc/controlDc';
+import { sealControl, openControl, sealControlBytes, openControlBytes } from '../api/e2ee';
+
+/** A data channel stand-in: jsdom has no RTCDataChannel. */
+function fakeDc(label: string, readyState: RTCDataChannelState = 'open') {
+    const sent: ArrayBuffer[] = [];
+    const dc = {
+        label,
+        readyState,
+        binaryType: 'blob',
+        onmessage: null as ((ev: MessageEvent) => void) | null,
+        onclose: null as (() => void) | null,
+        send: (b: ArrayBuffer) => { sent.push(b); },
+        close: () => { (dc as { readyState: RTCDataChannelState }).readyState = 'closed'; dc.onclose?.(); },
+    };
+    return { dc: dc as unknown as RTCDataChannel, sent, raw: dc };
+}
+
+beforeEach(() => resetControlChannels());
+
+describe('framing', () => {
+    it('round-trips kind + payload, and refuses an empty buffer', () => {
+        const payload = new Uint8Array([9, 8, 7]);
+        const frame = encodeFrame(FRAME_SEALED_INPUT, payload);
+        expect(frame[0]).toBe(FRAME_SEALED_INPUT);
+        const back = decodeFrame(frame)!;
+        expect(back.kind).toBe(FRAME_SEALED_INPUT);
+        expect([...back.payload]).toEqual([9, 8, 7]);
+        expect(decodeFrame(new Uint8Array([]))).toBeNull();
+    });
+});
+
+describe('laneFor — only absolute moves may be dropped', () => {
+    it('absolute moves take MOTION; everything else takes STATE', () => {
+        expect(laneFor('move')).toBe('motion');
+        // rmove deltas are CUMULATIVE — losing one loses aim distance, so
+        // they ride the reliable lane with the clicks they position.
+        for (const t of ['rmove', 'down', 'up', 'key', 'wheel', 'sas']) {
+            expect(laneFor(t), t).toBe('state');
+        }
+    });
+});
+
+describe('the registry', () => {
+    it('keeps ONE channel per lane and closes the loser (both sides create)', () => {
+        const mine = fakeDc(CTL_STATE_LABEL);
+        const theirs = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, 'state', mine.dc);
+        registerControlChannel(7, 'state', theirs.dc);
+        expect(theirs.raw.readyState, 'the second claim is closed, not stored').toBe('closed');
+        markHelloSeen(7);
+        expect(sendControlFrame(7, 'state', FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(true);
+        expect(mine.sent).toHaveLength(1);
+    });
+
+    it('an OPEN channel is not a capability: the hello is', () => {
+        const { dc } = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, 'state', dc);
+        expect(controlDcReady(7), 'open but unproved — the relay keeps it').toBe(false);
+        markHelloSeen(7);
+        expect(controlDcReady(7)).toBe(true);
+    });
+
+    it('losing the state lane drops the peer back to the relay', () => {
+        const state = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, 'state', state.dc);
+        markHelloSeen(7);
+        expect(controlDcReady(7)).toBe(true);
+        state.raw.close();
+        expect(controlDcReady(7), 'a dead lane must not read as capable').toBe(false);
+        // And a send over it answers false so the caller falls back.
+        expect(sendControlFrame(7, 'state', FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+    });
+
+    it('a throwing send answers false instead of exploding an input path', () => {
+        const { dc } = fakeDc(CTL_STATE_LABEL);
+        (dc as unknown as { send: () => void }).send = () => { throw new Error('closing'); };
+        registerControlChannel(7, 'state', dc);
+        markHelloSeen(7);
+        expect(sendControlFrame(7, 'state', FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
+    });
+
+    it('motion falls back to the state lane when no motion channel exists', () => {
+        const state = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, 'state', state.dc);
+        markHelloSeen(7);
+        expect(controlDcReady(7, 'motion')).toBe(true);
+        expect(sendControlFrame(7, 'motion', FRAME_SEALED_INPUT, new Uint8Array([2]))).toBe(true);
+        expect(state.sent).toHaveLength(1);
+    });
+
+    it('forgetting a peer closes its channels and disarms the capability', () => {
+        const state = fakeDc(CTL_STATE_LABEL);
+        const motion = fakeDc(CTL_MOTION_LABEL);
+        registerControlChannel(7, 'state', state.dc);
+        registerControlChannel(7, 'motion', motion.dc);
+        markHelloSeen(7);
+        forgetControlChannels(7);
+        expect(state.raw.readyState).toBe('closed');
+        expect(motion.raw.readyState).toBe('closed');
+        expect(controlDcReady(7)).toBe(false);
+    });
+
+    it('inbound frames reach the handler with their peer and lane; text is ignored', () => {
+        const seen: Array<{ peer: number; lane: string; kind: number }> = [];
+        setControlFrameHandler((peer, lane, frame) => seen.push({ peer, lane, kind: frame.kind }));
+        const { dc, raw } = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, 'state', dc);
+        expect(raw.binaryType, 'binary lane').toBe('arraybuffer');
+        const frame = encodeFrame(FRAME_HELLO, new Uint8Array([1]));
+        raw.onmessage!({ data: frame.buffer.slice(0) } as MessageEvent);
+        raw.onmessage!({ data: 'not binary' } as unknown as MessageEvent);
+        expect(seen).toEqual([{ peer: 7, lane: 'state', kind: FRAME_HELLO }]);
+    });
+});
+
+describe('raw vs base64 sealing — one construction, two encodings', () => {
+    it('a frame sealed raw opens through the relay helper and vice versa', async () => {
+        const key = new Uint8Array(32).fill(7);
+        const bytes = await sealControlBytes(key, '{"s":1}');
+        // Same AES-256-GCM nonce||ct: base64 it and the relay's opener reads it.
+        const asB64 = btoa(String.fromCharCode(...bytes));
+        expect(await openControl(key, asB64)).toBe('{"s":1}');
+        // And the relay's sealer's output opens through the raw one.
+        const sealed = await sealControl(key, '{"s":2}');
+        const back = Uint8Array.from(atob(sealed), c => c.charCodeAt(0));
+        expect(await openControlBytes(key, back)).toBe('{"s":2}');
+    });
+
+    it('a forged or truncated frame opens as null, never as content', async () => {
+        const key = new Uint8Array(32).fill(7);
+        const other = new Uint8Array(32).fill(8);
+        const bytes = await sealControlBytes(key, '{"s":1}');
+        expect(await openControlBytes(other, bytes), 'wrong key').toBeNull();
+        expect(await openControlBytes(key, bytes.slice(0, 10)), 'truncated').toBeNull();
+        const tampered = new Uint8Array(bytes);
+        tampered[tampered.length - 1] ^= 0xff;
+        expect(await openControlBytes(key, tampered), 'flipped tag').toBeNull();
+    });
+});
