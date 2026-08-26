@@ -27,6 +27,10 @@ vi.mock('../api/mobileApp', () => ({
 import { KeyboardOverlay } from '../components/DeviceStageMobileKeyboard';
 
 const send = vi.fn();
+/** The stage's latch registrar (heldKeysRef + gate-bypassing release). What
+ *  reaches it is what survives blur/session-end release — a modifier sent
+ *  through plain `send` instead would be invisible to that safety net. */
+const holdKey = vi.fn();
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -36,7 +40,7 @@ function mount() {
     document.body.appendChild(host);
     root = createRoot(host);
     act(() => {
-        root!.render(<KeyboardOverlay send={send} />);
+        root!.render(<KeyboardOverlay send={send} holdKey={holdKey} />);
     });
     const field = host.querySelector('input.device-stage-keyboard-capture');
     expect(field, 'the capture field must exist or nothing can be typed').toBeTruthy();
@@ -67,6 +71,7 @@ function button(label: string) {
 
 beforeEach(() => {
     send.mockClear();
+    holdKey.mockClear();
     showMobileKeyboard.mockClear();
     showMobileKeyboard.mockImplementation(async () => false);
 });
@@ -223,14 +228,95 @@ describe('the mobile keyboard forwards what was typed', () => {
     });
 
     /**
-     * Ctrl+C is a Ctrl that is still DOWN when C arrives, so modifiers alone
-     * keep the deferred release. Making everything a completed tap would break
-     * every combination button in the overlay.
+     * THE LATCH. "Press Ctrl, then press A" has to arrive as Ctrl+A — the
+     * 50 ms press-and-release this replaced made that physically impossible.
+     * The modifier goes through the REGISTRAR (holdKey), never plain send:
+     * that is what puts it in the stage's heldKeysRef, so blur or session
+     * end releases it on the host like any physically held key.
      */
-    it('holds a modifier open rather than tapping it', () => {
+    it('a tapped modifier latches down through the registrar and stays down', () => {
         mount();
         act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
-        expect(sent('key')).toEqual([{ t: 'key', code: 'ControlLeft', down: true }]);
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true]]);
+        expect(sent('key'), 'the modifier must ride the registrar, not send').toEqual([]);
+    });
+
+    it('typing a letter while Ctrl is latched sends Ctrl+KeyA, then spends the latch', () => {
+        const field = mount();
+        act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        type(field, field.value + 'a');
+        // The character is re-routed as the PHYSICAL key: a {t:'text'} frame
+        // is KEYEVENTF_UNICODE on the host, which no held modifier can touch.
+        expect(sent('text'), 'a chorded character must not travel as text').toEqual([]);
+        expect(sent('key')).toEqual([
+            { t: 'key', code: 'KeyA', down: true },
+            { t: 'key', code: 'KeyA', down: false },
+        ]);
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+    });
+
+    it('an extra key completes the chord too, and only one-shot latches are spent', () => {
+        mount();
+        act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        act(() => button('Esc').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(sent('key').map(e => [e.code, e.down])).toEqual([['Escape', true], ['Escape', false]]);
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+    });
+
+    it('a second tap locks the modifier through any number of keys; a third releases it', () => {
+        const field = mount();
+        const ctrl = () => act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        ctrl(); ctrl();                              // once → lock (still one down)
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true]]);
+        type(field, field.value + 'a');
+        type(field, field.value + 'b');
+        expect(sent('key').map(e => e.code)).toEqual(['KeyA', 'KeyA', 'KeyB', 'KeyB']);
+        expect(holdKey.mock.calls, 'a lock survives keys').toEqual([['ControlLeft', true]]);
+        ctrl();                                      // third tap releases
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+    });
+
+    it('a shifted character while latched wraps the key in ShiftLeft', () => {
+        const field = mount();
+        act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        type(field, field.value + 'A');
+        expect(sent('key')).toEqual([
+            { t: 'key', code: 'ShiftLeft', down: true },
+            { t: 'key', code: 'KeyA', down: true },
+            { t: 'key', code: 'KeyA', down: false },
+            { t: 'key', code: 'ShiftLeft', down: false },
+        ]);
+    });
+
+    it('unmappable input spends the one-shot latch and falls back to text', () => {
+        const field = mount();
+        act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        type(field, field.value + 'héllo');
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+        expect(sent('text')).toEqual([{ t: 'text', text: 'héllo' }]);
+    });
+
+    it('unmounting with a latched modifier releases it', () => {
+        mount();
+        act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        act(() => root!.unmount());
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+    });
+
+    it('window blur clears the latch paint and releases through the registrar', () => {
+        mount();
+        act(() => button('Ctrl').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        act(() => { window.dispatchEvent(new Event('blur')); });
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+        expect(button('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('the ^C button chords through the registrar without disturbing a latch', () => {
+        mount();
+        const cButton = Array.from(host!.querySelectorAll('button')).find(b => b.textContent === '^C')!;
+        act(() => cButton.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(holdKey.mock.calls).toEqual([['ControlLeft', true], ['ControlLeft', false]]);
+        expect(sent('key').map(e => e.code)).toEqual(['KeyC', 'KeyC']);
     });
 
     /**
@@ -276,7 +362,7 @@ describe('the bar reports its measured height', () => {
         const h = document.createElement('div');
         document.body.appendChild(h);
         const r = createRoot(h);
-        act(() => { r.render(<KeyboardOverlay send={send} onHeight={onHeight} />); });
+        act(() => { r.render(<KeyboardOverlay send={send} holdKey={holdKey} onHeight={onHeight} />); });
         expect(onHeight, 'the stage cannot compute a band it is never told about').toHaveBeenCalled();
         expect(typeof onHeight.mock.calls[0][0]).toBe('number');
 
@@ -312,7 +398,7 @@ describe('raising the keyboard on demand', () => {
         document.body.appendChild(host);
         root = createRoot(host);
         const render = (p: { raiseToken?: number; imeVisible?: boolean }) => act(() => {
-            root!.render(<KeyboardOverlay send={send} {...p} />);
+            root!.render(<KeyboardOverlay send={send} holdKey={holdKey} {...p} />);
         });
         render(props);
         const field = host.querySelector('input.device-stage-keyboard-capture') as HTMLInputElement;
@@ -321,17 +407,22 @@ describe('raising the keyboard on demand', () => {
     }
     const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
-    it('the toolbar-button path is unchanged: a plain mount focuses and asks nothing natively', async () => {
+    it('a plain mount focuses the field AND asks the native show — the first open must not gamble on Blink', async () => {
+        showMobileKeyboard.mockImplementation(async () => true);
         const { field } = mountRaise();
         await flush();
         expect(document.activeElement, 'the opening tap focuses the field').toBe(field);
-        expect(showMobileKeyboard, 'no token, no native ask').not.toHaveBeenCalled();
+        // A bare focus() left the first open to Blink's user-activation
+        // heuristic, which this WebView fails often enough that "bar up, no
+        // keyboard" was the first-open experience.
+        expect(showMobileKeyboard, 'the mount itself must ask').toHaveBeenCalledTimes(1);
     });
 
     it('a token bump keeps the field focused and asks the native side to show the IME', async () => {
         showMobileKeyboard.mockImplementation(async () => true);
         const { field, render } = mountRaise();
         await flush();
+        showMobileKeyboard.mockClear();          // the mount's own ask, counted above
         render({ raiseToken: 1 });
         await flush();
         expect(document.activeElement).toBe(field);
@@ -346,18 +437,22 @@ describe('raising the keyboard on demand', () => {
         expect(showMobileKeyboard).toHaveBeenCalledTimes(2);
     });
 
-    it('a mount WITH a token (the panel opened by the auto-keyboard) asks too', async () => {
+    it('a mount WITH a token (the panel opened by the auto-keyboard) asks as well', async () => {
         showMobileKeyboard.mockImplementation(async () => true);
         const { field } = mountRaise({ raiseToken: 1 });
         await flush();
         expect(document.activeElement).toBe(field);
-        expect(showMobileKeyboard).toHaveBeenCalledTimes(1);
+        // Mount raise + token raise: both fire, and both are harmless against
+        // an IME that is already up (the native side is idempotent — it
+        // double-taps showSoftInput itself).
+        expect(showMobileKeyboard).toHaveBeenCalledTimes(2);
     });
 
     it('without the native show, a focused field is blurred and refocused while the IME is down', async () => {
         const { field, render } = mountRaise();
         await flush();
         expect(document.activeElement).toBe(field);
+        showMobileKeyboard.mockClear();
         const blur = vi.spyOn(field, 'blur');
         const focus = vi.spyOn(field, 'focus');
         render({ raiseToken: 1, imeVisible: false });
@@ -372,6 +467,7 @@ describe('raising the keyboard on demand', () => {
         const { field, render } = mountRaise();
         await flush();
         const blur = vi.spyOn(field, 'blur');
+        showMobileKeyboard.mockClear();
         render({ raiseToken: 1, imeVisible: true });
         await flush();
         expect(showMobileKeyboard).toHaveBeenCalledTimes(1);
@@ -397,6 +493,7 @@ describe('raising the keyboard on demand', () => {
         // The field is focused (the opening tap); the back gesture then
         // dismissed the IME. The button must not rely on focus() alone.
         expect(document.activeElement).toBe(field);
+        showMobileKeyboard.mockClear();
         // The label has an icon in front of it, so match by class.
         const tap = host!.querySelector<HTMLButtonElement>('button.keyboard-btn-type');
         expect(tap).toBeTruthy();
