@@ -8,7 +8,7 @@ import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import { defaultSettings, loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
-import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen } from '../api/noiseFilter';
+import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed } from '../api/hotkeys';
 
 /** Shared mic-health notice text — the sentinel clears only its own message
@@ -16,6 +16,10 @@ import { registerHold, unregisterHold, registerPress, unregisterPress, startNati
 const MIC_SILENT_NOTICE = 'Your microphone is producing silence — nobody can hear you. Check its mute switch, then your input device in Settings.';
 /** Shown when we joined with no usable capture device at all. */
 const NO_MIC_NOTICE = 'No microphone detected — you joined in listen-only mode. You can hear everyone; nobody can hear you.';
+/** Shown when the mic DIED mid-call (device unplugged / Bluetooth out of
+ *  range) and no other input could be opened. The device watchdog retries
+ *  automatically when one returns. */
+const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is available — nobody can hear you. It will reconnect automatically when a microphone returns.';
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
@@ -1661,10 +1665,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
     // Handle leaving voice
     // Apply the CURRENT noise mode to a live call: fresh mic through the new
-    // pipeline, swapped into the mesh senders and (on SFU) republished.
+    // pipeline, swapped into the mesh senders and (on SFU) republished. Also
+    // the recovery path the audio-device watchdog below reuses — "restart the
+    // mic through the current pipeline" is the same operation either way.
+    // Returns the whole chain so the watchdog can coalesce restarts.
     const applyNoiseModeLive = useCallback(() => {
-        if (!isInVoiceRef.current) return;
-        webrtcManager.reapplyNoiseMode()
+        if (!isInVoiceRef.current) return Promise.resolve();
+        return webrtcManager.reapplyNoiseMode()
             .then(() => {
                 // A mode change re-acquires the mic, so a listen-only user whose
                 // device has since freed up now has a LIVE track — which
@@ -1678,6 +1685,19 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         setMicNotice(null);
                         broadcastStatus(false, isDeafenedRef.current);
                         return false;
+                    });
+                } else {
+                    // The OTHER direction: the re-acquire found NO usable mic
+                    // (device died mid-call with nothing to fall back to).
+                    // Surface it honestly — roster shows muted, banner explains
+                    // — instead of leaving a dead track behind healthy-looking
+                    // UI. The device watchdog retries when a device returns.
+                    setListenOnly(prev => {
+                        if (prev) return prev;
+                        setIsMuted(true);
+                        setMicNotice(MIC_LOST_NOTICE);
+                        broadcastStatus(true, isDeafenedRef.current);
+                        return true;
                     });
                 }
                 // reapplyNoiseMode stops the old mic track and swaps a fresh
@@ -1804,6 +1824,109 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         };
         window.addEventListener('sovereign:noise-fallback', onFallback);
         return () => window.removeEventListener('sovereign:noise-fallback', onFallback);
+    }, []);
+
+    // ── Audio-device watchdog ────────────────────────────────────────────
+    // A Bluetooth headset walking out of range kills the call's audio both
+    // ways and nothing above notices: the raw capture track dies inside the
+    // noise graph (the PUBLISHED Web Audio track keeps emitting silence
+    // forever), and the <audio> sinks point at a device that no longer
+    // exists. Leaving and rejoining was the only fix. Three signals feed one
+    // recovery:
+    //   - 'sovereign:mic-device-lost' (media.ts): the raw track ended, or sat
+    //     muted for 3 s → restart the mic through the current pipeline NOW
+    //     (getMicStream falls back to the OS default, or degrades to
+    //     listen-only when nothing can be opened).
+    //   - devicechange: a device (re)appeared or vanished → re-route every
+    //     playing element to the chosen sink, and restart the mic if we are
+    //     listen-only, holding a dead/muted track, or holding the WRONG
+    //     device (the selected one returned, or the OS default moved back to
+    //     the headset — chase it; Chromium never re-points a live capture).
+    //   - visibilitychange → visible: mobile can park capture and swallow
+    //     device events while backgrounded; re-evaluate on return.
+    // Restarts reuse applyNoiseModeLive (re-acquire → replaceTrack on every
+    // mesh sender → SFU republish → re-assert the mute/PTT gate) and are
+    // coalesced: one in flight, at most one queued.
+    useEffect(() => {
+        let debounce: ReturnType<typeof setTimeout> | null = null;
+        let running = false;
+        let queued = false;
+        let lastMuteRestart = 0;
+        const restartMic = () => {
+            if (!isInVoiceRef.current) return;
+            if (running) { queued = true; return; }
+            running = true;
+            Promise.resolve(applyNoiseModeLiveRef.current()).finally(() => {
+                running = false;
+                if (queued) { queued = false; restartMic(); }
+            });
+        };
+        const onMicLost = (e: Event) => {
+            const kind = (e as CustomEvent<{ kind?: string }>).detail?.kind;
+            if (kind === 'muted') {
+                // A wedged-but-still-registered device can hand back another
+                // born-muted track; don't re-open it in a tight loop. Real
+                // removals fire 'ended' or devicechange, which stay
+                // unthrottled.
+                const now = Date.now();
+                if (now - lastMuteRestart < 15000) return;
+                lastMuteRestart = now;
+            }
+            restartMic();
+        };
+        const evaluate = async () => {
+            if (!isInVoiceRef.current) return;
+            // OUTPUT half: chase the chosen sink. applyOutputDevice routes
+            // back to it when it reappears and falls back to the default when
+            // it is gone — either way the element keeps playing somewhere.
+            document.querySelectorAll('audio[id^="audio-"]').forEach(el =>
+                applyOutputDevice(el as HTMLAudioElement));
+            // INPUT half.
+            const state = webrtcManager.rawMicState();
+            let restart = webrtcManager.isListenOnly() || !state || state.ended || state.muted;
+            if (!restart && state) {
+                try {
+                    const inputs = (await navigator.mediaDevices.enumerateDevices())
+                        .filter(d => d.kind === 'audioinput');
+                    const selected = selectedInputDeviceId();
+                    if (selected) {
+                        // The device the user chose is back, but we are still
+                        // holding the fallback we degraded to while it was away.
+                        restart = !!state.deviceId && state.deviceId !== selected
+                            && inputs.some(d => d.deviceId === selected);
+                    } else if (state.deviceId && state.deviceId !== 'default' && state.groupId) {
+                        // On "Default": the OS default moved (the headset came
+                        // back and reclaimed it) while our capture stayed put.
+                        // Chromium's 'default' pseudo-entry shares its groupId
+                        // with the concrete device it aliases.
+                        const alias = inputs.find(d => d.deviceId === 'default');
+                        const concrete = alias && inputs.find(d =>
+                            d.deviceId !== 'default' && d.groupId === alias.groupId);
+                        restart = !!concrete && concrete.deviceId !== state.deviceId;
+                    }
+                } catch { /* can't enumerate — nothing to chase */ }
+            }
+            if (restart) restartMic();
+        };
+        const onDeviceChange = () => {
+            if (!isInVoiceRef.current) return;
+            if (debounce) clearTimeout(debounce);
+            // Windows fires several devicechange events per Bluetooth
+            // (dis)connect; let the churn settle, then act once.
+            debounce = setTimeout(() => { debounce = null; void evaluate(); }, 800);
+        };
+        const onVisible = () => {
+            if (document.visibilityState === 'visible') onDeviceChange();
+        };
+        window.addEventListener('sovereign:mic-device-lost', onMicLost);
+        navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
+        document.addEventListener('visibilitychange', onVisible);
+        return () => {
+            window.removeEventListener('sovereign:mic-device-lost', onMicLost);
+            navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+            document.removeEventListener('visibilitychange', onVisible);
+            if (debounce) clearTimeout(debounce);
+        };
     }, []);
 
     const leaveVoice = useCallback(() => {

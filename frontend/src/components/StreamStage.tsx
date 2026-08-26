@@ -334,14 +334,21 @@ export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }
     }, [applyAllGains]);
 
     // Output volume/device changed in Settings: re-apply to the live stream
-    // audio immediately rather than at the next gain recalculation.
+    // audio immediately rather than at the next gain recalculation. Also on
+    // devicechange — the chosen sink can vanish and return without any
+    // settings change (a Bluetooth headset out of / back in range), and
+    // applyOutputDevice chases it in both directions.
     useEffect(() => {
         const reapply = () => {
             applyAllGains();
             videoRefs.current.forEach(video => applyOutputDevice(video));
         };
         window.addEventListener('settingsChanged', reapply);
-        return () => window.removeEventListener('settingsChanged', reapply);
+        navigator.mediaDevices?.addEventListener?.('devicechange', reapply);
+        return () => {
+            window.removeEventListener('settingsChanged', reapply);
+            navigator.mediaDevices?.removeEventListener?.('devicechange', reapply);
+        };
     }, [applyAllGains]);
 
     // Close the context menu on outside click / Escape.

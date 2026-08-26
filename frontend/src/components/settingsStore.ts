@@ -555,14 +555,26 @@ export function inputGain(): number {
  *
  * `setSinkId` is Chromium-only (our desktop shell and the web target) and
  * rejects if the device has gone away — a stale id must fall back to the
- * default rather than leaving the element silent.
+ * default EXPLICITLY (setSinkId('')), both so the element keeps playing
+ * somewhere and so a later re-apply (devicechange, Settings) starts clean.
+ * The same explicitness covers the other direction: switching Settings back
+ * to Default used to early-return here, leaving every live element stuck on
+ * the previously chosen device.
  */
 export function applyOutputDevice(el: HTMLMediaElement): void {
     const id = loadSettings().outputDeviceId;
-    if (!id || id === 'default') return;
-    const sinkable = el as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> };
+    const sinkable = el as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
     if (typeof sinkable.setSinkId !== 'function') return;
+    if (!id || id === 'default') {
+        // Only elements actually routed elsewhere need the reset call.
+        if (sinkable.sinkId) {
+            void sinkable.setSinkId('').catch(() => { /* already unroutable */ });
+        }
+        return;
+    }
     void sinkable.setSinkId(id).catch(() => {
-        // Device unplugged or permission withdrawn: stay on the default sink.
+        // Device unplugged or permission withdrawn: fall back to the default
+        // sink rather than leaving the element pointed at a corpse.
+        void sinkable.setSinkId!('').catch(() => { /* keep whatever still plays */ });
     });
 }

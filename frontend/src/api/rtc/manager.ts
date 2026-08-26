@@ -487,6 +487,11 @@ export class WebRTCManager {
         return this.media.onMicTrackSwapped(fn);
     }
 
+    /** See MediaManager.rawMicState — device-level truth about the open mic. */
+    rawMicState() {
+        return this.media.rawMicState();
+    }
+
     /** The current local stream (processed mic + optional camera), or null. */
     getLocalStreamSync(): MediaStream | null {
         return this.media.getLocalStreamSync();

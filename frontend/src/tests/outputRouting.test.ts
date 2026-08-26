@@ -52,19 +52,28 @@ describe('master output gain', () => {
 });
 
 describe('output device routing', () => {
-    function fakeAudio(withSink: boolean) {
+    function fakeAudio(withSink: boolean, currentSinkId = '') {
         const calls: string[] = [];
         const el = {
             calls,
+            sinkId: currentSinkId,
             ...(withSink ? { setSinkId: (id: string) => { calls.push(id); return Promise.resolve(); } } : {}),
         };
         return el as unknown as HTMLMediaElement & { calls: string[] };
     }
 
-    it('leaves the element alone on the default device', () => {
+    it('leaves an unrouted element alone on the default device', () => {
         const el = fakeAudio(true);
         applyOutputDevice(el);
         expect(el.calls).toEqual([]);
+    });
+
+    it('returns a routed element to the default sink when Settings say default', () => {
+        // Switching Settings back to "Default" used to early-return and leave
+        // every live element stuck on the previously chosen device.
+        const el = fakeAudio(true, 'headset-1');
+        applyOutputDevice(el);
+        expect(el.calls).toEqual(['']);
     });
 
     it('routes to the chosen device', () => {
@@ -80,14 +89,31 @@ describe('output device routing', () => {
         expect(() => applyOutputDevice(el)).not.toThrow();
     });
 
-    it('swallows a rejection so an unplugged device cannot silence the call', async () => {
+    it('falls back to the default sink when the chosen device rejects', async () => {
+        // An unplugged device must not silence the call OR leave the element
+        // pointed at the corpse — the explicit '' re-route is what lets audio
+        // keep playing on the default until the device returns.
+        saveSettings({ ...loadSettings(), outputDeviceId: 'gone' });
+        const calls: string[] = [];
+        const el = {
+            setSinkId: (id: string) => {
+                calls.push(id);
+                return id === 'gone' ? Promise.reject(new Error('device not found')) : Promise.resolve();
+            },
+        } as unknown as HTMLMediaElement;
+        expect(() => applyOutputDevice(el)).not.toThrow();
+        // Give the rejected promise a turn; an unhandled rejection would fail
+        // the run.
+        await new Promise(r => setTimeout(r, 0));
+        expect(calls).toEqual(['gone', '']);
+    });
+
+    it('swallows a double rejection (no sink works at all)', async () => {
         saveSettings({ ...loadSettings(), outputDeviceId: 'gone' });
         const el = {
             setSinkId: () => Promise.reject(new Error('device not found')),
         } as unknown as HTMLMediaElement;
         expect(() => applyOutputDevice(el)).not.toThrow();
-        // Give the rejected promise a turn; an unhandled rejection would fail
-        // the run.
         await new Promise(r => setTimeout(r, 0));
     });
 });

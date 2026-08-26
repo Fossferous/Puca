@@ -58,6 +58,12 @@ export class MediaManager {
     // events never fire for SCRIPTED track swaps (spec: UA-initiated only), so
     // reacquireAudioTrack invokes these directly after swapping the mic track.
     private vadRebuilds = new Set<() => void>();
+    /** The RAW capture track — the device actually open. In the ML noise modes
+     *  the PUBLISHED track is a Web Audio destination that never ends, so only
+     *  this one carries the device's death: a Bluetooth headset walking out of
+     *  range fires `ended`/`mute` HERE while the published track keeps emitting
+     *  silence forever. */
+    private rawMicTrack: MediaStreamTrack | null = null;
 
     /**
      * Get the current local stream
@@ -69,6 +75,58 @@ export class MediaManager {
     /** True when we joined without a microphone (listen-only). */
     isListenOnly(): boolean {
         return this.noMic;
+    }
+
+    /**
+     * Watch the raw capture track for device death. `ended` means the OS took
+     * the device away (unplugged, Bluetooth out of range) — the spec never
+     * fires it for our own stop() calls, so no teardown guard is needed beyond
+     * track identity. A `mute` that persists 3 s is the softer variant of the
+     * same failure (endpoint still registered, no data flowing). Dispatches
+     * 'sovereign:mic-device-lost'; VoicePanel owns the recovery (re-acquire →
+     * replaceTrack on every sender → re-assert the mute/PTT gate).
+     */
+    private armMicDeviceWatch(track: MediaStreamTrack): void {
+        if (this.rawMicTrack === track) return; // already armed (downgrade path re-installs)
+        this.rawMicTrack = track;
+        if (typeof track.addEventListener !== 'function') return; // minimal test stubs
+        const lost = (kind: 'ended' | 'muted') => {
+            if (this.rawMicTrack !== track) return; // superseded by a newer capture
+            console.warn(`[WebRTC] Microphone device lost (${kind}) — requesting recovery`);
+            window.dispatchEvent(new CustomEvent('sovereign:mic-device-lost', { detail: { kind } }));
+        };
+        track.addEventListener('ended', () => lost('ended'));
+        let muteTimer: ReturnType<typeof setTimeout> | null = null;
+        track.addEventListener('mute', () => {
+            if (muteTimer) clearTimeout(muteTimer);
+            muteTimer = setTimeout(() => {
+                muteTimer = null;
+                if (track.muted && track.readyState === 'live') lost('muted');
+            }, 3000);
+        });
+        track.addEventListener('unmute', () => {
+            if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
+        });
+    }
+
+    /**
+     * State of the RAW capture track — device-level truth the published stream
+     * cannot give (see rawMicTrack). Null when no capture is open (listen-only
+     * or not in voice). Backs the devicechange evaluation in VoicePanel.
+     */
+    rawMicState(): { ended: boolean; muted: boolean; deviceId?: string; groupId?: string } | null {
+        const t = this.rawMicTrack;
+        if (!t) return null;
+        let settings: MediaTrackSettings = {};
+        try {
+            settings = typeof t.getSettings === 'function' ? t.getSettings() : {};
+        } catch { /* engine without getSettings */ }
+        return {
+            ended: t.readyState === 'ended',
+            muted: t.muted === true,
+            deviceId: settings.deviceId,
+            groupId: settings.groupId,
+        };
     }
 
     /**
@@ -110,6 +168,8 @@ export class MediaManager {
             if (!replacement) { fresh.getTracks().forEach(t => t.stop()); return; }
             stream.getAudioTracks().forEach(t => { stream.removeTrack(t); t.stop(); });
             stream.addTrack(replacement);
+            // The replacement is a fresh capture — move the device watch onto it.
+            this.armMicDeviceWatch(replacement);
         } catch (err) {
             // Re-capture failed too (device gone/busy). The original track is
             // still live and unsuppressed — audible noise beats silence.
@@ -155,6 +215,14 @@ export class MediaManager {
             }
 
             this.noMic = false;
+
+            // Watch the RAW capture track for device death (Bluetooth out of
+            // range, USB unplug) BEFORE processing wraps it: in the ML modes
+            // the published track is a Web Audio destination that never ends.
+            if (audio) {
+                const raw = this.localStream.getAudioTracks()[0];
+                if (raw) this.armMicDeviceWatch(raw);
+            }
 
             // Web Audio pass: the ML suppressor and/or the Settings mic-gain
             // stage. processAudioStream itself decides whether a graph is
@@ -210,6 +278,9 @@ export class MediaManager {
             this.localStream.getTracks().forEach(track => track.stop());
             this.localStream = null;
         }
+        // Deliberate teardown: any late ended/mute from the old capture is
+        // stale, not a device loss.
+        this.rawMicTrack = null;
         // Clear listen-only so a rejoin retries the mic (they may have plugged
         // a headset in since).
         this.noMic = false;
@@ -244,9 +315,11 @@ export class MediaManager {
 
         const mode = getNoiseSuppressionMode();
         const streamAtStart = this.localStream;
-        let mic: MediaStream;
+        // `rawMic` stays the CAPTURE stream even when processing wraps it in a
+        // Web Audio destination — the device watch must arm on the raw track.
+        let rawMic: MediaStream;
         try {
-            mic = await this.getMicStream(mode);
+            rawMic = await this.getMicStream(mode);
         } catch (err) {
             // A noise-mode change must not blow up a listen-only client (or one
             // whose mic vanished mid-call) — stay listen-only instead.
@@ -258,10 +331,14 @@ export class MediaManager {
         // processAudioStream both builds whatever graph the current mode +
         // Settings gain need AND tears down the previous one when switching to
         // a pass-through (its no-graph branch calls cleanupNoiseFilter).
+        let mic: MediaStream = rawMic;
         try {
-            mic = await processAudioStream(mic);
+            mic = await processAudioStream(rawMic);
         } catch (noiseErr) {
-            await this.downgradeToNativeNS(mic, noiseErr);
+            // downgradeToNativeNS swaps a fresh Standard capture into rawMic
+            // in place (and re-arms the device watch on it).
+            await this.downgradeToNativeNS(rawMic, noiseErr);
+            mic = rawMic;
         }
         // The user left voice (or left + rejoined) while the graph was building:
         // installing into a dead/replaced stream would leave a hot mic behind.
@@ -274,6 +351,12 @@ export class MediaManager {
         if (!newAudio) return null;
         newAudio.enabled = wasEnabled;
         this.noMic = false; // we have a real mic again
+
+        // Re-arm the device watch on the fresh capture. rawMic's current audio
+        // track is the real device either way: the original capture when
+        // processing succeeded, or the Standard replacement after a downgrade.
+        const rawTrack = rawMic.getAudioTracks()[0];
+        if (rawTrack) this.armMicDeviceWatch(rawTrack);
 
         if (oldAudio) { oldAudio.stop(); this.localStream.removeTrack(oldAudio); }
         this.localStream.addTrack(newAudio);
