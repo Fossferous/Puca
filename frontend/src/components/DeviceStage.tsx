@@ -43,15 +43,15 @@ import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessag
 import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
 import {
     ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, availableEdgeHops, captureSurfaceSize, caretBandFrom,
-    caretFollowTransform, clampPanTo,
+    caretFollowTransform, carryFractionAcross, clampPanTo,
     initialMonitorRequest, manualCompositeHoldActive,
     monitorRegions, pickFollowTarget,
     remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
     type EdgeHop, type MonitorGeom, type View as ZoomView,
 } from './deviceZoomFollow';
 import {
-    autoKeyboardVerdict, autoKeyboardVerdictAtPress,
-    type AutoKeyboardVerdict, type Press, type SurfaceSize,
+    autoKeyboardVerdict, autoKeyboardVerdictAtPress, suppressedByManualClose,
+    type AutoKeyboardVerdict, type CaretState, type ManualClose, type Press, type SurfaceSize,
 } from './deviceAutoKeyboard';
 import { installBackgroundResume } from './deviceStageResume';
 import { installStallWatchdog } from './deviceStageStall';
@@ -605,6 +605,23 @@ export function DeviceStage() {
     }, []);
     const padWheel = useCallback((dy: number) => { sendRef.current({ t: 'wheel', dy }); }, []);
 
+    /** The keyboard overlay's latched modifiers, registered HERE so the one
+     *  release path covers them: downs ride the gated send; releases go
+     *  straight to the transport — padButton's rule, and the physical keyup
+     *  path's: a modifier latched before "Pause control" must still lift, and
+     *  an unmatched up (the down itself was swallowed by the pause) is a
+     *  no-op on every host backend. Recording both in heldKeysRef is what
+     *  buys blur / backgrounding / session-end release for free. */
+    const overlayHoldKey = useCallback((code: string, down: boolean) => {
+        if (down) {
+            heldKeysRef.current.add(code);
+            sendRef.current({ t: 'key', code, down: true });
+        } else {
+            heldKeysRef.current.delete(code);
+            if (sessionIdRef.current) sendInput(sessionIdRef.current, { t: 'key', code, down: false });
+        }
+    }, []);
+
     // Pointer-lock lifecycle (Game mode). Esc or the browser can drop the lock
     // at any time; track it so relative mode never silently degrades to
     // absolute moves — sending nothing without the lock is deliberate.
@@ -988,6 +1005,11 @@ export function DeviceStage() {
         /** performance.now() at request, for the [zoom-follow] timing line —
          *  the number that says whether the agent-side switch work landed. */
         startedAt: number;
+        /** Runs EXACTLY ONCE, at the first apply after the host confirmed the
+         *  switch — the edge-hop uses it to walk the pointer across the seam.
+         *  Nulled after running; carried into the correction record so a
+         *  confirm that outlives the deadline still gets it. */
+        onConfirmed: (() => void) | null;
     } | null>(null);
     /** Mirror of session.activeMonitor for callbacks that must read it fresh. */
     const activeMonitorRef = useRef<number | null>(null);
@@ -1021,6 +1043,8 @@ export function DeviceStage() {
          *  to build) landed the view correctly but left auto mode 'none' —
          *  and zooming out then never returned to All Displays. */
         becomes: { mode: 'none' } | { mode: 'single'; monitorId: number };
+        /** See pendingFollowRef.onConfirmed — null once it has run. */
+        onConfirmed: (() => void) | null;
     } | null>(null);
 
     const clearPendingFollow = useCallback(() => {
@@ -1050,10 +1074,18 @@ export function DeviceStage() {
         // remap around so the eventual resize re-runs it with the truth.
         followCorrectionRef.current =
             v.videoWidth === p.fromVw && v.videoHeight === p.fromVh
-                ? { expectMonitor: p.expectMonitor, remap: p.remap, until: Date.now() + 5_000, becomes: p.becomes }
+                // onConfirmed: null — it runs below, and the correction's later
+                // re-run must not repeat it (a second pointer seed would yank a
+                // cursor the user may already have moved).
+                ? { expectMonitor: p.expectMonitor, remap: p.remap, until: Date.now() + 5_000, becomes: p.becomes, onConfirmed: null }
                 : null;
+        const confirmed = p.onConfirmed;
         clearPendingFollow();
         setTransform(next);
+        // After the transform: this hook re-seeds the pointer, and the paint
+        // it drives (followPan → applyFollowPan) must clamp against the view
+        // the switch just landed, not the one it left.
+        confirmed?.();
     }, [clearPendingFollow]);
 
     // Apply the pending remap once the switch is CONFIRMED and the intrinsic
@@ -1087,6 +1119,7 @@ export function DeviceStage() {
                 // the way back out is lost.
                 autoFollowRef.current = c.becomes;
                 setTransform(c.remap({ pict, videoW: v.videoWidth, videoH: v.videoHeight }));
+                c.onConfirmed?.();
             }
         }
     }, [videoBox, session?.activeMonitor, session, applyPendingFollow]);
@@ -1182,13 +1215,14 @@ export function DeviceStage() {
         expectMonitor: number,
         becomes: { mode: 'none' } | { mode: 'single'; monitorId: number },
         remap: (to: ZoomView) => { scale: number; x: number; y: number },
+        onConfirmed: (() => void) | null = null,
     ) => {
         const s = session;
         const v = videoRef.current;
         if (!s || !v) return;
         expectedAutoMonitorRef.current = expectMonitor;
         pendingFollowRef.current = {
-            expectMonitor, becomes, remap,
+            expectMonitor, becomes, remap, onConfirmed,
             fromVw: v.videoWidth, fromVh: v.videoHeight,
             startedAt: performance.now(),
             // The fallback covers a same-size switch, where no resize
@@ -1210,6 +1244,7 @@ export function DeviceStage() {
                         remap: p.remap,
                         until: Date.now() + 4_000,
                         becomes: p.becomes,
+                        onConfirmed: p.onConfirmed,
                     };
                 }
                 clearPendingFollow();
@@ -1261,8 +1296,32 @@ export function DeviceStage() {
             fromMon: fromMon as Required<MonitorGeom>,
             toMon: toMon as Required<MonitorGeom>,
             dir: hop.dir, to, maxZoom: MAX_ZOOM,
-        }));
-    }, [session, beginMonitorSwitch]);
+        }), () => {
+            // THE POINTER CROSSES WITH THE VIEW. Every fraction this stage
+            // retains — the trackpad machine's position, lastAimRef, the drawn
+            // cursor — is a fraction OF THE CAPTURED SURFACE, and the switch
+            // just changed which surface that is. Left alone, x≈1.0 ("monitor
+            // A's right edge", where panning-by-cursor put it) silently becomes
+            // "monitor B's right edge": the next finger movement re-centres the
+            // follow camera there and teleports the real pointer with it — the
+            // far side of the screen just hopped onto, undoing the near-edge
+            // landing above. Carrying the DESKTOP point across (clamped onto
+            // B's near edge) makes the camera agree with the landing, and the
+            // one explicit move walks the machine's pointer through the seam
+            // so a click before any movement lands on the screen being viewed.
+            // Confirmation-gated (see applyPendingFollow): a move sent before
+            // the host has re-aimed input would land on the OLD monitor.
+            const aim = lastAimRef.current;
+            if (!aim) return;
+            // A finger already down owns the pointer: resetting under it would
+            // forget (and strand) anything the gesture has pressed.
+            if (gestures.busy()) return;
+            const carried = carryFractionAcross(
+                aim, fromMon as Required<MonitorGeom>, toMon as Required<MonitorGeom>);
+            gestures.reset(carried.x, carried.y);
+            sendRef.current({ t: 'move', x: carried.x, y: carried.y });
+        });
+    }, [session, beginMonitorSwitch, gestures]);
 
     // Trigger evaluation, debounced past the pinch: level-based, so it
     // cannot flap (see deviceZoomFollow.ts for the hysteresis story).
@@ -1500,6 +1559,11 @@ export function DeviceStage() {
         && session?.viewOnly !== true;
     const wantCaretTracking = autoKeyboardWanted || caretFollowActive;
     const lastCaretRef = useRef<CaretReport | null>(null);
+    /** The user's last explicit close of the keyboard — the auto-raise's
+     *  stand-down record (suppressedByManualClose). Cleared on a manual open,
+     *  on a surface change (the tracking cleanup below), and by expiry.
+     *  Declared before the tracking effect that clears it. */
+    const manualKbCloseRef = useRef<ManualClose | null>(null);
     /** The auto-keyboard's report sink; a slot for the same reason as
      *  caretOnAimRef — the subscription below outlives any one render of the
      *  feature and must not be re-created when its closure changes. */
@@ -1540,6 +1604,9 @@ export function DeviceStage() {
             unsub();
             setCaretTracking(sessionActiveId, false);
             lastCaretRef.current = null;
+            // The close record holds caret fractions of THIS surface; after a
+            // monitor switch or session change they compare nothing.
+            manualKbCloseRef.current = null;
         };
     }, [wantCaretTracking, sessionActiveId, activeMonitorForTracking]);
 
@@ -1676,7 +1743,9 @@ export function DeviceStage() {
         press: Press | null;
         raised: number;
         dropped: number;
-    }>({ atPress: null, onReport: null, press: null, raised: 0, dropped: 0 });
+        /** Raises swallowed by the manual-close holdoff. */
+        held: number;
+    }>({ atPress: null, onReport: null, press: null, raised: 0, dropped: 0, held: 0 });
     /** The captured surface in desktop px — what the caret fractions are OF
      *  — so the decision's tolerances can be pixels (a third of one screen,
      *  not a third of a three-screen composite). From the host's announced
@@ -1711,6 +1780,21 @@ export function DeviceStage() {
             pendingAtPressRef.current = now;
             pressRef.current = press;
         };
+        // THE USER'S CLOSE OUTRANKS THE HEURISTIC. A raise whose caret sits on
+        // the line the keyboard was just closed over is the interaction the
+        // close was FOR (see what it covered, tap what is under it) and is
+        // swallowed; a different line — or the holdoff expiring — is fresh
+        // intent, and clears the record on its way through.
+        const throughHoldoff = (caret: CaretState | null): boolean => {
+            if (!caret) { manualKbCloseRef.current = null; return true; }
+            const held = suppressedByManualClose({
+                close: manualKbCloseRef.current, caret,
+                now: Date.now(), surface: surfaceSizeRef.current,
+            });
+            if (held) { autoKbDiagRef.current.held++; return false; }
+            manualKbCloseRef.current = null;
+            return true;
+        };
         pressEndHookRef.current = wasTap => {
             const pending = pendingAtPressRef.current;
             pendingAtPressRef.current = null;
@@ -1720,7 +1804,7 @@ export function DeviceStage() {
                 pressRef.current = null;
                 return;
             }
-            if (pending?.raise) raise();
+            if (pending?.raise && throughHoldoff(lastCaretRef.current)) raise();
         };
         pressCancelHookRef.current = () => {
             if (pressRef.current) autoKbDiagRef.current.dropped++;
@@ -1733,7 +1817,7 @@ export function DeviceStage() {
                 surface: surfaceSizeRef.current,
             });
             autoKbDiagRef.current.onReport = verdict;
-            if (verdict.raise) raise();
+            if (verdict.raise && throughHoldoff(r)) raise();
         };
         return () => {
             pressHookRef.current = null;
@@ -1744,6 +1828,31 @@ export function DeviceStage() {
             pendingAtPressRef.current = null;
         };
     }, [autoKeyboardWanted]);
+
+    /** The toolbar's keyboard button. Three states, not a toggle's two:
+     *  closed → open; open with the IME MEASURABLY down (the back gesture
+     *  dismissed it — the native tier reports the flip) → re-raise, because
+     *  the tap means "give me the keyboard", and making it "close the bar"
+     *  cost a second tap to type again every time; open otherwise → close,
+     *  recording the close so the auto-raise stands down (throughHoldoff).
+     *  "Measurably" excludes the `assumed` tier, which pins visible:true on
+     *  exactly the builds that cannot see a dismissal — there the button
+     *  stays a plain toggle rather than becoming a bar nothing can close. */
+    const onKeyboardButton = useCallback(() => {
+        if (activeMobileMenu !== 'keyboard') {
+            manualKbCloseRef.current = null;
+            setActiveMobileMenu('keyboard');
+            return;
+        }
+        const imeMeasurablyDown = !kbInset.visible
+            && (kbInset.source === 'native' || kbInset.source === 'visual-viewport');
+        if (imeMeasurablyDown) {
+            setKbRaiseToken(t => t + 1);
+            return;
+        }
+        manualKbCloseRef.current = { caret: lastCaretRef.current, at: Date.now() };
+        setActiveMobileMenu(null);
+    }, [activeMobileMenu, kbInset]);
 
     // A resolution or monitor change (<video> 'resize' → videoBox), a fold of the
     // key bar, the keyboard growing for a language switch, or a rotation: the band
@@ -2850,6 +2959,7 @@ export function DeviceStage() {
                     onCloseSession={() => endSession(session.id, 'you disconnected')}
                     activeMenu={activeMobileMenu}
                     setActiveMenu={setActiveMobileMenu}
+                    onKeyboard={onKeyboardButton}
                     onCollapse={() => setToolbarCollapsed(true)}
                     onMinimize={() => setIsMinimized(true)}
                     onHeight={setToolbarH}
@@ -2934,6 +3044,7 @@ export function DeviceStage() {
             {isMobile && activeMobileMenu === 'keyboard' && (
                 <KeyboardOverlay
                     send={send}
+                    holdKey={overlayHoldKey}
                     onHeight={setKeyBarH}
                     raiseToken={kbRaiseToken}
                     // Only a MEASURED "up" (the native plugin, or a real

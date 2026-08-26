@@ -27,7 +27,9 @@ import { describe, it, expect } from 'vitest';
 import {
     ASSUMED_SURFACE, AUTO_KEYBOARD_MOVE_PX, AUTO_KEYBOARD_SAME_FIELD_PX,
     AUTO_KEYBOARD_SAME_LINE_MIN_PX, AUTO_KEYBOARD_WINDOW_MS,
+    AUTO_KEYBOARD_CLOSE_HOLDOFF_MS,
     autoKeyboardVerdict, autoKeyboardVerdictAtPress, caretMoved, isMeasuredCaret,
+    suppressedByManualClose,
     pressNearCaret, pressOnCaretLine,
     type CaretState, type Press,
 } from '../components/deviceAutoKeyboard';
@@ -276,5 +278,43 @@ describe('a different surface', () => {
         const press = { x: 0.6, y: CY, at: T0 };
         expect(verdict({ press, before: { ...CARET, surf: null }, report: { ...CARET, x: 0.6 } }))
             .toEqual({ raise: true, reason: 'moved' });
+    });
+});
+
+describe('the manual-close holdoff', () => {
+    const close = { caret: CARET, at: T0 };
+    const held = (over: Partial<Parameters<typeof suppressedByManualClose>[0]>) =>
+        suppressedByManualClose({ close, caret: CARET, now: NOW, surface: ONE, ...over });
+
+    it('a raise on the line the keyboard was closed over is swallowed', () => {
+        expect(held({})).toBe(true);
+    });
+
+    it('a raise on a DIFFERENT line is fresh intent and passes', () => {
+        // Two line-tolerances below the close caret: clearly another field.
+        const other = { ...CARET, y: CARET.y + (3 * AUTO_KEYBOARD_SAME_LINE_MIN_PX) / 1080 };
+        expect(held({ caret: other })).toBe(false);
+    });
+
+    it('the holdoff expires on its own', () => {
+        expect(held({ now: T0 + AUTO_KEYBOARD_CLOSE_HOLDOFF_MS + 1 })).toBe(false);
+        // POSITIVE CONTROL: one ms inside the window it still holds.
+        expect(held({ now: T0 + AUTO_KEYBOARD_CLOSE_HOLDOFF_MS - 1 })).toBe(true);
+    });
+
+    it('no record, no holdoff', () => {
+        expect(held({ close: null })).toBe(false);
+    });
+
+    it('a close with NO known caret holds the whole window — there is nothing to compare', () => {
+        const blind = { caret: null, at: T0 };
+        expect(held({ close: blind })).toBe(true);
+        const other = { ...CARET, y: 0.9 };
+        expect(held({ close: blind, caret: other })).toBe(true);
+        expect(held({ close: blind, now: T0 + AUTO_KEYBOARD_CLOSE_HOLDOFF_MS + 1 })).toBe(false);
+    });
+
+    it('a NaN close timestamp fails OPEN — it must not hold the feature off forever', () => {
+        expect(held({ close: { caret: CARET, at: NaN } })).toBe(false);
     });
 });

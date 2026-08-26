@@ -18,6 +18,10 @@ interface ToolbarProps {
     /** Fold the bar away. Its own callback, not a menu value: a folded bar
      *  must survive the keyboard panel opening by itself. */
     onCollapse: () => void;
+    /** The keyboard button, when the stage wants more than toggle semantics
+     *  (re-raising an IME the back gesture dismissed instead of closing the
+     *  panel). Falls back to the plain toggle when absent. */
+    onKeyboard?: () => void;
     onMinimize: () => void;
     /** This bar's rendered height in CSS px (home-indicator inset included),
      *  on mount and on every resize, and 0 on unmount. The stage reserves
@@ -29,7 +33,7 @@ interface ToolbarProps {
     onHeight?: (px: number) => void;
 }
 
-export function MobileToolbar({ onCloseSession, activeMenu, setActiveMenu, onCollapse, onMinimize, onHeight }: ToolbarProps) {
+export function MobileToolbar({ onCloseSession, activeMenu, setActiveMenu, onCollapse, onKeyboard, onMinimize, onHeight }: ToolbarProps) {
     const toggleMenu = (menu: string) => {
         setActiveMenu(activeMenu === menu ? null : menu);
     };
@@ -62,9 +66,9 @@ export function MobileToolbar({ onCloseSession, activeMenu, setActiveMenu, onCol
             >
                 <MonitorIcon />
             </button>
-            <button 
-                className={`device-stage-mobile-btn ${activeMenu === 'keyboard' ? 'active' : ''}`} 
-                onClick={() => toggleMenu('keyboard')}
+            <button
+                className={`device-stage-mobile-btn ${activeMenu === 'keyboard' ? 'active' : ''}`}
+                onClick={() => (onKeyboard ?? (() => toggleMenu('keyboard')))()}
                 title="Keyboard"
             >
                 <KeyboardIcon />

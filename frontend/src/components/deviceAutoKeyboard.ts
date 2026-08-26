@@ -123,6 +123,20 @@ export type AutoKeyboardVerdict =
     | { raise: true; reason: 'appeared' | 'moved' | 'near' }
     | { raise: false; reason: 'no-press' | 'expired' | 'hidden' | 'not-a-caret' | 'surface-changed' | 'unchanged' | 'no-caret' | 'elsewhere' | 'other-line' };
 
+/** How long a manual close of the keyboard stands the auto-raise down.
+ *  Long enough to cover the interaction the user closed it FOR (read what the
+ *  keyboard was covering, hit the button underneath it); short enough that a
+ *  field tapped later in the session behaves normally again. */
+export const AUTO_KEYBOARD_CLOSE_HOLDOFF_MS = 5_000;
+
+/** What the stage records when the person explicitly closes the keyboard. */
+export interface ManualClose {
+    /** The caret known at the close, or null when none was. */
+    caret: CaretState | null;
+    /** Date.now() of the close. */
+    at: number;
+}
+
 /** Is `report` a measured caret (as opposed to hidden, a whole-field rect, or
  *  the stage's own pointer stand-in)? */
 export function isMeasuredCaret(report: CaretState): boolean {
@@ -233,4 +247,44 @@ export function autoKeyboardVerdict(input: {
     return pressOnCaretLine(press, report, surface)
         ? { raise: true, reason: 'appeared' }
         : { raise: false, reason: 'other-line' };
+}
+
+/**
+ * Does a recent MANUAL close of the keyboard swallow this raise?
+ *
+ * Closing the keyboard is the one unambiguous "not now" the user can give,
+ * and without this the very next tap near the caret brought it straight back
+ * — the panel covers half the screen, so "close it to see, tap what it was
+ * covering, watch it reopen" was the normal case, not the corner.
+ *
+ * A latch with releases for every kind of fresh intent (the standing rule):
+ *  - TIME — the holdoff expires on its own;
+ *  - PLACE — a raise whose caret is on a DIFFERENT line from the caret at
+ *    the close is a new field, i.e. new intent, and is not held (the caller
+ *    clears the record and raises);
+ *  - ASKING — the caller clears the record when the keyboard is opened by
+ *    hand, and when the surface changes (the fractions compare nothing then).
+ *
+ * When no caret was known at the close there is nothing to compare against,
+ * and the whole window holds: the user just said "not now" and the stage
+ * cannot distinguish the field they said it about.
+ */
+export function suppressedByManualClose(input: {
+    close: ManualClose | null;
+    /** The caret this raise is credited to: the report for an on-report
+     *  raise, the known caret for an at-press one. */
+    caret: CaretState;
+    now: number;
+    surface?: SurfaceSize | null;
+}): boolean {
+    const { close, caret, now, surface } = input;
+    if (!close) return false;
+    // `!(a <= b)` so a NaN timestamp fails OPEN here — an unparseable close
+    // record must not permanently hold the feature off.
+    if (!(now - close.at <= AUTO_KEYBOARD_CLOSE_HOLDOFF_MS) || now < close.at) return false;
+    if (!close.caret || !isMeasuredCaret(close.caret)) return true;
+    // "Same line as the close" via the same tolerance a press uses, with the
+    // candidate caret's centre standing in for the finger.
+    return pressOnCaretLine(
+        { x: caret.x, y: caret.y + caret.h / 2 }, close.caret, surface);
 }
