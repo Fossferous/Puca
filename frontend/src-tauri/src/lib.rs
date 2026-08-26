@@ -1169,6 +1169,16 @@ pub fn run() {
                 if let Some(tunnels) = handle.try_state::<tunnel_cmd::Tunnels>() {
                     tunnel_cmd::close_all(&tunnels);
                 }
+                // A detached display topology must not outlive the app: the
+                // tray Quit path skips the JS teardown that normally restores
+                // it, and "come back when the session ends" has to stay true
+                // for the person at the machine. Quiet when nothing is
+                // detached; the startup marker covers a hard crash.
+                if let Some(dt) =
+                    handle.try_state::<Arc<display_topology::DisplayTopology>>()
+                {
+                    dt.on_session_end();
+                }
             }
         });
 }

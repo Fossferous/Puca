@@ -200,26 +200,39 @@ describe('the two clusters are separate widgets, and stay separate', () => {
     });
 
     it('each saves under its OWN key, and restores from it', () => {
+        // Positions inside the PRE-PAINT clamp for the stacked cluster
+        // (~170px tall): jsdom's 768px viewport bounds a restored top at
+        // 768 - 170 - 4. The drag itself clamps against the measured rect
+        // (all-zero here), so only the restore path sees the estimate.
         mount();
         dragGrip('Move the mouse buttons', 30, 400);
-        dragGrip('Move the scroll buttons', 250, 600);
+        dragGrip('Move the scroll buttons', 250, 500);
         expect(vi.mocked(localStorage.setItem).mock.calls).toEqual([
             [BUTTONS_KEY, JSON.stringify({ left: 30, top: 400 })],
-            [SCROLL_KEY, JSON.stringify({ left: 250, top: 600 })],
+            [SCROLL_KEY, JSON.stringify({ left: 250, top: 500 })],
         ]);
 
         // Next launch: each cluster reads its own entry back.
         vi.mocked(localStorage.getItem).mockImplementation((k: string) =>
             k === BUTTONS_KEY ? JSON.stringify({ left: 30, top: 400 })
-                : k === SCROLL_KEY ? JSON.stringify({ left: 250, top: 600 })
+                : k === SCROLL_KEY ? JSON.stringify({ left: 250, top: 500 })
                     : null);
         act(() => root.unmount());
         root = createRoot(container);
         mount();
         expect(cluster('buttons').style.top).toBe('400px');
-        expect(cluster('scroll').style.top).toBe('600px');
+        expect(cluster('scroll').style.top).toBe('500px');
         expect(cluster('buttons').style.left).toBe('30px');
         expect(cluster('scroll').style.left).toBe('250px');
+    });
+
+    it('a position saved past the stacked cluster’s reach is pulled back on screen', () => {
+        // The taller column must not restore with its buttons hanging below
+        // the viewport: the pre-paint estimate clamps top to 768 - 170 - 4.
+        vi.mocked(localStorage.getItem).mockImplementation((k: string) =>
+            k === BUTTONS_KEY ? JSON.stringify({ left: 30, top: 700 }) : null);
+        mount();
+        expect(cluster('buttons').style.top).toBe('594px');
     });
 
     it('a held button survives dragging the OTHER cluster — one hand keeps working', () => {

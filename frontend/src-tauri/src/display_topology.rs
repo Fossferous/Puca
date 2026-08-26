@@ -14,8 +14,9 @@
 //! stranded with screens Windows thinks are gone has only Settings → Display
 //! to dig themselves out. So:
 //!  - the change is applied WITHOUT `SDC_SAVE_TO_DATABASE` — the CCD database
-//!    keeps the real layout, and restoring is asking Windows to re-extend
-//!    from it;
+//!    keeps the real layout, and restoring is asking Windows to re-apply the
+//!    database's CURRENT topology (SDC_USE_DATABASE_CURRENT — never a forced
+//!    extend, which would un-mirror a clone-mode machine);
 //!  - a MARKER FILE is written before the detach and removed after a
 //!    successful reattach, and app startup restores if it finds one (the
 //!    crash case);
@@ -65,8 +66,8 @@ pub const NOTHING_TO_DETACH: &str = "This machine has only one display — nothi
 pub struct DisplayTopology {
     /// The active configuration captured at detach, for the faithful restore.
     /// None once restored — and None after an app restart, where the marker
-    /// file plus `SDC_TOPOLOGY_EXTEND` (the CCD database still holds the real
-    /// layout) is the restore path instead.
+    /// file plus the database-current restore (the CCD database still holds
+    /// the real layout) is the path instead.
     saved: Mutex<Option<backend::Snapshot>>,
     /// Whether THIS process believes a detach is in force — drives the
     /// session-end restore without a disk read.
@@ -82,12 +83,18 @@ impl DisplayTopology {
             DetachPlan::NoPrimary => return Err(NO_PRIMARY_REFUSAL.to_string()),
             DetachPlan::Detach { keep: _, ref drop } => {
                 // The marker goes down BEFORE the OS call: a crash between the
-                // two restores a topology that never changed (harmless — the
-                // extend restore is what the database already says), where the
-                // other order strands a changed one.
+                // two restores from the database — which still holds the real
+                // layout, because nothing was changed yet — where the other
+                // order strands a changed topology with no marker. A FAILED
+                // call removes it again: an orphaned marker would make the
+                // next startup re-apply the database topology to a desktop
+                // this process never touched.
                 marker::write()?;
                 let dropped = drop.len();
-                backend::apply_detached(&snapshot, drop)?;
+                if let Err(e) = backend::apply_detached(&snapshot, drop) {
+                    marker::remove();
+                    return Err(e);
+                }
                 dropped
             }
         };
@@ -96,9 +103,17 @@ impl DisplayTopology {
         Ok(format!("Disabled {outcome} other display(s) — they come back when the session ends"))
     }
 
-    /// Put every display back. Safe to call when nothing is detached.
+    /// Put every display back. A NO-OP when nothing is detached: "Re-enable
+    /// displays" is an unconditional menu entry, and re-applying even the
+    /// database topology to a desktop this process never touched is a layout
+    /// change nobody asked for (the first version applied SDC_TOPOLOGY_EXTEND
+    /// here, which would have un-mirrored a clone-mode machine on a stray
+    /// tap). The marker check covers a detach a CRASHED run left behind.
     pub fn reattach(&self) -> Result<(), String> {
         let saved = self.saved.lock().unwrap().take();
+        if saved.is_none() && !*self.detached.lock().unwrap() && !marker::present() {
+            return Ok(());
+        }
         let result = backend::restore(saved);
         if result.is_ok() {
             *self.detached.lock().unwrap() = false;
@@ -170,7 +185,7 @@ mod backend {
     use windows::Win32::Devices::Display::{
         GetDisplayConfigBufferSizes, QueryDisplayConfig, SetDisplayConfig,
         DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO,
-        QDC_ONLY_ACTIVE_PATHS, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_TOPOLOGY_EXTEND,
+        QDC_ONLY_ACTIVE_PATHS, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_USE_DATABASE_CURRENT,
         SDC_USE_SUPPLIED_DISPLAY_CONFIG,
     };
     use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -250,8 +265,13 @@ mod backend {
     }
 
     /// Restore: the saved snapshot verbatim when this process still holds it,
-    /// else ask Windows to re-extend from the CCD database (which the detach
-    /// never wrote to).
+    /// else ask Windows to re-apply the CCD database's CURRENT topology for
+    /// the attached displays (which the detach never wrote to).
+    /// SDC_USE_DATABASE_CURRENT, NOT SDC_TOPOLOGY_EXTEND: the extend flag
+    /// SELECTS the extended topology, which would convert a clone/duplicate
+    /// or single-active-display machine to extended — a layout this feature
+    /// promised never to invent. The database-current form reproduces
+    /// whatever mode the user actually had.
     pub fn restore(saved: Option<Snapshot>) -> Result<(), String> {
         unsafe {
             if let Some(snap) = saved {
@@ -262,11 +282,11 @@ mod backend {
                 if rc == 0 {
                     return Ok(());
                 }
-                eprintln!("[display-topology] snapshot restore failed with {rc}; falling back to extend");
+                eprintln!("[display-topology] snapshot restore failed with {rc}; falling back to the database");
             }
-            let rc = SetDisplayConfig(None, None, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+            let rc = SetDisplayConfig(None, None, SDC_APPLY | SDC_USE_DATABASE_CURRENT);
             if rc != 0 {
-                return Err(format!("SetDisplayConfig(extend) failed with {rc}"));
+                return Err(format!("SetDisplayConfig(database restore) failed with {rc}"));
             }
         }
         Ok(())
@@ -297,7 +317,9 @@ mod backend {
     pub struct Snapshot;
     static CALLS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
     static NEXT_PLAN: Mutex<Option<DetachPlan>> = Mutex::new(None);
+    static FAIL_APPLY: Mutex<bool> = Mutex::new(false);
     pub fn set_next_plan(p: DetachPlan) { *NEXT_PLAN.lock().unwrap() = Some(p); }
+    pub fn fail_next_apply() { *FAIL_APPLY.lock().unwrap() = true; }
     pub fn take() -> Vec<&'static str> { std::mem::take(&mut CALLS.lock().unwrap()) }
     pub fn query_active() -> Result<(Snapshot, DetachPlan), String> {
         CALLS.lock().unwrap().push("query");
@@ -307,10 +329,13 @@ mod backend {
     }
     pub fn apply_detached(_s: &Snapshot, _drop: &[usize]) -> Result<(), String> {
         CALLS.lock().unwrap().push("apply");
+        if std::mem::take(&mut *FAIL_APPLY.lock().unwrap()) {
+            return Err("SetDisplayConfig(detach) failed with 87".to_string());
+        }
         Ok(())
     }
     pub fn restore(saved: Option<Snapshot>) -> Result<(), String> {
-        CALLS.lock().unwrap().push(if saved.is_some() { "restore-snapshot" } else { "restore-extend" });
+        CALLS.lock().unwrap().push(if saved.is_some() { "restore-snapshot" } else { "restore-database" });
         Ok(())
     }
 }
@@ -398,7 +423,7 @@ mod tests {
         // database (it has no snapshot) and clears it.
         marker::write().unwrap();
         t.restore_if_marked();
-        assert_eq!(backend::take(), vec!["restore-extend"]);
+        assert_eq!(backend::take(), vec!["restore-database"]);
         assert!(!marker::present());
     }
 
@@ -412,9 +437,25 @@ mod tests {
         t.reattach().unwrap();
         assert_eq!(backend::take(), vec!["restore-snapshot"]);
         assert!(!marker::present());
-        // Reattach with nothing detached still restores (idempotent lever for
-        // the user), from the database.
+        // Reattach with nothing detached is a NO-OP: re-applying even the
+        // database topology to a desktop this process never touched is a
+        // layout change nobody asked for (a stray tap of "Re-enable displays"
+        // must not un-mirror a clone-mode machine).
         t.reattach().unwrap();
-        assert_eq!(backend::take(), vec!["restore-extend"]);
+        assert_eq!(backend::take(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_failed_detach_cleans_its_marker_up() {
+        let _s = serial();
+        let t = DisplayTopology::default();
+        backend::take();
+        backend::fail_next_apply();
+        assert!(t.detach_others().is_err());
+        // An orphaned marker would make the NEXT startup re-apply the
+        // database topology to a desktop this run never changed.
+        assert!(!marker::present());
+        t.on_session_end();
+        assert_eq!(backend::take(), vec!["query", "apply"], "and nothing restores");
     }
 }

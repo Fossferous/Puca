@@ -108,7 +108,19 @@ function usePadPos(storageKey: string, ref: React.RefObject<HTMLDivElement | nul
         const reclamp = () => {
             setPos(p => {
                 const rect = ref.current?.getBoundingClientRect();
-                if (!p || !rect) return p;
+                if (!rect) return p;
+                if (!p) {
+                    // The CSS default is bottom-anchored and predates the
+                    // stacked column: on a short landscape viewport the taller
+                    // cluster can start ABOVE the screen with its grip — the
+                    // only way to move it — clipped off the top. Adopt a
+                    // clamped position only when the measured default actually
+                    // leaves the viewport (rect.height > 0 keeps jsdom, which
+                    // measures everything as zero at 0,0, on the CSS default).
+                    return rect.height > 0 && rect.top < 4
+                        ? clampTo({ left: rect.left, top: rect.top }, rect)
+                        : p;
+                }
                 const c = clampTo(p, rect);
                 return c.left === p.left && c.top === p.top ? p : c;
             });

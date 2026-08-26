@@ -240,6 +240,11 @@ describe('the monitor-hop offer', () => {
      * sent earlier would land on the old monitor.
      */
     it('confirming the hop seeds the pointer just inside the shared edge — and not before', async () => {
+        // TRACKPAD mode: the seed exists for the mode where the camera
+        // follows the pointer, and stands down everywhere else (in touch
+        // mode taps aim absolutely and the seed would only pan the camera
+        // to the stale tap point).
+        h.storage.set('device-stage-mouse-mode', 'trackpad');
         await mount(1);
         await zoomToEdge('left');
         // Give the stage an aim: a press on the picture sends a move first

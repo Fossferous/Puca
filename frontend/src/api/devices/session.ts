@@ -1234,8 +1234,14 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     // live session is holding (review W4-N3). Best-effort: on a phone the
     // invoke does not exist and the catch answers it.
     if (s.role === 'host' && owns) {
+        // The topology restore is for the LAST host session out: one viewer
+        // dropping must not re-extend the desktop under another session that
+        // is still working on it. Counted here, at the teardown, because the
+        // shell cannot see the session map.
+        const otherHostLive = [...sessions.values()].some(o =>
+            o !== s && o.role === 'host' && o.phase !== 'ended');
         void import('./hostBackend')
-            .then(m => m.shellDisplayPowerSessionEnd())
+            .then(m => m.shellDisplayPowerSessionEnd(!otherHostLive))
             .catch(() => undefined);
     }
     clearConnectDeadline(s);
@@ -4565,6 +4571,15 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                         // waits 5s to distinguish "done" from "old host
                         // ignored it": success produces no other signal.
                         const detail = await backend.powerAction(action);
+                        // The ack goes FIRST for the topology pair: the agent
+                        // rebuild below spends up to 5s per stream — the exact
+                        // length of the controller's POWER_ACK_TIMEOUT_MS — so
+                        // acking after it guaranteed the false "did not
+                        // respond" line about an action that succeeded.
+                        await sendSignal(s, {
+                            kind: 'power-ack', action,
+                            ...(typeof detail === 'string' && detail ? { detail } : {}),
+                        });
                         if (TOPOLOGY_POWER_ACTIONS.includes(action)) {
                             // The desktop just changed shape under every live
                             // capture: the agent rebuilds (fresh duplication,
@@ -4583,19 +4598,20 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                             // The session record must follow the agent's own
                             // remap rule: a single monitor that no longer
                             // exists lands on output 0; All Displays stays.
+                            // MEMBERSHIP of the announced ids, not the list
+                            // LENGTH: the agent's enumeration can have gaps
+                            // (an undescribable output is omitted without
+                            // renumbering), so an id can be valid past the
+                            // length and vice versa.
                             try {
                                 const fresh = await backend.listMonitors();
                                 if (s.monitor !== null && s.monitor !== ALL_DISPLAYS
-                                    && s.monitor >= fresh.length) {
+                                    && !fresh.some((m, i) => (m.id ?? i) === s.monitor)) {
                                     s.monitor = 0;
                                 }
                             } catch { /* the announce below degrades the same way */ }
                             void announceMonitors(s, { evenIfSingle: true });
                         }
-                        await sendSignal(s, {
-                            kind: 'power-ack', action,
-                            ...(typeof detail === 'string' && detail ? { detail } : {}),
-                        });
                         return;
                     }
                     if (action === 'shutdown') {

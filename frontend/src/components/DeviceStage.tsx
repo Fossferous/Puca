@@ -329,6 +329,10 @@ export function DeviceStage() {
     // a tablet used as a whiteboard and the wrong one for driving a desktop, so
     // it stays available and stops being what a phone lands in.
     const [isMouseMode, setIsMouseMode] = useState(readMouseModePreference);
+    /** Mirror for callbacks that outlive a render (the monitor-hop's
+     *  confirmation seed fires seconds after the tap that created it). */
+    const isMouseModeRef = useRef(isMouseMode);
+    useEffect(() => { isMouseModeRef.current = isMouseMode; }, [isMouseMode]);
     const [showVirtualMouse, setShowVirtualMouse] = useState(readVirtualMousePreference);
     /** Where THIS end draws the pointer, in picture-relative coordinates —
      *  the same numbers that steer the camera, written in the same frame. */
@@ -1311,11 +1315,20 @@ export function DeviceStage() {
             // so a click before any movement lands on the screen being viewed.
             // Confirmation-gated (see applyPendingFollow): a move sent before
             // the host has re-aimed input would land on the OLD monitor.
+            // TRACKPAD MODE ONLY. In touch mode the camera never follows the
+            // pointer and every tap aims absolutely, so the stale-fraction
+            // bug this seed kills cannot happen there — while the seed itself
+            // WOULD pan the camera (gestures.reset emits sink.cursor, and
+            // applyFollowPan does not check the mode) toward the last tap,
+            // yanking the view off the remap's landing.
+            if (!isMouseModeRef.current) return;
             const aim = lastAimRef.current;
             if (!aim) return;
             // A finger already down owns the pointer: resetting under it would
-            // forget (and strand) anything the gesture has pressed.
-            if (gestures.busy()) return;
+            // forget (and strand) anything the gesture has pressed. A held
+            // virtual-mouse button is the same fact by another route — the
+            // seeded move would drag whatever it is holding across the seam.
+            if (gestures.busy() || padPressedRef.current.size > 0) return;
             const carried = carryFractionAcross(
                 aim, fromMon as Required<MonitorGeom>, toMon as Required<MonitorGeom>);
             gestures.reset(carried.x, carried.y);
@@ -1837,19 +1850,32 @@ export function DeviceStage() {
      *  recording the close so the auto-raise stands down (throughHoldoff).
      *  "Measurably" excludes the `assumed` tier, which pins visible:true on
      *  exactly the builds that cannot see a dismissal — there the button
-     *  stays a plain toggle rather than becoming a bar nothing can close. */
+     *  stays a plain toggle rather than becoming a bar nothing can close.
+     *
+     *  ONE re-raise attempt per dismissal, then the next tap closes: a
+     *  hardware keyboard or DeX pins the NATIVE tier at visible:false too
+     *  (showSoftInput does nothing there), and an unconditional re-raise
+     *  would make this the other bar nothing can close. The attempt flag
+     *  clears whenever the IME actually comes up. */
+    const kbButtonTriedRaiseRef = useRef(false);
+    useEffect(() => {
+        if (kbInset.visible) kbButtonTriedRaiseRef.current = false;
+    }, [kbInset.visible]);
     const onKeyboardButton = useCallback(() => {
         if (activeMobileMenu !== 'keyboard') {
             manualKbCloseRef.current = null;
+            kbButtonTriedRaiseRef.current = false;
             setActiveMobileMenu('keyboard');
             return;
         }
         const imeMeasurablyDown = !kbInset.visible
             && (kbInset.source === 'native' || kbInset.source === 'visual-viewport');
-        if (imeMeasurablyDown) {
+        if (imeMeasurablyDown && !kbButtonTriedRaiseRef.current) {
+            kbButtonTriedRaiseRef.current = true;
             setKbRaiseToken(t => t + 1);
             return;
         }
+        kbButtonTriedRaiseRef.current = false;
         manualKbCloseRef.current = { caret: lastCaretRef.current, at: Date.now() };
         setActiveMobileMenu(null);
     }, [activeMobileMenu, kbInset]);

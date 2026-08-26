@@ -193,16 +193,24 @@ pub async fn power_action(
 
 /// Session teardown hook. Display POWER stays as set (the user decision
 /// display_power.rs documents: stop the keep-off ticker, relight nothing);
-/// display TOPOLOGY restores unconditionally (display_topology.rs's header:
-/// a detached topology is not self-healing and must not outlive the session
-/// that asked for it). The restore is a blocking SetDisplayConfig, so it
-/// leaves the webview thread (same W4-N2 rule as power_action).
+/// display TOPOLOGY restores when the caller says this was the LAST live
+/// host session (display_topology.rs's header: a detached topology is not
+/// self-healing and must not outlive the sessions that asked for it — but
+/// one viewer dropping must not re-extend the desktop under another that is
+/// still working on it). `restore_topology` defaults TRUE so an older webapp
+/// that passes nothing keeps the safe behaviour. The restore is a blocking
+/// SetDisplayConfig, so it leaves the webview thread (same W4-N2 rule as
+/// power_action).
 #[tauri::command]
 pub fn display_power_session_end(
     state: tauri::State<'_, std::sync::Arc<crate::display_power::DisplayPower>>,
     topology: tauri::State<'_, std::sync::Arc<crate::display_topology::DisplayTopology>>,
+    restore_topology: Option<bool>,
 ) {
     state.inner().on_session_end();
+    if restore_topology == Some(false) {
+        return;
+    }
     let dt = topology.inner().clone();
     std::thread::Builder::new()
         .name("display-topology-restore".into())

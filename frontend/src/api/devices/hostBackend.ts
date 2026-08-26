@@ -238,11 +238,14 @@ export async function shellPowerAction(
 }
 
 /** Session teardown: stop the display keep-off ticker, relight NOTHING —
- *  the stay-as-set rule (display_power.rs). No-op on a shell without the
- *  command (webview host, pre-W4 installer): the catch answers it. */
-export async function shellDisplayPowerSessionEnd(): Promise<void> {
+ *  the stay-as-set rule (display_power.rs) — and, when this was the LAST
+ *  live host session, put a detached display topology back
+ *  (display_topology.rs: topology is deliberately NOT stay-as-set). No-op on
+ *  a shell without the command (webview host, pre-W4 installer): the catch
+ *  answers it. */
+export async function shellDisplayPowerSessionEnd(restoreTopology = true): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('display_power_session_end').catch(() => undefined);
+    await invoke('display_power_session_end', { restoreTopology }).catch(() => undefined);
 }
 
 let cached: HostBackend | null = null;

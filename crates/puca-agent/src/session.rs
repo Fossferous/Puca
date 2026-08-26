@@ -1285,6 +1285,24 @@ impl Agent {
                     } else {
                         0
                     };
+                    // The same cross-session refusal SetMonitor enforces —
+                    // without it, two sessions remapped onto the one surviving
+                    // output would fight over an exclusive duplication and the
+                    // loser's rebuild could only fail. A skipped session keeps
+                    // its books and its (dead) capture; the reattach's next
+                    // topology poke revives it once its screen exists again.
+                    let wanted = reservation_keys(target, &puca_capture::outputs());
+                    if wanted.iter().any(|k| {
+                        self.monitor_reservations
+                            .get(k)
+                            .is_some_and(|held| held.session_id != session_id)
+                    }) {
+                        eprintln!(
+                            "[agent] topology change: session {session_id} not retargeted to \
+                             monitor {target} — another session streams it"
+                        );
+                        continue;
+                    }
                     let Some(stream) = self.streams.get(&session_id) else { continue };
                     let generation = stream.generation;
                     match stream.rebuild_capture_sync(target, std::time::Duration::from_secs(5)) {

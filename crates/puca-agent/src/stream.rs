@@ -292,7 +292,14 @@ impl Stream {
             Ok(res) => res.map_err(|e| format!("{e:?}")),
             Err(_) => {
                 cancelled.store(true, Ordering::Relaxed);
-                Err("timeout".to_string())
+                // The loop may be mid-build; a commit that lands a beat late
+                // must still move the caller's books (reservations, session
+                // record, input aim) — switch_monitor_sync's rule, for the
+                // same drift reason.
+                match rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(res) => res.map_err(|e| format!("{e:?}")),
+                    Err(_) => Err("timeout".to_string()),
+                }
             }
         }
     }
@@ -1287,7 +1294,12 @@ fn run(
                     }
                 }
                 StreamCommand::RebuildCapture { generation: gen, deadline, cancelled, monitor: target_monitor, reply_tx } => {
-                    if capture.is_none() {
+                    // Gated on the MODE, not on holding a capture: a VIDEO
+                    // stream whose previous rebuild failed sits at capture ==
+                    // None, and this command is exactly its way back (the
+                    // reattach fires another topology poke). Only a data-only
+                    // session genuinely has no screen to rebuild.
+                    if matches!(mode, StreamMode::DataOnly) {
                         let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(
                             "this session has no screen to rebuild".to_string(),
                         )));
@@ -1317,6 +1329,15 @@ fn run(
                         capture = None;
                         build(target_monitor)
                             .map_err(|second| format!("{first}; after releasing the old capture: {second}"))
+                    }).or_else(|both| {
+                        // Right after SetDisplayConfig the desktop is still
+                        // recomposing and DXGI can answer with exactly the
+                        // transient states the capture layer documents
+                        // (is_transient_display_state); one short beat is
+                        // usually all they need, and this thread has nothing
+                        // to pump while its capture is gone anyway.
+                        std::thread::sleep(Duration::from_millis(250));
+                        build(target_monitor).map_err(|third| format!("{both}; after 250ms: {third}"))
                     });
                     match fresh {
                         Ok(next) => {
@@ -1347,9 +1368,12 @@ fn run(
                         }
                         Err(e) => {
                             // The old capture may be gone (released for the
-                            // retry). The picture freezes until the controller
-                            // retries or switches screens — loud, not silent.
-                            eprintln!("[stream] topology rebuild FAILED, the picture may be frozen: {e}");
+                            // retry) and the pump skips while it is None — but
+                            // NOT permanently: the mode-based guard above lets
+                            // the next RebuildCapture (the reattach's topology
+                            // poke fires one) revive this stream. Loud, not
+                            // silent, in the meantime.
+                            eprintln!("[stream] topology rebuild FAILED, the picture is frozen until the next rebuild: {e}");
                             let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(e)));
                         }
                     }
