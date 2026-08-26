@@ -64,21 +64,27 @@ function clampTo(p: PadPos, rect: { width: number; height: number }): PadPos {
     };
 }
 
-function readSavedPos(key: string): PadPos | null {
+function readSavedPos(key: string, estimate: { width: number; height: number }): PadPos | null {
     try {
         const raw = localStorage.getItem(key);
         if (!raw) return null;
         const p = JSON.parse(raw) as PadPos;
         if (typeof p.left !== 'number' || typeof p.top !== 'number') return null;
         // Rough pre-paint clamp only — the layout effect below re-clamps
-        // against the measured cluster the moment it exists. The estimate is
-        // the STACKED buttons cluster (grip + three 46px buttons), the taller
-        // of the two.
-        return clampTo(p, { width: 60, height: 170 });
+        // against the measured cluster the moment it exists. Per cluster,
+        // because the two are different shapes now: the button ROW is wide
+        // and short, the scroll COLUMN narrow and tall, and one shared guess
+        // over-clamps whichever it does not describe.
+        return clampTo(p, estimate);
     } catch {
         return null;
     }
 }
+
+/** Grip strip + three 46px buttons in a row, padding included. */
+const BUTTONS_ESTIMATE = { width: 190, height: 60 };
+/** Grip cap + two 46px buttons in a column. */
+const SCROLL_ESTIMATE = { width: 60, height: 140 };
 
 /** Capture without trusting it: jsdom has no setPointerCapture at all, and a
  *  real engine THROWS (InvalidPointerId) when the pointer was already
@@ -98,8 +104,12 @@ function capture(e: React.PointerEvent): void {
  * from React state — state commits lag the event, so a quick flick used to
  * save nothing (or the previous frame's spot) depending on when the up landed.
  */
-function usePadPos(storageKey: string, ref: React.RefObject<HTMLDivElement | null>) {
-    const [pos, setPos] = useState<PadPos | null>(() => readSavedPos(storageKey));
+function usePadPos(
+    storageKey: string,
+    ref: React.RefObject<HTMLDivElement | null>,
+    estimate: { width: number; height: number },
+) {
+    const [pos, setPos] = useState<PadPos | null>(() => readSavedPos(storageKey, estimate));
 
     // Keep it reachable across rotation and resize: a portrait position near
     // the bottom is past the edge of a landscape viewport, and with the grip
@@ -184,8 +194,8 @@ export function DeviceStageVirtualMouse({ onButton, onWheel }: {
     // those genuinely is a bug worth catching.
     const buttonsRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const buttonsPad = usePadPos(BUTTONS_POS_KEY, buttonsRef);
-    const scrollPad = usePadPos(SCROLL_POS_KEY, scrollRef);
+    const buttonsPad = usePadPos(BUTTONS_POS_KEY, buttonsRef, BUTTONS_ESTIMATE);
+    const scrollPad = usePadPos(SCROLL_POS_KEY, scrollRef, SCROLL_ESTIMATE);
 
     // Live mirrors so the unmount cleanup releases through the CURRENT
     // callbacks, not the ones captured when the pad first mounted.

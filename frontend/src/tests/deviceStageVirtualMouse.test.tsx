@@ -226,13 +226,19 @@ describe('the two clusters are separate widgets, and stay separate', () => {
         expect(cluster('scroll').style.left).toBe('250px');
     });
 
-    it('a position saved past the stacked cluster’s reach is pulled back on screen', () => {
-        // The taller column must not restore with its buttons hanging below
-        // the viewport: the pre-paint estimate clamps top to 768 - 170 - 4.
+    it('a position saved past the scroll column’s reach is pulled back on screen', () => {
+        // The tall SCROLL column must not restore with its buttons hanging
+        // below the viewport: its pre-paint estimate clamps top to
+        // 768 - 140 - 4. The button ROW's estimate is short and wide, so the
+        // same saved top survives there — per-cluster estimates, not one
+        // shared guess.
         vi.mocked(localStorage.getItem).mockImplementation((k: string) =>
-            k === BUTTONS_KEY ? JSON.stringify({ left: 30, top: 700 }) : null);
+            k === SCROLL_KEY ? JSON.stringify({ left: 900, top: 700 })
+                : k === BUTTONS_KEY ? JSON.stringify({ left: 30, top: 700 })
+                    : null);
         mount();
-        expect(cluster('buttons').style.top).toBe('594px');
+        expect(cluster('scroll').style.top).toBe('624px');
+        expect(cluster('buttons').style.top).toBe('700px');
     });
 
     it('a held button survives dragging the OTHER cluster — one hand keeps working', () => {

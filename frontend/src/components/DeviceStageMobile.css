@@ -438,16 +438,15 @@
    over the line being read. Each half now parks in its own corner, and the
    two straddle the content instead of crossing it. Defaults put buttons and
    scroll under opposite thumbs; either can be dragged anywhere. */
-/* STACKED, not side by side. A row of buttons is a band across the picture —
-   the exact shape the split was escaping — and remote content is almost
-   always wider than it is tall, so the scarce dimension is width. A column
-   hugs the screen edge instead, and it puts scroll-up physically ABOVE
-   scroll-down, which the side-by-side chevrons never managed to mean. */
+/* ORIENTATION IS PER CLUSTER, and the user decided both. The L/M/R buttons
+   stay LEFT-TO-RIGHT — that is a mouse's own order, and a vertical column
+   broke the mapping ("lmr mouse should remain left to right"). The scroll
+   pair IS stacked: up physically above down, which the side-by-side
+   chevrons never managed to mean. */
 .device-stage-virtual-mouse {
     position: fixed;
     bottom: 190px;
     display: flex;
-    flex-direction: column;
     align-items: stretch;
     gap: 4px;
     padding: 6px;
@@ -461,13 +460,13 @@
     -webkit-user-select: none;
 }
 
-/* The grip caps the column: full-width, so the drag target is as wide as the
-   cluster rather than a 24px sliver beside it. */
+/* The grip leads its cluster: a 24px strip on the left of the button row,
+   stretched to the row's height by align-items: stretch. */
 .vm-grip {
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 24px;
+    width: 24px;
     color: #9aa0a6;
     cursor: grab;
     touch-action: none;
@@ -500,7 +499,16 @@
 }
 
 .vm-cluster-buttons { left: 12px; }
-.vm-cluster-scroll { right: 12px; }
+.vm-cluster-scroll {
+    right: 12px;
+    flex-direction: column;
+}
+/* In the column the grip caps the TOP instead: full-width, its height its
+   own (nothing on the cross axis sets it there). */
+.vm-cluster-scroll .vm-grip {
+    width: auto;
+    height: 24px;
+}
 
 .device-stage-minimized {
     position: fixed;
