@@ -2645,6 +2645,14 @@ export function DeviceStage() {
                                     ['displays_off', 'Turn displays off'],
                                     ['displays_off_keep_primary', 'Off, keep primary'],
                                     ['displays_on', 'Turn displays on'],
+                                    // The topology pair: DISABLE removes the
+                                    // non-primary displays from the desktop
+                                    // (windows re-arrange onto the primary)
+                                    // rather than darkening panels; restored
+                                    // by the second entry, by the session
+                                    // ending, or by the host app restarting.
+                                    ['displays_detach_others', 'Disable other displays'],
+                                    ['displays_reattach', 'Re-enable displays'],
                                 ] as const).map(([action, label]) => (
                                     <button
                                         key={action}

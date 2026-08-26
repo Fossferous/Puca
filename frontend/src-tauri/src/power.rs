@@ -40,6 +40,13 @@ pub enum PowerAction {
     DisplaysOffKeepPrimary,
     /// Ticker off, DDC wake, OS wake, input nudge.
     DisplaysOn,
+    /// TEMPORARILY remove the non-primary displays from the desktop topology
+    /// (display_topology.rs) — windows re-arrange onto the primary and the
+    /// pointer cannot leave it. Restored on reattach, session end, or the
+    /// next app start (crash marker); never written to the CCD database.
+    DisplaysDetachOthers,
+    /// Put the detached displays back.
+    DisplaysReattach,
 }
 
 /// Why a power action could not be performed.
@@ -109,11 +116,14 @@ mod imp {
 
     pub fn perform(action: PowerAction) -> Result<(), PowerError> {
         match action {
-            // Routed to display_power by the command layer before this is
-            // ever called; reaching here is a routing bug, not an OS state.
+            // Routed to display_power / display_topology by the command layer
+            // before this is ever called; reaching here is a routing bug, not
+            // an OS state.
             PowerAction::DisplaysOff
             | PowerAction::DisplaysOffKeepPrimary
-            | PowerAction::DisplaysOn => Err(PowerError::Failed(
+            | PowerAction::DisplaysOn
+            | PowerAction::DisplaysDetachOthers
+            | PowerAction::DisplaysReattach => Err(PowerError::Failed(
                 "display actions are routed to display_power, not perform()".into(),
             )),
             PowerAction::Lock => unsafe {
@@ -156,9 +166,11 @@ mod imp {
 #[tauri::command]
 pub async fn power_action(
     state: tauri::State<'_, std::sync::Arc<crate::display_power::DisplayPower>>,
+    topology: tauri::State<'_, std::sync::Arc<crate::display_topology::DisplayTopology>>,
     action: PowerAction,
 ) -> Result<Option<String>, String> {
     let dp = state.inner().clone();
+    let dt = topology.inner().clone();
     tauri::async_runtime::spawn_blocking(move || match action {
         PowerAction::Lock | PowerAction::Shutdown => {
             imp::perform(action).map_err(|e| e.to_string()).map(|()| None)
@@ -166,18 +178,40 @@ pub async fn power_action(
         PowerAction::DisplaysOff => dp.displays_off().map(|()| None),
         PowerAction::DisplaysOffKeepPrimary => dp.displays_off_keep_primary().map(Some),
         PowerAction::DisplaysOn => dp.displays_on().map(|()| None),
+        PowerAction::DisplaysDetachOthers => {
+            // A detach makes any keep-off ticker moot — and a ticker still
+            // broadcasting SC_MONITORPOWER over the one remaining display
+            // would keep the screen being streamed dark.
+            dp.disengage();
+            dt.detach_others().map(Some)
+        }
+        PowerAction::DisplaysReattach => dt.reattach().map(|()| None),
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// Session teardown hook: stay-as-set (stop the keep-off ticker, relight
-/// nothing) — the user decision display_power.rs documents.
+/// Session teardown hook. Display POWER stays as set (the user decision
+/// display_power.rs documents: stop the keep-off ticker, relight nothing);
+/// display TOPOLOGY restores unconditionally (display_topology.rs's header:
+/// a detached topology is not self-healing and must not outlive the session
+/// that asked for it). The restore is a blocking SetDisplayConfig, so it
+/// leaves the webview thread (same W4-N2 rule as power_action).
 #[tauri::command]
 pub fn display_power_session_end(
     state: tauri::State<'_, std::sync::Arc<crate::display_power::DisplayPower>>,
+    topology: tauri::State<'_, std::sync::Arc<crate::display_topology::DisplayTopology>>,
 ) {
     state.inner().on_session_end();
+    let dt = topology.inner().clone();
+    std::thread::Builder::new()
+        .name("display-topology-restore".into())
+        .spawn(move || dt.on_session_end())
+        .map(|_| ())
+        .unwrap_or_else(|e| {
+            eprintln!("[display-topology] could not spawn the restore thread ({e}); restoring inline");
+            topology.inner().on_session_end();
+        });
 }
 
 // There is deliberately NO `power_supported` probe. The controller cannot ask
@@ -215,6 +249,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PowerAction>("\"displays_on\"").unwrap(),
             PowerAction::DisplaysOn
+        );
+        assert_eq!(
+            serde_json::from_str::<PowerAction>("\"displays_detach_others\"").unwrap(),
+            PowerAction::DisplaysDetachOthers
+        );
+        assert_eq!(
+            serde_json::from_str::<PowerAction>("\"displays_reattach\"").unwrap(),
+            PowerAction::DisplaysReattach
         );
         assert!(serde_json::from_str::<PowerAction>("\"restart\"").is_err());
         assert!(serde_json::from_str::<PowerAction>("\"Lock\"").is_err());

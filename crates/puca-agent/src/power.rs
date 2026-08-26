@@ -35,6 +35,11 @@ pub enum PowerAction {
     DisplaysOff,
     DisplaysOffKeepPrimary,
     DisplaysOn,
+    /// Topology detach/reattach — refused before sign-in (see `plan`):
+    /// re-arranging the desktop layout of a machine nobody has signed into
+    /// is the keep-primary reasoning with higher stakes.
+    DisplaysDetachOthers,
+    DisplaysReattach,
 }
 
 impl PowerAction {
@@ -45,6 +50,8 @@ impl PowerAction {
             "displays_off" => Some(Self::DisplaysOff),
             "displays_off_keep_primary" => Some(Self::DisplaysOffKeepPrimary),
             "displays_on" => Some(Self::DisplaysOn),
+            "displays_detach_others" => Some(Self::DisplaysDetachOthers),
+            "displays_reattach" => Some(Self::DisplaysReattach),
             _ => None,
         }
     }
@@ -73,6 +80,10 @@ pub enum Plan {
 pub const KEEP_PRIMARY_REFUSAL: &str =
     "turning off only some displays is not available before sign-in";
 
+/// Same shape for the topology pair.
+pub const TOPOLOGY_REFUSAL: &str =
+    "changing the display layout is not available before sign-in";
+
 /// Pure: the sign-in-screen host is by definition on a locked console.
 pub fn plan(action: PowerAction) -> Plan {
     match action {
@@ -84,6 +95,11 @@ pub fn plan(action: PowerAction) -> Plan {
         // monitor firmware for a machine nobody has signed into — the
         // narrow value does not carry the surface. Honest refusal instead.
         PowerAction::DisplaysOffKeepPrimary => Plan::Refuse(KEEP_PRIMARY_REFUSAL),
+        // Re-arranging the desktop of a machine nobody has signed into is
+        // that reasoning with higher stakes — and there is no signed-in
+        // shell to restore it on session end.
+        PowerAction::DisplaysDetachOthers | PowerAction::DisplaysReattach =>
+            Plan::Refuse(TOPOLOGY_REFUSAL),
     }
 }
 
@@ -197,6 +213,11 @@ mod tests {
             Some(PowerAction::DisplaysOffKeepPrimary)
         );
         assert_eq!(PowerAction::parse("displays_on"), Some(PowerAction::DisplaysOn));
+        assert_eq!(
+            PowerAction::parse("displays_detach_others"),
+            Some(PowerAction::DisplaysDetachOthers)
+        );
+        assert_eq!(PowerAction::parse("displays_reattach"), Some(PowerAction::DisplaysReattach));
         assert_eq!(PowerAction::parse("Lock"), None);
         assert_eq!(PowerAction::parse("restart"), None);
         assert_eq!(PowerAction::parse("displaysoff"), None);
@@ -219,6 +240,14 @@ mod tests {
         assert_eq!(
             KEEP_PRIMARY_REFUSAL,
             "turning off only some displays is not available before sign-in"
+        );
+        // The topology pair is refused before sign-in the same way, wording
+        // pinned so the controller-facing copy cannot drift.
+        assert_eq!(plan(PowerAction::DisplaysDetachOthers), Plan::Refuse(TOPOLOGY_REFUSAL));
+        assert_eq!(plan(PowerAction::DisplaysReattach), Plan::Refuse(TOPOLOGY_REFUSAL));
+        assert_eq!(
+            TOPOLOGY_REFUSAL,
+            "changing the display layout is not available before sign-in"
         );
     }
 

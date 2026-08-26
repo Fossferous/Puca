@@ -78,6 +78,7 @@ describe('More menu', () => {
         expect(labels()).toEqual([
             'Browse files', 'Send clipboard', 'Insert Ctrl + Alt + Del', 'Alt + Tab', 'Alt + F4',
             'Turn displays off', 'Displays off, keep primary', 'Turn displays on',
+            'Disable other displays', 'Re-enable displays',
             'Lock', 'Shut down…',
         ]);
     });

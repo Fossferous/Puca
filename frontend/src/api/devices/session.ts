@@ -757,12 +757,17 @@ function drainPreKeyFrames(s: Internal): void {
  * multi-monitor machine, came up with no screen switcher at all: the one
  * configuration where remote control most needs one.
  */
-async function announceMonitors(s: Internal): Promise<void> {
+async function announceMonitors(s: Internal, opts?: { evenIfSingle?: boolean }): Promise<void> {
     if (s.phase === 'ended' || sessions.get(s.id) !== s) return;
     try {
         const backend = await getHostBackend();
         const monitors = await backend.listMonitors();
-        if (monitors.length > 1) {
+        // A single-screen machine normally offers no switcher at all — but
+        // after a TOPOLOGY change the controller is holding a list of screens
+        // that no longer exist, and the one-entry announce is what retires it
+        // (the switcher, the edge-hop chips and the zoom-follow maths all
+        // read that list).
+        if (monitors.length > 1 || (opts?.evenIfSingle && monitors.length === 1)) {
             await sendSignal(s, {
                 kind: 'monitors',
                 monitors: monitors.map((m, i) => ({
@@ -1947,14 +1952,25 @@ export function setPrivacyMode(sessionId: string, enabled: boolean): void {
 }
 
 /** What a controller may ask the host to do to the machine itself. The
- *  display trio (W4) spells snake_case on the wire — pinned on both Rust
- *  receiving ends (power.rs serde test, agent parse test). */
+ *  display trio (W4) and the topology pair spell snake_case on the wire —
+ *  pinned on both Rust receiving ends (power.rs serde test, agent parse
+ *  test). The topology pair DETACHES the non-primary displays from the
+ *  desktop (windows re-arrange onto the primary; the pointer cannot leave
+ *  it) rather than darkening panels; the host restores on reattach, session
+ *  end, and app start. */
 export type PowerAction =
     | 'lock' | 'shutdown'
-    | 'displays_off' | 'displays_off_keep_primary' | 'displays_on';
+    | 'displays_off' | 'displays_off_keep_primary' | 'displays_on'
+    | 'displays_detach_others' | 'displays_reattach';
 
 export const DISPLAY_POWER_ACTIONS: readonly PowerAction[] =
-    ['displays_off', 'displays_off_keep_primary', 'displays_on'];
+    ['displays_off', 'displays_off_keep_primary', 'displays_on',
+        'displays_detach_others', 'displays_reattach'];
+
+/** The pair that changes the desktop TOPOLOGY — the host must rebuild the
+ *  agent's captures and re-announce its screens after these. */
+export const TOPOLOGY_POWER_ACTIONS: readonly PowerAction[] =
+    ['displays_detach_others', 'displays_reattach'];
 
 /** How long a display action may go unanswered before the controller says
  *  so. Display actions are the one power set the controller WAITS on: lock
@@ -4549,6 +4565,33 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                         // waits 5s to distinguish "done" from "old host
                         // ignored it": success produces no other signal.
                         const detail = await backend.powerAction(action);
+                        if (TOPOLOGY_POWER_ACTIONS.includes(action)) {
+                            // The desktop just changed shape under every live
+                            // capture: the agent rebuilds (fresh duplication,
+                            // fresh composite union, input re-aimed — neither
+                            // its per-tick rebuild nor its blockage escalation
+                            // covers a topology change unprompted), and only
+                            // then is the new screen list announced. An old
+                            // agent answers "bad request" to the poke; it
+                            // heals slowly instead, and the announce is still
+                            // honest.
+                            try {
+                                await backend.displayTopologyChanged?.();
+                            } catch (e) {
+                                console.warn('[device-session] topology poke failed (old agent?)', e);
+                            }
+                            // The session record must follow the agent's own
+                            // remap rule: a single monitor that no longer
+                            // exists lands on output 0; All Displays stays.
+                            try {
+                                const fresh = await backend.listMonitors();
+                                if (s.monitor !== null && s.monitor !== ALL_DISPLAYS
+                                    && s.monitor >= fresh.length) {
+                                    s.monitor = 0;
+                                }
+                            } catch { /* the announce below degrades the same way */ }
+                            void announceMonitors(s, { evenIfSingle: true });
+                        }
                         await sendSignal(s, {
                             kind: 'power-ack', action,
                             ...(typeof detail === 'string' && detail ? { detail } : {}),
@@ -4761,6 +4804,8 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             if (s.pendingPowerAckTimer) { clearTimeout(s.pendingPowerAckTimer); s.pendingPowerAckTimer = null; }
             const friendly = data.action === 'displays_off' ? 'Displays turned off'
                 : data.action === 'displays_on' ? 'Displays turned on'
+                : data.action === 'displays_detach_others' ? 'Other displays disabled'
+                : data.action === 'displays_reattach' ? 'Displays restored'
                 : 'Other displays turned off';
             const detail = typeof data.detail === 'string' ? data.detail.slice(0, MAX_REASON_LEN) : null;
             // The detail (per-monitor DDC honesty) beats the generic line.

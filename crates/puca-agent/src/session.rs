@@ -1257,8 +1257,54 @@ impl Agent {
             | Request::QueryStreamQuality { .. }
             | Request::RequestKeyframe { .. }
             | Request::SetDrawCursor { .. }
+            | Request::DisplayTopologyChanged
             | Request::AddRemoteCandidate { .. } => {
                 Response::error("streaming is only implemented on Windows")
+            }
+
+            // The desktop's topology changed under every live capture (the
+            // shell detached or reattached displays). Rebuild each video
+            // stream against a fresh enumeration, retargeting a vanished
+            // index to output 0, then move the books — reservations, the
+            // session's monitor record, the input aim — exactly as a switch
+            // does. Sessions the shell hosts without a stream keep their
+            // records; the input aim is re-derived even for an unchanged id
+            // because the VIRTUAL DESKTOP rect (which absolute moves are
+            // normalised over) changed with the topology.
+            #[cfg(windows)]
+            Request::DisplayTopologyChanged => {
+                let count = ScreenCapture::monitor_count();
+                let ids: Vec<String> = self.streams.keys().cloned().collect();
+                let mut failures: Vec<String> = Vec::new();
+                for session_id in ids {
+                    let Some(&mon) = self.sessions.get(&session_id) else {
+                        continue; // data-only: no capture, no aim
+                    };
+                    let target = if mon == crate::composite::ALL_DISPLAYS || mon < count {
+                        mon
+                    } else {
+                        0
+                    };
+                    let Some(stream) = self.streams.get(&session_id) else { continue };
+                    let generation = stream.generation;
+                    match stream.rebuild_capture_sync(target, std::time::Duration::from_secs(5)) {
+                        Ok(()) => {
+                            let stream_key = StreamKey { session_id: session_id.clone(), generation };
+                            release_reservations(&mut self.monitor_reservations, &stream_key);
+                            for k in reservation_keys(target, &puca_capture::outputs()) {
+                                self.monitor_reservations.insert(k, stream_key.clone());
+                            }
+                            self.sessions.insert(session_id.clone(), target);
+                            Self::aim_input_at(target);
+                        }
+                        Err(e) => failures.push(format!("{session_id}: {e}")),
+                    }
+                }
+                if failures.is_empty() {
+                    Response::Ok
+                } else {
+                    Response::error(format!("capture rebuild failed for {}", failures.join("; ")))
+                }
             }
 
             Request::Inject { session_id, event } => {

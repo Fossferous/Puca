@@ -186,6 +186,19 @@ pub enum Request {
     /// the running encoder keeps the peer connection and the video track exactly
     /// where they are — the only visible effect is the picture changing.
     SetMonitor { session_id: String, monitor: usize },
+    /// The desktop's display TOPOLOGY just changed under every live capture —
+    /// the shell detached or reattached displays (display_topology.rs). The
+    /// agent rebuilds each video stream's capture against a fresh output
+    /// enumeration (remapping a vanished index to output 0), re-aims input,
+    /// and re-derives the caret surface. Neither the per-tick duplication
+    /// rebuild (same index) nor the blockage escalation (a composite with one
+    /// live tile is not blocked) covers this without being told.
+    ///
+    /// ADDITIVE — do NOT bump PROTOCOL_VERSION, same rule as RequestKeyframe:
+    /// an older agent answers "bad request", the caller swallows it, and the
+    /// cost is a stream that heals slowly (or not until a switch) instead of
+    /// instantly.
+    DisplayTopologyChanged,
     /// Enable or disable privacy mode (blank screen overlay).
     SetPrivacyMode { session_id: String, enabled: bool },
 

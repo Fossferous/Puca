@@ -165,6 +165,19 @@ pub enum StreamCommand {
         bitrate_bps: Option<u32>,
         reply_tx: std::sync::mpsc::Sender<Result<(u32, u32), StreamCommandError>>,
     },
+    /// Rebuild the capture from scratch against a FRESH output enumeration,
+    /// on `monitor` (which the caller has already remapped if the old index
+    /// vanished). The display-topology lever: a detach/reattach re-numbers
+    /// outputs and usually kills the live duplication, and neither the
+    /// per-tick rebuild (same index) nor the blockage escalation (a composite
+    /// with one live tile is not blocked) covers that.
+    RebuildCapture {
+        generation: u64,
+        deadline: Instant,
+        cancelled: Arc<AtomicBool>,
+        monitor: usize,
+        reply_tx: std::sync::mpsc::Sender<Result<(), StreamCommandError>>,
+    },
     /// Force the next encoded frame to be an IDR. Fire-and-forget: no
     /// generation, deadline or reply — unlike a monitor switch, running late
     /// or twice is harmless (one redundant I-frame), and the caller's proof
@@ -257,6 +270,29 @@ impl Stream {
                     Ok(Err(StreamCommandError::CommittedLate)) | Ok(Ok(())) => Ok(()),
                     _ => Err("timeout".to_string()),
                 }
+            }
+        }
+    }
+
+    /// Rebuild this stream's capture for a display-topology change (see
+    /// StreamCommand::RebuildCapture). `monitor` must already be valid
+    /// against the NEW enumeration — the caller does the remap.
+    pub fn rebuild_capture_sync(&self, monitor: usize, timeout: Duration) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + timeout;
+        self.command_tx.send(StreamCommand::RebuildCapture {
+            generation: self.generation,
+            deadline,
+            cancelled: cancelled.clone(),
+            monitor,
+            reply_tx: tx,
+        }).map_err(|_| "stream dead")?;
+        match rx.recv_timeout(timeout) {
+            Ok(res) => res.map_err(|e| format!("{e:?}")),
+            Err(_) => {
+                cancelled.store(true, Ordering::Relaxed);
+                Err("timeout".to_string())
             }
         }
     }
@@ -1247,6 +1283,74 @@ fn run(
                         }
                         Transition::Keep(same) => {
                             capture = Some(same);
+                        }
+                    }
+                }
+                StreamCommand::RebuildCapture { generation: gen, deadline, cancelled, monitor: target_monitor, reply_tx } => {
+                    if capture.is_none() {
+                        let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(
+                            "this session has no screen to rebuild".to_string(),
+                        )));
+                        continue;
+                    }
+                    if let Err(e) = command_gate(generation, gen, &cancelled, deadline) {
+                        let _ = reply_tx.send(Err(e));
+                        continue;
+                    }
+                    let build = |m: usize| -> Result<AnyCapture, String> {
+                        if m == crate::composite::ALL_DISPLAYS {
+                            VirtualCapture::new().map(AnyCapture::Virtual).map_err(|e| e.to_string())
+                        } else {
+                            ScreenCapture::new(m).map(AnyCapture::Single).map_err(|e| e.to_string())
+                        }
+                    };
+                    // Build fresh FIRST: after a topology change the old
+                    // duplication is normally dead, so there is no exclusivity
+                    // collision. If it IS still healthy (a reattach that left
+                    // this output alone), the fresh build fails on exclusivity
+                    // — release ours and try once more. No silent retarget on
+                    // failure: the session layer chose `monitor` and keeps its
+                    // records against it, and a stream that quietly lands on a
+                    // different screen than the agent's books is the exact
+                    // drift class SetMonitor's CommittedLate exists to prevent.
+                    let fresh = build(target_monitor).or_else(|first| {
+                        capture = None;
+                        build(target_monitor)
+                            .map_err(|second| format!("{first}; after releasing the old capture: {second}"))
+                    });
+                    match fresh {
+                        Ok(next) => {
+                            capture = Some(next);
+                            // A fresh capture is born drawing the host pointer;
+                            // re-apply ownership exactly as a switch does.
+                            if let Some(c) = capture.as_mut() {
+                                c.set_draw_cursor(draw_host_cursor);
+                            }
+                            // The encoder goes with it — the surface's size
+                            // has usually just changed, and the replacement
+                            // sizes itself from the next frame.
+                            encoder = None;
+                            want_keyframe = true;
+                            current_monitor = target_monitor;
+                            eprintln!("[stream] capture rebuilt for a display-topology change -> monitor {target_monitor}");
+                            // The SAME caret is a different fraction of a
+                            // different surface — same bookkeeping as a switch.
+                            caret_surf += 1;
+                            if caret_tracker.is_some() {
+                                caret_surface = capture
+                                    .as_ref()
+                                    .and_then(|c| c.caret_surface(current_monitor));
+                                caret_geometry_checked = Some(Instant::now());
+                                caret_last_sent = None;
+                            }
+                            let _ = reply_tx.send(Ok(()));
+                        }
+                        Err(e) => {
+                            // The old capture may be gone (released for the
+                            // retry). The picture freezes until the controller
+                            // retries or switches screens — loud, not silent.
+                            eprintln!("[stream] topology rebuild FAILED, the picture may be frozen: {e}");
+                            let _ = reply_tx.send(Err(StreamCommandError::ConstructionFailed(e)));
                         }
                     }
                 }

@@ -154,6 +154,31 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
             }
         },
         {
+            // TOPOLOGY, not panel power: the non-primary displays are removed
+            // from the desktop entirely — windows re-arrange onto the primary
+            // and the pointer cannot wander onto a dark screen. The host
+            // restores on "Re-enable", on session end, and on its next start,
+            // so nothing here can strand the machine.
+            label: 'Disable other displays',
+            icon: 'monitor',
+            input: true,
+            action: () => {
+                if (!sendPowerAction(session.id, 'displays_detach_others')) onNotice('Not connected — displays unchanged');
+                else onNotice('Disabling other displays…');
+                onClose();
+            }
+        },
+        {
+            label: 'Re-enable displays',
+            icon: 'monitor',
+            input: true,
+            action: () => {
+                if (!sendPowerAction(session.id, 'displays_reattach')) onNotice('Not connected — displays unchanged');
+                else onNotice('Re-enabling displays…');
+                onClose();
+            }
+        },
+        {
             // No confirmation: nothing is lost by a lock, and on a machine
             // with sign-in-screen access the session simply follows it there.
             // Without that access the follow gives up with a message saying

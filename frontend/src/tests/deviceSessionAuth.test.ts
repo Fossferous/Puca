@@ -20,6 +20,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const injectEvent = vi.fn(async () => {});
 const setMonitor = vi.fn(async (..._a: unknown[]) => {});
 const powerAction = vi.fn(async (..._a: unknown[]) => {});
+const displayTopologyChanged = vi.fn(async () => {});
+/** What listMonitors answers — the topology tests shrink it to one screen. */
+let monitorsList: Array<Record<string, unknown>> = [];
 const writeLocalClipboard = vi.fn(async () => {});
 const sent: Array<{ type: string; payload?: { session_id?: string; payload?: string } }> = [];
 type Handler = (m: unknown) => void;
@@ -59,8 +62,9 @@ vi.mock('../api/devices/hostBackend', () => ({
             ? { kind: 'webview-pc', stream: new MediaStream(), width: 1920, height: 1080 }
             : { kind: 'agent-pc' }),
         stopSession: async () => {},
-        listMonitors: async () => [],
+        listMonitors: async () => monitorsList,
         setMonitor: (...a: unknown[]) => setMonitor(...a),
+        displayTopologyChanged: () => displayTopologyChanged(),
         setFileAccess: (...a: unknown[]) => setFileAccess(...a),
         // Optional on the interface; a phone host has none. `hasPowerAction`
         // false leaves it undefined so the arm's "cannot lock or shut down
@@ -224,6 +228,9 @@ beforeEach(() => {
     armed = true;
     shareCaps = null;
     hasPowerAction = true;
+    monitorsList = [];
+    displayTopologyChanged.mockClear();
+    displayTopologyChanged.mockResolvedValue(undefined);
     consentAnswer = { monitor: 0 };
     transportKind = 'agent-pc';
     hostCaps = { capture: true, files: true };
@@ -1182,5 +1189,60 @@ describe('display power actions', () => {
         powerAction.mockClear();
         await signal(key, { kind: 'power', action: 'displays_off' });
         expect(powerAction).not.toHaveBeenCalled();
+    });
+
+    /**
+     * THE TOPOLOGY PAIR. Unlike panel power, a detach changes the desktop
+     * under every live capture — so the host must poke the agent's rebuild
+     * and re-announce its screens, and the announce must go out even at ONE
+     * screen, because retiring the controller's stale multi-screen list is
+     * exactly the point.
+     */
+    it('displays_detach_others pokes the agent rebuild, re-announces one screen, and ACKs the detail', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        powerAction.mockResolvedValueOnce('Disabled 2 other display(s) — they come back when the session ends');
+        monitorsList = [{ id: 0, label: 'Main', left: 0, top: 0, width: 1920, height: 1080 }];
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: 'displays_detach_others' });
+        expect(powerAction).toHaveBeenCalledWith('displays_detach_others');
+        expect(displayTopologyChanged, 'the agent must rebuild its captures').toHaveBeenCalledTimes(1);
+        const frames = await sentFrames(key, before);
+        const monitors = frames.find(f => f.kind === 'monitors');
+        expect(monitors, 'the one-screen announce retires the stale list').toBeTruthy();
+        expect((monitors!.monitors as unknown[]).length).toBe(1);
+        const ack = frames.find(f => f.kind === 'power-ack');
+        expect(ack?.detail).toMatch(/^Disabled 2/);
+    });
+
+    it('an old agent’s refused rebuild poke does not block the reattach ack', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        displayTopologyChanged.mockRejectedValueOnce(new Error('bad request'));
+        monitorsList = [
+            { id: 0, label: 'Main', left: 0, top: 0, width: 1920, height: 1080 },
+            { id: 1, label: 'Side', left: 1920, top: 0, width: 1920, height: 1080 },
+        ];
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: 'displays_reattach' });
+        expect(powerAction).toHaveBeenCalledWith('displays_reattach');
+        const frames = await sentFrames(key, before);
+        expect(frames.find(f => f.kind === 'power-ack'), 'the ack must survive the poke failing').toBeTruthy();
+        expect(frames.find(f => f.kind === 'monitors'), 'and the screens are still re-announced').toBeTruthy();
+    });
+
+    it('POSITIVE CONTROL: plain panel power neither pokes the agent nor re-announces', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        powerAction.mockClear();
+        monitorsList = [{ id: 0, label: 'Main', left: 0, top: 0, width: 1920, height: 1080 }];
+        const before = sent.length;
+        await signal(key, { kind: 'power', action: 'displays_off' });
+        expect(displayTopologyChanged).not.toHaveBeenCalled();
+        const frames = await sentFrames(key, before);
+        expect(frames.find(f => f.kind === 'monitors'),
+            'a single-screen announce is topology-only').toBeUndefined();
     });
 });

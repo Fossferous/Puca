@@ -341,6 +341,12 @@ export function agentHostBackend(): HostBackend {
         /** A SHELL capability, not an agent one — see shellPowerAction. */
         powerAction: shellPowerAction,
 
+        async displayTopologyChanged(): Promise<void> {
+            // The agent rebuilds every live capture against the new output
+            // enumeration and re-aims input (Request::DisplayTopologyChanged).
+            await request({ cmd: 'display_topology_changed' });
+        },
+
         /** Deliberately NOT wrapped in the error swallow requestKeyframe uses:
          *  a swallowed failure would let the host ack a change that never
          *  happened, and the controller would draw a second cursor over the

@@ -155,6 +155,13 @@ export interface HostBackend {
      *  Rejects on failure — never resolves over a machine that is still
      *  unlocked / still up. */
     powerAction?(action: import('./session').PowerAction): Promise<string | void>;
+    /** The desktop's display topology just changed (a detach/reattach): the
+     *  AGENT must rebuild every live capture against a fresh enumeration and
+     *  re-aim input. OPTIONAL and agent-only — the webview host's capture
+     *  follows the browser's own surface handling. Rejects on an old agent
+     *  ("bad request"); the caller swallows that and the stream heals slowly
+     *  instead of instantly. */
+    displayTopologyChanged?(): Promise<void>;
     /** Let the peer reach files on this machine, or revoke with null.
      *
      *  Separate from the session itself on purpose: agreeing to share a screen

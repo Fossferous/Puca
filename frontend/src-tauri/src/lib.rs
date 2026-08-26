@@ -4,6 +4,7 @@ mod capture_bar;
 mod clip_capture;
 mod clip_desktop_audio;
 mod display_power;
+mod display_topology;
 mod device_key;
 mod file_transfer;
 mod hotkeys;
@@ -926,6 +927,15 @@ pub fn run() {
             #[cfg(windows)]
             app.manage(Arc::new(ClipDesktopAudioState::default()));
             app.manage(Arc::new(display_power::DisplayPower::default()));
+            let topology = Arc::new(display_topology::DisplayTopology::default());
+            app.manage(topology.clone());
+            // A leftover detach marker means the last run died mid-detach:
+            // put the displays back before anything else runs. Off-thread —
+            // SetDisplayConfig can block, and this is the webview's setup.
+            std::thread::Builder::new()
+                .name("display-topology-startup".into())
+                .spawn(move || topology.restore_if_marked())
+                .ok();
 
             // Suspend / session-lock feed (session_events.rs): lets in-memory
             // features such as the clip replay buffer wipe themselves before a
