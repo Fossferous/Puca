@@ -225,3 +225,21 @@ describe('dispose', () => {
         expect(r.buttons()).toEqual([]);
     });
 });
+
+describe('busy', () => {
+    it('true exactly while a finger is on the pad — reset callers must stand down then', () => {
+        // The monitor-hop's pointer seed calls reset() when the switch
+        // confirms; reset() mid-gesture forgets a drag's sent button-down
+        // without releasing it. busy() is the guard.
+        expect(r.g.busy()).toBe(false);
+        r.g.down(P(1, 100, 100));
+        expect(r.g.busy()).toBe(true);
+        r.g.up(P(1, 100, 100));
+        expect(r.g.busy()).toBe(false);
+        // A cancel counts as the finger leaving too.
+        r.g.down(P(2, 100, 100));
+        expect(r.g.busy()).toBe(true);
+        r.g.cancel(P(2, 100, 100));
+        expect(r.g.busy()).toBe(false);
+    });
+});

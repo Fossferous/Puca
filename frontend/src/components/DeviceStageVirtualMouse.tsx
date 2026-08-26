@@ -34,7 +34,7 @@
  * (an unmatched button-up is a no-op on every host backend).
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ChevronDownIcon, ChevronUpIcon, MoreVerticalIcon } from './Icons';
+import { ChevronDownIcon, ChevronUpIcon, GripIcon } from './Icons';
 
 /** One wheel notch, in the units the host feeds straight to the OS; positive
  *  scrolls up, matching the desktop wheel path and the trackpad gesture. */
@@ -71,8 +71,10 @@ function readSavedPos(key: string): PadPos | null {
         const p = JSON.parse(raw) as PadPos;
         if (typeof p.left !== 'number' || typeof p.top !== 'number') return null;
         // Rough pre-paint clamp only — the layout effect below re-clamps
-        // against the measured cluster the moment it exists.
-        return clampTo(p, { width: 80, height: 60 });
+        // against the measured cluster the moment it exists. The estimate is
+        // the STACKED buttons cluster (grip + three 46px buttons), the taller
+        // of the two.
+        return clampTo(p, { width: 60, height: 170 });
     } catch {
         return null;
     }
@@ -269,7 +271,7 @@ export function DeviceStageVirtualMouse({ onButton, onWheel }: {
                 style={buttonsPad.style}
             >
                 <div className="vm-grip" aria-label="Move the mouse buttons" {...buttonsPad.gripHandlers}>
-                    <MoreVerticalIcon />
+                    <GripIcon />
                 </div>
                 <button type="button" className={`vm-btn ${heldView.has(0) ? 'vm-held' : ''}`} aria-label="Left mouse button" {...buttonHandlers(0)}>L</button>
                 <button type="button" className={`vm-btn ${heldView.has(1) ? 'vm-held' : ''}`} aria-label="Middle mouse button" {...buttonHandlers(1)}>M</button>
@@ -281,7 +283,7 @@ export function DeviceStageVirtualMouse({ onButton, onWheel }: {
                 style={scrollPad.style}
             >
                 <div className="vm-grip" aria-label="Move the scroll buttons" {...scrollPad.gripHandlers}>
-                    <MoreVerticalIcon />
+                    <GripIcon />
                 </div>
                 <button type="button" className="vm-btn" aria-label="Scroll up" {...scrollHandlers(1)}><ChevronUpIcon /></button>
                 <button type="button" className="vm-btn" aria-label="Scroll down" {...scrollHandlers(-1)}><ChevronDownIcon /></button>

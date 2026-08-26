@@ -148,6 +148,14 @@ export class TouchGestures {
         return { x: this.px, y: this.py };
     }
 
+    /** A finger is on the pad right now. `reset` mid-gesture forgets a drag's
+     *  sent button-down without releasing it (stranding it on the host) and
+     *  eats the rest of the gesture — callers with a live user, like the
+     *  monitor-hop's pointer seed, must check this and stand down. */
+    busy(): boolean {
+        return this.pointers.size > 0;
+    }
+
     /** Place the pointer without sending anything — for a fresh session. */
     reset(x = 0.5, y = 0.5): void {
         this.cancelLongPress();

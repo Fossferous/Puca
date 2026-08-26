@@ -721,6 +721,31 @@ export function remapAcrossBoundary(opts: {
 }
 
 /**
+ * A pointer fraction of one monitor's surface re-expressed on a neighbour's,
+ * preserving the DESKTOP-space point — the coordinate system both monitors
+ * actually share. Clamped into [0,1]: at a hop the pointer is at the shared
+ * edge (or, with HOP_ADJACENCY_TOL_PX, just past it), and the clamp is what
+ * turns "a hair outside the neighbour" into "on its near edge".
+ *
+ * This exists because a hop that leaves the pointer's FRACTION untouched
+ * silently changes what it means: x≈1.0 was "monitor A's right edge" and
+ * becomes "monitor B's right edge" — the far side of the screen just hopped
+ * onto. Everything that then consumes the fraction (the follow-cursor
+ * camera, the next {t:'move'}, the caret fallback) drags the session to the
+ * far edge, undoing remapAcrossBoundary's near-edge landing.
+ */
+export function carryFractionAcross(
+    frac: { x: number; y: number },
+    fromMon: Required<MonitorGeom>,
+    toMon: Required<MonitorGeom>,
+): { x: number; y: number } {
+    return {
+        x: clamp01((fromMon.left + frac.x * fromMon.width - toMon.left) / toMon.width),
+        y: clamp01((fromMon.top + frac.y * fromMon.height - toMon.top) / toMon.height),
+    };
+}
+
+/**
  * The transform for the SINGLE-monitor view that keeps what the user was
  * looking at in place: same centre point, same physical magnification (a
  * native pixel occupies the screen area its composite pixels did), clamped

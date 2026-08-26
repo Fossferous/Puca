@@ -389,6 +389,21 @@
     background: rgba(255,255,255,0.2);
 }
 
+/* A latched modifier: DOWN on the host, armed for the next key. Locked =
+   staying down through any number of keys. Same accent as the mouse pad's
+   held buttons, because it is the same fact — this is pressed over there. */
+.keyboard-btn.kb-latched {
+    background: rgba(30, 136, 229, 0.45);
+    box-shadow: inset 0 0 0 1px #1e88e5;
+    color: #fff;
+}
+
+.keyboard-btn.kb-locked {
+    background: #1e88e5;
+    box-shadow: inset 0 0 0 1px #90caf9;
+    color: #fff;
+}
+
 .keyboard-btn-icon {
     color: #1e88e5;
 }
@@ -423,10 +438,16 @@
    over the line being read. Each half now parks in its own corner, and the
    two straddle the content instead of crossing it. Defaults put buttons and
    scroll under opposite thumbs; either can be dragged anywhere. */
+/* STACKED, not side by side. A row of buttons is a band across the picture —
+   the exact shape the split was escaping — and remote content is almost
+   always wider than it is tall, so the scarce dimension is width. A column
+   hugs the screen edge instead, and it puts scroll-up physically ABOVE
+   scroll-down, which the side-by-side chevrons never managed to mean. */
 .device-stage-virtual-mouse {
     position: fixed;
     bottom: 190px;
     display: flex;
+    flex-direction: column;
     align-items: stretch;
     gap: 4px;
     padding: 6px;
@@ -440,11 +461,13 @@
     -webkit-user-select: none;
 }
 
+/* The grip caps the column: full-width, so the drag target is as wide as the
+   cluster rather than a 24px sliver beside it. */
 .vm-grip {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
+    height: 24px;
     color: #9aa0a6;
     cursor: grab;
     touch-action: none;

@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
     ZOOM_FOLLOW_CONTAINMENT, ZOOM_FOLLOW_IN, ZOOM_FOLLOW_LANDING_MIN,
     ZOOM_FOLLOW_OUT_AT, ZOOM_FOLLOW_RETURN_MAX, ZOOM_FOLLOW_REARM_RATIO,
-    captureSurfaceSize, clampPanTo, clampPanToStrip, initialMonitorRequest, manualCompositeHoldActive,
+    captureSurfaceSize, carryFractionAcross, clampPanTo, clampPanToStrip, initialMonitorRequest, manualCompositeHoldActive,
     monitorRegions, pickFollowTarget, remapIntoComposite,
     remapIntoMonitor, viewportInVideo, type Region, type View,
 } from '../components/deviceZoomFollow';
@@ -562,5 +562,42 @@ describe('availableEdgeHops — an edge only offers when it is genuinely an edge
     it('UNMEASURED geometry offers nothing rather than a guess', () => {
         const vague = [{ id: 0 }, { id: 1 }];
         expect(availableEdgeHops(PHONE, PICT, 2, { x: farX(2), y: 190 }, vague, 0)).toEqual([]);
+    });
+});
+
+describe('carryFractionAcross — the pointer keeps its desktop point over a hop', () => {
+    const A = { id: 0, left: 0, top: 0, width: 1920, height: 1080 };
+    const B = { id: 1, left: 1920, top: 0, width: 1920, height: 1080 };
+
+    it('a point at the shared seam crosses to the near edge, not the far one', () => {
+        // x ~ 1.0 on A ("A's right edge") is desktop x ~ 1920 = B's LEFT edge.
+        const c = carryFractionAcross({ x: 1, y: 0.4 }, A, B);
+        expect(c.x).toBeCloseTo(0, 10);
+        expect(c.y).toBeCloseTo(0.4, 10);
+        // The regression this kills: keeping the FRACTION would read as B's
+        // far edge. The carried value must be nowhere near it.
+        expect(c.x).toBeLessThan(0.01);
+    });
+
+    it("the reverse hop clamps onto the neighbour's far-side seam", () => {
+        // A point on B's LEFT edge is A's RIGHT edge — fraction 1 of A.
+        const c = carryFractionAcross({ x: 0, y: 0.4 }, B, A);
+        expect(c.x).toBeCloseTo(1, 10);
+    });
+
+    it('a point far outside the neighbour clamps to [0,1] instead of leaving it', () => {
+        expect(carryFractionAcross({ x: 0, y: 0.5 }, A, B).x).toBe(0);
+        expect(carryFractionAcross({ x: 1, y: 0.5 }, B, A).x).toBe(1);
+    });
+
+    it('different sizes: the DESKTOP point is preserved, not the fraction', () => {
+        // A 2560-wide screen left of a 1920 one, tops aligned, heights equal.
+        const wide = { id: 0, left: 0, top: 0, width: 2560, height: 1440 };
+        const tall = { id: 1, left: 2560, top: 360, width: 1920, height: 1080 };
+        // Desktop point (2560, 720) = wide's right edge, half down.
+        const c = carryFractionAcross({ x: 1, y: 0.5 }, wide, tall);
+        expect(c.x).toBeCloseTo(0, 10);
+        // y: desktop 720 → (720 - 360) / 1080 = 1/3 of the shorter screen.
+        expect(c.y).toBeCloseTo(1 / 3, 10);
     });
 });

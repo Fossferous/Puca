@@ -229,4 +229,64 @@ describe('the monitor-hop offer', () => {
         await zoomToEdge('right');
         expect(chips().map(c => c.getAttribute('aria-label'))).toEqual(['Show Side display']);
     });
+
+    /**
+     * THE POINTER CROSSES WITH THE VIEW — the far-edge regression. The remap
+     * lands the VIEW at the near edge, but every retained fraction (the aim,
+     * the trackpad position, the drawn cursor) still means "the far edge of
+     * the screen just hopped onto", and the next consumer dragged the whole
+     * session there. The fix walks the pointer across the seam with ONE
+     * absolute move, sent only after the host CONFIRMS the switch — a move
+     * sent earlier would land on the old monitor.
+     */
+    it('confirming the hop seeds the pointer just inside the shared edge — and not before', async () => {
+        await mount(1);
+        await zoomToEdge('left');
+        // Give the stage an aim: a press on the picture sends a move first
+        // (send() records every absolute move as the aim).
+        await act(async () => {
+            for (const type of ['pointerdown', 'pointerup'] as const) {
+                surface().dispatchEvent(new PointerEvent(type, {
+                    bubbles: true, cancelable: true, pointerId: 1, clientX: 40, clientY: 300,
+                }));
+            }
+        });
+        const moves = h.sendInput.mock.calls
+            .map(c => c[1] as { t?: string; x?: number; y?: number })
+            .filter(e => e?.t === 'move');
+        expect(moves.length, 'precondition: the press must have aimed').toBeGreaterThan(0);
+        const aim = moves[moves.length - 1];
+        h.sendInput.mockClear();
+
+        const chip = chips().find(c => c.getAttribute('aria-label') === 'Show Main display')!;
+        await act(async () => {
+            for (const type of ['pointerdown', 'pointerup'] as const) {
+                chip.dispatchEvent(new PointerEvent(type, {
+                    bubbles: true, cancelable: true, pointerId: 1, clientX: 20, clientY: 300,
+                }));
+            }
+            chip.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        });
+        expect(h.sendInput.mock.calls, 'nothing may be sent before the host confirms').toEqual([]);
+
+        // The host confirms: active monitor is now 0 (same capture dims, so
+        // the 350 ms fallback path applies the remap — still confirmation-
+        // gated inside applyPendingFollow).
+        await act(async () => {
+            h.snapshot = [session(0)];
+            for (const l of h.listeners) l(h.snapshot);
+        });
+        await act(async () => { await new Promise(r => setTimeout(r, 400)); });
+
+        const seeded = h.sendInput.mock.calls
+            .map(c => c[1] as { t?: string; x?: number; y?: number })
+            .filter(e => e?.t === 'move');
+        expect(seeded, 'exactly one placement move').toHaveLength(1);
+        // Hopping LEFT from the right-hand screen: the aim's desktop point is
+        // on monitor 1, which lies past monitor 0's RIGHT edge — the shared
+        // seam — so the carry clamps to x = 1, the near edge. y crosses
+        // unchanged (equal-height screens).
+        expect(seeded[0].x).toBe(1);
+        expect(seeded[0].y).toBeCloseTo(aim.y!, 10);
+    });
 });
