@@ -175,36 +175,75 @@ MEOF
 	done
 }
 
+# Build the two updater manifests LOCALLY, then ship them as files.
+#
+# They used to be written by remote heredocs with UNQUOTED delimiters
+# (`<<JEOF`, `<<VEOF`) whose bodies interpolated $notes — the release-notes
+# string taken straight off the command line. An unquoted delimiter means the
+# REMOTE shell performs command substitution on the body, and hosts.conf wires
+# every host as root@… , so `$(...)` or a stray backtick anywhere in a changelog
+# line executed as root on every production box. No attacker required: a normal
+# note like "fixed `useEffect` ordering" was enough. (cmd_mobile had it right all
+# along with <<'MEOF'.)
+#
+# Quoting the delimiters would stop the execution but still emit invalid JSON for
+# any note containing a quote, backslash or newline, so the manifests are built
+# here instead — values passed through the ENVIRONMENT, never interpolated into
+# the generator's source, and serialised by json.dump which escapes correctly by
+# construction.
+write_installer_manifests() {
+	local out_latest="$1" out_appver="$2" version="$3" notes="$4" pub_date="$5" sig="$6"
+	local py; py="$(command -v python3 || command -v python || true)"
+	[ -n "$py" ] || { echo "REFUSING to ship: python3 (or python) is required to build the updater manifests" >&2; exit 1; }
+	OUT_LATEST="$out_latest" OUT_APPVER="$out_appver" \
+	VERSION="$version" NOTES="$notes" PUB_DATE="$pub_date" SIG="$sig" \
+	DL_HOST="$DOWNLOAD_HOST" INSTALLER="$INSTALLER_NAME" \
+	"$py" -c '
+import json, os
+e = os.environ
+with open(e["OUT_LATEST"], "w") as f:
+    json.dump({
+        "version": e["VERSION"],
+        "notes": e["NOTES"],
+        "pub_date": e["PUB_DATE"],
+        "platforms": {"windows-x86_64": {
+            "signature": e["SIG"],
+            "url": "https://%s/%s" % (e["DL_HOST"], e["INSTALLER"]),
+        }},
+    }, f, indent=2)
+with open(e["OUT_APPVER"], "w") as f:
+    json.dump({
+        "version": e["VERSION"],
+        "download_url": "https://%s" % e["DL_HOST"],
+        "notes": e["NOTES"],
+    }, f, indent=2)
+'
+}
+
 cmd_installer() {
 	local exe="${1:?setup.exe}" sig_file="${2:?sig file}" version="${3:?version}" notes="${4:?notes}"
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	local tmp_latest tmp_appver
+	tmp_latest="$(mktemp)"; tmp_appver="$(mktemp)"
+	write_installer_manifests "$tmp_latest" "$tmp_appver" "$version" "$notes" "$pub_date" "$sig"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== installer $version -> $label ==="
 		scp_to "$entry" "$exe" "${entry#*:}:/tmp/Puca-Setup-dual.exe"
+		scp_to "$entry" "$tmp_latest" "${entry#*:}:/tmp/latest-dual.json"
+		scp_to "$entry" "$tmp_appver" "${entry#*:}:/tmp/app-version-dual.json"
 		ssh_to "$entry" "set -e
 			cd $INSTALL_DIR/downloads
 			[ -f $INSTALLER_NAME ] && cp -a $INSTALLER_NAME $INSTALLER_NAME.bak-dual-\$(date +%Y%m%d-%H%M%S)
 			[ -f latest.json ] && cp -a latest.json latest.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
 			mv /tmp/Puca-Setup-dual.exe $INSTALLER_NAME
 			chmod 644 $INSTALLER_NAME
-			cat > latest.json <<JEOF
-{
-  \"version\": \"$version\",
-  \"notes\": \"$notes\",
-  \"pub_date\": \"$pub_date\",
-  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$INSTALLER_NAME\" } }
-}
-JEOF
-			cat > $INSTALL_DIR/app-version.json <<VEOF
-{
-  \"version\": \"$version\",
-  \"download_url\": \"https://$DOWNLOAD_HOST\",
-  \"notes\": \"$notes\"
-}
-VEOF"
+			mv /tmp/latest-dual.json latest.json
+			chmod 644 latest.json
+			mv /tmp/app-version-dual.json $INSTALL_DIR/app-version.json
+			chmod 644 $INSTALL_DIR/app-version.json"
 		local served_sha
 		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
@@ -214,6 +253,7 @@ VEOF"
 			FAILED+=("$label:installer")
 		fi
 	done
+	rm -f "$tmp_latest" "$tmp_appver"
 }
 
 # Refuse to ship a backend whose migration BYTES don't match what a target
@@ -301,13 +341,53 @@ cmd_backend() {
 			systemctl restart '"$SERVICE_NAME"'
 			sleep 4
 			systemctl is-active '"$SERVICE_NAME"
-		local health
-		health="$(remote_body "$entry" "$API_HOST" /)"
-		if printf '%s' "$health" | grep -q "Backend Online"; then
-			echo "PASS  $label backend healthy"
-		else
-			echo "FAIL  $label backend did not respond as expected: $health"
+		# IDENTITY, not just liveness. `GET /` returns the constant
+		# "Puca Backend Online" (src/main.rs), compiled into every build ever
+		# shipped — so grepping it proves only that SOME puca is answering. It
+		# passes just as happily when `install` wrote to the wrong path, when the
+		# restart silently failed and the OLD process is still serving, or when
+		# the binary copied from the primary never landed. The webapp and
+		# installer paths above both compare hashes; this one is the only artifact
+		# built remotely and copied host-to-host, so it needs it most.
+		#
+		# Three checks, each catching a different half-failure:
+		#   1. the installed FILE is byte-identical to what we built and verified;
+		#   2. the unit is actually active;
+		#   3. the RUNNING process is executing that file — `install` replaces the
+		#      inode, so a process that never restarted still points at the old,
+		#      now-unlinked one and /proc/PID/exe reads "… (deleted)". That is the
+		#      exact signature of "new binary on disk, old binary serving", which
+		#      checks 1 and 2 both pass.
+		local remote_state installed_sha unit_active exe_path
+		remote_state="$(ssh_to "$entry" "
+			sha256sum '$INSTALL_DIR/$SERVICE_NAME' | cut -d' ' -f1
+			systemctl is-active '$SERVICE_NAME' || true
+			readlink /proc/\$(systemctl show -p MainPID --value '$SERVICE_NAME')/exe 2>/dev/null || echo UNKNOWN
+		")"
+		installed_sha="$(printf '%s\n' "$remote_state" | sed -n 1p)"
+		unit_active="$(printf '%s\n' "$remote_state" | sed -n 2p)"
+		exe_path="$(printf '%s\n' "$remote_state" | sed -n 3p)"
+
+		if [ "$installed_sha" != "$bin_sha" ]; then
+			echo "FAIL  $label installed binary sha256 $installed_sha != built $bin_sha"
 			FAILED+=("$label:backend")
+		elif [ "$unit_active" != "active" ]; then
+			echo "FAIL  $label $SERVICE_NAME is '$unit_active', not active"
+			FAILED+=("$label:backend")
+		elif [ "$exe_path" != "$INSTALL_DIR/$SERVICE_NAME" ]; then
+			# "(deleted)" suffix, UNKNOWN, or a different path all mean the live
+			# process is not the binary we just installed.
+			echo "FAIL  $label running process is not the installed binary (/proc exe -> '$exe_path')"
+			FAILED+=("$label:backend")
+		else
+			local health
+			health="$(remote_body "$entry" "$API_HOST" /)"
+			if printf '%s' "$health" | grep -q "Backend Online"; then
+				echo "PASS  $label backend healthy (sha256 matches, running the installed binary)"
+			else
+				echo "FAIL  $label backend did not respond as expected: $health"
+				FAILED+=("$label:backend")
+			fi
 		fi
 	done
 	rm -f "$built"

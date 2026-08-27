@@ -185,3 +185,104 @@ async fn channel_key_upsert_round_trips() {
         .execute(&pool)
         .await;
 }
+
+/// The epoch-squat regression (see `get_channel_keys`).
+///
+/// A member with nothing but VIEW_CHANNEL may create MAX(epoch)+1 wrapped only
+/// for themselves. Under the old unfiltered `SELECT MAX(epoch)`, every OTHER
+/// member was then told that squatted epoch was current — an epoch they hold no
+/// key for — and `ensureChannelKey` gates rotation on holding the current key,
+/// so they fell through to "cannot send", permanently, with no client-side
+/// recovery.
+///
+/// This pins the query that fixes it: the caller's current epoch is the newest
+/// one addressed to THEM, while the channel-wide max is reported separately so a
+/// rotation can target a free epoch instead of colliding with the squatted one.
+#[tokio::test]
+async fn a_squatted_epoch_is_not_the_victims_current_epoch() {
+    dotenv::dotenv().ok();
+    let pool = match create_test_pool().await {
+        Some(p) => p,
+        None => {
+            println!("Skipping: no database connection");
+            return;
+        }
+    };
+
+    let owner = make_user(&pool, "squat_owner").await;
+    let victim = make_user(&pool, "squat_victim").await;
+    let (_server_id, channel_id) = make_server_channel(&pool, owner).await;
+
+    // Epochs 1 and 2 are wrapped for both members — the healthy state.
+    for epoch in 1..=2 {
+        for uid in [owner, victim] {
+            sqlx::query(
+                "INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, sender_public_key, member_generation) \
+                 VALUES ($1, $2, $3, 'w', 'x25519:pk', 0)",
+            )
+            .bind(channel_id)
+            .bind(epoch)
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .expect("insert shared epoch");
+        }
+    }
+
+    // The squat: epoch 3, wrapped for the owner alone.
+    sqlx::query(
+        "INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, sender_public_key, member_generation) \
+         VALUES ($1, 3, $2, 'w', 'x25519:pk', 0)",
+    )
+    .bind(channel_id)
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .expect("insert squatted epoch");
+
+    let epochs_for = |uid: i32| {
+        let pool = pool.clone();
+        async move {
+            let row: (Option<i32>, Option<i32>) = sqlx::query_as(
+                "SELECT MAX(epoch) FILTER (WHERE recipient_id = $2), MAX(epoch) \
+                 FROM channel_keys WHERE channel_id = $1",
+            )
+            .bind(channel_id)
+            .bind(uid)
+            .fetch_one(&pool)
+            .await
+            .expect("select epochs");
+            row
+        }
+    };
+
+    let (victim_mine, victim_max) = epochs_for(victim).await;
+    assert_eq!(
+        victim_mine,
+        Some(2),
+        "victim's current epoch must be the newest wrapped FOR THEM (2), not the squatted 3"
+    );
+    assert_eq!(
+        victim_max,
+        Some(3),
+        "victim must still learn epoch 3 exists so a rotation can target 4"
+    );
+
+    let (owner_mine, owner_max) = epochs_for(owner).await;
+    assert_eq!(owner_mine, Some(3), "the squatter does hold epoch 3");
+    assert_eq!(owner_max, Some(3));
+
+    // A member nobody has wrapped for at all: holds nothing, so the handler
+    // falls back to the channel max rather than reporting 0 (which would send
+    // the client down its bootstrap branch and mint a low, unused epoch).
+    let newcomer = make_user(&pool, "squat_newcomer").await;
+    let (new_mine, new_max) = epochs_for(newcomer).await;
+    assert_eq!(new_mine, None, "newcomer holds no epoch");
+    assert_eq!(new_max, Some(3));
+
+    sqlx::query("DELETE FROM channel_keys WHERE channel_id = $1")
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .ok();
+}

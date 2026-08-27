@@ -49,8 +49,15 @@ pub struct WrappedKeyOutput {
 
 #[derive(Serialize)]
 pub struct ChannelKeysResponse {
-    /// Highest epoch that exists for this channel (0 if none yet).
+    /// Highest epoch WRAPPED FOR THE CALLER (0 if none yet). Falls back to
+    /// `max_epoch` when the caller holds nothing at all — i.e. a new member
+    /// waiting to be wrapped in. Deliberately not a channel-wide MAX: see the
+    /// comment in `get_channel_keys`.
     pub current_epoch: i32,
+    /// Highest epoch that exists in the channel for anyone. Additive field —
+    /// older clients ignore it; newer ones rotate to `max_epoch + 1` so they
+    /// target a free epoch rather than colliding with one already taken.
+    pub max_epoch: i32,
     /// The server's current member generation.
     pub current_generation: i32,
     /// The member generation the current epoch was minted for. If this differs
@@ -64,6 +71,27 @@ pub struct ChannelKeysResponse {
 pub struct MemberKey {
     pub user_id: i64,
     pub public_key: Option<String>,
+}
+
+// --- Pure decisions (unit-testable without a database) ---
+//
+// The crate is bin-only — no src/lib.rs — so `tests/` cannot import these
+// handlers. Keeping the two real decisions as free functions is what makes them
+// assertable at all; the surrounding SQL is covered by tests/e2ee_keys.rs.
+
+/// The epoch a caller should treat as current: the newest one wrapped for them,
+/// falling back to the channel-wide max when they hold nothing yet (a new member
+/// waiting to be wrapped in), and 0 when the channel has no keys at all.
+fn effective_epoch(mine: Option<i32>, max: Option<i32>) -> i32 {
+    mine.or(max).unwrap_or(0)
+}
+
+/// Clamp a client-claimed member generation into [0, server]. Understating only
+/// costs an extra rotation; overstating would suppress a required one, so it is
+/// made impossible. `server.max(0)` guards the clamp against an out-of-range
+/// stored value (clamp panics if min > max).
+fn stamp_generation(client: i32, server: i32) -> i32 {
+    client.clamp(0, server.max(0))
 }
 
 // --- Handlers ---
@@ -81,15 +109,17 @@ pub async fn publish_channel_keys(
     // Key custody follows visibility: a member VIEW-denied on the channel can
     // neither publish nor fetch its keys, and sees the same 404 as a missing
     // channel (hide its existence).
-    match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
-        ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL) => {}
+    let server_id = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+        ChannelPermAccess::Allowed { server_id, perms } if perms.has(Permissions::VIEW_CHANNEL) => {
+            server_id
+        }
         ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
         ChannelPermAccess::NotMember => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
-    }
+    };
 
     if payload.keys.is_empty() {
         return (StatusCode::BAD_REQUEST, "No keys provided").into_response();
@@ -97,6 +127,35 @@ pub async fn publish_channel_keys(
     if payload.keys.len() > 1000 {
         return (StatusCode::BAD_REQUEST, "Too many keys in one request").into_response();
     }
+
+    // Resolved BEFORE the transaction opens, deliberately. get_channel_viewer_ids
+    // takes the pool, so calling it once a tx is open would check out a SECOND
+    // connection while this handler already holds one AND holds the epoch
+    // advisory lock. With a 20-connection pool and a 10s acquire timeout, 20
+    // concurrent publishes would each block waiting for a connection none of them
+    // will release — a self-inflicted stall that looks exactly like a database
+    // outage.
+    let viewers = match crate::permissions::get_channel_viewer_ids(
+        &state.pool,
+        channel_id,
+        &server_id,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                "publish_channel_keys: viewer resolve failed for channel {}: {:?}",
+                channel_id,
+                e
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to resolve channel members",
+            )
+                .into_response();
+        }
+    };
 
     let mut tx = match state.pool.begin().await {
         Ok(t) => t,
@@ -209,7 +268,47 @@ pub async fn publish_channel_keys(
         }
     }
 
-    for k in &payload.keys {
+    // The generation is CLIENT-supplied and was previously stored verbatim, so a
+    // publisher could claim the server's current generation and make
+    // `epoch_generation == current_generation` for everyone — switching off the
+    // signal that forces rotation after a kick. Clamping is what makes it safe
+    // without inventing a new error the client cannot handle: understating can
+    // only cause an extra rotation (harmless, self-correcting), while
+    // overstating — the direction that suppresses a REQUIRED rotation — is now
+    // impossible. It also fixes a live bug in the other direction: a client
+    // posting 0 (the `#[serde(default)]` above, i.e. any older build) used to
+    // stamp 0 verbatim, so every other client saw a permanent generation
+    // mismatch and rotated on every single send.
+    let server_generation: i32 =
+        match sqlx::query_as::<_, (i32,)>("SELECT member_generation FROM servers WHERE id = $1")
+            .bind(&server_id)
+            .fetch_one(&mut *tx)
+            .await
+        {
+            Ok((g,)) => g,
+            Err(e) => {
+                tracing::error!("publish_channel_keys: generation read failed: {:?}", e);
+                let _ = tx.rollback().await;
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to store keys").into_response();
+            }
+        };
+    let stamped_generation = stamp_generation(payload.member_generation, server_generation);
+
+    // Recipients are FILTERED to channel viewers, not rejected. A malicious
+    // client could otherwise address rows to anyone at all; but rejecting the
+    // whole publish would break an honest one, because there is a benign race —
+    // the client fetches /member-keys, a moderator changes an overwrite, then the
+    // client posts. Dropping is sufficient and never fails a send:
+    // broadcast_perms_changed_and_evict bumps the generation on that same path,
+    // so a rotation follows regardless. (get_member_keys already applies this
+    // rule when handing out keys to wrap; this is the same rule enforced against
+    // a client that ignores it.)
+    let mut dropped_non_viewers: Vec<i64> = Vec::new();
+    for k in payload.keys.iter() {
+        if !viewers.contains(&k.recipient_id) {
+            dropped_non_viewers.push(k.recipient_id);
+            continue;
+        }
         let res = sqlx::query(
             r#"
             INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, sender_public_key, member_generation, sender_user_id)
@@ -223,7 +322,7 @@ pub async fn publish_channel_keys(
         .bind(k.recipient_id as i32)
         .bind(&k.wrapped_key)
         .bind(&k.sender_public_key)
-        .bind(payload.member_generation)
+        .bind(stamped_generation)
         // Who wrapped it — the recipient pins `sender_public_key` against this
         // user's pinned identity key instead of trusting it blind (migration 037).
         .bind(claims.sub as i32)
@@ -235,6 +334,54 @@ pub async fn publish_channel_keys(
             let _ = tx.rollback().await;
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to store keys").into_response();
         }
+    }
+
+    if !dropped_non_viewers.is_empty() {
+        // Only a sample of the ids: this list is client-controlled and the
+        // payload cap allows 1000 of them, so logging it whole would let a
+        // caller write an arbitrarily long line into the log on demand.
+        tracing::warn!(
+            "publish_channel_keys: channel {} epoch {} by user {} named {} non-viewer recipient(s) (first few: {:?}); dropped",
+            channel_id, payload.epoch, claims.sub, dropped_non_viewers.len(),
+            &dropped_non_viewers[..dropped_non_viewers.len().min(10)]
+        );
+    }
+
+    if payload.keys.len() == dropped_non_viewers.len() {
+        // Nothing was written, so committing would report success for an epoch
+        // that does not exist. 409 rather than 400 because it is the one status
+        // the client already handles gracefully (mintEpoch treats it as "someone
+        // else won this epoch", refetches, and retries on the next send) instead
+        // of rethrowing it as a hard send failure.
+        let _ = tx.rollback().await;
+        return (
+            StatusCode::CONFLICT,
+            "No recipients in this publish can view the channel",
+        )
+            .into_response();
+    }
+
+    // Coverage telemetry, deliberately NOT an error. An honest client legitimately
+    // omits a viewer whose served identity key conflicts with a local pin or a
+    // confirmed safety number (pinServedIdentityKey skips them, by design — audit
+    // M6). That pin state lives in one browser's localStorage, so the server can
+    // neither reconstruct it nor tell it apart from an attack; enforcing coverage
+    // here would reject a legitimate, security-motivated publish and take the
+    // whole channel down. Logging keeps the abuse signal, keyed to a real user id,
+    // at zero availability cost.
+    let covered: std::collections::HashSet<i64> = payload
+        .keys
+        .iter()
+        .map(|k| k.recipient_id)
+        .filter(|id| viewers.contains(id))
+        .collect();
+    let uncovered: Vec<i64> = viewers.difference(&covered).copied().collect();
+    if !uncovered.is_empty() {
+        tracing::warn!(
+            "publish_channel_keys: channel {} epoch {} by user {} covers {}/{} viewers; uncovered (first few): {:?}",
+            channel_id, payload.epoch, claims.sub, covered.len(), viewers.len(),
+            &uncovered[..uncovered.len().min(10)]
+        );
     }
 
     if let Err(e) = tx.commit().await {
@@ -266,20 +413,73 @@ pub async fn get_channel_keys(
         }
     };
 
-    let current_epoch: (Option<i32>,) =
-        sqlx::query_as("SELECT MAX(epoch) FROM channel_keys WHERE channel_id = $1")
-            .bind(channel_id)
-            .fetch_one(&state.pool)
-            .await
-            .unwrap_or((None,));
-    let current_epoch_val = current_epoch.0.unwrap_or(0);
+    // A caller's CURRENT epoch is the newest one actually ADDRESSED TO THEM, not
+    // the newest that exists. An unfiltered MAX(epoch) hands back a pointer the
+    // caller may be unable to follow: any member may create MAX+1 (the bound at
+    // the top of publish_channel_keys permits exactly that) wrapped only for
+    // themselves, and every other member then reads a `current_epoch` they hold
+    // no key for. ensureChannelKey gates rotation on HOLDING the current key
+    // (channelKeys.ts: "Only a holder of the current key can rotate"), so those
+    // members fall straight through to `return null` — unable to send, with no
+    // client-side recovery, permanently. An epoch that was never wrapped for you
+    // is not your epoch.
+    //
+    // `max_epoch` is served alongside so a client that CAN rotate targets the
+    // true next epoch instead of colliding with the squatted one and taking the
+    // 409 forever.
+    let epochs: (Option<i32>, Option<i32>) = match sqlx::query_as(
+        "SELECT MAX(epoch) FILTER (WHERE recipient_id = $2), MAX(epoch) \
+         FROM channel_keys WHERE channel_id = $1",
+    )
+    .bind(channel_id)
+    .bind(claims.sub as i32)
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // Previously swallowed silently. Preserve the old fail-soft shape
+            // (report "no keys yet") rather than 500ing, because this endpoint is
+            // also on the message READ path — decryptChannelContent does not catch,
+            // so a 500 here rejects the whole Promise.all and blanks the channel
+            // on a transient pool blip.
+            tracing::error!(
+                "get_channel_keys: epoch read failed for channel {}: {:?}",
+                channel_id,
+                e
+            );
+            (None, None)
+        }
+    };
+    let max_epoch_val = epochs.1.unwrap_or(0);
+    // Holding nothing at all falls back to the global max on purpose: that is the
+    // legitimate "new member, waiting to be wrapped in" state, and reporting 0
+    // instead would send the client down its bootstrap branch to mint a LOW epoch
+    // nobody else uses.
+    let current_epoch_val = effective_epoch(epochs.0, epochs.1);
 
     let current_generation: (i32,) =
-        sqlx::query_as("SELECT member_generation FROM servers WHERE id = $1")
+        match sqlx::query_as::<_, (i32,)>("SELECT member_generation FROM servers WHERE id = $1")
             .bind(&server_id)
             .fetch_one(&state.pool)
             .await
-            .unwrap_or((0,));
+        {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!(
+                    "get_channel_keys: generation read failed for server {}: {:?}",
+                    server_id,
+                    e
+                );
+                // Fail closed TOWARD ROTATION, not toward 500. This used to
+                // default to 0, which silently matched a missing/zero
+                // epoch_generation and told every client "membership unchanged" —
+                // so the rotation a kick should have forced never happened. -1 can
+                // never equal a stored generation (always >= 0), so holders rotate
+                // instead. Sends fail safe; reads keep working.
+                (-1,)
+            }
+        };
 
     // Generation the current epoch was minted for (any row of that epoch).
     let epoch_generation: (Option<i32>,) = sqlx::query_as(
@@ -323,6 +523,7 @@ pub async fn get_channel_keys(
 
     Json(ChannelKeysResponse {
         current_epoch: current_epoch_val,
+        max_epoch: max_epoch_val,
         current_generation: current_generation.0,
         epoch_generation: epoch_generation.0.unwrap_or(0),
         keys,
@@ -395,4 +596,61 @@ pub async fn get_member_keys(
         .collect();
 
     Json(members).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The squat: victim holds up to epoch 2, attacker mints 3 for themselves.
+    // The victim must stay on 2 (still sendable) and learn that 3 exists so a
+    // rotation can target 4 rather than colliding with 3.
+    #[test]
+    fn caller_keeps_their_own_newest_epoch_when_a_later_one_is_squatted() {
+        assert_eq!(effective_epoch(Some(2), Some(3)), 2);
+    }
+
+    #[test]
+    fn squatter_still_sees_their_own_epoch() {
+        assert_eq!(effective_epoch(Some(3), Some(3)), 3);
+    }
+
+    // A member nobody has wrapped for yet must NOT be told 0 — that would send
+    // the client down its bootstrap branch and mint a low, unused epoch.
+    #[test]
+    fn holding_nothing_falls_back_to_the_channel_max() {
+        assert_eq!(effective_epoch(None, Some(3)), 3);
+    }
+
+    #[test]
+    fn empty_channel_reports_zero() {
+        assert_eq!(effective_epoch(None, None), 0);
+    }
+
+    // Older clients send 0 (serde default). They must not be rejected, and must
+    // not silently inherit a coverage claim they never made.
+    #[test]
+    fn legacy_zero_generation_is_preserved_not_promoted() {
+        assert_eq!(stamp_generation(0, 7), 0);
+    }
+
+    // The attack this closes: claiming the current generation to switch off
+    // every other client's rotation signal.
+    #[test]
+    fn generation_cannot_be_overstated() {
+        assert_eq!(stamp_generation(9, 7), 7);
+        assert_eq!(stamp_generation(i32::MAX, 7), 7);
+    }
+
+    #[test]
+    fn honest_generation_passes_through() {
+        assert_eq!(stamp_generation(7, 7), 7);
+        assert_eq!(stamp_generation(3, 7), 3);
+    }
+
+    #[test]
+    fn negative_generation_never_reaches_the_column() {
+        assert_eq!(stamp_generation(-1, 7), 0);
+        assert_eq!(stamp_generation(-1, 0), 0);
+    }
 }

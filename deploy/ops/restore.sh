@@ -36,7 +36,13 @@ systemctl stop "$SERVICE_NAME"
 
 sudo -u postgres dropdb --if-exists "$DB_NAME"
 sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
-gunzip -c "$DB_GZ" | sudo -u postgres psql -q "$DB_NAME"
+# ON_ERROR_STOP is what makes `set -euo pipefail` above actually bite. Without
+# it psql reports failing statements and then EXITS 0, so a dump that restored
+# 60% of its tables and errored on the rest sails through to the "restore
+# complete" line below — on the disaster-recovery path, in exactly the scenario
+# this script exists for. `-q` compounds it by hiding the notices that would
+# otherwise hint something was wrong.
+gunzip -c "$DB_GZ" | sudo -u postgres psql -q -v ON_ERROR_STOP=1 "$DB_NAME"
 
 if [ -n "$UP_TGZ" ]; then
 	rm -rf "$UPLOADS"
