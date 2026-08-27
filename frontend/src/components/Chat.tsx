@@ -134,6 +134,7 @@ import { ChannelDashboard } from './ChannelDashboard';
 /* StreamViewer removed - now using StreamStage */
 import './Chat.css';
 import { parseServerTimestampSecs } from '../utils/serverTime';
+import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
 import { canMoveVoiceMember, voiceMoveTargets } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
@@ -214,6 +215,42 @@ interface User {
     id: number;
     username: string;
     display_name?: string | null;
+}
+
+/**
+ * Map decrypted API history to display rows, resolving `reply_to` previews
+ * within the batch. Shared by the initial channel load and the reconnect
+ * catch-up so both produce identical rows — a catch-up that built them
+ * differently would show the same message two ways depending on how it arrived.
+ */
+function toDisplayMessages(history: ApiMessage[]): DisplayMessage[] {
+    const displayMessages: DisplayMessage[] = history.map((msg: ApiMessage) => ({
+        id: msg.id,
+        sender: { id: msg.user_id, username: msg.username },
+        content: msg.content,
+        timestamp: parseServerTimestampSecs(msg.created_at),
+        created_at: msg.created_at,
+        reply_to_id: msg.reply_to_id,
+        is_task: msg.is_task,
+        is_completed: msg.is_completed,
+        parent_message_id: msg.parent_message_id,
+        encState: msg.encState,
+        clip_consent: msg.clip_consent ?? undefined,
+    }));
+    const messagesById = new Map(displayMessages.map(m => [m.id, m]));
+    displayMessages.forEach(msg => {
+        if (msg.reply_to_id) {
+            const parentMsg = messagesById.get(msg.reply_to_id);
+            if (parentMsg) {
+                msg.reply_to = {
+                    id: parentMsg.id,
+                    username: parentMsg.sender.username,
+                    content: parentMsg.content.slice(0, 100),
+                };
+            }
+        }
+    });
+    return displayMessages;
 }
 
 /**
@@ -1881,35 +1918,7 @@ export function Chat({ onLogout }: ChatProps) {
                 const history = await decryptChannelMessages(currentChannel!.id, raw);
                 if (cancelled) return;
                 console.debug('[Chat] Loaded messages count:', history.length);
-                // First pass: Convert API messages to display format
-                const displayMessages: DisplayMessage[] = history.map((msg: ApiMessage) => ({
-                    id: msg.id,
-                    sender: { id: msg.user_id, username: msg.username },
-                    content: msg.content,
-                    timestamp: parseServerTimestampSecs(msg.created_at),
-                    created_at: msg.created_at,
-                    reply_to_id: msg.reply_to_id,
-                    is_task: msg.is_task,
-                    is_completed: msg.is_completed,
-                    parent_message_id: msg.parent_message_id,
-                    encState: msg.encState,
-                    clip_consent: msg.clip_consent ?? undefined,
-                }));
-
-                // Second pass: Populate reply_to references
-                const messagesById = new Map(displayMessages.map(m => [m.id, m]));
-                displayMessages.forEach(msg => {
-                    if (msg.reply_to_id) {
-                        const parentMsg = messagesById.get(msg.reply_to_id);
-                        if (parentMsg) {
-                            msg.reply_to = {
-                                id: parentMsg.id,
-                                username: parentMsg.sender.username,
-                                content: parentMsg.content.slice(0, 100),
-                            };
-                        }
-                    }
-                });
+                const displayMessages = toDisplayMessages(history);
 
                 if (cancelled) return;
                 console.debug('[Chat] Setting messages:', displayMessages.length);
@@ -1925,6 +1934,76 @@ export function Chat({ onLogout }: ChatProps) {
         return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
     }, [currentChannel?.id]);
+
+    // Catch the OPEN conversation up after a socket gap.
+    //
+    // The backend fan-out is fire-and-forget with no queue or replay (see
+    // reconnectCatchup.ts's header), so a MessageNotification/DirectMessage sent
+    // while this device had no live session is simply gone. Nothing re-fetched it
+    // for the channel the user is LOOKING AT: the two history effects are keyed
+    // on the selection id so they do not re-run on a reconnect, and
+    // handleChannelClick suppresses the reload when the same channel is
+    // re-clicked, so there was not even a click-to-refresh. The messages stayed
+    // missing until the user switched away and back.
+    //
+    // reconnectCatchup.ts cannot cover this and is not meant to: it returns early
+    // unless isAndroidApp(), every branch is gated on document.hidden ("Reconnecting
+    // while the app is VISIBLE posts nothing"), and it only raises notifications —
+    // it never touches message state.
+    //
+    // Merging is additive (see mergeMissing) so a message sent while the socket
+    // was down keeps its optimistic bubble until the real row arrives. Read state
+    // is deliberately NOT touched: marking the channel read here would clear the
+    // unread badge for messages the user has not actually looked at yet if the
+    // tab was in the background.
+    useEffect(() => {
+        const chanId = currentChannel?.id;
+        const dmId = currentDM?.id;
+        const dmPeer = currentDM?.other_user_id;
+        if (chanId === undefined && dmId === undefined) return;
+
+        // Same staleness guard as the history loader above, and needed for the
+        // same reason: a fetch started for channel A must not land its messages
+        // in channel B's view if the user switches while it is in flight.
+        // Removing the listener does not cancel a promise already awaiting.
+        let cancelled = false;
+        let running = false;
+
+        const catchUp = async () => {
+            if (running) return; // a burst of reconnects must not stack fetches
+            running = true;
+            try {
+                // Both are refreshed when both are set, rather than picking one:
+                // opening a DM does not necessarily clear the selected channel,
+                // so an either/or would silently skip whichever lost the toss.
+                // Each writes only its own state, and the merge is additive.
+                if (chanId !== undefined) {
+                    const raw = await getMessages(chanId, 50);
+                    const fetched = toDisplayMessages(await decryptChannelMessages(chanId, raw));
+                    if (cancelled) return;
+                    setMessages(prev => mergeMissing(prev, fetched, m => m.id, m => m.timestamp));
+                }
+                if (dmId !== undefined && dmPeer !== undefined) {
+                    const raw = await getDMMessages(dmId);
+                    const fetched = await decryptDMMessages(raw, dmPeer);
+                    if (cancelled) return;
+                    setDmMessages(prev => mergeMissing(
+                        prev, fetched, m => String(m.id), m => parseServerTimestampSecs(m.created_at),
+                    ));
+                }
+            } catch (error) {
+                console.error('[Chat] reconnect catch-up failed:', error);
+            } finally {
+                running = false;
+            }
+        };
+
+        window.addEventListener('wsConnected', catchUp);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('wsConnected', catchUp);
+        };
+    }, [currentChannel?.id, currentDM?.id, currentDM?.other_user_id]);
 
     // Load messages from all subchannels when collection is selected
     useEffect(() => {

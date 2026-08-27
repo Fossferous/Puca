@@ -34,6 +34,7 @@ import {
     setControlFrameHandler, setControlHelloProvider, sfuControlReady,
 } from './rtc/controlDc';
 import { getCachedPublicKey } from './dms';
+import { pinServedIdentityKey } from './keyVerification';
 
 // End a control session that receives no input for this long (stuck/abandoned).
 const INACTIVITY_MS = 90_000;
@@ -164,35 +165,28 @@ let recvChain: Promise<void> = Promise.resolve();
 /**
  * Resolve a peer's identity public key with TOFU pinning: pin on first use, and
  * FAIL CLOSED if the server ever serves a different key later (catches a server
- * key-substitution MITM after first contact). First-contact authenticity still
- * rests on the server, exactly as DMs do — verifying a key fingerprint
- * out-of-band would be the full fix.
+ * key-substitution MITM after first contact).
+ *
+ * Delegates to keyVerification's `pinServedIdentityKey` so control sessions
+ * consult the SAME trust state as DMs, channel keys and device shares. This used
+ * to be a second, private implementation over its own memory map: it shared the
+ * `control_pin_<id>` localStorage key but never consulted `verified_key_<id>`,
+ * so a peer the user had VERIFIED but never messaged had no control pin yet and
+ * control would happily pin whatever the server served — silently ignoring the
+ * out-of-band confirmation that exists to catch exactly that substitution.
+ *
+ * The served key is kept rather than using `resolvePinnedIdentityKey` so the two
+ * null cases stay distinguishable: no published key at all is not a security
+ * event and must not raise the substitution notice.
  */
-const controlPinMem = new Map<number, string>();
-
 async function getPinnedIdentityKey(userId: number): Promise<string | null> {
     const served = await getCachedPublicKey(userId);
     if (!served) return null;
-    const keyChanged = () => {
-        setNotice("This user's security key changed — control blocked. Verify their identity before retrying.");
-        return null;
-    };
-    // In-memory pin: catches a per-session key swap even when persistence is
-    // unavailable (private mode / some mobile webviews), so the fix never
-    // silently degrades to fully server-trusted within a run.
-    const mem = controlPinMem.get(userId);
-    if (mem && mem !== served) return keyChanged();
-    if (!mem) controlPinMem.set(userId, served);
-    // Persistent pin across restarts (best-effort — the in-memory pin still holds).
-    try {
-        const pinKey = `control_pin_${userId}`;
-        const pinned = localStorage.getItem(pinKey);
-        if (pinned && pinned !== served) return keyChanged();
-        if (!pinned) localStorage.setItem(pinKey, served);
-    } catch {
-        /* no persistence this run; in-memory pin above still applies */
+    const key = pinServedIdentityKey(userId, served);
+    if (!key) {
+        setNotice("This user's security key changed — control blocked. Open their profile and verify their safety number to trust the new key.");
     }
-    return served;
+    return key;
 }
 
 /** VIEWER: derive the session key from my ephemeral + the host's ephemeral/static. */
