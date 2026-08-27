@@ -35,7 +35,7 @@
  * live-connection consent pair (2100).
  */
 import { useEffect, useRef, useState } from 'react';
-import { attachPreview, discardSeal, getReplayState, subscribeReplay, trimSeal, uploadAndBuild, type ReplayState } from '../api/clips/replayBuffer';
+import { attachPreview, discardSeal, getReplayState, subscribeReplay, trimSeal, undoTrim, uploadAndBuild, type ReplayState } from '../api/clips/replayBuffer';
 import type { SealedInfo } from '../api/clips/clipTypes';
 import { formatClock, formatMB } from '../api/clips/clipPresets';
 import { CHIP_SECONDS, durationChips, outcomeCopy, resolveClipTarget } from '../api/clips/clipComposerLogic';
@@ -212,8 +212,37 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                 : 'Nothing was cut — both cut points snapped back to the whole clip. Drag further in to trim.');
             setTrimGen(g => g + 1); // the preview effect re-attaches to the new footage
         } catch (e) {
-            setTrimError(e instanceof Error ? e.message : String(e));
+            setTrimError(`Trim failed: ${e instanceof Error ? e.message : String(e)}`);
             setTrimGen(g => g + 1); // the old preview was detached above; bring it back
+        } finally {
+            setTrimming(false);
+        }
+    };
+
+    // Undo the LAST applied trim (one level, not a full history — the worker
+    // only ever keeps one step back). O(1): the worker never retired the
+    // pre-trim ciphertext/key, so this is a pointer swap, not a re-mux — cut
+    // too much, and this is the way back that never existed before. Shares
+    // `trimming` with applyTrim: both reshape `sealed` and must not overlap
+    // (Post/Discard/Apply/Reset are all gated on the same flag already).
+    const doUndo = async () => {
+        if (!sealed?.canUndo || trimming) return;
+        const before = sealed.durationMs;
+        setTrimming(true); setTrimError(null); setTrimNote(null);
+        detachRef.current?.();
+        try {
+            const info = await undoTrim();
+            setSealed(info);
+            // Any pending (un-applied) slider adjustment was an offset into
+            // the now-superseded, shorter timeline — it no longer means
+            // anything against the restored one.
+            setTrimStartMs(0);
+            setTrimEndMs(null);
+            setTrimNote(`Restored to ${formatClock(info.durationMs / 1000)} (undid the trim to ${formatClock(before / 1000)}).`);
+            setTrimGen(g => g + 1);
+        } catch (e) {
+            setTrimError(`Undo failed: ${e instanceof Error ? e.message : String(e)}`);
+            setTrimGen(g => g + 1);
         } finally {
             setTrimming(false);
         }
@@ -527,6 +556,15 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                                 <div className="clip-composer-label">
                                     Trim <span className="clip-composer-muted">(optional — cuts snap outward to the nearest keyframe, about 2 s)</span>
                                 </div>
+                                {trimError && <p className="clip-composer-error"><WarningIcon size={13} /> {trimError}. The clip is unchanged — you can still post it as-is.</p>}
+                                {sealed.canUndo && (
+                                    <div className="clip-composer-actions clip-trim-actions">
+                                        <span className="clip-composer-hint">Cut too much? Undo restores exactly what the last trim removed.</span>
+                                        <button className="clip-btn secondary" onClick={() => void doUndo()} disabled={trimming || postWindowPassed}>
+                                            {trimming ? 'Working…' : 'Undo last trim'}
+                                        </button>
+                                    </div>
+                                )}
                                 {!canTrim ? (
                                     <p className="clip-composer-hint">{tooLargeToTrim ? 'This clip is too large to trim here — post it as-is.' : 'This clip is too short to trim — post it as-is.'}</p>
                                 ) : (
@@ -554,7 +592,6 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                                                 ? (trimNote ?? <>Whole clip ({formatClock(durMs / 1000)}). Drag the handles to trim, or just post as-is.</>)
                                                 : <>Will keep about <strong>{formatClock(trimStartMs / 1000)} – {formatClock(endMs / 1000)}</strong> ({formatClock(keepMs / 1000)}), widened to the nearest keyframes. Apply, then check the preview before posting.</>}
                                         </p>
-                                        {trimError && <p className="clip-composer-error"><WarningIcon size={13} /> Trim failed: {trimError}. The clip is unchanged — you can still post it as-is.</p>}
                                         {isTrimmed && (
                                             <div className="clip-composer-actions clip-trim-actions">
                                                 <button className="clip-btn secondary" onClick={() => { setTrimStartMs(0); setTrimEndMs(null); setTrimError(null); }} disabled={trimming}>Reset</button>

@@ -173,11 +173,19 @@ export interface TrimSealedResult {
  * whichever key the posted parts were sealed with, so nothing else changes.
  *
  * All-or-nothing: the caller's `parts`/`secrets` are untouched if anything
- * throws; only after every new part is sealed are the old wires and the old
- * secrets zero-filled. Memory: the whole decrypted clip is resident once
- * (decrypted straight into one buffer), next to the old ciphertext (rollback)
- * and the new ciphertext as it accumulates; each re-mux output part is sealed
- * and zero-filled AS IT IS PRODUCED. Tested in clipTrimRemux.test.ts.
+ * throws. Memory: the whole decrypted clip is resident once (decrypted
+ * straight into one buffer), next to the old ciphertext (rollback) and the
+ * new ciphertext as it accumulates; each re-mux output part is sealed and
+ * zero-filled AS IT IS PRODUCED. Tested in clipTrimRemux.test.ts.
+ *
+ * `retireOriginal` decides what happens to `parts`/`secrets` on SUCCESS (the
+ * error path above never touches them either way): `true` zero-fills them —
+ * the original behaviour, for a caller with no further use for the pre-trim
+ * bytes. `false` leaves them completely untouched, still valid and openable
+ * under their original indices — replayWorker.ts passes `false` and keeps
+ * the result as a one-level undo point, since decrypting never mutates its
+ * input (clipCrypto.ts's `openPart` always returns a fresh buffer), so
+ * "don't zero it" is the entire mechanism; no copy is made or needed.
  */
 export async function trimSealedParts(
     secrets: ClipSecrets,
@@ -188,6 +196,7 @@ export async function trimSealedParts(
     endMs: number,
     maxParts: number,
     partBudget: number,
+    retireOriginal: boolean,
 ): Promise<TrimSealedResult | null> {
     const lo = Math.max(0, Math.min(startMs, endMs));
     const hi = Math.min(durationMs, Math.max(startMs, endMs));
@@ -222,9 +231,12 @@ export async function trimSealedParts(
             const next = kept[i + 1];
             kept[i].durMs = kept[i].isInit ? 0 : Math.max(0, Math.round(((next?.startS ?? result.durationS) - (kept[i].startS ?? 0)) * 1000));
         }
-        // Only now, with every new part sealed, retire the superseded ciphertext and key.
-        for (const p of parts) p.wire.fill(0);
-        secrets.key.fill(0); secrets.noncePrefix.fill(0);
+        // Only now, with every new part sealed, retire the superseded ciphertext
+        // and key — unless the caller asked to keep them (undo point).
+        if (retireOriginal) {
+            for (const p of parts) p.wire.fill(0);
+            secrets.key.fill(0); secrets.noncePrefix.fill(0);
+        }
         return { secrets: fresh, parts: kept, durationMs: Math.round(result.durationS * 1000), totalCipherBytes: totalCipher, hasAudio: result.hasAudio };
     } catch (e) {
         // Roll back: the new ciphertext is worthless without its key.

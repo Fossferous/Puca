@@ -103,26 +103,63 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   prefix — clipCrypto derives a part's nonce from (prefix, index) and the
   re-mux re-uses indices 0..m, so re-sealing under the old key would repeat
   AES-GCM nonces; the manifest carries whichever key the posted parts were
-  sealed with). Only after every new part is sealed are the old ciphertexts
-  and the old key zero-filled, so a failure mid-way leaves the original
-  intact and postable. The cut points snap OUTWARD to the nearest keyframes
-  (one GOP ≈ 2 s), so the user never loses footage they asked to keep and
-  the result is never wider than the approved clip (its only input); audio
-  starts at the first whole AAC frame inside the cut (≤ 21 ms late — a
-  straddling frame is dropped, not clamped, which would have written it ~1 ms
-  long). `clipTrim.ts trimSealedParts` is the whole algorithm outside the
-  worker; `clipTrimRemux.test.ts` runs it against the real mediabunny muxer
-  and real WebCrypto on a multi-GOP file and proves: a FRONT trim's output
-  starts at t=0 (fragments carry absolute `tfdt` — a positive control shows
-  the demuxer reports them — so merely relisting the later parts of the
-  original would have stalled every player at 0 s); every new nonce differs
-  from every old one and the new parts reject under the old key; a failure
-  mid-way leaves every old wire byte-identical. `e2e/clip-worker-headless.mjs`
-  plays a front-trimmed clip from the real worker bundle and asserts
-  `currentTime` advances and `buffered` starts at 0. Memory: the re-mux
-  holds the old ciphertext + the whole decrypted clip + the new ciphertext
-  (≈ 3× the clip on top of the ring), so the composer refuses trim above
-  `TRIM_MAX_CIPHER_BYTES` (768 MiB) and on clips shorter than two GOPs.
+  sealed with). The cut points snap OUTWARD to the nearest keyframes (one
+  GOP ≈ 2 s), so the user never loses footage they asked to keep and the
+  result is never wider than the approved clip (its only input); audio starts
+  at the first whole AAC frame inside the cut (≤ 21 ms late — a straddling
+  frame is dropped, not clamped, which would have written it ~1 ms long).
+  `clipTrim.ts trimSealedParts` is the whole algorithm outside the worker;
+  `clipTrimRemux.test.ts` runs it against the real mediabunny muxer and real
+  WebCrypto on a multi-GOP file and proves: a FRONT trim's output starts at
+  t=0 (fragments carry absolute `tfdt` — a positive control shows the
+  demuxer reports them — so merely relisting the later parts of the original
+  would have stalled every player at 0 s); every new nonce differs from
+  every old one and the new parts reject under the old key; a failure
+  mid-way leaves every old wire byte-identical AND (positive control) leaves
+  the ORIGINAL untouched under `retireOriginal: false` too, still openable
+  at its original indices under its original secrets.
+  `e2e/clip-worker-headless.mjs` plays a front-trimmed clip from the real
+  worker bundle, undoes it, and asserts the restored clip plays too — the
+  worker-protocol proof `clipTrimRemux.test.ts` alone cannot give, since the
+  undo bookkeeping (`undoPoint`) lives in replayWorker.ts, not clipTrim.ts.
+
+- **Undo restores exactly one trim — cutting too much used to be
+  unrecoverable, now it is not.** Applying a trim used to zero-fill the
+  pre-trim ciphertext and key the moment the new parts were sealed
+  (`trimSealedParts`'s `retireOriginal` argument, always `true` before this),
+  so a cut deeper than intended had no way back short of a fresh approval
+  round — and if the call had ended, not even that. The worker now decides
+  whether to retire: `retireOriginal: false` leaves the pre-trim `parts` and
+  `secrets` completely untouched (decrypting never mutates them — WebCrypto's
+  `decrypt` always returns a fresh buffer — so "don't zero it" is the whole
+  mechanism, no copy needed) and keeps them as `undoPoint`, a single extra
+  `SealedClip` the worker holds alongside the current one. `t:'undoTrim'`
+  swaps `sealed` back to it — O(1), a pointer swap, not a re-mux — and
+  retires whatever was current (it was never uploaded: undo is only reachable
+  from the composer's pre-Post `approved`-phase trim UI). A SECOND trim
+  retires the existing undo point before installing a new one, so this is
+  one level, not a history: undoing twice does not reach further back than
+  the immediately-prior state. `undoPoint` is zero-filled the moment it can
+  no longer be reached — a newer trim, an undo, or a discard — so at most
+  two `SealedClip`s are ever resident (current + one undo step), bounded the
+  same way a single trim already is (`TRIM_MAX_CIPHER_BYTES`): steady-state
+  memory while an undo point exists can reach ~2× the clip instead of ~1×,
+  on top of the ring. If a partial upload's parts get server-side-deleted
+  because the clip they belonged to is about to become the undo point (a
+  retry-then-trim sequence), that undo point's `uploadedIds` are cleared too
+  — otherwise undoing back to it and retrying the upload would believe parts
+  the server just deleted were still there, and post a manifest with dead
+  part ids. `SealedInfo.canUndo` is computed once, at the single call site
+  that turns `sealed` into an outgoing message (`postSealed` in
+  replayWorker.ts), so it can never drift from whichever operation
+  (seal/trim/undo) most recently ran. `trim` and `undoTrim` mutually exclude
+  each other and drain against `discardSeal`/`wipe` via a shared `reshapeRun`
+  promise (the same pattern `previewRun`/`uploadRun` already use) — decrypting
+  a part has no per-part cancellation check the way `preview()`'s loop does,
+  so an unguarded `wipe` (reachable outside any UI gate — Chromium's "Stop
+  sharing" control, a system suspend) landing mid-decrypt would zero-fill the
+  exact ciphertext array a trim/undo is still reading, surfacing a raw
+  AES-GCM error instead of a clean "discarded" outcome.
 - **A posted clip can be downloaded by anyone who can see the message.**
   Once posted, every required approver already agreed to release it; the
   Download button (`ClipAttachment`) fetches + decrypts every part and

@@ -119,4 +119,40 @@ describe('clip preview is gated on approval (docs/CLIPS.md)', () => {
         expect('<video className="x" ref={r} />').toMatch(VIDEO_EL);
         expect('a <video> in prose').toMatch(VIDEO_EL); // which is why comments are stripped first
     });
+
+    it('"Undo last trim" (doUndo) appears ONLY inside the approved branch and NOWHERE before it', () => {
+        // Same class of guarantee as the <video>/attachPreview gate above: undo
+        // restores footage from BEFORE the last trim, which is still nothing
+        // wider than what every participant already approved — but it must
+        // stay unreachable before approval regardless, same as preview/trim.
+        const code = src();
+        const callSite = /void doUndo\(\)/g;
+        const approved = renderBranch(code, 'approved');
+        expect(approved).toMatch(callSite);
+        expect((code.match(callSite) ?? []).length).toBe(1);
+        for (const pre of ['choose', 'sealing', 'sealed', 'proposing', 'pending']) {
+            expect(renderBranch(code, pre), `doUndo() reachable from the '${pre}' branch`).not.toMatch(callSite);
+        }
+        // doUndo itself only ever calls the worker-proxy undoTrim() — never
+        // attachPreview or anything ring-level.
+        const fnStart = code.indexOf('const doUndo = async ()');
+        expect(fnStart).toBeGreaterThan(-1);
+        const fnBody = code.slice(fnStart, code.indexOf('const uploadAndPost = async ('));
+        expect(fnBody).toMatch(/undoTrim\(\)/);
+        expect(fnBody).not.toMatch(/attachPreview\(/);
+    });
+
+    it('the worker zero-fills AND clears a live undoPoint on discard/wipe, not just `sealed`', () => {
+        // discardSealed() is the ONLY path 'discardSeal' and 'wipe' use to tear
+        // down — assert it retires undoPoint BEFORE sealed (order doesn't
+        // matter functionally, but both must be there), so an applied trim's
+        // pre-trim ciphertext/key don't survive a "wipe everything" action.
+        const worker = readFileSync(join(__dirname, '..', 'api', 'clips', 'replayWorker.ts'), 'utf8');
+        const fnStart = worker.indexOf('function discardSealed(): void {');
+        expect(fnStart).toBeGreaterThan(-1);
+        const fnBody = worker.slice(fnStart, worker.indexOf('\n}\n', fnStart));
+        expect(fnBody).toMatch(/if \(undoPoint\) \{ zeroSealedClip\(undoPoint\); undoPoint = null; \}/);
+        expect(fnBody).toMatch(/zeroSealedClip\(sealed\)/);
+        expect(fnBody).toMatch(/sealed = null/);
+    });
 });

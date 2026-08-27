@@ -56,6 +56,13 @@ export type ToWorker =
      *  (re-using the old key would repeat AES-GCM nonces across indices). Replies
      *  `sealed` with the new info, or `trimFailed` leaving the original intact. */
     | { t: 'trim'; startMs: number; endMs: number; token?: string; baseUrl?: string }   // token+baseUrl ⇒ also DELETE parts a failed upload already landed
+    /** Restore the sealed clip to how it was immediately before the LAST
+     *  successful `trim` (one level — undoing twice does not reach further
+     *  back). O(1): the pre-trim ciphertext + key were kept, not re-derived,
+     *  so this is a pointer swap, not a re-mux. Replies `sealed` with the
+     *  restored info, or `undoFailed` (nothing to undo) leaving the current
+     *  sealed clip untouched — same contract as `trim`/`trimFailed`. */
+    | { t: 'undoTrim' }
     /** `proposalId` is the SERVER's clip id (the approved proposal); it is the
      *  multipart `clip_id` the consent gate checks. The seal-time id in the
      *  manifest is a separate crypto binding (AAD) and stays as sealed. */
@@ -94,6 +101,11 @@ export interface SealedInfo {
     audioCodec: ClipAudioCodec | null;
     /** Per-part durations, ms (index 0 = init segment = 0). */
     partDurMs: number[];
+    /** True when a trim can be undone — i.e. the worker is holding the state
+     *  from immediately before the last one. False right after a fresh seal,
+     *  after an undo (only one level), and after a no-op trim (the whole
+     *  range re-requested — nothing was superseded). */
+    canUndo: boolean;
 }
 
 /** worker → main */
@@ -108,6 +120,9 @@ export type FromWorker =
     /** Trim failed: unlike `sealFailed`, the EXISTING sealed clip is untouched
      *  and still postable as-is — this must not wipe it or drop the phase back. */
     | { t: 'trimFailed'; message: string }
+    /** Undo failed (nothing to undo, or the clip changed underneath it): the
+     *  CURRENT sealed clip is untouched, same contract as `trimFailed`. */
+    | { t: 'undoFailed'; message: string }
     | { t: 'uploadProgress'; done: number; total: number; bytesDone: number }
     | { t: 'uploaded'; href: string; partIds: string[] }
     | { t: 'uploadFailed'; message: string; status?: number; failedIdx: number[] }

@@ -14,8 +14,13 @@
  * Trim narrows the ALREADY-APPROVED window; it can only remove footage, never
  * add anything outside what was described to approvers, so posting a trimmed
  * clip needs no new consent. It RE-MUXES the kept range (clipTrim.ts) so the
- * result is a self-consistent file whose timeline starts at 0.
+ * result is a self-consistent file whose timeline starts at 0. `undoTrim`
+ * restores exactly one trim back — an applied trim used to be a one-way door,
+ * so cutting too much had no way back before this existed — by KEEPING
+ * (rather than zero-filling) the pre-trim ciphertext and key as `undoPoint`;
+ * never a full history, and always cleared the moment it is superseded.
  *
+
  * Privacy contract (docs/CLIPS.md): no MediaRecorder, no Blob for the buffer,
  * no IndexedDB/localStorage/File; every closed GOP is AES-GCM ciphertext under
  * a non-extractable key; plaintext exists only in flight (the open GOP, the
@@ -505,6 +510,9 @@ class Ring {
             clipId, durationMs: Math.round(totalS * 1000), leadInMs: Math.round(win.leadInUs / 1000), lostMs: Math.round(win.lostUs / 1000),
             width: this.width, height: this.height, partCount: sealedParts.length, totalCipherBytes: totalCipher,
             videoCodec: this.vDecoderConfig.codec, audioCodec: hasAudio ? audioCodec : null, partDurMs: sealedParts.map(p => p.durMs),
+            // Overwritten with the real value at send time (postSealed) — a
+            // fresh seal always discards any undo point (discardSealed, below).
+            canUndo: false,
         };
         return { clipId, secrets, parts: sealedParts, info, videoCodec: this.vDecoderConfig.codec, audioCodec: hasAudio ? audioCodec : null, uploadedIds: new Map() };
     }
@@ -537,6 +545,17 @@ function copyBytes(src: AllowSharedBufferSource): Uint8Array {
 // ---- worker state machine ---------------------------------------------------
 let ring: Ring | null = null;
 let sealed: SealedClip | null = null;
+/** The state one 'trim' ago — a single level of undo (docs/CLIPS.md). An
+ *  applied trim used to be a one-way door: the pre-trim ciphertext and key
+ *  were zero-filled the moment the new parts were sealed, so cutting too much
+ *  had no way back short of a fresh approval round (if the call was even
+ *  still live to ask). Kept for exactly ONE trim back, never a full history:
+ *  a NEW trim retires whatever undo point existed before installing this one
+ *  (see the 'trim' case), so at most two SealedClips are ever resident at
+ *  once — bounded the same way a single trim already is
+ *  (TRIM_MAX_CIPHER_BYTES). Cleared (zero-filled) the moment it can no longer
+ *  be reached: an undo, a discard, or a newer trim superseding it. */
+let undoPoint: SealedClip | null = null;
 
 /** Bumped by every preview start, discard and trim so a preview that is still
  *  streaming notices it has been superseded and stops (posting previewFailed
@@ -547,6 +566,21 @@ let previewGen = 0;
 let previewRun: Promise<void> | null = null;
 /** The in-flight upload, if any — trim waits for it too (it reads the wires trim retires). */
 let uploadRun: Promise<void> | null = null;
+/** The in-flight 'trim' or 'undoTrim', if any. Both read/zero-fill `sealed`/
+ *  `undoPoint` by REFERENCE (never a copy — that's the whole point of
+ *  `retireOriginal: false`), and neither drains against the OTHER or against
+ *  a concurrent discard: `trimSealedParts`'s decrypt loop has no per-iteration
+ *  cancellation check (unlike `preview()`, which re-checks `sealed !== s`
+ *  before every part for exactly this reason). Left unguarded, a `wipe`/
+ *  `discardSeal` — reachable outside the composer's own `trimming` gate, e.g.
+ *  Chromium's "Stop sharing" control or a system-suspend hook — landing
+ *  mid-decrypt would zero-fill the exact array the loop is iterating,
+ *  surfacing a raw AES-GCM `OperationError` instead of the intended clean
+ *  "the clip was discarded" message. `discardSeal`/`wipe` drain this before
+ *  calling `discardSealed()`, and `trim`/`undoTrim` drain it before starting,
+ *  making all four mutually exclusive — the same pattern `previewRun`/
+ *  `uploadRun` already use, just one operation class up. */
+let reshapeRun: Promise<void> | null = null;
 const PREVIEW_SOURCEOPEN_TIMEOUT_MS = 10_000;
 
 /** Release a worker-side MediaSource: drop its buffered (decrypted) media and
@@ -565,15 +599,31 @@ function releaseMediaSource(ms: MediaSource | undefined): void {
     } catch { /* ignore */ }
 }
 
+/** Zero-fill one SealedClip's ciphertext, key, and release its (decrypted)
+ *  preview buffers. Shared by discardSealed and every place that retires a
+ *  superseded undo point — the same cleanup either state needs. */
+function zeroSealedClip(s: SealedClip): void {
+    for (const p of s.parts) p.wire.fill(0);
+    s.parts.length = 0;
+    s.secrets.key.fill(0); s.secrets.noncePrefix.fill(0);
+    releaseMediaSource(s.ms);
+    s.ms = undefined;
+}
+
 function discardSealed(): void {
+    if (undoPoint) { zeroSealedClip(undoPoint); undoPoint = null; }
     if (!sealed) return;
     previewGen++; // any in-flight preview stops at its next step
-    for (const p of sealed.parts) p.wire.fill(0);
-    sealed.parts.length = 0;
-    sealed.secrets.key.fill(0); sealed.secrets.noncePrefix.fill(0);
-    releaseMediaSource(sealed.ms);
-    sealed.ms = undefined;
+    zeroSealedClip(sealed);
     sealed = null;
+}
+
+/** Post the CURRENT `sealed` as a `sealed` message, stamping `canUndo` from
+ *  the CURRENT `undoPoint` — the one place that invariant is computed, so it
+ *  can never drift from whichever operation (seal/trim/undoTrim) just ran. */
+function postSealed(): void {
+    if (!sealed) return;
+    post({ t: 'sealed', info: { ...sealed.info, canUndo: undoPoint !== null } });
 }
 
 /** Stream the CURRENT sealed clip into a worker-side MediaSource and hand the
@@ -632,19 +682,27 @@ async function preview(seq: number): Promise<void> {
  * tfdt), seal under FRESH secrets (re-using the key would repeat AES-GCM
  * nonces across indices), all-or-nothing rollback, zero-fill — lives in
  * clipTrim.ts `trimSealedParts` so it is testable outside the worker. This
- * wrapper only maps SealedClip in and out and retires the old MediaSource.
+ * wrapper only maps SealedClip in and out and retires the old MediaSource
+ * (its buffered/decrypted preview data — not its ciphertext, see below).
  * Peak memory is ~3× the clip on top of the ring, which is why the composer
  * refuses trim above TRIM_MAX_CIPHER_BYTES.
+ *
+ * `s` itself — its ciphertext parts and key — is left completely untouched
+ * (`retireOriginal: false`): the caller (self.onmessage's 'trim' case) keeps
+ * it as the one-level undo point instead of discarding it, which is why an
+ * applied trim is no longer a one-way door (docs/CLIPS.md).
  */
 async function trimSealed(s: SealedClip, startMs: number, endMs: number): Promise<SealedClip> {
     if (s.info.totalCipherBytes > TRIM_MAX_CIPHER_BYTES) throw new Error('this clip is too large to trim in memory — post it as-is');
-    const r = await trimSealedParts(s.secrets, s.clipId, s.parts, s.info.durationMs, startMs, endMs, MAX_CLIP_PARTS, PART_MAX_PLAINTEXT);
+    const r = await trimSealedParts(s.secrets, s.clipId, s.parts, s.info.durationMs, startMs, endMs, MAX_CLIP_PARTS, PART_MAX_PLAINTEXT, false);
     if (!r) return s; // nothing to trim
     releaseMediaSource(s.ms);
     const info: SealedInfo = {
         ...s.info, durationMs: r.durationMs, leadInMs: 0, lostMs: 0,
         partCount: r.parts.length, totalCipherBytes: r.totalCipherBytes, partDurMs: r.parts.map(p => p.durMs),
         audioCodec: r.hasAudio ? s.info.audioCodec : null,
+        // Overwritten with the real value at send time (postSealed).
+        canUndo: false,
     };
     return { ...s, secrets: r.secrets, parts: r.parts, info, audioCodec: r.hasAudio ? s.audioCodec : null, uploadedIds: new Map(), uploadedFor: undefined, ms: undefined };
 }
@@ -696,7 +754,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                 discardSealed();
                 try {
                     sealed = await ring.seal(m.clipId, m.requestedMs, m.maxMs);
-                    post({ t: 'sealed', info: sealed.info });
+                    postSealed();
                 } catch (e) {
                     post({ t: 'sealFailed', message: e instanceof Error ? e.message : String(e) });
                 }
@@ -713,37 +771,102 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                 break;
             }
             case 'trim': {
-                // Every outcome posts sealed or trimFailed — same contract.
-                try {
-                    if (!sealed) throw new Error('nothing sealed');
-                    // Supersede and drain any in-flight preview before touching
-                    // the parts it reads; it fails fast at its next step.
-                    previewGen++;
-                    if (previewRun) await previewRun;
-                    // …and an in-flight upload, which reads the same wires.
-                    if (uploadRun) await uploadRun.catch(() => { /* reported on its own channel */ });
-                    if (!sealed) throw new Error('nothing sealed');
-                    const s = sealed;
-                    const partialIds = new Map(s.uploadedIds);
-                    const r = await trimSealed(s, m.startMs, m.endMs);
-                    if (sealed !== s) {
-                        // A discardSeal (cancel/decline/disarm) landed while the
-                        // re-mux ran: what it destroyed must not come back under
-                        // a fresh key. The rollback in trimSealedParts cannot see
-                        // this, so retire the result here.
-                        for (const p of r.parts) p.wire.fill(0);
-                        r.secrets.key.fill(0); r.secrets.noncePrefix.fill(0);
-                        throw new Error('the clip was discarded');
+                // Mutual exclusion against a concurrent 'undoTrim' (both read/
+                // zero-fill sealed/undoPoint by reference, and neither has a
+                // per-iteration cancellation check the way preview() does) —
+                // see reshapeRun's own comment. Every outcome still posts
+                // sealed or trimFailed, same contract as before.
+                if (reshapeRun) await reshapeRun.catch(() => { /* its own outcome already posted */ });
+                const run = (async () => {
+                    try {
+                        if (!sealed) throw new Error('nothing sealed');
+                        // Supersede and drain any in-flight preview before touching
+                        // the parts it reads; it fails fast at its next step.
+                        previewGen++;
+                        if (previewRun) await previewRun;
+                        // …and an in-flight upload, which reads the same wires.
+                        if (uploadRun) await uploadRun.catch(() => { /* reported on its own channel */ });
+                        if (!sealed) throw new Error('nothing sealed');
+                        const s = sealed;
+                        const partialIds = new Map(s.uploadedIds);
+                        const r = await trimSealed(s, m.startMs, m.endMs);
+                        if (sealed !== s) {
+                            // A discardSeal (cancel/decline/disarm) landed while the
+                            // re-mux ran: what it destroyed must not come back under
+                            // a fresh key. The rollback in trimSealedParts cannot see
+                            // this, so retire the result here (unless r IS s — the
+                            // no-op "nothing to trim" case — which discardSealed
+                            // already zeroed).
+                            if (r !== s) { for (const p of r.parts) p.wire.fill(0); r.secrets.key.fill(0); r.secrets.noncePrefix.fill(0); }
+                            throw new Error('the clip was discarded');
+                        }
+                        if (r !== s) {
+                            // A real trim: `s` becomes the new one-level undo point
+                            // (docs/CLIPS.md), replacing whatever it was before.
+                            // `trimSealed` passed `retireOriginal: false`, so `s`'s
+                            // ciphertext and key are still fully intact — nothing to
+                            // copy, just keep the reference instead of dropping it.
+                            if (partialIds.size && m.token && m.baseUrl) {
+                                // Parts a failed upload already landed belong to
+                                // THIS pre-trim state; delete them server-side
+                                // rather than leave quota debris — and since they
+                                // are gone, a resumed upload of this undo point (if
+                                // the user undoes back to it) must start fresh, not
+                                // assume ids the server no longer has. (Not
+                                // reachable through the shipped composer today —
+                                // upload only starts after leaving the trim UI —
+                                // kept for whichever caller resumes an in-flight
+                                // upload from this phase.)
+                                discardParts(partialIds.values(), { baseUrl: m.baseUrl, token: m.token });
+                                s.uploadedIds = new Map(); s.uploadedFor = undefined;
+                            }
+                            if (undoPoint) zeroSealedClip(undoPoint);
+                            undoPoint = s;
+                        }
+                        sealed = r;
+                        postSealed();
+                    } catch (e) {
+                        post({ t: 'trimFailed', message: e instanceof Error ? e.message : String(e) });
                     }
-                    sealed = r;
-                    // Parts a failed upload already landed belong to the PRE-trim
-                    // clip; nothing references them now and discardSeal only knows
-                    // the current ids — delete them rather than leave quota debris.
-                    if (r !== s && partialIds.size && m.token && m.baseUrl) discardParts(partialIds.values(), { baseUrl: m.baseUrl, token: m.token });
-                    post({ t: 'sealed', info: sealed.info });
-                } catch (e) {
-                    post({ t: 'trimFailed', message: e instanceof Error ? e.message : String(e) });
-                }
+                })();
+                reshapeRun = run;
+                await run;
+                if (reshapeRun === run) reshapeRun = null;
+                break;
+            }
+            case 'undoTrim': {
+                // Same contract as 'trim': every outcome posts sealed or
+                // undoFailed, and a failure leaves the CURRENT sealed clip
+                // untouched. O(1) — a pointer swap, not a re-mux, since the
+                // pre-trim ciphertext and key were never retired. Same
+                // reshapeRun exclusion as 'trim' (see its own comment).
+                if (reshapeRun) await reshapeRun.catch(() => { /* its own outcome already posted */ });
+                const run = (async () => {
+                    try {
+                        if (!sealed || !undoPoint) throw new Error('nothing to undo');
+                        const current = sealed;
+                        const restored = undoPoint;
+                        // Same draining as 'trim': an in-flight preview/upload
+                        // reads the wires about to be swapped out from under it.
+                        previewGen++;
+                        if (previewRun) await previewRun;
+                        if (uploadRun) await uploadRun.catch(() => { /* reported on its own channel */ });
+                        if (sealed !== current || undoPoint !== restored) throw new Error('the clip changed while undo was pending');
+                        // The current (post-trim) clip was never uploaded — undo is
+                        // only reachable before Post (ClipComposerModal.tsx keeps
+                        // it inside the pre-upload 'approved' phase) — so there is
+                        // no server-side debris to clean up for it, unlike 'trim'.
+                        zeroSealedClip(current);
+                        undoPoint = null;
+                        sealed = restored;
+                        postSealed();
+                    } catch (e) {
+                        post({ t: 'undoFailed', message: e instanceof Error ? e.message : String(e) });
+                    }
+                })();
+                reshapeRun = run;
+                await run;
+                if (reshapeRun === run) reshapeRun = null;
                 break;
             }
             case 'upload': {
@@ -753,6 +876,13 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                 break;
             }
             case 'discardSeal': {
+                // Drain an in-flight trim/undo first — it reads sealed/undoPoint
+                // by reference, and zeroing them out from under it would surface
+                // a raw crypto error instead of failing that operation cleanly
+                // (reshapeRun's own comment). By the time it settles, sealed/
+                // undoPoint reflect its outcome, so discardSealed() below always
+                // operates on fully-settled state.
+                if (reshapeRun) await reshapeRun.catch(() => { /* its own outcome already posted */ });
                 // Parts that already reached the server are unreferenced ciphertext
                 // that would count against the clipper's quota forever — delete them.
                 if (sealed && sealed.uploadedIds.size && m.token && m.baseUrl) discardParts(sealed.uploadedIds.values(), { baseUrl: m.baseUrl, token: m.token });
@@ -760,6 +890,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                 break;
             }
             case 'wipe': {
+                if (reshapeRun) await reshapeRun.catch(() => { /* its own outcome already posted */ });
                 discardSealed();
                 if (ring) { await ring.wipe(); ring = null; }
                 post({ t: 'wiped' });

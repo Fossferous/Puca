@@ -495,13 +495,14 @@ function handleWorker(s: Session, m: FromWorker): void {
             break;
         }
         case 'sealed':
-            // `trim` reuses this message (it IS a re-seal) — resolve whichever
-            // of the two pending callers is waiting; `sealedAt` is preserved
-            // across a trim (docs/CLIPS.md: it does not change what was
-            // described to approvers, only what ends up in the final upload).
+            // `trim`/`undoTrim` reuse this message (both ARE a re-seal) —
+            // resolve whichever pending caller is waiting; `sealedAt` is
+            // preserved across either (docs/CLIPS.md: neither changes what
+            // was described to approvers, only what ends up in the upload).
             emit({ phase: 'sealed', sealed: m.info, sealedAt: state.sealedAt ?? Date.now() });
             s.pending.get('seal')?.resolve(m.info); s.pending.delete('seal');
             s.pending.get('trim')?.resolve(m.info); s.pending.delete('trim');
+            s.pending.get('undoTrim')?.resolve(m.info); s.pending.delete('undoTrim');
             break;
         case 'sealFailed':
             emit({ phase: 'armed', sealed: null, notice: `Could not prepare the clip: ${m.message}` });
@@ -522,6 +523,10 @@ function handleWorker(s: Session, m: FromWorker): void {
             // Unlike sealFailed: the EXISTING sealed clip is untouched and
             // still postable as-is — must not wipe `sealed` or drop the phase.
             s.pending.get('trim')?.reject(new Error(m.message)); s.pending.delete('trim');
+            break;
+        case 'undoFailed':
+            // Same contract as trimFailed: the CURRENT sealed clip is untouched.
+            s.pending.get('undoTrim')?.reject(new Error(m.message)); s.pending.delete('undoTrim');
             break;
         case 'uploadProgress':
             emit({ phase: 'uploading', upload: { done: m.done, total: m.total, bytesDone: m.bytesDone } });
@@ -607,6 +612,21 @@ export function trimSeal(startMs: number, endMs: number, server?: { token: strin
     return new Promise<SealedInfo>((resolve, reject) => {
         s.pending.set('trim', { resolve: resolve as (v: unknown) => void, reject });
         post(s, { t: 'trim', startMs, endMs, token: server?.token, baseUrl: server?.baseUrl });
+    });
+}
+
+/**
+ * Restore the sealed clip to how it was immediately before the last
+ * successful `trimSeal` — one level, not a full history (docs/CLIPS.md).
+ * Only meaningful when `state.sealed?.canUndo` is true; resolves with the
+ * restored (longer) info. On failure the CURRENT sealed clip is untouched.
+ */
+export function undoTrim(): Promise<SealedInfo> {
+    const s = session;
+    if (!s || !state.sealed) return Promise.reject(new Error('nothing sealed'));
+    return new Promise<SealedInfo>((resolve, reject) => {
+        s.pending.set('undoTrim', { resolve: resolve as (v: unknown) => void, reject });
+        post(s, { t: 'undoTrim' });
     });
 }
 

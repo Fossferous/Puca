@@ -234,7 +234,7 @@ describe('trimSealedParts (decrypt → re-mux → re-seal under FRESH secrets)',
         const oldSecrets: ClipSecrets = { key: oldKey, noncePrefix: oldPrefix, clipId: secrets.clipId.slice() };
         const oldNonces = new Set(parts.map(p => nonceOf(p.wire)));
         const durationMs = Math.round(base.videoDuration * 1000);
-        const r = await trimSealedParts(secrets, clipId, parts, durationMs, Math.round(base.keyTimes[2] * 1000) + 300, durationMs, 64, 200 * 1024);
+        const r = await trimSealedParts(secrets, clipId, parts, durationMs, Math.round(base.keyTimes[2] * 1000) + 300, durationMs, 64, 200 * 1024, true);
         expect(r).not.toBeNull();
         expect(Buffer.from(r!.secrets.key).equals(Buffer.from(oldKey))).toBe(false);
         expect(Buffer.from(r!.secrets.noncePrefix).equals(Buffer.from(oldPrefix))).toBe(false);
@@ -260,6 +260,30 @@ describe('trimSealedParts (decrypt → re-mux → re-seal under FRESH secrets)',
         expect(isZero(secrets.key) && isZero(secrets.noncePrefix)).toBe(true);
     }, 60_000);
 
+    it('retireOriginal: false leaves the original completely untouched — still valid, still openable, still re-trimmable (the undo point)', async () => {
+        const { secrets, parts, clipId } = await sealMulti(200 * 1024);
+        const before = parts.map(p => p.wire.slice());
+        const keyBefore = secrets.key.slice(), prefixBefore = secrets.noncePrefix.slice();
+        const durationMs = Math.round(base.videoDuration * 1000);
+        const r = await trimSealedParts(secrets, clipId, parts, durationMs, Math.round(base.keyTimes[2] * 1000) + 300, durationMs, 64, 200 * 1024, false);
+        expect(r).not.toBeNull();
+        // the "original" (what replayWorker.ts keeps as the undo point) is
+        // byte-identical to before the trim — not a copy elsewhere, THIS object
+        parts.forEach((p, i) => expect(Buffer.from(p.wire).equals(Buffer.from(before[i]))).toBe(true));
+        expect(Buffer.from(secrets.key).equals(Buffer.from(keyBefore))).toBe(true);
+        expect(Buffer.from(secrets.noncePrefix).equals(Buffer.from(prefixBefore))).toBe(true);
+        // positive control: it still actually decrypts (untouched ≠ merely
+        // "not zero" — a corrupted-but-nonzero buffer would fail here)
+        const restoredPlain = [];
+        for (const p of parts) restoredPlain.push(await openPart(secrets, p.index, p.wire));
+        const restored = await probe(concatParts(restoredPlain));
+        expect(near(restored.videoDuration, base.videoDuration)).toBe(true);
+        // and it can be trimmed AGAIN from this same untouched state (undoing
+        // and then trimming differently must not be a one-shot affair)
+        const r2 = await trimSealedParts(secrets, clipId, parts, durationMs, 500, Math.round(base.keyTimes[4] * 1000), 64, 200 * 1024, true);
+        expect(r2).not.toBeNull();
+    }, 60_000);
+
     it('is all-or-nothing: a part that fails to decrypt leaves every old wire byte-identical and the old secrets intact', async () => {
         const { secrets, parts, clipId } = await sealMulti(200 * 1024);
         // tamper one ciphertext byte of the LAST part (decrypt fails late, after others succeeded)
@@ -268,21 +292,21 @@ describe('trimSealedParts (decrypt → re-mux → re-seal under FRESH secrets)',
         const before = parts.map(p => p.wire.slice());
         const keyBefore = secrets.key.slice(), prefixBefore = secrets.noncePrefix.slice();
         const durationMs = Math.round(base.videoDuration * 1000);
-        await expect(trimSealedParts(secrets, clipId, parts, durationMs, 1500, durationMs, 64, 200 * 1024)).rejects.toThrow();
+        await expect(trimSealedParts(secrets, clipId, parts, durationMs, 1500, durationMs, 64, 200 * 1024, true)).rejects.toThrow();
         parts.forEach((p, i) => expect(Buffer.from(p.wire).equals(Buffer.from(before[i]))).toBe(true));
         expect(Buffer.from(secrets.key).equals(Buffer.from(keyBefore))).toBe(true);
         expect(Buffer.from(secrets.noncePrefix).equals(Buffer.from(prefixBefore))).toBe(true);
         // (positive control) the same call on the untampered clip succeeds
         victim.wire[PART_HEADER_BYTES + 5] ^= 0x01;
-        expect(await trimSealedParts(secrets, clipId, parts, durationMs, 1500, durationMs, 64, 200 * 1024)).not.toBeNull();
+        expect(await trimSealedParts(secrets, clipId, parts, durationMs, 1500, durationMs, 64, 200 * 1024, true)).not.toBeNull();
     }, 60_000);
 
-    it('a whole-range request is a no-op (null) and touches nothing', async () => {
+    it('a whole-range request is a no-op (null) and touches nothing, whichever way retireOriginal is set', async () => {
         const { secrets, parts, clipId } = await sealMulti(200 * 1024);
         const before = parts.map(p => p.wire.slice());
         const durationMs = Math.round(base.videoDuration * 1000);
-        expect(await trimSealedParts(secrets, clipId, parts, durationMs, 0, durationMs, 64, 200 * 1024)).toBeNull();
-        expect(await trimSealedParts(secrets, clipId, parts, durationMs, -5, durationMs + 500, 64, 200 * 1024)).toBeNull();
+        expect(await trimSealedParts(secrets, clipId, parts, durationMs, 0, durationMs, 64, 200 * 1024, true)).toBeNull();
+        expect(await trimSealedParts(secrets, clipId, parts, durationMs, -5, durationMs + 500, 64, 200 * 1024, false)).toBeNull();
         parts.forEach((p, i) => expect(Buffer.from(p.wire).equals(Buffer.from(before[i]))).toBe(true));
         expect(isZero(secrets.key)).toBe(false);
     }, 60_000);
@@ -291,7 +315,7 @@ describe('trimSealedParts (decrypt → re-mux → re-seal under FRESH secrets)',
         const { secrets, parts, clipId } = await sealMulti(200 * 1024);
         const before = parts.map(p => p.wire.slice());
         const durationMs = Math.round(base.videoDuration * 1000);
-        await expect(trimSealedParts(secrets, clipId, parts, durationMs, 1500, durationMs, 2, 64 * 1024)).rejects.toThrow(/more than 2 parts/);
+        await expect(trimSealedParts(secrets, clipId, parts, durationMs, 1500, durationMs, 2, 64 * 1024, true)).rejects.toThrow(/more than 2 parts/);
         parts.forEach((p, i) => expect(Buffer.from(p.wire).equals(Buffer.from(before[i]))).toBe(true));
     }, 60_000);
 });

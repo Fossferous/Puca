@@ -107,6 +107,51 @@ const result = await page.evaluate(async ({ workerUrl, seconds }) => {
         const trimmed = await waitFor(m => inbox.indexOf(m) >= beforeTrim && (m.t === 'sealed' || m.t === 'trimFailed'), 30000);
         out.trimmed = trimmed;
         if (trimmed.t === 'sealed') out.previewTrimmed = await previewOnce('trimmed');
+        // UNDO: cutting too much used to be a one-way door (docs/CLIPS.md) —
+        // the pre-trim ciphertext/key were zero-filled the instant the new
+        // parts were sealed. Proves the real worker's message-level undo
+        // bookkeeping (`undoPoint` in replayWorker.ts), which a unit test
+        // against the extracted clipTrim.ts algorithm alone cannot: the kept
+        // ciphertext must survive being routed through actual postMessage/
+        // structured-clone boundaries and the worker's own state machine,
+        // not just a function call, and the restored clip must actually PLAY.
+        let undone;
+        if (trimmed.t === 'sealed') {
+            const beforeUndo = inbox.length;
+            w.postMessage({ t: 'undoTrim' });
+            undone = await waitFor(m => inbox.indexOf(m) >= beforeUndo && (m.t === 'sealed' || m.t === 'undoFailed'), 30000);
+            out.undone = undone;
+            if (undone.t === 'sealed') out.previewUndone = await previewOnce('undone');
+        }
+        // ONE LEVEL, not a history: a SECOND trim must retire the undo point
+        // the first trim left behind, so undoing after two trims lands on the
+        // state right before the second one — never all the way back to the
+        // original. `undone` (above) already restored `sealed` to the full
+        // clip, so this starts a fresh two-trim chain from there.
+        // Both trims keep from 0 — the start always snaps to the FIRST
+        // keyframe (0), which is exact regardless of real GOP timing; only
+        // the end varies, so each step's cut is chosen as a fraction of the
+        // PREVIOUS duration to reliably keep narrowing (an end-only trim on
+        // an already-narrow re-mux, whose kept range holds few keyframes,
+        // can otherwise snap right back to a no-op).
+        if (undone?.t === 'sealed') {
+            const beforeTrim2a = inbox.length;
+            w.postMessage({ t: 'trim', startMs: 0, endMs: Math.floor(undone.info.durationMs * 0.55) });
+            const trim2a = await waitFor(m => inbox.indexOf(m) >= beforeTrim2a && (m.t === 'sealed' || m.t === 'trimFailed'), 30000);
+            out.trim2a = trim2a;
+            if (trim2a.t === 'sealed') {
+                const beforeTrim2b = inbox.length;
+                w.postMessage({ t: 'trim', startMs: 0, endMs: Math.floor(trim2a.info.durationMs * 0.5) });
+                const trim2b = await waitFor(m => inbox.indexOf(m) >= beforeTrim2b && (m.t === 'sealed' || m.t === 'trimFailed'), 30000);
+                out.trim2b = trim2b;
+                if (trim2b.t === 'sealed') {
+                    const beforeUndo2 = inbox.length;
+                    w.postMessage({ t: 'undoTrim' });
+                    const undo2 = await waitFor(m => inbox.indexOf(m) >= beforeUndo2 && (m.t === 'sealed' || m.t === 'undoFailed'), 30000);
+                    out.undo2 = undo2;
+                }
+            }
+        }
         // Ring keeps running after a discard.
         w.postMessage({ t: 'discardSeal' });
         await new Promise(r => setTimeout(r, 1500));
@@ -119,7 +164,7 @@ const result = await page.evaluate(async ({ workerUrl, seconds }) => {
     return out;
 }, { workerUrl: `/assets/${workerFile}`, seconds: 14 });
 
-console.log(JSON.stringify({ armed: result.armed, sealed: result.sealed, preview: result.preview, trimmed: result.trimmed, previewTrimmed: result.previewTrimmed, afterDiscard: result.afterDiscard, wiped: result.wiped }, null, 1).slice(0, 4000));
+console.log(JSON.stringify({ armed: result.armed, sealed: result.sealed, preview: result.preview, trimmed: result.trimmed, previewTrimmed: result.previewTrimmed, undone: result.undone, previewUndone: result.previewUndone, trim2a: result.trim2a, trim2b: result.trim2b, undo2: result.undo2, afterDiscard: result.afterDiscard, wiped: result.wiped }, null, 1).slice(0, 4000));
 ck(result.armed?.t === 'armed', 'worker arms', `codec=${result.armed?.videoCodec} audio=${result.armed?.audioCodec}`);
 ck(result.armed?.audioCodec === 'mp4a.40.2' || result.armed?.audioCodec === 'opus', 'audio encoder configured');
 const last = result.statuses?.[result.statuses.length - 1];
@@ -140,6 +185,24 @@ ck(result.previewTrimmed?.ready?.t === 'previewReady' && result.previewTrimmed?.
 ck(result.previewTrimmed?.playback && result.previewTrimmed.playback.currentTime > 0.5, 'the FRONT-trimmed clip actually PLAYS from 0 (currentTime advanced — a relisted-parts trim stalls at 0)', `currentTime=${result.previewTrimmed?.playback?.currentTime}`);
 ck(result.previewTrimmed?.playback && result.previewTrimmed.playback.buffered0 !== null && result.previewTrimmed.playback.buffered0 < 0.1, 'the trimmed clip buffers from t≈0 (timeline re-based, not the original offset)', `buffered=[${result.previewTrimmed?.playback?.buffered0}, ${result.previewTrimmed?.playback?.bufferedEnd}]`);
 ck(result.previewTrimmed?.playback && Math.abs((result.previewTrimmed.playback.bufferedEnd ?? 0) - result.trimmed.info.durationMs / 1000) < 0.6, 'buffered end ≈ the trimmed duration', `bufferedEnd=${result.previewTrimmed?.playback?.bufferedEnd} dur=${result.trimmed?.info?.durationMs}`);
+ck(result.sealed?.info?.canUndo === false, 'fresh seal reports canUndo=false (nothing trimmed yet)', String(result.sealed?.info?.canUndo));
+ck(result.trimmed?.info?.canUndo === true, 'after a real trim, canUndo=true — the pre-trim state is being kept, not zero-filled', String(result.trimmed?.info?.canUndo));
+ck(result.undone?.t === 'sealed', 'undoTrim re-seals (worker restores the pre-trim state)', result.undone?.message ?? '');
+ck(result.undone?.t === 'sealed' && result.undone.info.durationMs === result.sealed.info.durationMs, 'undo restores the EXACT original duration — cutting too much is no longer a one-way door', `original=${result.sealed?.info?.durationMs} restored=${result.undone?.info?.durationMs}`);
+ck(result.undone?.t === 'sealed' && result.undone.info.partCount === result.sealed.info.partCount, 'undo restores the exact original part count', `original=${result.sealed?.info?.partCount} restored=${result.undone?.info?.partCount}`);
+ck(result.undone?.info?.canUndo === false, 'after undoing, canUndo=false — one level only, not a history', String(result.undone?.info?.canUndo));
+ck(result.previewUndone?.ready?.t === 'previewReady' && result.previewUndone?.playback && !result.previewUndone.playback.error && result.previewUndone.playback.readyState >= 2, 'the UNDONE (restored) clip previews — the kept ciphertext/key survive a real postMessage round trip and still decrypt', JSON.stringify(result.previewUndone?.playback));
+ck(result.previewUndone?.playback && result.previewUndone.playback.currentTime > 0.5, 'the restored clip actually PLAYS', `currentTime=${result.previewUndone?.playback?.currentTime}`);
+ck(result.previewUndone?.playback && Math.abs((result.previewUndone.playback.bufferedEnd ?? 0) - result.sealed.info.durationMs / 1000) < 0.6, 'restored clip buffers the FULL original duration, not the trimmed one', `bufferedEnd=${result.previewUndone?.playback?.bufferedEnd} dur=${result.sealed?.info?.durationMs}`);
+// ONE LEVEL OF UNDO, not a history: trim, trim again, then undo ONCE — must
+// land on the state right before the SECOND trim, never further back.
+ck(result.trim2a?.t === 'sealed' && result.trim2b?.t === 'sealed', 'two trims in a row both succeed', `${result.trim2a?.message ?? ''} ${result.trim2b?.message ?? ''}`);
+ck(result.trim2a?.t === 'sealed' && result.undone?.t === 'sealed' && result.trim2a.info.durationMs < result.undone.info.durationMs - 1500, 'the FIRST of the two trims actually narrowed (distinguishable from the original)', `original=${result.undone?.info?.durationMs} trim1=${result.trim2a?.info?.durationMs}`);
+ck(result.trim2b?.t === 'sealed' && result.trim2a?.t === 'sealed' && result.trim2b.info.durationMs < result.trim2a.info.durationMs - 500, 'the second trim actually narrowed further (distinguishable from the first)', `trim1=${result.trim2a?.info?.durationMs} trim2=${result.trim2b?.info?.durationMs}`);
+ck(result.undo2?.t === 'sealed', 'undo after two trims re-seals', result.undo2?.message ?? '');
+ck(result.undo2?.t === 'sealed' && result.trim2a?.t === 'sealed' && result.undo2.info.durationMs === result.trim2a.info.durationMs, 'undoing ONCE after two trims restores the state right before the SECOND trim — proves the first undo point was retired, not accumulated', `expected(trim1)=${result.trim2a?.info?.durationMs} got=${result.undo2?.info?.durationMs}`);
+ck(result.undo2?.t === 'sealed' && result.undone?.t === 'sealed' && result.undo2.info.durationMs !== result.undone.info.durationMs, 'and it does NOT go all the way back to the original full clip (that would mean undo accumulated a full history instead of one level)', `original=${result.undone?.info?.durationMs} got=${result.undo2?.info?.durationMs}`);
+ck(result.undo2?.info?.canUndo === false, 'after the second undo, canUndo=false again', String(result.undo2?.info?.canUndo));
 ck(!!result.afterDiscard && result.afterDiscard.bufferedMs > 0, 'ring keeps running after discardSeal', `bufferedMs=${result.afterDiscard?.bufferedMs}`);
 ck(result.wiped?.t === 'wiped', 'wipe acknowledged');
 
