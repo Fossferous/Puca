@@ -21,20 +21,14 @@ import { initPushRegistration, teardownPushRegistration } from './api/pushRegist
 // at most one dialog.
 let batteryAskInFlight = false;
 import { UpdateBanner } from './components/UpdateBanner';
-import { ServiceUpdateBanner } from './components/ServiceUpdateBanner';
+// Every always-mounted remote-control global, behind one specifier so a
+// lite build can alias the lot away — see components/RcGlobals.tsx.
+import { RcGlobals } from './components/RcGlobals';
 import { RecoveryCodeModal } from './components/RecoveryCodeModal';
-import { RemoteControlOverlay } from './components/RemoteControlOverlay';
-import { DeviceStage } from './components/DeviceStage';
-import { UnattendedPassphrasePrompt } from './components/UnattendedPassphrasePrompt';
-import { HostConsentPrompt } from './components/HostConsentPrompt';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
 import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipProposals } from './api/clips/clipProposals';
 import { API_BASE_URL } from './api/config';
 import { ClipApprovalPrompt } from './components/ClipApprovalPrompt';
-import { FileAccessPrompt } from './components/FileAccessPrompt';
-import { HostFilesIndicator } from './components/HostFilesIndicator';
-import { DeviceDownloads } from './components/DeviceDownloads';
-import { DeviceFileBrowser } from './components/DeviceFileBrowser';
 import './App.css';
 
 const MAX_AUTO_RETRIES = 3;
@@ -375,17 +369,9 @@ function App() {
         <RequireAuth>
           <div className="app">
             <UpdateBanner />
-            <ServiceUpdateBanner />
             <RecoveryCodeModal />
-            <RemoteControlOverlay />
-            <DeviceStage />
-                <UnattendedPassphrasePrompt />
-            <HostConsentPrompt />
             <ClipApprovalPrompt />
-            <FileAccessPrompt />
-            <HostFilesIndicator />
-            <DeviceDownloads />
-            <DeviceFileBrowser />
+            <RcGlobals />
             <Chat onLogout={handleLogout} />
           </div>
         </RequireAuth>

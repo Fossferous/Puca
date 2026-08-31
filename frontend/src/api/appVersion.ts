@@ -17,7 +17,7 @@
  * see components/UpdateGate.tsx. Nothing here installs on its own.
  */
 import { API_BASE_URL } from './config';
-import { isMobile, isTauri } from './platform';
+import { isMobile, isTauri, RC_ENABLED } from './platform';
 import { updateCheckBases } from './updateCheckBases';
 
 /** Per-base bound on the /app-version fetch. The fallback-base loop below only
@@ -132,10 +132,34 @@ export async function currentAppVersion(): Promise<string> {
     return __APP_VERSION__;
 }
 
-/** Open the release download page in the system browser. */
+/**
+ * Open the release download page in the system browser.
+ *
+ * VARIANT-AWARE. The `download_url` comes from the server's `/app-version`,
+ * which serves one file to every client and knows nothing about lite vs full.
+ * Sending a lite user there unqualified lands them on the FULL installer — the
+ * one that reintroduces remote control on the exact machine whose owner chose
+ * the build without it. So a lite build appends `?variant=lite` (preserving any
+ * existing query), which a lite-aware download site can honour to serve the
+ * lite installer. If the site ignores it the user is no worse off than before
+ * this existed; if it honours it, the fallback stays on the lite channel.
+ */
 export async function openDownloadPage(url: string): Promise<void> {
+    let target = url;
+    if (!RC_ENABLED) {
+        try {
+            const u = new URL(url);
+            u.searchParams.set('variant', 'lite');
+            target = u.toString();
+        } catch {
+            // Not a parseable absolute URL — leave it untouched rather than
+            // mangle it. openDownloadPage's callers already validated it starts
+            // with https://, so this is defensive only.
+            target = url;
+        }
+    }
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('open_external', { url });
+    await invoke('open_external', { url: target });
 }
 
 export type UpdateProgress =

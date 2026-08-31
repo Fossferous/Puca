@@ -16,6 +16,27 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
+# build.rs reads the app identifier out of tauri.conf.json (or the merged
+# TAURI_CONFIG the CLI supplies for --config overlays) so the crate cannot
+# disagree with the bundle about where its data directory lives.
+serde_json = "1.0"
+
+# "remote-control" gates My Devices screen-share/input-control, Wake-on-LAN +
+# device presence, and the remote file browser/transfer (grants, shares,
+# unattended hosting, the host agent bridge, port forwarding). It does NOT
+# gate anything shared with another feature: voice calls, Clips (both use
+# puca-capture/puca-encode and the audio/hotkey/capture-bar plumbing), or
+# ordinary DM file attachments (file_transfer.rs's transfer_begin/write/
+# finish/abort — only its RC-only shareable_folders command is gated).
+# Default on: the normal desktop build is unchanged. A "lite" build passes
+# `--no-default-features` to drop it.
+[features]
+default = ["remote-control"]
+remote-control = [
+    "dep:puca-ua",
+    "dep:puca-service",
+    "dep:clipboard-win",
+]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -60,12 +81,15 @@ puca-encode = { path = "../../crates/puca-encode" }
 
 # The unattended-access gate. Host side only: it VERIFIES a controller's
 # signature and never derives anything from a passphrase, so no Argon2id here.
-puca-ua = { path = "../../crates/puca-ua" }
+# RC-only (unattended hosting arm/disarm) — optional, see [features] above.
+puca-ua = { path = "../../crates/puca-ua", optional = true }
 
-# Per-device identity ("My Devices"). The device private keys live ONLY on the
-# Rust side and are never handed to JS — that is what lets the future native
-# host agent take ownership of them without a rewrite, and what stops a webview
-# XSS from walking off with a machine's identity.
+# This device's identity keypair (device_key.rs). NOT optional and NOT
+# remote-control: device ATTESTATION signs with it to prove which device a
+# connection is, and Android push delivery addresses frames to the id that
+# produces. public_identity() needs BOTH curves — the x25519 half is this
+# device's public key, not just the input to the remote-control key agreement.
+# Only device_key_dh and device_key_forget are gated, inside the module.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
@@ -79,12 +103,15 @@ version = "0.22"
 # loopback) + the Win32 shim hiding WebView2's screen-capture bar (capture_bar.rs)
 [target.'cfg(windows)'.dependencies]
 # Reused for its install/status logic, so the app and the elevated helper cannot
-# end up disagreeing about what "installed" means.
-puca-service = { path = "../../crates/puca-service" }
+# end up disagreeing about what "installed" means. RC-only (unattended-hosting
+# SYSTEM service) — optional, see [features] above. A target-specific
+# dependency can still be gated by a top-level feature; Cargo resolves both
+# conditions together.
+puca-service = { path = "../../crates/puca-service", optional = true }
 # Clipboard for device sessions. navigator.clipboard.readText() needs document
 # focus and a permission grant, so it cannot serve a background HOST — which is
-# exactly when a device session needs it.
-clipboard-win = "5"
+# exactly when a device session needs it. RC-only — optional.
+clipboard-win = { version = "5", optional = true }
 wasapi = "0.22"
 sysinfo = "0.32"
 # Win32_UI_Shell is for SHGetFileInfoW in audio_capture.rs (app icons for the
@@ -94,7 +121,9 @@ sysinfo = "0.32"
 # only ever built by `npm run tauri:build`, i.e. at release time.
 # Win32_System_IO = CancelSynchronousIo (the agent-pipe read deadline in
 # agent_ipc.rs); Win32_System_Pipes = the test-only named-pipe server that
-# proves the deadline fires.
-windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes"] }
+# proves the deadline fires. Win32_System_Services = the read-only SCM query in
+# rc_leftovers.rs, which detects a SovereignRemote service a previous FULL
+# install left behind (needed in the LITE build especially).
+windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
 
 

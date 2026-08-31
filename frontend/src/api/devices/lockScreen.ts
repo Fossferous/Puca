@@ -23,7 +23,7 @@ import { apiClient } from '../client';
 import { API_BASE_URL } from '../config';
 import { getToken, decodeJwtPayload } from '../auth';
 import { getActiveIdentity, deriveAccountSigningKey } from '../e2ee';
-import { buildAuthRecord, signAuthRecord } from './identity';
+import { buildAuthRecord, signAuthRecord } from '../deviceIdentity/identity';
 import { buildUaRecord } from './unattended';
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

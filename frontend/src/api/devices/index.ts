@@ -8,35 +8,20 @@
  * is reported rather than displayed.
  */
 import { apiClient } from '../client';
-import { getToken, decodeJwtPayload } from '../auth';
-import { getActiveIdentity, deriveAccountSigningKey } from '../e2ee';
-import { isMobile, isTauri } from '../platform';
-import { wsClient } from '../websocket';
-import { ensureDeviceKey, signWithDeviceKey } from './deviceKey';
+import { thisDeviceId } from '../thisDevice';
 import {
-    attestationMessage,
-    buildAuthRecord,
-    signAuthRecord,
-    verifyAuthRecord,
-    type DevicePlatform,
-} from './identity';
+    currentUserId,
+    enrolThisDevice,
+    isThisDeviceRevoked,
+    onDeviceEnrolled,
+    resetEnrolmentState,
+    markThisDeviceRevoked,
+    type DeviceRow,
+} from '../deviceIdentity/attest';
+import { getActiveIdentity, deriveAccountSigningKey } from '../e2ee';
+import { wsClient } from '../websocket';
+import { verifyAuthRecord } from './identityRc';
 
-export interface DeviceRow {
-    id: string;
-    device_pub: string;
-    sign_pub: string;
-    name: string;
-    platform: DevicePlatform;
-    auth_record: string;
-    auth_sig: string;
-    host_enabled: boolean;
-    host_policy: string | null;
-    host_sig: string | null;
-    lan_info: string | null;
-    created_at: string;
-    last_seen_at: string | null;
-    online: boolean;
-}
 
 /** A device row plus whether its enrolment signature actually verified. */
 export interface VerifiedDevice extends DeviceRow {
@@ -46,56 +31,11 @@ export interface VerifiedDevice extends DeviceRow {
     isThisDevice: boolean;
 }
 
-function currentPlatform(): DevicePlatform {
-    if (isTauri()) {
-        const ua = navigator.userAgent;
-        if (/Windows/i.test(ua)) return 'windows';
-        if (/Mac OS X|Macintosh/i.test(ua)) return 'macos';
-        return 'linux';
-    }
-    if (isMobile()) return /iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'ios' : 'android';
-    return 'web';
-}
 
-/** A reasonable default name; the user can rename it afterwards. */
-function defaultDeviceName(): string {
-    const platform = currentPlatform();
-    const label: Record<DevicePlatform, string> = {
-        windows: 'Windows PC',
-        linux: 'Linux PC',
-        macos: 'Mac',
-        android: 'Android phone',
-        ios: 'iPhone',
-        web: 'Web browser',
-    };
-    return label[platform];
-}
 
-/** Signed-in user id straight from the JWT — same approach as dms.ts. No
- *  verification needed here: it only selects which account's records we build,
- *  and every one of them is signature-checked afterwards. */
-export function currentUserId(): number | null {
-    const t = getToken();
-    if (!t) return null;
-    const p = decodeJwtPayload(t);
-    return typeof p?.sub === 'number' ? p.sub : null;
-}
 
-let cachedDeviceId: string | null = null;
 
-/** Has the server told us THIS device was signed out?
- *
- *  Drives the only way back: a button the user presses. Automatic recovery is
- *  what made revocation meaningless in the first place — the client discarded
- *  its identity on the 403 and re-enrolled seconds later as a new device. A
- *  deliberate press is fine and an automatic retry is not, which is the whole
- *  distinction. */
-let thisDeviceRevoked = false;
 
-/** True when this machine has been signed out and has not been re-added. */
-export function isThisDeviceRevoked(): boolean {
-    return thisDeviceRevoked;
-}
 
 /**
  * Discard this device's identity and enrol again as a NEW device.
@@ -105,12 +45,11 @@ export function isThisDeviceRevoked(): boolean {
  * from nowhere else.
  */
 export async function resetThisDeviceIdentity(userId: number): Promise<DeviceRow | null> {
-    const { forgetDeviceKey } = await import('./deviceKey');
+    const { forgetDeviceKey } = await import('./deviceKeyRc');
     const { clearPeerKeyCache } = await import('./peerKeys');
     await forgetDeviceKey();
     clearPeerKeyCache();
-    cachedDeviceId = null;
-    thisDeviceRevoked = false;
+    resetEnrolmentState();
     const row = await enrolThisDevice(userId);
 
     // Enrolling is not the same as being REACHABLE. Attestation binds a device
@@ -124,85 +63,12 @@ export async function resetThisDeviceIdentity(userId: number): Promise<DeviceRow
     return row;
 }
 
-/** This device's id, if it has enrolled in this session. */
-export function thisDeviceId(): string | null {
-    return cachedDeviceId;
-}
-
-/**
- * Enrol this device (idempotent — same keys produce the same id, and the server
- * treats a repeat as a refresh).
- *
- * Requires an unlocked identity: without the seed there is no account signing
- * key, so no enrolment record can be signed. Returns null in that case rather
- * than throwing, because it runs opportunistically at startup and a user who
- * has not completed E2EE setup is a normal state, not an error.
- */
-export async function enrolThisDevice(userId: number, name?: string): Promise<DeviceRow | null> {
-    const identity = getActiveIdentity();
-    if (!identity) return null;
-
-    const keys = await ensureDeviceKey();
-    const { canonical, deviceId } = buildAuthRecord({
-        devicePub: keys.device_pub,
-        signPub: keys.sign_pub,
-        name: name ?? defaultDeviceName(),
-        platform: currentPlatform(),
-        userId,
-    });
-    let row: DeviceRow;
-    try {
-        row = await apiClient.post<DeviceRow>('/devices', {
-            device_pub: keys.device_pub,
-            sign_pub: keys.sign_pub,
-            name: name ?? defaultDeviceName(),
-            platform: currentPlatform(),
-            auth_record: canonical,
-            auth_sig: signAuthRecord(identity, canonical),
-        });
-    } catch (e) {
-        // This device was signed out from elsewhere. KEEP its identity.
-        //
-        // The first version of this handler called forgetDeviceKey() here, which
-        // was exactly backwards. The device id is derived from the keypair, so
-        // discarding it mints a NEW id — and the attestation handler re-runs
-        // enrolThisDevice on every DeviceChallenge, which the server sends on
-        // every WebSocket connect. The machine therefore came back about a
-        // second later as a brand-new device with full access, under a default
-        // name, with nothing to approve it. The remediation WAS the bypass:
-        // without it the keypair survives, the same id is derived, and the same
-        // 403 is returned forever, which is what "revoked" has to mean.
-        //
-        // It also quietly handed the server a primitive it should never have:
-        // answer any POST /devices with "device_revoked" and every client
-        // destroys its OS-protected device private key. This module's own header
-        // says the server is a registrar, not an authority.
-        //
-        // Cost of getting this right: a device revoked by mistake cannot re-add
-        // itself: it must be cleared deliberately (device_key_forget) from that
-        // machine. That is the correct direction for the failure to point.
-        if (String((e as Error)?.message ?? '').includes('device_revoked')) {
-            cachedDeviceId = null;
-            thisDeviceRevoked = true;
-            console.warn(
-                '[devices] this device was signed out and will stay signed out; '
-                + 're-add it deliberately from this machine if that was a mistake',
-            );
-            return null;
-        }
-        throw e;
-    }
-    cachedDeviceId = deviceId;
-    thisDeviceRevoked = false;
-    // Publish the account signing PUBLIC key alongside enrolment — it is what
-    // lets a FRIEND holding a device share verify that this account's devices
-    // are really its own (see shares.ts). Best-effort and fire-and-forget:
-    // enrolment must not fail because publication did.
-    void import('./shares')
-        .then(({ publishSigningKey }) => publishSigningKey())
-        .catch(() => { /* best-effort */ });
-    return row;
-}
+/** This device's id, if it has enrolled in this session.
+ *  Re-exported for existing RC callers; the cache itself is a leaf module
+ *  (api/thisDevice.ts) so the preserved push path can read the id without
+ *  importing this registry. */
+// thisDeviceId is NOT re-exported: callers import it from api/thisDevice
+// directly, so needing this device's id never drags in this registry.
 
 /**
  * Every enrolled device, each marked with whether its record actually verified.
@@ -219,7 +85,7 @@ export async function listDevices(userId: number): Promise<VerifiedDevice[]> {
     return devices.map(d => ({
         ...d,
         verified: accountKey ? verifyAuthRecord(accountKey, d, userId) : false,
-        isThisDevice: d.id === cachedDeviceId,
+        isThisDevice: d.id === thisDeviceId(),
     }));
 }
 
@@ -243,7 +109,7 @@ export async function revokeDevice(deviceId: string): Promise<{ revoked: boolean
     // set when a LATER enrolment was refused, which needs a reconnect — so the
     // banner appeared minutes later, or not at all. Record it here, where we
     // already know which device it was.
-    if (deviceId === cachedDeviceId) thisDeviceRevoked = true;
+    if (deviceId === thisDeviceId()) markThisDeviceRevoked();
     return result;
 }
 
@@ -258,8 +124,14 @@ export async function revokeDevice(deviceId: string): Promise<{ revoked: boolean
  * keeps working for chat and is simply not addressable by device. Throwing here
  * would break the socket for users who have no device key at all.
  */
-export function installDeviceAttestation(): void {
-    // --- Cross-user shares: this device's host-side notifications ------------
+/**
+ * Host-side notifications for CROSS-USER device shares.
+ *
+ * Was part of installDeviceAttestation until attestation moved to
+ * api/deviceIdentity/attest.ts (push needs it in every build). What is left
+ * here is share-specific and belongs to remote control.
+ */
+export function installShareNotifications(): void {
     //
     // NOTE: producing a share's grant SIGNATURE is deliberately NOT wired to
     // any reconnect or push here. Only the host device holds the key, but that
@@ -275,7 +147,7 @@ export function installDeviceAttestation(): void {
     // device itself skips it (its own in-app banner covers the live session).
     wsClient.on('DeviceShareSessionStarted', (msg: { payload?: { host_device?: string; from_username?: string } }) => {
         const p = msg?.payload;
-        if (!p?.host_device || p.host_device === cachedDeviceId) return;
+        if (!p?.host_device || p.host_device === thisDeviceId()) return;
         void (async () => {
             try {
                 const { isPermissionGranted, sendNotification } =
@@ -293,34 +165,21 @@ export function installDeviceAttestation(): void {
         })();
     });
 
-    wsClient.on('DeviceChallenge', (msg: { payload?: { nonce?: string } }) => {
-        void (async () => {
-            try {
-                const nonce = msg?.payload?.nonce;
-                const userId = currentUserId();
-                if (!nonce || userId == null) return;
-                // Enrolment is what makes the id known; without it the server
-                // has nothing to look up.
-                if (!cachedDeviceId) await enrolThisDevice(userId);
-                const deviceId = cachedDeviceId;
-                // Explicit rather than relying on enrolment having set it: a
-                // null id here would attest as "device null", which the server
-                // answers by silently ignoring — a failure mode that looks
-                // exactly like the feature not being wired up at all.
-                if (!deviceId) return;
-
-                const sig = await signWithDeviceKey(attestationMessage(nonce, userId));
-                wsClient.send({ type: 'DeviceAttest', payload: { device_id: deviceId, sig } });
-                // Anything that must reach the server AS this device can go
-                // out from here on: the socket delivers in order, so the
-                // server processes the DeviceAttest above before whatever a
-                // listener sends next. session.ts reattaches held device
-                // sessions on this — sent from `wsConnected` it raced the
-                // attestation and the server refused every claim.
-                window.dispatchEvent(new CustomEvent('deviceAttested'));
-            } catch (e) {
-                console.warn('[devices] attestation skipped:', e);
-            }
-        })();
-    });
 }
+
+// Re-exported for the My Devices UI, which has always imported these from
+// this barrel. They live in api/deviceIdentity/attest.ts because device
+// ENROLMENT and attestation must also work in a build without remote
+// control (push registration needs this device's id).
+export { currentUserId, enrolThisDevice, isThisDeviceRevoked };
+export type { DeviceRow };
+
+// Publishing the account signing PUBLIC key is what lets a FRIEND holding a
+// device share verify that this account's devices are really its own (see
+// shares.ts). It follows enrolment, but only in a build that HAS shares —
+// hence a hook rather than a call inside enrolThisDevice.
+onDeviceEnrolled(() => {
+    void import('./shares')
+        .then(({ publishSigningKey }) => publishSigningKey())
+        .catch(() => { /* best-effort */ });
+});

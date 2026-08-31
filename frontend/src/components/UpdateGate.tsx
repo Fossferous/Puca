@@ -19,8 +19,8 @@
  */
 
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { isTauri } from '../api/platform';
-import { isNewerVersion, isTrustedBundleUrl, shouldAutoInstallOnLaunch, AUTO_ATTEMPT_KEY } from './updateGate.utils';
+import { isTauri, RC_ENABLED } from '../api/platform';
+import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, shouldAutoInstallOnLaunch, AUTO_ATTEMPT_KEY } from './updateGate.utils';
 import { updateCheckBases } from '../api/updateCheckBases';
 import { checkForNewVersion, currentAppVersion, installUpdateInPlace, UpdateAbandonedError } from '../api/appVersion';
 import { loadSettings } from './settingsStore';
@@ -281,7 +281,12 @@ export function UpdateGate({ children }: UpdateGateProps) {
 
         // Phase 1 — the CHECK. Any failure here (offline, server down, bad
         // response) is non-fatal: keep the current bundle and load the app.
-        let updateInfo: { version?: string; url?: string; checksum?: string; sessionKey?: string };
+        let updateInfo: {
+            version?: string; url?: string; checksum?: string; sessionKey?: string;
+            /** Which build this bundle is for. Absent means the full build,
+             *  because every manifest published before lite existed omits it. */
+            variant?: string;
+        };
         let currentVersion: string;
         try {
             // Blessed at the entry point too (main.tsx — see the comment
@@ -304,7 +309,15 @@ export function UpdateGate({ children }: UpdateGateProps) {
             let checkResponse: Response | null = null;
             for (const base of updateCheckBases(API_BASE)) {
                 try {
-                    checkResponse = await fetchWithTimeout(`${base}/api/mobile-updates/check`, CHECK_FETCH_TIMEOUT_MS);
+                    // The OTA pushes a JS BUNDLE into an installed APK, so a
+                    // lite install served the full manifest would receive the
+                    // whole remote-control frontend over the air and the
+                    // guarantee would evaporate after shipping. Ask for this
+                    // build's channel; the refusal below is what enforces it,
+                    // since an older server ignores the parameter.
+                    const checkUrl = `${base}/api/mobile-updates/check`
+                        + (RC_ENABLED ? '' : '?variant=lite');
+                    checkResponse = await fetchWithTimeout(checkUrl, CHECK_FETCH_TIMEOUT_MS);
                     break; // reached a server; its answer (incl. 404) is final
                 } catch (err) {
                     console.warn(`[UpdateGate] check via ${base} unreachable:`, err);
@@ -329,6 +342,26 @@ export function UpdateGate({ children }: UpdateGateProps) {
         if (gaveUp.value) return;
 
         if (!updateInfo || !updateInfo.url || !updateInfo.version) {
+            setState(s => ({ ...s, status: 'upToDate' }));
+            return;
+        }
+
+        // VARIANT MUST MATCH, and this is checked CLIENT-SIDE on purpose.
+        //
+        // Requesting ?variant=lite protects nothing by itself: a server that
+        // predates lite ignores the parameter and answers with the ordinary
+        // manifest, which would install the full remote-control bundle into a
+        // lite app. So the client refuses anything that is not its own variant.
+        //
+        // Absent means FULL — every manifest published before lite existed has
+        // no variant field, and those are full bundles. That asymmetry is why
+        // the comparison is written against the expected value rather than by
+        // testing for the string 'lite'.
+        if (!bundleVariantMatches(updateInfo.variant, RC_ENABLED)) {
+            console.warn(
+                `[UpdateGate] Refusing a "${updateInfo.variant ?? 'full'}" bundle: this is the `
+                + `"${RC_ENABLED ? 'full' : 'lite'}" build. Publish a matching manifest for this channel.`,
+            );
             setState(s => ({ ...s, status: 'upToDate' }));
             return;
         }

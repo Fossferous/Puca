@@ -76,3 +76,25 @@ export function isTrustedBundleUrl(url: string, apiBase: string): boolean {
         return false;
     }
 }
+
+/**
+ * May a build with `rcEnabled` apply a bundle advertising `manifestVariant`?
+ *
+ * The OTA pushes a JS BUNDLE into an already-installed APK, so this is what
+ * stops a lite install — one whose whole promise is that it contains no
+ * remote-control code — from being handed the full frontend over the air. No
+ * artifact check can catch that: it happens after shipping.
+ *
+ * FAILS CLOSED, and the asymmetry matters. An ABSENT variant means "full",
+ * because every manifest published before the lite build existed omits the
+ * field and every one of those is a full bundle. Reading absent as "matches
+ * anything" would defeat the entire control on exactly the servers that have
+ * not been updated yet — which is the case it exists for, since a server that
+ * ignores `?variant=lite` answers with the ordinary manifest.
+ */
+export function bundleVariantMatches(
+    manifestVariant: string | undefined | null,
+    rcEnabled: boolean,
+): boolean {
+    return (manifestVariant ?? 'full') === (rcEnabled ? 'full' : 'lite');
+}

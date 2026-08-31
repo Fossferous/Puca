@@ -30,6 +30,20 @@ export function isMobile(): boolean {
 }
 
 /**
+ * Whether this build contains remote control: My Devices screen share +
+ * input control, Wake-on-LAN + device presence, the remote file browser, and
+ * in-call control of a screen share. A compile-time flag, not a runtime
+ * setting — a lite build sets VITE_ENABLE_RC=false.
+ *
+ * This re-exports the injected LITERAL rather than deriving a value from
+ * import.meta.env, so a gate compiles to `if (false)` in the module that
+ * writes it and Rollup can drop the branch without cross-module analysis.
+ * Excluding the code is enforced by vite.config.ts's rc-exclusion-guard, which
+ * fails the build if any remote-control module is still reachable.
+ */
+export const RC_ENABLED = __RC_ENABLED__;
+
+/**
  * The Capacitor ANDROID app specifically. iOS is a native platform too
  * (isMobile() is true there) but carries none of the SovereignApp plugin's
  * features — notifications, keep-alive, the widget — so UI for those must

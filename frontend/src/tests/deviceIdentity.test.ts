@@ -1,12 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import {
-    deriveDeviceId,
-    buildAuthRecord,
-    signAuthRecord,
-    verifyAuthRecord,
-    attestationMessage,
-    DEVICE_AUTH_TYPE,
-} from '../api/devices/identity';
+import { deriveDeviceId, buildAuthRecord, signAuthRecord, attestationMessage, DEVICE_AUTH_TYPE } from '../api/deviceIdentity/identity';
+import { verifyAuthRecord } from '../api/devices/identityRc';
 import {
     canonicalJson,
     deriveAccountSigningKey,

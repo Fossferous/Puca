@@ -80,7 +80,9 @@ vi.mock('../api/devices/clipboard', () => ({
 }));
 vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
 vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTunnels: () => {} }));
-vi.mock('../api/devices/deviceKey', () => ({ deviceKeyDh: async () => new Uint8Array(32).fill(3) }));
+vi.mock('../api/devices/deviceKeyRc', () => ({
+    deviceKeyDh: async () => new Uint8Array(32).fill(3),
+}));
 vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: async () => 'x25519:' + btoa('k') }));
 vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => null }));
 vi.mock('../api/devices/hostAgent', () => ({
@@ -94,7 +96,9 @@ vi.mock('../api/devices/unattended', () => ({
     confirmUaSeed: () => {},
     forgetUaSeed: () => {},
 }));
-vi.mock('../api/devices/index', () => ({ thisDeviceId: () => 'dev-me' }));
+vi.mock('../api/thisDevice', () => ({
+    thisDeviceId: () => 'dev-me',
+}));
 vi.mock('../api/devices/hostConsent', () => ({
     requestHostConsent: async () => ({ monitor: 0 }),
 }));

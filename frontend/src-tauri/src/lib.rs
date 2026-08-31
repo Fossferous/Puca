@@ -1,29 +1,58 @@
+// RC ("remote-control" feature) = My Devices screen-share/input-control,
+// Wake-on-LAN + presence, and the remote file browser/transfer. Everything
+// below is unreachable in a build without that feature: no commands
+// registered, so these modules compile to nothing and pull in none of their
+// dependencies (puca-ua, puca-service, the device-identity keypair crates).
+#[cfg(feature = "remote-control")]
 mod agent_ipc;
 mod audio_capture;
 mod capture_bar;
 mod clip_capture;
 mod clip_desktop_audio;
+#[cfg(feature = "remote-control")]
 mod display_power;
+#[cfg(feature = "remote-control")]
 mod display_topology;
+// NOT gated: device attestation needs ensure()/sign() in every build. The
+// remote-control-only halves (dh, forget) are gated inside the module.
 mod device_key;
 mod file_transfer;
+// Detection + removal of remote-control machinery a previous FULL install left
+// on this machine (the SovereignRemote LocalSystem service and its secrets).
+// NOT gated: the LITE build is the one that needs it, because removing remote
+// control from the artifact does not remove it from the host.
+mod rc_leftovers;
 mod hotkeys;
+#[cfg(feature = "remote-control")]
 mod lan;
+#[cfg(feature = "remote-control")]
 mod privacy_screen;
+#[cfg(feature = "remote-control")]
 mod power;
+#[cfg(feature = "remote-control")]
 mod remote_control;
 mod session_events;
+// NOT gated: VoicePanel raises the capture/encode processes' priority whenever
+// a VOICE screen share is live (holdStreamBoost('voice-share')), which is a
+// preserved feature. Gating it made the share collapse under a fullscreen game
+// on lite builds — silently, because streamBoost.ts swallows the rejected
+// invoke as best-effort. stream_boost.rs depends on nothing gated.
 mod stream_boost;
+#[cfg(feature = "remote-control")]
 mod tunnel;
+#[cfg(feature = "remote-control")]
 mod unattended_store;
+#[cfg(feature = "remote-control")]
 mod tunnel_pump;
+#[cfg(feature = "remote-control")]
 mod tunnel_cmd;
-#[cfg(windows)]
-#[cfg(windows)]
+#[cfg(all(windows, feature = "remote-control"))]
 mod lock_screen;
+#[cfg(feature = "remote-control")]
 mod service_cmd;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "remote-control"))]
 mod service_link;
+#[cfg(feature = "remote-control")]
 mod wol;
 
 use std::sync::Arc;
@@ -245,6 +274,7 @@ async fn hide_screen_capture_bar() -> u32 {
 ///   two events out of order — a `down` overtaking the move that placed it
 ///   clicks the wrong thing on the host. One thread + one FIFO channel keeps
 ///   the order the events arrived in.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn inject_input(event: remote_control::ControlInput) -> Result<(), String> {
     remote_control::inject_queued(event)
@@ -252,6 +282,11 @@ fn inject_input(event: remote_control::ControlInput) -> Result<(), String> {
 
 /// This device's public identity, creating the keypair on first call.
 /// The private halves stay in device_key.rs and are never returned to JS.
+///
+/// NOT gated on remote control: this is what device ATTESTATION enrols with,
+/// and Android native push delivery addresses frames to the resulting id.
+/// Gating it left a lite desktop build unable to attest at all — the JS has no
+/// fallback under isTauri(), so the invoke simply rejected.
 #[tauri::command]
 fn device_key_ensure() -> Result<device_key::DevicePublicIdentity, String> {
     device_key::ensure()
@@ -262,6 +297,9 @@ fn device_key_ensure() -> Result<device_key::DevicePublicIdentity, String> {
 /// The CALLER supplies the whole message, so there is exactly one definition of
 /// what a device signature covers (see attestationMessage in the client). This
 /// is the only way JS can exercise the key — it can never read it.
+///
+/// NOT gated, for the same reason as device_key_ensure: attestation signs the
+/// server's per-connection challenge with it in every build.
 #[tauri::command]
 fn device_key_sign(message: String) -> Result<String, String> {
     device_key::sign(&message)
@@ -273,6 +311,7 @@ fn device_key_sign(message: String) -> Result<String, String> {
 /// device-control session key, but must never hold the long-lived key. A leaked
 /// shared secret costs one peer pairing; a leaked private key costs the
 /// machine's identity permanently.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn device_key_dh(peer_pub: String) -> Result<String, String> {
     device_key::dh(&peer_pub)
@@ -283,6 +322,7 @@ fn device_key_dh(peer_pub: String) -> Result<String, String> {
 /// Native rather than `navigator.clipboard.readText()`, which needs document
 /// focus and a permission grant — unreliable for a HOST running in the
 /// background, which is exactly when a device session wants it.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn clipboard_read_text() -> Result<String, String> {
     #[cfg(windows)]
@@ -292,6 +332,7 @@ fn clipboard_read_text() -> Result<String, String> {
 }
 
 /// Write text to the clipboard.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn clipboard_write_text(text: String) -> Result<(), String> {
     #[cfg(windows)]
@@ -403,6 +444,7 @@ fn set_clip_armed_indicator(
 /// unwanted. The tooltip is the always-available answer to "is anything
 /// controlling this machine right now?" — so it must be driven by the SESSION,
 /// not by whether a UI happens to be mounted.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn set_device_session_indicator(
     app: tauri::AppHandle,
@@ -452,6 +494,7 @@ fn set_device_session_indicator(
 /// Async + spawn_blocking: `wol::send` now enumerates network adapters to find
 /// the physical card to bind to, and a sync command runs on the webview's main
 /// thread (same hazard as `get_running_apps`).
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 async fn wol_send(mac: String, broadcast: Option<String>) -> Result<u32, String> {
     tauri::async_runtime::spawn_blocking(move || wol::send(&mac, broadcast.as_deref()))
@@ -461,6 +504,7 @@ async fn wol_send(mac: String, broadcast: Option<String>) -> Result<u32, String>
 
 /// Discard this device's identity, so a later enrolment is genuinely a NEW
 /// device rather than a resurrection of a revoked one.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn device_key_forget() -> Result<(), String> {
     device_key::forget()
@@ -473,6 +517,7 @@ fn device_key_forget() -> Result<(), String> {
 /// (hundreds of ms), and a SYNC Tauri command runs on the main thread — which
 /// froze the whole window the moment "Allow" was clicked, so the click looked
 /// ignored and users clicked again. Same hazard, same fix as get_running_apps.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 async fn list_anticheat_processes() -> Vec<String> {
     tauri::async_runtime::spawn_blocking(remote_control::detect_anticheat)
@@ -606,12 +651,14 @@ fn release_attention_topmost(app: tauri::AppHandle) {
 /// has focus, via a one-shot `host-killswitch-hotkey` event. When `any_input`
 /// is true, ANY real host mouse/keyboard input also revokes (one-shot
 /// `host-input-detected`).
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn start_control_guard(app: tauri::AppHandle, any_input: bool, kill_vk: u32, kill_mods: u32) {
     remote_control::start_guard(app, any_input, kill_vk, kill_mods);
 }
 
 /// Stop the physical-input kill switch.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn stop_control_guard() {
     remote_control::stop_guard();
@@ -638,12 +685,14 @@ fn stop_hotkey_listener() {
 
 /// Enumerate monitors + the virtual desktop so the host can map the shared
 /// surface onto the right screen (multi-monitor / negative coordinates).
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn list_monitors() -> remote_control::MonitorList {
     remote_control::list_monitors()
 }
 
 /// Set which monitor the injected absolute moves map onto (None = primary).
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn set_control_monitor(target: Option<remote_control::TargetMonitor>) {
     remote_control::set_target(target);
@@ -652,6 +701,7 @@ fn set_control_monitor(target: Option<remote_control::TargetMonitor>) {
 /// Release every key/button currently held (called on any control teardown).
 /// Ordered behind the injection queue, so a queued `down` cannot re-stick a
 /// key after this reports done.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 fn release_control_input() {
     remote_control::release_all_ordered();
@@ -801,7 +851,7 @@ fn clear_webview_permissions() -> Result<String, String> {
     #[cfg(windows)]
     {
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let app_data = std::path::Path::new(&local_app_data).join("com.sovereign.chat");
+            let app_data = std::path::Path::new(&local_app_data).join(env!("PUCA_IDENTIFIER"));
             let marker_file = app_data.join(".clear_permissions_on_start");
 
             // Create marker file to signal cleanup on next startup
@@ -829,7 +879,7 @@ fn check_and_clear_permissions_on_startup() {
     #[cfg(windows)]
     {
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let app_data = std::path::Path::new(&local_app_data).join("com.sovereign.chat");
+            let app_data = std::path::Path::new(&local_app_data).join(env!("PUCA_IDENTIFIER"));
             let marker_file = app_data.join(".clear_permissions_on_start");
             let webview_path = app_data.join("EBWebView");
 
@@ -926,16 +976,19 @@ pub fn run() {
             app.manage(Arc::new(ClipCaptureState::default()));
             #[cfg(windows)]
             app.manage(Arc::new(ClipDesktopAudioState::default()));
-            app.manage(Arc::new(display_power::DisplayPower::default()));
-            let topology = Arc::new(display_topology::DisplayTopology::default());
-            app.manage(topology.clone());
-            // A leftover detach marker means the last run died mid-detach:
-            // put the displays back before anything else runs. Off-thread —
-            // SetDisplayConfig can block, and this is the webview's setup.
-            std::thread::Builder::new()
-                .name("display-topology-startup".into())
-                .spawn(move || topology.restore_if_marked())
-                .ok();
+            #[cfg(feature = "remote-control")]
+            {
+                app.manage(Arc::new(display_power::DisplayPower::default()));
+                let topology = Arc::new(display_topology::DisplayTopology::default());
+                app.manage(topology.clone());
+                // A leftover detach marker means the last run died mid-detach:
+                // put the displays back before anything else runs. Off-thread —
+                // SetDisplayConfig can block, and this is the webview's setup.
+                std::thread::Builder::new()
+                    .name("display-topology-startup".into())
+                    .spawn(move || topology.restore_if_marked())
+                    .ok();
+            }
 
             // Suspend / session-lock feed (session_events.rs): lets in-memory
             // features such as the clip replay buffer wipe themselves before a
@@ -959,10 +1012,14 @@ pub fn run() {
             // revoke can actually live. Always enabled: a menu item that greys
             // itself out would leak whether a grant is currently live to anyone
             // who can see the menu, and revoking nothing costs nothing.
+            #[cfg(feature = "remote-control")]
             let stop_files_item =
                 MenuItem::with_id(app, "stop-files", "Stop file access", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            #[cfg(feature = "remote-control")]
             let tray_menu = Menu::with_items(app, &[&open_item, &stop_files_item, &quit_item])?;
+            #[cfg(not(feature = "remote-control"))]
+            let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
             let show_main = show_main_window;
 
@@ -995,6 +1052,7 @@ pub fn run() {
                     // agent takes a session id per grant. It re-reads the scope
                     // on every request, so this takes effect on the next one
                     // with no reconnect.
+                    #[cfg(feature = "remote-control")]
                     "stop-files" => {
                         use tauri::Emitter;
                         let _ = app.emit("sovereign://revoke-file-access", ());
@@ -1016,7 +1074,12 @@ pub fn run() {
                         // on the MAIN thread, which also dispatches every
                         // Tauri invoke (including input injection). This
                         // stamp brackets the stall window in the log; pair it
-                        // with the host webview's [inject-slow] lines.
+                        // with the host webview's [inject-slow] lines. RC-only
+                        // (the stall it investigates can't happen without live
+                        // input injection) — the native context menu itself
+                        // still opens on right-click regardless, that's Tauri's
+                        // default tray behaviour, not this handler.
+                        #[cfg(feature = "remote-control")]
                         TrayIconEvent::Click { button: tauri::tray::MouseButton::Right, button_state: tauri::tray::MouseButtonState::Up, .. } => {
                             agent_ipc::agent_log(
                                 "[tray] context menu opening - main thread blocks until dismissed".into(),
@@ -1029,8 +1092,11 @@ pub fn run() {
 
             // Open partial files for in-flight peer-to-peer transfers.
             app.manage(file_transfer::TransferFiles::default());
-            app.manage(tunnel_cmd::Tunnels::default());
-            app.manage(unattended_store::UaGateState::default());
+            #[cfg(feature = "remote-control")]
+            {
+                app.manage(tunnel_cmd::Tunnels::default());
+                app.manage(unattended_store::UaGateState::default());
+            }
 
             // Logger: debug builds log to stdout + the webview console; release
             // builds log to a FILE only (no console spam) so field diagnostics
@@ -1063,25 +1129,27 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_state,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_state,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_begin_enrol,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_finish_enrol,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_arm,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_disarm,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             lock_screen::lock_screen_unenrol,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_enable,
-            #[cfg(windows)]
+            #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_disable,
+            #[cfg(feature = "remote-control")]
             service_cmd::service_update,
+            #[cfg(feature = "remote-control")]
             service_cmd::service_bundled_fingerprint,
             set_close_to_tray,
             get_running_apps,
@@ -1094,53 +1162,90 @@ pub fn run() {
             stop_clip_video_capture,
             start_clip_desktop_audio,
             stop_clip_desktop_audio,
+            #[cfg(feature = "remote-control")]
             inject_input,
             device_key_ensure,
             device_key_sign,
+            #[cfg(feature = "remote-control")]
             device_key_dh,
+            #[cfg(feature = "remote-control")]
             device_key_forget,
+            #[cfg(feature = "remote-control")]
             wol_send,
+            #[cfg(feature = "remote-control")]
             lan::lan_info,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_arm_host,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_open_listener,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_inbound,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_status,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_close,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_policy_get,
+            #[cfg(feature = "remote-control")]
             tunnel_cmd::tunnel_policy_set,
+            #[cfg(feature = "remote-control")]
             unattended_store::unattended_state,
+            #[cfg(feature = "remote-control")]
             unattended_store::unattended_arm,
+            #[cfg(feature = "remote-control")]
             unattended_store::unattended_disarm,
+            #[cfg(feature = "remote-control")]
             unattended_store::unattended_challenge,
+            #[cfg(feature = "remote-control")]
             unattended_store::unattended_verify,
+            #[cfg(feature = "remote-control")]
             privacy_screen::privacy_screen_engage,
+            #[cfg(feature = "remote-control")]
             privacy_screen::privacy_screen_release,
+            #[cfg(feature = "remote-control")]
             privacy_screen::privacy_screen_supported,
+            #[cfg(feature = "remote-control")]
             privacy_screen::privacy_screen_lock_would_blind,
+            #[cfg(feature = "remote-control")]
             power::power_action,
+            #[cfg(feature = "remote-control")]
             power::display_power_session_end,
             stream_boost::set_stream_boost,
             log_stream_diag,
+            #[cfg(feature = "remote-control")]
             agent_ipc::agent_probe,
+            #[cfg(feature = "remote-control")]
             agent_ipc::agent_diagnose,
+            #[cfg(feature = "remote-control")]
             agent_ipc::agent_log,
+            #[cfg(feature = "remote-control")]
             agent_ipc::agent_request,
+            #[cfg(feature = "remote-control")]
             agent_ipc::agent_stop,
+            #[cfg(feature = "remote-control")]
             clipboard_read_text,
+            #[cfg(feature = "remote-control")]
             clipboard_write_text,
             autostart_enabled,
             set_autostart,
+            #[cfg(feature = "remote-control")]
             set_device_session_indicator,
             set_clip_armed_indicator,
+            #[cfg(feature = "remote-control")]
             list_anticheat_processes,
             attention_main_window,
             release_attention_topmost,
+            #[cfg(feature = "remote-control")]
             start_control_guard,
+            #[cfg(feature = "remote-control")]
             stop_control_guard,
             start_hotkey_listener,
             stop_hotkey_listener,
+            #[cfg(feature = "remote-control")]
             list_monitors,
+            #[cfg(feature = "remote-control")]
             set_control_monitor,
+            #[cfg(feature = "remote-control")]
             release_control_input,
             open_external,
             set_unread_badge,
@@ -1150,34 +1255,44 @@ pub fn run() {
             file_transfer::transfer_write,
             file_transfer::transfer_finish,
             file_transfer::transfer_abort,
+            rc_leftovers::rc_leftovers_status,
+            rc_leftovers::rc_leftovers_remove,
             file_transfer::attachment_save,
+            #[cfg(feature = "remote-control")]
             file_transfer::shareable_folders,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|handle, event| {
+            // Only read when the remote-control feature is compiled in (below);
+            // a lite build never touches `handle` in this closure otherwise.
+            #[cfg(not(feature = "remote-control"))]
+            let _ = &handle;
             // On exit, release any keys/buttons a control session left held so a
             // crash/quit mid-control can't strand input down in the target app.
             if let tauri::RunEvent::Exit = event {
-                remote_control::release_all_ordered();
-                // The agent holds a screen capture and can inject input; it must
-                // not outlive the app that authorises it.
-                agent_ipc::agent_stop();
-                // Forwarded ports must not outlive the app either: an orphaned
-                // listener is a route into this machine's network with nothing
-                // left to authorise it.
-                if let Some(tunnels) = handle.try_state::<tunnel_cmd::Tunnels>() {
-                    tunnel_cmd::close_all(&tunnels);
-                }
-                // A detached display topology must not outlive the app: the
-                // tray Quit path skips the JS teardown that normally restores
-                // it, and "come back when the session ends" has to stay true
-                // for the person at the machine. Quiet when nothing is
-                // detached; the startup marker covers a hard crash.
-                if let Some(dt) =
-                    handle.try_state::<Arc<display_topology::DisplayTopology>>()
+                #[cfg(feature = "remote-control")]
                 {
-                    dt.on_session_end();
+                    remote_control::release_all_ordered();
+                    // The agent holds a screen capture and can inject input; it
+                    // must not outlive the app that authorises it.
+                    agent_ipc::agent_stop();
+                    // Forwarded ports must not outlive the app either: an
+                    // orphaned listener is a route into this machine's network
+                    // with nothing left to authorise it.
+                    if let Some(tunnels) = handle.try_state::<tunnel_cmd::Tunnels>() {
+                        tunnel_cmd::close_all(&tunnels);
+                    }
+                    // A detached display topology must not outlive the app: the
+                    // tray Quit path skips the JS teardown that normally restores
+                    // it, and "come back when the session ends" has to stay true
+                    // for the person at the machine. Quiet when nothing is
+                    // detached; the startup marker covers a hard crash.
+                    if let Some(dt) =
+                        handle.try_state::<Arc<display_topology::DisplayTopology>>()
+                    {
+                        dt.on_session_end();
+                    }
                 }
             }
         });

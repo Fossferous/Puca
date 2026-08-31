@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { RC_ENABLED } from '../api/platform';
 import {
     subscribeToStreamState,
     getSelectedStreams,
@@ -186,6 +187,10 @@ export function StreamPip({ onExpand, onClose, poppedStreams = [], onTogglePopou
                                 </button>
                             );
                         }
+                        // Absent, not inert, in a build without remote control:
+                        // this one also calls onExpand(), so a dead button would
+                        // expand the view as though a request were in flight.
+                        if (!RC_ENABLED) return null;
                         return (
                             <button
                                 className="pip-btn"

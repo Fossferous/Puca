@@ -1,0 +1,43 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "//productName": "SEPARATE INSTALL SLOT. On Windows, NSIS derives the install directory, the Add/Remove Programs entry and the autostart Run value from productName. A distinct name is what lets this build's installer FIND an existing full install (by its own Add/Remove key) and remove it — see installer-hooks-lite.nsh. The two variants are mutually exclusive by design.",
+  "productName": "Púca Lite",
+  "//identifier": "DELIBERATELY NOT OVERRIDDEN — it must stay com.sovereign.chat, the same as the full build. identifier is what Tauri keys %APPDATA%/%LOCALAPPDATA% off, so sharing it is exactly what makes switching between the variants keep you signed in, with your keys, settings and history intact. The installer removes the other variant rather than running alongside it, so nothing is ever sharing that directory at the same time — which also avoids the WebView2 user-data lock that silently leaves a second process with no webview at all.",
+  "build": {
+    "//": "MUST override this. tauri.conf.json sets beforeBuildCommand to 'npm run build', which is the FULL pipeline: it rebuilds both remote-control sidecars AND overwrites ../dist with a bundle built without VITE_ENABLE_RC. Tauri runs it AFTER the lite frontend has been built, so the lite installer would ship the complete remote-control frontend and the agent/service executables. Empty here because scripts/build-lite.mjs has already produced ../dist.",
+    "beforeBuildCommand": ""
+  },
+  "//app": "windows[] is REPEATED IN FULL, not patched. Tauri merges configs RFC-7386, which replaces arrays wholesale rather than merging their elements — so declaring only a title here silently dropped width, height, resizable, fullscreen and additionalBrowserArgs. That last one carries --autoplay-policy=no-user-gesture-required, without which voice audio will not autoplay. check-lite-identity.mjs fails the build if any key the full config sets goes missing from this copy.",
+  "app": {
+          "windows": [
+                {
+                      "title": "Puca Lite",
+                      "width": 1200,
+                      "height": 800,
+                      "resizable": true,
+                      "fullscreen": false,
+                      "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI"
+                }
+          ]
+    },
+  "bundle": {
+    "//externalBin": "No sidecars. binaries/puca-agent is the native remote-desktop host agent and binaries/puca-service is the elevated helper that installs it as a SYSTEM service; neither exists in a build without remote control.",
+    "externalBin": [],
+    "shortDescription": "Self-hosted end-to-end encrypted chat and voice",
+    "longDescription": "Puca Lite is a self-hosted communication app: end-to-end encrypted messages, DMs, attachments and voice. It contains no remote-control features. It talks only to the server you run.",
+    "windows": {
+      "nsis": {
+        "//installerHooks": "Removes an existing full 'Púca' install (and a legacy 'Sovereign' one) before installing, so the two variants are never installed at once. App DATA survives — it lives under `identifier`, which both share. See installer-hooks-lite.nsh.",
+        "installerHooks": "installer-hooks-lite.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "//endpoints": "Its OWN manifest, and this stays separate even though everything else is shared. Sharing it means the updater downloads the FULL installer and a lite install silently upgrades itself into the remote-control build. scripts/tauri-build.mjs derives this from the operator's real endpoint when an untracked tauri.release.json is present, so this placeholder only applies to a build with no overlay.",
+      "endpoints": [
+        "https://download.example.com/latest-lite.json"
+      ]
+    }
+  }
+}

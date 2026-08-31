@@ -212,9 +212,8 @@ export async function prepareSink(t: TransferView): Promise<PreparedSink | null>
         throw new NoSinkError(
             `This phone can receive files up to `
             + `${Math.floor(MOBILE_MEMORY_MAX_BYTES / (1024 * 1024))} MB — this one is `
-            + `${Math.round(t.size / (1024 * 1024))} MB. Turning on file sharing in `
-            + `the Devices view — the Devices button in the left rail — lifts the limit, `
-            + `or use the desktop app.`,
+            + `${Math.round(t.size / (1024 * 1024))} MB. Turning on "Save large files to `
+            + `this phone" in Settings → Advanced lifts the limit, or use the desktop app.`,
         );
     }
 

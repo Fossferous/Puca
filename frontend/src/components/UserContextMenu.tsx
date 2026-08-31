@@ -6,7 +6,7 @@ import { getLocalUserVolumes, getLocalUserMutes, setLocalUserVolume, setLocalUse
 import { isAvatarHidden, setAvatarHidden } from './avatarPrefs';
 import { getCurrentStreamingUserId } from './voiceState';
 import { offerControl } from '../api/remoteControl';
-import { isTauri } from '../api/platform';
+import { isTauri, RC_ENABLED } from '../api/platform';
 import { isDeveloperMode } from './settingsStore';
 import { blockUser, unblockUser } from '../api/blocking';
 import { isBlocked as isUserBlocked, setBlockedLocal } from './blockStore';
@@ -242,8 +242,9 @@ export function UserContextMenu({
                         <span className="context-icon">{isMuted ? <SpeakerOffIcon /> : <SpeakerIcon />}</span>
                         {isMuted ? 'Unmute' : 'Mute'}
                     </button>
-                    {/* Offer control of my screen — only while I'm sharing on desktop. */}
-                    {isTauri() && getCurrentStreamingUserId() === currentUserId && (
+                    {/* Offer control of my screen — only while I'm sharing on desktop,
+                        and only in a build that HAS remote control. */}
+                    {RC_ENABLED && isTauri() && getCurrentStreamingUserId() === currentUserId && (
                         <button
                             className="context-item"
                             onClick={() => { offerControl(userId, username); onClose(); }}

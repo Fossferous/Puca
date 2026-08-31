@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getProfile, updateProfile } from '../api/profile';
 import { unblockUser, type BlockedUser } from '../api/blocking';
+import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
 import { changePassword, deleteAccount, requestEmailChange } from '../api/auth';
@@ -181,6 +182,71 @@ function AndroidNotificationHealth({ wantsNotifications, backgroundDelivery }: {
     );
 }
 
+/**
+ * Android "All files access" for LARGE incoming attachments.
+ *
+ * This is the PRESERVED half of a permission that used to be requestable only
+ * from the Devices view. The Devices view is remote-control and the lite build
+ * removes it — but the same MANAGE_EXTERNAL_STORAGE grant is what lets an
+ * ordinary DM/P2P attachment over 100 MB stream straight to disk
+ * (api/capacitorSink.ts) instead of failing in memory. Without a grant path
+ * here, a fresh lite install could never receive a large file and the error
+ * even pointed at a screen that does not exist. So the grant lives on this
+ * preserved surface too, framed around the thing it actually enables here.
+ *
+ * Imports come from api/androidStorage.ts (the shared module), NOT
+ * api/devices/hostCapacitor.ts (excluded from the lite bundle).
+ */
+function AndroidFileDownloadAccess() {
+    // 'loading' vs null vs a real status — the same three-state care the Devices
+    // card takes, so "still asking the plugin" never paints as "no plugin".
+    const [status, setStatus] =
+        useState<{ hasAllFilesAccess: boolean; sdk: number } | null | 'loading'>('loading');
+
+    useEffect(() => {
+        let live = true;
+        const check = () => {
+            void import('../api/androidStorage')
+                .then(m => m.allFilesAccessStatus())
+                .then(st => { if (live) setStatus(st); })
+                .catch(() => { if (live) setStatus(null); });
+        };
+        check();
+        // The grant happens on a system Settings screen; re-read on return.
+        const vis = () => { if (document.visibilityState === 'visible') check(); };
+        document.addEventListener('visibilitychange', vis);
+        return () => { live = false; document.removeEventListener('visibilitychange', vis); };
+    }, []);
+
+    // Nothing to offer when the plugin is absent or the OS is too old — a
+    // button that cannot work is worse than no button.
+    if (status === null || (status !== 'loading' && status.sdk < 30)) return null;
+
+    const grant = () => { void import('../api/androidStorage').then(m => m.requestAllFilesAccess()); };
+    const granted = status !== 'loading' && status.hasAllFilesAccess;
+
+    return (
+        <div className="settings-option">
+            <div className="option-info">
+                <label>Save large files to this phone</label>
+                <span className="option-hint">
+                    {status === 'loading'
+                        ? 'Checking…'
+                        : granted
+                            ? 'On. Files larger than 100 MB sent to you are saved straight to '
+                              + 'this phone’s storage.'
+                            : 'Files up to 100 MB are received in memory. To receive larger ones, '
+                              + 'Android needs the system “All files access” permission, granted on '
+                              + 'a Settings screen.'}
+                </span>
+            </div>
+            {!granted && status !== 'loading' && (
+                <button className="secondary-btn" onClick={grant}>Open Settings</button>
+            )}
+        </div>
+    );
+}
+
 /** How long a mic-test take records before it stops itself and plays back. */
 const MIC_TEST_RECORD_MS = 6000;
 /** A take stopped sooner than this is discarded — nothing worth hearing, and
@@ -225,6 +291,28 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     // indistinguishable from a dead button / an empty list — and this card is
     // the primary unblock affordance.
     const [blockedError, setBlockedError] = useState<string | null>(null);
+    // Start-with-the-OS. Native registry state, not a stored setting, so it is
+    // read from the shell rather than from settingsStore. The toggle lived only
+    // in the Devices view — which the lite build removes — so a lite user who
+    // had it on could never turn it off. It belongs in Settings regardless: it
+    // is an ordinary desktop-app preference, not a remote-control one.
+    const [autostartOn, setAutostartOn] = useState<boolean | null>(null);
+    const [autostartError, setAutostartError] = useState<string | null>(null);
+    useEffect(() => {
+        let live = true;
+        if (autostartSupported()) {
+            void isAutostartEnabled().then(v => { if (live) setAutostartOn(v); });
+        }
+        return () => { live = false; };
+    }, []);
+    const toggleAutostart = async (next: boolean) => {
+        setAutostartError(null);
+        const err = await setAutostart(next);
+        if (err) { setAutostartError(err); return; }
+        // Read BACK rather than trust the write: this touches the registry,
+        // where security software can revert it after the call returns.
+        setAutostartOn(await isAutostartEnabled());
+    };
     // Capturing a hotkey: while set, the next non-modifier keypress becomes the
     // binding for that settings field (keyCode = Windows VK in WebView2). One
     // capture flow shared by the kill switch, push-to-talk and push-to-mute.
@@ -2323,6 +2411,18 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                 <p className="settings-description">
                                     Advanced settings for power users.
                                 </p>
+                                {isAndroidApp() && (
+                                    <>
+                                        <h3>Phone Storage</h3>
+                                        <div className="settings-card">
+                                            {/* The all-files grant for receiving large attachments.
+                                                On this preserved surface because the lite build removes
+                                                the Devices view where it used to live, and the attachment
+                                                sink (not remote control) is what needs it. */}
+                                            <AndroidFileDownloadAccess />
+                                        </div>
+                                    </>
+                                )}
                                 {isTauri() && (
                                     <>
                                         <h3>Desktop App</h3>
@@ -2359,6 +2459,28 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     onChange={(e) => updateSetting('autoInstallUpdates', e.target.checked)}
                                                 />
                                             </div>
+                                            {autostartSupported() && (
+                                                <div className="settings-option">
+                                                    <div className="option-info">
+                                                        <label>Start Puca when I sign in</label>
+                                                        <span className="option-hint">
+                                                            Launches Puca in the tray at sign-in, so notifications
+                                                            reach you without opening it first. Off by default.
+                                                            {autostartError && (
+                                                                <span style={{ color: 'var(--danger, #f38ba8)', display: 'block' }}>
+                                                                    {autostartError}
+                                                                </span>
+                                                            )}
+                                                        </span>
+                                                    </div>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={autostartOn === true}
+                                                        disabled={autostartOn === null}
+                                                        onChange={(e) => void toggleAutostart(e.target.checked)}
+                                                    />
+                                                </div>
+                                            )}
                                         </div>
                                     </>
                                 )}

@@ -35,7 +35,7 @@ vi.mock('../api/devices', () => ({
     currentUserId: () => currentUserId(),
     thisDeviceId: () => thisDeviceId(),
 }));
-vi.mock('../api/devices/deviceKey', () => ({
+vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyCustody: () => 'os-protected' as const,
 }));
 // DevicesView prefetches the ICE config on mount to take a round trip off

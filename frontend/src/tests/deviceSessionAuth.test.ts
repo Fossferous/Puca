@@ -98,8 +98,10 @@ vi.mock('../api/devices/clipboard', () => ({
 }));
 vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
 vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTunnels: () => {} }));
-vi.mock('../api/devices/deviceKey', () => ({
+vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyDh: async () => new Uint8Array(32).fill(3),
+}));
+vi.mock('../api/deviceIdentity/deviceKey', () => ({
     ensureDeviceKey: async () => ({ sign_pub: 'ed25519:' + btoa('s') }),
 }));
 /** When non-null, activeHostSession connects UNDER A SHARE with exactly these
@@ -133,7 +135,12 @@ vi.mock('../api/devices/unattended', () => ({
 
 // connectToDevice refuses without an enrolled identity, so the controller path
 // cannot start at all unless this is mocked.
-vi.mock('../api/devices/index', () => ({ thisDeviceId: () => 'dev-me', currentUserId: () => 1 }));
+vi.mock('../api/thisDevice', () => ({
+    thisDeviceId: () => 'dev-me',
+}));
+vi.mock('../api/devices/index', () => ({
+    currentUserId: () => 1,
+}));
 
 // An UNARMED host now asks the person sitting at it before sharing, because
 // shipping the agent removed the browser picker that was doing that by accident.

@@ -54,10 +54,10 @@ import {
     isThisDeviceRevoked,
     resetThisDeviceIdentity,
     currentUserId,
-    thisDeviceId,
     type VerifiedDevice,
 } from '../api/devices';
-import { deviceKeyCustody } from '../api/devices/deviceKey';
+import { thisDeviceId } from '../api/thisDevice';
+import { deviceKeyCustody } from '../api/devices/deviceKeyRc';
 import { warmPeerKeys } from '../api/devices/peerKeys';
 import { fetchIceConfig } from '../api/iceConfig';
 import { agentDiagnosis } from '../api/devices/hostAgent';
@@ -72,7 +72,7 @@ import {
 import { usePullToRefresh } from '../hooks/usePullToRefresh';
 import { isMobile } from '../api/platform';
 import { forgetHostBackendChoice } from '../api/devices/hostBackend';
-import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/devices/autostart';
+import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
 import { pairWaker, parseWakerKeys, type WakerBootstrap } from '../api/devices/waker';
 import { groupIntoMachines, machineOf, ungrouped, type Machine } from '../api/devices/machines';
 import {

@@ -1,0 +1,137 @@
+/* Leftover remote-access warning (lite build).
+ *
+ * Sits at the top like UpdateBanner and borrows its geometry, but is
+ * deliberately NOT the same blue: this is a warning about the machine's
+ * security posture, not an offer of a new version, and the two must not be
+ * mistaken for one another at a glance.
+ *
+ * Colours come from the theme's tokens where they exist so all eight themes and
+ * [data-contrast="high"] keep working — the amber is a literal only because
+ * there is no warning token in the palette.
+ */
+
+.rcleft-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(135deg, #8a5a00 0%, #a86a00 100%);
+    color: #fff;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    z-index: 10001; /* above UpdateBanner: a security notice must not be covered */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.rcleft-icon {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.rcleft-icon svg {
+    width: 22px;
+    height: 22px;
+}
+
+.rcleft-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0; /* let the path ellipsis instead of stretching the banner */
+    flex: 1;
+}
+
+.rcleft-text strong {
+    font-size: 14px;
+}
+
+.rcleft-text span {
+    font-size: 13px;
+    opacity: 0.95;
+}
+
+.rcleft-path {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px !important;
+    opacity: 0.8 !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rcleft-note,
+.rcleft-error {
+    margin-top: 2px;
+}
+
+.rcleft-error {
+    color: #ffd9d9;
+}
+
+.rcleft-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.rcleft-remove-btn,
+.rcleft-recheck-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+}
+
+.rcleft-remove-btn {
+    background: #fff;
+    color: #7a4f00;
+    border-color: #fff;
+}
+
+.rcleft-remove-btn:hover:not(:disabled),
+.rcleft-recheck-btn:hover:not(:disabled) {
+    filter: brightness(1.08);
+}
+
+.rcleft-remove-btn:disabled,
+.rcleft-recheck-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.rcleft-remove-btn svg,
+.rcleft-recheck-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+/* Narrow windows and the 390x844 mobile walk: stack rather than squeeze the
+   buttons off-screen. */
+@media (max-width: 640px) {
+    .rcleft-banner {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 10px 14px;
+    }
+
+    .rcleft-actions {
+        width: 100%;
+    }
+
+    .rcleft-remove-btn,
+    .rcleft-recheck-btn {
+        flex: 1;
+        justify-content: center;
+    }
+}

@@ -15,7 +15,8 @@
  * already holds the seed.
  */
 import { isTauri } from '../platform';
-import { thisDeviceId, updateDeviceLanInfo } from './index';
+import { updateDeviceLanInfo } from './index';
+import { thisDeviceId } from '../thisDevice';
 import { unattendedAccessState } from './lockScreen';
 import { sealLanInfo, type LanInfo } from './wake';
 

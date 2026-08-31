@@ -14,7 +14,7 @@
  */
 import { apiClient } from '../client';
 import { canonicalJson } from '../e2ee';
-import { signWithDeviceKey } from './deviceKey';
+import { signWithDeviceKey } from '../deviceIdentity/deviceKey';
 
 export const DEVICE_GRANT_TYPE = 'sovereign-device-grant-v1';
 

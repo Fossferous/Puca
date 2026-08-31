@@ -46,7 +46,7 @@ vi.mock('../api/client', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/client')>()),
     apiClient: { post: api.post, delete: api.delete },
 }));
-vi.mock('../api/devices', () => ({ thisDeviceId: () => 'dev-test-1' }));
+vi.mock('../api/thisDevice', () => ({ thisDeviceId: () => 'dev-test-1' }));
 vi.mock('../api/platform', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/platform')>()),
     isMobile: () => platform.mobile,

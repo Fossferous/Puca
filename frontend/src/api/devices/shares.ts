@@ -23,9 +23,9 @@
 import { apiClient } from '../client';
 import { canonicalJson, deriveAccountSigningKey, getActiveIdentity } from '../e2ee';
 import { pinServedSigningKey } from '../keyVerification';
-import { signWithDeviceKey } from './deviceKey';
-import { verifyAuthRecordWithKey } from './identity';
-import { thisDeviceId } from './index';
+import { signWithDeviceKey } from '../deviceIdentity/deviceKey';
+import { verifyAuthRecordWithKey } from './identityRc';
+import { thisDeviceId } from '../thisDevice';
 
 export type ShareCapability = 'control' | 'view_only' | 'files';
 

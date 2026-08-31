@@ -39,15 +39,74 @@ gradle.taskGraph.whenReady { graph ->
     }
 }
 
+// LITE VARIANT. The applicationId is deliberately the SAME as the full build.
+//
+// On Android, applicationId is app identity: two APKs sharing it are the same
+// app, so installing lite over full REPLACES it, and because both are signed
+// with the same key Android treats that as an ordinary update and KEEPS the
+// app's data. That single mechanism gives both properties we want — the two
+// variants are mutually exclusive, and switching between them keeps you signed
+// in with your keys and history.
+//
+// A suffixed `.lite` id was tried and is WRONG here: it makes the two coexist,
+// which means two installs of the same chat app each holding a socket, each
+// notifying, each attesting as a device — and no shared session.
+//
+// What the lite build does change is the visible label (see
+// capacitor.config.ts: appName "Púca Lite"), so an installed app says which
+// variant it is.
+//
+// Nothing about applicationId may ever change for either variant — see the
+// keystore note at the top of this file: a release APK must carry the same
+// applicationId AND be signed by the same key as the installed app, or Android
+// refuses the upgrade and the user's only way out is uninstall + reinstall,
+// which destroys their local data.
+def isLite = System.getenv('PUCA_LITE') == '1'
+
+// VERSION CODE CARRIES THE VARIANT, and it has to.
+//
+// @capgo/capacitor-updater wipes its stored OTA bundles only when the app's
+// versionCode CHANGES (resetWhenUpdate, keyed on LatestNativeBuildVersion vs
+// the current versionCode). With both variants on one code, installing Lite
+// over Full preserved Capgo's bundle store and the app booted the full
+// remote-control bundle inside the Lite APK — silently, because the OTA
+// variant gate only checks bundles it is about to DOWNLOAD.
+//
+// Scheme: base * 10 + variant, so every release still increases monotonically
+// and Lite sits one above the Full build of the SAME version:
+//     0.8.117 full -> 801170        0.8.117 lite -> 801171
+// Full -> Lite therefore installs immediately (higher code) and resets the
+// bundle store. Lite -> Full needs the next Full release (801180), which is
+// how Android works: it refuses a strictly lower versionCode. Raising the
+// multiplier is a one-way ratchet — 801170 > any previous 8xxxx — so existing
+// installs upgrade normally.
+def baseVersionCode = 80117
+def variantVersionCode = baseVersionCode * 10 + (isLite ? 1 : 0)
+def variantName = isLite ? 'lite' : 'full'
+logger.lifecycle("PUCA variant=${variantName} versionCode=${variantVersionCode} " +
+        "(applicationId is shared, so installing one REPLACES the other and keeps its data)")
+
 android {
     namespace = "com.sovereign.app"
     compileSdk = rootProject.ext.compileSdkVersion
+    // AGP 8 defaults buildConfig off; PUCA_VARIANT above needs it.
+    buildFeatures {
+        buildConfig = true
+    }
     defaultConfig {
         applicationId "com.sovereign.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 80117
+        versionCode variantVersionCode
         versionName "0.8.117"
+        // The native layer's ONLY way to know which variant it is. The JS
+        // bundle cannot answer this: an OTA bundle can be from either variant,
+        // which is the whole problem above.
+        buildConfigField "String", "PUCA_VARIANT", "\"${variantName}\""
+        // The launcher label. Capacitor's appName never reaches the APK —
+        // res/values/strings.xml owns app_name — so it is set here instead,
+        // and removed from strings.xml to avoid a duplicate-resource error.
+        resValue "string", "app_name", isLite ? "Púca Lite" : "Púca"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

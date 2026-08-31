@@ -13,7 +13,7 @@ import {
     appIsBackgrounded,
     pageIsPainting,
     __setPaintProbeForTests,
-} from '../api/devices/pagePainting';
+} from '../api/pagePainting';
 
 function setVisibility(state: 'visible' | 'hidden'): void {
     Object.defineProperty(document, 'visibilityState', {
@@ -83,7 +83,7 @@ describe('noticing a resume without visibilitychange', () => {
             return 1;
         });
         vi.stubGlobal('setInterval', () => 1 as unknown as ReturnType<typeof setInterval>);
-        const mod = await import('../api/devices/pagePainting');
+        const mod = await import('../api/pagePainting');
         const resumed = vi.fn();
         mod.onPaintResumed(resumed);
         mod.installPaintProbe(); // requests the first frame

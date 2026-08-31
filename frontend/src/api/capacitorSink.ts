@@ -127,7 +127,7 @@ export function safeDownloadName(raw: string): string {
 export async function capacitorFileSink(t: TransferView): Promise<PreparedSink | null> {
     if (Capacitor.getPlatform() !== 'android') return null;
 
-    const { allFilesAccessStatus, shareableRoots } = await import('./devices/hostCapacitor');
+    const { allFilesAccessStatus, shareableRoots } = await import('./androidStorage');
     const status = await allFilesAccessStatus();
     // No plugin (old APK running new JS over the air), too old, or the user
     // has not granted storage access — all fall back rather than throw.

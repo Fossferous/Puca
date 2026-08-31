@@ -15,6 +15,7 @@
  * denied, or the share stops.
  */
 import { wsClient, type ServerMessage } from './websocket';
+import { computeRmoveScale } from './rmoveScale';
 import { isTauri } from './platform';
 import { getCurrentStreamingUserId, getStreamData, selectStream } from '../components/voiceState';
 import { clearAllScreenLatency, setScreenLatencyMinimised } from './rtc/receiverLatency';
@@ -573,12 +574,7 @@ export function isControlActive(hostUserId: number): boolean {
  * the same arc it would locally. Falls back to 1 on degenerate sizes (video
  * metadata not loaded yet). Pure so tests can drive it.
  */
-export function computeRmoveScale(videoW: number, videoH: number, rectW: number, rectH: number): number {
-    if (!(videoW > 0) || !(videoH > 0) || !(rectW > 0) || !(rectH > 0)) return 1;
-    const displayedW = videoW * Math.min(rectW / videoW, rectH / videoH);
-    if (!Number.isFinite(displayedW) || !(displayedW > 0)) return 1;
-    return videoW / displayedW;
-}
+export { computeRmoveScale };
 
 // VIEWER: the host's capture pixel size, relayed once in the grant. FPS-mode
 // delta scaling calibrates against THIS (a stable size) rather than the live

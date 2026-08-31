@@ -1,5 +1,5 @@
 import { WS_URL } from './config';
-import { onPaintResumed } from './devices/pagePainting';
+import { onPaintResumed } from './pagePainting';
 
 // The authoritative wire-protocol definition lives in the Rust backend
 // (src/ws.rs); payloads arrive as untyped JSON and are cast at use sites.

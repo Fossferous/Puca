@@ -22,45 +22,17 @@
  * request by the file server — so revocation is instant and teardown's
  * `setFileAccess(id, null)` works unchanged.
  */
-import { registerPlugin, Capacitor } from '@capacitor/core';
+import {
+    SovereignFiles,
+    pluginAvailable,
+    shareableRoots,
+    allFilesAccessStatus,
+    requestAllFilesAccess,
+} from '../androidStorage';
+import { Capacitor } from '@capacitor/core';
 import type { HostBackend, FileScopeRequest, MonitorInfo } from './hostBackend';
 import type { GrantedRoot } from './hostFsServer';
 import type { FsProvider } from './fsJail';
-
-/** The ~80-line native micro-plugin (SovereignFilesPlugin.java). */
-interface SovereignFilesPlugin {
-    status(): Promise<{ hasAllFilesAccess: boolean; sdk: number }>;
-    requestAccess(): Promise<void>;
-    roots(): Promise<{ roots: { label: string; path: string }[] }>;
-    canonicalize(options: { path: string }): Promise<{ path: string }>;
-}
-
-const SovereignFiles = registerPlugin<SovereignFilesPlugin>('SovereignFiles');
-
-function pluginAvailable(): boolean {
-    return Capacitor.isPluginAvailable('SovereignFiles');
-}
-
-/** Folders the consent prompt offers. Fixed list, never free-typed: a list
- *  cannot be talked into an app-private path, and nobody wants to type
- *  /storage/emulated/0/… on a phone keyboard. */
-export async function shareableRoots(): Promise<{ label: string; path: string }[]> {
-    if (!pluginAvailable()) return [];
-    try {
-        return (await SovereignFiles.roots()).roots;
-    } catch {
-        return [];
-    }
-}
-
-export async function allFilesAccessStatus(): Promise<{ hasAllFilesAccess: boolean; sdk: number } | null> {
-    if (!pluginAvailable()) return null;
-    try {
-        return await SovereignFiles.status();
-    } catch {
-        return null;
-    }
-}
 
 /**
  * WHY file sharing is unavailable, in the app's own words.
@@ -112,10 +84,6 @@ export async function filesDiagnostics(): Promise<FilesDiagnostics> {
 /** Fire the system "All files access" Settings screen for this app. There is
  *  no runtime dialog for MANAGE_EXTERNAL_STORAGE — it is a Settings toggle —
  *  so callers re-check status on visibilitychange when the user comes back. */
-export async function requestAllFilesAccess(): Promise<void> {
-    if (!pluginAvailable()) return;
-    await SovereignFiles.requestAccess();
-}
 
 /** Per-session granted scope; the file server reads it per request. */
 const grantedRoots = new Map<string, GrantedRoot>();
@@ -229,3 +197,8 @@ export function capacitorHostBackend(): HostBackend {
         },
     };
 }
+
+// Re-exported for the remote-control file browser, which imported these
+// from this module before they moved to api/androidStorage.ts (shared with
+// the ordinary attachment sink).
+export { shareableRoots, allFilesAccessStatus, requestAllFilesAccess };

@@ -7,7 +7,7 @@
  * on every boot and can be remote-controlled is, from the outside,
  * indistinguishable from something unwanted; the difference has to be visible.
  */
-import { isTauri } from '../platform';
+import { isTauri } from './platform';
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     const { invoke } = await import('@tauri-apps/api/core');

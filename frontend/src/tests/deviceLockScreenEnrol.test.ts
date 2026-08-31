@@ -54,7 +54,7 @@ vi.mock('../api/e2ee', () => ({
     deriveAccountSigningKey: () => ({ publicKeyEncoded: 'ed25519:ACCT' }),
 }));
 
-vi.mock('../api/devices/identity', () => ({
+vi.mock('../api/deviceIdentity/identity', () => ({
     buildAuthRecord: () => ({ canonical: '{}', deviceId: 'new-id' }),
     signAuthRecord: () => 'sig',
 }));

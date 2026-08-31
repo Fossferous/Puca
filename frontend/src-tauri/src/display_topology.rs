@@ -157,7 +157,7 @@ mod marker {
         let base = std::env::var("HOME")
             .map(|h| format!("{h}/.local/share"))
             .map_err(|_| "HOME is not set".to_string())?;
-        let dir = std::path::Path::new(&base).join("com.sovereign.chat").join("device");
+        let dir = std::path::Path::new(&base).join(env!("PUCA_IDENTIFIER")).join("device");
         std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
         Ok(dir.join("display-topology-detached"))
     }

@@ -14,8 +14,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { listFriends, type Friend } from '../api/friends';
-import { thisDeviceId, currentUserId, type VerifiedDevice } from '../api/devices';
-import { signWithDeviceKey } from '../api/devices/deviceKey';
+import { currentUserId, type VerifiedDevice } from '../api/devices';
+import { thisDeviceId } from '../api/thisDevice';
+import { signWithDeviceKey } from '../api/deviceIdentity/deviceKey';
 import {
     buildShareRecord,
     createShare,

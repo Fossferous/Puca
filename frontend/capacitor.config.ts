@@ -1,8 +1,19 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
+// LITE VARIANT. `npm run cap:build:android:lite` sets PUCA_LITE=1.
+//
+// appId is deliberately SHARED with the full build: on Android that is app
+// identity, so a lite APK installs over a full one as an ordinary update —
+// replacing it (the variants are mutually exclusive) while KEEPING its data,
+// which is what carries your session across the switch. It must therefore stay
+// in step with android/app/build.gradle, which hardcodes the same value.
+//
+// Only the LABEL differs, so an installed app says which variant it is.
+const LITE = process.env.PUCA_LITE === '1';
+
 const config: CapacitorConfig = {
     appId: 'com.sovereign.app',
-    appName: 'Púca',
+    appName: LITE ? 'Púca Lite' : 'Púca',
     webDir: 'dist',
     server: {
         // For development: uncomment to connect to local dev server

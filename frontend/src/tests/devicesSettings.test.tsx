@@ -32,7 +32,7 @@ vi.mock('../api/devices', () => ({
     isThisDeviceRevoked: () => isThisDeviceRevoked(),
     resetThisDeviceIdentity: (...a: unknown[]) => resetThisDeviceIdentity(...a),
 }));
-vi.mock('../api/devices/deviceKey', () => ({
+vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyCustody: () => deviceKeyCustody(),
 }));
 const connectToDevice = vi.fn();

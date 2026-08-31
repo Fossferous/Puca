@@ -49,7 +49,7 @@ let dhGate: Promise<void> = Promise.resolve();
 function holdKeyAgreement(): void {
     dhGate = new Promise<void>(resolve => { releaseDh = resolve; });
 }
-vi.mock('../api/devices/deviceKey', () => ({
+vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyDh: async () => {
         await dhGate;
         return new Uint8Array(32).fill(3);
@@ -103,7 +103,9 @@ vi.mock('../api/platform', () => ({
 vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: async () => 'x25519:' + btoa('k') }));
 vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
 vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTunnels: () => {} }));
-vi.mock('../api/devices/index', () => ({ thisDeviceId: () => 'dev-me' }));
+vi.mock('../api/thisDevice', () => ({
+    thisDeviceId: () => 'dev-me',
+}));
 vi.mock('../api/devices/hostBackend', () => ({
     getHostBackend: async () => ({
         kind: 'agent',

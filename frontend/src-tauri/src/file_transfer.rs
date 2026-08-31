@@ -388,6 +388,7 @@ fn percent_decode(s: &str) -> String {
 ///
 /// Only directories that exist are returned, so nothing on this list can be
 /// approved and then fail validation.
+#[cfg(feature = "remote-control")]
 #[tauri::command]
 pub async fn shareable_folders(app: tauri::AppHandle) -> Vec<ShareableFolder> {
     let p = app.path();
@@ -413,6 +414,7 @@ pub async fn shareable_folders(app: tauri::AppHandle) -> Vec<ShareableFolder> {
         .collect()
 }
 
+#[cfg(feature = "remote-control")]
 #[derive(serde::Serialize)]
 pub struct ShareableFolder {
     pub label: String,

@@ -46,7 +46,7 @@ import {
     sealControl,
     type ControlEphemeral,
 } from '../e2ee';
-import { deviceKeyDh } from './deviceKey';
+import { deviceKeyDh } from './deviceKeyRc';
 import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writeLocalClipboard, MAX_CLIPBOARD_BYTES } from './clipboard';
 import { getHostBackend } from './hostBackend';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
@@ -62,7 +62,7 @@ import {
     signUaChallengeSeed,
 } from './unattended';
 import { requestUnattendedPassphrase } from './unattendedPrompt';
-import { appIsBackgrounded } from './pagePainting';
+import { appIsBackgrounded } from '../pagePainting';
 
 /** How long a controller has to answer the unattended challenge before the
  *  session is torn down. Generous, because a human is typing a passphrase on a
@@ -171,7 +171,8 @@ class RateCounter {
  *  so the frontend, which had it as a bare literal in the mobile menu, gets a
  *  name as well. */
 export const ALL_DISPLAYS = 255;
-import { thisDeviceId, currentUserId } from './index';
+import { currentUserId } from './index';
+import { thisDeviceId } from '../thisDevice';
 
 export type SessionRole = 'controller' | 'host';
 export type SessionPhase = 'connecting' | 'active' | 'ended';
@@ -3243,7 +3244,7 @@ export function installDeviceSessions(): void {
                     teardown(s, 'share verification failed', false);
                     return;
                 }
-                const { ensureDeviceKey } = await import('./deviceKey');
+                const { ensureDeviceKey } = await import('../deviceIdentity/deviceKey');
                 const { verifyWithAccountKey } = await import('../e2ee');
                 const myKeys = await ensureDeviceKey();
                 const grantOk = await shareAuthorises(

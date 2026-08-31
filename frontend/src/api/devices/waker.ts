@@ -22,7 +22,7 @@
 import { apiClient } from '../client';
 import { getToken } from '../auth';
 import { getActiveIdentity } from '../e2ee';
-import { buildAuthRecord, signAuthRecord } from './identity';
+import { buildAuthRecord, signAuthRecord } from '../deviceIdentity/identity';
 import type { DeviceRow } from './index';
 
 /** The three public values `puca-waker init` prints. */

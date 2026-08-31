@@ -34,7 +34,7 @@ import {
     setMobilePushAccount,
     syncMobilePushGates,
 } from './mobileApp';
-import { thisDeviceId } from './devices';
+import { thisDeviceId } from './thisDevice';
 import { isMobile } from './platform';
 
 let teardownEvents: (() => void) | null = null;

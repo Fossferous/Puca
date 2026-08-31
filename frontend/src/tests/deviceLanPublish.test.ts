@@ -32,8 +32,10 @@ vi.mock('../api/e2ee', () => ({
     openDeviceLan: (_id: unknown, blob: string) => Promise.resolve(blob),
 }));
 
-vi.mock('../api/devices/index', () => ({
+vi.mock('../api/thisDevice', () => ({
     thisDeviceId: () => 'app-row',
+}));
+vi.mock('../api/devices/index', () => ({
     updateDeviceLanInfo: (id: string, blob: string) => {
         if (failOn === id) return Promise.reject(new Error('patch refused'));
         patched.push({ id, blob });

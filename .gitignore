@@ -9,6 +9,9 @@ node_modules/
 # Build outputs
 target/
 dist/
+# scripts/check-no-rc.mjs stages a full and a lite build side by side here to
+# diff them; pure build output, regenerated on every run.
+frontend/.rc-check/
 releases/
 archive/
 *.exe

@@ -27,7 +27,7 @@ vi.mock('@capacitor/core', () => ({
 
 let status: { hasAllFilesAccess: boolean; sdk: number } | null = { hasAllFilesAccess: true, sdk: 33 };
 let roots: { label: string; path: string }[] = [{ label: 'Downloads', path: '/storage/emulated/0/Download' }];
-vi.mock('../api/devices/hostCapacitor', () => ({
+vi.mock('../api/androidStorage', () => ({
     allFilesAccessStatus: async () => status,
     shareableRoots: async () => roots,
 }));

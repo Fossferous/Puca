@@ -13,6 +13,13 @@
             "runtimeExecutable": "npm",
             "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--port", "5174", "--strictPort"],
             "port": 5174
+        },
+        {
+            "//": "Serves the BUILT bundle in frontend/dist, which is the only way to exercise a LITE build: the lite variant exists solely as a production build (VITE_ENABLE_RC=false), so `npm run dev` would always serve the full one. Build with `npm run build:lite` first.",
+            "name": "frontend-preview",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": ["run", "preview", "--prefix", "frontend", "--", "--port", "5175", "--strictPort"],
+            "port": 5175
         }
     ]
 }

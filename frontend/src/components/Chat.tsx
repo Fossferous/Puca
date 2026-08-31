@@ -14,7 +14,6 @@ import { ServerCreateWizard } from './ServerCreateWizard';
 import { JoinServerModal } from './JoinServerModal';
 import { InviteModal } from './InviteModal';
 import { ServerSettingsModal } from './ServerSettingsModal';
-import { DevicesView } from './DevicesView';
 import { UserProfilePopup } from './UserProfilePopup';
 import { ContextMenu } from './ContextMenu';
 import { useContextMenu, menuItems, imageMenuItems, formatQuote, stripAttachmentKeys, replyPreviewText } from './contextMenuUtils';
@@ -30,7 +29,7 @@ import {
 import { addReaction, notifyReactionChanged } from '../api/reactions';
 import { ForwardModal } from './ForwardModal';
 import { getToken } from '../api/auth';
-import { appIsForeground, isMobile as isNativeMobile } from '../api/platform';
+import { appIsForeground, isMobile as isNativeMobile, RC_ENABLED } from '../api/platform';
 import {
     // getOrCreateDefaultServer removed - no auto-join default server
     listServers,
@@ -161,6 +160,19 @@ import { SmartAvatar } from './SmartAvatar';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
 
+// Lazy + code-split, not a static import: DevicesView pulls in the whole
+// remote-control API surface (host agent bridge, grants/shares, WoL, device
+// identity keys). React.lazy's factory only runs when the component actually
+// renders, so gating every render site on RC_ENABLED means a lite build
+// (VITE_ENABLE_RC=false) never fetches this chunk at all — not just hides it.
+// Behind the FOLDED LITERAL, not the imported const: a module-scope
+// React.lazy factory is an unconditional edge in Rollup's graph, which is what
+// emitted a 42 kB DevicesView chunk into a lite bundle that could never load
+// it. Inside `if (__RC_ENABLED__)` the whole expression — and the import edge
+// with it — is dropped.
+const DevicesView = __RC_ENABLED__
+    ? React.lazy(() => import('./DevicesView').then(m => ({ default: m.DevicesView })))
+    : (() => null);
 
 /**
  * The socket was not OPEN at send time. Distinct from SecureSendError so the
@@ -984,10 +996,13 @@ export function Chat({ onLogout }: ChatProps) {
         // is why the current position is derived instead of read straight
         // from mobilePanel.
         const order = ['servers', 'channels', 'chat', 'members', 'devices'] as const;
-        const current: (typeof order)[number] = showDevicesView ? 'devices' : mobilePanel;
+        const current: (typeof order)[number] = (RC_ENABLED && showDevicesView) ? 'devices' : mobilePanel;
         const i = order.indexOf(current);
         if (i < 0) return;
-        const next = order[Math.min(order.length - 1, Math.max(0, i + delta))];
+        // 'devices' is skipped as a landing stop in a lite build — showDevicesView
+        // can never become true there, so there is one fewer valid stop.
+        const maxIndex = RC_ENABLED ? order.length - 1 : order.length - 2;
+        const next = order[Math.min(maxIndex, Math.max(0, i + delta))];
         if (next === current) return;
         if (next === 'devices') {
             setShowDevicesView(true);
@@ -3408,7 +3423,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // panel up, HomeSidebar is not mounted and the dashboard is
                 // translated off-screen in that slot.
                 if (isMobile) setMobilePanel('chat');
-            } else if (target === 'devices') {
+            } else if (RC_ENABLED && target === 'devices') {
                 setShowFriendsPanel(false);
                 setShowChecklist(false);
                 setShowAllChecklists(false);
@@ -3878,12 +3893,16 @@ export function Chat({ onLogout }: ChatProps) {
             />
 
             {/* Devices — first-class view. Rendered after FriendsPanel so it
-                paints above the dashboard at the shared z-band while open. */}
-            {showDevicesView && (
-                <DevicesView
-                    onClose={() => leaveDevicesView('servers')}
-                    onOpenSettings={() => setShowSettings(true)}
-                />
+                paints above the dashboard at the shared z-band while open.
+                Absent entirely from a lite build (RC_ENABLED false): the
+                chunk this Suspense would load is never fetched. */}
+            {RC_ENABLED && showDevicesView && (
+                <React.Suspense fallback={null}>
+                    <DevicesView
+                        onClose={() => leaveDevicesView('servers')}
+                        onOpenSettings={() => setShowSettings(true)}
+                    />
+                </React.Suspense>
             )}
 
             {/* User Context Menu */}
@@ -3992,7 +4011,7 @@ export function Chat({ onLogout }: ChatProps) {
                 }}
                 onCreateServer={openServerWizard}
                 onJoinServer={() => setShowJoinModal(true)}
-                onOpenDevices={() => {
+                onOpenDevices={!RC_ENABLED ? undefined : () => {
                     // Toggle, like the Friends/Tasks rail buttons: pressing the
                     // active button again returns to wherever you were.
                     if (showDevicesView) {
@@ -4012,7 +4031,7 @@ export function Chat({ onLogout }: ChatProps) {
                     // devices doesn't show the rail".
                     if (isMobile) setMobilePanel('servers');
                 }}
-                devicesActive={showDevicesView}
+                devicesActive={RC_ENABLED && showDevicesView}
                 onMarkedRead={(serverId) => {
                     // Only the current server has live per-channel badge state;
                     // clear it optimistically (server-side is already updated).
@@ -5803,21 +5822,23 @@ export function Chat({ onLogout }: ChatProps) {
                         <span className="nav-icon"><TasksIcon size={20} /></span>
                         <span className="nav-label">Tasks</span>
                     </button>
-                    <button
-                        className={`mobile-nav-btn ${showDevicesView ? 'active' : ''}`}
-                        onClick={() => {
-                            setShowChecklist(false);
-                            setShowFriendsPanel(false);
-                            setShowDevicesView(true);
-                            // THE SERVERS SLOT, matching the rail's onOpenDevices:
-                            // DevicesView anchors at left:72px beside the rail and
-                            // its sidebar-eviction CSS keys on 'servers'.
-                            setMobilePanel('servers');
-                        }}
-                    >
-                        <span className="nav-icon"><MonitorIcon size={20} /></span>
-                        <span className="nav-label">Devices</span>
-                    </button>
+                    {RC_ENABLED && (
+                        <button
+                            className={`mobile-nav-btn ${showDevicesView ? 'active' : ''}`}
+                            onClick={() => {
+                                setShowChecklist(false);
+                                setShowFriendsPanel(false);
+                                setShowDevicesView(true);
+                                // THE SERVERS SLOT, matching the rail's onOpenDevices:
+                                // DevicesView anchors at left:72px beside the rail and
+                                // its sidebar-eviction CSS keys on 'servers'.
+                                setMobilePanel('servers');
+                            }}
+                        >
+                            <span className="nav-icon"><MonitorIcon size={20} /></span>
+                            <span className="nav-label">Devices</span>
+                        </button>
+                    )}
                 </nav>
             )}
 

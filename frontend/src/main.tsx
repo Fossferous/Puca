@@ -53,41 +53,74 @@ installTauriLinkInterceptor()
 // wire() is idempotent; Chat's own call becomes a harmless re-entry.
 import { fileTransferManager } from './api/fileTransferManager'
 fileTransferManager.wire()
-// Answer the server's per-connection device challenge. Registering the handler
-// here (rather than in a component) means it is armed before the first socket
-// opens, including on a reconnect — a challenge that arrives with no listener
-// is simply lost, and the connection would stay unattested for its whole life.
-import { installDeviceAttestation } from './api/devices'
-installDeviceAttestation()
-// Device-control sessions. Registered here, not in a component, so a request
-// that arrives before any UI has mounted is still answered — an unanswered
-// DeviceConnectRequested looks to the controller exactly like an offline device.
-import { installDeviceSessions } from './api/devices/session'
-installDeviceSessions()
-// Wake-on-LAN responder: another of your devices may ask THIS one to broadcast
-// a magic packet, since a sleeping machine has no socket of its own.
 // Measure whether this page is actually being PAINTED. Every watchdog in the
 // device-session layer defers while the app is backgrounded, and after a long
 // screen-lock an Android WebView can report itself hidden while the user is
 // looking straight at it — which deferred all of them for ever. Frame
 // callbacks cannot get stuck that way, so they are what the deferrals are
 // corroborated against, and their restarting after a gap is what notices a
-// resume when `visibilitychange` never arrives.
-import { installPaintProbe } from './api/devices/pagePainting'
+// resume when `visibilitychange` never arrives. Shared infrastructure, not
+// RC-only: websocket.ts also subscribes to it for core reconnect timing.
+import { installPaintProbe } from './api/pagePainting'
 installPaintProbe()
-import { installWakeResponder } from './api/devices/wake'
-installWakeResponder()
-// And hear the server's verdict on a wake WE asked for. Without this every
-// refusal — no waker online, rate-limited, asking to wake yourself — arrives as
-// a generic Error frame that only the chat view listens for, so the device card
-// waits out its full three minutes and then blames the BIOS.
-import { installWakeResultListener } from './api/devices/wakeSession'
-installWakeResultListener()
-// The other half: record THIS machine's LAN details (MAC / IP / broadcast) so
-// another of your devices can wake it later. Sealed client-side before it
-// leaves — the server never learns which MAC belongs to which device.
-import { installLanPublisher } from './api/devices/lanInfo'
-installLanPublisher()
+// Everything below answers this machine acting as a remote-control HOST —
+// attesting its device identity, accepting an incoming control/file-browse
+// session, and responding to a Wake-on-LAN request from another of the
+// account's devices. Absent entirely from a lite build (RC_ENABLED false):
+// wiring these listeners regardless of whether the UI to manage them exists
+// would leave a lite install still silently answerable as an RC target.
+// Answer the server's per-connection device challenge, and enrol this device
+// if it has not been. NOT gated on remote control: this is what gives the
+// machine an id, which Android native push delivery addresses frames to.
+// Armed before the first socket opens — a challenge that arrives with no
+// listener is simply lost, and the connection stays unattested for its life.
+import { installDeviceAttestation } from './api/deviceIdentity/attest'
+installDeviceAttestation()
+// The injected LITERAL, not the RC_ENABLED const re-exported from platform.ts.
+// Measured: with the const, Rollup did not fold this branch and every dynamic
+// import below stayed in the graph — the whole remote-control surface shipped
+// in a lite bundle that could never reach it. As a literal the branch is
+// `if (false)` right here and the import edges go with it.
+if (__RC_ENABLED__) {
+    // Fire-and-forget dynamic imports, not top-level await: this must stay
+    // synchronous with the rest of main.tsx's boot sequence (React's root
+    // render follows below) in every build, including this one. Each import
+    // resolves in well under a frame; a device challenge or wake request
+    // arriving in that window is no worse off than before this file wired
+    // these handlers via a static import.
+    //
+    // Passive notice when a friend's session goes live on another of this
+    // account's devices (cross-user device shares).
+    void import('./api/devices').then(({ installShareNotifications }) => installShareNotifications())
+    // Device-control sessions. Registered here, not in a component, so a
+    // request that arrives before any UI has mounted is still answered — an
+    // unanswered DeviceConnectRequested looks to the controller exactly like
+    // an offline device.
+    void import('./api/devices/session').then(({ installDeviceSessions }) => installDeviceSessions())
+    // Wake-on-LAN responder: another of your devices may ask THIS one to
+    // broadcast a magic packet, since a sleeping machine has no socket of its
+    // own.
+    void import('./api/devices/wake').then(({ installWakeResponder }) => installWakeResponder())
+    // And hear the server's verdict on a wake WE asked for. Without this every
+    // refusal — no waker online, rate-limited, asking to wake yourself —
+    // arrives as a generic Error frame that only the chat view listens for, so
+    // the device card waits out its full three minutes and then blames the
+    // BIOS.
+    void import('./api/devices/wakeSession').then(({ installWakeResultListener, cancelAllWakes }) => {
+        installWakeResultListener()
+        // auth.ts used to import and call this directly; that edge is what put
+        // the RC stack in every build's main chunk. It now registers itself.
+        void import('./api/logoutHooks').then(({ registerLogoutCleanup }) => registerLogoutCleanup(cancelAllWakes))
+    })
+    // Remembered unattended seeds must not survive a sign-out — same inversion.
+    void import('./api/devices/unattended').then(({ clearRememberedUaSeeds }) => {
+        void import('./api/logoutHooks').then(({ registerLogoutCleanup }) => registerLogoutCleanup(clearRememberedUaSeeds))
+    })
+    // The other half: record THIS machine's LAN details (MAC / IP / broadcast)
+    // so another of your devices can wake it later. Sealed client-side before
+    // it leaves — the server never learns which MAC belongs to which device.
+    void import('./api/devices/lanInfo').then(({ installLanPublisher }) => installLanPublisher())
+}
 // Android: catch the navigation intent this launch carried (widget button,
 // notification tap) BEFORE React renders — Chat consumes it whenever it
 // finally mounts — and declare the background-delivery keep-alive from the

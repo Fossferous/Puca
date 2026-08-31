@@ -36,7 +36,7 @@ import {
     getControlHostCapture,
     type ControlState,
 } from '../api/remoteControl';
-import { isMobile, isTauri } from '../api/platform';
+import { isMobile, isTauri, RC_ENABLED } from '../api/platform';
 import { outputGain, applyOutputDevice } from './settingsStore';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
@@ -719,7 +719,11 @@ export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }
                                             {isMuted ? <SpeakerOffIcon /> : volume > 100 ? <MegaphoneIcon /> : <SpeakerIcon />}
                                         </button>
                                     )}
-                                    {!isOwnStream && (() => {
+                                    {/* Remote control of a viewed screen. RC_ENABLED, not just
+                                        isTauri(): a lite build has no control transport at all, so
+                                        rendering these would offer a button that silently does
+                                        nothing. Folding on the literal also drops the JSX. */}
+                                    {RC_ENABLED && !isOwnStream && (() => {
                                         const mine = control.controlling?.userId === userId ? control.controlling : null;
                                         if (mine?.status === 'active') {
                                             return (
@@ -1092,7 +1096,7 @@ export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }
                                 ALWAYS rendered (with an empty-state line) so a
                                 solo sharer can see the feature exists — hiding
                                 it entirely read as "feature missing". */}
-                            {isTauri() && (() => {
+                            {RC_ENABLED && isTauri() && (() => {
                                 const me = getCurrentStreamingUserId();
                                 const targets = getAllVoiceUsers().filter(u => u.id !== me);
                                 return (
@@ -1132,7 +1136,7 @@ export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }
                             {/* Remote control lives here too — the hover-header
                                 Request control button is easy to miss (the header
                                 only shows on hover). */}
-                            {(() => {
+                            {RC_ENABLED && (() => {
                                 const mine = control.controlling?.userId === ctxMenu.userId ? control.controlling : null;
                                 if (mine?.status === 'active') {
                                     return (

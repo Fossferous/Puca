@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isNewerVersion, isTrustedBundleUrl } from '../components/updateGate.utils';
+import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches } from '../components/updateGate.utils';
 
 describe('OTA anti-rollback (isNewerVersion)', () => {
     it('applies a strictly newer version', () => {
@@ -42,5 +42,40 @@ describe('OTA bundle-URL trust (isTrustedBundleUrl)', () => {
         // would trust an attacker-named bundle. Must refuse.
         expect(isTrustedBundleUrl('https://download.example.com/mobile/x.enc.zip', '')).toBe(false);
         expect(isTrustedBundleUrl('https://evil.example.com/x.enc.zip', '')).toBe(false);
+    });
+});
+
+describe('OTA build-variant gate (bundleVariantMatches)', () => {
+    // The threat this closes: an OTA pushes a JS bundle into an installed APK,
+    // so a lite install handed the full manifest would silently gain the whole
+    // remote-control frontend after shipping. No build-time check can see it.
+    it('lets each build apply its OWN variant', () => {
+        expect(bundleVariantMatches('full', true)).toBe(true);
+        expect(bundleVariantMatches('lite', false)).toBe(true);
+    });
+
+    it('REFUSES a full bundle on a lite install (the whole point)', () => {
+        expect(bundleVariantMatches('full', false)).toBe(false);
+    });
+
+    it('refuses a lite bundle on a full install, so lite never downgrades a full app', () => {
+        expect(bundleVariantMatches('lite', true)).toBe(false);
+    });
+
+    it('treats an ABSENT variant as full, so a server that ignores ?variant=lite cannot feed a lite app', () => {
+        // This is the case the gate exists for. Every manifest published
+        // before the lite build existed omits the field, and all of them are
+        // full bundles — so absent must NOT mean "matches anything", or an
+        // un-updated server defeats the control entirely.
+        expect(bundleVariantMatches(undefined, false)).toBe(false);
+        expect(bundleVariantMatches(null, false)).toBe(false);
+        // ...and the same absence is correct for a full install.
+        expect(bundleVariantMatches(undefined, true)).toBe(true);
+    });
+
+    it('refuses an unrecognised variant rather than guessing', () => {
+        expect(bundleVariantMatches('beta', false)).toBe(false);
+        expect(bundleVariantMatches('beta', true)).toBe(false);
+        expect(bundleVariantMatches('', false)).toBe(false);
     });
 });

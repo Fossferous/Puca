@@ -30,9 +30,11 @@ vi.mock('../api/devices', () => ({
     renameDevice: vi.fn(),
     revokeDevice: vi.fn(),
     currentUserId: () => 42,
-    thisDeviceId: () => 'thisDev',
 }));
-vi.mock('../api/devices/deviceKey', () => ({ deviceKeyCustody: () => 'os-protected' as const }));
+vi.mock('../api/thisDevice', () => ({ thisDeviceId: () => 'thisDev' }));
+vi.mock('../api/devices/deviceKeyRc', () => ({
+    deviceKeyCustody: () => 'os-protected' as const,
+}));
 // DevicesView prefetches the ICE config on mount to take a round trip off
 // the first Control click. Unmocked it is a REAL fetch to API_BASE_URL from
 // every test in this file — slow, noisy, and dependent on the machine's

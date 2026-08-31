@@ -14,6 +14,13 @@ const APP_VERSION = JSON.parse(
 export default defineConfig({
     define: {
         __APP_VERSION__: JSON.stringify(APP_VERSION),
+        // Tests always run against the FULL feature set, whatever the ambient
+        // VITE_ENABLE_RC says. That is deliberate: the remote-control suites
+        // are the regression cover for code a lite build merely omits, and
+        // they must keep running and passing in this one source tree. This
+        // config also carries no `resolve.alias` for the RC stand-ins, so the
+        // tests resolve the real modules rather than the lite ones.
+        __RC_ENABLED__: 'true',
     },
     plugins: [react()],
     test: {

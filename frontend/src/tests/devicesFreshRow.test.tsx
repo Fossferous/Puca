@@ -28,7 +28,9 @@ vi.mock('../api/devices', () => ({
     isThisDeviceRevoked: () => false,
     resetThisDeviceIdentity: vi.fn(),
 }));
-vi.mock('../api/devices/deviceKey', () => ({ deviceKeyCustody: () => 'os-protected' }));
+vi.mock('../api/devices/deviceKeyRc', () => ({
+    deviceKeyCustody: () => 'os-protected',
+}));
 vi.mock('../api/iceConfig', () => ({
     fetchIceConfig: vi.fn().mockResolvedValue({ iceServers: [], iceTransportPolicy: 'all' }),
 }));

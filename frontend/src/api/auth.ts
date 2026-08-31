@@ -231,8 +231,11 @@ import { setPendingRecoveryCode } from './recoveryPrompt';
 import { clearChannelKeyCache } from './channelKeys';
 import { resetIceConfigCache } from './iceConfig';
 import { clearBlobCache } from './attachments';
-import { clearRememberedUaSeeds } from './devices/unattended';
-import { cancelAllWakes } from './devices/wakeSession';
+// Feature teardown is REGISTERED, not imported. Importing the device modules
+// here put auth.ts — which sits on nearly every import path — into an import
+// cycle with api/devices/index.ts, dragging the whole remote-control stack
+// into the main chunk of every build. See api/logoutHooks.ts.
+import { runLogoutCleanups } from './logoutHooks';
 
 // ============ Public API ============
 
@@ -691,15 +694,17 @@ export function logout(): void {
     clearChannelKeyCache();
     resetIceConfigCache(); // Don't reuse this user's TURN credentials post-logout
     clearBlobCache(); // Revoke decrypted-attachment object URLs (shared-session hygiene)
-    // Remembered unattended seeds grant SYSTEM-level control of this user's
-    // machines — of everything on this hygiene list they are the item that
-    // must least survive a sign-out on a shared browser.
-    clearRememberedUaSeeds();
-    // Any in-flight "wake then connect" wait belongs to the account that just
-    // signed out. Left running, its 5s poll keeps calling /devices with a dead
-    // token — each one a 401 that trips the global auth-expired handling — for
-    // up to three minutes.
-    cancelAllWakes();
+    // Feature-owned teardown, reached through a registry rather than by
+    // importing the features themselves — see api/logoutHooks.ts for why.
+    // Covers, in a build where those features are present:
+    //  - remembered unattended seeds, which grant SYSTEM-level control of this
+    //    user's machines and so of everything on this hygiene list are what
+    //    must least survive a sign-out on a shared browser;
+    //  - any in-flight "wake then connect" wait, which belongs to the account
+    //    that just signed out. Left running, its 5s poll keeps calling
+    //    /devices with a dead token — each one a 401 that trips the global
+    //    auth-expired handling — for up to three minutes.
+    runLogoutCleanups();
 }
 
 /**

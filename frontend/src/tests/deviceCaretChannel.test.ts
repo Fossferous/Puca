@@ -31,7 +31,9 @@ vi.mock('../api/websocket', () => ({
     },
 }));
 
-vi.mock('../api/devices/deviceKey', () => ({ deviceKeyDh: async () => new Uint8Array(32).fill(3) }));
+vi.mock('../api/devices/deviceKeyRc', () => ({
+    deviceKeyDh: async () => new Uint8Array(32).fill(3),
+}));
 vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: async () => 'x25519:' + btoa('k') }));
 vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
 // async, unlike the cursorOwnership rig: restartMedia awaits closeTunnels and
@@ -40,7 +42,9 @@ vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: 
 vi.mock('../api/devices/tunnel', () => ({
     attachTunnelChannel: () => {}, closeTunnels: async () => {},
 }));
-vi.mock('../api/devices/index', () => ({ thisDeviceId: () => 'dev-me' }));
+vi.mock('../api/thisDevice', () => ({
+    thisDeviceId: () => 'dev-me',
+}));
 vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => null }));
 vi.mock('../api/devices/unattended', () => ({
     deriveUaSeed: () => new Uint8Array(32),

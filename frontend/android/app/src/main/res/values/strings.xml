@@ -1,6 +1,9 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Púca</string>
+    <!-- app_name is set per-variant in app/build.gradle (resValue), because
+         the Lite build must show a different launcher label and Capacitor's
+         appName never reaches the APK. Defining it here too is a duplicate
+         resource and fails the build. -->
     <string name="title_activity_main">Puca</string>
     <string name="package_name">com.sovereign.app</string>
     <string name="custom_url_scheme">com.sovereign.app</string>

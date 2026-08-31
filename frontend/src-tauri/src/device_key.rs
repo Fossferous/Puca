@@ -52,7 +52,7 @@ fn key_path() -> Result<PathBuf, String> {
     let base = std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .map_err(|_| "LOCALAPPDATA is not set".to_string())?
-        .join("com.sovereign.chat")
+        .join(env!("PUCA_IDENTIFIER"))
         .join("device");
 
     #[cfg(not(windows))]
@@ -270,6 +270,11 @@ pub fn sign(message: &str) -> Result<String, String> {
 ///
 /// Returns Err on a low-order/zero peer point rather than a zero secret, so
 /// callers fail closed instead of deriving a key an attacker can predict.
+///
+/// REMOTE-CONTROL ONLY: the device-control session key is the only thing that
+/// agrees a shared secret with a peer device. Attestation signs, it never
+/// agrees.
+#[cfg(feature = "remote-control")]
 pub fn dh(peer_pub: &str) -> Result<String, String> {
     use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -296,6 +301,10 @@ pub fn dh(peer_pub: &str) -> Result<String, String> {
 
 /// Forget this device's identity (used when the user revokes THIS device, so a
 /// later re-enrolment is genuinely a new device rather than a resurrection).
+///
+/// REMOTE-CONTROL ONLY: reached from the My Devices "add this machine back"
+/// button, which a build without remote control has no UI for.
+#[cfg(feature = "remote-control")]
 pub fn forget() -> Result<(), String> {
     let path = key_path()?;
     match std::fs::remove_file(&path) {
