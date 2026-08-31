@@ -82,9 +82,44 @@ mod imp {
         WATCH.iter().position(|w| w.load(Ordering::SeqCst) == vk)
     }
 
-    /// Shared edge detector + emitter for both hooks. Only real transitions:
-    /// keyboard auto-repeat sends WM_KEYDOWN over and over while held, and the
-    /// frontend wants edges.
+    /// Hands transitions from the hook callback to a dedicated emitter thread.
+    ///
+    /// `app.emit` used to run INSIDE the hook proc. That call serializes the
+    /// payload and walks the runtime's listener plumbing — work whose latency
+    /// is not ours to bound — and Windows SILENTLY REMOVES a low-level hook
+    /// whose callback repeatedly exceeds its latency budget
+    /// (LowLevelHooksTimeout): no error, no signal, HOOK_LIVE still true, and
+    /// every global hotkey is dead until the feed is restarted. A game plus
+    /// the encoder is exactly the load that produces it — the field report
+    /// was "hotkeys sometimes stop working". The hook proc now only pushes
+    /// onto an unbounded channel (an atomic-list append, never blocking) and
+    /// the emitter thread does the slow part at its leisure.
+    static EMITTER: OnceLock<std::sync::mpsc::Sender<KeyEvent>> = OnceLock::new();
+
+    fn emitter() -> &'static std::sync::mpsc::Sender<KeyEvent> {
+        EMITTER.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<KeyEvent>();
+            // Process-lifetime thread; parks on recv when idle. Torn down with
+            // the process — the ACTIVE gate already stops events at the source.
+            std::thread::spawn(move || {
+                while let Ok(ev) = rx.recv() {
+                    if let Some(app) = APP.get() {
+                        if let Err(e) = app.emit("global-hotkey", ev) {
+                            eprintln!("[hotkeys] emit failed: {e:?}");
+                        }
+                    } else {
+                        eprintln!("[hotkeys] transition dropped: no app handle");
+                    }
+                }
+            });
+            tx
+        })
+    }
+
+    /// Shared edge detector for both hooks. Only real transitions: keyboard
+    /// auto-repeat sends WM_KEYDOWN over and over while held, and the frontend
+    /// wants edges. Runs in the hook callback — everything here must be cheap
+    /// and lock-free (atomics, GetAsyncKeyState, a channel append).
     unsafe fn emit_transition(slot: usize, vk: u32, is_down: bool) {
         let bit = 1u32 << slot;
         let was_down = DOWN.load(Ordering::SeqCst) & bit != 0;
@@ -104,13 +139,7 @@ mod imp {
             shift_key: down_now(VK_SHIFT.0 as i32),
             down: is_down,
         };
-        if let Some(app) = APP.get() {
-            if let Err(e) = app.emit("global-hotkey", ev) {
-                eprintln!("[hotkeys] emit failed: {e:?}");
-            }
-        } else {
-            eprintln!("[hotkeys] transition dropped: no app handle");
-        }
+        let _ = emitter().send(ev); // receiver lives for the process
     }
 
     unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

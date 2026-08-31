@@ -133,6 +133,39 @@ describe('hold actions', () => {
         expect(ups).toBe(1);
     });
 
+    it('native PRESS actions fire despite extra game modifiers (crouch/sprint)', () => {
+        // Regression (reported as "mic hotkeys sometimes work, sometimes
+        // don't"): toggle-mute via the GLOBAL hook was exact-matched, so a
+        // Ctrl held to crouch — or Shift to sprint — at the moment the combo
+        // was pressed silently vetoed it. On the native feed the app has no
+        // focus by definition (nobody is typing in it), so the in-app
+        // typing-protection rationale for exact matching does not apply.
+        let toggles = 0;
+        registerPress('t.gametoggle',
+            () => ({ keyCode: 77, ctrl: false, alt: false, shift: false, label: 'M' }),
+            () => { toggles++; });
+        // Plain M bound; pressed with Ctrl held (crouching): must still fire.
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false });
+        expect(toggles).toBe(1);
+        // And with Shift (sprinting).
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: false, altKey: false, shiftKey: true });
+        expect(toggles).toBe(2);
+        // A binding WITH modifiers still requires its own: bare M must not
+        // fire a Ctrl+Shift+M binding.
+        let combo = 0;
+        registerPress('t.gamecombo',
+            () => ({ keyCode: 68, ctrl: true, alt: false, shift: true, label: 'D' }),
+            () => { combo++; });
+        nativeKeyEvent('down', { keyCode: 68, ctrlKey: false, altKey: false, shiftKey: false });
+        expect(combo).toBe(0);
+        nativeKeyEvent('down', { keyCode: 68, ctrlKey: true, altKey: false, shiftKey: true });
+        expect(combo).toBe(1);
+        // The IN-APP path keeps exact matching — Ctrl+M while a plain-M
+        // binding exists is typing/another command, not this hotkey.
+        key('keydown', 77, { ctrlKey: true });
+        expect(toggles).toBe(2);
+    });
+
     it('scopes native dispatch to the allowed actions only', () => {
         // The native feed is restricted to voice actions — a global keypress
         // must not trigger unrelated actions sharing the same key.

@@ -349,7 +349,17 @@ export function nativeKeyEvent(kind: 'down' | 'up', key: {
         }
         for (const [id, entry] of pressActions) {
             if (only && !only.has(id)) continue;
-            if (eventMatchesBinding(key, entry.getBinding())) entry.onPress();
+            // SUBSET here, unlike the in-app feed's exact match. Exact
+            // matching exists to keep a plain-M binding from firing on Ctrl+M
+            // while TYPING in the app — but on this feed the app does not
+            // have focus by definition: the user is in a game, holding Ctrl
+            // to crouch or Shift to sprint, and pressing their toggle-mute
+            // combo. Exact matching silently vetoed the press whenever any
+            // extra game modifier happened to be down — the field report was
+            // "hotkeys sometimes work, sometimes don't". Same rationale as
+            // the hold actions' long-standing subset rule, applied to the
+            // same situation.
+            if (eventMatchesBinding(key, entry.getBinding(), 'subset')) entry.onPress();
         }
     } else {
         for (const [id, entry] of holdActions) {
