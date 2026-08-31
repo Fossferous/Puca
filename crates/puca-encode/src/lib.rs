@@ -227,6 +227,21 @@ mod stub {
                 "H.264 encoding is only implemented on Windows".into(),
             ))
         }
+
+        // Signature mirrors of the Windows encoder, so the live-encode tests
+        // (ignored off Windows, but still COMPILED by `cargo test`) build
+        // everywhere. Unreachable in practice: `new` never returns Ok here.
+        pub fn backend(&self) -> &str {
+            "unavailable"
+        }
+
+        pub fn dims(&self) -> (u32, u32) {
+            (0, 0)
+        }
+
+        pub fn update_size(&mut self, _width: u32, _height: u32) -> bool {
+            false
+        }
     }
 }
 

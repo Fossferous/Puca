@@ -1588,7 +1588,15 @@ impl Agent {
                             .unwrap_or_default()
                             .to_string();
                         if !line.is_empty() {
-                            if self.streams.contains_key(&session_id) {
+                            // `streams` is Windows-only (like every stream
+                            // request); elsewhere no stream can exist yet, so
+                            // every candidate takes the held path below —
+                            // same shape as SessionStatus's cfg split.
+                            #[cfg(windows)]
+                            let stream_live = self.streams.contains_key(&session_id);
+                            #[cfg(not(windows))]
+                            let stream_live = false;
+                            if stream_live {
                                 // Deliberately swallowed. Chrome emits mDNS
                                 // .local candidates the agent cannot parse, and
                                 // ending the session over one would discard the
@@ -2546,6 +2554,7 @@ mod tests {
         assert_eq!(b64(&[0xff, 0xfe, 0xfd]), "//79");
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_stale_terminal_event_cannot_remove_newer_stream_or_reservation() {
         let mut a = agent();
@@ -2708,6 +2717,7 @@ mod tests {
         let _ = rx;
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_explicit_stop_followed_by_late_terminal_event_is_harmless() {
         let mut a = agent();
@@ -2733,6 +2743,7 @@ mod tests {
         let _ = rx;
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_failed_start_releases_only_its_own_streamkey_reservation() {
         let mut a = agent();
@@ -2765,6 +2776,7 @@ mod tests {
         assert_eq!(a.monitor_reservations.get(&0), Some(&existing_key));
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_data_only_stream_neither_reserves_a_monitor_nor_is_blocked_by_one() {
         let mut a = agent();
@@ -2814,6 +2826,7 @@ mod tests {
         assert!(!a.sessions.contains_key("s-files"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_monitor_switch_releases_only_old_matching_reservation() {
         let mut a = agent();
@@ -2841,6 +2854,7 @@ mod tests {
     /// A composite really is duplicating every output, so reserving only the
     /// sentinel left the member screens looking free — and a second session
     /// would be promised a screen DXGI was about to refuse it.
+    #[cfg(windows)]
     #[test]
     fn all_displays_reserves_every_output_and_a_single_screen_reserves_one() {
         // A GAPPED list, because `outputs()` omits what it cannot describe and
@@ -2861,6 +2875,7 @@ mod tests {
         assert!(!reservation_keys(2, &outputs).contains(&crate::composite::ALL_DISPLAYS));
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_agent_drains_panic_terminal_event_and_cleans_reservation() {
         let mut a = agent();
@@ -3045,7 +3060,9 @@ mod tests {
         }
         // Still gated: StartStream checks only Capability::Capture, so without
         // holding this offer an unproven peer would get a live picture of the
-        // sign-in screen the moment it connects.
+        // sign-in screen the moment it connects. (`streams` is Windows-only;
+        // elsewhere the same guarantee holds vacuously — nothing can stream.)
+        #[cfg(windows)]
         assert!(a.streams.is_empty(), "must not have started capturing yet");
     }
 
@@ -3110,8 +3127,13 @@ mod tests {
         // all use a deliberately invalid SDP for the same reason — this
         // checks that the release fired and reached negotiation, not that
         // negotiation completed.
+        // The handle call must run on EVERY platform — an earlier revision put
+        // it inside the cfg(windows) match below, so off Windows the release
+        // never fired and the final pending_offer assertion failed. Only the
+        // response's SHAPE is platform-dependent.
+        let released = a.handle(Request::SealedSignal { session_id: "s1".into(), payload: response });
         #[cfg(windows)]
-        match a.handle(Request::SealedSignal { session_id: "s1".into(), payload: response }) {
+        match released {
             Response::Error { message } => {
                 assert!(
                     !message.contains("unattended access"),
@@ -3133,6 +3155,16 @@ mod tests {
                 assert_eq!(v["sid"], "s1");
             }
             other => panic!("expected the held offer to be answered or fail on SDP, got {other:?}"),
+        }
+        // Off Windows the release fires all the same, but the stream start
+        // behind it is Windows-only — the honest response is that refusal.
+        #[cfg(not(windows))]
+        match released {
+            Response::Error { message } => assert!(
+                message.contains("only implemented on Windows"),
+                "expected the capture refusal, got: {message}"
+            ),
+            other => panic!("expected the capture refusal off Windows, got {other:?}"),
         }
 
         // Whatever happened, the offer is no longer sitting there un-held: a

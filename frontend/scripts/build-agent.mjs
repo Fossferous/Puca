@@ -220,5 +220,13 @@ const bytes = statSync(staged).size;
 const floor = process.platform === 'win32' ? 500_000 : 100_000;
 if (bytes < floor) throw new Error(`staged agent looks wrong: ${bytes} bytes (floor ${floor} for ${process.platform})`);
 assertStamped(staged, 'puca-agent');
-assertCarriesFrozenLabel(staged, 'puca-agent');
+// Windows only, like the size floor above and for the same reason: the label
+// lives in the sealed-control path, which only the Windows build links —
+// main() off Windows is the cross-compile guard stub that exits 2, so the
+// constant is dead code there and LLVM strips the string from the binary.
+// Only the artefact that ships (the Windows sidecar) can — or needs to —
+// carry it.
+if (process.platform === 'win32') {
+    assertCarriesFrozenLabel(staged, 'puca-agent');
+}
 console.log(`[build-agent] staged ${staged} (${bytes} bytes)`);

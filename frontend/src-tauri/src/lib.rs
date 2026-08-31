@@ -19,8 +19,8 @@ mod unattended_store;
 mod tunnel_pump;
 mod tunnel_cmd;
 #[cfg(windows)]
-#[cfg(windows)]
 mod lock_screen;
+#[cfg(windows)]
 mod service_cmd;
 #[cfg(windows)]
 mod service_link;
@@ -1081,7 +1081,9 @@ pub fn run() {
             service_cmd::service_enable,
             #[cfg(windows)]
             service_cmd::service_disable,
+            #[cfg(windows)]
             service_cmd::service_update,
+            #[cfg(windows)]
             service_cmd::service_bundled_fingerprint,
             set_close_to_tray,
             get_running_apps,

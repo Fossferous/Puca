@@ -75,12 +75,17 @@ image = { version = "0.24", features = ["png"], default-features = false }
 # audio_capture.rs encodes PCM chunks for the 'audio-data' event
 version = "0.22"
 
+# Reused for its install/status logic, so the app and the elevated helper cannot
+# end up disagreeing about what "installed" means. A COMMON dependency, not a
+# cfg(windows) one: lan.rs and wol.rs re-export its cross-platform lan/wol
+# modules on every OS (the crate builds and tests green on Linux; only its
+# SCM/install pieces are internally Windows-gated).
+[dependencies.puca-service]
+path = "../../crates/puca-service"
+
 # Windows-only: per-app audio capture (audio_capture.rs, WASAPI process
 # loopback) + the Win32 shim hiding WebView2's screen-capture bar (capture_bar.rs)
 [target.'cfg(windows)'.dependencies]
-# Reused for its install/status logic, so the app and the elevated helper cannot
-# end up disagreeing about what "installed" means.
-puca-service = { path = "../../crates/puca-service" }
 # Clipboard for device sessions. navigator.clipboard.readText() needs document
 # focus and a permission grant, so it cannot serve a background HOST — which is
 # exactly when a device session needs it.
