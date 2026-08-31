@@ -23,7 +23,7 @@ const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is avai
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
-import { isTauri } from '../api/platform';
+import { isTauri, isMobile as isNativeMobile } from '../api/platform';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
@@ -51,7 +51,7 @@ import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon } from './Icons';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import { Toast } from './Toast';
 import './VoicePanel.css';
 
@@ -148,6 +148,42 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
     // Detect mobile for hiding screen share option
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+    // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: mirrors mobile.css's media
+    // query exactly, plus the native shell. This decides whether the compact
+    // panel is the fixed bottom bar (collapsible, height-reserved); the
+    // UA-sniff `isMobile` above answers a different question ("no screen-share
+    // picker on this device") and must not gate layout.
+    const isPhonePanel = isNativeMobile() || (typeof window !== 'undefined'
+        && window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches);
+
+    // Mobile: the full control set is behind an expand chevron. Collapsed is
+    // the DEFAULT — the full panel is ~230px tall, which with the soft
+    // keyboard up left no room for messages at all (the "everything stacked
+    // on top of each other while typing" report).
+    const [controlsExpanded, setControlsExpanded] = useState(false);
+    const panelRef = useRef<HTMLDivElement>(null);
+
+    // Mobile: publish the panel's REAL height so mobile.css can reserve
+    // exactly that much room above the bottom nav for .chat-main and the
+    // side panels. The old hardcoded 172px drifted from the panel's actual
+    // size as controls were added, leaving the composer covered by the
+    // panel's top rows. documentElement, not the panel: the panel is
+    // portaled to <body> while the readers are elsewhere in the tree.
+    useEffect(() => {
+        if (!isPhonePanel) return;
+        const el = panelRef.current;
+        if (!el) return;
+        const apply = () => document.documentElement.style.setProperty(
+            '--mobile-voice-panel-h', `${Math.ceil(el.getBoundingClientRect().height)}px`);
+        apply();
+        const ro = new ResizeObserver(apply);
+        ro.observe(el);
+        return () => {
+            ro.disconnect();
+            document.documentElement.style.removeProperty('--mobile-voice-panel-h');
+        };
+    }, [isPhonePanel]);
 
     // Camera PiP (Picture-in-Picture) state for mobile
     const [pipPosition, setPipPosition] = useState({ x: 20, y: 100 });
@@ -2693,7 +2729,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             </span>,
             document.body
         )}
-        <div className="voice-panel-compact">
+        <div
+            ref={panelRef}
+            className={`voice-panel-compact${isPhonePanel && isInVoice && !controlsExpanded ? ' vp-collapsed' : ''}`}
+        >
             {/* Permission Help Modal */}
             {showPermissionHelp && (
                 <div className="permission-help-overlay">
@@ -2867,7 +2906,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             )}
                         </select>
                         <button
-                            className={`voice-btn ${isCameraOn ? 'active' : ''}`}
+                            className={`voice-btn vp-camera ${isCameraOn ? 'active' : ''}`}
                             onClick={async () => {
                                 try {
                                     await setCameraEnabled(!isCameraOn);
@@ -2880,10 +2919,25 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         >
                             {isCameraOn ? <CameraIcon size={18} /> : <CameraOffIcon size={18} />}
                         </button>
+                        {/* Mobile only: collapsed, the bar shows just mic /
+                            deafen / hang-up; everything else (noise mode,
+                            camera, any future control) is behind this
+                            chevron. CSS keys the hiding on .vp-collapsed. */}
+                        {isPhonePanel && (
+                            <button
+                                className="voice-btn vp-expand"
+                                onClick={() => setControlsExpanded(e => !e)}
+                                title={controlsExpanded ? 'Fewer voice controls' : 'More voice controls'}
+                                aria-label={controlsExpanded ? 'Fewer voice controls' : 'More voice controls'}
+                                aria-expanded={controlsExpanded}
+                            >
+                                {controlsExpanded ? <ChevronDownIcon size={18} /> : <ChevronUpIcon size={18} />}
+                            </button>
+                        )}
                         {/* Hide screen share on mobile - not supported */}
                         {!isMobile && (
                             <button
-                                className={`voice-btn ${isScreenSharing ? 'active screen-share' : ''}`}
+                                className={`voice-btn vp-screenshare ${isScreenSharing ? 'active screen-share' : ''}`}
                                 onClick={async () => {
                                     if (isScreenSharing) {
                                         void sfuManager.stopScreenShare(); // no-op on mesh calls
