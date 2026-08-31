@@ -336,7 +336,14 @@ function levelScratch(n: number): Float32Array {
 }
 
 self.onmessage = async (e: MessageEvent) => {
-    const data = e.data as { type?: string; port?: MessagePort; bypassInference?: boolean; tuning?: DfTuning } | null;
+    const data = e.data as {
+        type?: string;
+        port?: MessagePort;
+        bypassInference?: boolean;
+        tuning?: DfTuning;
+        /** Allocate the 30 s raw-microphone diagnostic rings (developer mode only). */
+        capture?: boolean;
+    } | null;
     if (data?.type === 'capture') {
         const hop = df?.hop_size ?? 480;
         const c = captureRead(hop);
@@ -367,9 +374,21 @@ self.onmessage = async (e: MessageEvent) => {
         );
         level = new LevelNormalizer(df.delay_hops);
         captureDelayHops = df.delay_hops;
-        captureHops = CAPTURE_S * Math.round(48000 / df.hop_size);
-        captureRaw = new Float32Array(captureHops * df.hop_size);
-        captureEnh = new Float32Array(captureHops * df.hop_size);
+        // OPT-IN since the 0.8.130 security pass. These rings hold the last 30
+        // seconds of RAW, pre-gain microphone audio and were allocated and kept
+        // filling for every DeepFilter call, for everyone — a rolling recording
+        // of the user's microphone sitting in memory, reachable from a single
+        // window global. It is a genuinely useful diagnostic, so it survives,
+        // but only when the user has turned developer mode on.
+        if (data.capture) {
+            captureHops = CAPTURE_S * Math.round(48000 / df.hop_size);
+            captureRaw = new Float32Array(captureHops * df.hop_size);
+            captureEnh = new Float32Array(captureHops * df.hop_size);
+        } else {
+            captureHops = 0;
+            captureRaw = null;
+            captureEnh = null;
+        }
         const hopSize = df.hop_size;
         rawRing = Array.from({ length: df.delay_hops + 1 }, () => new Float32Array(hopSize));
         rawRingPos = 0;

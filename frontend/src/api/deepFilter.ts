@@ -31,6 +31,7 @@
  * Advanced → Experimental.
  */
 import workletUrl from './dfWorklet.js?url';
+import { isDeveloperMode } from '../components/settingsStore';
 import type { DfTuning } from './dfTuning';
 
 export type DeepFilterNodes = {
@@ -148,7 +149,12 @@ function startWorker(
 ): Promise<{ worker: Worker; hop: number; delayHops: number }> {
     return new Promise((resolve, reject) => {
         const worker = new Worker(new URL('./dfWorker.ts', import.meta.url), { type: 'module' });
-        worker.postMessage({ type: 'init', port: hopPort, bypassInference, tuning }, [hopPort]);
+        // `capture` gates the worker's 30 s raw-microphone diagnostic rings.
+        // Developer mode only — see dfWorker.ts.
+        worker.postMessage(
+            { type: 'init', port: hopPort, bypassInference, tuning, capture: isDeveloperMode() },
+            [hopPort],
+        );
         const timer = setTimeout(() => {
             worker.terminate();
             reject(new Error('DeepFilter worker init timed out'));

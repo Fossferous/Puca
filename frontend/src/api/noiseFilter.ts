@@ -29,7 +29,7 @@
  */
 import { applyDeepFilter, isDeepFilterAvailable, deepFilterDiagnostics, captureDeepFilter, encodeWav16 } from './deepFilter';
 import { DEFAULT_TUNING, POST_FILTER_BETA, type DfTuning } from './dfTuning';
-import { inputGain, loadSettings } from '../components/settingsStore';
+import { inputGain, loadSettings, isDeveloperMode } from '../components/settingsStore';
 import { saveAttachment } from './saveAttachment';
 
 export type NoiseSuppressionMode = 'off' | 'standard' | 'rnnoise' | 'deepfilter';
@@ -776,7 +776,15 @@ if (typeof window !== 'undefined') {
     // by (desktop: <Downloads>/Puca/, web: a browser download). Nothing
     // is uploaded; the user decides what to do with the files. Play them
     // through e2e/df-offline.mjs's metrics or just listen.
+    //
+    // DEVELOPER MODE ONLY since the 0.8.130 security pass. Installed
+    // unconditionally, this put a function on `window` that writes 30 seconds of
+    // the user's raw microphone audio to disk, reachable by any script running
+    // in the webview — which on desktop is exactly where an XSS would land. The
+    // worker's rings are gated by the same flag, so with developer mode off
+    // there is no buffer for it to read either.
     (window as unknown as Record<string, unknown>).__pucaDfCapture = async () => {
+        if (!isDeveloperMode()) return 'turn on Developer mode in Settings first';
         if (currentMode !== 'deepfilter') return 'DeepFilter is not the live mode (' + currentMode + ')';
         const c = await captureDeepFilter();
         if (!c) return 'no DeepFilter graph is live (or the worker did not answer)';

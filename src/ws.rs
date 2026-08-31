@@ -1516,6 +1516,13 @@ const MAX_ROOM_ID_LEN: usize = 128;
 const MAX_SDP_LEN: usize = 64 * 1024;
 const MAX_CANDIDATE_LEN: usize = 4 * 1024;
 const MAX_CONTROL_EVENT_LEN: usize = 8 * 1024;
+/// Human-readable disconnect/refusal text relayed between peers. It is shown in
+/// a toast, so it has no business being large. Unbounded, it was one of four
+/// relay fields a client could fill to the 256 KiB frame limit and then park in
+/// a stalled peer's outbound queue, which bounds MESSAGES (256) rather than
+/// bytes — so a handful of sockets could pin hundreds of megabytes of server
+/// memory with strings nobody would ever read.
+const MAX_REASON_LEN: usize = 512;
 /// Max stored/relayed chat message content (bytes).
 const MAX_MESSAGE_CONTENT_LEN: usize = 8000;
 
@@ -2529,6 +2536,9 @@ async fn handle_message(
             {
                 return Err("handshake payload too long".to_string());
             }
+            if reason.as_ref().is_some_and(|r| r.len() > MAX_REASON_LEN) {
+                return Err("reason too long".to_string());
+            }
             // Only the HOST may answer, and only its own pinned socket.
             // `share_notice` is Some only for a cross-user session going
             // Active: the owner's OTHER sessions are told who just connected,
@@ -2626,6 +2636,9 @@ async fn handle_message(
         }
 
         ClientMessage::DeviceEnd { session_id, reason } => {
+            if reason.as_ref().is_some_and(|r| r.len() > MAX_REASON_LEN) {
+                return Err("reason too long".to_string());
+            }
             if let Some((target, target_user)) = state.end_device_session(&session_id, conn_id) {
                 state.send_to_conn(
                     target_user,
@@ -2777,6 +2790,9 @@ async fn handle_message(
         // ControlRequested prompts (with an attacker-chosen from_username) at any
         // enumerated user. Drop silently when they share no room.
         ClientMessage::ControlRequest { target_user, eph } => {
+            if eph.as_ref().is_some_and(|e| e.len() > MAX_CONTROL_EVENT_LEN) {
+                return Err("handshake payload too long".to_string());
+            }
             if users_share_room(state, user_id, target_user) {
                 state.send_signal_to_user(
                     user_id,
@@ -2798,6 +2814,9 @@ async fn handle_message(
             cap_w,
             cap_h,
         } => {
+            if eph.as_ref().is_some_and(|e| e.len() > MAX_CONTROL_EVENT_LEN) {
+                return Err("handshake payload too long".to_string());
+            }
             if users_share_room(state, user_id, target_user) {
                 state.send_signal_to_user(
                     user_id,
