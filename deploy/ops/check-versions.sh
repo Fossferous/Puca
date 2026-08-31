@@ -239,6 +239,10 @@ for entry in "${HOSTS[@]}"; do
 	# The webapp carries no version string, so compare the ENTRY BUNDLE the
 	# host serves against the one in the local dist/ — a hash match is the
 	# only honest way to say "this host is serving the build I just made".
+	# GOTCHA: dist/ holds whichever variant was built LAST. The webapp is
+	# always the FULL build, so after a lite build this reports a false
+	# mismatch until a plain `npm run build` restores the full dist —
+	# exactly what happened on 0.8.127's first post-ship audit.
 	#
 	# READ index.html, DO NOT LIST THE DIRECTORY. vite does not empty
 	# dist/assets between builds, so it accumulates every previous entry
