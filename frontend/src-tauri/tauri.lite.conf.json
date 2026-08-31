@@ -9,17 +9,20 @@
   },
   "//app": "windows[] is REPEATED IN FULL, not patched. Tauri merges configs RFC-7386, which replaces arrays wholesale rather than merging their elements — so declaring only a title here silently dropped width, height, resizable, fullscreen and additionalBrowserArgs. That last one carries --autoplay-policy=no-user-gesture-required, without which voice audio will not autoplay. check-lite-identity.mjs fails the build if any key the full config sets goes missing from this copy.",
   "app": {
-          "windows": [
-                {
-                      "title": "Puca Lite",
-                      "width": 1200,
-                      "height": 800,
-                      "resizable": true,
-                      "fullscreen": false,
-                      "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI"
-                }
-          ]
-    },
+    "windows": [
+      {
+        "title": "Puca Lite",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: wss: blob: data:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    }
+  },
   "bundle": {
     "//externalBin": "No sidecars. binaries/puca-agent is the native remote-desktop host agent and binaries/puca-service is the elevated helper that installs it as a SYSTEM service; neither exists in a build without remote control.",
     "externalBin": [],

@@ -48,6 +48,14 @@ OFFSITE_CMD="${OFFSITE_CMD:-}"
 
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 mkdir -p "$DIR"
+# The dumps written below contain every user's SRP verifier and their
+# password-wrapped E2EE seed — the offline-attack material for the whole
+# instance. Without this they took the default mode (commonly 0755 on the
+# directory, 0644 on the files), readable by every local account on the box.
+# Set it on the directory AND via umask, so each file created below inherits it
+# and a re-run over an existing directory is corrected too.
+chmod 700 "$DIR" 2>/dev/null || true
+umask 077
 
 # --- 1. Postgres ---
 DB_FILE="$DIR/$DB_NAME-db-$TS.sql.gz"

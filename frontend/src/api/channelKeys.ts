@@ -249,8 +249,30 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         const ck = await unwrapChannelKey(identity, wrapped);
         if (ck) keys.set(row.epoch, ck);
     }
+    // Epoch floor. `current_epoch` is whatever the untrusted server says it is,
+    // and nothing remembered the highest this channel had already reached — so
+    // the server could name a SUPERSEDED epoch and every client would go back to
+    // encrypting under a key that an ejected member still holds. Rotation is the
+    // one mechanism that removes someone's future read access; letting the party
+    // being defended against choose the epoch number undoes it.
+    //
+    // Clamp upward rather than throwing: refusing outright would let a server
+    // deny the channel entirely, and a stale-but-real key still decrypts
+    // history. Encryption uses `currentEpoch`, so the floor is what matters.
+    const floorKey = `e2ee_epoch_floor_${channelId}`;
+    let floor = 0;
+    try { floor = Number(localStorage.getItem(floorKey) ?? '0') || 0; } catch { /* private mode */ }
+    const currentEpoch = Math.max(resp.current_epoch, floor);
+    if (resp.current_epoch < floor) {
+        console.warn(
+            `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch} but this device ` +
+            `has already seen ${floor} — treating ${floor} as current (rotation must not go backwards)`,
+        );
+    } else if (resp.current_epoch > floor) {
+        try { localStorage.setItem(floorKey, String(resp.current_epoch)); } catch { /* private mode */ }
+    }
     return {
-        currentEpoch: resp.current_epoch,
+        currentEpoch,
         currentGeneration: resp.current_generation ?? 0,
         epochGeneration: resp.epoch_generation ?? 0,
         keys,

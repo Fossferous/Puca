@@ -130,6 +130,14 @@ export const defaultSettings = {
     // click-to-load placeholder. Attachments on your own server are unaffected;
     // they are not third-party.
     loadRemoteImages: false,
+    // When true, hide Windows' own "… is sharing your screen" bar during a
+    // capture. OFF by default: the app used to do this unconditionally, and
+    // re-hide the bar every 700 ms for the whole capture, which suppressed the
+    // strongest indicator the user had that their screen was being recorded —
+    // along with its in-band "Stop sharing" button. Kept as an option because
+    // the bar genuinely does sit on top of a fullscreen game. The tray icon
+    // badges amber while any capture runs whether or not this is on.
+    hideOsCaptureBar: false,
 
     // --- Screen-control (remote control of your shared screen) kill switches ---
     // Custom kill-switch hotkey. Enforced by the native low-level hook so it

@@ -1,13 +1,26 @@
+# Local development database.
+#
+# NOT a production deployment. It exists so `cargo run` has a Postgres to talk
+# to on a developer's machine; production runs Postgres on the host, configured
+# by deploy/ (see docs/PRODUCTION_DEPLOYMENT.md).
 services:
   postgres:
     image: postgres:16-alpine
     container_name: puca-postgres
     environment:
       POSTGRES_USER: postgres
+      # Development-only credential, and it is why the port below is bound to
+      # loopback. If you point anything real at this compose file, change it.
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: puca
     ports:
-      - "5432:5432"
+      # LOOPBACK, not 0.0.0.0. Plain "5432:5432" published this database on every
+      # interface, and it ships with the password above — so on any host with a
+      # routable address that was an open, trivially-credentialed database
+      # holding every user's SRP verifier and password-wrapped E2EE seed. Docker
+      # publishes ports by writing its own iptables rules, which bypass a host
+      # firewall configured with ufw, so "there's a firewall" is not a defence.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     security_opt:

@@ -391,21 +391,85 @@ struct TrayTipState(std::sync::Mutex<TrayTipParts>);
 struct TrayTipParts {
     device: Option<String>,
     clip: Option<String>,
+    /// A voice/channel screen share running from this machine.
+    share: Option<String>,
+    /// Mirrored here rather than applied straight to the tray, because the tray
+    /// ICON now has two writers — unread and capture — and whichever ran last
+    /// would otherwise clobber the other.
+    unread: bool,
+}
+
+/// Unread badge: red.
+const BADGE_UNREAD: [u8; 3] = [0xF0, 0x3E, 0x3E];
+/// Capture badge: amber. Deliberately a different hue from unread, because this
+/// one means "this machine is being recorded or driven right now".
+const BADGE_CAPTURE: [u8; 3] = [0xF5, 0xA6, 0x23];
+
+/// Recompute the tray ICON from every state that should be visible in it.
+///
+/// Capture outranks unread: a red dot that might just mean "you have messages"
+/// is not an acceptable way to signal that the screen is being recorded.
+///
+/// This exists because the tooltip was not enough. For a native clip arm and an
+/// armed unattended host there is no OS-drawn indicator at all — DXGI Desktop
+/// Duplication draws none — and the in-app pill is unreachable behind a
+/// fullscreen game or when the window is closed to tray, which is exactly when
+/// those run. A hover-gated tooltip is not an indicator; the icon is.
+fn refresh_tray_icon(app: &tauri::AppHandle, state: &TrayTipState) {
+    use tauri::tray::TrayIconId;
+    let (capturing, unread) = {
+        let p = state.0.lock().unwrap();
+        (
+            p.device.is_some() || p.clip.is_some() || p.share.is_some(),
+            p.unread,
+        )
+    };
+    let icon = if capturing {
+        badged_tray_icon(app, BADGE_CAPTURE)
+    } else if unread {
+        badged_tray_icon(app, BADGE_UNREAD)
+    } else {
+        app.default_window_icon().cloned()
+    };
+    if let Some(tray) = app.tray_by_id(&TrayIconId::new("main-tray")) {
+        let _ = tray.set_icon(icon);
+    }
 }
 
 fn compose_tray_tip(app: &tauri::AppHandle, state: &TrayTipState) {
     use tauri::tray::TrayIconId;
     let parts = state.0.lock().unwrap();
-    let tip = match (&parts.device, &parts.clip) {
-        (Some(d), Some(c)) => format!("{d}\n{c}"),
-        (Some(d), None) => d.clone(),
-        (None, Some(c)) => c.clone(),
-        (None, None) => "Puca".to_string(),
+    let lines: Vec<String> = [&parts.device, &parts.clip, &parts.share]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let tip = if lines.is_empty() {
+        "Puca".to_string()
+    } else {
+        lines.join("\n")
     };
     drop(parts);
     if let Some(tray) = app.tray_by_id(&TrayIconId::new("main-tray")) {
         let _ = tray.set_tooltip(Some(&tip));
     }
+    refresh_tray_icon(app, state);
+}
+
+/// Reflect a running screen share in the tray.
+///
+/// The voice screen share had no always-present local indicator: its stream tile
+/// lives inside a window that may be minimised or closed to tray, and the app
+/// hides WebView2's own sharing bar. Now it badges the tray like every other
+/// capture path.
+#[tauri::command]
+fn set_screen_share_indicator(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, TrayTipState>,
+    sharing: bool,
+) {
+    state.0.lock().unwrap().share = sharing.then(|| "Puca — sharing your screen".to_string());
+    compose_tray_tip(&app, &state);
 }
 
 /// Reflect the armed clip replay buffer in the tray.
@@ -727,7 +791,7 @@ fn open_external(url: String) -> Result<(), String> {
 /// Runtime-generated red disc (RGBA) for the unread badge — no asset files.
 /// A plain filled disc with a ~1px soft edge: Windows renders taskbar
 /// overlays at ~16px, where any glyph or count would be unreadable.
-fn red_dot_rgba(size: u32) -> Vec<u8> {
+fn dot_rgba(size: u32, rgb: [u8; 3]) -> Vec<u8> {
     let mut buf = vec![0u8; (size * size * 4) as usize];
     let c = (size as f32 - 1.0) / 2.0;
     let r = size as f32 * 0.42;
@@ -738,9 +802,9 @@ fn red_dot_rgba(size: u32) -> Vec<u8> {
             let a = ((r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
             if a > 0 {
                 let i = ((y * size + x) * 4) as usize;
-                buf[i] = 0xF0;
-                buf[i + 1] = 0x3E;
-                buf[i + 2] = 0x3E;
+                buf[i] = rgb[0];
+                buf[i + 1] = rgb[1];
+                buf[i + 2] = rgb[2];
                 buf[i + 3] = a;
             }
         }
@@ -750,7 +814,7 @@ fn red_dot_rgba(size: u32) -> Vec<u8> {
 
 /// The app icon with the red unread dot composed into the bottom-right
 /// corner — used as the tray icon while there are unread messages.
-fn badged_tray_icon(app: &tauri::AppHandle) -> Option<tauri::image::Image<'static>> {
+fn badged_tray_icon(app: &tauri::AppHandle, rgb: [u8; 3]) -> Option<tauri::image::Image<'static>> {
     let base = app.default_window_icon()?;
     let (w, h) = (base.width(), base.height());
     // A base icon smaller than the minimum dot would underflow the offset
@@ -760,7 +824,7 @@ fn badged_tray_icon(app: &tauri::AppHandle) -> Option<tauri::image::Image<'stati
     }
     let mut rgba = base.rgba().to_vec();
     let dot = (w.min(h) / 2).max(8); // must stay legible at the 16px tray size
-    let dot_rgba = red_dot_rgba(dot);
+    let dot_rgba = dot_rgba(dot, rgb);
     let (ox, oy) = (w - dot, h - dot);
     for y in 0..dot {
         for x in 0..dot {
@@ -788,24 +852,25 @@ fn badged_tray_icon(app: &tauri::AppHandle) -> Option<tauri::image::Image<'stati
 /// clears it on focus. All calls are best-effort — a missing window/tray
 /// (shutdown races) must never error into the webview.
 #[tauri::command]
-fn set_unread_badge(app: tauri::AppHandle, unread: bool) {
+fn set_unread_badge(app: tauri::AppHandle, state: tauri::State<'_, TrayTipState>, unread: bool) {
     #[cfg(windows)]
     if let Some(w) = app.get_webview_window("main") {
         let overlay = if unread {
-            Some(tauri::image::Image::new_owned(red_dot_rgba(32), 32, 32))
+            Some(tauri::image::Image::new_owned(
+                dot_rgba(32, BADGE_UNREAD),
+                32,
+                32,
+            ))
         } else {
             None
         };
         let _ = w.set_overlay_icon(overlay);
     }
-    if let Some(tray) = app.tray_by_id("main-tray") {
-        let icon = if unread {
-            badged_tray_icon(&app)
-        } else {
-            app.default_window_icon().cloned()
-        };
-        let _ = tray.set_icon(icon);
-    }
+    // Record the flag and let ONE function decide the icon. Setting it directly
+    // here meant unread and capture fought over the tray: clearing unread reset
+    // the icon to the plain app icon even while the screen was being recorded.
+    state.0.lock().unwrap().unread = unread;
+    refresh_tray_icon(&app, &state);
 }
 
 /// Seconds since the last SYSTEM-WIDE keyboard/mouse input (GetLastInputInfo).
@@ -1231,6 +1296,7 @@ pub fn run() {
             #[cfg(feature = "remote-control")]
             set_device_session_indicator,
             set_clip_armed_indicator,
+            set_screen_share_indicator,
             #[cfg(feature = "remote-control")]
             list_anticheat_processes,
             attention_main_window,

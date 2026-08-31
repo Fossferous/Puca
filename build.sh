@@ -51,10 +51,17 @@ build_frontend() {
     log "Building frontend..."
     cd "$FRONTEND_DIR"
     
-    # Install dependencies if needed
+    # Install dependencies if needed.
+    #
+    # `npm ci`, not `npm install`: this script builds the artifacts that get
+    # SIGNED and shipped, so its dependency tree has to be the one in
+    # package-lock.json. `npm install` is free to pick up any newer version
+    # inside each semver range, which means a release could contain a package
+    # nobody reviewed — including the OTA updater plugin that verifies bundle
+    # signatures. CI already uses `npm ci`; the release path did not.
     if [ ! -d "node_modules" ]; then
-        log "Installing dependencies..."
-        npm install
+        log "Installing dependencies (npm ci, from the lockfile)..."
+        npm ci
     fi
     
     # Run TypeScript check

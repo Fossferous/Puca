@@ -38,9 +38,14 @@ REM Build frontend
 echo [BUILD] Building frontend...
 cd /d "%FRONTEND_DIR%"
 
+REM `npm ci`, not `npm install`: this script builds the artifacts that get SIGNED
+REM and shipped, so its dependency tree must be exactly package-lock.json.
+REM `npm install` may pick up any newer version within each semver range, so a
+REM release could ship a package nobody reviewed - including the OTA updater
+REM plugin that verifies bundle signatures. CI already uses `npm ci`.
 if not exist "node_modules" (
-    echo [BUILD] Installing dependencies...
-    call npm install
+    echo [BUILD] Installing dependencies ^(npm ci, from the lockfile^)...
+    call npm ci
 )
 
 echo [BUILD] Type checking...

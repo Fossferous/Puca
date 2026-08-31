@@ -416,6 +416,28 @@ export async function login(username: string, password: string): Promise<string>
             pw_kdf: PwKdf | null;
         } = await apiClient.get('/keys/wrap');
 
+        // Refuse a DOWNGRADE. Which key-derivation scheme this client uses was
+        // decided entirely by a number the untrusted server sends, with nothing
+        // remembering what this account had already reached — so a server that
+        // reported key_version 2 pushed a v3 account back onto the legacy
+        // password-derived identity and overwrote the cached seed.
+        //
+        // On its own that is not a confidentiality break (the SRP verifier in
+        // the same row is a cheaper offline target than either KDF, and the
+        // migrate path is refused server-side with a 409). But a client that
+        // treats the server as untrusted should not accept a protocol
+        // downgrade on the server's word, so pin the highest version seen.
+        const pinnedKey = `e2ee_key_version_${username.toLowerCase()}`;
+        const pinned = Number(localStorage.getItem(pinnedKey) ?? '0') || 0;
+        if (wrap.key_version < pinned) {
+            throw new Error(
+                `server offered key_version ${wrap.key_version} for an account already at ${pinned} — refusing to downgrade`,
+            );
+        }
+        if (wrap.key_version > pinned) {
+            try { localStorage.setItem(pinnedKey, String(wrap.key_version)); } catch { /* private mode */ }
+        }
+
         if (wrap.key_version >= 3 && wrap.wrap_salt && wrap.seed_wrapped_pw) {
             const seed = await unwrapSeedWithPassword(
                 password, wrap.wrap_salt, wrap.seed_wrapped_pw,
@@ -692,6 +714,27 @@ export function logout(): void {
     localStorage.removeItem(REMEMBER_ME_KEY);
     clearActiveIdentity(); // Clear E2EE identity on logout
     clearChannelKeyCache();
+    // Secrets and personal data that outlived a sign-out. Everything below is
+    // either a private key or a real-world location, and none of it belongs to
+    // the NEXT person to use this browser profile.
+    //   - the web device private key, which identifies this browser as an
+    //     enrolled device of the account that just signed out;
+    //   - saved task places, which are home/work COORDINATES.
+    // Deliberately KEPT: `verified_key_*` and `control_pin_*`. Those are
+    // trust-on-first-use anchors against a server substituting a peer's identity
+    // key, and wiping them on every sign-out would hand a malicious server a
+    // fresh substitution window at each login — the opposite of hygiene.
+    for (const k of ['sovereign_device_key_v1', 'sovereignTaskPlaces', 'sovereignTaskPlaceAssign']) {
+        try { localStorage.removeItem(k); } catch { /* private mode */ }
+    }
+    // Task places are stored per-user (`<key>: <uid>`), so remove those too.
+    try {
+        for (const k of Object.keys(localStorage)) {
+            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign')) {
+                localStorage.removeItem(k);
+            }
+        }
+    } catch { /* private mode */ }
     resetIceConfigCache(); // Don't reuse this user's TURN credentials post-logout
     clearBlobCache(); // Revoke decrypted-attachment object URLs (shared-session hygiene)
     // Feature-owned teardown, reached through a registry rather than by
