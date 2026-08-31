@@ -1,5 +1,9 @@
 # Púca — Install, Test & Hosting Guide
 
+> **Superseded where it disagrees: [`deploy/README.md`](../deploy/README.md)**
+> is the canonical, tested-against-the-code deployment path (it also covers
+> the Lite build variant and `deploy/ops/dual-ship.sh`, which this page
+> predates).
 Three audiences:
 
 1. **You (host)** — run the backend + Postgres on your server.

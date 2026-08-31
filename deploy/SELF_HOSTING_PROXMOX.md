@@ -117,7 +117,7 @@ RUST_LOG=puca=info,tower_http=warn
 Lock it down:
 
 ```bash
-sudo chown -R sovereign:puca /opt/puca
+sudo chown -R puca:puca /opt/puca
 sudo chmod 600 /opt/puca/.env
 ```
 

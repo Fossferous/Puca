@@ -49,6 +49,7 @@ import { getFileUrl } from '../api/uploads';
 import { isBlocked } from './blockStore';
 import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
+import { decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon } from './Icons';
@@ -78,6 +79,9 @@ interface VoicePanelProps {
     serverRequireMediaE2ee?: boolean;
     /** This is an AFK channel: the mic is hard-muted (you can't talk here). */
     isAfkChannel?: boolean;
+    /** The server's AFK window in ms (afk_timeout_minutes × 60000). Absent ⇒
+     *  the backend predates the setting; the old fixed 15 min applies. */
+    afkTimeoutMs?: number;
     /** Called after 15 min of no voice activity, so the parent can move the
      *  user to the server's AFK channel. Not armed in an AFK channel or while
      *  screen-sharing. */
@@ -94,7 +98,7 @@ interface VoicePanelProps {
 // (voiceState) and render INSIDE each participant's voice-stage tile
 // (VoiceStage.tsx) — where profile/stream tiles already live.
 
-export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, onInactive, sfuMode = false, clipPolicy }: VoicePanelProps) {
+export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy }: VoicePanelProps) {
     const [isInVoice, setIsInVoice] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
     const [isDeafened, setIsDeafened] = useState(false);
@@ -189,21 +193,43 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     }, [sfuMode]);
 
     // --- Inactivity auto-move to AFK ---------------------------------------
-    // After 15 min with no voice activity, call onInactive() so the parent can
-    // move us to the server's AFK channel. Not armed in an AFK channel, while
-    // screen-sharing, or if there's no AFK channel (parent passes no onInactive).
-    const AFK_INACTIVITY_MS = 15 * 60 * 1000;
+    // Discord's rules, copied (see utils/afkIdle.ts for the contract and the
+    // history): silent for the server's AFK window AND no input → moved to
+    // the AFK channel. Muted / deafened / listen-only / watching a stream do
+    // NOT exempt — they used to, and since everyone mutes before walking
+    // away, the move had become nearly unreachable ("users are not getting
+    // kicked when AFK"). Not armed in an AFK channel, or when there's no AFK
+    // channel to move to (parent passes no onInactive).
     const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Server-configurable window (Discord's 1/5/15/30/60 min); ref so live
+    // timer callbacks read the current value without re-arming churn.
+    const afkTimeoutMsRef = useRef(afkTimeoutMs);
+    useEffect(() => { afkTimeoutMsRef.current = afkTimeoutMs; }, [afkTimeoutMs]);
     // Refs so the timer callback reads current values without re-arming churn.
     const isScreenSharingRef = useRef(isScreenSharing);
     const listenOnlyRef = useRef(false);
     const isCameraOnRef = useRef(isCameraOn);
     const onInactiveRef = useRef(onInactive);
     const isAfkChannelRef = useRef(isAfkChannel);
-    // Presence signals the idle timer reads (see resetInactivity): being muted,
-    // and watching someone's stream.
     const isMutedRef = useRef(false);
-    const watchingStreamRef = useRef(false);
+    // In-app input — the browser/mobile stand-in for the OS idle probe (and
+    // the only input signal a web build can see). A ref write per event; no
+    // state, no re-renders, no throttling needed.
+    const lastAppInputRef = useRef<number | null>(null);
+    useEffect(() => {
+        const mark = () => { lastAppInputRef.current = Date.now(); };
+        const opts = { capture: true, passive: true } as AddEventListenerOptions;
+        window.addEventListener('pointerdown', mark, opts);
+        window.addEventListener('keydown', mark, opts);
+        window.addEventListener('touchstart', mark, opts);
+        window.addEventListener('wheel', mark, opts);
+        return () => {
+            window.removeEventListener('pointerdown', mark, { capture: true });
+            window.removeEventListener('keydown', mark, { capture: true });
+            window.removeEventListener('touchstart', mark, { capture: true });
+            window.removeEventListener('wheel', mark, { capture: true });
+        };
+    }, []);
     // Live deafen state read from the setOnRemoteStream callback: a peer that
     // (re)connects while we're deafened must have its <audio> start muted, else
     // deafen is bypassed for anyone who joins after we deafened. (audit M8)
@@ -266,11 +292,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { onInactiveRef.current = onInactive; }, [onInactive]);
     useEffect(() => { isAfkChannelRef.current = isAfkChannel; }, [isAfkChannel]);
     useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
-    useEffect(() => {
-        const update = () => { watchingStreamRef.current = globalSelectedStreams.size > 0; };
-        update();
-        return subscribeToStreamState(update);
-    }, []);
 
     // --- Input mode: voice activity / push-to-talk / push-to-mute -----------
     // The HOLD key gates the transmitted track locally (track.enabled) without
@@ -306,54 +327,51 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const clearInactivity = useCallback(() => {
         if (inactivityTimer.current) { clearTimeout(inactivityTimer.current); inactivityTimer.current = null; }
     }, []);
-    const resetInactivity = useCallback(() => {
+    /** Arm the idle check `ms` from now. The timer firing at all proves no
+     *  speech reset it in the meantime (the VAD calls resetInactivity), so
+     *  the check only has to separate present-but-silent from away — which
+     *  decideAfk (utils/afkIdle.ts) does from the input signals, per
+     *  Discord's rules. Fail-OPEN on a probe error: wrongly moving a present
+     *  user is the worse failure, so a full quiet window must pass again
+     *  before the next look. */
+    const armInactivity = useCallback(function arm(ms: number) {
         clearInactivity();
         // Only arm when a move is possible and meaningful.
         if (!onInactiveRef.current || isAfkChannelRef.current) return;
         inactivityTimer.current = setTimeout(() => {
-            // Sharing screen or camera counts as active — reschedule instead of moving.
-            // Listen-only users can't speak and can't toggle mute — both
-            // activity signals are unavailable to them — so an attentive
-            // listener would be yanked to AFK every 15 minutes.
-            //
-            // A MUTED user is in exactly that position and used to be moved for
-            // it: muting zeroes the track, so the VAD never fires, and someone
-            // who simply stays muted and listens produces no signal at all. Being
-            // muted is a deliberate act of presence, not absence — the most
-            // common way to sit in a call — so it can never by itself mean AFK.
-            //
-            // Watching someone's stream is presence too, for the same reason
-            // sharing one is.
-            if (
-                isScreenSharingRef.current
-                || isCameraOnRef.current
-                || listenOnlyRef.current
-                || isMutedRef.current
-                || watchingStreamRef.current
-            ) { resetInactivity(); return; }
-            // Desktop: ANY system-wide input is presence. Someone deep in a
-            // game — silent, unmuted, push-to-talk idle — generates constant
-            // keyboard/mouse input the app can never observe as speech, and
-            // was being yanked to AFK mid-match. GetLastInputInfo is a single
-            // idle-seconds number (no input contents). Fail-OPEN: on any
-            // probe error, treat the user as active — wrongly moving a
-            // present user is the worse failure.
             void (async () => {
+                const timeoutMs = afkTimeoutMsRef.current;
+                // Desktop: ANY system-wide input is presence. Someone deep in
+                // a game — silent, push-to-talk idle — generates constant
+                // keyboard/mouse input the app can never observe as speech,
+                // and used to be yanked to AFK mid-match. GetLastInputInfo is
+                // a single idle-seconds number (no input contents). <0 means
+                // the platform has no probe (non-Windows desktop) — treated
+                // as absent so the in-app fallback decides, never as
+                // "present forever".
+                let osIdleSecs: number | null = null;
                 if (isTauri()) {
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
                         const idleSecs = await invoke<number>('get_idle_seconds');
-                        // <0 means the platform has no idle probe (non-Windows
-                        // desktop). Fall through to the plain timer rather than
-                        // reading "no signal" as "present forever", which would
-                        // disable AFK auto-move entirely on that build.
-                        if (idleSecs >= 0 && idleSecs * 1000 < AFK_INACTIVITY_MS) { resetInactivity(); return; }
-                    } catch { resetInactivity(); return; }
+                        if (idleSecs >= 0) osIdleSecs = idleSecs;
+                    } catch { arm(timeoutMs); return; }
                 }
-                onInactiveRef.current?.();
+                const d = decideAfk({
+                    timeoutMs,
+                    broadcasting: isScreenSharingRef.current || isCameraOnRef.current,
+                    osIdleSecs,
+                    lastAppInputMs: lastAppInputRef.current,
+                    nowMs: Date.now(),
+                });
+                if (d.action === 'move') onInactiveRef.current?.();
+                else arm(d.recheckInMs);
             })();
-        }, AFK_INACTIVITY_MS);
-    }, [clearInactivity, AFK_INACTIVITY_MS]);
+        }, ms);
+    }, [clearInactivity]);
+    const resetInactivity = useCallback(() => {
+        armInactivity(afkTimeoutMsRef.current);
+    }, [armInactivity]);
     // Clear on unmount (also covers the remount when the parent moves us).
     useEffect(() => clearInactivity, [clearInactivity]);
 

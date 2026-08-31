@@ -8,7 +8,8 @@ import { uploadFile, discardUpload } from '../api/uploads';
 import type { Invite, Ban, Report, AuditLogEntry, Channel } from '../api/servers';
 import { RoleSettingsModal } from './RoleSettingsModal';
 import { EmojiSettings } from './EmojiSettings';
-import { CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, ShieldCheckIcon, SparkleIcon, TrashIcon, WarningIcon } from './Icons';
+import { CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, MoonIcon, ShieldCheckIcon, SparkleIcon, TrashIcon, WarningIcon } from './Icons';
+import { AFK_TIMEOUT_CHOICES_MIN } from '../utils/afkIdle';
 import './ServerSettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { fetchFileUrl } from '../api/authedMedia';
@@ -46,6 +47,9 @@ interface ServerSettingsModalProps {
     initialClipMaxSeconds?: number;
     /** Pinned target text channel, or null = the clipper picks per clip. */
     initialClipChannelId?: number | null;
+    /** AFK auto-move window, minutes (Discord's 1|5|15|30|60). undefined =
+     *  the backend predates the setting: render disabled, don't send it. */
+    initialAfkTimeoutMinutes?: number;
 }
 
 export function ServerSettingsModal({
@@ -63,6 +67,7 @@ export function ServerSettingsModal({
     initialClipsEnabled = false,
     initialClipMaxSeconds = 120,
     initialClipChannelId = null,
+    initialAfkTimeoutMinutes,
 }: ServerSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<'overview' | 'roles' | 'emoji' | 'invites' | 'moderation'>('overview');
 
@@ -80,6 +85,10 @@ export function ServerSettingsModal({
     const [iconPreview, setIconPreview] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+
+    // AFK auto-move window (Discord's option set — utils/afkIdle.ts).
+    const afkSupported = typeof initialAfkTimeoutMinutes === 'number';
+    const [afkTimeoutMinutes, setAfkTimeoutMinutes] = useState(initialAfkTimeoutMinutes ?? 15);
 
     // Clips policy (docs/CLIPS.md) — owner-only, per server.
     const [clipsEnabled, setClipsEnabled] = useState(initialClipsEnabled);
@@ -123,6 +132,7 @@ export function ServerSettingsModal({
         setClipsEnabled(initialClipsEnabled);
         setClipMaxSeconds(initialClipMaxSeconds);
         setClipChannelId(initialClipChannelId);
+        setAfkTimeoutMinutes(initialAfkTimeoutMinutes ?? 15);
         // Authenticated fetch -> object URL; null until it lands.
         setIconPreview(null);
         if (initialIconFileId) void fetchFileUrl(initialIconFileId).then(setIconPreview);
@@ -268,6 +278,9 @@ export function ServerSettingsModal({
                     clip_max_seconds: clipMaxSeconds,
                     clip_channel_id: clipChannelId ?? 0,
                 } : {}),
+                // Same older-backend rule as clips: a server that never
+                // returned the field would silently drop the write.
+                ...(afkSupported ? { afk_timeout_minutes: afkTimeoutMinutes } : {}),
             });
             setSavedIconId(iconFileId);   // this pick is now the live icon
             setSuccess('Settings saved!');
@@ -403,6 +416,34 @@ export function ServerSettingsModal({
                                     or Firefox) is muted rather than relayed through the server. The desktop app
                                     supports this.
                                 </span>
+                            </div>
+
+                            {/* AFK auto-move (Discord's rules — utils/afkIdle.ts):
+                                idle in voice for this window → moved to the AFK
+                                channel. The window is the only knob; what counts
+                                as idle is fixed by the rules. */}
+                            <div className="form-group">
+                                <label htmlFor="afk-timeout"><MoonIcon /> AFK timeout</label>
+                                <select
+                                    id="afk-timeout"
+                                    value={afkTimeoutMinutes}
+                                    onChange={e => setAfkTimeoutMinutes(Number(e.target.value))}
+                                    disabled={!isOwner || !afkSupported}
+                                >
+                                    {AFK_TIMEOUT_CHOICES_MIN.map(mins => (
+                                        <option key={mins} value={mins}>
+                                            {mins === 60 ? '1 hour' : `${mins} minute${mins === 1 ? '' : 's'}`}
+                                        </option>
+                                    ))}
+                                </select>
+                                <span className="setting-help">
+                                    Anyone in a voice channel who hasn’t spoken or touched their keyboard,
+                                    mouse or screen for this long is moved to the AFK channel. Playing a
+                                    game counts as activity; being muted does not.
+                                </span>
+                                {!afkSupported && (
+                                    <span className="setting-help">This server runs an older version without this setting.</span>
+                                )}
                             </div>
 
                             {/* Clips (docs/CLIPS.md). The owner decides whether this

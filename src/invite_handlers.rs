@@ -289,8 +289,8 @@ pub async fn join_via_invite(
     }
 
     // Return server info
-    let server: Option<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool)> = sqlx::query_as(
-        "SELECT id, name, owner_id, (replace(created_at::text, ' ', 'T') || 'Z') AS created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, COALESCE(is_public, false) FROM servers WHERE id = $1"
+    let server: Option<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32)> = sqlx::query_as(
+        "SELECT id, name, owner_id, (replace(created_at::text, ' ', 'T') || 'Z') AS created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, COALESCE(is_public, false), afk_timeout_minutes FROM servers WHERE id = $1"
     )
     .bind(&server_id)
     .fetch_optional(&state.pool)
@@ -298,7 +298,7 @@ pub async fn join_via_invite(
     .unwrap_or(None);
 
     match server {
-        Some((id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public)) => {
+        Some((id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes)) => {
             Json(ServerResponse {
                 id,
                 name,
@@ -311,6 +311,7 @@ pub async fn join_via_invite(
                 clip_max_seconds,
                 clip_channel_id: clip_channel_id.map(|c| c as i64),
                 is_public,
+                afk_timeout_minutes,
             })
             .into_response()
         }

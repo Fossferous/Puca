@@ -11,6 +11,35 @@ calls, or files.
 
 ---
 
+## Getting the app — Full or Lite
+
+Púca ships every release as **two distinct builds**:
+
+| | **Púca (Full)** | **Púca Lite** |
+|---|---|---|
+| Chat, voice, video, screen-share viewing, file transfer, E2EE | ✓ | ✓ |
+| My Devices (remote desktop), remote input, Wake-on-LAN | ✓ | **absent** |
+| Screen capture / input injection / system service code in the binary | present (opt-in) | **compiled out entirely** |
+
+Lite is not Full with features switched off — the remote-control code is
+**excluded at compile time** and is not in the artifact, which you can verify
+yourself (`frontend/scripts/check-no-rc.mjs` builds both and proves the
+difference, with a positive control). It exists for people who don't want
+screen-capture/input-injection machinery on their machine at all — and
+because antivirus heuristics sometimes flag exactly that machinery in the
+full build. The two installs are mutually exclusive on one machine but share
+their data: switching between them keeps your session, keys, and history.
+
+**Because Púca is self-hosted, the app you install is built for the server it
+talks to.** If someone runs a Púca server for you, get the installer or APK
+from *their* download page — it offers both variants side by side. If you're
+setting up your own server, [`deploy/README.md`](deploy/README.md) is the
+complete path, including building both variants of the clients
+(`npm run tauri:build` / `npm run tauri:build:lite`) and publishing your own
+download page with the Full/Lite picker.
+
+---
+
 ## Radical transparency
 
 This section exists because privacy-and-security software makes big claims
@@ -146,7 +175,8 @@ document is actually trying to make.
 - 📺 **Screen sharing** — including giving a trusted friend control of your
   shared screen, with an explicit per-request consent prompt.
 - 🖥️ **My Devices** — remote-desktop access to machines you own, gated by a
-  device-key trust chain the server cannot forge into.
+  device-key trust chain the server cannot forge into. (Full build only —
+  the Lite build compiles all of this out; see "Getting the app" above.)
 - 👥 **Servers & channels** — communities with text, voice, and collection
   channels, categories, and a public-server discovery list.
 - 🎭 **Roles & permissions** — granular, per-server role-based access

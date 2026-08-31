@@ -32,7 +32,7 @@ sudo -u postgres psql -c "ALTER USER postgres PASSWORD '<strong-db-password>';"
 # Service user + directory layout
 sudo useradd --system --home /opt/puca --shell /usr/sbin/nologin puca
 sudo mkdir -p /opt/puca/uploads /opt/puca/releases
-sudo chown -R sovereign:puca /opt/puca
+sudo chown -R puca:puca /opt/puca
 ```
 
 > `uploads/` and `releases/` must exist before first start: the systemd unit
@@ -53,7 +53,7 @@ Migrations run automatically at startup; no manual step.
 
 ```bash
 sudo cp .env.example /opt/puca/.env
-sudo chown sovereign:puca /opt/puca/.env && sudo chmod 600 /opt/puca/.env
+sudo chown puca:puca /opt/puca/.env && sudo chmod 600 /opt/puca/.env
 sudoedit /opt/puca/.env
 ```
 
@@ -107,10 +107,39 @@ been superseded). The API base URL is a build-time env var read by
 cd frontend
 echo 'VITE_API_URL=https://chat.example.com' > .env.production
 npm run build          # web assets / desktop webview
-npm run tauri build    # desktop installers
+npm run tauri:build    # desktop installer (NOT `npm run tauri build` — the
+                       # colon script also builds the native agent and merges
+                       # your untracked src-tauri/tauri.release.json overlay,
+                       # which is what points the auto-updater at YOUR host;
+                       # see src-tauri/tauri.release.example.json)
 ```
 
 The WebSocket URL is derived automatically (`wss://chat.example.com/ws`).
+
+### The Lite variant (no remote control)
+
+Every release exists in two builds. **Full** is everything. **Lite** contains
+ZERO remote-control code — no screen capture, no input injection, no system
+service; the code is excluded at compile time, not merely hidden — for people
+who don't want that machinery installed at all (it is also what antivirus
+heuristics sometimes flag in the full build). Chat, voice, watching a
+screen-share and file transfer are identical in both. The two installs are
+mutually exclusive on a machine but share their data, so switching keeps the
+session and history.
+
+```bash
+npm run tauri:build:lite        # lite desktop installer ("Puca Lite")
+npm run cap:build:android:lite  # lite Android project (then build the APK)
+```
+
+Ship lite artifacts alongside full ones under distinct names
+(`Puca-Lite-Setup.exe`, `Puca-Lite-<ver>.apk`, `latest-lite.json`,
+`mobile-update-lite.json`) — `deploy/ops/dual-ship.sh` has
+`installer-lite` / `apk-lite` / `mobile-lite` subcommands that do this and
+verify it; both variants always ship the same version number. The download
+page (`deploy/download-site/index.html`) offers both behind a Full/Lite
+picker, and the mobile OTA endpoint serves each variant its own manifest
+(`GET /api/mobile-updates/check?variant=lite`).
 
 ## 7. Smoke test
 

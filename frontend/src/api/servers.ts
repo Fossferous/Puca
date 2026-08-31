@@ -19,6 +19,10 @@ export interface Server {
     clip_max_seconds?: number;
     /** Pinned target text channel, or null = the clipper picks. */
     clip_channel_id?: number | null;
+    /** Minutes of inactivity before a voice member is moved to the AFK
+     *  channel — Discord's option set (1|5|15|30|60). Absent ⇒ the backend
+     *  predates the setting; clients fall back to the old fixed 15. */
+    afk_timeout_minutes?: number;
 }
 
 export interface Channel {
@@ -231,7 +235,7 @@ export function listPublicServers(): Promise<PublicServer[]> {
 
 export function updateServerSettings(
     serverId: string,
-    settings: { name?: string; is_public?: boolean; description?: string; icon_file_id?: string; require_media_e2ee?: boolean; clips_enabled?: boolean; clip_max_seconds?: number; clip_channel_id?: number }
+    settings: { name?: string; is_public?: boolean; description?: string; icon_file_id?: string; require_media_e2ee?: boolean; clips_enabled?: boolean; clip_max_seconds?: number; clip_channel_id?: number; afk_timeout_minutes?: number }
 ): Promise<void> {
     return apiClient.patch(`/servers/${serverId}/settings`, settings);
 }

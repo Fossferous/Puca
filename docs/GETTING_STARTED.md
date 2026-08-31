@@ -1,5 +1,10 @@
 # Getting Started with Púca Chat
 
+> **The canonical setup path is [`deploy/README.md`](../deploy/README.md)**
+> (quick local try: the README's Quick start). This page is older prose;
+> where they disagree, those win. Notably: the app now ships as TWO builds,
+> Full and Lite (no remote-control code) — see the README's "Getting the
+> app" section.
 Welcome! This guide will help you set up and start using Púca.
 
 ---

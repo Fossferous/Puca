@@ -1,5 +1,8 @@
 # Production Deployment Guide
 
+> **Superseded where it disagrees: [`deploy/README.md`](../deploy/README.md)**
+> is the canonical, tested-against-the-code deployment path (it also covers
+> the Lite build variant, which this page predates).
 Step-by-step guide to deploy Púca on a VPS with a custom domain.
 
 ---

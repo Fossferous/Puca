@@ -42,6 +42,9 @@ pub struct ServerResponse {
     /// every Save on a public server silently wrote is_public=false (the PATCH
     /// sends the toggle unconditionally). NULL in legacy rows reads as false.
     pub is_public: bool,
+    /// Minutes of inactivity before a voice member is moved to the AFK channel.
+    /// Discord's option set (1|5|15|30|60); 15 was the old hardcoded value.
+    pub afk_timeout_minutes: i32,
 }
 
 // --- ICE Configuration DTOs ---
@@ -241,8 +244,8 @@ pub async fn get_or_create_default_server(
     );
 
     // Check if default server exists
-    let server_result = sqlx::query_as::<_, (String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool)>(
-        "SELECT id, name, owner_id, (replace(created_at::text, ' ', 'T') || 'Z') AS created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, COALESCE(is_public, false) FROM servers WHERE id = $1"
+    let server_result = sqlx::query_as::<_, (String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32)>(
+        "SELECT id, name, owner_id, (replace(created_at::text, ' ', 'T') || 'Z') AS created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, COALESCE(is_public, false), afk_timeout_minutes FROM servers WHERE id = $1"
     )
     .bind(DEFAULT_SERVER_ID)
     .fetch_optional(&state.pool)
@@ -271,6 +274,7 @@ pub async fn get_or_create_default_server(
         clip_max_seconds,
         clip_channel_id,
         is_public,
+        afk_timeout_minutes,
     )) = server
     {
         // Server exists, make sure user is a member
@@ -294,6 +298,7 @@ pub async fn get_or_create_default_server(
             clip_max_seconds,
             clip_channel_id: clip_channel_id.map(|c| c as i64),
             is_public,
+            afk_timeout_minutes,
         }
     } else {
         // Create the default server (first user becomes owner)
@@ -334,6 +339,7 @@ pub async fn get_or_create_default_server(
             clip_max_seconds: 120,
             clip_channel_id: None,
             is_public: false,
+            afk_timeout_minutes: 15,
         }
     };
 
@@ -348,9 +354,9 @@ pub async fn list_servers(
     // owner_id is INTEGER (i32), also include icon_file_id, description, and the E2EE policy.
     // Rail order is per-member (server_members.position, migration 036):
     // dragged-into-place servers first, never-ordered ones after by join age.
-    let servers: Vec<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool)> = sqlx::query_as(
+    let servers: Vec<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32)> = sqlx::query_as(
         r#"
-        SELECT s.id, s.name, s.owner_id, (replace(s.created_at::text, ' ', 'T') || 'Z') AS created_at, s.icon_file_id, s.description, s.require_media_e2ee, s.clips_enabled, s.clip_max_seconds, s.clip_channel_id, COALESCE(s.is_public, false)
+        SELECT s.id, s.name, s.owner_id, (replace(s.created_at::text, ' ', 'T') || 'Z') AS created_at, s.icon_file_id, s.description, s.require_media_e2ee, s.clips_enabled, s.clip_max_seconds, s.clip_channel_id, COALESCE(s.is_public, false), s.afk_timeout_minutes
         FROM servers s
         JOIN server_members sm ON s.id = sm.server_id
         WHERE sm.user_id = $1
@@ -365,7 +371,7 @@ pub async fn list_servers(
     let response: Vec<ServerResponse> = servers
         .into_iter()
         .map(
-            |(id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public)| {
+            |(id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes)| {
                 ServerResponse {
                     id,
                     name,
@@ -378,6 +384,7 @@ pub async fn list_servers(
                     clip_max_seconds,
                     clip_channel_id: clip_channel_id.map(|c| c as i64),
                     is_public,
+                    afk_timeout_minutes,
                 }
             },
         )
@@ -705,6 +712,17 @@ pub struct UpdateServerRequest {
     pub clips_enabled: Option<bool>,
     pub clip_max_seconds: Option<i32>,
     pub clip_channel_id: Option<i64>,
+    /// AFK auto-move window, minutes. Discord's option set only — see
+    /// afk_timeout_valid; validated for an honest 400, with the DB CHECK
+    /// (migration 052) as the backstop.
+    pub afk_timeout_minutes: Option<i32>,
+}
+
+/// Discord's AFK-timeout options, verbatim: 1, 5, 15, 30 or 60 minutes.
+/// One authority shared by the handler validation and mirrored by the DB
+/// CHECK in migration 052 — if this set ever changes, both move together.
+pub fn afk_timeout_valid(minutes: i32) -> bool {
+    matches!(minutes, 1 | 5 | 15 | 30 | 60)
 }
 
 // --- Invite Handlers ---
@@ -832,6 +850,18 @@ pub async fn update_server_settings(
         }
     }
 
+    // AFK timeout: Discord's five options only, same honest-400-over-CHECK
+    // rationale as the clips validation below.
+    if let Some(mins) = payload.afk_timeout_minutes {
+        if !afk_timeout_valid(mins) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "AFK timeout must be 1, 5, 15, 30 or 60 minutes",
+            )
+                .into_response();
+        }
+    }
+
     // Clips policy validation. Mirror the CHECK constraint (honest 400 instead
     // of a 23514 surfacing as 500), and pin the target channel to THIS server
     // (same class as the icon_file_id mass-assignment guard above).
@@ -953,6 +983,13 @@ pub async fn update_server_settings(
         }
         qb.push("require_media_e2ee = ")
             .push_bind(require_media_e2ee);
+        any = true;
+    }
+    if let Some(mins) = payload.afk_timeout_minutes {
+        if any {
+            qb.push(", ");
+        }
+        qb.push("afk_timeout_minutes = ").push_bind(mins);
         any = true;
     }
     if let Some(ref desc) = payload.description {
@@ -1704,4 +1741,22 @@ pub async fn get_ice_config(
     };
 
     Json(config).into_response()
+}
+
+#[cfg(test)]
+mod afk_timeout_tests {
+    use super::afk_timeout_valid;
+
+    /// The five Discord options pass; everything else — including the
+    /// plausible-looking neighbours an off-by-one or a "just allow any
+    /// minute count" refactor would let through — is refused.
+    #[test]
+    fn only_discords_five_options_are_valid() {
+        for ok in [1, 5, 15, 30, 60] {
+            assert!(afk_timeout_valid(ok), "{ok} must be a valid AFK timeout");
+        }
+        for bad in [0, -1, 2, 10, 14, 16, 20, 45, 59, 61, 120, i32::MAX, i32::MIN] {
+            assert!(!afk_timeout_valid(bad), "{bad} must be refused");
+        }
+    }
 }

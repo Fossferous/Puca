@@ -3817,6 +3817,10 @@ export function Chat({ onLogout }: ChatProps) {
                     initialClipsEnabled={currentServer.clips_enabled === true}
                     initialClipMaxSeconds={currentServer.clip_max_seconds ?? 120}
                     initialClipChannelId={currentServer.clip_channel_id ?? null}
+                    // Deliberately NOT defaulted here: undefined = the backend
+                    // predates the setting, and the modal renders the control
+                    // disabled instead of pretending a save would stick.
+                    initialAfkTimeoutMinutes={currentServer.afk_timeout_minutes}
                 />
             )}
 
@@ -4527,6 +4531,13 @@ export function Chat({ onLogout }: ChatProps) {
                                     ?.require_media_e2ee ?? false
                             }
                             isAfkChannel={!!currentVoiceChannel.is_afk}
+                            // Same voice-channel's-own-server resolution as the
+                            // E2EE policy above; missing field = older backend,
+                            // keep the historic 15 minutes.
+                            afkTimeoutMs={
+                                ((servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)
+                                    ?.afk_timeout_minutes ?? 15) * 60_000
+                            }
                             sfuMode={!!currentVoiceChannel.sfu_mode}
                             // Clips policy of the VOICE channel's server (docs/CLIPS.md) —
                             // not the viewed one; the default post target is the viewed
