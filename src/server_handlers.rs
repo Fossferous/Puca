@@ -1639,13 +1639,32 @@ pub async fn get_ice_config(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let google_stun = IceServer {
-        urls: vec![
+    // Address-discovery STUN. Operator-controlled via STUN_SERVERS (comma
+    // separated), which REPLACES the list rather than adding to it, and can be
+    // set empty to use none at all.
+    //
+    // The Google servers below were hardcoded in both branches of the match
+    // further down, so even a deployment with its own fully-configured coturn
+    // still had every participant's client contact Google on every ICE gather —
+    // disclosing their IP address and the timing of every call to a third party,
+    // on a product whose entire premise is self-hosting. They remain the DEFAULT
+    // (STUN is what makes P2P work behind NAT, and most self-hosters have no
+    // alternative to hand), but they are now a default an operator can change.
+    let stun_urls: Vec<String> = match std::env::var("STUN_SERVERS") {
+        Ok(v) => v
+            .split(',')
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect(),
+        Err(_) => vec![
             "stun:stun.l.google.com:19302".to_string(),
             "stun:stun1.l.google.com:19302".to_string(),
             "stun:stun2.l.google.com:19302".to_string(),
             "stun:stun3.l.google.com:19302".to_string(),
         ],
+    };
+    let google_stun = IceServer {
+        urls: stun_urls,
         username: None,
         credential: None,
     };
@@ -1725,14 +1744,19 @@ pub async fn get_ice_config(
         })
     });
 
-    let ice_servers = match self_hosted_turn {
+    // An empty STUN list (STUN_SERVERS="") must not produce an IceServer with no
+    // urls — some stacks reject that outright.
+    let stun = if google_stun.urls.is_empty() { None } else { Some(google_stun) };
+    let ice_servers: Vec<IceServer> = match (self_hosted_turn, stun) {
         // Authenticated + self-hosted TURN configured: list our relay FIRST — it's
-        // LAN-local, so ICE prefers its (lower-latency) relay candidate. Google
-        // STUN is address discovery only (never carries media).
-        Some(turn) => vec![turn, google_stun],
+        // LAN-local, so ICE prefers its (lower-latency) relay candidate. STUN is
+        // address discovery only (never carries media).
+        (Some(turn), Some(stun)) => vec![turn, stun],
+        (Some(turn), None) => vec![turn],
         // Anonymous, or TURN not configured: STUN-only (address discovery). No
         // third-party relay — media never traverses a server we don't control.
-        None => vec![google_stun],
+        (None, Some(stun)) => vec![stun],
+        (None, None) => vec![],
     };
 
     let config = IceConfiguration {

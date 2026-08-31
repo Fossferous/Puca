@@ -171,11 +171,19 @@ export async function createShare(
 }
 
 export async function listDeviceShares(hostDevice: string): Promise<DeviceShare[]> {
-    return apiClient.get<DeviceShare[]>(`/devices/${encodeURIComponent(hostDevice)}/shares`);
+    const rows = await apiClient.get<DeviceShare[]>(`/devices/${encodeURIComponent(hostDevice)}/shares`);
+    return Array.isArray(rows) ? rows : [];
 }
 
 export async function listIncomingShares(): Promise<IncomingShare[]> {
-    return apiClient.get<IncomingShare[]>('/shares/incoming');
+    // Coerce at the boundary. The caller renders `incoming?.filter(...)`, so a
+    // response that is not an array — an error envelope, a paginated wrapper, a
+    // server that simply lies — threw "incoming?.filter is not a function" out
+    // of DevicesView's render and took the entire Devices tab down with it.
+    // The server is untrusted by this product's own threat model, so it must not
+    // be able to break a view by changing a response shape.
+    const rows = await apiClient.get<IncomingShare[]>('/shares/incoming');
+    return Array.isArray(rows) ? rows : [];
 }
 
 export async function respondShare(inviteId: number, accept: boolean): Promise<DeviceShare> {

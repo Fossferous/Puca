@@ -1021,6 +1021,38 @@ button.message-attachment.error { color: #ffb4b4; }
     opacity: 0.9;
 }
 
+/* Placeholder for a third-party image the reader has not asked to load. Sized
+   like a chip rather than reserving the image's box: the dimensions are unknown
+   until it is fetched, and reserving space for something that may never load
+   leaves a hole in the transcript. */
+.message-image-blocked {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    margin: 4px 0;
+    padding: 8px 12px;
+    border: 1px dashed var(--border-color, #45475a);
+    border-radius: 8px;
+    background: var(--bg-secondary, #1e1e2e);
+    color: var(--text-secondary, #a6adc8);
+    font: inherit;
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.message-image-blocked:hover {
+    border-color: var(--accent-color, #89b4fa);
+    color: var(--text-primary, #cdd6f4);
+}
+
+.message-image-blocked svg {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+}
+
 /* Inline video attachments — same footprint rules as images. The height cap
    keeps one portrait clip from filling the channel; width also caps at the
    viewport so a 400px player cannot overflow a 390px phone. */

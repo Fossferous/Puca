@@ -1,8 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- allowBackup=false. The app's data directory includes the WebView profile
+         (app_webview), and that is where the E2EE identity seed, the session
+         JWT, the web device private key and remembered unattended-access seeds
+         actually live. Auto Backup and device-to-device transfer copy that
+         directory by default, so "true" handed the keys to a user's entire
+         message history to Google's backup service. The old exclude-only rules
+         listed two SharedPreferences files and asserted in a comment that
+         localStorage was "not under any backed-up domain" — it is.
+         Nothing here needs backing up: a device re-derives its state by logging
+         in. The rule files are kept and are now include-only, so re-enabling
+         backup later cannot silently restore the old behaviour. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"

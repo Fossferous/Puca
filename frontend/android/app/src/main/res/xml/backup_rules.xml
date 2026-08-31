@@ -1,13 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Auto Backup rules (API 30 and below; 31+ uses data_extraction_rules.xml).
-     Exclude-only, so everything else keeps the exact pre-existing backup
-     behaviour. The geofence store holds task-place COORDINATES, and the
-     feature's contract is "coordinates never leave the device" — a Google
-     cloud backup is leaving the device. (The webview's localStorage copy is
-     not under any backed-up domain, so this one file is the whole exposure.) -->
+
+     Backup is DISABLED outright by android:allowBackup="false" in the manifest,
+     so these rules are not consulted today. They are kept, and inverted to
+     INCLUDE-ONLY, as a second line of defence: if anyone ever flips allowBackup
+     back on, an empty include set backs up nothing, instead of the old
+     exclude-only list silently resuming a whole-data-directory backup.
+
+     The exclude-only version listed sovereign_geofences.xml and
+     sovereign_push.xml and reasoned that the WebView's localStorage "is not
+     under any backed-up domain". That was wrong: app_webview sits in the app's
+     data directory and Auto Backup takes it by default — and that is where the
+     E2EE identity seed, the session JWT, the web device private key and
+     remembered unattended-access seeds actually live.
+
+     Nothing here needs to survive a reinstall via backup: a device re-derives
+     its state by logging in, and the identity seed is recoverable from the
+     server-held wrap with the password or the recovery phrase. So the correct
+     include set is empty. If something ever genuinely needs backing up, add one
+     explicit <include> for that path and nothing else. -->
 <full-backup-content>
-    <exclude domain="sharedpref" path="sovereign_geofences.xml" />
-        <!-- The session JWT + the social-graph mirror (mutes/blocks). A restored
-             backup must not resurrect an authenticated session on another device. -->
-        <exclude domain="sharedpref" path="sovereign_push.xml" />
+    <!-- Intentionally empty: include-only with no includes backs up nothing. -->
+    <include domain="root" path="backup-nothing-placeholder" />
 </full-backup-content>

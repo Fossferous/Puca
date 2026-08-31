@@ -52,10 +52,21 @@
     margin-bottom: 4px;
 }
 
-.link-preview-favicon {
+/* Locally-drawn site mark. Replaces the favicon <img>, which was fetched from
+   google.com and disclosed every linked hostname to a third party on render. */
+.link-preview-mark {
     width: 16px;
     height: 16px;
-    border-radius: 2px;
+    border-radius: 3px;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-tertiary, #313244);
+    color: var(--text-secondary, #a6adc8);
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1;
 }
 
 .link-preview-title {

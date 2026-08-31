@@ -16,7 +16,59 @@ import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
 import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
+import { remoteImagesAllowed } from './settingsStore';
 import type { MemberWithRoles, Channel } from '../api/servers';
+
+/**
+ * A third-party image referenced by a message.
+ *
+ * The URL is chosen by whoever SENT the message, so fetching it automatically
+ * reports the reader's IP address, user agent and read time to that host —
+ * `![](https://attacker.example/px.png)` in a channel or an unsolicited DM is a
+ * working locator for everyone who scrolls past. `referrerPolicy="no-referrer"`
+ * (kept below) hides which app made the request but not that it was made.
+ *
+ * So by default this renders a placeholder and the fetch happens only when the
+ * reader asks for it. Images on the user's own server are not third-party and
+ * are never gated — see `remoteImagesAllowed`.
+ */
+function RemoteImage({ href, alt }: { href: string; alt?: string }) {
+    const [show, setShow] = useState(() => remoteImagesAllowed(href));
+    let host = '';
+    try {
+        host = new URL(href, window.location.href).hostname;
+    } catch {
+        host = 'another site';
+    }
+
+    if (!show) {
+        return (
+            <button
+                type="button"
+                className="message-image-blocked"
+                onClick={() => setShow(true)}
+                title={`Loads from ${host}, which will see your IP address`}
+            >
+                <PaperclipIcon />
+                <span>Show image from {host}</span>
+            </button>
+        );
+    }
+    return (
+        <span className="message-image">
+            <img
+                src={href}
+                alt={alt ?? ''}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                onClick={() => openExternalUrl(href)}
+                onError={(e) => {
+                    (e.currentTarget.closest('.message-image') as HTMLElement).style.display = 'none';
+                }}
+            />
+        </span>
+    );
+}
 
 /** Fetch + decrypt an E2EE attachment and render it (image and video inline,
  *  else a download link). The plaintext bytes only ever exist in this browser. */
@@ -232,19 +284,7 @@ function renderNodes(nodes: Node[], ctx: Ctx, keyPrefix = ''): React.ReactNode[]
                 if (!isSafeUrl(node.href)) return <React.Fragment key={key}>{node.href}</React.Fragment>;
                 // Bare image/GIF links embed inline (matching how most chat apps handle them); others are links.
                 if (isImageUrl(node.href)) {
-                    return (
-                        <span key={key} className="message-image">
-                            {/* referrerPolicy=no-referrer: a bare image URL is a
-                                third-party host the SENDER chose, so loading it
-                                leaks the viewer to them. We can't stop the fetch
-                                without a proxy / click-to-load (tracked
-                                separately), but we can withhold the Referer so
-                                the app URL and channel context don't leak too. */}
-                            <img src={node.href} alt="" loading="lazy" referrerPolicy="no-referrer"
-                                onClick={() => openExternalUrl(node.href)}
-                                onError={(e) => { (e.currentTarget.closest('.message-image') as HTMLElement).style.display = 'none'; }} />
-                        </span>
-                    );
+                    return <RemoteImage key={key} href={node.href} />;
                 }
                 return <a key={key} href={node.href} target="_blank" rel="noopener noreferrer" className="message-link">{node.href}</a>;
             case 'image':
@@ -252,15 +292,7 @@ function renderNodes(nodes: Node[], ctx: Ctx, keyPrefix = ''): React.ReactNode[]
                 if (isScrubbedClipRef(node.href)) return <span key={key} className="clip-attachment-broken">{node.alt} (clip removed)</span>;
                 if (isEncAttachment(node.href)) return <EncryptedAttachment key={key} href={node.href} name={node.alt} />;
                 if (!isSafeUrl(node.href)) return node.alt ? <React.Fragment key={key}>{node.alt}</React.Fragment> : null;
-                return (
-                    <span key={key} className="message-image">
-                        {/* See the bare-URL case above — withhold the Referer
-                            from the sender-chosen third-party image host. */}
-                        <img src={node.href} alt={node.alt} loading="lazy" referrerPolicy="no-referrer"
-                            onClick={() => openExternalUrl(node.href)}
-                            onError={(e) => { (e.currentTarget.closest('.message-image') as HTMLElement).style.display = 'none'; }} />
-                    </span>
-                );
+                return <RemoteImage key={key} href={node.href} alt={node.alt} />;
             case 'mentionEveryone':
                 return <span key={key} className="mention everyone">@everyone</span>;
             case 'mentionHere':

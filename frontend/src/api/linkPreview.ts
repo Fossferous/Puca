@@ -4,9 +4,7 @@ export interface LinkPreviewData {
     url: string;
     title?: string;
     description?: string;
-    image?: string;
     siteName?: string;
-    favicon?: string;
 }
 
 // URL detection regex
@@ -30,13 +28,25 @@ export function isImageUrl(url: string): boolean {
     return imageExtensions.some(ext => lowercaseUrl.includes(ext));
 }
 
-/** Favicon URL for a domain (Google's favicon service as a reliable fallback). */
-function getFaviconUrl(url: string): string {
+/**
+ * Site mark for a link — derived LOCALLY, never fetched.
+ *
+ * This used to return `https://www.google.com/s2/favicons?domain=<hostname>`,
+ * which meant that merely RENDERING a message told Google the hostname of the
+ * link, the reader's IP and the time they read it — for every link in every
+ * channel and DM, with no setting to turn it off. In an app whose whole claim is
+ * that nobody can see what you talk about, that was the single widest leak in
+ * the product, and it bought only a 16px picture.
+ *
+ * The card shows the first letter of the registrable name instead. No request,
+ * no third party, and it works offline and on a self-hosted LAN deployment.
+ */
+export function siteInitial(url: string): string {
     try {
-        const urlObj = new URL(url);
-        return `https://www.google.com/s2/favicons?domain=${urlObj.hostname}&sz=32`;
+        const host = new URL(url).hostname.replace(/^www\./, '');
+        return (host[0] || '?').toUpperCase();
     } catch {
-        return '';
+        return '?';
     }
 }
 
@@ -71,7 +81,6 @@ export async function fetchLinkPreview(url: string): Promise<LinkPreviewData | n
             url,
             title: hostname,
             description: url,
-            favicon: getFaviconUrl(url),
             siteName: hostname,
         };
 
@@ -94,10 +103,10 @@ async function getServicePreview(url: string, hostname: string): Promise<LinkPre
             return {
                 url,
                 title: 'YouTube Video',
-                image: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+                // No thumbnail fetch: img.youtube.com would disclose the video
+                // id, the viewer's IP and the read time to Google on render.
                 siteName: 'YouTube',
-                favicon: getFaviconUrl(url),
-            };
+                };
         }
     }
 
@@ -110,8 +119,7 @@ async function getServicePreview(url: string, hostname: string): Promise<LinkPre
                 title: `${parts[0]}/${parts[1]}`,
                 description: `GitHub Repository`,
                 siteName: 'GitHub',
-                favicon: getFaviconUrl(url),
-            };
+                };
         }
     }
 
@@ -121,7 +129,6 @@ async function getServicePreview(url: string, hostname: string): Promise<LinkPre
             url,
             title: 'Twitter/X Post',
             siteName: 'Twitter',
-            favicon: getFaviconUrl(url),
         };
     }
 

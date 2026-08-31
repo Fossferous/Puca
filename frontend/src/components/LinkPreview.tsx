@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { extractUrls, fetchLinkPreview, isImageUrl, type LinkPreviewData } from '../api/linkPreview';
+import { extractUrls, fetchLinkPreview, isImageUrl, siteInitial, type LinkPreviewData } from '../api/linkPreview';
 import './LinkPreview.css';
 
 interface LinkPreviewProps {
@@ -52,23 +52,19 @@ export function LinkPreview({ content }: LinkPreviewProps) {
                     rel="noopener noreferrer"
                     className="link-preview-card"
                 >
-                    {preview.image && (
-                        <div className="link-preview-image">
-                            <img
-                                src={preview.image}
-                                alt=""
-                                onError={(e) => {
-                                    // Hide broken images
-                                    (e.target as HTMLImageElement).style.display = 'none';
-                                }}
-                            />
-                        </div>
-                    )}
+                    {/*
+                      * Deliberately NO <img> anywhere in this card. Both assets it
+                      * used to load were third-party (google.com/s2/favicons and
+                      * img.youtube.com), so simply rendering a message disclosed
+                      * the linked hostname, the reader's IP and the read time to
+                      * Google. The card is built entirely from the URL the user
+                      * already has. Do not reintroduce a remote src here.
+                      */}
                     <div className="link-preview-content">
                         <div className="link-preview-site">
-                            {preview.favicon && (
-                                <img src={preview.favicon} alt="" className="link-preview-favicon" />
-                            )}
+                            <span className="link-preview-mark" aria-hidden="true">
+                                {siteInitial(preview.url)}
+                            </span>
                             <span>{preview.siteName || new URL(preview.url).hostname}</span>
                         </div>
                         {preview.title && (

@@ -1405,10 +1405,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="option-info">
                                             <label>Require encryption for calls</label>
                                             <span className="option-hint">
-                                                Only exchange voice, video and screen share with people whose media is
-                                                end-to-end encrypted. Anyone who can’t be encrypted is muted instead of
-                                                relayed through the server. The desktop app supports this; Safari, iOS
-                                                and Firefox participants will be blocked while it’s on.
+                                                On by default. Only exchange voice, video and screen share with people
+                                                whose media is end-to-end encrypted; anyone who can’t be encrypted is
+                                                muted rather than relayed through the server in a form it can read.
+                                                Turning this off does not just relax a check — it lets the server
+                                                downgrade a call to server-readable simply by disrupting the handshake.
+                                                The desktop app supports encryption; Safari, iOS and Firefox
+                                                participants are muted while this is on.
                                             </span>
                                         </div>
                                         <input
@@ -1431,6 +1434,24 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             type="checkbox"
                                             checked={settings.forceRelayOnly}
                                             onChange={(e) => updateSetting('forceRelayOnly', e.target.checked)}
+                                        />
+                                    </div>
+
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Load images from other sites automatically</label>
+                                            <span className="option-hint">
+                                                When a message links an image hosted somewhere else, loading it tells
+                                                that site your IP address and the moment you read the message — so
+                                                anyone who can message you could use one to find out where you are.
+                                                Leave this off and those images show a "Show image" button instead.
+                                                Attachments stored on your own server are never affected.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            checked={settings.loadRemoteImages}
+                                            onChange={(e) => updateSetting('loadRemoteImages', e.target.checked)}
                                         />
                                     </div>
                                 </div>

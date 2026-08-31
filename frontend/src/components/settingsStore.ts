@@ -104,12 +104,32 @@ export const defaultSettings = {
     // server in a form it could access. Fail-closed. Safe default for the
     // desktop app (Chromium/WebView2 supports media E2EE); may block calls with
     // Safari/iOS/Firefox participants.
-    requireMediaE2ee: false,
+    // DEFAULT ON since the 0.8.130 security pass. The frame-encryption layer
+    // itself was already correct and tamper-evident (the capability tag is MAC'd
+    // under the static pairwise key, so a server that strips or rewrites the
+    // ephemeral fails verification), but with enforcement OFF that verification
+    // failure downgraded the call to transport-only instead of refusing it —
+    // and transport-only means the server decrypts and re-encrypts every frame.
+    // A server that wanted to listen simply had to break the handshake it was
+    // already relaying. Off-by-default made that the shipped behaviour.
+    // The cost is real and deliberate: a peer whose browser has no Insertable
+    // Streams (iOS/Safari, Firefox) is now MUTED rather than carried in the
+    // clear, and the per-peer indicator names the reason. Users who would rather
+    // connect than encrypt can turn this off.
+    requireMediaE2ee: true,
     // When true, force all call media through the server's TURN relay
     // (iceTransportPolicy: 'relay') so other participants never see your real IP.
     // No effect if no relay is available; the operator running TURN can still see
     // the relayed connections.
     forceRelayOnly: false,
+    // When true, images hosted on OTHER sites load automatically in messages.
+    // Off by default: the URL is chosen by whoever SENT the message, so the
+    // fetch hands that host your IP address, your user agent and the moment you
+    // read it — a working read receipt and locator for anyone who can post in a
+    // channel you read or send you a DM. With this off such an image becomes a
+    // click-to-load placeholder. Attachments on your own server are unaffected;
+    // they are not third-party.
+    loadRemoteImages: false,
 
     // --- Screen-control (remote control of your shared screen) kill switches ---
     // Custom kill-switch hotkey. Enforced by the native low-level hook so it
@@ -497,6 +517,30 @@ export function applyAppearance(s: Settings = loadSettings()): void {
 export function isDeveloperMode(): boolean {
     return loadSettings().developerMode
         || localStorage.getItem('sovereign_dev_mode') === 'true';
+}
+
+/**
+ * May this image URL be fetched automatically?
+ *
+ * True when the user opted in, OR when the host is somewhere the client already
+ * talks to anyway — its own origin or the configured API host. Those are not
+ * third parties: the server already knows your IP because you are connected to
+ * it, so gating them would cost usability and buy nothing.
+ *
+ * Everything else is a host chosen by whoever sent the message, and fetching it
+ * discloses the reader's IP, user agent and read time to them.
+ */
+export function remoteImagesAllowed(url: string): boolean {
+    if (loadSettings().loadRemoteImages) return true;
+    try {
+        const host = new URL(url, window.location.href).host;
+        if (host === window.location.host) return true;
+        const api = import.meta.env.VITE_API_URL;
+        if (api && host === new URL(api).host) return true;
+    } catch {
+        /* unparseable URL — treat as remote */
+    }
+    return false;
 }
 
 /** Notification-sound categories, gated on the master `soundsEnabled` toggle. */
