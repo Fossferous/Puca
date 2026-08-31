@@ -384,6 +384,11 @@ pub async fn recovery_challenge(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChallengeRequest>,
 ) -> impl IntoResponse {
+    // Unauthenticated route: bound the caller-supplied name before it is
+    // lowercased and fed through the constant-work pseudo-material path.
+    if crate::handlers::reject_oversized_username(&req.username).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid username").into_response();
+    }
     let username_lower = req.username.to_lowercase();
 
     // The account must be on v3 with a recovery blob to be recoverable.
@@ -467,6 +472,15 @@ pub async fn recovery_reset(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RecoveryResetRequest>,
 ) -> impl IntoResponse {
+    // Unauthenticated route: bound the caller-supplied fields before any of them
+    // is lowercased, hashed, or used to key a lookup.
+    if crate::handlers::reject_oversized_username(&req.username).is_err()
+        || crate::handlers::reject_oversized_hex(&req.proof).is_err()
+        || crate::handlers::reject_oversized_hex(&req.new_salt_hex).is_err()
+        || crate::handlers::reject_oversized_hex(&req.new_verifier_hex).is_err()
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid request").into_response();
+    }
     if let Err(msg) = validate_pw_kdf_iterations(req.new_pw_kdf_iterations) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
@@ -512,14 +526,22 @@ pub async fn recovery_reset(
 
     // Account public key P, or a deterministic pseudo key when the account is
     // unknown / has no identity key — so the DH runs identically either way.
-    let pubkey_row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT public_key FROM users WHERE LOWER(username) = $1")
-            .bind(&username_lower)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
+    // `id` comes back with the key so the credential rewrite below can be scoped
+    // to the EXACT row whose key authorised it. Scoping the UPDATE by
+    // `LOWER(username)` instead meant that if two rows ever case-folded to the
+    // same name (users.username is only case-SENSITIVE unique), one account's
+    // proof rewrote both. ORDER BY id makes the row chosen here deterministic
+    // and identical to the one the challenge step read.
+    let pubkey_row: Option<(i32, Option<String>)> = sqlx::query_as(
+        "SELECT id, public_key FROM users WHERE LOWER(username) = $1 ORDER BY id LIMIT 1",
+    )
+    .bind(&username_lower)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+    let account_id: Option<i32> = pubkey_row.as_ref().map(|(id, _)| *id);
     let real_key = pubkey_row
-        .and_then(|(pk,)| pk)
+        .and_then(|(_, pk)| pk)
         .as_deref()
         .and_then(decode_public_key);
     let account_pub: [u8; 32] = match real_key {
@@ -588,7 +610,7 @@ pub async fn recovery_reset(
                 "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
              recovery_salt = $5, seed_wrapped_rc = $6, pw_kdf_iterations = $7, pw_kdf = $8, \
              force_password_reset = FALSE, token_version = token_version + 1 \
-             WHERE LOWER(username) = $9 RETURNING id",
+             WHERE id = $9 RETURNING id",
             )
             .bind(&salt)
             .bind(&verifier)
@@ -598,7 +620,7 @@ pub async fn recovery_reset(
             .bind(rc)
             .bind(req.new_pw_kdf_iterations)
             .bind(&req.new_pw_kdf)
-            .bind(&username_lower)
+            .bind(account_id)
             .fetch_optional(&state.pool)
             .await
         } else {
@@ -606,7 +628,7 @@ pub async fn recovery_reset(
                 // token_version bump (M1): a recovery reset evicts all outstanding JWTs.
                 "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
              pw_kdf_iterations = $5, pw_kdf = $6, force_password_reset = FALSE, \
-             token_version = token_version + 1 WHERE LOWER(username) = $7 RETURNING id",
+             token_version = token_version + 1 WHERE id = $7 RETURNING id",
             )
             .bind(&salt)
             .bind(&verifier)
@@ -614,7 +636,7 @@ pub async fn recovery_reset(
             .bind(&req.new_seed_wrapped_pw)
             .bind(req.new_pw_kdf_iterations)
             .bind(&req.new_pw_kdf)
-            .bind(&username_lower)
+            .bind(account_id)
             .fetch_optional(&state.pool)
             .await
         };
@@ -628,6 +650,21 @@ pub async fn recovery_reset(
             // right through the reset, until their JWT expired on its own.
             // None = no such user; same 200 as ever (M4: no enumeration oracle).
             if let Some((id,)) = uid {
+                // Enrolled devices too. /devices/token re-reads token_version at
+                // mint time, so the bump in the UPDATE above does NOT stop a
+                // device that still holds its Ed25519 key from minting fresh
+                // account JWTs. This is the "someone else has my account" path —
+                // a machine the attacker enrolled has to stop working, and the
+                // owner re-enrols their own from the Devices tab.
+                if let Err(e) = sqlx::query(
+                    "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+                )
+                .bind(id)
+                .execute(&state.pool)
+                .await
+                {
+                    tracing::error!("recovery reset: device revocation failed for {}: {:?}", id, e);
+                }
                 state.disconnect_user(id as i64);
             }
             tracing::info!("Recovery reset succeeded for {}", username_lower);

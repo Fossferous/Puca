@@ -19,9 +19,16 @@ chat.example.com {
 		# with the real TCP peer ({remote_host}) so a client cannot inject a
 		# spoofed leftmost value and mint a fresh limiter bucket per request
 		# (which would defeat the 5/s auth and 50/s API limits entirely).
-		# If you later front this with Cloudflare/another proxy, switch to
-		# trusted_proxies + read CF-Connecting-IP instead.
 		header_up X-Forwarded-For {remote_host}
+		# Same reasoning, for the header the backend prefers when
+		# TRUST_CF_CONNECTING_IP=true. Caddy forwards unknown client headers
+		# verbatim, so without this a caller behind THIS proxy could still hand
+		# the backend a CF-Connecting-IP of its choosing. Delete it here and the
+		# backend cannot be fooled even if the flag is set by mistake.
+		# If you later front this with Cloudflare, remove this line, set
+		# TRUST_CF_CONNECTING_IP=true, and lock the origin to Cloudflare's
+		# ranges with deploy/cloudflare/origin-firewall.sh.
+		header_up -CF-Connecting-IP
 	}
 
 	header {

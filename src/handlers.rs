@@ -135,9 +135,44 @@ pub struct ResetPasswordRequest {
 /// Deliberately EXCLUDES `#`, which the account tombstone (`deleted#<id>`)
 /// relies on being unregisterable — without this, squatting a tombstone name
 /// wedges that user's deletion forever.
+/// Longest username `validate_username` will ever accept.
+pub const MAX_USERNAME_LEN: usize = 32;
+
+/// A 2048-bit SRP group element is 256 bytes (512 hex chars) and the proof is 32
+/// bytes (64). Both ceilings are generous; the point is that they exist at all.
+pub const MAX_SRP_HEX_LEN: usize = 1024;
+
+/// Reject a username too long to name any account, before anything expensive
+/// touches it.
+///
+/// `validate_username` bounds the value at REGISTRATION, but it was never called
+/// on the login or recovery routes — so those accepted a username up to the
+/// 2 MiB body limit, lowercased it, drove it through a multi-pass HMAC, and
+/// stored it as a permanent key in the login-backoff map. Length is the ONLY
+/// thing checked here: the charset rule belongs to registration, and applying it
+/// at login could lock out an account created under an older rule. A name longer
+/// than the registration ceiling cannot exist, so refusing it reveals nothing
+/// about which accounts do.
+pub fn reject_oversized_username(username: &str) -> Result<(), StatusCode> {
+    // Bytes first: `chars().count()` on a 2 MiB string still walks 2 MiB, and a
+    // UTF-8 char is at most 4 bytes.
+    if username.len() > MAX_USERNAME_LEN * 4 || username.chars().count() > MAX_USERNAME_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+/// Reject an over-long hex field before it is decoded, hashed, or stored.
+pub fn reject_oversized_hex(value: &str) -> Result<(), StatusCode> {
+    if value.len() > MAX_SRP_HEX_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 pub fn validate_username(username: &str) -> Result<(), &'static str> {
     let n = username.chars().count();
-    if n < 3 || n > 32 {
+    if n < 3 || n > MAX_USERNAME_LEN {
         return Err("Username must be between 3 and 32 characters");
     }
     if !username
@@ -273,6 +308,12 @@ pub async fn login_step_1(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginStep1Request>,
 ) -> Result<Json<LoginStep1Response>, StatusCode> {
+    // 0. Bound the caller-supplied fields before anything hashes, stores or
+    //    keys on them. `a_pub_hex` was persisted verbatim into login_attempts
+    //    for ten minutes at whatever size the body limit allowed.
+    reject_oversized_username(&payload.username)?;
+    reject_oversized_hex(&payload.a_pub_hex)?;
+
     // 1. Fetch user from database (case-insensitive). A DELETED account is
     //    treated exactly like an unknown username — it takes the synthesised
     //    path below, so a tombstone is unauthenticatable AND indistinguishable
@@ -369,6 +410,16 @@ pub async fn login_step_2(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginStep2Request>,
 ) -> Result<Json<LoginStep2Response>, StatusCode> {
+    // Bound the caller-supplied fields FIRST. Everything below — the lowercase
+    // for the backoff key, the multi-pass HMAC in `pseudo_material`, and the
+    // permanent entry in the login-failure map — scales with these, and none of
+    // them was bounded.
+    reject_oversized_username(&payload.username)?;
+    reject_oversized_hex(&payload.m_hex)?;
+    if let Some(aid) = payload.attempt_id.as_deref() {
+        reject_oversized_hex(aid)?;
+    }
+
     tracing::info!(">>> login_step_2 called for user: {}", payload.username);
 
     // M3: per-username exponential backoff. Apply the delay owed from prior
@@ -1316,6 +1367,14 @@ pub async fn delete_account(
     // delete it first.
     for q in [
         "DELETE FROM device_tokens WHERE user_id = $1",
+        // Enrolled MACHINES, as distinct from the push tokens above. The
+        // tombstone is an UPDATE so the devices FK cascade never fires, and
+        // /devices/token re-reads token_version at mint time — so the bump above
+        // is absorbed and a device holding its Ed25519 key could keep minting
+        // full account JWTs indefinitely after the account was deleted. Revoked
+        // rather than deleted: device_shares reference these rows, and
+        // "a REVOKED device stays revoked" is the invariant enrol_device relies on.
+        "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
         "DELETE FROM notification_preferences WHERE user_id = $1",
         "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",
         "DELETE FROM friend_requests WHERE sender_id = $1 OR receiver_id = $1",
@@ -1444,7 +1503,20 @@ pub async fn search_users(
     // serve (a pg_trgm GIN index is the real fix, but that needs the extension).
     // Until then, run it under a short per-statement timeout so one scan can't
     // pin a pool connection for the full acquire budget as the table grows.
-    let search_pattern = format!("%{}%", query.q.to_lowercase());
+    //
+    // Escape the LIKE metacharacters first. This is NOT SQL injection — the
+    // pattern is still bound — but `%` and `_` are live wildcards inside the
+    // value, so a query of "%" satisfied the 2-char minimum while matching every
+    // row, turning the selectivity floor and the LIMIT into a directory dump of
+    // the 20 alphabetically-first accounts. `\` is escaped first or it would
+    // corrupt the escapes added after it.
+    let escaped = query
+        .q
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let search_pattern = format!("%{}%", escaped);
 
     let mut tx = match state.pool.begin().await {
         Ok(t) => t,
@@ -1461,8 +1533,12 @@ pub async fn search_users(
         -- Yourself is INCLUDED. You are a valid DM recipient (messaging your
         -- own other device is the point), and search is the only way to start
         -- that conversation — excluding yourself made it unreachable.
+        -- A deleted account is a tombstone (deleted_at set, name rewritten to
+        -- deleted#<id>); it must not be findable or DM-able.
+        -- ESCAPE '\' pairs with the metacharacter escaping done on the pattern.
         SELECT id, username, display_name, show_online_status FROM users
-        WHERE LOWER(username) LIKE $1
+        WHERE LOWER(username) LIKE $1 ESCAPE '\'
+          AND deleted_at IS NULL
         ORDER BY username ASC
         LIMIT 20
         "#,

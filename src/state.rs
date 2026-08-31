@@ -863,6 +863,8 @@ pub struct AppState {
     /// top of the per-user cap, so one host holding many accounts can't open an
     /// unbounded number of sockets. Self-cleaning at 0.
     pub ws_conns_by_ip: DashMap<IpAddr, usize>,
+    /// In-flight `/upload` requests per IP (see [`IpSlotKind::Upload`]).
+    pub upload_streams: DashMap<IpAddr, usize>,
 
     /// Live + reserved usage of LiveKit SFU rooms, keyed by room name
     /// ("sfu_<channel id>"). Fed by the /livekit/webhook event stream and by
@@ -997,6 +999,11 @@ pub enum IpSlotKind {
     File,
     /// Live WebSocket connections.
     Ws,
+    /// In-flight `/upload` requests. Each one buffers its whole file field in
+    /// RAM (up to the route's 28 MiB body limit) before anything is written, so
+    /// without a ceiling a single authenticated client can hold an unbounded
+    /// multiple of that resident simply by opening concurrent uploads.
+    Upload,
 }
 
 /// RAII slot in a per-IP counter. Held for the lifetime of the resource it
@@ -1013,6 +1020,7 @@ impl Drop for IpSlotGuard {
         let map = match self.kind {
             IpSlotKind::File => &self.state.file_streams,
             IpSlotKind::Ws => &self.state.ws_conns_by_ip,
+            IpSlotKind::Upload => &self.state.upload_streams,
         };
         // Decrement under the shard lock, then prune at zero in a separate call
         // (holding the get_mut ref across remove_if would deadlock the shard).
@@ -1027,47 +1035,105 @@ impl Drop for IpSlotGuard {
 
 /// The real client IP behind the reverse proxy.
 ///
-/// PREFERS `CF-Connecting-IP`, because this deployment sits behind Cloudflare
-/// (the origin is ufw-locked to Cloudflare's ranges — see
-/// docs/security-fixes-0720). Cloudflare STRIPS any client-sent
-/// `CF-Connecting-IP` and re-sets it to the true client, and a direct
-/// connection that could forge it can't reach the origin. `X-Forwarded-For` is
-/// NOT trustworthy on its own: proxies commonly APPEND to it, so a client that
-/// pre-sends `X-Forwarded-For: <spoofed>` makes the LEFTMOST entry
-/// attacker-controlled — and every place keyed on this IP (the per-IP file /
-/// WS ceilings) would then see a fresh identity per request, defeating the
-/// limit. XFF/X-Real-IP stay as the fallback for local dev and any
-/// non-Cloudflare deployment, where no CF header is present.
+/// Whether the operator has vouched for `CF-Connecting-IP`.
 ///
-/// Keep this precedence identical to the rate limiter's
-/// `CfConnectingIpKeyExtractor` (middleware/rate_limit.rs) — the two must agree
-/// on who a caller is.
-pub fn real_client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
-    if let Some(ip) = headers
-        .get("cf-connecting-ip")
+/// This header is only trustworthy on a deployment genuinely fronted by
+/// Cloudflare WITH the origin firewalled to Cloudflare's ranges
+/// (deploy/cloudflare/origin-firewall.sh). Anywhere else the client simply sends
+/// it, and NEITHER shipped reverse-proxy config strips it — they sanitise
+/// `X-Forwarded-For` and leave this one alone. Believing it unconditionally let
+/// any caller mint a fresh rate-limit bucket per request by varying one header,
+/// which nullified the auth and API limiters on the deployments deploy/README.md
+/// actually documents. So it is OPT-IN, and off by default.
+fn trust_cf_connecting_ip() -> bool {
+    static TRUST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRUST.get_or_init(|| {
+        std::env::var("TRUST_CF_CONNECTING_IP")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Whether the TCP peer is a reverse proxy whose forwarding headers we may
+/// believe.
+///
+/// Loopback and private/link-local peers are the documented topology: Caddy or
+/// nginx on the same host (or LAN) proxying to 127.0.0.1:3000, and BOTH shipped
+/// configs OVERWRITE `X-Forwarded-For` with the real TCP peer, so the value is
+/// the proxy's assertion rather than the client's. A PUBLIC peer means the
+/// socket is directly exposed (BIND_ADDR=0.0.0.0 with no proxy) — there the peer
+/// IS the client, and anything it forwards is its own unverifiable claim.
+fn peer_is_trusted_proxy(ip: IpAddr) -> bool {
+    fn v4_trusted(v4: std::net::Ipv4Addr) -> bool {
+        v4.is_loopback() || v4.is_private() || v4.is_link_local()
+    }
+    match ip {
+        IpAddr::V4(v4) => v4_trusted(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4_trusted(v4);
+            }
+            let o = v6.octets();
+            // ::1, unique-local fc00::/7, link-local fe80::/10
+            v6.is_loopback() || (o[0] & 0xfe) == 0xfc || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80)
+        }
+    }
+}
+
+fn header_ip(headers: &HeaderMap, name: &str) -> Option<IpAddr> {
+    headers
+        .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(ip) = xff
-            .split(',')
-            .filter_map(|s| s.trim().parse::<IpAddr>().ok())
-            .next()
-        {
+}
+
+/// The caller's real IP, for rate limiting and per-IP ceilings.
+///
+/// A forwarded header is believed only when something actually vouches for it:
+/// `CF-Connecting-IP` when the operator opted in, `X-Forwarded-For`/`X-Real-IP`
+/// when the TCP peer is a local/LAN reverse proxy. Otherwise the peer address —
+/// the one value a client cannot choose — wins.
+///
+/// This is the SINGLE policy: the rate limiter's key extractor
+/// (middleware/rate_limit.rs) calls straight into it, rather than keeping a
+/// parallel copy of the precedence that could drift.
+pub fn real_client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
+    client_ip_with_policy(headers, peer, trust_cf_connecting_ip())
+}
+
+/// The policy itself, with the one environment-derived input passed in so it can
+/// be tested both ways in the same process (the env read is cached in a
+/// `OnceLock`, so a test that set the variable could not un-set it).
+fn client_ip_with_policy(headers: &HeaderMap, peer: SocketAddr, trust_cf: bool) -> IpAddr {
+    if trust_cf {
+        if let Some(ip) = header_ip(headers, "cf-connecting-ip") {
             return ip;
         }
     }
-    if let Some(rip) = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return rip;
+    if peer_is_trusted_proxy(peer.ip()) {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(ip) = xff
+                .split(',')
+                .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+                .next()
+            {
+                return ip;
+            }
+        }
+        if let Some(rip) = header_ip(headers, "x-real-ip") {
+            return rip;
+        }
     }
     peer.ip()
 }
+
+/// Ceiling on how many distinct usernames the login-backoff map will track.
+///
+/// Entries are keyed by a string an unauthenticated caller chooses, so the map
+/// needs a bound or it is an unbounded allocation primitive. 8192 is far above
+/// any real deployment's active-failure set and far below anything that matters
+/// for memory.
+pub const MAX_TRACKED_LOGIN_FAILURES: usize = 8192;
 
 /// Consecutive failed-login accounting for one username (M3).
 #[derive(Clone, Copy)]
@@ -1111,6 +1177,7 @@ impl AppState {
             password_proofs: DashMap::new(),
             file_streams: DashMap::new(),
             ws_conns_by_ip: DashMap::new(),
+            upload_streams: DashMap::new(),
             sfu_rooms: DashMap::new(),
             sfu_measured_egress_kbps: AtomicU64::new(0),
             sfu_measured_at: AtomicU64::new(0),
@@ -1147,6 +1214,19 @@ impl AppState {
         const WINDOW: std::time::Duration = std::time::Duration::from_secs(900);
         let key = username.to_lowercase();
         let now = Instant::now();
+        // The key is caller-supplied on an UNAUTHENTICATED route, so without a
+        // ceiling this map grows forever — one permanent entry per guessed name.
+        // Sweep streaks that have aged out of the window first; if it is still
+        // full, a name not already tracked goes untracked (it has no streak to
+        // throttle yet) while every name already present keeps updating.
+        if self.login_failures.len() >= MAX_TRACKED_LOGIN_FAILURES
+            && !self.login_failures.contains_key(&key)
+        {
+            self.login_failures.retain(|_, v| v.last.elapsed() <= WINDOW);
+            if self.login_failures.len() >= MAX_TRACKED_LOGIN_FAILURES {
+                return;
+            }
+        }
         let mut e = self.login_failures.entry(key).or_insert(LoginFailureState {
             count: 0,
             last: now,
@@ -1203,6 +1283,7 @@ impl AppState {
             let map = match kind {
                 IpSlotKind::File => &self.file_streams,
                 IpSlotKind::Ws => &self.ws_conns_by_ip,
+                IpSlotKind::Upload => &self.upload_streams,
             };
             let mut entry = map.entry(ip).or_insert(0);
             if *entry >= cap {
@@ -2198,43 +2279,119 @@ impl AppState {
 
 #[cfg(test)]
 mod client_ip_tests {
-    use super::real_client_ip;
+    use super::{client_ip_with_policy, peer_is_trusted_proxy};
     use axum::http::HeaderMap;
     use std::net::SocketAddr;
 
-    fn peer() -> SocketAddr {
+    /// A directly-exposed socket: the peer IS the client (BIND_ADDR=0.0.0.0).
+    fn direct() -> SocketAddr {
         "203.0.113.9:4000".parse().unwrap()
     }
-
-    #[test]
-    fn cf_connecting_ip_wins_over_spoofed_xff() {
-        // The attack: a client prepends its own X-Forwarded-For to mint a fresh
-        // rate-limit identity per request. CF-Connecting-IP is set by Cloudflare
-        // and must win, so the caller is keyed on their true IP.
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
-        h.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
-        assert_eq!(real_client_ip(&h, peer()).to_string(), "198.51.100.7");
+    /// The documented topology: Caddy/nginx proxying to the loopback listener.
+    fn behind_proxy() -> SocketAddr {
+        "127.0.0.1:54321".parse().unwrap()
     }
 
     #[test]
-    fn falls_back_to_xff_then_peer_without_cf() {
-        // No Cloudflare header (local dev / non-CF proxy): keep the prior
-        // behaviour so nothing regresses.
+    fn direct_peer_ignores_every_forwarded_header() {
+        // THE ATTACK this gate exists to stop: one header per request minted a
+        // fresh rate-limit bucket, nullifying the 5/s auth and 50/s API limits.
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
+        h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        h.insert("x-real-ip", "192.0.2.55".parse().unwrap());
+        assert_eq!(
+            client_ip_with_policy(&h, direct(), false),
+            direct().ip(),
+            "a directly-exposed peer must be keyed on its socket address"
+        );
+    }
+
+    #[test]
+    fn proxied_peer_honours_leftmost_xff() {
+        // POSITIVE CONTROL for the test above: the same headers ARE honoured
+        // when something vouches for them, so `direct_peer_ignores_*` is proving
+        // the gate works rather than that the rig never reads a header at all.
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "5.6.7.8, 9.9.9.9".parse().unwrap());
-        assert_eq!(real_client_ip(&h, peer()).to_string(), "5.6.7.8");
+        assert_eq!(
+            client_ip_with_policy(&h, behind_proxy(), false).to_string(),
+            "5.6.7.8"
+        );
 
-        let empty = HeaderMap::new();
-        assert_eq!(real_client_ip(&empty, peer()), peer().ip());
+        let mut r = HeaderMap::new();
+        r.insert("x-real-ip", "192.0.2.55".parse().unwrap());
+        assert_eq!(
+            client_ip_with_policy(&r, behind_proxy(), false).to_string(),
+            "192.0.2.55"
+        );
     }
 
     #[test]
-    fn garbage_cf_header_does_not_panic_and_falls_through() {
+    fn cf_header_needs_the_operator_opt_in() {
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
+        // Off by default, even from a proxy: neither shipped config strips it,
+        // so the value reaching us is still the client's own.
+        assert_eq!(
+            client_ip_with_policy(&h, behind_proxy(), false),
+            behind_proxy().ip()
+        );
+        // On when the operator asserts a Cloudflare front door. The peer there is
+        // a PUBLIC Cloudflare address, so this must not depend on a private peer.
+        assert_eq!(
+            client_ip_with_policy(&h, direct(), true).to_string(),
+            "198.51.100.7"
+        );
+    }
+
+    #[test]
+    fn garbage_headers_do_not_panic_and_fall_through() {
         let mut h = HeaderMap::new();
         h.insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
+        h.insert("x-forwarded-for", "also-not-an-ip".parse().unwrap());
         h.insert("x-real-ip", "192.0.2.55".parse().unwrap());
-        assert_eq!(real_client_ip(&h, peer()).to_string(), "192.0.2.55");
+        assert_eq!(
+            client_ip_with_policy(&h, behind_proxy(), true).to_string(),
+            "192.0.2.55"
+        );
+        let empty = HeaderMap::new();
+        assert_eq!(
+            client_ip_with_policy(&empty, behind_proxy(), true),
+            behind_proxy().ip()
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_classification() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.5",
+            "172.16.0.1",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                peer_is_trusted_proxy(ip.parse().unwrap()),
+                "{ip} should be treated as a local reverse proxy"
+            );
+        }
+        for ip in [
+            "203.0.113.9",
+            "8.8.8.8",
+            "172.32.0.1", // just outside 172.16/12
+            "2606:4700::1",
+            "::ffff:203.0.113.9",
+        ] {
+            assert!(
+                !peer_is_trusted_proxy(ip.parse().unwrap()),
+                "{ip} is a public peer and must not be trusted to forward"
+            );
+        }
     }
 }
 

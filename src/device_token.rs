@@ -184,9 +184,13 @@ pub async fn device_token(
     // while leaving general account access intact until the user happens to
     // change their password. This was the one path in the family that forgot.
     let row = sqlx::query_as::<_, (String, i32, String)>(
+        // `u.deleted_at IS NULL` matters as much as the device's own revocation:
+        // account deletion is a tombstone UPDATE, so without it a device enrolled
+        // before the deletion still resolves to a live row here and mints a full
+        // account token for an account that no longer exists.
         "SELECT d.sign_pub, d.user_id, u.username \
          FROM devices d JOIN users u ON u.id = d.user_id \
-         WHERE d.id = $1 AND d.revoked_at IS NULL",
+         WHERE d.id = $1 AND d.revoked_at IS NULL AND u.deleted_at IS NULL",
     )
     .bind(&payload.device_id)
     .fetch_optional(&state.pool)

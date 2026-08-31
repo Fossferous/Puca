@@ -401,10 +401,28 @@ pub async fn propose_clip(
     if solo && !proposer_alone {
         return (StatusCode::CONFLICT, Json(RefusalWithData { error: "window_predates_log", earliest_ms: Some(earliest), retry_after_ms: None })).into_response();
     }
-    let names: Vec<(i32, String)> = if ids.is_empty() { Vec::new() } else {
-        sqlx::query_as("SELECT id, username FROM users WHERE id = ANY($1)")
+    // FAIL CLOSED on a DB error. `unwrap_or_default()` here turned a transient
+    // failure into an EMPTY approver list, and an empty list resolves with
+    // nobody prompted — a multi-party clip published as though the clipper had
+    // been alone. "No data" must never read as "nobody was there"; that is the
+    // same rule the `solo && !proposer_alone` guard four lines up enforces.
+    let names: Vec<(i32, String)> = if ids.is_empty() {
+        Vec::new()
+    } else {
+        match sqlx::query_as("SELECT id, username FROM users WHERE id = ANY($1)")
             .bind(ids.iter().map(|&i| i as i32).collect::<Vec<i32>>())
-            .fetch_all(&state.pool).await.unwrap_or_default()
+            .fetch_all(&state.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("propose_clip: approver lookup failed: {:?}", e);
+                return plain(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Could not confirm who was in that call. Try again in a moment.",
+                );
+            }
+        }
     };
     // Deleted accounts (no users row) are dropped — they can never consent.
     let votes: Vec<ClipVoter> = names.into_iter().map(|(id, username)| {

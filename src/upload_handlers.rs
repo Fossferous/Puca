@@ -269,8 +269,33 @@ async fn clip_upload_gate(state: &AppState, claims: &Claims, clip_id: Option<&st
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
+    // Per-IP ceiling on CONCURRENT uploads. `field.bytes()` below materialises
+    // the whole part in RAM and this route raises the body limit to 28 MiB, so
+    // N simultaneous uploads pin roughly N x 28 MiB. GET /files has had such a
+    // ceiling since the slow-drip download work; the write side never got one.
+    // Held for the whole handler and released on every exit path by Drop.
+    let ip = crate::state::real_client_ip(&headers, peer);
+    let cap = std::env::var("UPLOAD_MAX_CONCURRENT_PER_IP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4)
+        .max(1);
+    let _upload_guard = match state.try_acquire_ip_slot(ip, crate::state::IpSlotKind::Upload, cap) {
+        Some(g) => g,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "2")],
+                "Too many concurrent uploads",
+            )
+                .into_response()
+        }
+    };
+
     let mut kind = String::from("attachment");
     let mut clip_id: Option<String> = None;
     let mut part_index: Option<i32> = None;
