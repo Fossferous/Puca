@@ -193,6 +193,19 @@ fn sas_removal_fragment() -> String {
 /// What is still installed. Cheap and read-only — safe to call on every launch.
 #[tauri::command]
 pub fn rc_leftovers_status() -> RcLeftovers {
+    // In a build that CONTAINS remote control, the service is a MANAGED
+    // component — Settings → Devices owns enrol/update/remove — and nothing
+    // this module can see is ever a "leftover" there. 0.8.127 shipped without
+    // this guard and with the banner mounted in the full build: every machine
+    // with sign-in-screen access enrolled got a red security banner branding
+    // its own service a stray and offering to delete its enrolment secrets,
+    // and the banner (z 10001) sat exactly on top of ServiceUpdateBanner
+    // (z 10000), hiding the release's genuine "service needs an update"
+    // notice. `cfg!` rather than `#[cfg]` so the detection code below stays
+    // compiled (and warning-free) in both variants.
+    if cfg!(feature = "remote-control") {
+        return RcLeftovers::default();
+    }
     let dir = install_dir();
     let (service_installed, service_running) = query_service();
     RcLeftovers {
@@ -220,6 +233,18 @@ pub fn rc_leftovers_status() -> RcLeftovers {
 /// token and arming record behind would not honour it.
 #[tauri::command]
 pub fn rc_leftovers_remove() -> Result<(), String> {
+    // Same variant gate as rc_leftovers_status, and more load-bearing here:
+    // in the full build this command would stop and delete the user's own
+    // enrolled service AND erase its secrets. The full build's removal path
+    // is Settings → Devices (deprovision), which deliberately PRESERVES the
+    // secrets; this one deliberately does not, and that trade is only right
+    // on a build that contains no remote control at all.
+    if cfg!(feature = "remote-control") {
+        return Err(
+            "This build manages the service itself — use Settings → Devices to update or remove it."
+                .into(),
+        );
+    }
     #[cfg(windows)]
     {
         use windows::core::{HSTRING, PCWSTR};
@@ -323,5 +348,24 @@ mod tests {
         assert!(!s.service_running || s.service_installed);
         // secrets live inside the install dir.
         assert!(!s.secrets_present || s.install_dir_present);
+    }
+
+    /// THE 0.8.127 REGRESSION PIN. A build that contains remote control must
+    /// report NO leftovers and refuse removal, whatever is on the machine —
+    /// its service is a managed component, not a stray. This test runs under
+    /// the default feature set (remote-control on), and on a machine with the
+    /// service actually enrolled (the primary dev box is one) it goes red the
+    /// moment the guard is removed — which is exactly how 0.8.127 shipped a
+    /// red "Remove it" banner to every enrolled full install. On a machine
+    /// without the service it cannot distinguish guard from absence; the
+    /// enrolled dev box is the tripwire.
+    #[test]
+    #[cfg(feature = "remote-control")]
+    fn full_build_reports_no_leftovers_and_refuses_removal() {
+        let s = super::rc_leftovers_status();
+        assert!(!s.service_installed && !s.service_running);
+        assert!(!s.install_dir_present && !s.secrets_present);
+        assert!(s.install_dir.is_empty());
+        assert!(super::rc_leftovers_remove().is_err());
     }
 }

@@ -24,22 +24,28 @@ import { FileAccessPrompt } from './FileAccessPrompt';
 import { HostFilesIndicator } from './HostFilesIndicator';
 import { DeviceDownloads } from './DeviceDownloads';
 import { DeviceFileBrowser } from './DeviceFileBrowser';
-import { RcLeftoversBanner } from './RcLeftoversBanner';
 
 /**
  * Render order matches what App.tsx had, because these overlap on screen and
  * their stacking is positional: the consent prompts must paint above the
  * device stage, and the file browser above both.
+ *
+ * RcLeftoversBanner is DELIBERATELY NOT HERE — it belongs to the LITE
+ * stand-in (RcGlobals.lite.tsx) alone. It was mounted here in 0.8.127 on the
+ * assumption it "will normally report nothing" in the full build; that was
+ * wrong for exactly the machines that matter: the detection reports the
+ * SovereignRemote service whenever it exists, and in the FULL build that
+ * service is the user's own, deliberately-enrolled sign-in-screen component,
+ * managed from Settings → Devices — not a leftover. Every enrolled machine
+ * got a red banner offering to delete its enrolment secrets, and (z 10001
+ * over 10000, same top strip) the banner also sat exactly on top of
+ * ServiceUpdateBanner, hiding the real "service needs an update" notice the
+ * release should have shown. rc_leftovers_status is also variant-gated in
+ * Rust now, so remounting this here would still show nothing.
  */
 export function RcGlobals() {
     return (
         <>
-            {/* Also mounted in the LITE stand-in: a leftover remote-access
-                service outlives the app that installed it, so BOTH builds must
-                be able to tell the user it is there. In the full build it will
-                normally report nothing, because service_cmd can remove it
-                properly from Settings. */}
-            <RcLeftoversBanner />
             <ServiceUpdateBanner />
             <RemoteControlOverlay />
             <DeviceStage />
