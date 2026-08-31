@@ -51,6 +51,7 @@ import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
+import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
 import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import { Toast } from './Toast';
 import './VoicePanel.css';
@@ -184,6 +185,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             document.documentElement.style.removeProperty('--mobile-voice-panel-h');
         };
     }, [isPhonePanel]);
+
+    // Coming back to the foreground: resume any remote-voice element the
+    // platform paused AND our background nudge could not restart (iOS Safari
+    // refuses play() while hidden). Companion to keepVoiceAudioAlive above.
+    useEffect(() => installVoiceAudioResume(), []);
 
     // Camera PiP (Picture-in-Picture) state for mobile
     const [pipPosition, setPipPosition] = useState({ x: 20, y: 100 });
@@ -1235,6 +1241,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // Play through the output device chosen in Settings, not
                     // just the system default.
                     applyOutputDevice(audio);
+                    // Android pauses playing media elements when the app
+                    // backgrounds while the MIC keeps transmitting — peers
+                    // heard the user, the user heard silence. Fight the
+                    // platform pause for the life of the element (removal
+                    // disarms it; see voiceAudioKeepAlive.ts).
+                    keepVoiceAudioAlive(audio);
                     document.body.appendChild(audio);
                     console.log(`[VoicePanel] Created new audio element for ${userId}`);
                 }
