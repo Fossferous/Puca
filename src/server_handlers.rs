@@ -1651,17 +1651,50 @@ pub async fn get_ice_config(
     // (STUN is what makes P2P work behind NAT, and most self-hosters have no
     // alternative to hand), but they are now a default an operator can change.
     let stun_urls: Vec<String> = match std::env::var("STUN_SERVERS") {
+        // An explicit operator choice always wins. May be set empty to use none.
         Ok(v) => v
             .split(',')
             .map(|u| u.trim().to_string())
             .filter(|u| !u.is_empty())
             .collect(),
-        Err(_) => vec![
-            "stun:stun.l.google.com:19302".to_string(),
-            "stun:stun1.l.google.com:19302".to_string(),
-            "stun:stun2.l.google.com:19302".to_string(),
-            "stun:stun3.l.google.com:19302".to_string(),
-        ],
+        Err(_) => {
+            // Nothing set. If this deployment runs its OWN TURN server, use it
+            // for address discovery too — coturn answers STUN on the same host
+            // and port, so this costs nothing and keeps the lookup inside
+            // infrastructure the operator already controls.
+            //
+            // A STUN server necessarily learns the client's public IP and port
+            // (that is precisely what it is asked for) and the timing of every
+            // call setup. It sees no media and not who is being called. But on a
+            // self-hosted privacy product, handing that to Google on every ICE
+            // gather — including for operators who HAD configured their own
+            // relay, because the Google entry sat in both arms of the match
+            // below — was the wrong default. Google is now the last resort only:
+            // a deployment with no TURN of its own, where without STUN
+            // peer-to-peer calls simply fail behind NAT.
+            let own = std::env::var("TURN_SERVER")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    // TURN_SERVER may already carry a scheme; normalise to stun:.
+                    let host = s
+                        .strip_prefix("turns:")
+                        .or_else(|| s.strip_prefix("turn:"))
+                        .unwrap_or(s.as_str())
+                        .to_string();
+                    format!("stun:{host}")
+                });
+            match own {
+                Some(u) => vec![u],
+                None => vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
+                    "stun:stun2.l.google.com:19302".to_string(),
+                    "stun:stun3.l.google.com:19302".to_string(),
+                ],
+            }
+        }
     };
     let google_stun = IceServer {
         urls: stun_urls,

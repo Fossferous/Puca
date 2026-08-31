@@ -86,10 +86,29 @@ import { ensureChannelKey, getChannelKeyForEpoch, clearChannelKeyCache } from '.
 import { apiClient } from '../api/client';
 import { pinServedIdentityKey } from '../api/keyVerification';
 
+// src/tests/setup.ts installs a localStorage whose methods are bare vi.fn(), so
+// getItem ALWAYS returns undefined. Anything that reads back what it wrote —
+// like the channel-key epoch floor — is therefore untestable against it, and a
+// test written on top of it would pass no matter what the code did. Give this
+// file a real in-memory store so the floor assertions below mean something.
+const memStore = new Map<string, string>();
+Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+        getItem: (k: string) => (memStore.has(k) ? memStore.get(k)! : null),
+        setItem: (k: string, v: string) => { memStore.set(k, String(v)); },
+        removeItem: (k: string) => { memStore.delete(k); },
+        clear: () => { memStore.clear(); },
+        key: (i: number) => [...memStore.keys()][i] ?? null,
+        get length() { return memStore.size; },
+    },
+});
+
 describe('channelKeys manager', () => {
     beforeEach(async () => {
         fake.reset();
         clearChannelKeyCache();
+        localStorage.clear(); // the epoch floor persists there; don't leak between tests
         const me = await testIdentity(...ME);
         setActiveIdentity(me);
         fake.members = [{ user_id: 1, public_key: me.publicKeyEncoded }];
@@ -483,5 +502,42 @@ describe('channelKeys manager', () => {
         expect(res).not.toBeNull();
         expect(res!.epoch).toBe(2);
         expect(Buffer.from(res!.key)).toEqual(Buffer.from(cur));
+    });
+    // --- Epoch floor (anti-rollback) ------------------------------------
+    //
+    // The untrusted server names current_epoch. Without a floor it could name a
+    // SUPERSEDED one and clients would go back to encrypting under a key an
+    // ejected member still holds. The floor is only applied when we still hold
+    // that epoch's key, because clamping unconditionally made the channel
+    // permanently unsendable after a legitimate server-side key purge.
+
+    it('stays on the higher epoch when the server rolls back and we hold its key', async () => {
+        // Reach epoch 2 honestly, so both keys are published and held.
+        const first = await ensureChannelKey(42);
+        expect(first!.epoch).toBe(1);
+        fake.currentGeneration = 1; // membership changed -> rotate
+        const second = await ensureChannelKey(42);
+        expect(second!.epoch).toBe(2);
+
+        // The server now lies, naming the superseded epoch.
+        fake.currentEpoch = 1;
+        fake.epochGeneration = 1;
+        clearChannelKeyCache();
+        const after = await ensureChannelKey(42);
+        expect(after).not.toBeNull();
+        expect(after!.epoch).toBeGreaterThanOrEqual(2);
+        expect(Buffer.from(after!.key)).toEqual(Buffer.from(second!.key));
+    });
+
+    it('accepts a lower epoch rather than bricking the channel when the key is gone', async () => {
+        // POSITIVE CONTROL for the test above. Same rollback, but the client
+        // holds no key for the floor — the state a server-side purge or a
+        // restore from an older backup produces. Clamping here returned null
+        // from ensureChannelKey forever, which is a self-inflicted denial of
+        // service and exactly what a hostile server would want.
+        localStorage.setItem('e2ee_epoch_floor_42', '9');
+        const res = await ensureChannelKey(42);
+        expect(res).not.toBeNull();
+        expect(res!.epoch).toBeLessThan(9);
     });
 });

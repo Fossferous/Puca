@@ -256,20 +256,34 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
     // one mechanism that removes someone's future read access; letting the party
     // being defended against choose the epoch number undoes it.
     //
-    // Clamp upward rather than throwing: refusing outright would let a server
-    // deny the channel entirely, and a stale-but-real key still decrypts
-    // history. Encryption uses `currentEpoch`, so the floor is what matters.
-    const floorKey = `e2ee_epoch_floor_${channelId}`;
-    let floor = 0;
-    try { floor = Number(localStorage.getItem(floorKey) ?? '0') || 0; } catch { /* private mode */ }
-    const currentEpoch = Math.max(resp.current_epoch, floor);
+    // The floor is only APPLIED when we actually hold that epoch's key. Clamping
+    // unconditionally is what a first cut did, and it bricks the channel: with
+    // `currentEpoch` set above anything in `keys`, ensureChannelKey finds no held
+    // key, matches none of its branches, and returns null — "can't send
+    // securely", permanently, because the floor never decreases. A server-side
+    // key purge (see the membership_change_bumps_generation_and_purges_keys
+    // test) or a restore from an older backup reaches that state legitimately.
+    // Refusing to send is also exactly the denial-of-service a malicious server
+    // would want, so the safe direction is: prefer the higher epoch when we can
+    // still encrypt under it, otherwise take the server's word and say so.
+    const floor = epochFloor(channelId);
+    let currentEpoch = resp.current_epoch;
     if (resp.current_epoch < floor) {
-        console.warn(
-            `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch} but this device ` +
-            `has already seen ${floor} — treating ${floor} as current (rotation must not go backwards)`,
-        );
+        if (keys.has(floor)) {
+            currentEpoch = floor;
+            console.warn(
+                `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch} but this device ` +
+                `already holds ${floor} — staying on ${floor} (rotation must not go backwards)`,
+            );
+        } else {
+            console.warn(
+                `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch}, below the ${floor} ` +
+                `this device has seen, and no key for ${floor} is held — accepting ${resp.current_epoch}. ` +
+                `Expected after a server-side key purge or restore; suspicious otherwise.`,
+            );
+        }
     } else if (resp.current_epoch > floor) {
-        try { localStorage.setItem(floorKey, String(resp.current_epoch)); } catch { /* private mode */ }
+        raiseEpochFloor(channelId, resp.current_epoch);
     }
     return {
         currentEpoch,
@@ -361,6 +375,38 @@ async function getState(channelId: number, forceReload = false): Promise<Channel
 }
 
 /**
+ * Highest channel-key epoch this device has ever seen for `channelId`.
+ *
+ * Persisted so a server cannot roll a client back to a superseded epoch — the
+ * key an ejected member still holds. Per browser profile, which is the right
+ * grain: it records what THIS device observed.
+ */
+function epochFloor(channelId: number): number {
+    try {
+        return Number(localStorage.getItem(`e2ee_epoch_floor_${channelId}`) ?? '0') || 0;
+    } catch {
+        return 0; // private mode / storage disabled: no floor, no false alarms
+    }
+}
+
+/**
+ * Record a newly observed epoch, if it is higher than what we had.
+ *
+ * Called from BOTH the server-load path and every mint, because a mint makes an
+ * epoch current WITHOUT a reload: without the mint call sites the floor lagged a
+ * rotation by one, and a server could roll back to the epoch we had just
+ * rotated away from — precisely the move the floor exists to stop.
+ */
+function raiseEpochFloor(channelId: number, epoch: number): void {
+    if (epoch <= epochFloor(channelId)) return;
+    try {
+        localStorage.setItem(`e2ee_epoch_floor_${channelId}`, String(epoch));
+    } catch {
+        /* private mode */
+    }
+}
+
+/**
  * Ensure a channel key exists that we can encrypt with, returning its epoch and
  * key. If the channel has no keys yet, bootstrap epoch 1 by generating a key and
  * wrapping it for every member. Returns null if E2EE can't be used (no identity,
@@ -383,6 +429,7 @@ export async function ensureChannelKey(
     if (state.currentEpoch === 0) {
         const key = await mintEpoch(channelId, 1, state.currentGeneration);
         if (!key) return null;
+        raiseEpochFloor(channelId, 1);
         cache.set(channelId, {
             currentEpoch: 1,
             currentGeneration: state.currentGeneration,
@@ -407,6 +454,7 @@ export async function ensureChannelKey(
         if (!key) return null; // e.g. no member keys yet — can't send this round
         const newKeys = new Map(state.keys);
         newKeys.set(newEpoch, key);
+        raiseEpochFloor(channelId, newEpoch);
         cache.set(channelId, {
             currentEpoch: newEpoch,
             currentGeneration: state.currentGeneration,
@@ -432,6 +480,7 @@ export async function ensureChannelKey(
         }
         const newKeys = new Map(state.keys);
         newKeys.set(newEpoch, key);
+        raiseEpochFloor(channelId, newEpoch);
         cache.set(channelId, {
             currentEpoch: newEpoch,
             currentGeneration: state.currentGeneration,
