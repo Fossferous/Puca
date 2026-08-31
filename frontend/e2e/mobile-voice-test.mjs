@@ -120,6 +120,47 @@ const overlapInfo = await page.evaluate(() => {
 });
 console.log('>>> [overlap-check]', JSON.stringify(overlapInfo));
 
+// The compact panel is a slim COLLAPSED bar by default on phones — the full
+// two-row panel stood ~230px tall, which with the soft keyboard up left no
+// room for the message list ("everything stacked on top of each other while
+// typing"). Verify the collapsed class, the expand chevron, and the measured
+// --mobile-voice-panel-h variable mobile.css uses to reserve EXACTLY the
+// panel's height (the old hardcoded 172px drifted from the real size and
+// left the composer covered).
+const barInfo = await page.evaluate(() => {
+    const vp = document.querySelector('.voice-panel-compact');
+    if (!vp) return null;
+    return {
+        collapsed: vp.classList.contains('vp-collapsed'),
+        height: vp.getBoundingClientRect().height,
+        reservedVar: document.documentElement.style.getPropertyValue('--mobile-voice-panel-h'),
+        expandBtn: !!vp.querySelector('.vp-expand'),
+    };
+});
+console.log('>>> [collapsed-bar]', JSON.stringify(barInfo));
+
+// The chevron reveals the full control set (noise mode, camera, …) and the
+// reservation variable must follow the taller panel.
+await tryStep('expand-voice-controls', async () => {
+    await page.locator('.vp-expand').tap({ timeout: 3000 });
+    await page.waitForTimeout(500);
+});
+await shot('voice-bar-expanded');
+const expandedInfo = await page.evaluate(() => {
+    const vp = document.querySelector('.voice-panel-compact');
+    if (!vp) return null;
+    return {
+        collapsed: vp.classList.contains('vp-collapsed'),
+        height: vp.getBoundingClientRect().height,
+        reservedVar: document.documentElement.style.getPropertyValue('--mobile-voice-panel-h'),
+    };
+});
+console.log('>>> [expanded-bar]', JSON.stringify(expandedInfo));
+await tryStep('collapse-voice-controls', async () => {
+    await page.locator('.vp-expand').tap({ timeout: 3000 });
+    await page.waitForTimeout(400);
+});
+
 // Also check the checklist-drawer-closes-on-nav fix
 await tryStep('open-channel-checklist', async () => {
     // The drawer-under-test is now the text-channel checklist (self-DM notes

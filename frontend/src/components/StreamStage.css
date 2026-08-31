@@ -852,3 +852,13 @@
     from { background-position: 1rem 0; }
     to { background-position: 0 0; }
 }
+/* --- Mobile (coarse pointer): touch has no hover ------------------------- */
+/* DESIGN_PHILOSOPHY §5: opacity:0-until-:hover controls are invisible but
+   still tappable on a phone — the per-tile strip (mute, fullscreen, stop
+   watching, remote control) simply did not exist for touch users. Gate
+   mirrors mobile.css exactly. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .stream-tile-header {
+        opacity: 1;
+    }
+}

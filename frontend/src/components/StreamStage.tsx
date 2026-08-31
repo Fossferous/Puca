@@ -41,7 +41,7 @@ import { outputGain, applyOutputDevice } from './settingsStore';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
-    CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
+    ChatIcon, CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
     LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, ScreenIcon, SpeakerIcon,
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
@@ -70,6 +70,13 @@ function charToKeyCode(ch: string): string | null {
 
 interface StreamStageProps {
     onBackToChat: () => void;
+    /** Mobile: minimize to the docked mini-player over chat, KEEPING every
+     *  selected stream. When present it replaces the header's "Back to Chat"
+     *  (which deselects everything) — on a phone the stage covers the whole
+     *  screen including the bottom nav, so this button is how you get to the
+     *  composer without giving up the stream. Stopping a stream stays on the
+     *  per-tile close button. */
+    onMinimize?: () => void;
     /** Which stream (if any) is popped out into the OS picture-in-picture
      *  window, and the toggle for it. Optional: absent → no control. */
     poppedStreams?: number[];
@@ -123,7 +130,7 @@ type StreamContextMenu = {
     isOwn: boolean;
 };
 
-export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }: StreamStageProps) {
+export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTogglePopout }: StreamStageProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
     const [streamers, setStreamers] = useState<Array<{ userId: number; username: string; stream: MediaStream | null }>>([]);
     const { focusedStreamId: focusedStream, focusMode, setFocusedStream, setFocusMode } = useStreamStore();
@@ -658,9 +665,19 @@ export function StreamStage({ onBackToChat, poppedStreams = [], onTogglePopout }
                             <StopSharingIcon /> Stop Sharing
                         </button>
                     )}
-                    <button className="back-to-chat-btn" onClick={handleBackToChat}>
-                        ← Back to Chat
-                    </button>
+                    {onMinimize ? (
+                        <button
+                            className="back-to-chat-btn"
+                            onClick={onMinimize}
+                            title="Keep watching in a mini player over chat"
+                        >
+                            <ChatIcon /> Chat
+                        </button>
+                    ) : (
+                        <button className="back-to-chat-btn" onClick={handleBackToChat}>
+                            ← Back to Chat
+                        </button>
+                    )}
                 </div>
             </div>
 
