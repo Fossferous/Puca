@@ -7,11 +7,14 @@
  * remote-control module is still reachable.
  *
  * PUCA_LITE=1 is separate and just as load-bearing: it switches the native
- * app IDENTITY (capacitor.config.ts's appId/appName and android/app/
- * build.gradle's applicationId) so a lite APK is a different app to Android
- * and can be installed alongside the full one. Both are exported here rather
- * than in package.json, because a `VAR=x cmd` prefix in an npm script does not
- * work when npm runs it through cmd.exe on Windows.
+ * variant identity — the visible appName ("Púca Lite"), the versionCode
+ * (base*10+1, so Capgo's bundle-store reset fires on a variant switch) and
+ * BuildConfig.PUCA_VARIANT — while the applicationId deliberately stays THE
+ * SAME as the full build (capacitor.config.ts and build.gradle both pin
+ * com.sovereign.app), so installing one variant REPLACES the other and keeps
+ * the app's data. Both env vars are exported here rather than in
+ * package.json, because a `VAR=x cmd` prefix in an npm script does not work
+ * when npm runs it through cmd.exe on Windows.
  *
  *   node scripts/build-lite.mjs               # bundle only
  *   node scripts/build-lite.mjs --sync android # bundle, then `cap sync android`
@@ -39,6 +42,6 @@ if (syncIdx !== -1) {
         console.error('[build-lite] --sync needs a platform (android | ios)');
         process.exit(1);
     }
-    console.log(`[build-lite] syncing the LITE bundle into ${platform} as com.sovereign.app.lite`);
+    console.log(`[build-lite] syncing the LITE bundle into ${platform} (shared appId com.sovereign.app, appName "Púca Lite")`);
     run('npx', ['cap', 'sync', platform]);
 }
