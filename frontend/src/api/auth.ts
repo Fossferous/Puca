@@ -583,6 +583,23 @@ export async function changePassword(
  * additionally requires the username retyped and refuses while the user still
  * owns servers. On success every outstanding session is evicted.
  */
+/**
+ * Sign out on EVERY device, by bumping the account's `token_version`.
+ *
+ * `logout()` is deliberately local: `token_version` is per-USER and there is no
+ * per-session claim, so bumping it on an ordinary sign-out would kick every
+ * other device — signing out on a phone would drop a desktop mid-call. The
+ * backend route to revoke account-wide has existed since the M1 work but nothing
+ * in the UI ever called it, which left a user who believed a token was stolen
+ * with no remedy short of changing their password.
+ *
+ * The caller's own token is invalidated too, so treat this as terminal: clear
+ * local state and reload.
+ */
+export async function logoutEverywhere(): Promise<void> {
+    await apiClient.post('/auth/logout', {});
+}
+
 export async function deleteAccount(username: string, currentPassword: string): Promise<void> {
     const wrap: {
         key_version: number;

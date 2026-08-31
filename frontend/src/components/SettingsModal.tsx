@@ -4,7 +4,7 @@ import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
-import { changePassword, deleteAccount, requestEmailChange } from '../api/auth';
+import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere } from '../api/auth';
 import { currentAppVersion } from '../api/appVersion';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -336,7 +336,29 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const [deletePassword, setDeletePassword] = useState('');
     const [deleteConfirmName, setDeleteConfirmName] = useState('');
     const [deleteStatus, setDeleteStatus] = useState<'idle' | 'working' | 'error'>('idle');
+    const [logoutAllStatus, setLogoutAllStatus] = useState<'idle' | 'working' | 'error'>('idle');
     const [deleteError, setDeleteError] = useState('');
+
+    /**
+     * Account-wide session revocation.
+     *
+     * Ordinary sign-out is deliberately local: `token_version` is a per-USER
+     * counter with no per-session claim, so bumping it on every sign-out would
+     * kick the desktop when someone signs out on their phone. That left no
+     * remedy at all for a token believed stolen, short of changing the password.
+     * This is that remedy, and it is why it lives behind its own button.
+     */
+    const handleLogoutEverywhere = async () => {
+        setLogoutAllStatus('working');
+        try {
+            await logoutEverywhere();
+            // Every token for this account is now refused, this one included.
+            localStorage.clear();
+            window.location.reload();
+        } catch {
+            setLogoutAllStatus('error');
+        }
+    };
 
     const handleDeleteAccount = async () => {
         setDeleteError('');
@@ -1277,6 +1299,29 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <div className="password-change-error">{pwError}</div>
                                         )}
                                     </form>
+                                </div>
+
+                                <h3>Sessions</h3>
+                                <div className="settings-card">
+                                    <p className="settings-hint">
+                                        Signing out normally only signs out this device. If you think a
+                                        session token has been stolen — a shared or lost computer, a
+                                        browser you did not close — sign out everywhere. Every device is
+                                        signed out immediately, including this one, and you will need to
+                                        log in again.
+                                    </p>
+                                    <button
+                                        className="danger-btn"
+                                        disabled={logoutAllStatus === 'working'}
+                                        onClick={handleLogoutEverywhere}
+                                    >
+                                        {logoutAllStatus === 'working' ? 'Signing out…' : 'Sign out on all devices'}
+                                    </button>
+                                    {logoutAllStatus === 'error' && (
+                                        <div className="password-change-error">
+                                            Could not sign out everywhere. Check your connection and try again.
+                                        </div>
+                                    )}
                                 </div>
 
                                 <h3>Account Removal</h3>
