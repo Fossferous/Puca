@@ -7,7 +7,9 @@
 # the mobile OTA manifest, and whatever webapp bundle is actually served.
 # Nothing in the pipeline ties them together, so shipping a subset — a
 # web-only fix that skips the installer, say — silently leaves them
-# disagreeing.
+# disagreeing. Deployments that ship the LITE variant add three more
+# (latest-lite.json, the ?variant=lite OTA manifest, the lite APK link),
+# checked below only once they exist — a full-only deployment stays green.
 #
 # That drift is not cosmetic. The desktop app decides whether to prompt by
 # comparing /app-version against its own version and then downloads whatever
@@ -82,7 +84,7 @@ if [ "$PREFLIGHT" = "1" ]; then
 	CLASH=0
 	for entry in "${HOSTS[@]}"; do
 		label="${entry%%:*}"
-		live="$(body "$entry" "$DOWNLOAD_HOST" /latest.json | ver_of)"
+		live="$(body "$entry" "$DOWNLOAD_HOST" /latest.json | ver_of || true)"
 		if [ -z "$live" ]; then
 			printf 'WARN  %-6s could not read latest.json — cannot rule out a clash\n' "$label"
 			CLASH=1
@@ -91,6 +93,17 @@ if [ "$PREFLIGHT" = "1" ]; then
 			CLASH=1
 		else
 			printf 'ok    %-6s serving %s, so %s is free\n' "$label" "$live" "$EXPECTED"
+		fi
+		# The LITE channel wears the same version numbers (both variants ship
+		# each release under one number), so a number the lite channel already
+		# serves is just as spoken-for as one the full channel does — a
+		# mid-release crash could leave lite@X live with full@X never shipped.
+		# Absence is fine: a deployment that never shipped lite has no
+		# latest-lite.json and this stays silent.
+		live_lite="$(body "$entry" "$DOWNLOAD_HOST" /latest-lite.json | ver_of || true)"
+		if [ -n "$live_lite" ] && [ "$live_lite" = "$EXPECTED" ]; then
+			printf 'CLASH %-6s lite channel already serving %s\n' "$label" "$live_lite"
+			CLASH=1
 		fi
 	done
 	echo
@@ -145,13 +158,13 @@ for entry in "${HOSTS[@]}"; do
 	# is that the page links an APK at all and that the linked file actually
 	# serves, because a href pointing at a missing file is a 404 wearing a
 	# version number.
-	apk_href="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE "$APK_PREFIX-[0-9.]+\.apk" | head -1)"
+	apk_href="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE "$APK_PREFIX-[0-9.]+\.apk" | head -1 || true)"
 	if [ -z "$apk_href" ]; then
 		printf 'FAIL  %-22s no Android link on the download page\n' "download-page APK"
 		FAILED+=("$label/apk-link")
 	else
 		apk_code="$(ssh_to "$entry" "curl -sk -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$apk_href' --max-time 25" 2>/dev/null || true)"
-		apk_ver="$(printf '%s' "$apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+		apk_ver="$(printf '%s' "$apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 		if [ "$apk_code" = "200" ]; then
 			if [ "$apk_ver" = "$EXPECTED" ]; then
 				printf 'PASS  %-22s %s (current)\n' "download-page APK" "$apk_ver"
@@ -165,6 +178,64 @@ for entry in "${HOSTS[@]}"; do
 		fi
 	fi
 
+	# --- LITE surfaces (the build with no remote control) -------------------
+	# A deployment that never shipped lite is legitimate: absence of EVERY
+	# lite surface is INFO, not FAIL. But once lite IS deployed, the
+	# same-version contract covers it too (both variants ship each release
+	# under one number — CLAUDE.md), so a present lite surface is asserted
+	# exactly like its full sibling. The OTA check additionally demands the
+	# "variant":"lite" tag: the version alone cannot tell the lite manifest
+	# from the full one (same number by design), and a backend that predates
+	# the variant-aware route answers ?variant=lite with the FULL manifest —
+	# which would leave lite phones silently never updating while every
+	# version here still matched.
+	lite_latest="$(body "$entry" "$DOWNLOAD_HOST" /latest-lite.json | ver_of || true)"
+	lite_ota_body="$(body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite')"
+	lite_ota_ver="$(printf '%s' "$lite_ota_body" | ver_of || true)"
+	# grep -c, not -q: -q SIGPIPEs the writer under pipefail.
+	lite_ota_tagged="$(printf '%s' "$lite_ota_body" | grep -cE '"variant"[[:space:]]*:[[:space:]]*"lite"' || true)"
+	if [ -z "$lite_latest" ] && [ "${lite_ota_tagged:-0}" -eq 0 ]; then
+		printf 'INFO  %-22s not deployed on this host (no latest-lite.json, no lite OTA manifest)\n' "lite surfaces"
+	else
+		check "lite latest-lite.json" "$lite_latest"
+		if [ "${lite_ota_tagged:-0}" -gt 0 ]; then
+			check "lite OTA manifest" "$lite_ota_ver"
+		else
+			printf 'FAIL  %-22s ?variant=lite answered "%s" WITHOUT variant:lite — backend predates the variant-aware route\n' \
+				"lite OTA manifest" "${lite_ota_ver:-<empty>}"
+			FAILED+=("$label/lite-ota-variant")
+		fi
+		# Same reported-not-asserted rule as the full APK above: the lite APK
+		# legitimately trails on OTA-only releases; what must hold is that the
+		# page links one and the linked file actually serves. Needs the
+		# APK_PREFIX_LITE name from hosts.conf — an older hosts.conf without
+		# the *_LITE variables skips this one check rather than dying on
+		# set -u (see hosts.conf.example for the variables to add).
+		if [ -n "${APK_PREFIX_LITE:-}" ]; then
+			lite_apk_href="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE "$APK_PREFIX_LITE-[0-9.]+\.apk" | head -1 || true)"
+			if [ -z "$lite_apk_href" ]; then
+				printf 'FAIL  %-22s no lite Android link on the download page\n' "download-page liteAPK"
+				FAILED+=("$label/lite-apk-link")
+			else
+				lite_apk_code="$(ssh_to "$entry" "curl -sk -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$lite_apk_href' --max-time 25" 2>/dev/null || true)"
+				lite_apk_ver="$(printf '%s' "$lite_apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+				if [ "$lite_apk_code" = "200" ]; then
+					if [ "$lite_apk_ver" = "$EXPECTED" ]; then
+						printf 'PASS  %-22s %s (current)\n' "download-page liteAPK" "$lite_apk_ver"
+					else
+						printf 'INFO  %-22s %s (trails %s — same OTA-only rule as the full APK)\n' \
+							"download-page liteAPK" "$lite_apk_ver" "$EXPECTED"
+					fi
+				else
+					printf 'FAIL  %-22s %s linked but serves HTTP %s\n' "download-page liteAPK" "$lite_apk_href" "${lite_apk_code:-<none>}"
+					FAILED+=("$label/lite-apk-file")
+				fi
+			fi
+		else
+			printf 'WARN  %-22s APK_PREFIX_LITE not set in hosts.conf — lite APK link unchecked (see hosts.conf.example)\n' "download-page liteAPK"
+		fi
+	fi
+
 	# The webapp carries no version string, so compare the ENTRY BUNDLE the
 	# host serves against the one in the local dist/ — a hash match is the
 	# only honest way to say "this host is serving the build I just made".
@@ -175,7 +246,7 @@ for entry in "${HOSTS[@]}"; do
 	# first match picks an arbitrary STALE hash and reports a perfectly
 	# correct deployment as drifted, which is exactly what it did on its
 	# first run. index.html names the one entry that is actually loaded.
-	served="$(body "$entry" "$APP_HOST" / | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1)"
+	served="$(body "$entry" "$APP_HOST" / | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1 || true)"
 	local_entry="$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' "$REPO/frontend/dist/index.html" 2>/dev/null | head -1 | sed 's#^assets/##')"
 	if [ -z "$local_entry" ]; then
 		printf 'SKIP  %-22s no local dist/index.html to compare (run npm run build)\n' "webapp bundle"

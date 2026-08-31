@@ -21,7 +21,22 @@
   }
   .logo { font-size: 44px; font-weight: 800; letter-spacing: -0.02em;
     background: linear-gradient(90deg,#a970ff,#4cc4ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .tag { color: #9a95b4; margin: 6px 0 32px; font-size: 15px; }
+  .tag { color: #9a95b4; margin: 6px 0 24px; font-size: 15px; }
+
+  /* Full / Lite picker. Two buttons, one active at a time — plain radio
+     semantics via a hidden input pair, no JS framework needed for the
+     switch itself. JS below only handles the ?variant=lite deep link and
+     the visible/hidden toggle it can't do in pure CSS across browsers this
+     old (no :has() reliance for something this central). */
+  .variant-picker { display: flex; gap: 8px; margin-bottom: 24px; padding: 4px;
+    background: rgba(255,255,255,0.05); border-radius: 12px; }
+  .variant-btn {
+    flex: 1; padding: 10px 12px; border-radius: 9px; border: none; cursor: pointer;
+    font-size: 14px; font-weight: 700; color: #b7b2cf; background: transparent;
+  }
+  .variant-btn.active { color: #fff; background: rgba(255,255,255,0.1); }
+  .variant-btn .sub { display: block; font-weight: 400; font-size: 11px; opacity: .75; margin-top: 2px; }
+
   .downloads { display: flex; flex-direction: column; gap: 12px; align-items: center; }
   .btn {
     display: inline-block; text-decoration: none; font-weight: 700; font-size: 17px;
@@ -40,21 +55,57 @@
   .steps b { color: #e8e6f0; }
   code { background: rgba(255,255,255,0.07); padding: 2px 7px; border-radius: 6px; font-size: 13px; }
   a.link { color: #7fb8ff; }
+  [data-variant-panel] { display: none; }
+  [data-variant-panel].shown { display: block; }
 </style>
 </head>
 <body>
   <div class="card">
     <div class="logo">Puca</div>
     <div class="tag">Self-hosted, end-to-end encrypted chat</div>
-    <div class="downloads">
-      <!-- These two filenames must match INSTALLER_NAME and APK_PREFIX in
-           deploy/ops/hosts.conf: they are what dual-ship.sh uploads. The APK
-           link is checked at ship time and refuses to publish on a mismatch;
-           the installer link is not, so keep it in step by hand. -->
-      <a class="btn" href="/Puca-Setup.exe" download>Download for Windows</a>
-      <a class="btn secondary" href="/mobile/Puca-0.8.117.apk" download>Download for Android (.apk)</a>
+
+    <!-- The FULL panel and its tab are pre-selected in the markup (class
+         "shown"/"active"), not only by the script below: with JavaScript
+         unavailable the panels would otherwise ALL be display:none and this
+         download page would offer zero downloads. JS-off visitors get the
+         full build's links and a dead (but visible) tab row; the script
+         re-applies or overrides the selection the moment it runs. -->
+    <div class="variant-picker" role="tablist" aria-label="Choose a build">
+      <button type="button" class="variant-btn active" id="tab-full" onclick="selectVariant('full')">
+        Full
+        <span class="sub">chat, voice &amp; remote device access</span>
+      </button>
+      <button type="button" class="variant-btn" id="tab-lite" onclick="selectVariant('lite')">
+        Lite
+        <span class="sub">chat &amp; voice — no remote control</span>
+      </button>
     </div>
-    <div class="meta">v0.8.104 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; iOS via TestFlight</div>
+
+    <div data-variant-panel="full" class="shown">
+      <div class="downloads">
+        <!-- These filenames must match INSTALLER_NAME and APK_PREFIX in
+             deploy/ops/hosts.conf: they are what dual-ship.sh's `installer`
+             and `apk` subcommands upload. The APK link is checked at ship
+             time and refuses to publish on a mismatch; the installer link
+             is not, so keep it in step by hand. -->
+        <a class="btn" href="/Puca-Setup.exe" download>Download for Windows</a>
+        <a class="btn secondary" href="/mobile/Puca-0.8.117.apk" download>Download for Android (.apk)</a>
+      </div>
+      <div class="meta">v0.8.104 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; iOS via TestFlight</div>
+    </div>
+
+    <div data-variant-panel="lite">
+      <div class="downloads">
+        <!-- These filenames must match INSTALLER_NAME_LITE and APK_PREFIX_LITE
+             in deploy/ops/hosts.conf: what dual-ship.sh's `installer-lite`
+             and `apk-lite` subcommands upload. Same refuse-until-linked rule
+             as the full APK applies to this one too. -->
+        <a class="btn" href="/Puca-Lite-Setup.exe" download>Download for Windows</a>
+        <a class="btn secondary" href="/mobile/Puca-Lite-0.8.117.apk" download>Download for Android (.apk)</a>
+      </div>
+      <div class="meta">v0.8.104 &middot; Windows 10/11 (64-bit) &middot; Android 7+</div>
+    </div>
+
     <div class="steps">
       <b>Getting started</b><br>
       1. Download and run the installer (Windows) or the .apk (Android).<br>
@@ -68,14 +119,46 @@
       <b>More info &rarr; Run anyway</b>. On Android, allow install from your browser
       and accept the app's own signature.<br>
       <br>
-      <span style="opacity:.8">Antivirus may also quarantine the remote-access
+      <span data-variant-panel="full" class="shown" style="opacity:.8">Antivirus may also quarantine the remote-access
       components (a generic detection such as <b>Trojan:Win32/Bearfoos.B!ml</b>).
       It's a false positive, but an understandable one: those files capture the
       screen, inject input and can install a system service &mdash; what every
       remote-desktop tool does, and what a trojan does too. Unsigned, that's enough
       for a heuristic to act. Remote access is opt-in; chat and voice work without
-      it.</span>
+      it. If you'd rather not have that code on your machine at all, the
+      <a class="link" href="javascript:selectVariant('lite')">Lite build</a> above
+      doesn't include it.</span>
+      <span data-variant-panel="lite" style="opacity:.8">This build contains no
+      remote-access code at all &mdash; no screen capture, no input injection, no
+      system service. Chat, voice and file transfer all work the same as the full
+      build.</span>
     </div>
   </div>
+  <script>
+    // The variant lives in the URL so a link (or the app's own "no update
+    // path" fallback — see api/appVersion.ts's openDownloadPage, which
+    // appends ?variant=lite when RC_ENABLED is false) can land a visitor on
+    // the right panel directly, without them having to know which button to
+    // click. Session-remembered too, so picking one sticks across visits —
+    // this page is what a returning user's browser bookmarked.
+    function selectVariant(v) {
+      v = (v === 'lite') ? 'lite' : 'full';
+      document.querySelectorAll('[data-variant-panel]').forEach(function (el) {
+        el.classList.toggle('shown', el.getAttribute('data-variant-panel') === v);
+      });
+      document.getElementById('tab-full').classList.toggle('active', v === 'full');
+      document.getElementById('tab-lite').classList.toggle('active', v === 'lite');
+      try { sessionStorage.setItem('puca-download-variant', v); } catch (e) { /* private mode */ }
+      var url = new URL(window.location.href);
+      url.searchParams.set('variant', v);
+      history.replaceState(null, '', url);
+    }
+    (function () {
+      var fromQuery = new URLSearchParams(window.location.search).get('variant');
+      var fromSession = null;
+      try { fromSession = sessionStorage.getItem('puca-download-variant'); } catch (e) { /* private mode */ }
+      selectVariant(fromQuery || fromSession || 'full');
+    })();
+  </script>
 </body>
 </html>

@@ -15,11 +15,25 @@
 # it does not change what gets built, just how many places it lands.
 #
 # Usage:
-#   dual-ship.sh webapp    <dist-tarball.tar.gz>
-#   dual-ship.sh mobile    <enc-bundle.zip> <version> <sessionKey> <checksum>
-#   dual-ship.sh installer <setup.exe> <sig-file> <version> <notes>
-#   dual-ship.sh backend   <src-tarball.tar.gz>
-#   dual-ship.sh apk       <Puca-x.y.z.apk> <version>
+#   dual-ship.sh webapp        <dist-tarball.tar.gz>
+#   dual-ship.sh mobile        <enc-bundle.zip> <version> <sessionKey> <checksum>
+#   dual-ship.sh mobile-lite   <enc-bundle.zip> <version> <sessionKey> <checksum>
+#   dual-ship.sh installer     <setup.exe> <sig-file> <version> <notes>
+#   dual-ship.sh installer-lite <setup.exe> <sig-file> <version> <notes>
+#   dual-ship.sh backend       <src-tarball.tar.gz>
+#   dual-ship.sh apk           <Puca-x.y.z.apk> <version>
+#   dual-ship.sh apk-lite      <Puca-Lite-x.y.z.apk> <version>
+#
+# The *-lite subcommands ship the build with NO remote control (see
+# CLAUDE.md's "Lite variant" section) ALONGSIDE the corresponding full one —
+# under INSTALLER_NAME_LITE / APK_PREFIX_LITE / MOBILE_BUNDLE_PREFIX_LITE, a
+# separate latest-lite.json / mobile-update-lite.json — never overwriting the
+# full artifact. There is no lite webapp or lite backend: both are shared
+# unconditionally; only the desktop installer and the two mobile channels
+# differ between the variants. A release that ships lite always ships full
+# too — full is not lite's dependency, but every release described in
+# CLAUDE.md's Deploying section produces both, and shipping one without the
+# other just means half your users are one version behind.
 #
 # Each subcommand loops over every host, then verifies by running curl ON
 # that host against its own loopback — never from wherever this script
@@ -155,13 +169,14 @@ cmd_mobile() {
   \"version\": \"$version\",
   \"url\": \"https://$DOWNLOAD_HOST/mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip\",
   \"sessionKey\": \"$session_key\",
-  \"checksum\": \"$checksum\"
+  \"checksum\": \"$checksum\",
+  \"variant\": \"full\"
 }
 MEOF
 			chown $SERVICE_USER:$SERVICE_USER mobile-update.json"
 		local check seen_version
 		check="$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)"
-		seen_version="$(printf '%s' "$check" | grep -oE '"version":[[:space:]]*"[^"]*"' | head -1 | grep -oE '[0-9][0-9.]*' | head -1)"
+		seen_version="$(printf '%s' "$check" | grep -oE '"version":[[:space:]]*"[^"]*"' | head -1 | grep -oE '[0-9][0-9.]*' | head -1 || true)"
 		if [ "$seen_version" = "$version" ]; then
 			echo "PASS  $label OTA endpoint reports $seen_version"
 		else
@@ -172,6 +187,90 @@ MEOF
 		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip")"
 		[ "$bundle_code" = "200" ] && echo "PASS  $label bundle downloadable" \
 			|| { echo "FAIL  $label bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-bundle"); }
+	done
+}
+
+# Same shape as cmd_mobile, for the build with no remote control. Writes a
+# SEPARATE manifest (mobile-update-lite.json) that only
+# GET /api/mobile-updates/check?variant=lite serves — see
+# src/update_routes.rs. Never touches mobile-update.json or the full bundle,
+# so running this alone cannot regress an existing full install.
+#
+# The "variant":"lite" field in the manifest is what the app's own
+# bundleVariantMatches (frontend/src/components/updateGate.utils.ts) checks
+# before installing ANY downloaded bundle — belt and braces on top of the
+# endpoint split: even a manifest served from the wrong file, or copy-pasted
+# by hand, still gets refused client-side if the tag doesn't match the build
+# that's asking.
+cmd_mobile_lite() {
+	local bundle="${1:?enc bundle}" version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
+	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
+	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
+	for entry in "${HOSTS[@]}"; do
+		local label; label="$(label_of "$entry")"
+		echo "=== mobile OTA (lite) $version -> $label ==="
+		# Snapshot the FULL endpoint before touching anything, so "the full
+		# channel was not disturbed" can be PROVEN by comparison afterwards.
+		# The first version of this check accepted any 200-or-404 answer —
+		# and 404 is exactly what a deleted full manifest produces, so it
+		# could not detect the one regression it existed to rule out.
+		local full_before full_after
+		full_before="$(remote_code "$entry" "$API_HOST" /api/mobile-updates/check):$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)"
+		scp_to "$entry" "$bundle" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip"
+		ssh_to "$entry" "set -e
+			cd $INSTALL_DIR
+			[ -f mobile-update-lite.json ] && cp -a mobile-update-lite.json mobile-update-lite.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
+			cat > mobile-update-lite.json <<'MEOF'
+{
+  \"version\": \"$version\",
+  \"url\": \"https://$DOWNLOAD_HOST/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip\",
+  \"sessionKey\": \"$session_key\",
+  \"checksum\": \"$checksum\",
+  \"variant\": \"lite\"
+}
+MEOF
+			chown $SERVICE_USER:$SERVICE_USER mobile-update-lite.json"
+		local check seen_version tag_hits
+		check="$(remote_body "$entry" "$API_HOST" "/api/mobile-updates/check?variant=lite")"
+		seen_version="$(printf '%s' "$check" | grep -oE '"version":[[:space:]]*"[^"]*"' | head -1 | grep -oE '[0-9][0-9.]*' | head -1 || true)"
+		# The version alone cannot prove the LITE manifest answered: both
+		# variants ship the same version number, so a backend that predates
+		# the variant-aware route ignores the query param, serves the FULL
+		# manifest, and still matches on version — a false PASS while every
+		# lite phone silently stops updating (the client refuses a full
+		# manifest, fail-closed, and is then never offered anything else).
+		# The variant tag is the only discriminator, so demand it.
+		# grep -c, not -q: -q SIGPIPEs the writer under pipefail (see the
+		# webapp preflight above for the history).
+		tag_hits="$(printf '%s' "$check" | grep -cE '"variant"[[:space:]]*:[[:space:]]*"lite"' || true)"
+		if [ "$seen_version" != "$version" ]; then
+			echo "FAIL  $label lite OTA endpoint reports '$seen_version', expected $version"
+			FAILED+=("$label:mobile-lite")
+		elif [ "${tag_hits:-0}" -eq 0 ]; then
+			echo "FAIL  $label ?variant=lite answered version $seen_version WITHOUT \"variant\":\"lite\" —"
+			echo "      this host's backend predates the variant-aware route and is serving the FULL"
+			echo "      manifest on the lite channel. Ship the backend here, then re-run mobile-lite."
+			FAILED+=("$label:mobile-lite-variant")
+		else
+			echo "PASS  $label lite OTA endpoint reports $seen_version with variant:lite"
+		fi
+		# Confirm the FULL endpoint was NOT disturbed by this ship — the two
+		# manifests live in different files specifically so one can never
+		# clobber the other, and comparing the endpoint's answer before vs
+		# after is what actually proves that in practice, rather than by
+		# inspecting the code. (Status-only checks cannot: a deleted full
+		# manifest and a never-shipped one both answer 404.)
+		full_after="$(remote_code "$entry" "$API_HOST" /api/mobile-updates/check):$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)"
+		if [ "$full_after" = "$full_before" ]; then
+			echo "PASS  $label full OTA endpoint undisturbed"
+		else
+			echo "FAIL  $label full OTA endpoint CHANGED during a lite ship (HTTP ${full_before%%:*} -> ${full_after%%:*}; bodies compared)"
+			FAILED+=("$label:mobile-lite-isolation")
+		fi
+		local bundle_code
+		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip")"
+		[ "$bundle_code" = "200" ] && echo "PASS  $label lite bundle downloadable" \
+			|| { echo "FAIL  $label lite bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-lite-bundle"); }
 	done
 }
 
@@ -212,6 +311,51 @@ VEOF"
 		else
 			echo "FAIL  $label installer hash mismatch"
 			FAILED+=("$label:installer")
+		fi
+	done
+}
+
+# Same shape as cmd_installer, for the build with no remote control. Writes
+# latest-lite.json instead of latest.json — the desktop Tauri updater reads
+# whichever URL was baked into the binary at build time (tauri.conf.json vs
+# tauri.lite.conf.json), so this needs no query-param trick the way mobile
+# does; each variant only ever asks for its own manifest.
+#
+# Deliberately does NOT touch app-version.json: that file drives the
+# in-browser fallback download page, is identical for both variants (same
+# version number, same notes — see CLAUDE.md), and the frontend already
+# appends ?variant=lite itself before opening it (api/appVersion.ts). Writing
+# it twice would only risk the two ships disagreeing about its content.
+cmd_installer_lite() {
+	local exe="${1:?setup.exe}" sig_file="${2:?sig file}" version="${3:?version}" notes="${4:?notes}"
+	local sig; sig="$(cat "$sig_file")"
+	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
+	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	for entry in "${HOSTS[@]}"; do
+		local label; label="$(label_of "$entry")"
+		echo "=== installer (lite) $version -> $label ==="
+		scp_to "$entry" "$exe" "${entry#*:}:/tmp/Puca-Lite-Setup-dual.exe"
+		ssh_to "$entry" "set -e
+			cd $INSTALL_DIR/downloads
+			[ -f $INSTALLER_NAME_LITE ] && cp -a $INSTALLER_NAME_LITE $INSTALLER_NAME_LITE.bak-dual-\$(date +%Y%m%d-%H%M%S)
+			[ -f latest-lite.json ] && cp -a latest-lite.json latest-lite.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
+			mv /tmp/Puca-Lite-Setup-dual.exe $INSTALLER_NAME_LITE
+			chmod 644 $INSTALLER_NAME_LITE
+			cat > latest-lite.json <<JEOF
+{
+  \"version\": \"$version\",
+  \"notes\": \"$notes\",
+  \"pub_date\": \"$pub_date\",
+  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$INSTALLER_NAME_LITE\" } }
+}
+JEOF"
+		local served_sha
+		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME_LITE --max-time 120 | sha256sum | cut -d' ' -f1")"
+		if [ "$served_sha" = "$local_sha" ]; then
+			echo "PASS  $label lite installer hash matches"
+		else
+			echo "FAIL  $label lite installer hash mismatch"
+			FAILED+=("$label:installer-lite")
 		fi
 	done
 }
@@ -358,15 +502,62 @@ cmd_apk() {
 	done
 }
 
+# Same shape as cmd_apk, for the build with no remote control. Same
+# page-must-already-link-it refusal, checked against APK_PREFIX_LITE. Each
+# APK subcommand guards only ITS OWN link — apk does not require the lite
+# link and apk-lite does not require the full one, deliberately: a full-only
+# release (an operator who never adopted lite) must stay shippable. What
+# keeps the two Android links moving together is the release process
+# shipping both variants at the same version, plus check-versions.sh
+# flagging a lite surface that trails once lite is deployed — not a
+# cross-gate here.
+cmd_apk_lite() {
+	local apk="${1:?usage: dual-ship.sh apk-lite <APK> <version>}" version="${2:?version}"
+	local page="$HERE/../download-site/index.html"
+	[ -f "$HERE/../download-site/index.local.html" ] && page="$HERE/../download-site/index.local.html"
+	if ! grep -q "$APK_PREFIX_LITE-$version.apk" "$page"; then
+		echo "REFUSING: $page does not link $APK_PREFIX_LITE-$version.apk."
+		echo "Update the lite Android href + version label there first — the page and the APK ship together."
+		exit 1
+	fi
+	local local_sha; local_sha="$(sha256sum "$apk" | cut -d' ' -f1)"
+	for entry in "${HOSTS[@]}"; do
+		local label; label="$(label_of "$entry")"
+		echo "=== apk (lite) $version -> $label ==="
+		scp_to "$entry" "$apk" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$APK_PREFIX_LITE-$version.apk"
+		scp_to "$entry" "$page" "${entry#*:}:$INSTALL_DIR/downloads/index.html"
+		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/mobile/$APK_PREFIX_LITE-$version.apk $INSTALL_DIR/downloads/index.html"
+		local served_sha
+		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/mobile/$APK_PREFIX_LITE-$version.apk' --max-time 120 | sha256sum | cut -d' ' -f1")"
+		if [ "$served_sha" = "$local_sha" ]; then
+			echo "PASS  $label lite apk hash matches"
+		else
+			echo "FAIL  $label lite apk hash mismatch"
+			FAILED+=("$label:apk-lite")
+		fi
+		local page_links
+		page_links="$(remote_body "$entry" "$DOWNLOAD_HOST" / | grep -c "$APK_PREFIX_LITE-$version.apk" || true)"
+		if [ "${page_links:-0}" -gt 0 ]; then
+			echo "PASS  $label download page links the new lite APK"
+		else
+			echo "FAIL  $label download page does not link $APK_PREFIX_LITE-$version.apk"
+			FAILED+=("$label:apk-lite-page")
+		fi
+	done
+}
+
 main() {
 	local sub="${1:-}"; shift || true
 	case "$sub" in
-		webapp)    cmd_webapp "$@" ;;
-		mobile)    cmd_mobile "$@" ;;
-		installer) cmd_installer "$@" ;;
-		backend)   cmd_backend "$@" ;;
-		apk)       cmd_apk "$@" ;;
-		*) echo "usage: dual-ship.sh {webapp|mobile|installer|backend|apk} ..." >&2; exit 2 ;;
+		webapp)         cmd_webapp "$@" ;;
+		mobile)         cmd_mobile "$@" ;;
+		mobile-lite)    cmd_mobile_lite "$@" ;;
+		installer)      cmd_installer "$@" ;;
+		installer-lite) cmd_installer_lite "$@" ;;
+		backend)        cmd_backend "$@" ;;
+		apk)            cmd_apk "$@" ;;
+		apk-lite)       cmd_apk_lite "$@" ;;
+		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|installer|installer-lite|backend|apk|apk-lite} ..." >&2; exit 2 ;;
 	esac
 
 	# Independent of what was shipped: confirm each host identifies as itself,

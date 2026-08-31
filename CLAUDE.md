@@ -141,13 +141,43 @@ second box as a rollback target, that rollback is only real if it has kept
 receiving every release — otherwise "rolling back" means downgrading every user
 to whatever it was last given, without warning.
 
-**Ship with `deploy/ops/dual-ship.sh {webapp|mobile|installer|backend|apk} ...`,
-never a manual `scp`/`ssh` to one box.** A single-host deploy leaves the others
-silently stale, which looks identical to a successful release. dual-ship.sh
-refuses to report success unless it verified EVERY host individually, over that
-host's own loopback — if you run an origin lock (only your CDN may reach the
-origin), an external check depends on the caller's source IP being exempt, and a
-changed source IP once turned a perfectly healthy box into a connection timeout.
+**Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|installer|
+installer-lite|backend|apk|apk-lite} ...`, never a manual `scp`/`ssh` to one
+box.** A single-host deploy leaves the others silently stale, which looks
+identical to a successful release. dual-ship.sh refuses to report success
+unless it verified EVERY host individually, over that host's own loopback — if
+you run an origin lock (only your CDN may reach the origin), an external check
+depends on the caller's source IP being exempt, and a changed source IP once
+turned a perfectly healthy box into a connection timeout.
+
+**The `*-lite` subcommands ship the Lite variant** (no remote-control code —
+My Devices, Wake-on-LAN, remote file transfer, in-call screen-share control —
+excluded at compile time, not just hidden). Lite is a separate artifact under
+a separate name (`INSTALLER_NAME_LITE`, `MOBILE_BUNDLE_PREFIX_LITE`,
+`APK_PREFIX_LITE` in `hosts.conf`), uploaded **alongside**, never over, the
+full one — both variants ship the same version number. `apk-lite` refuses to
+publish until `deploy/download-site/index.html` actually links the exact lite
+APK filename, the same page-and-APK-ship-together gate `apk` has. The
+installer links carry no version in their filenames, so neither installer
+subcommand has that gate — the page's own HTML comments say which names must
+be kept in step by hand. **There is no lite webapp and no lite backend** —
+the web app and the server are shared unconditionally between both variants,
+so `webapp` and `backend` ship once and cover both.
+
+Mobile OTA is variant-aware over one query param: the installed app requests
+`GET /api/mobile-updates/check?variant=lite` (full omits the param), and
+`src/update_routes.rs` resolves that to `mobile-update-lite.json` instead of
+`mobile-update.json` on the server (env vars `MOBILE_UPDATE_FILE_LITE` /
+`MOBILE_UPDATE_FILE` override the filenames; defaults match). `mobile-lite`
+writes the lite manifest and verifies it through that same query param,
+demanding the `"variant": "lite"` tag in the answer — the version number alone
+proves nothing, since both variants ship the same one and a backend that
+predates the variant-aware route answers `?variant=lite` with the full
+manifest. Never assume the plain endpoint reflects a lite ship. The download page
+(`deploy/download-site/index.html`) understands `?variant=lite` too, so the
+client's own "no update path" fallback (`api/appVersion.ts`'s
+`openDownloadPage`, which appends `?variant=lite` when `RC_ENABLED` is false)
+lands a lite user on the lite tab, not the full one.
 
 Confirm which box actually answered a request with
 `curl -sI https://$API_HOST/ | grep -i "$HOST_HEADER"` (both from `hosts.conf`).

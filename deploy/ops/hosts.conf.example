@@ -61,6 +61,20 @@ INSTALLER_NAME="Puca-Setup.exe"     # desktop installer at DOWNLOAD_HOST/<this>
 MOBILE_BUNDLE_PREFIX="puca-web"     # OTA bundle: <prefix>-<version>.enc.zip
 APK_PREFIX="Puca"                   # Android build: <prefix>-<version>.apk
 
+# The LITE variant (no remote control) is a SEPARATE artifact under a
+# distinct name, never a suffix or a different version of the ones above —
+# both variants ship the same version number, and dual-ship.sh's
+# installer-lite/apk-lite/mobile-lite subcommands upload these alongside,
+# never over, the full ones. The lite OTA manifest's filename is NOT
+# configurable here: dual-ship.sh writes mobile-update-lite.json (hardcoded),
+# which is the backend's default for its MOBILE_UPDATE_FILE_LITE env var
+# (src/update_routes.rs). Do not override that env var on the server — the
+# ship would write one file while the endpoint reads another, and the
+# mobile-lite verification would fail on every host.
+INSTALLER_NAME_LITE="Puca-Lite-Setup.exe"
+MOBILE_BUNDLE_PREFIX_LITE="puca-web-lite"
+APK_PREFIX_LITE="Puca-Lite"
+
 # ------------------------------------------------------------------ ssh ----
 #
 # StrictHostKeyChecking=yes, NOT accept-new.
