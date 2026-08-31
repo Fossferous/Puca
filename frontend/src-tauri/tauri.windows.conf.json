@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "//": [
+    "Windows-only overlay, merged over tauri.conf.json by Tauri itself.",
+    "puca-service is the WINDOWS service (SCM install, ProgramFiles paths,",
+    "NSIS hooks) and build-agent.mjs only builds/stages it on win32 — so the",
+    "base config must not demand it on Linux/macOS, where the missing staged",
+    "binary failed the whole build. JSON merge REPLACES arrays, so this list",
+    "must name every Windows sidecar, agent included."
+  ],
+  "bundle": {
+    "externalBin": [
+      "binaries/puca-agent",
+      "binaries/puca-service"
+    ]
+  }
+}
