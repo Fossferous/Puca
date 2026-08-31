@@ -279,6 +279,21 @@ cmd_installer() {
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	# THE UPDATER MANIFEST POINTS AT A VERSIONED NAME, NEVER THE STABLE ONE.
+	#
+	# Cloudflare caches .exe at the edge (measured: Cache-Control max-age=14400,
+	# a 4-hour TTL) while latest.json is no-store — so after a release, a
+	# client's fresh manifest carried the NEW signature while the stable
+	# $INSTALLER_NAME URL still served the PREVIOUS release's bytes from the
+	# edge. Signature verification then fails on every retry until the TTL
+	# expires — surfaced to users as "This update could not be installed", and
+	# invisible to this script because its per-host verification deliberately
+	# runs over loopback, which bypasses the CDN entirely (a machine sat
+	# unupdatable on 0.8.117 for exactly this on 2026-08-31). A versioned URL
+	# has never been fetched before a release exists, so it can never be
+	# stale. The stable name is still uploaded — it is what the download page
+	# links for humans, where an edge-TTL of staleness is tolerable.
+	local versioned="${INSTALLER_NAME%.exe}-$version.exe"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== installer $version -> $label ==="
@@ -287,14 +302,15 @@ cmd_installer() {
 			cd $INSTALL_DIR/downloads
 			[ -f $INSTALLER_NAME ] && cp -a $INSTALLER_NAME $INSTALLER_NAME.bak-dual-\$(date +%Y%m%d-%H%M%S)
 			[ -f latest.json ] && cp -a latest.json latest.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
+			cp /tmp/Puca-Setup-dual.exe $versioned
 			mv /tmp/Puca-Setup-dual.exe $INSTALLER_NAME
-			chmod 644 $INSTALLER_NAME
+			chmod 644 $INSTALLER_NAME $versioned
 			cat > latest.json <<JEOF
 {
   \"version\": \"$version\",
   \"notes\": \"$notes\",
   \"pub_date\": \"$pub_date\",
-  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$INSTALLER_NAME\" } }
+  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$versioned\" } }
 }
 JEOF
 			cat > $INSTALL_DIR/app-version.json <<VEOF
@@ -313,6 +329,46 @@ VEOF"
 			FAILED+=("$label:installer")
 		fi
 	done
+	verify_cdn_exe "$versioned" "$local_sha" "installer" "$INSTALLER_NAME"
+}
+
+# Fetch the updater's exe through the CDN — the path CLIENTS actually take —
+# and hash-compare. The loopback checks above prove each ORIGIN is right;
+# this proves the edge is handing out the same bytes the manifest's
+# signature was made for, which is the exact thing that silently broke on
+# 2026-08-31. Runs ONCE (the edge is global, not per-host), from this
+# machine over normal DNS — that traffic goes THROUGH Cloudflare, so the
+# origin lock does not apply to it (only direct-to-origin checks are the
+# trap CLAUDE.md warns about). The stable page name is checked too, but only
+# WARNS when stale: its edge copy lags by up to the cache TTL by design, and
+# a human who grabs the previous installer just auto-updates on first run.
+verify_cdn_exe() {
+	local versioned="$1" local_sha="$2" tag="$3" stable="$4"
+	local cdn_sha
+	cdn_sha="$(curl -sL "https://$DOWNLOAD_HOST/$versioned" --max-time 300 | sha256sum | cut -d' ' -f1 || true)"
+	if [ "$cdn_sha" != "$local_sha" ]; then
+		# One retry after a minute: Cloudflare negative-caches a 404 for a few
+		# minutes, so any probe of the versioned URL from before this ship
+		# (a curious curl, a client that raced the upload) leaves a brief
+		# window where the edge answers with the cached error. Measured live
+		# on this check's very first run, 2026-08-31.
+		echo "  ...  CDN bytes for $versioned don't match yet (negative-cache window?) — retrying in 60s"
+		sleep 60
+		cdn_sha="$(curl -sL "https://$DOWNLOAD_HOST/$versioned" --max-time 300 | sha256sum | cut -d' ' -f1 || true)"
+	fi
+	if [ "$cdn_sha" = "$local_sha" ]; then
+		echo "PASS  CDN serves the versioned $tag correctly ($versioned)"
+	else
+		echo "FAIL  CDN returned wrong bytes for $versioned — the UPDATER url is bad; do not trust this release until this passes"
+		FAILED+=("cdn:$tag-versioned")
+	fi
+	local stable_sha
+	stable_sha="$(curl -sL "https://$DOWNLOAD_HOST/$stable" --max-time 300 | sha256sum | cut -d' ' -f1 || true)"
+	if [ "$stable_sha" = "$local_sha" ]; then
+		echo "PASS  CDN serves the stable page name fresh ($stable)"
+	else
+		echo "WARN  CDN still serves an older $stable at the edge (expected for up to its cache TTL; page downloads lag, the updater does not)"
+	fi
 }
 
 # Same shape as cmd_installer, for the build with no remote control. Writes
@@ -331,6 +387,11 @@ cmd_installer_lite() {
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	# Versioned updater URL for the same reason as cmd_installer (see its
+	# header comment): the stable name can be stale at the CDN edge for its
+	# whole cache TTL, and a fresh manifest + stale exe = signature failure
+	# on every client until the edge expires.
+	local versioned="${INSTALLER_NAME_LITE%.exe}-$version.exe"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== installer (lite) $version -> $label ==="
@@ -339,14 +400,15 @@ cmd_installer_lite() {
 			cd $INSTALL_DIR/downloads
 			[ -f $INSTALLER_NAME_LITE ] && cp -a $INSTALLER_NAME_LITE $INSTALLER_NAME_LITE.bak-dual-\$(date +%Y%m%d-%H%M%S)
 			[ -f latest-lite.json ] && cp -a latest-lite.json latest-lite.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
+			cp /tmp/Puca-Lite-Setup-dual.exe $versioned
 			mv /tmp/Puca-Lite-Setup-dual.exe $INSTALLER_NAME_LITE
-			chmod 644 $INSTALLER_NAME_LITE
+			chmod 644 $INSTALLER_NAME_LITE $versioned
 			cat > latest-lite.json <<JEOF
 {
   \"version\": \"$version\",
   \"notes\": \"$notes\",
   \"pub_date\": \"$pub_date\",
-  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$INSTALLER_NAME_LITE\" } }
+  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$versioned\" } }
 }
 JEOF"
 		local served_sha
@@ -358,6 +420,7 @@ JEOF"
 			FAILED+=("$label:installer-lite")
 		fi
 	done
+	verify_cdn_exe "$versioned" "$local_sha" "installer-lite" "$INSTALLER_NAME_LITE"
 }
 
 # Refuse to ship a backend whose migration BYTES don't match what a target
