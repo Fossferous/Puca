@@ -139,7 +139,25 @@ class WebSocketClient {
         let opened = false;
 
         return new Promise((resolve, reject) => {
-            const socket = new WebSocket(`${WS_URL}?token=${token}`);
+            // The token rides Sec-WebSocket-Protocol, NOT the query string.
+            //
+            // A query string is written verbatim into the access log of every
+            // proxy and web server on the path — the Caddy in front of this one
+            // included — so `?token=<jwt>` deposited a live session credential
+            // into log files that rotate, ship off-box and get backed up, by
+            // software with no idea it was handling one. Browsers cannot set an
+            // Authorization header on a WebSocket (the constructor takes only a
+            // URL and a subprotocol list); the subprotocol header is the
+            // standard way round that, and nothing on this path logs it.
+            //
+            // Two values by convention: the marker, then the credential. The
+            // server echoes back only "bearer" — it must echo something or the
+            // browser fails the connection, and echoing the token would put it
+            // in a response header and undo the point.
+            //
+            // The backend accepts both forms and ships BEFORE this, so a client
+            // can never meet a server that understands neither.
+            const socket = new WebSocket(WS_URL, ['bearer', token]);
             this.ws = socket;
 
             socket.onopen = () => {
