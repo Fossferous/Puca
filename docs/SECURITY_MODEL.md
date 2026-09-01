@@ -206,7 +206,8 @@ serving push-to-talk and the remote-control kill switch.)
   bundled binary (`externalBin` in `tauri.conf.json`) and the app links and calls it
   (`src-tauri/Cargo.toml`, `src-tauri/src/lock_screen.rs`). Same rule as the Run key below — a
   sentence that loses to one command costs more trust than the thing it was denying, and the
-  command here is `sc query PúcaRemote`.
+  command here is `sc query SovereignRemote` — the service keeps its original
+  registration name, because renaming it would orphan every already-installed copy.
 
   What is still true is the part that actually matters: **installing Púca registers
   nothing.** No service is created, nothing is written to Program Files, and no elevation
