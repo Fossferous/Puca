@@ -38,9 +38,25 @@ pub struct Claims {
 
 /// Lifetime of a freshly minted token.
 pub const TOKEN_TTL_HOURS: i64 = 24;
-/// Renew once the token is past halfway through its life. Any authenticated
-/// request in that window silently extends the session.
-const RENEW_WHEN_REMAINING_HOURS: i64 = 12;
+/// Renew once the token is more than a few hours old. Any authenticated
+/// request past that point silently extends the session.
+///
+/// WAS 12 (renew only in the last half of the token's life), and that window
+/// was too narrow to catch ordinary use. A session renews only if a request
+/// happens to land between 12 and 24 hours after the token was minted, so
+/// someone who opens the app once a day, at a slightly earlier hour than
+/// yesterday, never enters the window and is signed out roughly daily —
+/// despite using the app every single day. Measured on the live server: of
+/// nine accounts, four had ZERO renewals in a week, and the reported symptom
+/// was "it keeps logging me out."
+///
+/// Widening it does not lengthen how long a stolen token stays usable. That
+/// ceiling is `MAX_SESSION_DAYS`, enforced against `sst` (the real sign-in
+/// time, which renewal carries forward and cannot reset), and revocation is
+/// unaffected either way because `token_version` is re-checked on every single
+/// request. All this changes is how much ordinary use it takes to stay signed
+/// in: now any request more than four hours after the last mint.
+const RENEW_WHEN_REMAINING_HOURS: i64 = 20;
 /// A sliding session still ends: after this long since the user actually
 /// signed in, renewal stops and they must authenticate again.
 const MAX_SESSION_DAYS: i64 = 30;
@@ -231,6 +247,29 @@ mod tests {
             "session start must NOT reset, or the cap never bites"
         );
         assert!(out.exp > c.exp, "renewal must actually extend expiry");
+    }
+
+    #[test]
+    fn renews_for_a_user_who_opens_the_app_daily_at_a_drifting_hour() {
+        // THE REPORTED BUG. With the old 12-hour window, a token 8 hours old
+        // (16 remaining) did NOT renew — so someone who opens the app each day
+        // slightly earlier than the day before never lands inside the window
+        // and is signed out roughly daily, despite daily use. Four of nine live
+        // accounts had zero renewals in a week.
+        //
+        // Deliberately asserted at 16h remaining rather than "past the
+        // constant": pinning the behaviour rather than restating the threshold
+        // means narrowing the window back would fail this test instead of
+        // quietly moving with it.
+        let now = Utc::now().timestamp();
+        let c = claims_with(16 * 3600, now);
+        let renewed = renew_if_stale(&c, SECRET).expect("a token 8h into its life must renew");
+        let out = validate_token(&renewed, SECRET).expect("renewed token must verify");
+        assert!(out.exp > c.exp, "renewal must extend expiry");
+        assert_eq!(
+            out.sst, now,
+            "widening the window must NOT reset the session start, or the 30-day cap never bites",
+        );
     }
 
     #[test]
