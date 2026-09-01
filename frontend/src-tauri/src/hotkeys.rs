@@ -82,6 +82,26 @@ mod imp {
         WATCH.iter().position(|w| w.load(Ordering::SeqCst) == vk)
     }
 
+    /// Counts transitions the hook has actually emitted. Read by `diag` — the
+    /// one number that separates "the hook is not receiving" from "it receives
+    /// and something downstream drops it", which look identical to a user.
+    static EVENTS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    pub(super) fn diag() -> serde_json::Value {
+        let watching: Vec<u32> = WATCH
+            .iter()
+            .map(|w| w.load(Ordering::SeqCst))
+            .filter(|v| *v != 0)
+            .collect();
+        serde_json::json!({
+            "platform": "windows",
+            "active": ACTIVE.load(Ordering::SeqCst),
+            "hook_live": HOOK_LIVE.load(Ordering::SeqCst),
+            "watching": watching,
+            "events_seen": EVENTS_SEEN.load(Ordering::SeqCst),
+        })
+    }
+
     /// Hands transitions from the hook callback to a dedicated emitter thread.
     ///
     /// `app.emit` used to run INSIDE the hook proc. That call serializes the
@@ -139,6 +159,7 @@ mod imp {
             shift_key: down_now(VK_SHIFT.0 as i32),
             down: is_down,
         };
+        EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
         let _ = emitter().send(ev); // receiver lives for the process
     }
 
@@ -360,6 +381,40 @@ pub fn start(app: tauri::AppHandle, keys: Vec<u32>) -> bool {
 #[cfg(windows)]
 pub fn stop() {
     imp::stop();
+}
+
+/// What the native feed currently believes, for diagnosing "hotkeys don't work
+/// when Puca isn't focused".
+///
+/// EXISTS BECAUSE GUESSING FAILED. That report has been chased three times on
+/// three different theories — modifiers not subset-matching, a hook silently
+/// removed for exceeding its latency budget, and the shipped defaults being
+/// deliberately in-app only — each plausible, each fixed, and the report
+/// survived all three. Nothing observable from outside distinguishes "the hook
+/// was never installed" from "the key never reached the watch list" from
+/// "presses arrive and something later discards them", and those have entirely
+/// different causes.
+///
+/// `active`: the feed was asked to run. `hook_live`: SetWindowsHookExW
+/// actually succeeded. `watching`: the virtual-key codes in the watch list — a
+/// missing key here means the problem is upstream in the frontend, not in the
+/// hook. `events_seen`: transitions emitted since start; still zero while
+/// pressing the key means the hook is not receiving at all.
+#[cfg(windows)]
+pub fn diag() -> serde_json::Value {
+    imp::diag()
+}
+
+#[cfg(not(windows))]
+pub fn diag() -> serde_json::Value {
+    serde_json::json!({
+        "platform": "non-windows",
+        "active": false,
+        "hook_live": false,
+        "watching": Vec::<u32>::new(),
+        "events_seen": 0,
+        "note": "global hotkeys need the Windows low-level hook; unavailable here",
+    })
 }
 
 #[cfg(not(windows))]
