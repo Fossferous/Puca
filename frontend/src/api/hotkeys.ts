@@ -484,5 +484,25 @@ if (typeof window !== 'undefined') {
         nativeFeedActive: () => nativeFeedActive,
         allowedActions: () => (nativeAllow ? [...nativeAllow] : null),
         registered: () => ({ hold: [...holdActions.keys()], press: [...pressActions.keys()] }),
+        // What the NATIVE side believes — the low-level hook itself. That is
+        // the half that can die without the JS side noticing, which is why
+        // "hotkeys stop after a while" could not be diagnosed from up here.
+        //
+        //   await __pucaHotkeysDebug.native()      (DevTools, during a call)
+        //
+        //   hook_live false        -> the hook is not installed
+        //   watching missing a VK  -> the bind never reached the native side
+        //   events_seen stuck at 0 -> installed but receiving nothing
+        //   events_seen rising     -> the hook sees the key; a later stage drops it
+        //   rearms                 -> times the watchdog re-installed the hook
+        //
+        // Reached through this object, not window.__TAURI__: withGlobalTauri
+        // is off on purpose (it would hand full IPC to any injected script),
+        // so `invoke` only exists in module code like this.
+        native: async () => {
+            if (!isTauri()) return { platform: 'web', note: 'no native hook in a browser' };
+            const { invoke } = await import('@tauri-apps/api/core');
+            return invoke('hotkey_diag');
+        },
     };
 }
