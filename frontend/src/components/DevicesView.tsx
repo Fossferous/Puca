@@ -80,6 +80,7 @@ import {
     lockScreenState,
     enableLockScreenAccess,
     disableLockScreenAccess,
+    forgetThisMachine,
     type LockScreenState,
     unattendedAccessState,
     enrolLockScreenAccess,
@@ -692,6 +693,35 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         // elevation prompt the switch must go back on its own, and if the helper
         // half-succeeded the truth is on the machine, not in our return value.
         setLockScreen(await lockScreenState());
+        setBusyId(null);
+    };
+
+    // "Off, and take the key with you."
+    //
+    // Deliberately confirmed rather than a plain switch: unlike turning the
+    // feature off, this one cannot be undone by turning it back on — the
+    // machine has to be set up again from scratch. It is also offered when the
+    // feature is already OFF, which is the case that actually needed it: the
+    // key outlives the switch, so someone who has already turned it off is
+    // exactly the person with no other way to remove it.
+    const doForgetThisMachine = async () => {
+        const ok = window.confirm(
+            'Erase this computer’s key?\n\n'
+            + 'Lock-screen access will be turned off and this computer’s own key, '
+            + 'passphrase record and connection details will be deleted from it.\n\n'
+            + 'Turning the feature on again afterwards means setting this computer up '
+            + 'from scratch. Nothing about your account or your messages is affected.',
+        );
+        if (!ok) return;
+        setBusyId('lock-screen');
+        setError(null);
+        const err = await forgetThisMachine();
+        if (err) setError(err);
+        setLockScreen(await lockScreenState());
+        // The enrolment is what this just erased, so the sign-in-screen panel
+        // must be re-read too or it keeps offering controls for a machine that
+        // is no longer enrolled.
+        await refreshSignIn();
         setBusyId(null);
     };
 
@@ -1582,10 +1612,17 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                         as the system account and starts with Windows. It runs a
                                         capture agent ONLY while this computer is locked or nobody is
                                         signed in, and stops it again the moment you unlock. Windows
-                                        will ask your permission once.
+                                        will ask your permission once. Once you set this computer up
+                                        for unlocking, it also keeps this computer&rsquo;s own key and
+                                        passphrase record in a <code>secrets</code> folder there.
                                         <br /><br />
-                                        Turning it off removes the service and those files. You can
-                                        also check or remove it yourself in Services
+                                        Turning it off removes the service and those two files, and
+                                        {' '}<strong>keeps the <code>secrets</code> folder</strong>, so
+                                        that turning it back on later does not make you set this
+                                        computer up again from scratch. If you would rather that key
+                                        did not stay here, use &ldquo;Turn off and erase this
+                                        computer&rsquo;s key&rdquo; below. You can also check or
+                                        remove any of it yourself in Services
                                         (<code>services.msc</code>), without this app.
                                         {lockScreen?.problem && (
                                             <>
@@ -1616,6 +1653,39 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                     }
                                     onChange={e => void toggleLockScreen(e.target.checked)}
                                 />
+                            </div>
+                        )}
+
+                        {/* THE WAY OUT OF THE KEY, not just out of the feature.
+                            Shown whether or not the service is installed,
+                            because the case that needed this most is the one
+                            where the switch is already OFF: the key outlives
+                            the switch by design, so someone who has turned the
+                            feature off is exactly the person with no other way
+                            to remove it. `uninstall` treats "not installed" as
+                            success, so the same call is correct in both states. */}
+                        {lockScreenSupported() && (
+                            <div className="dv-card device-option">
+                                <div className="option-info">
+                                    <label>Erase this computer&rsquo;s key</label>
+                                    <span className="option-hint">
+                                        Turns lock-screen access off and also deletes this
+                                        computer&rsquo;s own key, passphrase record and connection
+                                        details &mdash; the things the switch above deliberately
+                                        keeps. Use it if you want nothing left behind rather than a
+                                        setup you can resume. Turning the feature on afterwards means
+                                        setting this computer up again from scratch. Your account and
+                                        your messages are not affected.
+                                    </span>
+                                </div>
+                                <button
+                                    type="button"
+                                    className="btn-secondary"
+                                    disabled={busyId === 'lock-screen'}
+                                    onClick={() => void doForgetThisMachine()}
+                                >
+                                    Turn off and erase
+                                </button>
                             </div>
                         )}
 

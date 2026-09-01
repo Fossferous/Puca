@@ -228,6 +228,56 @@ pub fn deprovision() -> Result<String, String> {
     purge_except_secrets(&install_dir()?)
 }
 
+/// Deprovision AND erase this machine's enrolment — the device private key,
+/// the signing seed, the link config and the arming record, all of which live
+/// under `secrets/` and which `deprovision` deliberately preserves.
+///
+/// WHY THIS HAS TO EXIST. Preserving `secrets/` across a routine off/on is
+/// correct and hard-won (see `purge_except_secrets`: the all-or-nothing purge
+/// that used to be here forgot the machine's identity three times before the
+/// pattern was spotted). But `enrol::forget` — the documented tool for "forget
+/// this machine's identity" — was reachable from NOWHERE: not this crate's
+/// CLI, not the app. So the only honest answer to "how do I remove the key
+/// this machine holds?" was to delete a folder under Program Files by hand,
+/// as an administrator, which is not an answer. The switch keeps enrolment,
+/// the UI now says so, and this is the explicit way to decline that.
+///
+pub fn deprovision_and_forget() -> Result<String, String> {
+    crate::install::uninstall()?;
+    purge_including_secrets(&install_dir()?)
+}
+
+/// `purge_except_secrets`, and then `secrets/` as well.
+///
+/// SEPARATED FROM `deprovision_and_forget` for exactly the reason its sibling
+/// is separated from `deprovision`: the SCM call cannot run in a unit test, and
+/// the untested version of that pair is the one that wiped enrolment by
+/// accident. This half is the half that destroys data, so it is the half that
+/// has to be testable against a throwaway directory.
+///
+/// Removes the DIRECTORY rather than the filenames `enrol::forget` knows about.
+/// Naming files would mean a secret added to `secrets/` later silently
+/// surviving a call whose entire purpose is that nothing does.
+fn purge_including_secrets(dir: &std::path::Path) -> Result<String, String> {
+    let base = purge_except_secrets(dir)?;
+    let secrets = dir.join("secrets");
+    if !secrets.exists() {
+        return Ok(format!("{base}; there was no enrolment stored"));
+    }
+    // Best-effort, and reported as success either way: the service and the
+    // binaries are already gone by this point, so failing the whole operation
+    // would send the caller back through an elevation prompt while leaving
+    // them no better off. Say plainly what is left instead.
+    match std::fs::remove_dir_all(&secrets) {
+        Ok(()) => Ok(format!("{base}; erased this machine's enrolment")),
+        Err(e) => Ok(format!(
+            "{base}; but this machine's enrolment could NOT be removed from {} \
+             ({e}). Delete that folder by hand to finish.",
+            secrets.display()
+        )),
+    }
+}
+
 /// Remove everything directly inside `dir` except a `secrets` subdirectory.
 ///
 /// SEPARATED FROM `deprovision` so it is testable against a real, throwaway
@@ -377,6 +427,41 @@ mod tests {
         assert!(scratch.0.join("secrets").exists());
         assert!(scratch.0.join("secrets/link.json").exists());
         assert!(scratch.0.join("secrets/device.key").exists());
+    }
+
+    #[test]
+    fn forgetting_this_machine_takes_the_secrets_too() {
+        // The other half of the pair, and the one that destroys data. Its
+        // sibling above is its POSITIVE CONTROL: both run the same fixture,
+        // and that one asserts the secrets SURVIVE. If this rig could not tell
+        // the two apart — a fixture that never wrote secrets, say — that test
+        // would fail rather than let this one pass for the wrong reason.
+        let scratch = Scratch::new("forget-secrets");
+
+        assert!(scratch.0.join("secrets/device.key").exists());
+
+        let result = purge_including_secrets(&scratch.0).expect("purge");
+        assert!(result.contains("erased this machine's enrolment"), "{result}");
+
+        assert!(!scratch.0.join(crate::INSTALLED_SERVICE_EXE).exists());
+        // The whole directory, not merely the files enrol::forget names: a
+        // secret added to secrets/ later must not outlive this call.
+        assert!(!scratch.0.join("secrets").exists(), "secrets/ survived a forget");
+        assert!(!scratch.0.join("secrets/device.key").exists());
+        assert!(!scratch.0.join("secrets/link.json").exists());
+    }
+
+    #[test]
+    fn forgetting_says_so_plainly_when_there_was_no_enrolment() {
+        // Turning the feature off, then choosing "erase" afterwards, is the
+        // exact sequence the UI now offers — and by then secrets/ may already
+        // be absent. That must read as a completed request, not an error, or
+        // the user is left unsure whether the key is gone.
+        let scratch = Scratch::new("forget-nothing");
+        std::fs::remove_dir_all(scratch.0.join("secrets")).expect("clear secrets");
+
+        let result = purge_including_secrets(&scratch.0).expect("purge");
+        assert!(result.contains("there was no enrolment stored"), "{result}");
     }
 
     #[test]

@@ -1855,6 +1855,35 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         backgroundDelivery={settings.mobileBackgroundDelivery}
                                     />
                                     )}
+                                    {/* STATED BECAUSE IT IS NOT OPTIONAL, and there is
+                                        no switch here to imply otherwise. On Android the
+                                        signed bundle is checked and applied at every
+                                        launch, before sign-in (UpdateGate, dispatched from
+                                        main.tsx outside RequireAuth). Desktop's equivalent
+                                        is opt-in and defaults OFF, so a user reasoning
+                                        from the desktop app — or from how app stores
+                                        work — would guess wrong. The behaviour is
+                                        deliberate; the silence about it was not. */}
+                                    {isAndroidApp() && (
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Updates on this phone</label>
+                                            <span className="option-hint">
+                                                Puca updates itself here automatically: each time it
+                                                starts, it fetches the current version from your
+                                                server and applies it before the app opens.
+                                                <strong> There is no switch for this</strong>, and it
+                                                happens before you sign in. It is how a broken
+                                                version gets fixed and how every device on your
+                                                server stays on the same one. Only bundles signed by
+                                                your server's key are accepted, and one that is older
+                                                than what this phone already has is refused. The
+                                                desktop app is different &mdash; there it is optional
+                                                and off unless you turn it on.
+                                            </span>
+                                        </div>
+                                    </div>
+                                    )}
                                     {isAndroidApp() && (
                                     <div className="settings-option">
                                         <div className="option-info">
