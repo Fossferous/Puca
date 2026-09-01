@@ -29,10 +29,11 @@ mod imp {
         GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+        CallNextHookEx, GetMessageW, KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW,
+        UnhookWindowsHookEx,
         KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-        WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
+        WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN,
         WM_XBUTTONUP,
     };
 
@@ -87,6 +88,28 @@ mod imp {
     /// and something downstream drops it", which look identical to a user.
     static EVENTS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+    /// How often the hook thread tears down and re-installs both hooks.
+    ///
+    /// THE BUG THIS EXISTS FOR. Windows silently REMOVES a low-level hook whose
+    /// callback exceeds its latency budget (LowLevelHooksTimeout). No error, no
+    /// message, HOOK_LIVE still true — every global hotkey is simply dead from
+    /// that moment until the feed restarts, which only a leave/rejoin of voice
+    /// does. 0.8.129 moved the slow work off the callback, which makes removal
+    /// RARER; it cannot make it impossible, because the budget is measured on
+    /// the whole machine's scheduling, not this process's — a game plus the
+    /// encoder under load is exactly the condition. Field report after that
+    /// fix: "hotkeys stop working after a period of time".
+    ///
+    /// There is no notification to react to, so: re-install on a timer. Unhook +
+    /// rehook is a few microseconds once a minute, and bounds the dead window to
+    /// this interval instead of the rest of the call.
+    const REARM_EVERY_MS: u32 = 60_000;
+
+    /// Re-arms performed since the feed started. Surfaced by `diag`: a rising
+    /// count with a stuck `events_seen` means something OTHER than hook removal
+    /// is eating the input.
+    static REARMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     pub(super) fn diag() -> serde_json::Value {
         let watching: Vec<u32> = WATCH
             .iter()
@@ -99,6 +122,8 @@ mod imp {
             "hook_live": HOOK_LIVE.load(Ordering::SeqCst),
             "watching": watching,
             "events_seen": EVENTS_SEEN.load(Ordering::SeqCst),
+            "rearms": REARMS.load(Ordering::SeqCst),
+            "rearm_every_ms": REARM_EVERY_MS,
         })
     }
 
@@ -235,11 +260,11 @@ mod imp {
 
             let hmod = GetModuleHandleW(None).unwrap_or_default();
             let hinst = HINSTANCE(hmod.0);
-            let kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0);
+            let mut kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0);
             // Mouse hook rides the same thread/pump (the remote_control guard
             // proves the pattern). Best-effort: keyboard bindings must keep
             // working even if the mouse hook is refused.
-            let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
+            let mut mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
             if let Err(e) = &mouse_hook {
                 eprintln!("[hotkeys] WH_MOUSE_LL install FAILED (mouse bindings inactive): {e:?}");
             }
@@ -262,12 +287,32 @@ mod imp {
             // so a false ACTIVE here means we were told to quit before we were
             // reachable and the WM_QUIT went nowhere.
             if installed && ACTIVE.load(Ordering::SeqCst) {
+                // Thread-scoped timer (no window): WM_TIMER is posted to this
+                // thread's queue and arrives through the GetMessageW below.
+                let timer = SetTimer(None, 0, REARM_EVERY_MS, None);
                 let mut msg = MSG::default();
                 loop {
                     let r = GetMessageW(&mut msg, None, 0, 0).0;
                     if r == 0 || r == -1 {
                         break; // WM_QUIT (0) or error (-1)
                     }
+                    if msg.message == WM_TIMER {
+                        // Unconditional re-install: there is no way to ASK
+                        // Windows whether it dropped the hook, so re-arming
+                        // only when a check says so is not an option.
+                        if let Ok(h) = kbd_hook { let _ = UnhookWindowsHookEx(h); }
+                        if let Ok(h) = mouse_hook { let _ = UnhookWindowsHookEx(h); }
+                        kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0);
+                        mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
+                        HOOK_LIVE.store(kbd_hook.is_ok(), Ordering::SeqCst);
+                        REARMS.fetch_add(1, Ordering::Relaxed);
+                        if let Err(e) = &kbd_hook {
+                            eprintln!("[hotkeys] re-arm FAILED, global hotkeys dead until next tick: {e:?}");
+                        }
+                    }
+                }
+                if timer != 0 {
+                    let _ = KillTimer(None, timer);
                 }
             }
 
