@@ -472,27 +472,45 @@ fn compose_tray_tip(app: &tauri::AppHandle, state: &TrayTipState) {
 ///
 /// So stop the capture FIRST, then clear the indicators: after this returns,
 /// "nothing is captured" and "nothing is shown" are both true and agree.
+/// TWO cfg'd versions, not one with `#[cfg(windows)]` on its PARAMETERS.
+///
+/// `#[tauri::command]` generates a wrapper that resolves each parameter from
+/// managed state by name. Attribute-cfg'ing individual parameters strips them
+/// from the signature on non-Windows while the generated wrapper still reasons
+/// about them, and the clip states are `app.manage`d only under `#[cfg(windows)]`
+/// anyway — so the non-Windows build would ask for state that was never managed.
+/// `stop_clip_video_capture` above already uses this two-version shape; follow it.
+#[cfg(windows)]
 #[tauri::command]
 fn reset_capture_state(
     app: tauri::AppHandle,
     state: tauri::State<'_, TrayTipState>,
-    #[cfg(windows)] clip_video: tauri::State<'_, Arc<ClipCaptureState>>,
-    #[cfg(windows)] clip_audio: tauri::State<'_, Arc<ClipDesktopAudioState>>,
+    clip_video: tauri::State<'_, Arc<ClipCaptureState>>,
+    clip_audio: tauri::State<'_, Arc<ClipDesktopAudioState>>,
 ) {
-    #[cfg(windows)]
-    {
-        clip_capture::stop_video_capture(clip_video.inner().clone());
-        // generation None = "whatever is running": this IS the whole-session
-        // teardown that argument exists for.
-        clip_desktop_audio::stop_capture(clip_audio.inner().clone(), None);
-    }
+    clip_capture::stop_video_capture(clip_video.inner().clone());
+    // generation None = "whatever is running": this IS the whole-session
+    // teardown that argument exists for.
+    clip_desktop_audio::stop_capture(clip_audio.inner().clone(), None);
+    clear_tray_capture_parts(&app, &state);
+}
+
+/// No native clip capture off Windows, so there is nothing to stop — but the
+/// tray parts are cross-platform and must still be cleared.
+#[cfg(not(windows))]
+#[tauri::command]
+fn reset_capture_state(app: tauri::AppHandle, state: tauri::State<'_, TrayTipState>) {
+    clear_tray_capture_parts(&app, &state);
+}
+
+fn clear_tray_capture_parts(app: &tauri::AppHandle, state: &tauri::State<'_, TrayTipState>) {
     {
         let mut p = state.0.lock().unwrap();
         p.clip = None;
         p.share = None;
         p.device = None;
     }
-    compose_tray_tip(&app, &state);
+    compose_tray_tip(app, state);
 }
 
 /// Reflect a running screen share in the tray.

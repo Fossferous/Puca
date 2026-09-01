@@ -43,6 +43,8 @@ interface SovereignAppPlugin {
     /** The FCM wake-doorbell token (APKs from 0.8.67). Constant payload —
      *  the token is the only device fact that ever reaches Google. */
     wakeToken(): Promise<{ token: string | null; reason?: string }>;
+    /** Stop registering with FCM and drop the existing registration. */
+    disableWake(): Promise<void>;
     syncPushGates(opts: {
         mutedServers: Record<string, boolean | string>;
         mutedChannels: Record<string, boolean>;
@@ -362,6 +364,25 @@ export async function getMobileWakeToken(): Promise<string | null> {
         return r.token ?? null;
     } catch {
         return null; // old APK without the method
+    }
+}
+
+/**
+ * Stop this device registering with Google's push service, and drop the
+ * registration it already has.
+ *
+ * The consent gate was one-way: `getMobileWakeToken` turns Firebase auto-init
+ * ON and nothing ever turned it off, so a phone stayed registered with FCM
+ * after sign-out and after background delivery was switched off. Consent that
+ * cannot be withdrawn is not consent — and this repo has been bitten by
+ * one-way latches before.
+ */
+export async function disableMobileWake(): Promise<void> {
+    if (!android()) return;
+    try {
+        await App.disableWake();
+    } catch {
+        // Old APK without the method, or a build with no Firebase at all.
     }
 }
 

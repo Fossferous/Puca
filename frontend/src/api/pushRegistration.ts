@@ -30,6 +30,7 @@ import { getMutedChannels } from '../components/mutedChannelsStore';
 import { getBlockedIds } from '../components/blockStore';
 import {
     getMobileWakeToken,
+    disableMobileWake,
     setMobileNativeDelivery,
     setMobilePushAccount,
     syncMobilePushGates,
@@ -241,6 +242,13 @@ export async function teardownPushRegistration(): Promise<void> {
     // BEFORE the JWT drops (the caller sequences this): the doorbell must stop
     // addressing a phone whose account signed out.
     await unregisterWakeToken();
+    // And stop this device registering with Google at all. The consent gate was
+    // one-way — wakeToken() enabled Firebase auto-init and nothing ever turned
+    // it off — so a phone stayed registered with FCM after sign-out or after
+    // background delivery was switched off. Consent granted once and never
+    // revocable is not consent. See [[one-way-latch]] in this repo's history:
+    // the same shape has bitten it before.
+    await disableMobileWake();
     await setMobileNativeDelivery(null);
     await setMobilePushAccount(null);
 }

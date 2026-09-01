@@ -66,6 +66,20 @@
       DetailPrint "SovereignRemote removed."
       RMDir /r "$PROGRAMFILES64\Sovereign\service"
       RMDir "$PROGRAMFILES64\Sovereign"
+      ; The machine-wide secure-attention policy the service set, removed the
+      ; same way rc_leftovers.rs does it: ONLY when our own ownership marker
+      ; says the value is ours. Without this the uninstall leaves an
+      ; unattributable HKLM policy behind — SoftwareSASGeneration permits
+      ; software-generated Ctrl+Alt+Del, and an admin later auditing this
+      ; machine has no way to tell what set it or whether it is still needed.
+      ; Never delete a policy we did not set: the marker is the whole check.
+      ReadRegDWORD $R2 HKLM "SOFTWARE\Sovereign" "SovereignSetSoftwareSAS"
+      ${If} $R2 == 1
+        DeleteRegValue HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" "SoftwareSASGeneration"
+        DeleteRegValue HKLM "SOFTWARE\Sovereign" "SovereignSetSoftwareSAS"
+        DeleteRegKey /ifempty HKLM "SOFTWARE\Sovereign"
+        DetailPrint "Secure-attention policy restored."
+      ${EndIf}
     ${Else}
       ; LogicLib rather than a relative `IfSilent +2`: ${If} blocks compile to
       ; several instructions, so a hand-counted jump inside one is fragile.

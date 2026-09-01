@@ -534,6 +534,28 @@ public class SovereignAppPlugin extends Plugin {
      * {token: null} when Firebase isn't configured in this build; a token
      * parked by onNewToken while the app was dead takes priority (newest).
      */
+    /**
+     * Stop this device registering with Google's push service.
+     *
+     * The consent gate was one-way: wakeToken() turned auto-init ON and nothing
+     * ever turned it off, so a user who signed out, or who switched background
+     * delivery off, kept a phone registered with FCM indefinitely — consent
+     * granted once and never revocable, which is not consent. Called from the
+     * push teardown, alongside unregistering the token server-side.
+     */
+    @PluginMethod
+    public void disableWake(PluginCall call) {
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().setAutoInitEnabled(false);
+            // Drops the registration itself, not just the auto-init preference —
+            // otherwise the existing token stays valid at Google's end.
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().deleteToken();
+        } catch (Exception e) {
+            // No FirebaseApp in this build: nothing was ever registered.
+        }
+        call.resolve();
+    }
+
     @PluginMethod
     public void wakeToken(PluginCall call) {
         String pending = PushPrefs.takePendingWakeToken(getContext());
