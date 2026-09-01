@@ -2461,9 +2461,40 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     The same bindings appear next to their features in
                                     Voice &amp; Video and Privacy &amp; Safety.
                                     Mute and Deafen come bound to Ctrl+Shift+M / Ctrl+Shift+D and
-                                    work while Púca is focused; rebind them to a combination
-                                    of your own to make them work system-wide during a call.
+                                    work while Púca is focused. To use them from a game or another
+                                    app, either rebind them to a combination of your own or turn on
+                                    the switch below.
                                 </p>
+                                {/* THE DIRECT ROUTE TO SYSTEM-WIDE.
+                                    Changing a bind already opts it in — VoicePanel treats "you
+                                    changed it" as proof you meant to claim the key. But that left
+                                    anyone happy with Ctrl+Shift+M no way in except picking a
+                                    combination they did not want, and the paragraph above was the
+                                    only thing that said so. It was reported as a bug twice. This
+                                    is the same choice, offered directly. */}
+                                <div className="settings-card">
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Use Mute and Deafen from other apps</label>
+                                            <span className="option-hint">
+                                                Lets the default Ctrl+Shift+M / Ctrl+Shift+D work
+                                                while a game or another program has focus. Off by
+                                                default because those combinations belong to other
+                                                apps too &mdash; Ctrl+Shift+D opens Run and Debug in
+                                                VS Code, Ctrl+Shift+M its Problems panel &mdash; so
+                                                claiming them everywhere can mute or deafen you while
+                                                you are working in something else. Rebinding to a
+                                                combination of your own has the same effect and does
+                                                not need this switch.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            checked={settings.globalVoiceHotkeys}
+                                            onChange={(e) => updateSetting('globalVoiceHotkeys', e.target.checked)}
+                                        />
+                                    </div>
+                                </div>
                                 {/* Only REAL bindings are listed. This tab used to advertise
                                     five shortcuts (Ctrl+M, Ctrl+D, …) that had no handler
                                     anywhere in the app. */}

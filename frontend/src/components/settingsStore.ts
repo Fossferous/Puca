@@ -193,6 +193,30 @@ export const defaultSettings = {
     toggleDeafenBinding: { keyCode: 68, ctrl: true, alt: false, shift: true, label: 'D' } as KeyBinding | null,
     openSettingsBinding: null as KeyBinding | null,
     searchBinding: null as KeyBinding | null,
+    /**
+     * Let the mute/deafen shortcuts fire while another app has focus.
+     *
+     * OFF BY DEFAULT, and the default is the whole point: the shipped binds are
+     * Ctrl+Shift+M / Ctrl+Shift+D, which are VS Code's Problems panel and
+     * Run-and-Debug view. Claiming those system-wide for everyone deafened
+     * alt-tabbed users with no visible cause, and put two of the commonest
+     * letters on the low-level keyboard hook's watch list — an IPC event for
+     * every 'm' and 'd' typed anywhere on the machine.
+     *
+     * WHY IT EXISTS AT ALL. VoicePanel only registers a bind globally when it
+     * differs from the shipped default, treating "you changed it" as proof you
+     * meant to claim the key. That inference is sound but invisible: a user who
+     * is happy with Ctrl+Shift+M has no way to reach the global behaviour, and
+     * nothing tells them why their hotkey dies the moment they tab into a game.
+     * Reported twice as "hotkeys don't work when Puca isn't focused" — which is
+     * exactly what it looks like from outside.
+     *
+     * So: record the intent instead of inferring it. A user who changes the
+     * bind still gets global registration as before (that inference stays
+     * valid); this switch is the other route to the same place, for someone who
+     * wants to keep the default combo.
+     */
+    globalVoiceHotkeys: false,
 
     // --- Clips (desktop replay buffer; api/clips/) --------------------------
     /** Seconds kept in the ring while armed. The SERVER caps how long a CLIP may
