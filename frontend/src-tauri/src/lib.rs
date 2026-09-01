@@ -822,8 +822,15 @@ fn stop_hotkey_listener() {
 /// Report what the native hotkey feed believes, for diagnosing "hotkeys don't
 /// work when Puca isn't focused" WHILE IT IS HAPPENING.
 ///
-/// Read it from DevTools during a call:
-///   await window.__TAURI__.core.invoke('hotkey_diag')
+/// Read it from DevTools. The frontend adds its own half (in-call state, the
+/// bindings, the start/stop log with reasons) and this native half:
+///   await __pucaHotkeysDebug.snapshot()
+/// NOT window.__TAURI__ — withGlobalTauri is off on purpose, that global does
+/// not exist. The native half alone, on any build:
+///   await window.__TAURI_INTERNALS__.invoke('hotkey_diag')
+///
+/// `starts` / `stops` are lifetime call counts: active:false with both at
+/// zero means nothing in this process ever asked for a hook.
 ///
 /// How to read the answer:
 ///   hook_live false          -> the low-level hook is not installed; the feed

@@ -57,11 +57,9 @@ function keyLabel(e: KeyboardEvent): string {
 }
 
 import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
-
-function sameCombo(a: KeyBinding | null | undefined, b: KeyBinding | null | undefined): boolean {
-    if (!a || !b) return a === b || (!a && !b);   // both unbound counts as same
-    return a.keyCode === b.keyCode && a.ctrl === b.ctrl && a.alt === b.alt && a.shift === b.shift;
-}
+// The scope predicate is shared with the desktop-global feed: what a row says
+// about where a hotkey works is computed by the code that decides it.
+import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
 
 /**
  * Selectable themes. The colour themes (styles/theme.css) tint every surface
@@ -604,7 +602,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                 return; // stay in capture so the next press can be a different key
             }
             setBindConflict(null);
-            setSettings(prev => { const s = { ...prev, [field]: next }; saveSettings(s); return s; });
+            // A capture is a choice — recorded, so the desktop-global feed can
+            // tell it from an untouched default even when the combination is
+            // the same one we ship.
+            setSettings(prev => { const s = markVoiceBindProvenance({ ...prev, [field]: next }, field, true); saveSettings(s); return s; });
             setCapturingBind(null);
         };
         // MOUSE buttons are bindable too (not for the kill switch — its
@@ -637,7 +638,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                 return;
             }
             setBindConflict(null);
-            setSettings(prev => { const s = { ...prev, [field]: next }; saveSettings(s); return s; });
+            // A capture is a choice — recorded, so the desktop-global feed can
+            // tell it from an untouched default even when the combination is
+            // the same one we ship.
+            setSettings(prev => { const s = markVoiceBindProvenance({ ...prev, [field]: next }, field, true); saveSettings(s); return s; });
             setCapturingBind(null);
         };
         window.addEventListener('keydown', onKey, true);
@@ -660,7 +664,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         setBindConflict(null);
         setCapturingBind(null);
         setSettings(prev => {
-            const s = { ...prev, [field]: defaultSettings[field] };
+            // Reset is recorded as NOT chosen: the bind goes back to in-app
+            // only, unless the "from other apps" switch is on.
+            const s = markVoiceBindProvenance({ ...prev, [field]: defaultSettings[field] }, field, false);
             saveSettings(s);
             return s;
         });
@@ -2510,10 +2516,22 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         const inert = needsMode !== null
                                             && settings.voiceInputMode !== needsMode
                                             && !!settings[field];
+                                        // Where a voice hotkey works, from the predicate the hook
+                                        // itself uses. Before this, the only thing that said "this
+                                        // one is in-app only" was the paragraph at the top.
+                                        const scope = isVoiceBindField(field) && settings[field]
+                                            ? voiceBindScope(settings, field) : null;
                                         return (
                                             <div className="keybind-row" key={field}>
                                                 <span>{label}</span>
                                                 {bindControl(field)}
+                                                {scope && (
+                                                    <span className={`keybind-scope ${scope.startsWith('global:') ? 'is-global' : 'is-local'}`}>
+                                                        {scope.startsWith('global:')
+                                                            ? 'Works from other apps too.'
+                                                            : 'Only while Púca is focused — rebind it, or turn on the switch above.'}
+                                                    </span>
+                                                )}
                                                 {inert && (
                                                     <span className="keybind-inert">
                                                         Inactive — input mode is

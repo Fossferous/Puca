@@ -87,6 +87,12 @@ mod imp {
     /// one number that separates "the hook is not receiving" from "it receives
     /// and something downstream drops it", which look identical to a user.
     static EVENTS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// start()/stop() calls since the process began — never reset. With
+    /// `active` alone, "never started" and "started, then stopped" read the
+    /// same (both false); these two tell them apart from the Rust side,
+    /// independent of anything the frontend remembers or forgot to log.
+    static STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static STOPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// How often the hook thread tears down and re-installs both hooks.
     ///
@@ -122,6 +128,8 @@ mod imp {
             "hook_live": HOOK_LIVE.load(Ordering::SeqCst),
             "watching": watching,
             "events_seen": EVENTS_SEEN.load(Ordering::SeqCst),
+            "starts": STARTS.load(Ordering::SeqCst),
+            "stops": STOPS.load(Ordering::SeqCst),
             "rearms": REARMS.load(Ordering::SeqCst),
             "rearm_every_ms": REARM_EVERY_MS,
         })
@@ -150,10 +158,10 @@ mod imp {
                 while let Ok(ev) = rx.recv() {
                     if let Some(app) = APP.get() {
                         if let Err(e) = app.emit("global-hotkey", ev) {
-                            eprintln!("[hotkeys] emit failed: {e:?}");
+                            log::warn!("[hotkeys] emit failed: {e:?}");
                         }
                     } else {
-                        eprintln!("[hotkeys] transition dropped: no app handle");
+                        log::warn!("[hotkeys] transition dropped: no app handle");
                     }
                 }
             });
@@ -266,17 +274,17 @@ mod imp {
             // working even if the mouse hook is refused.
             let mut mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
             if let Err(e) = &mouse_hook {
-                eprintln!("[hotkeys] WH_MOUSE_LL install FAILED (mouse bindings inactive): {e:?}");
+                log::warn!("[hotkeys] WH_MOUSE_LL install FAILED (mouse bindings inactive): {e:?}");
             }
             let installed = match &kbd_hook {
                 Ok(_) => {
                     HOOK_LIVE.store(true, Ordering::SeqCst);
-                    eprintln!("[hotkeys] WH_KEYBOARD_LL hook installed (mouse: {})",
+                    log::info!("[hotkeys] WH_KEYBOARD_LL hook installed (mouse: {})",
                         if mouse_hook.is_ok() { "ok" } else { "unavailable" });
                     true
                 }
                 Err(e) => {
-                    eprintln!("[hotkeys] hook install FAILED: {e:?}");
+                    log::error!("[hotkeys] hook install FAILED: {e:?}");
                     false
                 }
             };
@@ -307,7 +315,7 @@ mod imp {
                         HOOK_LIVE.store(kbd_hook.is_ok(), Ordering::SeqCst);
                         REARMS.fetch_add(1, Ordering::Relaxed);
                         if let Err(e) = &kbd_hook {
-                            eprintln!("[hotkeys] re-arm FAILED, global hotkeys dead until next tick: {e:?}");
+                            log::warn!("[hotkeys] re-arm FAILED, global hotkeys dead until next tick: {e:?}");
                         }
                     }
                 }
@@ -339,6 +347,7 @@ mod imp {
     /// Returns whether a hook is actually live (see the wrapper's doc).
     pub fn start(app: AppHandle, keys: Vec<u32>) -> bool {
         let _lifecycle = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+        STARTS.fetch_add(1, Ordering::Relaxed);
         let _ = APP.set(app);
         // Re-arming a slot with a DIFFERENT key invalidates that slot's
         // down-state bit: the bit tracks a physical key, so after a rebind it
@@ -387,6 +396,7 @@ mod imp {
     /// it stops the feed.
     pub fn stop() {
         let _lifecycle = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+        STOPS.fetch_add(1, Ordering::Relaxed);
         // ACTIVE first: it is what a thread that has not yet published its id
         // checks to discover it was told to quit before it was reachable.
         ACTIVE.store(false, Ordering::SeqCst);
@@ -409,7 +419,7 @@ mod imp {
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        eprintln!("[hotkeys] stop: hook thread did not exit within 100ms");
+        log::warn!("[hotkeys] stop: hook thread did not exit within 100ms");
     }
 }
 
@@ -444,7 +454,10 @@ pub fn stop() {
 /// actually succeeded. `watching`: the virtual-key codes in the watch list — a
 /// missing key here means the problem is upstream in the frontend, not in the
 /// hook. `events_seen`: transitions emitted since start; still zero while
-/// pressing the key means the hook is not receiving at all.
+/// pressing the key means the hook is not receiving at all. `starts` /
+/// `stops`: lifetime call counts — active:false with both at zero means
+/// nothing in this process ever asked for a hook; with `stops` > 0 it was
+/// asked for and then stopped (the frontend's feed log says by whom).
 #[cfg(windows)]
 pub fn diag() -> serde_json::Value {
     imp::diag()
@@ -458,6 +471,8 @@ pub fn diag() -> serde_json::Value {
         "hook_live": false,
         "watching": Vec::<u32>::new(),
         "events_seen": 0,
+        "starts": 0,
+        "stops": 0,
         "note": "global hotkeys need the Windows low-level hook; unavailable here",
     })
 }

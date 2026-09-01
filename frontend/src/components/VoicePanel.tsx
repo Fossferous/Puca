@@ -5,11 +5,12 @@ import { sfuManager } from '../api/rtc/sfuManager';
 import { setSfuControlSender } from '../api/rtc/controlDc';
 import type { MediaE2eeReason } from '../api/rtc/types';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
-import { defaultSettings, loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
+import { loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
-import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed } from '../api/hotkeys';
+import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
+import { computeNativeWatch } from '../api/hotkeyScope';
 
 /** Shared mic-health notice text — the sentinel clears only its own message
  *  (the dead-graph fallback writes to the same slot and must not be wiped). */
@@ -2220,82 +2221,75 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         };
     }, [isInVoice]);
 
+    /** What the feed was last asked to watch — for __pucaHotkeysDebug.snapshot(). */
+    const lastNativeWatchRef = useRef<{ ids: string[]; keys: number[]; at: number } | null>(null);
+    // Lend the diag the inputs the feed decision is made from. Refs, not
+    // state, so this stays fresh with [] deps — and so a snapshot taken while
+    // the feed is DOWN still says why. That is the case that matters: every
+    // cause of "hotkeys die when Púca loses focus" found so far was this
+    // decision producing an empty list, with nothing recording that it had.
+    useEffect(() => {
+        setNativeFeedHost(() => {
+            const s = loadSettings();
+            return {
+                isInVoice: isInVoiceRef.current,
+                isAfkChannel: isAfkChannelRef.current,
+                listenOnly: listenOnlyRef.current,
+                voiceInputMode: voiceInputModeRef.current,
+                clipArmed: isBufferingRef.current,
+                globalVoiceHotkeys: s.globalVoiceHotkeys === true,
+                voiceBindsUserSet: s.voiceBindsUserSet ?? {},
+                bindings: {
+                    toggleMute: s.toggleMuteBinding,
+                    toggleDeafen: s.toggleDeafenBinding,
+                    ptt: s.pttBinding,
+                    ptm: s.ptmBinding,
+                    saveClip: s.saveClipBinding,
+                },
+                lastComputed: lastNativeWatchRef.current,
+            };
+        });
+        return () => setNativeFeedHost(null);
+    }, []);
+
     // DESKTOP-GLOBAL feed: while in a call, the native WH_KEYBOARD_LL hook
     // reports the bound voice keys system-wide, so PTT/PTM and mute/deafen
     // keep working while a fullscreen game has focus. Scoped to the voice
     // actions only, and re-synced on every settings save so a rebind swaps
     // the watch list live. No-op on web.
+    //
+    // WHICH keys qualify is decided in api/hotkeyScope.ts — one predicate,
+    // shared with the Keybinds tab, so the row's "works from other apps" and
+    // the hook's watch list cannot disagree. (The rule used to live here and
+    // inferred "the user chose this" from the bind differing from the shipped
+    // default; that reclassified a deliberate choice of the same combination
+    // as untouched, and the feed silently watched nothing.)
     useEffect(() => {
         if (!isInVoice || !isTauri()) return;
         // Listen-only / AFK: no mic, so no mic hotkeys — but the save-clip key
         // still works while the buffer is armed (a system-audio-only clip).
         const micKeys = !isAfkChannel && !listenOnly;
         const sync = () => {
-            const s = loadSettings();
-            // Bindings are nullable (unset by default, clearable in Settings).
-            // Only feed the native hook keys that actually exist — and note
-            // loadSettings() spreads a JSON.parse, so its `any` hides these
-            // derefs from tsc: a null here would throw and kill the whole feed,
-            // taking every global hotkey with it.
-            const ids: string[] = [];
-            const keys: number[] = [];
-            const watch = (id: string, b: { keyCode: number } | null | undefined) => {
-                if (!b) return;
-                ids.push(id);
-                keys.push(b.keyCode);
-            };
-            if (micKeys) {
-                // The SHIPPED default binds (Ctrl+Shift+M / Ctrl+Shift+D) are
-                // in-app only — they exist so the hotkey works at all, not to
-                // claim system-wide keys nobody chose. Fed to the global hook
-                // they fire while OTHER apps have focus: Ctrl+Shift+D is VS
-                // Code's Run-and-Debug view, Ctrl+Shift+M its Problems panel —
-                // an alt-tabbed user deafened themself with no visible cause.
-                // (They also put two of the most common letters on the
-                // WH_KEYBOARD_LL watch list, an IPC event per 'm'/'d' typed
-                // anywhere.) A binding the user SET, even to the same combo,
-                // is a choice — but an unchanged default is not; comparing
-                // values is the only provenance we have.
-                const isDefault = (b: { keyCode: number; ctrl: boolean; alt: boolean; shift: boolean } | null | undefined,
-                    d: { keyCode: number; ctrl: boolean; alt: boolean; shift: boolean } | null) =>
-                    !!b && !!d && b.keyCode === d.keyCode && b.ctrl === d.ctrl && b.alt === d.alt && b.shift === d.shift;
-                // ...OR the user has explicitly asked for system-wide voice
-                // shortcuts. The value comparison infers intent from "you
-                // changed it", which is sound but unreachable for someone who
-                // is happy with Ctrl+Shift+M: they could only opt in by
-                // choosing a combo they did not want, and nothing told them
-                // why their hotkey died the moment they tabbed into a game.
-                // Reported twice as "hotkeys don't work when Puca isn't
-                // focused" — which is exactly how it looks from outside.
-                // `globalVoiceHotkeys` records the intent instead of guessing
-                // it, and carries the same consequences described above, which
-                // is why it stays off until asked for.
-                const wantsGlobal = s.globalVoiceHotkeys === true;
-                if (wantsGlobal || !isDefault(s.toggleMuteBinding, defaultSettings.toggleMuteBinding)) {
-                    watch('voice.toggleMute', s.toggleMuteBinding);
-                }
-                if (wantsGlobal || !isDefault(s.toggleDeafenBinding, defaultSettings.toggleDeafenBinding)) {
-                    watch('voice.toggleDeafen', s.toggleDeafenBinding);
-                }
-                if (voiceInputModeRef.current === 'pushToTalk') {
-                    watch('voice.ptt', s.pttBinding);
-                } else if (voiceInputModeRef.current === 'pushToMute') {
-                    watch('voice.ptm', s.ptmBinding);
-                }
-            }
-            // The whole point of the clip hotkey is a fullscreen game with focus,
-            // so it MUST ride the native hook — and `clipArmed` is in this
-            // effect's deps so arming re-syncs the watch list immediately (a
-            // settings save is not something the user does mid-match).
-            if (clipArmed) watch('voice.saveClip', s.saveClipBinding);
-            if (ids.length === 0) { void stopNativeFeed(); return; }
+            const { ids, keys } = computeNativeWatch(loadSettings(), {
+                micKeys,
+                voiceInputMode: voiceInputModeRef.current,
+                // In this effect's deps, so arming re-syncs the watch list
+                // immediately (a settings save is not something the user does
+                // mid-match).
+                clipArmed,
+            });
+            lastNativeWatchRef.current = { ids, keys, at: Math.round(performance.now()) };
+            // Nothing qualifies: the feed is torn down rather than left idle.
+            // Named, because a silent stop here and "never started" used to
+            // be indistinguishable from outside.
+            if (ids.length === 0) { void stopNativeFeed('sync: no bind qualifies for system-wide'); return; }
             void startNativeFeed(ids, keys);
         };
         sync();
         window.addEventListener('settingsChanged', sync);
         return () => {
             window.removeEventListener('settingsChanged', sync);
-            void stopNativeFeed();
+            void stopNativeFeed('voice hotkey effect cleanup');
         };
     }, [isInVoice, voiceInputMode, isAfkChannel, listenOnly, clipArmed]);
 
