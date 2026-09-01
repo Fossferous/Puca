@@ -25,10 +25,17 @@ chat.example.com {
 		# verbatim, so without this a caller behind THIS proxy could still hand
 		# the backend a CF-Connecting-IP of its choosing. Delete it here and the
 		# backend cannot be fooled even if the flag is set by mistake.
-		# If you later front this with Cloudflare, remove this line, set
-		# TRUST_CF_CONNECTING_IP=true, and lock the origin to Cloudflare's
-		# ranges with deploy/cloudflare/origin-firewall.sh.
+		# If you later front this with Cloudflare, do NOT hand-edit this block:
+		# swap in deploy/cloudflare/caddy-behind-cloudflare.snippet wholesale
+		# (global options block included — it is required, and missing it
+		# degrades silently to one rate-limit bucket for the entire internet)
+		# and lock the origin with deploy/cloudflare/origin-firewall.sh.
+		# Leave TRUST_CF_CONNECTING_IP unset in both modes.
 		header_up -CF-Connecting-IP
+		# Same again for X-Real-IP: the backend falls back to it when
+		# X-Forwarded-For is absent, and Caddy forwards unknown client headers
+		# verbatim — so a caller could hand the backend one of its choosing.
+		header_up -X-Real-IP
 	}
 
 	header {

@@ -53,17 +53,28 @@ cert one of these ways instead:
 
 ### 4. Restore the real client IP at the origin (REQUIRED for rate limiting)
 Behind Cloudflare every request arrives from a Cloudflare IP, so the backend
-rate limiter would bucket ALL users under one key. Swap the `reverse_proxy`
-block in your live Caddyfile to the CF-aware variant in
-[`caddy-behind-cloudflare.snippet`](caddy-behind-cloudflare.snippet). It reads
-the true client IP from `CF-Connecting-IP` — but that header is only
-trustworthy once step 5 guarantees requests can *only* come from Cloudflare.
+rate limiter would bucket ALL users under one key. Install
+[`caddy-behind-cloudflare.snippet`](caddy-behind-cloudflare.snippet) — BOTH of
+its blocks. The global options block (`trusted_proxies` +
+`client_ip_headers`) is what makes Caddy resolve the real client IP; the site
+block hands that resolved value to the backend. A Caddyfile permits only one
+global options block, first in the file, so merge those two directives into
+yours if you already have one. Swapping in only the site block degrades
+silently: every user lands in one rate-limit bucket keyed on a Cloudflare edge
+IP. The snippet's closing comment has a curl check to prove the rollout took.
+
+Client-IP resolution consults `trusted_proxies`, so a request that reaches the
+origin directly has its headers ignored and is keyed on its own address —
+rate-limit integrity does not depend on step 5 being up. Step 5 is still
+required, as defence in depth and to keep the origin address unprobeable.
 
 ### 5. Lock the origin to Cloudflare (REQUIRED)
-If the origin still answers 80/443 from the whole internet, an attacker just
-skips Cloudflare (and can forge `CF-Connecting-IP`). Restrict inbound 80/443 to
-Cloudflare's published ranges with [`origin-firewall.sh`](origin-firewall.sh).
-Run it on the Caddy host; re-run when Cloudflare updates its ranges.
+If the origin still answers 80/443 from the whole internet, an attacker can
+skip Cloudflare's own protections (bot fight, edge rate rules, WAF) by hitting
+the origin IP directly. Restrict inbound 80/443 to Cloudflare's published
+ranges with [`origin-firewall.sh`](origin-firewall.sh). Run it on the Caddy
+host; re-run when Cloudflare updates its ranges, and keep its list in step
+with the `trusted_proxies` list in the snippet.
 
 ### 6. Cloudflare settings worth enabling
 - A **rate-limiting rule** on `/auth/*` (free tier includes one) — defence in

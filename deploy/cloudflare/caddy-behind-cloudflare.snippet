@@ -1,64 +1,89 @@
 # Caddy config for when chat.example.com is PROXIED through Cloudflare.
 #
-# Replaces the direct-mode block in the live Caddyfile. Pair it with the origin
-# lock (deploy/cloudflare/origin-firewall.sh), which drops non-Cloudflare
-# traffic on 80/443.
+# This file is a FULL replacement for the direct-mode chat block: install BOTH
+# the global options block and the site block. Pair it with the origin lock
+# (deploy/cloudflare/origin-firewall.sh), which drops non-Cloudflare traffic
+# on 80/443.
 #
 # Why any of this is needed: behind Cloudflare the TCP peer is always a
 # Cloudflare edge IP, so a rate limiter keyed on the peer would lump every user
-# on the internet into a handful of buckets. Cloudflare sends the real client
-# IP, and this config resolves it into X-Forwarded-For, which is what the
+# on the internet into a handful of buckets. This config resolves the real
+# client IP and hands it to the backend in X-Forwarded-For, which is what the
 # backend keys on.
 #
-# NOTE both blocks below are required. The global block is not optional
-# decoration: `{http.request.client_ip}` is resolved from the SERVER-level
-# `trusted_proxies` option only. The `trusted_proxies` subdirective inside
+# NOTE both blocks below are required, and a Caddyfile permits only ONE global
+# options block (first thing in the file) — merge these directives into yours
+# if you already have one. The global block is not optional decoration:
+# `{client_ip}` is resolved from the SERVER-level `trusted_proxies` +
+# `client_ip_headers` options only. The `trusted_proxies` subdirective inside
 # `reverse_proxy` governs that directive's own header handling and does NOT
 # feed the placeholder. Set one without the other and client_ip silently falls
 # back to the direct peer — i.e. the Cloudflare edge IP — which is exactly the
 # single-bucket failure this config exists to prevent, arriving silently.
 
 {
-	# Server-level, so {http.request.client_ip} resolves. Keep this CIDR list in
-	# sync with https://www.cloudflare.com/ips — origin-firewall.sh uses the same
-	# list, and the two drifting apart is the likeliest way this breaks.
 	servers {
+		# Keep this CIDR list in sync with https://www.cloudflare.com/ips —
+		# origin-firewall.sh uses the same list, and the two drifting apart is
+		# the likeliest way this breaks.
 		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+
+		# Resolve the client IP from the header CLOUDFLARE sets, not from
+		# X-Forwarded-For. This line is load-bearing:
+		#
+		# Caddy's default is to read X-Forwarded-For left-to-right and take the
+		# first parseable entry. Cloudflare does not replace a visitor-supplied
+		# X-Forwarded-For — it APPENDS to it — so with the default, a client
+		# that types "X-Forwarded-For: <anything>" into its request controls
+		# the leftmost entry, and therefore the rate-limit key, straight
+		# through a fully locked origin. Fresh key per request = no rate limit.
+		#
+		# CF-Connecting-IP has neither problem: Cloudflare strips any inbound
+		# copy and writes exactly one value, the connecting client, so a
+		# visitor cannot influence it through the edge. And on a DIRECT hit
+		# (origin lock down), the peer is not in trusted_proxies, headers are
+		# ignored entirely, and client_ip is the attacker's own address — the
+		# limiter still bites.
+		#
+		# trusted_proxies_strict is deliberately NOT set: it only changes how
+		# multi-hop X-Forwarded-For chains are walked, CF-Connecting-IP is
+		# single-valued, and strict mode would mis-bucket any client whose own
+		# egress address happens to fall in a Cloudflare range (e.g. WARP).
+		client_ip_headers CF-Connecting-IP
 	}
 }
 
 chat.example.com {
 	reverse_proxy 127.0.0.1:3000 {
-		# Use the RESOLVED client IP, not the raw CF-Connecting-IP header.
+		# {client_ip} (long form {http.vars.client_ip}) is the value the two
+		# global directives above resolved. Do NOT write
+		# {http.request.client_ip} — that placeholder does not exist, and
+		# Caddy's header rewrites pass unknown placeholders through VERBATIM,
+		# so the backend would receive the literal string as its
+		# X-Forwarded-For and fall back to peer-based bucketing.
 		#
-		# Both give the same answer for traffic that actually came through
-		# Cloudflare. They differ precisely when a request reaches the origin
-		# WITHOUT passing through Cloudflare, and that difference is the point:
-		#
-		#   {http.request.header.CF-Connecting-IP} is whatever the caller typed.
-		#     A direct caller sets it per request, mints a fresh limiter bucket
-		#     every time, and walks through the auth and API limits.
-		#   {http.request.client_ip} consults trusted_proxies first. From an
-		#     untrusted peer it ignores the forged headers entirely and yields
-		#     that peer's real address, so the limiter still bites.
-		#
-		# So rate-limit integrity no longer depends on the origin lock being up.
-		# That matters here: ufw in the home LXC has been observed reading back
-		# inactive after a `--force enable`, which is why ops/healthcheck.sh
-		# re-asserts it on a timer. Defence in depth, for a failure with a
-		# demonstrated history rather than a hypothetical one.
-		header_up X-Forwarded-For {http.request.client_ip}
+		# Rate-limit integrity this way does not depend on the origin lock
+		# being up. That matters here: ufw in the home LXC has been observed
+		# reading back inactive after a `--force enable`, which is why
+		# deploy/ops/healthcheck.sh re-asserts it on a timer. Defence in
+		# depth, for a failure with a demonstrated history rather than a
+		# hypothetical one.
+		header_up X-Forwarded-For {client_ip}
 
-		# Do not forward the raw header. The backend prefers it when
+		# Do not forward the raw client headers the backend also reads.
+		# CF-Connecting-IP: the backend prefers it when
 		# TRUST_CF_CONNECTING_IP=true, and nothing above sanitises it.
+		# X-Real-IP: the backend falls back to it when X-Forwarded-For is
+		# absent, and Caddy forwards unknown client headers verbatim.
 		#
-		# You do NOT need that flag with this config: X-Forwarded-For is already
-		# the resolved client IP, and the backend trusts XFF from a loopback
-		# peer. Leave TRUST_CF_CONNECTING_IP unset (the default). It exists for
-		# the different topology where Cloudflare fronts the backend with no
-		# Caddy in between, and enabling it here would only add a second,
-		# weaker trust path to the same answer.
+		# You do NOT need TRUST_CF_CONNECTING_IP with this config:
+		# X-Forwarded-For already carries the resolved client IP, and the
+		# backend trusts XFF from a loopback peer. Leave the flag unset (the
+		# default). It exists for the different topology where Cloudflare
+		# fronts the backend with no Caddy in between, and enabling it here
+		# would only add a second, weaker trust path to the same answer.
 		header_up -CF-Connecting-IP
+		header_up -X-Real-IP
 	}
 
 	header {
@@ -73,3 +98,10 @@ chat.example.com {
 
 	encode gzip
 }
+
+# Verifying after rollout (from a machine that is NOT a trusted proxy):
+#   curl -s https://chat.example.com/ -H "X-Forwarded-For: 203.0.113.9" \
+#        -H "CF-Connecting-IP: 203.0.113.9"
+# then confirm in the backend logs that the request was keyed to YOUR real
+# public IP, not 203.0.113.9. If it was keyed to a Cloudflare edge address,
+# the global block above is missing or was not merged into your Caddyfile.

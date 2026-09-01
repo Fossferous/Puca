@@ -2,9 +2,15 @@
 # Lock the origin so ONLY Cloudflare can reach HTTP/HTTPS. Run on the host that
 # terminates TLS (the box that terminates TLS). Requires ufw and curl.
 #
-# This is REQUIRED when chat.example.com is proxied through Cloudflare: without it,
-# an attacker can bypass Cloudflare by hitting the origin IP directly AND forge
-# the CF-Connecting-IP header the reverse proxy trusts.
+# This is REQUIRED when chat.example.com is proxied through Cloudflare: without
+# it, an attacker who learns the origin IP can hit it directly, skipping every
+# edge protection (bot fight, WAF, Cloudflare rate rules). Client-IP resolution
+# itself no longer depends on this lock — caddy-behind-cloudflare.snippet keys
+# a direct hit on the peer's own address — so this is defence in depth, not the
+# only thing standing between forged headers and the rate limiter.
+#
+# Keep the ranges here and the trusted_proxies list in that snippet in step:
+# both mirror https://www.cloudflare.com/ips.
 #
 # Only ports 80/443 are touched — SSH (22) and the TURN ports are left alone, so
 # this cannot lock you out of SSH or break coturn. ufw is FIRST-MATCH: the

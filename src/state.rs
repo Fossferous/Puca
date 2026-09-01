@@ -1111,14 +1111,21 @@ fn client_ip_with_policy(headers: &HeaderMap, peer: SocketAddr, trust_cf: bool) 
         }
     }
     if peer_is_trusted_proxy(peer.ip()) {
+        // X-Real-IP is a FALLBACK for proxies that never set X-Forwarded-For
+        // (nginx sets both; the Caddy configs set XFF and strip X-Real-IP).
+        // It must only be consulted when XFF is ABSENT: when the proxy DID
+        // set XFF but the value has no parseable entry, falling through to a
+        // second header would hand the decision to whichever value the proxy
+        // did NOT sanitise — X-Real-IP passes through Caddy verbatim unless
+        // stripped. Degrading to the peer (one shared bucket behind this
+        // proxy) is the fail-safe direction; a per-request client-chosen
+        // bucket is the fail-open one.
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(ip) = xff
+            return xff
                 .split(',')
                 .filter_map(|s| s.trim().parse::<IpAddr>().ok())
                 .next()
-            {
-                return ip;
-            }
+                .unwrap_or_else(|| peer.ip());
         }
         if let Some(rip) = header_ip(headers, "x-real-ip") {
             return rip;
@@ -2361,18 +2368,44 @@ mod client_ip_tests {
 
     #[test]
     fn garbage_headers_do_not_panic_and_fall_through() {
+        // An UNPARSEABLE XFF must degrade to the peer, NOT slide over to
+        // X-Real-IP. The proxy set XFF; if its value is garbage, trusting a
+        // second header it did not sanitise hands the bucket key back to the
+        // client (X-Real-IP passes through Caddy verbatim unless stripped).
+        // Fail-shared (everyone behind the proxy in one bucket) over
+        // fail-open (a fresh client-chosen bucket per request).
         let mut h = HeaderMap::new();
         h.insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
         h.insert("x-forwarded-for", "also-not-an-ip".parse().unwrap());
         h.insert("x-real-ip", "192.0.2.55".parse().unwrap());
         assert_eq!(
-            client_ip_with_policy(&h, behind_proxy(), true).to_string(),
-            "192.0.2.55"
+            client_ip_with_policy(&h, behind_proxy(), true),
+            behind_proxy().ip()
         );
         let empty = HeaderMap::new();
         assert_eq!(
             client_ip_with_policy(&empty, behind_proxy(), true),
             behind_proxy().ip()
+        );
+    }
+
+    #[test]
+    fn x_real_ip_only_when_xff_is_absent() {
+        // The positive control for the test above: X-Real-IP IS honoured from
+        // a trusted proxy when X-Forwarded-For is genuinely absent (a proxy
+        // that only sets X-Real-IP). Without this, the garbage-XFF assertion
+        // could pass because X-Real-IP was never consulted at all.
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", "192.0.2.55".parse().unwrap());
+        assert_eq!(
+            client_ip_with_policy(&h, behind_proxy(), false).to_string(),
+            "192.0.2.55"
+        );
+        // And the pair: once XFF appears with a usable entry, it wins.
+        h.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
+        assert_eq!(
+            client_ip_with_policy(&h, behind_proxy(), false).to_string(),
+            "198.51.100.7"
         );
     }
 

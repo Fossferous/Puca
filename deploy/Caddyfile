@@ -31,6 +31,10 @@ chat.example.com {
 		# real client into X-Forwarded-For either way, and the backend trusts XFF
 		# from this loopback peer, so the flag buys nothing here.
 		header_up -CF-Connecting-IP
+		# Same again for X-Real-IP: the backend falls back to it when
+		# X-Forwarded-For is absent, and Caddy forwards unknown client headers
+		# verbatim — so a caller could hand the backend one of its choosing.
+		header_up -X-Real-IP
 	}
 
 	header {
