@@ -2259,10 +2259,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 const isDefault = (b: { keyCode: number; ctrl: boolean; alt: boolean; shift: boolean } | null | undefined,
                     d: { keyCode: number; ctrl: boolean; alt: boolean; shift: boolean } | null) =>
                     !!b && !!d && b.keyCode === d.keyCode && b.ctrl === d.ctrl && b.alt === d.alt && b.shift === d.shift;
-                if (!isDefault(s.toggleMuteBinding, defaultSettings.toggleMuteBinding)) {
+                // ...OR the user has explicitly asked for system-wide voice
+                // shortcuts. The value comparison infers intent from "you
+                // changed it", which is sound but unreachable for someone who
+                // is happy with Ctrl+Shift+M: they could only opt in by
+                // choosing a combo they did not want, and nothing told them
+                // why their hotkey died the moment they tabbed into a game.
+                // Reported twice as "hotkeys don't work when Puca isn't
+                // focused" — which is exactly how it looks from outside.
+                // `globalVoiceHotkeys` records the intent instead of guessing
+                // it, and carries the same consequences described above, which
+                // is why it stays off until asked for.
+                const wantsGlobal = s.globalVoiceHotkeys === true;
+                if (wantsGlobal || !isDefault(s.toggleMuteBinding, defaultSettings.toggleMuteBinding)) {
                     watch('voice.toggleMute', s.toggleMuteBinding);
                 }
-                if (!isDefault(s.toggleDeafenBinding, defaultSettings.toggleDeafenBinding)) {
+                if (wantsGlobal || !isDefault(s.toggleDeafenBinding, defaultSettings.toggleDeafenBinding)) {
                     watch('voice.toggleDeafen', s.toggleDeafenBinding);
                 }
                 if (voiceInputModeRef.current === 'pushToTalk') {
