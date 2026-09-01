@@ -28,6 +28,7 @@ const bridge = vi.hoisted(() => ({
     setMobilePushAccount: vi.fn<(id: number | null) => Promise<void>>().mockResolvedValue(undefined),
     syncMobilePushGates: vi.fn().mockResolvedValue(undefined),
     getMobileWakeToken: vi.fn<() => Promise<string | null>>().mockResolvedValue(null),
+    disableMobileWake: vi.fn().mockResolvedValue(undefined),
 }));
 const api = vi.hoisted(() => ({
     post: vi.fn().mockResolvedValue({}),
@@ -41,6 +42,7 @@ vi.mock('../api/mobileApp', async (importOriginal) => ({
     setMobilePushAccount: bridge.setMobilePushAccount,
     syncMobilePushGates: bridge.syncMobilePushGates,
     getMobileWakeToken: bridge.getMobileWakeToken,
+    disableMobileWake: bridge.disableMobileWake,
 }));
 vi.mock('../api/client', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/client')>()),
@@ -275,5 +277,20 @@ describe('teardownPushRegistration', () => {
         setServerNotifyLevel('srv-2', 'nothing');
         await Promise.resolve();
         expect(bridge.syncMobilePushGates.mock.calls.length).toBe(after);
+    });
+
+    /**
+     * The consent gate has to be revocable. Enabling Firebase auto-init on
+     * first use and never disabling it left a phone registered with Google
+     * after sign-out — consent granted once and never withdrawable.
+     *
+     * This assertion exists because the mock previously OMITTED
+     * disableMobileWake, so both call sites fell through to the real jsdom
+     * no-op and no test could observe whether revocation happened at all.
+     */
+    it('stops this device registering with Google', async () => {
+        await initPushRegistration();
+        await teardownPushRegistration();
+        expect(bridge.disableMobileWake).toHaveBeenCalled();
     });
 });

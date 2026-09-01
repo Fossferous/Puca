@@ -506,9 +506,24 @@ fn reset_capture_state(app: tauri::AppHandle, state: tauri::State<'_, TrayTipSta
 fn clear_tray_capture_parts(app: &tauri::AppHandle, state: &tauri::State<'_, TrayTipState>) {
     {
         let mut p = state.0.lock().unwrap();
+        // ONLY the parts the webview owns.
+        //
+        // `clip` and `share` are driven entirely by JavaScript, so a reload
+        // definitively ends them — the native clip capture is stopped by the
+        // caller just above, and a screen share cannot outlive the page that
+        // held its MediaStream.
+        //
+        // `device` is NOT ours to clear. A My Devices session can be hosted by
+        // the native agent, which keeps streaming across a webview reload and is
+        // torn down only at RunEvent::Exit or by the server's detach grace. A
+        // first cut cleared it here, which made the tray go DARK while the
+        // screen was still being sent — trading a stale indicator for a MISSING
+        // one during real capture. That is much the worse direction: a badge
+        // that is occasionally late is a nuisance; a badge that is absent while
+        // someone is watching your screen is the exact failure this indicator
+        // exists to prevent. session.ts re-asserts it when the page comes back.
         p.clip = None;
         p.share = None;
-        p.device = None;
     }
     compose_tray_tip(app, state);
 }

@@ -1642,7 +1642,28 @@ fn turn_urls_from_env(turn_server: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|u| !u.is_empty())
-        .map(str::to_string)
+        .map(|u| {
+            // Canonicalise the SCHEME to lowercase, keeping the host as typed.
+            //
+            // `stun_urls_from_turn` was made case-insensitive so an operator who
+            // writes `TURN:` still gets STUN — but this helper forwarded the
+            // scheme verbatim, so that same value produced a working TURN entry
+            // that two case-SENSITIVE consumers then failed to recognise:
+            // `withRelayOnlyIfRequested`'s hasTurn check, which silently left
+            // "Hide my IP" doing nothing, and the remote-desktop agent's ICE
+            // parser, which never allocated a relay. Browsers accept any case
+            // and normalise internally, so nothing downstream sees a change —
+            // but our own matchers run BEFORE the browser does.
+            //
+            // Splitting on the first ':' and lowercasing only the left side
+            // leaves a hostname untouched (hostnames are case-insensitive for
+            // DNS, but an IDN/punycode host must not be mangled), and an entry
+            // with no ':' is passed through for the browser to reject as before.
+            match u.split_once(':') {
+                Some((scheme, rest)) => format!("{}:{}", scheme.to_ascii_lowercase(), rest),
+                None => u.to_string(),
+            }
+        })
         .collect()
 }
 
@@ -1966,6 +1987,27 @@ mod stun_derivation_tests {
         assert_eq!(
             stun_urls_from_turn("TURN:turn.example.com:3478?transport=udp"),
             vec!["stun:turn.example.com:3478".to_string()]
+        );
+    }
+
+    /// The scheme must leave the server in ONE canonical form, because two
+    /// case-SENSITIVE consumers match on it before any browser normalises it:
+    /// the relay-only privacy check and the remote-desktop agent's ICE parser.
+    #[test]
+    fn turn_urls_canonicalise_the_scheme_but_not_the_host() {
+        assert_eq!(
+            turn_urls_from_env("TURN:Turn.Example.COM:3478?transport=udp"),
+            vec!["turn:Turn.Example.COM:3478?transport=udp".to_string()],
+            "scheme lowercased, host left exactly as the operator typed it"
+        );
+        assert_eq!(
+            turn_urls_from_env("TuRnS:h:5349"),
+            vec!["turns:h:5349".to_string()]
+        );
+        assert_eq!(
+            turn_urls_from_env("no-scheme-here"),
+            vec!["no-scheme-here".to_string()],
+            "passed through for the browser to reject, as before"
         );
     }
 

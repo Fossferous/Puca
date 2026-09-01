@@ -111,6 +111,16 @@ async function reconcileDelivery(): Promise<void> {
     const s = loadSettings();
     if (s.mobileBackgroundDelivery === false || s.mobileNotifications === false) {
         await unregisterWakeToken();
+        // RE-READ the setting after the await. The unregister is a network
+        // round trip, and `settingsChanged` fires for every setting in the app —
+        // so a user who flips background delivery off and straight back on can
+        // have the ON event overtaken by this branch finishing, which would then
+        // disable the registration they just asked for and leave them with the
+        // setting ON and no doorbell until the next app start.
+        if (!(loadSettings().mobileBackgroundDelivery === false
+            || loadSettings().mobileNotifications === false)) {
+            return;
+        }
         // ...and stop registering with Google at all. Dropping only the server
         // row left the phone registered with FCM after the user switched
         // background delivery off — the setting stopped the doorbell RINGING
