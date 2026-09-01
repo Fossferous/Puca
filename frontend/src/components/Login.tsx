@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
 import { login, register, resetPasswordMigration, REMEMBER_ME_KEY } from '../api/auth';
 import { wsClient } from '../api/websocket';
+import { isTauri, isMobile } from '../api/platform';
 import './Login.css';
 
 interface LoginProps {
@@ -305,6 +306,40 @@ export function Login({ onLoginSuccess }: LoginProps) {
             <div className="login-card">
                 <h1 className="login-title">Puca</h1>
                 <p className="login-subtitle">Self-Hosted Communication</p>
+
+                {/*
+                  * Browser only, and shown BEFORE the password field.
+                  *
+                  * In a browser the operator of this server also serves the
+                  * JavaScript that performs the encryption, on every page load.
+                  * That makes end-to-end encryption a promise about the operator
+                  * rather than a property of the maths: they could serve one
+                  * person a modified bundle and take their seed, and nothing —
+                  * not the browser, not this app, not a checksum — would show it.
+                  * Subresource Integrity cannot fix it, because the hash would be
+                  * served by the same host as the script.
+                  *
+                  * docs/SECURITY_MODEL.md has said this plainly for a long time.
+                  * The problem was placement: the person it concerns arrives via
+                  * an invite link and never reads a repository. The desktop app
+                  * loads its own bundled code and is not affected, which is why
+                  * the notice says so rather than just warning.
+                  */}
+                {!isTauri() && !isMobile() && (
+                    <p className="login-trust-note">
+                        You are using Puca in a browser, so this server sends your browser the code
+                        that encrypts your messages — every time you open it. That means its operator
+                        <em> could</em> read what you send here if they chose to. The desktop app
+                        ships its own code and is not affected.{' '}
+                        <a
+                            href="https://github.com/Fossferous/Puca/blob/main/docs/SECURITY_MODEL.md"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            What this does and does not protect
+                        </a>
+                    </p>
+                )}
 
                 {successMessage && <div className="success-message" style={{ color: '#43b581', marginBottom: '15px', padding: '10px', background: 'rgba(67, 181, 129, 0.1)', borderRadius: '4px' }}>{successMessage}</div>}
 

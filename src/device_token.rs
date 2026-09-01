@@ -183,12 +183,19 @@ pub async fn device_token(
     // explicit "A REVOKED device stays revoked" guard for the mirror half —
     // while leaving general account access intact until the user happens to
     // change their password. This was the one path in the family that forgot.
-    let row = sqlx::query_as::<_, (String, i32, String)>(
+    let row = sqlx::query_as::<_, (String, i32, String, i32)>(
         // `u.deleted_at IS NULL` matters as much as the device's own revocation:
         // account deletion is a tombstone UPDATE, so without it a device enrolled
         // before the deletion still resolves to a live row here and mints a full
         // account token for an account that no longer exists.
-        "SELECT d.sign_pub, d.user_id, u.username \
+        //
+        // token_version comes from the SAME statement as the revocation check,
+        // not a second one. Two autocommit reads straddle /auth/logout's own two
+        // writes, so a mint that saw `revoked_at IS NULL` before the revocation
+        // and `token_version` before the bump would issue a token outliving both
+        // — the exact window "sign out on all devices" exists to close. One
+        // snapshot cannot be half-stale.
+        "SELECT d.sign_pub, d.user_id, u.username, u.token_version \
          FROM devices d JOIN users u ON u.id = d.user_id \
          WHERE d.id = $1 AND d.revoked_at IS NULL AND u.deleted_at IS NULL",
     )
@@ -199,7 +206,7 @@ pub async fn device_token(
 
     // Same answer as a bad signature: whether a device id exists is not
     // something an unauthenticated caller should be able to measure.
-    let Some((sign_pub, user_id, username)) = row else {
+    let Some((sign_pub, user_id, username, token_version)) = row else {
         return Err(bad("that device could not be verified"));
     };
     let user_id = user_id as UserId;
@@ -207,28 +214,6 @@ pub async fn device_token(
     if !crate::ws::verify_device_attestation(&sign_pub, &payload.nonce, user_id, &payload.sig) {
         return Err(bad("that device could not be verified"));
     }
-
-    // The CURRENT token version, read now rather than remembered: a password
-    // change or recovery reset since this device was enrolled must invalidate
-    // what it gets here, exactly as it would any other session.
-    //
-    // BIND i32, NOT i64. `users.id` is INTEGER, and three other call sites run
-    // this BYTE-IDENTICAL statement text binding i32 (auth.rs:158, ws.rs:55,
-    // server_handlers.rs:1573). sqlx caches prepared statements per connection
-    // keyed on the text, so whichever width touches a pooled connection first
-    // types the statement there and the other then fails at RUNTIME with
-    // "incorrect binary data format in bind parameter 1" — nondeterministically,
-    // depending only on which connection served the request. That is the same
-    // trap that made moderation intermittently 500 (fixed once for kick/ban vs
-    // leave_server); this call site was missed by that sweep. It matters most
-    // here because this route IS the cold-boot recovery path, so the failure
-    // strands exactly the machine it exists to rescue.
-    let token_version: i32 =
-        sqlx::query_scalar("SELECT token_version FROM users WHERE id = $1")
-            .bind(user_id as i32)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("database error: {e}")))?;
 
     let token = mint_device_token(user_id, &username, token_version, &state.jwt_secret)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

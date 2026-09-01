@@ -1315,8 +1315,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         Signing out normally only signs out this device. If you think a
                                         session token has been stolen — a shared or lost computer, a
                                         browser you did not close — sign out everywhere. Every device is
-                                        signed out immediately, including this one, and you will need to
-                                        log in again.
+                                        signed out immediately, including this one.
+                                        <br /><br />
+                                        This also un-enrols your computers and phones from My Devices, so
+                                        remote access and any device shares you granted stop working. Each
+                                        machine re-enrols the next time you sign in on it — which means
+                                        being physically at any computer you reach remotely.
                                     </p>
                                     <button
                                         className="danger-btn"
@@ -2697,9 +2701,31 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
 
                                 <h3>Debug</h3>
                                 <div className="settings-card">
+                                    <p className="settings-hint">
+                                        Wipes everything this app has stored in this browser, including the
+                                        record of which contacts&rsquo; encryption keys you have already
+                                        confirmed. After this, the next key the server offers for each
+                                        contact is accepted as new — so only use it if something is
+                                        actually broken.
+                                    </p>
                                     <button
                                         className="secondary-btn"
                                         onClick={() => {
+                                            // Confirmed, because this destroys the trust-on-first-use
+                                            // anchors (verified_key_*, control_pin_*) and the
+                                            // anti-downgrade pins (e2ee_key_version_*,
+                                            // e2ee_epoch_floor_*). Those are the client's only defence
+                                            // against a server substituting a peer's identity key or
+                                            // rolling a channel back to a superseded epoch, and a debug
+                                            // button that silently disarms them is a footgun pointed at
+                                            // exactly the user most likely to press it.
+                                            const ok = window.confirm(
+                                                'This clears all local app data, including the record of which '
+                                                + 'contacts’ encryption keys you have already verified.\n\n'
+                                                + 'You will have to verify them again, and until you do, a '
+                                                + 'substituted key would not be flagged.\n\nContinue?',
+                                            );
+                                            if (!ok) return;
                                             localStorage.clear();
                                             window.location.reload();
                                         }}

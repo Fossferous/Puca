@@ -56,6 +56,32 @@
   font-size: 0.9rem;
 }
 
+/* Browser-only trust notice. Deliberately NOT styled as an error or a warning
+   banner: it states a true and permanent property of running in a browser, not
+   a fault to be dismissed, and an alarm-coloured box on every single visit
+   would train people to scroll past the one thing here they most need to read. */
+.login-trust-note {
+  margin: -1rem 0 1.75rem;
+  padding: 0.75rem 0.875rem;
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 0 4px 4px 0;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.login-trust-note em {
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.login-trust-note a {
+  color: rgba(255, 255, 255, 0.85);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .login-form {
   display: flex;
   flex-direction: column;

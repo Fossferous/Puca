@@ -157,9 +157,10 @@ pub const MAX_SRP_HEX_LEN: usize = 1024;
 /// 2 MiB body limit, lowercased it, drove it through a multi-pass HMAC, and
 /// stored it as a permanent key in the login-backoff map. Length is the ONLY
 /// thing checked here: the charset rule belongs to registration, and applying it
-/// at login could lock out an account created under an older rule. A name longer
-/// than the registration ceiling cannot exist, so refusing it reveals nothing
-/// about which accounts do.
+/// at login could lock out an account created under an older rule — which is
+/// also why the ceiling here is a RESOURCE bound well above the registration
+/// limit rather than the registration limit itself. Refusing a name longer than
+/// any plausible account reveals nothing about which accounts exist.
 pub fn reject_oversized_username(username: &str) -> Result<(), StatusCode> {
     // Bound RESOURCE consumption, not the registration business rule.
     //
@@ -649,9 +650,22 @@ pub async fn logout(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    // ONE transaction. The token bump and the device revocation are the two
+    // halves of a single promise ("nothing that was signed in still is"), and
+    // running them as separate autocommit statements left a window where the
+    // bump had landed and the revocation had not — enrolled devices still able
+    // to mint fresh account tokens, with the caller told it had failed and no
+    // way to know which half applied. Either both land or neither does.
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("logout: could not begin transaction for user {}: {:?}", claims.sub, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to log out").into_response();
+        }
+    };
     if let Err(e) = sqlx::query("UPDATE users SET token_version = token_version + 1 WHERE id = $1")
         .bind(claims.sub as i32)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
     {
         tracing::error!(
@@ -673,21 +687,27 @@ pub async fn logout(
         "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
     )
     .bind(claims.sub as i32)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     {
-        // Do not report success: the caller pressed this because they believe a
-        // token was stolen, and a partial revocation is exactly the case where
-        // silence is dangerous.
+        // Dropping `tx` without commit rolls the bump back too, so the account
+        // is left exactly as it was and "Try again" is honest advice.
         tracing::error!(
-            "logout: token_version bumped but device revocation FAILED for user {}: {:?}",
+            "logout: device revocation failed for user {}, rolling back: {:?}",
             claims.sub,
             e
         );
-        state.disconnect_user(claims.sub);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Sessions were signed out but enrolled devices could not be revoked. Try again.",
+            "Could not sign out everywhere. Nothing was changed — try again.",
+        )
+            .into_response();
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("logout: commit failed for user {}: {:?}", claims.sub, e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not sign out everywhere. Nothing was changed — try again.",
         )
             .into_response();
     }
@@ -707,6 +727,17 @@ pub async fn reset_password(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ResetPasswordRequest>,
 ) -> impl IntoResponse {
+    // Bounds FIRST, above the disabled-by-default gate below. The gate's own
+    // branch formats the username into a warning log, so a guard placed after it
+    // still let a megabyte of caller-supplied text through on a stock server —
+    // the one configuration nearly every deployment runs.
+    if reject_oversized_username(&payload.username).is_err()
+        || reject_oversized_hex(&payload.salt_hex).is_err()
+        || reject_oversized_hex(&payload.verifier_hex).is_err()
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid request").into_response();
+    }
+
     // SECURITY: this endpoint overwrites an account's SRP salt+verifier with NO
     // proof of identity — it treats force_password_reset=TRUE as authorization.
     // That makes any such account (the case-insensitive-login migration flagged
@@ -730,11 +761,6 @@ pub async fn reset_password(
             .into_response();
     }
 
-    // The unauthenticated credential route the first bounds sweep missed. It is
-    // disabled by default (above), but the guard belongs here regardless.
-    if reject_oversized_username(&payload.username).is_err() {
-        return (StatusCode::BAD_REQUEST, "Invalid username").into_response();
-    }
 
     tracing::info!(">>> reset_password called for user: {}", payload.username);
 

@@ -737,12 +737,20 @@ export function logout(): void {
     // ordinary sign-out would tear down the user's own remote-desktop host and
     // require physical access to restore it. Those platforms keep their identity
     // across sign-out, which is the behaviour that was there before.
+    // ONE gate for both halves. The revoke and the key scrub have to agree: if
+    // the key is destroyed while the row survives, the next sign-in attests a
+    // stale id with a fresh key, is silently refused, and enrols ANOTHER row —
+    // so a habitual sign-out/sign-in user walks toward the 64-device cap with a
+    // Devices tab full of ghosts. A first cut gated the revoke on web-only but
+    // left the scrub unconditional, which produced exactly that on iOS/Android.
+    let revokedThisDevice = false;
     if (!isTauri() && !isMobile()) {
         const devId = thisDeviceId();
         if (devId) {
             // Fire-and-forget: the token is still valid on this line, and a
             // failed revoke must not block the user from signing out.
             void apiClient.delete(`/devices/${encodeURIComponent(devId)}`).catch(() => { /* best effort */ });
+            revokedThisDevice = true;
         }
         clearThisDeviceId();
     }
@@ -765,7 +773,18 @@ export function logout(): void {
     // trust-on-first-use anchors against a server substituting a peer's identity
     // key, and wiping them on every sign-out would hand a malicious server a
     // fresh substitution window at each login — the opposite of hygiene.
-    for (const k of ['sovereign_device_key_v1', 'sovereignTaskPlaces', 'sovereignTaskPlaceAssign']) {
+    const scrub = ['sovereignTaskPlaces', 'sovereignTaskPlaceAssign'];
+    // The device key goes only where the row above was revoked with it. On
+    // Tauri and Capacitor the enrolled device is the MACHINE and its identity
+    // must survive an ordinary sign-out, or the user's own remote-desktop host
+    // is torn down and needs physical access to restore.
+    // Only when the row was actually revoked with it. Signing out before the
+    // socket has attested leaves `thisDeviceId()` null and nothing to revoke —
+    // dropping the key there would strand the existing row and enrol a fresh one
+    // on the next sign-in, which is the very ghost this is meant to prevent.
+    // Keeping it lets the next session re-attest as the SAME device.
+    if (revokedThisDevice) scrub.push('sovereign_device_key_v1');
+    for (const k of scrub) {
         try { localStorage.removeItem(k); } catch { /* private mode */ }
     }
     // Task places are stored per-user (`<key>: <uid>`), so remove those too.

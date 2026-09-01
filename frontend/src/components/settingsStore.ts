@@ -1,4 +1,5 @@
 import { isTauri } from '../api/platform';
+import { isMediaE2eeSupported } from '../api/rtc/mediaCrypto';
 import { setIconStyle, type IconStyle } from './iconStyle';
 // App settings persisted in localStorage. Extracted from SettingsModal so that
 // component file only exports a component (keeps React Fast Refresh working).
@@ -382,7 +383,20 @@ const MEDIA_E2EE_MIGRATION_KEY = 'requireMediaE2eeDefaultOn_v1';
 function migrateRequireMediaE2ee(parsed: Partial<Settings> | null): Partial<Settings> {
     if (localStorage.getItem(MEDIA_E2EE_MIGRATION_KEY)) return parsed ?? {};
     const next = { ...(parsed ?? {}) };
-    const changed = parsed != null && next.requireMediaE2ee === false;
+    // CAPABILITY TERM. This is the one migration of the four that arms a
+    // FAIL-CLOSED setting, and an engine without WebRTC Encoded Transform
+    // (Safari and Firefox on the web, the WebKit/WebKitGTK Tauri shells on
+    // macOS and Linux) cannot satisfy it: with it on, the manager publishes no
+    // local media and drops inbound tracks, so voice is dead in both directions.
+    // Flipping it blind would have taken working calls away from those users on
+    // upgrade, for a setting they never touched — and re-armed anyone who had
+    // already turned it off after their calls broke.
+    //
+    // The marker below is still written UNCONDITIONALLY, which is what keeps the
+    // disarm contract: a user who later turns this off deliberately is not
+    // re-armed on the next launch, on any engine.
+    const changed =
+        parsed != null && next.requireMediaE2ee === false && isMediaE2eeSupported();
     if (changed) next.requireMediaE2ee = true;
     try {
         // Marked done even with nothing stored, so a user who later turns this
