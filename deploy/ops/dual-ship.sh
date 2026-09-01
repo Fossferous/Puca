@@ -274,6 +274,98 @@ MEOF
 	done
 }
 
+# Build an updater manifest LOCALLY, as a file, and ship it. Never build one
+# with a heredoc inside an ssh command string.
+#
+# WHY. Both installer paths used to do:
+#     ssh_to "$entry" "... cat > latest.json <<JEOF
+#     { \"notes\": \"$notes\", ... }
+#     JEOF"
+# The delimiter was UNQUOTED (contrast the mobile paths, which correctly use
+# <<'MEOF'), and the whole body sat inside a double-quoted string handed to
+# ssh. So the body was expanded TWICE: once here, and again by the REMOTE
+# shell — running as root, on every host. A release-notes string containing a
+# backtick or $( ) therefore executed as root everywhere. That is not an
+# exotic input: it is what an ordinary changelog line looks like the first
+# time someone writes "fixed `useEffect` ordering" or "bumped $PATH handling".
+# The notes string comes straight from argv, so this was reachable by anyone
+# who could talk the operator into shipping their changelog text.
+#
+# json.dump also fixes a second, quieter bug in the same lines: the heredoc
+# pasted $notes between two literal quotes with no escaping, so a notes string
+# containing a double quote, a backslash or a newline silently produced a
+# manifest no client could parse — a release that looks successful here and
+# breaks every updater.
+#
+# Values travel through the ENVIRONMENT, so nothing is re-parsed as shell.
+#
+# Pick an interpreter that actually RUNS, not merely one that is on PATH:
+# Windows ships a `python3` App-Execution-Alias stub in WindowsApps that
+# resolves to a real path, satisfies `command -v`, and then exits with
+# "Python was not found" the moment you use it. Probing with -c is the only
+# check that distinguishes the stub from an interpreter.
+PY=""
+for _cand in python3 python py; do
+	if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c '' >/dev/null 2>&1; then
+		PY="$_cand"; break
+	fi
+done
+if [ -z "$PY" ]; then
+	echo "REFUSING: no working python found (tried python3, python, py)." >&2
+	echo "It is needed to build the updater manifests safely." >&2
+	exit 1
+fi
+
+# Hand the interpreter a path IT understands.
+#
+# On Git Bash/MSYS — how this script is normally run — the shell's /tmp is
+# %LOCALAPPDATA%\Temp, but a native Windows python resolves the same "/tmp/x"
+# string to C:\tmp\x, a different directory that often exists. So `mktemp`
+# followed by a python write followed by `scp` silently ships a MISSING or
+# STALE manifest: the shell and the interpreter are looking at two different
+# files, and nothing errors. Command-line arguments get mangled into Windows
+# form by MSYS automatically; values passed through the ENVIRONMENT (which is
+# what makes this injection-proof) do not, so translate explicitly.
+# cygpath is absent on Linux/macOS, where the path is already native.
+to_native_path() {
+	if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+build_installer_manifest() {
+	local out="$1" version="$2" notes="$3" pub_date="$4" sig="$5" url="$6"
+	PUCA_OUT="$(to_native_path "$out")" PUCA_VERSION="$version" PUCA_NOTES="$notes" \
+	PUCA_PUB_DATE="$pub_date" PUCA_SIG="$sig" PUCA_URL="$url" \
+	"$PY" -c '
+import json, os
+m = {
+    "version": os.environ["PUCA_VERSION"],
+    "notes": os.environ["PUCA_NOTES"],
+    "pub_date": os.environ["PUCA_PUB_DATE"],
+    "platforms": {"windows-x86_64": {
+        "signature": os.environ["PUCA_SIG"],
+        "url": os.environ["PUCA_URL"],
+    }},
+}
+with open(os.environ["PUCA_OUT"], "w", encoding="utf-8", newline="\n") as f:
+    json.dump(m, f, indent=2)
+'
+}
+
+# Same, for the plain app-version.json the in-app banner reads.
+build_app_version_json() {
+	local out="$1" version="$2" notes="$3" download_url="$4"
+	PUCA_OUT="$(to_native_path "$out")" PUCA_VERSION="$version" PUCA_NOTES="$notes" PUCA_DL="$download_url" \
+	"$PY" -c '
+import json, os
+m = {
+    "version": os.environ["PUCA_VERSION"],
+    "download_url": os.environ["PUCA_DL"],
+    "notes": os.environ["PUCA_NOTES"],
+}
+with open(os.environ["PUCA_OUT"], "w", encoding="utf-8", newline="\n") as f:
+    json.dump(m, f, indent=2)
+'
+}
+
 cmd_installer() {
 	local exe="${1:?setup.exe}" sig_file="${2:?sig file}" version="${3:?version}" notes="${4:?notes}"
 	local sig; sig="$(cat "$sig_file")"
@@ -294,10 +386,17 @@ cmd_installer() {
 	# stale. The stable name is still uploaded — it is what the download page
 	# links for humans, where an edge-TTL of staleness is tolerable.
 	local versioned="${INSTALLER_NAME%.exe}-$version.exe"
+	local tmp_latest tmp_appver
+	tmp_latest="$(mktemp)"; tmp_appver="$(mktemp)"
+	build_installer_manifest "$tmp_latest" "$version" "$notes" "$pub_date" "$sig" \
+		"https://$DOWNLOAD_HOST/$versioned"
+	build_app_version_json "$tmp_appver" "$version" "$notes" "https://$DOWNLOAD_HOST"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== installer $version -> $label ==="
 		scp_to "$entry" "$exe" "${entry#*:}:/tmp/Puca-Setup-dual.exe"
+		scp_to "$entry" "$tmp_latest" "${entry#*:}:/tmp/puca-latest-dual.json"
+		scp_to "$entry" "$tmp_appver" "${entry#*:}:/tmp/puca-appver-dual.json"
 		ssh_to "$entry" "set -e
 			cd $INSTALL_DIR/downloads
 			[ -f $INSTALLER_NAME ] && cp -a $INSTALLER_NAME $INSTALLER_NAME.bak-dual-\$(date +%Y%m%d-%H%M%S)
@@ -305,21 +404,9 @@ cmd_installer() {
 			cp /tmp/Puca-Setup-dual.exe $versioned
 			mv /tmp/Puca-Setup-dual.exe $INSTALLER_NAME
 			chmod 644 $INSTALLER_NAME $versioned
-			cat > latest.json <<JEOF
-{
-  \"version\": \"$version\",
-  \"notes\": \"$notes\",
-  \"pub_date\": \"$pub_date\",
-  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$versioned\" } }
-}
-JEOF
-			cat > $INSTALL_DIR/app-version.json <<VEOF
-{
-  \"version\": \"$version\",
-  \"download_url\": \"https://$DOWNLOAD_HOST\",
-  \"notes\": \"$notes\"
-}
-VEOF"
+			mv /tmp/puca-latest-dual.json latest.json
+			mv /tmp/puca-appver-dual.json $INSTALL_DIR/app-version.json
+			chmod 644 latest.json $INSTALL_DIR/app-version.json"
 		local served_sha
 		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
@@ -329,6 +416,7 @@ VEOF"
 			FAILED+=("$label:installer")
 		fi
 	done
+	rm -f "$tmp_latest" "$tmp_appver"
 	verify_cdn_exe "$versioned" "$local_sha" "installer" "$INSTALLER_NAME"
 }
 
@@ -392,10 +480,14 @@ cmd_installer_lite() {
 	# whole cache TTL, and a fresh manifest + stale exe = signature failure
 	# on every client until the edge expires.
 	local versioned="${INSTALLER_NAME_LITE%.exe}-$version.exe"
+	local tmp_latest; tmp_latest="$(mktemp)"
+	build_installer_manifest "$tmp_latest" "$version" "$notes" "$pub_date" "$sig" \
+		"https://$DOWNLOAD_HOST/$versioned"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== installer (lite) $version -> $label ==="
 		scp_to "$entry" "$exe" "${entry#*:}:/tmp/Puca-Lite-Setup-dual.exe"
+		scp_to "$entry" "$tmp_latest" "${entry#*:}:/tmp/puca-latest-lite-dual.json"
 		ssh_to "$entry" "set -e
 			cd $INSTALL_DIR/downloads
 			[ -f $INSTALLER_NAME_LITE ] && cp -a $INSTALLER_NAME_LITE $INSTALLER_NAME_LITE.bak-dual-\$(date +%Y%m%d-%H%M%S)
@@ -403,14 +495,8 @@ cmd_installer_lite() {
 			cp /tmp/Puca-Lite-Setup-dual.exe $versioned
 			mv /tmp/Puca-Lite-Setup-dual.exe $INSTALLER_NAME_LITE
 			chmod 644 $INSTALLER_NAME_LITE $versioned
-			cat > latest-lite.json <<JEOF
-{
-  \"version\": \"$version\",
-  \"notes\": \"$notes\",
-  \"pub_date\": \"$pub_date\",
-  \"platforms\": { \"windows-x86_64\": { \"signature\": \"$sig\", \"url\": \"https://$DOWNLOAD_HOST/$versioned\" } }
-}
-JEOF"
+			mv /tmp/puca-latest-lite-dual.json latest-lite.json
+			chmod 644 latest-lite.json"
 		local served_sha
 		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME_LITE --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
@@ -420,6 +506,7 @@ JEOF"
 			FAILED+=("$label:installer-lite")
 		fi
 	done
+	rm -f "$tmp_latest"
 	verify_cdn_exe "$versioned" "$local_sha" "installer-lite" "$INSTALLER_NAME_LITE"
 }
 
