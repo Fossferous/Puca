@@ -819,6 +819,26 @@ fn stop_hotkey_listener() {
     hotkeys::stop();
 }
 
+/// Report what the native hotkey feed believes, for diagnosing "hotkeys don't
+/// work when Puca isn't focused" WHILE IT IS HAPPENING.
+///
+/// Read it from DevTools during a call:
+///   await window.__TAURI__.core.invoke('hotkey_diag')
+///
+/// How to read the answer:
+///   hook_live false          -> the low-level hook is not installed; the feed
+///                               is not running at all.
+///   watching missing your VK -> your binding never reached the native side;
+///                               the fault is in the frontend, not the hook.
+///   events_seen stuck at 0   -> the hook is installed but receiving nothing.
+///   events_seen rising       -> the hook sees your key and something further
+///                               down (modifier match, action routing) drops
+///                               it — a completely different bug.
+#[tauri::command]
+fn hotkey_diag() -> serde_json::Value {
+    hotkeys::diag()
+}
+
 /// Enumerate monitors + the virtual desktop so the host can map the shared
 /// surface onto the right screen (multi-monitor / negative coordinates).
 #[cfg(feature = "remote-control")]
@@ -1382,6 +1402,7 @@ pub fn run() {
             stop_control_guard,
             start_hotkey_listener,
             stop_hotkey_listener,
+            hotkey_diag,
             #[cfg(feature = "remote-control")]
             list_monitors,
             #[cfg(feature = "remote-control")]
