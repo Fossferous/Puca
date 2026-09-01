@@ -45,7 +45,7 @@ download page with the Full/Lite picker.
 This section exists because privacy-and-security software makes big claims
 easily and cheaply. The rest of this README is a normal project README; this
 part is instead of one. If you only read one section, read this one, and then
-go read [`docs/SECURITY_FOR_SKEPTICS.md`](docs/SECURITY_FOR_SKEPTICS.md),
+go read [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md),
 which is the long, unflattering-where-it's-unflattering version of everything
 below.
 
@@ -61,7 +61,7 @@ AI-suggested-and-human-typed.
 What that honestly means: this is a **single-maintainer project with no
 external audit**, and "AI-assisted" is not a substitute for one — it changes
 *how* the code was written, not whether it has been independently checked by
-a second party. Read [`docs/SECURITY_FOR_SKEPTICS.md` §8](docs/SECURITY_FOR_SKEPTICS.md#8-on-the-code-being-ai-written)
+a second party. Read [`docs/SECURITY_MODEL.md` §8](docs/SECURITY_MODEL.md#8-on-the-code-being-ai-written)
 for the honest version of that argument, including the parts that cut against
 this project (a bus factor of one, and a test suite where CI runs a smaller
 fraction of it than you'd want).
@@ -199,7 +199,7 @@ document is actually trying to make.
   `frontend/src/api/auth.ts`, used for password authentication, not for
   encrypting anything; its `modPow` is not constant-time. That is called out
   here rather than left for you to find, and in more detail in
-  [`docs/SECURITY_FOR_SKEPTICS.md`](docs/SECURITY_FOR_SKEPTICS.md).
+  [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
 
 ---
 
@@ -303,7 +303,7 @@ See `src/main.rs` for the full route list.
 ## Security
 
 This is the short version. The long version is
-[`docs/SECURITY_FOR_SKEPTICS.md`](docs/SECURITY_FOR_SKEPTICS.md) — read it
+[`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — read it
 before trusting either version.
 
 - **Authentication**: SRP-6a, 2048-bit group (RFC 5054), SHA-256. Your
@@ -324,7 +324,7 @@ before trusting either version.
   attachment, or task content; identity private keys or channel keys.
 - **What the server does see, unavoidably**: who talks to whom and when,
   message sizes and timing, and (for the honest limit on that) exactly what
-  [§2 of the skeptics doc](docs/SECURITY_FOR_SKEPTICS.md#2-what-the-server-operator-can-see)
+  [§2 of the security model](docs/SECURITY_MODEL.md#2-what-the-server-operator-can-see)
   says it does.
 - **Transport**: TLS terminated at your reverse proxy (Caddy/nginx — the
   backend process itself never speaks TLS by design, see

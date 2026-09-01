@@ -16,7 +16,7 @@
  * evaluated on-device by the OS. So coordinates live in localStorage here
  * and in the APK's SharedPreferences, never in a request body. The cost is
  * honest: places do not sync between devices, and a fresh install starts
- * empty. docs/SECURITY_FOR_SKEPTICS.md §2's "what the operator can see"
+ * empty. docs/SECURITY_MODEL.md §2's "what the operator can see"
  * list stays unchanged by this feature.
  *
  * The native side receives ONLY {taskId, lat, lon, radius} — no label, no

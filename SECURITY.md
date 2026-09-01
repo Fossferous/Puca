@@ -45,7 +45,7 @@ forward.
 Read these before reporting; they will tell you whether something is a finding
 or a documented trade-off:
 
-- [`docs/SECURITY_FOR_SKEPTICS.md`](docs/SECURITY_FOR_SKEPTICS.md) — the honest
+- [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — the honest
   version, written for someone who does not trust the project. It states the
   weaknesses as plainly as the strengths, including which parts of the test
   suite CI never runs.

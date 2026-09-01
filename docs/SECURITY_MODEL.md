@@ -1,4 +1,4 @@
-# Púca: a security document for someone who doesn't trust it
+# Púca security model: what it protects, and what it does not
 
 You have read access to this repository. This document exists so you can use it.
 
@@ -224,7 +224,7 @@ serving push-to-talk and the remote-control kill switch.)
   sign in to this computer" writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` —
   per-user, no admin rights, removable by unticking the box or by deleting that value.
   Verified present on the author's own machine as `Púca : ...\app.exe --hidden`, which
-  is why this bullet no longer claims there is none: this page is meant to survive a skeptic
+  is why this bullet no longer claims there is none: this page is meant to survive someone
   running `reg query`, and a sentence that loses to one command costs more trust than the
   entry itself. It starts the APP, never the agent — the app's agent has no persistence
   mechanism of any kind.
