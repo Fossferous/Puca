@@ -456,6 +456,45 @@ fn compose_tray_tip(app: &tauri::AppHandle, state: &TrayTipState) {
     refresh_tray_icon(app, state);
 }
 
+/// Called once by the webview as it loads, to clear state the page cannot own.
+///
+/// The tray parts and the native capture threads live in the PROCESS, but every
+/// one of them is driven by JavaScript. A webview reload — F5, a crash recovery,
+/// a dev reload — destroys the JS that owned them while the process keeps
+/// running, which left two bad states:
+///
+///   * the tray badge and tooltip latched ON with nothing capturing, so the one
+///     always-present indicator this app has became a light that is sometimes
+///     just wrong. An indicator users learn to disbelieve is worse than none;
+///   * the native clip capture kept running with no consumer — DXGI duplication
+///     and the WASAPI loopback still recording the screen into a ring nobody
+///     would ever read.
+///
+/// So stop the capture FIRST, then clear the indicators: after this returns,
+/// "nothing is captured" and "nothing is shown" are both true and agree.
+#[tauri::command]
+fn reset_capture_state(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, TrayTipState>,
+    #[cfg(windows)] clip_video: tauri::State<'_, Arc<ClipCaptureState>>,
+    #[cfg(windows)] clip_audio: tauri::State<'_, Arc<ClipDesktopAudioState>>,
+) {
+    #[cfg(windows)]
+    {
+        clip_capture::stop_video_capture(clip_video.inner().clone());
+        // generation None = "whatever is running": this IS the whole-session
+        // teardown that argument exists for.
+        clip_desktop_audio::stop_capture(clip_audio.inner().clone(), None);
+    }
+    {
+        let mut p = state.0.lock().unwrap();
+        p.clip = None;
+        p.share = None;
+        p.device = None;
+    }
+    compose_tray_tip(&app, &state);
+}
+
 /// Reflect a running screen share in the tray.
 ///
 /// The voice screen share had no always-present local indicator: its stream tile
@@ -1297,6 +1336,7 @@ pub fn run() {
             set_device_session_indicator,
             set_clip_armed_indicator,
             set_screen_share_indicator,
+            reset_capture_state,
             #[cfg(feature = "remote-control")]
             list_anticheat_processes,
             attention_main_window,

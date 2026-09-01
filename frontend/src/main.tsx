@@ -44,6 +44,26 @@ applyAppearance(bootSettings)
 import { installTauriLinkInterceptor } from './api/openExternal'
 installTauriLinkInterceptor()
 
+// Desktop shell: the tray capture badge, the tooltip and the native clip
+// capture threads live in the PROCESS, but every one of them is driven from
+// here. A webview reload (F5, a crash recovery, a dev reload) throws away the
+// JavaScript that owned them while the process keeps running — which left the
+// tray claiming a capture that no longer had a consumer, and a DXGI/WASAPI
+// capture still recording the screen into a ring nobody would read.
+//
+// Run once, as early as the link interceptor, so the window a stale indicator
+// or an orphaned capture can exist in is as short as possible.
+void (async () => {
+    const { isTauri } = await import('./api/platform')
+    if (!isTauri()) return
+    try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('reset_capture_state')
+    } catch {
+        /* best effort — an older shell without the command must still boot */
+    }
+})()
+
 // P2P transfer handlers, wired SYNCHRONOUSLY at startup — not in Chat's mount
 // effect, which runs a React tree later. The server sweeps PARKED file offers
 // to a connection the moment it registers, so the very first frames after the

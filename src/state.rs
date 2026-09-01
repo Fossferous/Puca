@@ -1216,15 +1216,29 @@ impl AppState {
         let now = Instant::now();
         // The key is caller-supplied on an UNAUTHENTICATED route, so without a
         // ceiling this map grows forever — one permanent entry per guessed name.
-        // Sweep streaks that have aged out of the window first; if it is still
-        // full, a name not already tracked goes untracked (it has no streak to
-        // throttle yet) while every name already present keeps updating.
+        //
+        // When full, EVICT THE OLDEST rather than refusing the new key. Refusing
+        // was fail-open on a counter an attacker controls the keys of: flood the
+        // map with 8192 throwaway names and every subsequent name — including the
+        // one being attacked — records no failure and accrues no backoff. Eviction
+        // keeps the same memory bound while leaving every username throttleable,
+        // and costs nothing extra: the stale sweep below already walks the map.
         if self.login_failures.len() >= MAX_TRACKED_LOGIN_FAILURES
             && !self.login_failures.contains_key(&key)
         {
             self.login_failures.retain(|_, v| v.last.elapsed() <= WINDOW);
             if self.login_failures.len() >= MAX_TRACKED_LOGIN_FAILURES {
-                return;
+                // Still full of live streaks: drop the least recently touched, so
+                // the newcomer is tracked. `last` is monotonic per entry, so the
+                // minimum is the oldest activity.
+                let oldest = self
+                    .login_failures
+                    .iter()
+                    .min_by_key(|e| e.value().last)
+                    .map(|e| e.key().clone());
+                if let Some(k) = oldest {
+                    self.login_failures.remove(&k);
+                }
             }
         }
         let mut e = self.login_failures.entry(key).or_insert(LoginFailureState {
@@ -2408,6 +2422,44 @@ mod crash_resistance_tests {
             .connect_lazy("postgres://localhost/does_not_connect")
             .expect("lazy pool");
         AppState::new(pool, "test-secret".into(), None, std::sync::Arc::new(crate::wake::NullWake))
+    }
+
+    /// The login-backoff map is bounded, and being full must not switch the
+    /// throttle OFF for a name the attacker has not already inserted.
+    ///
+    /// Refusing new keys when full was fail-open on a counter whose keys an
+    /// unauthenticated caller chooses: flood it with throwaway names and the
+    /// account actually under attack records no failures and accrues no delay.
+    /// The bound is kept by EVICTING the oldest entry instead.
+    #[tokio::test]
+    async fn full_login_failure_map_evicts_rather_than_stopping_the_throttle() {
+        let state = test_state();
+        for i in 0..MAX_TRACKED_LOGIN_FAILURES {
+            state.record_login_failure(&format!("filler-{i}"));
+        }
+        assert_eq!(
+            state.login_failures.len(),
+            MAX_TRACKED_LOGIN_FAILURES,
+            "precondition: the map should be exactly at its ceiling"
+        );
+
+        // The attacked account, seen for the first time while the map is full.
+        for _ in 0..10 {
+            state.record_login_failure("victim");
+        }
+
+        assert!(
+            state.login_failures.contains_key("victim"),
+            "a fresh username must still be tracked when the map is full"
+        );
+        assert!(
+            !state.login_backoff_delay("victim").is_zero(),
+            "and must therefore accrue backoff after repeated failures"
+        );
+        assert!(
+            state.login_failures.len() <= MAX_TRACKED_LOGIN_FAILURES,
+            "eviction must keep the memory bound the ceiling exists for"
+        );
     }
 
     /// The presence split. Every assertion here maps to a shipped bug: a
