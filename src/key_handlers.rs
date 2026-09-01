@@ -47,6 +47,25 @@ pub struct WrappedKeyOutput {
     pub sender_user_id: Option<i64>,
 }
 
+/// The epoch `get_channel_keys` reports to a caller: the newest epoch that
+/// caller actually HOLDS, falling back to the channel's newest when they hold
+/// nothing.
+///
+/// PUBLIC, AND USED BY THE HANDLER, so that `tests/e2ee_keys.rs` exercises the
+/// very string the server runs. A regression test that pastes its own copy of
+/// a query proves the query is right and nothing about the code path — revert
+/// the handler and such a test stays green. Binding both to this constant is
+/// what makes the test fail if anyone puts the unfiltered `MAX(epoch)` back.
+///
+/// $1 = channel id, $2 = calling user id.
+pub const CURRENT_EPOCH_FOR_CALLER_SQL: &str = r#"
+    SELECT COALESCE(
+        MAX(epoch) FILTER (WHERE recipient_id = $2),
+        MAX(epoch)
+    )
+    FROM channel_keys WHERE channel_id = $1
+"#;
+
 #[derive(Serialize)]
 pub struct ChannelKeysResponse {
     /// Highest epoch that exists for this channel (0 if none yet).
@@ -266,12 +285,35 @@ pub async fn get_channel_keys(
         }
     };
 
-    let current_epoch: (Option<i32>,) =
-        sqlx::query_as("SELECT MAX(epoch) FROM channel_keys WHERE channel_id = $1")
-            .bind(channel_id)
-            .fetch_one(&state.pool)
-            .await
-            .unwrap_or((None,));
+    // THE EPOCH THIS CALLER CAN ACTUALLY USE, not the highest that exists.
+    //
+    // This was a bare `MAX(epoch)` over the whole channel, and that is a
+    // permanent, member-triggerable send freeze for everyone else. The publish
+    // bound above deliberately allows any member to create MAX+1, and nothing
+    // requires them to wrap it for anybody but themselves. Every other member
+    // is then told `current_epoch = N`, holds no key for N, and
+    // `ensureChannelKey` falls to its last branch — "a key exists but wasn't
+    // wrapped for us, we can't send securely" — returning null. It re-reads
+    // this value on every send and gets the same answer, so there is no
+    // client-side recovery and no error the user can act on: the channel just
+    // stops accepting their messages, silently and for good.
+    //
+    // It does not take an attacker. A member whose public key was not yet
+    // published when someone else rotated reaches the identical state through
+    // ordinary use.
+    //
+    // Answering with the highest epoch THIS caller holds makes the client's
+    // rotation arithmetic work again: it holds that key, so it is allowed to
+    // rotate from it, and publish accepts channel-MAX+1. A caller holding
+    // nothing (a genuinely new member) still needs the channel-wide value, or
+    // it would try to bootstrap epoch 1 over an established channel and be
+    // refused by the same bound.
+    let current_epoch: (Option<i32>,) = sqlx::query_as(CURRENT_EPOCH_FOR_CALLER_SQL)
+        .bind(channel_id)
+        .bind(claims.sub as i32)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or((None,));
     let current_epoch_val = current_epoch.0.unwrap_or(0);
 
     let current_generation: (i32,) =
@@ -395,4 +437,160 @@ pub async fn get_member_keys(
         .collect();
 
     Json(members).into_response()
+}
+
+#[cfg(test)]
+mod current_epoch_tests {
+    use super::CURRENT_EPOCH_FOR_CALLER_SQL;
+    use sqlx::{postgres::PgPoolOptions, PgPool};
+
+    /// Self-skips when no throwaway database is configured, like the harnesses
+    /// in `tests/`. NEVER point this at a real database: it inserts users,
+    /// a server, a channel and channel keys, then deletes them.
+    ///
+    ///   TEST_DATABASE_URL=postgres://postgres@localhost:5434/db cargo test
+    async fn pool() -> Option<PgPool> {
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        PgPoolOptions::new().max_connections(2).connect(&url).await.ok()
+    }
+
+    async fn make_user(pool: &PgPool, tag: &str) -> i32 {
+        let username = format!("epoch_{tag}_{}", uuid::Uuid::new_v4());
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO users (username, salt, verifier) VALUES ($1, '00', '00') RETURNING id",
+        )
+        .bind(&username)
+        .fetch_one(pool)
+        .await
+        .expect("insert user");
+        row.0
+    }
+
+    async fn epoch_reported_to(pool: &PgPool, channel_id: i32, user_id: i32) -> i32 {
+        let r: (Option<i32>,) = sqlx::query_as(CURRENT_EPOCH_FOR_CALLER_SQL)
+            .bind(channel_id)
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .expect("current-epoch query");
+        r.0.unwrap_or(0)
+    }
+
+    /// A member who mints an epoch only for themselves must not freeze the
+    /// channel for everybody else.
+    ///
+    /// THE BUG THIS PINS. `get_channel_keys` answered `current_epoch` with a
+    /// bare `MAX(epoch)` across the whole channel, while `publish_channel_keys`
+    /// deliberately permits any member to create MAX+1 and never requires them
+    /// to wrap it for anyone else. One member publishing epoch 2 for themselves
+    /// alone therefore left every other member told "the current epoch is 2"
+    /// holding no key for it — and `ensureChannelKey` ends at its final branch,
+    /// "a key exists but wasn't wrapped for us", returning null on every send
+    /// from then on. Re-fetching cannot change the answer, so there is no
+    /// client-side recovery and no error the user can act on.
+    ///
+    /// It needs no attacker: a member whose public key had not been published
+    /// when somebody else rotated arrives in the same state.
+    ///
+    /// IN THIS MODULE, not `tests/`, deliberately — this crate has no lib
+    /// target, so an integration test could only paste its own copy of the
+    /// query and would stay green after someone reverted the handler. Here it
+    /// runs `CURRENT_EPOCH_FOR_CALLER_SQL` itself, the same constant the
+    /// handler binds.
+    #[tokio::test]
+    async fn an_epoch_minted_for_one_member_does_not_freeze_the_others() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping: TEST_DATABASE_URL not set");
+            return;
+        };
+        let squatter = make_user(&pool, "squat").await;
+        let victim = make_user(&pool, "victim").await;
+        let newcomer = make_user(&pool, "new").await;
+
+        let server_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'epoch-test', $2)")
+            .bind(&server_id)
+            .bind(squatter)
+            .execute(&pool)
+            .await
+            .expect("insert server");
+        let ch: (i32,) = sqlx::query_as(
+            "INSERT INTO channels (server_id, name, type) VALUES ($1, 'general', 0) RETURNING id",
+        )
+        .bind(&server_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert channel");
+        let channel_id = ch.0;
+
+        // Epoch 1 wrapped for BOTH: the ordinary, healthy state.
+        for uid in [squatter, victim] {
+            sqlx::query(
+                "INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, \
+                 sender_public_key, member_generation) VALUES ($1, 1, $2, 'w', 'x25519:pk', 0)",
+            )
+            .bind(channel_id)
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .expect("insert epoch 1");
+        }
+        // Epoch 2 wrapped for the squatter ONLY — which the publish bound allows.
+        sqlx::query(
+            "INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, \
+             sender_public_key, member_generation) VALUES ($1, 2, $2, 'w', 'x25519:pk', 0)",
+        )
+        .bind(channel_id)
+        .bind(squatter)
+        .execute(&pool)
+        .await
+        .expect("insert epoch 2");
+
+        // The victim is told 1 — an epoch they HOLD, so they can still send and
+        // can rotate to 3 from it. This is the whole fix.
+        assert_eq!(
+            epoch_reported_to(&pool, channel_id, victim).await,
+            1,
+            "the victim must be told the newest epoch they actually hold, or they can never send again",
+        );
+        assert_eq!(
+            epoch_reported_to(&pool, channel_id, squatter).await,
+            2,
+            "a member who holds epoch 2 should be told 2",
+        );
+        // Holding nothing, a new member still needs the channel-wide value: told
+        // 0 they would try to bootstrap epoch 1 over an established channel, and
+        // the publish bound would refuse it.
+        assert_eq!(
+            epoch_reported_to(&pool, channel_id, newcomer).await,
+            2,
+            "a member holding no key must fall back to the channel-wide max, not 0",
+        );
+
+        // POSITIVE CONTROL. The OLD query against the SAME rows must hand the
+        // victim an epoch they do not hold — otherwise the fixture never
+        // reproduced the bug and the assertions above prove nothing.
+        let old: (Option<i32>,) =
+            sqlx::query_as("SELECT MAX(epoch) FROM channel_keys WHERE channel_id = $1")
+                .bind(channel_id)
+                .fetch_one(&pool)
+                .await
+                .expect("old query");
+        assert_eq!(
+            old.0.unwrap_or(0),
+            2,
+            "control: the old unfiltered query must report an epoch the victim cannot use",
+        );
+
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
+            .bind(&server_id)
+            .execute(&pool)
+            .await;
+        for uid in [squatter, victim, newcomer] {
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(uid)
+                .execute(&pool)
+                .await;
+        }
+    }
 }
