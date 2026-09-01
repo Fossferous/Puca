@@ -252,3 +252,6 @@ docs/DEVICES_HANDOFF.md
 docs/TESTING_AND_LAUNCH.md
 docs/VPS_MIGRATION.md
 docs/SCREENSHARE_REDESIGN_PLAN.md
+
+# screenshots and evidence from on-demand e2e harnesses (csp-smoke-desktop etc.)
+frontend/e2e-artifacts/
