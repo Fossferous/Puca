@@ -39,11 +39,81 @@ pub struct ServiceState {
 }
 
 /// The service binary, shipped beside the app exactly as the agent is.
+///
+/// NOTE THIS LIVES IN A USER-WRITABLE DIRECTORY. The app installs per-user into
+/// `%LOCALAPPDATA%`, so anything running as this user can replace this file.
+/// See `elevation_source` for why that matters and when we avoid it.
 fn service_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let candidate = dir.join("puca-service.exe");
     candidate.exists().then_some(candidate)
+}
+
+/// The installed copy under `%ProgramFiles%`, which only administrators can
+/// write. `None` until the service has been provisioned at least once.
+fn installed_service_path() -> Option<PathBuf> {
+    let dir = std::env::var_os("ProgramFiles").map(PathBuf::from)?;
+    let candidate = dir.join("Sovereign").join("service").join("puca-service.exe");
+    candidate.exists().then_some(candidate)
+}
+
+/// WHICH binary to hand to `runas` — the security-relevant choice on this path.
+///
+/// THE PROBLEM. The bundled copy sits in `%LOCALAPPDATA%`, which this user can
+/// write. Any process already running as the user can replace it and then
+/// simply wait: the next time the user accepts a UAC prompt believing they are
+/// elevating Puca's helper, the substituted binary runs with full rights and
+/// goes on to register a LocalSystem service. That converts "code running as
+/// you" into "persistent SYSTEM", riding a consent the user was going to give
+/// anyway. No tight race is needed, because the file can be swapped and left.
+///
+/// It is not a signature problem we can check our way out of: these binaries
+/// are deliberately not code-signed (a documented, accepted trade-off — see
+/// docs/SECURITY_MODEL.md), so there is nothing to verify against, and an
+/// attacker who can swap the service binary can equally swap the app doing the
+/// verifying. An integrity check performed by the untrusted side proves
+/// nothing.
+///
+/// WHAT ACTUALLY HELPS. Once the service has been provisioned once, an
+/// admin-only copy exists under `%ProgramFiles%`, and `install.rs` already
+/// refuses to register a service whose image is not admin-only. Elevating THAT
+/// copy for every subsequent operation removes the swap entirely from update,
+/// disable and deprovision — which is most of the exposure, since those recur
+/// for the life of the install while the first provision happens once.
+///
+/// The first provision is irreducible without either code-signing or an
+/// administrator-run installer: there is no admin-only copy yet, and putting
+/// one there is the very thing that needs elevating. That residual is
+/// deliberate and documented rather than hidden.
+///
+/// WHICH COPY IS CORRECT DEPENDS ON THE OPERATION, and getting it wrong is
+/// silent. `provision` and `update` work by copying the RUNNING binary into
+/// the install directory ("the copy source is always the newest build" —
+/// `main.rs`), so elevating the installed copy for those would reinstall the
+/// OLD version: an update that reports success and changes nothing. Only
+/// operations that purely REMOVE can safely prefer the installed copy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ElevationSource {
+    /// The build shipped with this app. Required wherever the elevated process
+    /// installs itself.
+    Bundled,
+    /// The admin-only installed copy when one exists, else the bundled one.
+    /// A same-user attacker cannot swap this.
+    PreferInstalled,
+}
+
+/// Split out as a pure function so the choice is unit-testable; `run_elevated`
+/// itself cannot be, as it raises a real UAC prompt.
+fn elevation_source(
+    which: ElevationSource,
+    installed: Option<PathBuf>,
+    bundled: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match which {
+        ElevationSource::Bundled => bundled,
+        ElevationSource::PreferInstalled => installed.or(bundled),
+    }
 }
 
 fn agent_path() -> Option<PathBuf> {
@@ -63,7 +133,7 @@ fn agent_path() -> Option<PathBuf> {
 /// A cancelled prompt returns ERROR_CANCELLED (1223), which is reported as the
 /// user's own choice rather than as a failure — declining a UAC prompt is a
 /// valid answer, not an error condition.
-fn run_elevated(args: &[&str]) -> Result<(), String> {
+fn run_elevated(args: &[&str], which: ElevationSource) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, WAIT_OBJECT_0};
     use windows::Win32::UI::Shell::{
@@ -71,7 +141,7 @@ fn run_elevated(args: &[&str]) -> Result<(), String> {
     };
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
-    let exe = service_path().ok_or_else(|| {
+    let exe = elevation_source(which, installed_service_path(), service_path()).ok_or_else(|| {
         "This build does not include the system service component.".to_string()
     })?;
     let params = args
@@ -161,7 +231,7 @@ pub fn service_state() -> ServiceState {
 pub fn service_enable() -> Result<(), String> {
     let agent = agent_path()
         .ok_or_else(|| "The agent component is missing from this install.".to_string())?;
-    run_elevated(&["provision", &agent.to_string_lossy()])
+    run_elevated(&["provision", &agent.to_string_lossy()], ElevationSource::Bundled)
 }
 
 /// Turn it off, removing the service and its binaries.
@@ -173,7 +243,7 @@ pub fn service_enable() -> Result<(), String> {
 /// as well.
 #[tauri::command]
 pub fn service_disable() -> Result<(), String> {
-    run_elevated(&["deprovision"])
+    run_elevated(&["deprovision"], ElevationSource::PreferInstalled)
 }
 
 /// Turn it off AND erase this machine's enrolment.
@@ -184,7 +254,7 @@ pub fn service_disable() -> Result<(), String> {
 /// believing the key is gone when it is not.
 #[tauri::command]
 pub fn service_disable_and_forget() -> Result<(), String> {
-    run_elevated(&["deprovision-forget"])
+    run_elevated(&["deprovision-forget"], ElevationSource::PreferInstalled)
 }
 
 /// Replace the installed service binaries with this build's. One UAC prompt;
@@ -200,7 +270,7 @@ pub fn service_disable_and_forget() -> Result<(), String> {
 pub fn service_update() -> Result<(), String> {
     let agent = agent_path()
         .ok_or_else(|| "The agent component is missing from this install.".to_string())?;
-    run_elevated(&["update", &agent.to_string_lossy()])
+    run_elevated(&["update", &agent.to_string_lossy()], ElevationSource::Bundled)
 }
 
 /// Fingerprint of the service+agent pair BUNDLED with this app — the "what I
@@ -223,4 +293,62 @@ pub fn service_bundled_fingerprint() -> Result<Option<String>, String> {
     let Some(service) = service_path() else { return Ok(None) };
     let Some(agent) = agent_path() else { return Ok(None) };
     puca_service::install::pair_fingerprint(&service, &agent).map(Some)
+}
+
+#[cfg(test)]
+mod elevation_source_tests {
+    use super::{elevation_source, ElevationSource};
+    use std::path::PathBuf;
+
+    fn installed() -> Option<PathBuf> {
+        Some(PathBuf::from(r"C:\Program Files\Sovereign\service\puca-service.exe"))
+    }
+    fn bundled() -> Option<PathBuf> {
+        Some(PathBuf::from(r"C:\Users\someone\AppData\Local\Puca\puca-service.exe"))
+    }
+
+    /// The security half: an operation that only REMOVES prefers the admin-only
+    /// copy, so a same-user attacker who swapped the bundled binary cannot have
+    /// it elevated.
+    #[test]
+    fn removal_operations_elevate_the_admin_only_copy() {
+        assert_eq!(
+            elevation_source(ElevationSource::PreferInstalled, installed(), bundled()),
+            installed(),
+        );
+    }
+
+    /// The correctness half, and the reason this is an enum rather than a bool
+    /// defaulting to "safest". `provision` and `update` copy the RUNNING binary
+    /// into the install directory, so elevating the installed copy would
+    /// reinstall the OLD build — an update that reports success and changes
+    /// nothing, which is invisible until someone wonders why a fixed service
+    /// bug persists. Pinned so that "harden it further" cannot quietly become
+    /// "break updates".
+    #[test]
+    fn self_installing_operations_must_elevate_the_bundled_build() {
+        assert_eq!(
+            elevation_source(ElevationSource::Bundled, installed(), bundled()),
+            bundled(),
+            "update/provision must run the NEW binary, never the installed one",
+        );
+    }
+
+    /// First provision: no admin-only copy exists yet, so the bundled one is
+    /// all there is. This residual is the documented, irreducible part.
+    #[test]
+    fn falls_back_to_bundled_before_the_first_provision() {
+        assert_eq!(
+            elevation_source(ElevationSource::PreferInstalled, None, bundled()),
+            bundled(),
+        );
+    }
+
+    /// A build with no service component at all (Lite, or a broken install)
+    /// must yield nothing rather than a path that does not exist.
+    #[test]
+    fn no_service_component_yields_nothing() {
+        assert_eq!(elevation_source(ElevationSource::PreferInstalled, None, None), None);
+        assert_eq!(elevation_source(ElevationSource::Bundled, installed(), None), None);
+    }
 }
