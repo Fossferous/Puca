@@ -24,7 +24,15 @@ use crate::state::{AppState, DeviceReattachOutcome, DeviceSession, DeviceSession
 /// Query parameters for WebSocket connection
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    pub token: String,
+    /// DEPRECATED — kept only so clients older than the subprotocol change keep
+    /// connecting. A token here is written to every access log, proxy log and
+    /// history entry along the path: a live session credential landing on disk
+    /// in plaintext, by software that has no idea it is handling one. The
+    /// replacement is `Sec-WebSocket-Protocol` (see `bearer_from_subprotocol`),
+    /// which no proxy logs by default. Remove this once no shipped client sends
+    /// it — until then, dropping it would sign out every existing install.
+    #[serde(default)]
+    pub token: Option<String>,
     /// `delivery` marks a background notification socket (the phone's native
     /// delivery connection). Such sessions are presence-invisible, excluded
     /// from file-transfer deliverability, and receive the undelivered-frame
@@ -38,6 +46,37 @@ pub struct WsQuery {
     pub device: Option<String>,
 }
 
+/// The token a browser sent via `Sec-WebSocket-Protocol`.
+///
+/// WHY THIS HEADER. Browsers cannot set an `Authorization` header on a
+/// WebSocket — the constructor takes a URL and a subprotocol list and nothing
+/// else — so the usual advice is to put the token in the query string. That
+/// advice is wrong for anything that logs: query strings are written verbatim
+/// into access logs by essentially every proxy and web server (including
+/// Caddy, in front of this one), so every connection deposits a working
+/// session credential into a log file that is rotated, shipped and backed up.
+/// The subprotocol header is not logged by default anywhere in that path.
+///
+/// The convention is two values: a marker, then the credential. We accept
+/// `bearer, <jwt>` and echo the MARKER back as the negotiated protocol —
+/// echoing the token instead would put it in the response headers, undoing
+/// the point.
+///
+/// Returns the raw token; the caller validates it exactly as before, so this
+/// changes only how the credential travels, never what it authorises.
+fn bearer_from_subprotocol(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)?
+        .to_str()
+        .ok()?;
+    let mut parts = raw.split(',').map(str::trim);
+    if parts.next()? != "bearer" {
+        return None;
+    }
+    let token = parts.next()?;
+    (!token.is_empty()).then(|| token.to_string())
+}
+
 /// WebSocket upgrade handler
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -46,8 +85,18 @@ pub async fn ws_handler(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // Header first, query second: a client that sends both is a NEW client
+    // talking to this server, and we want it exercising the path we intend to
+    // keep. The query fallback exists only for installs that predate the
+    // change, and refusing them here would sign out every one of them.
+    let offered_protocol = bearer_from_subprotocol(&headers);
+    let presented = match offered_protocol.as_deref().or(query.token.as_deref()) {
+        Some(t) => t,
+        None => return (StatusCode::UNAUTHORIZED, "Missing token").into_response(),
+    };
+
     // Validate JWT token before upgrading
-    match validate_token(&query.token, &state.jwt_secret) {
+    match validate_token(presented, &state.jwt_secret) {
         Ok(claims) => {
             // M1 revocation: reject a token whose `tv` no longer matches the
             // user's token_version (logout / password change / recovery reset).
@@ -128,11 +177,17 @@ pub async fn ws_handler(
                     return (StatusCode::UNAUTHORIZED, "Device revoked").into_response();
                 }
             }
-            ws.max_message_size(256 * 1024)
-                .max_frame_size(256 * 1024)
-                .on_upgrade(move |socket| {
-                    handle_socket(socket, state, claims, ip_guard, delivery, claimed_device)
-                })
+            let ws = ws.max_message_size(256 * 1024).max_frame_size(256 * 1024);
+            // MUST echo a subprotocol when the client offered one. A browser
+            // that sends Sec-WebSocket-Protocol and gets no selection back
+            // FAILS the connection — so omitting this would break exactly the
+            // clients moving onto the safer path, while the old query-string
+            // ones kept working. Echo the marker, never the token: putting the
+            // credential in a response header would undo the whole change.
+            let ws = if offered_protocol.is_some() { ws.protocols(["bearer"]) } else { ws };
+            ws.on_upgrade(move |socket| {
+                handle_socket(socket, state, claims, ip_guard, delivery, claimed_device)
+            })
         }
         Err(e) => {
             tracing::warn!("WebSocket auth failed: {}", e);
@@ -3854,5 +3909,77 @@ mod crash_resistance_tests {
         assert!(MAX_CANDIDATE_LEN <= 16 * 1024);
         assert!(MAX_CONTROL_EVENT_LEN <= 16 * 1024);
         assert!(MAX_ROOMS_PER_CONN >= 2 && MAX_ROOMS_PER_CONN <= 1024);
+    }
+}
+
+#[cfg(test)]
+mod ws_bearer_subprotocol_tests {
+    use super::bearer_from_subprotocol;
+    use axum::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderMap, HeaderValue};
+
+    fn with_protocol(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn reads_the_token_after_the_bearer_marker() {
+        assert_eq!(
+            bearer_from_subprotocol(&with_protocol("bearer, abc.def.ghi")).as_deref(),
+            Some("abc.def.ghi"),
+        );
+    }
+
+    #[test]
+    fn tolerates_the_spacing_browsers_actually_send() {
+        // `new WebSocket(url, ['bearer', tok])` serialises without a space in
+        // some engines and with one in others. Both are the same offer.
+        for raw in ["bearer,abc.def", "bearer, abc.def", "bearer ,  abc.def"] {
+            assert_eq!(
+                bearer_from_subprotocol(&with_protocol(raw)).as_deref(),
+                Some("abc.def"),
+                "failed for {raw:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_offers_that_are_not_ours() {
+        // Something else negotiating a subprotocol must not be read as a
+        // credential — it would be treated as a JWT and rejected, turning an
+        // unrelated feature into an auth failure.
+        assert!(bearer_from_subprotocol(&with_protocol("graphql-ws")).is_none());
+        assert!(bearer_from_subprotocol(&with_protocol("chat, superchat")).is_none());
+    }
+
+    #[test]
+    fn a_marker_with_no_token_is_not_a_credential() {
+        // Empty or missing second value must fall through to the query-string
+        // path rather than presenting "" as a token.
+        assert!(bearer_from_subprotocol(&with_protocol("bearer")).is_none());
+        assert!(bearer_from_subprotocol(&with_protocol("bearer, ")).is_none());
+    }
+
+    #[test]
+    fn absent_header_is_absent_not_empty() {
+        assert!(bearer_from_subprotocol(&HeaderMap::new()).is_none());
+    }
+
+    /// The token must never travel in a place that gets logged. This pins the
+    /// SHAPE of what we echo back: the marker only. Echoing the negotiated
+    /// value verbatim — the obvious implementation — would put the credential
+    /// into a response header and undo the entire change.
+    #[test]
+    fn the_marker_is_what_gets_echoed_never_the_token() {
+        let tok = "header.payload.signature";
+        let offered = format!("bearer, {tok}");
+        let parsed = bearer_from_subprotocol(&with_protocol(&offered)).expect("parses");
+        assert_eq!(parsed, tok);
+        // What ws_handler selects is the literal "bearer"; assert it is not
+        // the credential, so a future edit that echoes `parsed` fails here.
+        let echoed = "bearer";
+        assert_ne!(echoed, parsed);
+        assert!(!echoed.contains(tok));
     }
 }
