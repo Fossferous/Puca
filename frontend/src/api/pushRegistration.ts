@@ -111,6 +111,14 @@ async function reconcileDelivery(): Promise<void> {
     const s = loadSettings();
     if (s.mobileBackgroundDelivery === false || s.mobileNotifications === false) {
         await unregisterWakeToken();
+        // ...and stop registering with Google at all. Dropping only the server
+        // row left the phone registered with FCM after the user switched
+        // background delivery off — the setting stopped the doorbell RINGING
+        // while the registration it exists for stayed live, which is not what
+        // "off" means to the person who chose it. Safe to await, unlike
+        // getMobileWakeToken: disableWake resolves without waiting on a
+        // Firebase Task, so it cannot hang a no-Play-Services build.
+        await disableMobileWake();
     } else {
         // Unawaited for the same reason as at init: this can sit on a Firebase
         // promise that never settles.

@@ -1625,6 +1625,27 @@ pub async fn get_voice_users(
 // --- WebRTC ICE Configuration ---
 
 
+/// The TURN URLs to hand clients, from a `TURN_SERVER` value.
+///
+/// Splits the comma-separated list and DROPS EMPTY ENTRIES. That last part is
+/// the whole point: a trailing comma, a doubled comma or a whitespace-only entry
+/// otherwise puts `""` into `iceServers[].urls`, and an empty ICE URL makes
+/// `new RTCPeerConnection()` throw exactly as a malformed one does — the same
+/// Critical that the STUN derivation below was fixed for, at its sibling site in
+/// the same function. Fixing one half of a pair and leaving the other is this
+/// repository's documented failure mode; this is that other half.
+///
+/// The entries themselves are passed through unchanged: TURN needs its scheme
+/// and its `?transport=` parameter, unlike the STUN URLs derived from them.
+fn turn_urls_from_env(turn_server: &str) -> Vec<String> {
+    turn_server
+        .split(',')
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Plain-STUN URLs derived from a `TURN_SERVER` value.
 ///
 /// `TURN_SERVER` is NOT a single bare URL. This project's own provisioner writes
@@ -1653,11 +1674,22 @@ fn stun_urls_from_turn(turn_server: &str) -> Vec<String> {
         let entry = entry.trim();
         // Only plain TURN. A `turns:` entry, or anything with no recognised
         // scheme, is skipped rather than guessed at.
-        let Some(rest) = entry.strip_prefix("turn:") else {
+        //
+        // Case-INSENSITIVE: URI schemes are case-insensitive per RFC 3986 and
+        // browsers accept `TURN:`, so a lowercase-only match would silently drop
+        // a legitimate operator value and leave the deployment with no STUN and
+        // no warning.
+        let lower = entry.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("turn:") else {
             continue;
         };
-        let host = rest.split('?').next().unwrap_or(rest).trim();
-        if host.is_empty() {
+        let host = rest.split('?').next().unwrap_or(&rest).trim();
+        // Must actually NAME a host. `turn::` leaves ":" here, which yields
+        // `stun::` — rejected by the browser exactly like a malformed URL, so a
+        // non-empty check alone is not enough. The hostname is whatever precedes
+        // the port separator (and for a bracketed IPv6 literal, the bracket
+        // makes the first segment non-empty, which is the behaviour we want).
+        if host.is_empty() || host.split(':').next().unwrap_or("").is_empty() {
             continue;
         }
         seen.insert(format!("stun:{host}"));
@@ -1803,10 +1835,7 @@ pub async fn get_ice_config(
         Some(IceServer {
             // TURN_SERVER may hold several comma-separated URLs
             // (e.g. "turn:host:3479?transport=udp,turn:host:3479?transport=tcp").
-            urls: turn_server
-                .split(',')
-                .map(|u| u.trim().to_string())
-                .collect(),
+            urls: turn_urls_from_env(&turn_server),
             username: Some(username),
             credential: Some(credential),
         })
@@ -1837,7 +1866,7 @@ pub async fn get_ice_config(
 
 #[cfg(test)]
 mod stun_derivation_tests {
-    use super::stun_urls_from_turn;
+    use super::{stun_urls_from_turn, turn_urls_from_env};
 
     /// THE REGRESSION THIS EXISTS FOR. deploy/migrate/provision.sh writes a
     /// comma-separated pair with `?transport=` query parameters. Swapping the
@@ -1888,24 +1917,86 @@ mod stun_derivation_tests {
         );
     }
 
-    /// Nothing emitted may carry a character that would make the URL malformed.
+    /// An ICE URL a browser will actually accept — asserted properly.
+    ///
+    /// A first cut of this test only checked for ',' and '?' and called itself
+    /// "cannot be malformed", which is a weaker claim than its name: it passed
+    /// on shapes Chrome rejects. Assert the grammar we actually emit.
+    fn assert_usable_stun_url(url: &str) {
+        let host = url
+            .strip_prefix("stun:")
+            .unwrap_or_else(|| panic!("{url} must be a stun: URL"));
+        assert!(!host.is_empty(), "{url} must name a host");
+        for bad in [',', '?', ' ', '\t', '#', '/', '@'] {
+            assert!(!url.contains(bad), "{url} must not contain {bad:?}");
+        }
+        // A bare scheme, or a host that is only a port separator, is rejected by
+        // the browser just as a malformed one is.
+        assert!(host != ":", "{url} must name a host, not just a separator");
+        assert!(!host.starts_with(':'), "{url} must not start with a port");
+    }
+
     #[test]
     fn no_emitted_url_can_be_malformed() {
         for input in [
             "turn:a.example:3478?transport=udp,turn:b.example:3478?transport=tcp",
             "  turn:c.example:3478  ,  ",
+            "turn:c.example:3478,,turn:c.example:3478",
+            ",turn:c.example:3478,",
+            "TURN:UPPER.example:3478?transport=udp",
             "turn:",
+            "turn::",
             "",
+            ",",
+            "   ",
             "garbage",
             "turns:d.example:5349",
         ] {
             for url in stun_urls_from_turn(input) {
-                assert!(url.starts_with("stun:"), "{url} must be a stun: URL");
-                assert!(!url.contains(','), "{url} must not contain a comma");
-                assert!(!url.contains('?'), "{url} must not contain a query");
-                assert!(url.len() > "stun:".len(), "{url} must name a host");
+                assert_usable_stun_url(&url);
             }
         }
+    }
+
+    /// The scheme is case-insensitive per RFC 3986 and browsers accept it, so a
+    /// lowercase-only match would silently drop a legitimate value and leave the
+    /// deployment with no STUN and no warning.
+    #[test]
+    fn scheme_matching_is_case_insensitive() {
+        assert_eq!(
+            stun_urls_from_turn("TURN:turn.example.com:3478?transport=udp"),
+            vec!["stun:turn.example.com:3478".to_string()]
+        );
+    }
+
+    /// The SIBLING branch. The round-4 Critical was a malformed STUN URL; the
+    /// TURN list beside it split on ',' with no empty filter, so a trailing or
+    /// doubled comma put "" into iceServers[].urls — and an EMPTY ICE URL makes
+    /// RTCPeerConnection throw exactly as a malformed one does.
+    #[test]
+    fn turn_urls_never_contain_an_empty_entry() {
+        for input in [
+            "turn:a.example:3478,",
+            ",turn:a.example:3478",
+            "turn:a.example:3478,,turn:b.example:3478",
+            "  turn:a.example:3478  ,   ,  turn:b.example:3478 ",
+            ",",
+            "   ",
+        ] {
+            for url in turn_urls_from_env(input) {
+                assert!(!url.is_empty(), "an empty ICE URL is rejected by the browser");
+                assert!(!url.contains(','), "{url} must be one URL, not a list");
+                assert_eq!(url.trim(), url, "{url} must be trimmed");
+            }
+        }
+        assert_eq!(
+            turn_urls_from_env("turn:a.example:3478?transport=udp,turn:a.example:3478?transport=tcp"),
+            vec![
+                "turn:a.example:3478?transport=udp".to_string(),
+                "turn:a.example:3478?transport=tcp".to_string(),
+            ],
+            "the real pair must survive intact, scheme and query included"
+        );
     }
 }
 

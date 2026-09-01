@@ -527,6 +527,35 @@ public class SovereignAppPlugin extends Plugin {
     }
 
     /**
+     * Stop this device registering with Google's push service, and drop the
+     * registration it already has.
+     *
+     * The consent gate was one-way: {@link #wakeToken} turns Firebase auto-init
+     * ON and nothing ever turned it off, so a phone stayed registered with FCM
+     * after sign-out and after background delivery was switched off. Consent
+     * that cannot be withdrawn is not consent.
+     *
+     * Resolves WITHOUT awaiting deleteToken()'s Task, deliberately. The JS side
+     * awaits this call, and awaiting a Firebase Task can hang forever on a build
+     * with no Play Services — which would leave the steps after it in
+     * teardownPushRegistration unreached, stranding the WS URL and the session
+     * token in PushPrefs after sign-out. A dropped registration this app will
+     * ignore anyway is much the cheaper failure.
+     */
+    @PluginMethod
+    public void disableWake(PluginCall call) {
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().setAutoInitEnabled(false);
+            // Drops the registration itself, not just the auto-init preference —
+            // otherwise the existing token stays valid at Google's end.
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().deleteToken();
+        } catch (Exception e) {
+            // No FirebaseApp in this build: nothing was ever registered.
+        }
+        call.resolve();
+    }
+
+    /**
      * This device's FCM WAKE token, so JS can register it with the server
      * (registration needs the JWT, which Java cannot read). The token
      * addresses a doorbell whose payload is a constant — it is the only thing
@@ -543,19 +572,6 @@ public class SovereignAppPlugin extends Plugin {
      * granted once and never revocable, which is not consent. Called from the
      * push teardown, alongside unregistering the token server-side.
      */
-    @PluginMethod
-    public void disableWake(PluginCall call) {
-        try {
-            com.google.firebase.messaging.FirebaseMessaging.getInstance().setAutoInitEnabled(false);
-            // Drops the registration itself, not just the auto-init preference —
-            // otherwise the existing token stays valid at Google's end.
-            com.google.firebase.messaging.FirebaseMessaging.getInstance().deleteToken();
-        } catch (Exception e) {
-            // No FirebaseApp in this build: nothing was ever registered.
-        }
-        call.resolve();
-    }
-
     @PluginMethod
     public void wakeToken(PluginCall call) {
         String pending = PushPrefs.takePendingWakeToken(getContext());
