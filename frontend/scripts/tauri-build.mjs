@@ -20,6 +20,11 @@
  * update server to point at. It just says so, loudly, rather than pretending.
  */
 import { spawnSync } from 'node:child_process';
+// Static CRT for app.exe. Same reason, same environment-override trap, as
+// the identical helper in build-agent.mjs; see the comment there.
+const CRT_STATIC = '-C target-feature=+crt-static';
+const withCrtStatic = (flags) =>
+    (flags && flags.includes('crt-static')) ? flags : [flags, CRT_STATIC].filter(Boolean).join(' ');
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -298,7 +303,11 @@ if (liteEndpointOverride) {
 if (cargoPassthrough.length) args.push('--', ...cargoPassthrough);
 
 console.log(`[tauri-build] tauri build ${args.join(' ')}`);
-const r = spawnSync('npx', ['tauri', 'build', ...args], { stdio: 'inherit', shell: true });
+const r = spawnSync('npx', ['tauri', 'build', ...args], {
+    stdio: 'inherit',
+    shell: true,
+    env: { ...process.env, RUSTFLAGS: withCrtStatic(process.env.RUSTFLAGS) },
+});
 if (mergedDir) {
     try { rmSync(mergedDir, { recursive: true, force: true }); } catch { /* best effort */ }
 }

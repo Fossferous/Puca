@@ -63,7 +63,27 @@ const version = (() => {
 
 // Inherit the real environment, then add ours — dropping the inherited env would
 // take PATH, CARGO_HOME and the MSVC toolchain variables with it.
-const cargoEnv = version ? { ...process.env, PUCA_VERSION: version } : process.env;
+// Link the C runtime STATICALLY into both sidecars. Without this they import
+// VCRUNTIME140.dll, which is NOT part of Windows: it ships with the VC++
+// Redistributable, and a clean install does not have it. Found by running the
+// installer in Windows Sandbox (a clean Windows 11 image): the service refused
+// to start with 0xC0000135 STATUS_DLL_NOT_FOUND, and app.exe carries the same
+// import, so the app cannot start at all on a fresh machine.
+//
+// Set HERE, in the environment, rather than in .cargo/config.toml: an
+// environment RUSTFLAGS silently overrides every config-file rustflags, and
+// this machine has one (`-L <vcpkg lib dir>`), so a config-file setting looked
+// applied and reached nothing. The first attempt at this fix shipped unchanged
+// binaries behind a green import check that was case-sensitive against an
+// upper-case import name. Append, never replace, so an existing -L survives.
+const CRT_STATIC = '-C target-feature=+crt-static';
+const withCrtStatic = (flags) =>
+    (flags && flags.includes('crt-static')) ? flags : [flags, CRT_STATIC].filter(Boolean).join(' ');
+const cargoEnv = {
+    ...process.env,
+    RUSTFLAGS: withCrtStatic(process.env.RUSTFLAGS),
+    ...(version ? { PUCA_VERSION: version } : {}),
+};
 if (version) console.log(`[build-agent] stamping sidecars as ${version}`);
 
 /**
