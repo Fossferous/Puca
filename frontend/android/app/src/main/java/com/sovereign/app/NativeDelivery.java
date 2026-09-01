@@ -137,16 +137,32 @@ final class NativeDelivery {
             main.postDelayed(this::connect, 30_000);
             return;
         }
-        StringBuilder full = new StringBuilder(url).append("?token=").append(token)
-                // Presence-invisible, transfer-excluded, queue-draining.
-                .append("&mode=delivery");
+        // Presence-invisible, transfer-excluded, queue-draining.
+        StringBuilder full = new StringBuilder(url).append("?mode=delivery");
         String device = PushPrefs.deliveryDeviceId(ctx);
         if (device != null && !device.isEmpty()) {
             full.append("&device=").append(device);
         }
         SocketListener listener = new SocketListener(account);
         current = listener;
-        listener.ws = http.newWebSocket(new Request.Builder().url(full.toString()).build(), listener);
+        // THE TOKEN RIDES A HEADER, NOT THE URL. This was "?token=" + token,
+        // and a query string is written verbatim into the access log of every
+        // proxy and web server on the path — so this phone deposited a live
+        // session credential into log files on every reconnect, and this socket
+        // reconnects often (Doze, network changes, keep-alive restarts).
+        //
+        // Unlike a browser, OkHttp CAN set request headers on a WebSocket, so
+        // this end sends the standard two-value offer directly rather than
+        // needing the constructor trick the web client uses.
+        //
+        // The server prefers this header and still accepts the old query
+        // parameter, so an APK older than this keeps connecting.
+        listener.ws = http.newWebSocket(
+                new Request.Builder()
+                        .url(full.toString())
+                        .addHeader("Sec-WebSocket-Protocol", "bearer, " + token)
+                        .build(),
+                listener);
     }
 
     private void scheduleReconnect(SocketListener from) {
