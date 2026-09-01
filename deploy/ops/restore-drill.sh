@@ -69,14 +69,36 @@ fi
 
 # --- 3. Restore into a THROWAWAY database ---
 if sudo -u postgres createdb "$DRILL_DB" 2>/dev/null; then
-	if gunzip -c "$DB_GZ" | sudo -u postgres psql -q "$DRILL_DB" >/dev/null 2>&1; then
+	# ON_ERROR_STOP for the same reason as restore.sh: without it psql exits 0
+	# after individual statements fail, so a half-restored dump would print
+	# "restored into scratch db" and go on to pass the checks below. The tool
+	# whose entire job is proving a backup is restorable must not be the one
+	# reporting a partial restore as a success.
+	if gunzip -c "$DB_GZ" | sudo -u postgres psql -q -v ON_ERROR_STOP=1 "$DRILL_DB" >/dev/null 2>&1; then
 		ok "restored into scratch db $DRILL_DB"
 		TC=$(sudo -u postgres psql -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" "$DRILL_DB")
 		[ "${TC:-0}" -ge 20 ] && ok "schema present ($TC tables)" || bad "too few tables ($TC)"
-		for t in users servers channels messages; do
+		# Assert, don't narrate. These counts used to go through note(), which
+		# only echoes — so a backup that restored a structurally perfect but
+		# EMPTY schema printed "RESTORE DRILL PASSED", and a query that failed
+		# outright printed the literal string "ERR" and still passed. Same lesson
+		# the uploads block below already learned: an assertion that cannot fail
+		# is not a check. users/servers/channels must be populated for the backup
+		# to be worth anything; `messages` is exempt because a brand-new server
+		# legitimately has none.
+		for t in users servers channels; do
 			c=$(sudo -u postgres psql -tAc "SELECT count(*) FROM $t" "$DRILL_DB" 2>/dev/null || echo "ERR")
-			note "rows in $t: $c"
+			case "$c" in
+				''|*[!0-9]*) bad "rows in $t: could not be counted ($c)" ;;
+				0)           bad "table $t restored EMPTY (0 rows)" ;;
+				*)           ok  "rows in $t: $c" ;;
+			esac
 		done
+		mc=$(sudo -u postgres psql -tAc "SELECT count(*) FROM messages" "$DRILL_DB" 2>/dev/null || echo "ERR")
+		case "$mc" in
+			''|*[!0-9]*) bad "rows in messages: could not be counted ($mc)" ;;
+			*)           note "rows in messages: $mc (not asserted — a new deployment may legitimately have none)" ;;
+		esac
 	else
 		bad "restore into scratch db failed"
 	fi

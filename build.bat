@@ -48,9 +48,16 @@ if not exist "node_modules" (
     call npm ci
 )
 
-echo [BUILD] Type checking...
+REM Lint — NOT a typecheck. `npm run lint` is `eslint . && check-no-ui-emoji`;
+REM the typecheck is `tsc -b`, which runs inside `npm run build` below. This
+REM used to only echo a warning on failure, making the one gate that catches
+REM react-hooks/rules-of-hooks advisory — see build.sh for the v0.7.7 incident.
+echo [BUILD] Linting...
 call npm run lint
-if errorlevel 1 echo [WARN] Lint warnings found
+if errorlevel 1 (
+    echo [ERROR] Lint failed
+    exit /b 1
+)
 
 echo [BUILD] Building...
 call npm run build

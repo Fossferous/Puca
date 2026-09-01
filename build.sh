@@ -64,9 +64,16 @@ build_frontend() {
         npm ci
     fi
     
-    # Run TypeScript check
-    log "Type checking..."
-    npm run lint || warn "Lint warnings found"
+    # Lint — NOT a typecheck. `npm run lint` is `eslint . && check-no-ui-emoji`;
+    # the typecheck is `tsc -b`, which runs inside `npm run build` below.
+    #
+    # This used to be `|| warn`, and warn() is a bare echo, so a lint failure was
+    # swallowed despite `set -e`. That made the one gate that catches
+    # react-hooks/rules-of-hooks advisory — and in v0.7.7 a hook below an early
+    # return shipped as far as a signed installer, where it replaced the entire
+    # app with the crash screen on first click. Lint failures abort the build.
+    log "Linting..."
+    npm run lint
     
     # Build
     if [ "$PROD" = true ]; then
