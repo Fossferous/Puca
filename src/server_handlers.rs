@@ -1624,6 +1624,47 @@ pub async fn get_voice_users(
 
 // --- WebRTC ICE Configuration ---
 
+
+/// Plain-STUN URLs derived from a `TURN_SERVER` value.
+///
+/// `TURN_SERVER` is NOT a single bare URL. This project's own provisioner writes
+/// a comma-separated pair with query parameters:
+///
+///   TURN_SERVER=turn:turn.example.com:3479?transport=udp,turn:turn.example.com:3479?transport=tcp
+///
+/// A first cut simply swapped the scheme on the whole string, producing one
+/// malformed `stun:host:port?transport=udp,turn:host:port?transport=tcp`. That is
+/// not a degraded ICE server — `new RTCPeerConnection()` REJECTS a malformed URL
+/// with a SyntaxError, and every path that opens a peer connection (mesh voice,
+/// screen share, both My Devices session paths, peer-to-peer file transfer)
+/// constructs it bare. So the default configuration this repo provisions would
+/// have taken out four product surfaces at once, for every user of that server,
+/// including two peers on the same LAN who need no STUN at all. The `?` alone is
+/// enough; the comma is not required.
+///
+/// Rules: split on `,`; keep only `turn:` entries, because `turns:` is the TLS
+/// port and coturn does not answer plain STUN there — deriving from it yields a
+/// STUN server that never replies and merely delays ICE; strip the scheme and
+/// anything from `?` onward; de-duplicate, since the udp/tcp pair collapses to
+/// one host:port.
+fn stun_urls_from_turn(turn_server: &str) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in turn_server.split(',') {
+        let entry = entry.trim();
+        // Only plain TURN. A `turns:` entry, or anything with no recognised
+        // scheme, is skipped rather than guessed at.
+        let Some(rest) = entry.strip_prefix("turn:") else {
+            continue;
+        };
+        let host = rest.split('?').next().unwrap_or(rest).trim();
+        if host.is_empty() {
+            continue;
+        }
+        seen.insert(format!("stun:{host}"));
+    }
+    seen.into_iter().collect()
+}
+
 /// Get ICE configuration for WebRTC peer connections.
 ///
 /// No third-party relay: media only ever traverses a server we control. Every
@@ -1672,21 +1713,15 @@ pub async fn get_ice_config(
             // below — was the wrong default. Google is now the last resort only:
             // a deployment with no TURN of its own, where without STUN
             // peer-to-peer calls simply fail behind NAT.
-            let own = std::env::var("TURN_SERVER")
+            let configured = std::env::var("TURN_SERVER")
                 .ok()
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(|s| {
-                    // TURN_SERVER may already carry a scheme; normalise to stun:.
-                    let host = s
-                        .strip_prefix("turns:")
-                        .or_else(|| s.strip_prefix("turn:"))
-                        .unwrap_or(s.as_str())
-                        .to_string();
-                    format!("stun:{host}")
-                });
-            match own {
-                Some(u) => vec![u],
+                .filter(|s| !s.is_empty());
+            match configured {
+                // A TURN server is configured, so this operator has their own
+                // relay: use it for STUN and never fall back to Google, even if
+                // no plain-STUN URL can be derived (a TLS-only deployment).
+                Some(turn) => stun_urls_from_turn(&turn),
                 None => vec![
                     "stun:stun.l.google.com:19302".to_string(),
                     "stun:stun1.l.google.com:19302".to_string(),
@@ -1798,6 +1833,80 @@ pub async fn get_ice_config(
     };
 
     Json(config).into_response()
+}
+
+#[cfg(test)]
+mod stun_derivation_tests {
+    use super::stun_urls_from_turn;
+
+    /// THE REGRESSION THIS EXISTS FOR. deploy/migrate/provision.sh writes a
+    /// comma-separated pair with `?transport=` query parameters. Swapping the
+    /// scheme on the whole string produced ONE malformed URL, and a malformed
+    /// ICE URL makes `new RTCPeerConnection()` throw SyntaxError — taking out
+    /// mesh voice, screen share, both remote-desktop paths and peer-to-peer file
+    /// transfer for every user of that server, including two peers on the same
+    /// LAN who need no STUN at all.
+    #[test]
+    fn the_provisioners_own_turn_server_yields_one_clean_url() {
+        let provisioned =
+            "turn:turn.example.com:3479?transport=udp,turn:turn.example.com:3479?transport=tcp";
+        assert_eq!(
+            stun_urls_from_turn(provisioned),
+            vec!["stun:turn.example.com:3479".to_string()],
+            "the udp/tcp pair must collapse to one query-free host:port"
+        );
+    }
+
+    /// A single query-bearing URL is enough to throw; the comma is not required.
+    #[test]
+    fn a_query_string_alone_is_stripped() {
+        assert_eq!(
+            stun_urls_from_turn("turn:turn.example.com:3478?transport=udp"),
+            vec!["stun:turn.example.com:3478".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_plain_documented_form_still_works() {
+        assert_eq!(
+            stun_urls_from_turn("turn:turn.example.com:3478"),
+            vec!["stun:turn.example.com:3478".to_string()]
+        );
+    }
+
+    /// `turns:` is the TLS port; coturn does not answer plain STUN there, so
+    /// deriving from it would produce a server that never replies and only
+    /// delays ICE. Skipped rather than guessed at — and because TURN_SERVER is
+    /// set, the caller does NOT fall back to Google.
+    #[test]
+    fn tls_only_turn_yields_no_stun_rather_than_a_dead_one() {
+        assert!(stun_urls_from_turn("turns:turn.example.com:5349").is_empty());
+        assert_eq!(
+            stun_urls_from_turn("turns:turn.example.com:5349,turn:turn.example.com:3478"),
+            vec!["stun:turn.example.com:3478".to_string()],
+            "a mixed list still yields the usable plain entry"
+        );
+    }
+
+    /// Nothing emitted may carry a character that would make the URL malformed.
+    #[test]
+    fn no_emitted_url_can_be_malformed() {
+        for input in [
+            "turn:a.example:3478?transport=udp,turn:b.example:3478?transport=tcp",
+            "  turn:c.example:3478  ,  ",
+            "turn:",
+            "",
+            "garbage",
+            "turns:d.example:5349",
+        ] {
+            for url in stun_urls_from_turn(input) {
+                assert!(url.starts_with("stun:"), "{url} must be a stun: URL");
+                assert!(!url.contains(','), "{url} must not contain a comma");
+                assert!(!url.contains('?'), "{url} must not contain a query");
+                assert!(url.len() > "stun:".len(), "{url} must name a host");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

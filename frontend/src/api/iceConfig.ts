@@ -82,9 +82,15 @@ function tokenUserId(token: string | null): number | null {
  */
 export function withRelayOnlyIfRequested(config: IceConfiguration | RTCConfiguration): RTCConfiguration {
     const servers = (config.iceServers ?? []) as RTCIceServer[];
+    // `turns:` counts too. Matching only the literal `turn:` meant that on a
+    // TLS-TURN deployment — an ordinary configuration, and the one an operator
+    // picks when they care most about privacy — the relay was present, usable,
+    // and silently ignored: the user ticked "Hide my IP" and went on handing out
+    // their address. A privacy control that quietly does nothing is worse than
+    // an absent one, because nothing tells the user it did not apply.
     const hasTurn = servers.some((s) =>
         (Array.isArray(s.urls) ? s.urls : [s.urls]).some(
-            (u) => typeof u === 'string' && u.startsWith('turn:'),
+            (u) => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:')),
         ),
     );
     return loadSettings().forceRelayOnly && hasTurn
