@@ -1284,6 +1284,8 @@ pub fn run() {
             service_cmd::service_enable,
             #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_disable,
+            #[cfg(all(windows, feature = "remote-control"))]
+            service_cmd::service_disable_and_forget,
             #[cfg(feature = "remote-control")]
             service_cmd::service_update,
             #[cfg(feature = "remote-control")]

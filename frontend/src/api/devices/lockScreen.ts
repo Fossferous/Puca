@@ -14,9 +14,20 @@
  *   - registers a Windows service, `SovereignRemote`, running as LocalSystem
  *     and starting at boot;
  *   - that service runs an agent ONLY while the machine is locked or nobody is
- *     signed in, and stops it again on unlock.
+ *     signed in, and stops it again on unlock;
+ *   - and, once you enrol the machine, this machine's own remote-access
+ *     private key, signing seed and arming record, under a `secrets` folder in
+ *     that same directory.
  *
- * Turning it off removes all three. "Off" has to be a state, not a claim.
+ * Turning it off removes the first three. It deliberately KEEPS the fourth, so
+ * that switching the feature off and on again does not force you to enrol the
+ * machine from scratch — the all-or-nothing version of this used to wipe
+ * enrolment by accident, three times, before anyone noticed.
+ *
+ * That is a defensible default and a genuine convenience, but it is not
+ * something a user can be expected to infer from a switch labelled "off", so
+ * the UI states it and `forgetThisMachine` is the one-click way to decline it.
+ * "Off" has to be a state, not a claim — including about what it leaves.
  */
 import { isTauri } from '../platform';
 import { apiClient } from '../client';
@@ -89,11 +100,36 @@ export async function enableLockScreenAccess(): Promise<string | null> {
     }
 }
 
-/** Turn it off: stop the service, delete it, remove its files. */
+/**
+ * Turn it off: stop the service, delete it, remove its binaries.
+ *
+ * KEEPS this machine's enrolment (device key, signing seed, arming record) so
+ * that turning it back on does not mean enrolling again — see
+ * `forgetThisMachine` for the version that removes those too, and the UI copy
+ * that now states which of the two you are getting.
+ */
 export async function disableLockScreenAccess(): Promise<string | null> {
     if (!isTauri()) return 'This can only be turned off from the desktop app.';
     try {
         await invokeTauri<void>('service_disable');
+        return null;
+    } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+    }
+}
+
+/**
+ * Turn it off AND erase this machine's enrolment.
+ *
+ * Until this existed there was no way to remove the enrolment secrets from the
+ * app at all: the service crate's `enrol::forget` was reachable from neither
+ * its own CLI nor here, so the only route was deleting a folder under Program
+ * Files as an administrator.
+ */
+export async function forgetThisMachine(): Promise<string | null> {
+    if (!isTauri()) return 'This can only be done from the desktop app.';
+    try {
+        await invokeTauri<void>('service_disable_and_forget');
         return null;
     } catch (e) {
         return e instanceof Error ? e.message : String(e);

@@ -164,10 +164,27 @@ pub fn service_enable() -> Result<(), String> {
     run_elevated(&["provision", &agent.to_string_lossy()])
 }
 
-/// Turn it off, removing the service and its files.
+/// Turn it off, removing the service and its binaries.
+///
+/// KEEPS this machine's enrolment — the device private key, signing seed and
+/// arming record under `secrets/` — so that turning the feature back on does
+/// not mean enrolling the machine again. The UI now says so in as many words;
+/// `service_disable_and_forget` is the version for someone who wants that gone
+/// as well.
 #[tauri::command]
 pub fn service_disable() -> Result<(), String> {
     run_elevated(&["deprovision"])
+}
+
+/// Turn it off AND erase this machine's enrolment.
+///
+/// ONE elevated call rather than a disable followed by a separate forget: two
+/// consecutive UAC prompts for what the user experiences as a single decision
+/// is how people end up stopping half way through it, which here would mean
+/// believing the key is gone when it is not.
+#[tauri::command]
+pub fn service_disable_and_forget() -> Result<(), String> {
+    run_elevated(&["deprovision-forget"])
 }
 
 /// Replace the installed service binaries with this build's. One UAC prompt;

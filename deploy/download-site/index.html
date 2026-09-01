@@ -51,6 +51,7 @@
   }
   .btn.secondary:hover { background: rgba(255,255,255,0.1); box-shadow: 0 8px 20px rgba(0,0,0,0.35); }
   .meta { margin-top: 18px; color: #7d7897; font-size: 13px; }
+  .apk-note { margin: 14px auto 0; max-width: 46em; color: #7d7897; font-size: 13px; line-height: 1.55; text-align: left; }
   .steps { margin-top: 34px; text-align: left; color: #b7b2cf; font-size: 14px; line-height: 1.7; }
   .steps b { color: #e8e6f0; }
   code { background: rgba(255,255,255,0.07); padding: 2px 7px; border-radius: 6px; font-size: 13px; }
@@ -92,6 +93,15 @@
         <a class="btn secondary" href="/mobile/Puca-0.8.130.apk" download>Download for Android (.apk)</a>
       </div>
       <div class="meta">v0.8.130 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; iOS via TestFlight</div>
+      <p class="apk-note">
+        The Android app keeps itself up to date: each time it starts it fetches the
+        current version from this server and applies it before opening. There is no
+        switch for that, and it happens before you sign in &mdash; it is how a broken
+        version gets fixed and how every device here stays on the same one. Only
+        updates signed by this server are accepted, and an older one is refused. The
+        Windows app is different: there, updating is optional and off unless you turn
+        it on.
+      </p>
     </div>
 
     <div data-variant-panel="lite">

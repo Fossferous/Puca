@@ -84,11 +84,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             Ok(())
         }
-        // The whole of "off": the service is stopped, deleted, and its files
-        // removed. Turning this feature off must leave nothing behind, or "off"
-        // is a claim rather than a state.
+        // "Off": the service is stopped, deleted, and its binaries removed.
+        //
+        // This deliberately KEEPS `secrets/` — this machine's enrolment — so
+        // that toggling the feature off and on again does not force a
+        // re-enrolment (see `provision::deprovision`, and the bug that cost
+        // three of them). That is a real convenience and it is why the comment
+        // that used to sit here — "must leave nothing behind, or 'off' is a
+        // claim rather than a state" — was describing an intention this
+        // command has never implemented. Use `deprovision-forget` for the
+        // version that genuinely leaves nothing.
         Some("deprovision") => {
             println!("{}", puca_service::provision::deprovision()?);
+            Ok(())
+        }
+        // "Off, and forget this machine too." One elevated run, so the app can
+        // offer it as a single action rather than two consecutive UAC prompts.
+        Some("deprovision-forget") => {
+            println!("{}", puca_service::provision::deprovision_and_forget()?);
             Ok(())
         }
         Some("uninstall") => {
@@ -105,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("run") | None => windows_impl::run(),
         Some(other) => {
-            eprintln!("unknown command {other:?}; use provision <agent> | update <agent> | deprovision | status | install | uninstall | run");
+            eprintln!("unknown command {other:?}; use provision <agent> | update <agent> | deprovision | deprovision-forget | status | install | uninstall | run");
             std::process::exit(2);
         }
     }
