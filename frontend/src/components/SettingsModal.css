@@ -784,6 +784,20 @@
     color: #faa61a;
 }
 
+/* Where a voice hotkey works — computed from the predicate the desktop-global
+   hook uses (api/hotkeyScope.ts), so the row cannot promise what the hook
+   does not do. */
+.keybind-scope {
+    flex-basis: 100%;
+    margin-top: 4px;
+    font-size: 0.75rem;
+    color: var(--text-muted, #949ba4);
+}
+
+.keybind-scope.is-global {
+    color: var(--status-positive, #23a559);
+}
+
 .keybind-activate {
     background: var(--brand-primary, #5865f2);
     color: #fff;

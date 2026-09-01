@@ -383,6 +383,46 @@ let nativeStartInFlight: Promise<void> | null = null;
 let nativeFeedGeneration = 0;
 
 /**
+ * What the feed was last ASKED to watch, whether or not that start went
+ * through — a superseded or refused start leaves nativeAllow describing a
+ * feed that never installed, so the two are reported side by side.
+ */
+let lastRequested: { ids: string[]; keys: number[] } | null = null;
+
+/**
+ * The last few start/stop calls with their reasons. Exists because the feed
+ * used to stop SILENTLY: "never started" and "started, then stopped" produced
+ * the same console (nothing), and that fork is exactly what could not be
+ * answered when the report was "hotkeys work in Púca and die when another
+ * window has focus".
+ */
+type FeedLogEntry = {
+    at: number; kind: 'start' | 'stop'; reason: string;
+    ids: string[] | null; keys: number[] | null; result: string;
+};
+const FEED_LOG_MAX = 40;
+const feedLog: FeedLogEntry[] = [];
+function recordFeed(kind: FeedLogEntry['kind'], reason: string, watch: { ids: string[]; keys: number[] } | null, result: string): void {
+    feedLog.push({
+        at: Math.round(performance.now()), kind, reason,
+        ids: watch ? [...watch.ids] : null, keys: watch ? [...watch.keys] : null, result,
+    });
+    if (feedLog.length > FEED_LOG_MAX) feedLog.splice(0, feedLog.length - FEED_LOG_MAX);
+}
+
+/**
+ * The host (VoicePanel) lends the diag the inputs its feed decision is made
+ * from — in-call state, bindings, the last computed watch list. A provider
+ * callback rather than an import: VoicePanel imports this module, not the
+ * other way round.
+ */
+export type NativeFeedHostSnapshot = Record<string, unknown>;
+let hostProvider: (() => NativeFeedHostSnapshot) | null = null;
+export function setNativeFeedHost(provider: (() => NativeFeedHostSnapshot) | null): void {
+    hostProvider = provider;
+}
+
+/**
  * Start (or reconfigure) the desktop-global key feed: the Rust hook watches
  * exactly `watchedKeys` (VK codes) and reports their transitions; matching
  * events dispatch to the actions in `actionIds` only. Safe to call again with
@@ -390,6 +430,7 @@ let nativeFeedGeneration = 0;
  */
 export async function startNativeFeed(actionIds: string[], watchedKeys: number[]): Promise<void> {
     if (!isTauri()) return;
+    lastRequested = { ids: [...actionIds], keys: [...watchedKeys] };
     nativeAllow = new Set(actionIds);
     // Serialize overlapping starts. A settings save can fire start #1 while a
     // React effect re-run fires stop + start #2 in the same task, and both
@@ -398,7 +439,12 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
     // could arrive after a re-press and cut the mic mid-sentence).
     const gen = ++nativeFeedGeneration;
     if (nativeStartInFlight) await nativeStartInFlight.catch(() => { /* prior attempt failed */ });
-    if (gen !== nativeFeedGeneration) return; // superseded while we waited
+    if (gen !== nativeFeedGeneration) {
+        // A newer start, or a stop, took over while we waited: nothing was
+        // invoked for THIS request.
+        recordFeed('start', 'superseded while waiting', { ids: actionIds, keys: watchedKeys }, 'skipped');
+        return;
+    }
     nativeStartInFlight = (async () => {
         const { invoke } = await import('@tauri-apps/api/core');
         // TRUE only when a hook is really watching (non-Windows desktop and a
@@ -407,6 +453,7 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
         const hooked = await invoke<boolean>('start_hotkey_listener', { keys: watchedKeys.filter(k => k > 0) });
         if (!hooked) {
             console.warn('[hotkeys] no global hook on this platform — keys work while focused');
+            recordFeed('start', 'sync', { ids: actionIds, keys: watchedKeys }, 'refused: no hook');
             nativeFeedActive = false;
             return;
         }
@@ -431,7 +478,9 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
             });
         }
         nativeFeedActive = true;
-        console.log('[hotkeys] native feed watching VKs:', watchedKeys.filter(k => k > 0).join(','));
+        // Pairs, not bare VKs: the reader wants to know WHICH action a key is for.
+        console.log('[hotkeys] native feed watching:', actionIds.map((id, i) => `${id}=${watchedKeys[i]}`).join(' '));
+        recordFeed('start', 'sync', { ids: actionIds, keys: watchedKeys }, 'hooked');
     })();
     try {
         await nativeStartInFlight;
@@ -441,14 +490,20 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
         // the blur handler keeps its release-on-focus-loss safety net.
         nativeFeedActive = false;
         console.warn('[hotkeys] native feed unavailable:', err);
+        recordFeed('start', 'sync', { ids: actionIds, keys: watchedKeys }, 'error: ' + String(err));
     } finally {
         if (gen === nativeFeedGeneration) nativeStartInFlight = null;
     }
 }
 
 /** Stop the desktop-global feed and release anything it held. No-op on web. */
-export async function stopNativeFeed(): Promise<void> {
+export async function stopNativeFeed(reason = 'unspecified'): Promise<void> {
     if (!isTauri()) return;
+    // Logged on the SUCCESS path too. A stop used to be silent, which left
+    // "the feed never started" and "it started and something stopped it"
+    // with the same console output: none.
+    console.log('[hotkeys] native feed stop:', reason, nativeFeedActive ? '(was live)' : '(was not live)');
+    recordFeed('stop', reason, lastRequested, nativeFeedActive ? 'was live' : 'was not live');
     nativeFeedGeneration++; // cancel any start still waiting its turn
     nativeStartInFlight = null;
     nativeFeedActive = false;
@@ -479,30 +534,68 @@ export function resetHotkeysForTest(): void {
 
 // Read-only diagnostics for live verification (devtools/CDP): whether the
 // desktop-global feed runs, which actions it feeds, and what's registered.
+//
+//   await __pucaHotkeysDebug.snapshot()      (DevTools; in a call or not)
+//
+// ONE call, both halves. Reading it:
+//   host: null                     -> the voice panel is not mounted at all
+//   host.isInVoice false           -> not in a call; the feed is call-scoped
+//                                     by design, so this is the healthy idle
+//   host.lastComputed.ids empty    -> in a call, but no bind qualified for
+//                                     system-wide: look at host.bindings,
+//                                     host.voiceBindsUserSet and
+//                                     host.globalVoiceHotkeys (the rule is
+//                                     api/hotkeyScope.ts); listenOnly or
+//                                     isAfkChannel true drops the mic keys
+//   log                            -> the start/stop sequence with reasons:
+//                                     separates "never started" from
+//                                     "started, then stopped"
+//   native.starts / native.stops   -> the same fork from the Rust side, so a
+//                                     start that never reached IPC shows
+//   native.hook_live false         -> asked for, but SetWindowsHookExW failed
+//   native.watching missing a VK   -> the bind never reached the native side
+//   native.events_seen stuck at 0  -> installed but receiving nothing
+//   native.events_seen rising      -> the hook sees the key; a later stage
+//                                     drops it (a different bug)
+//   native.rearms                  -> times the watchdog re-installed the hook
+//
+// Reached through this object, not window.__TAURI__: withGlobalTauri is off
+// on purpose (it would hand full IPC to any injected script), so `invoke`
+// only exists in module code like this. On a build without snapshot(),
+// `await window.__TAURI_INTERNALS__.invoke('hotkey_diag')` gives the native
+// half alone.
+async function nativeDiag(): Promise<unknown> {
+    if (!isTauri()) return { platform: 'web', note: 'no native hook in a browser' };
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke('hotkey_diag');
+}
+
 if (typeof window !== 'undefined') {
     (window as unknown as Record<string, unknown>).__pucaHotkeysDebug = {
         nativeFeedActive: () => nativeFeedActive,
         allowedActions: () => (nativeAllow ? [...nativeAllow] : null),
         registered: () => ({ hold: [...holdActions.keys()], press: [...pressActions.keys()] }),
-        // What the NATIVE side believes — the low-level hook itself. That is
-        // the half that can die without the JS side noticing, which is why
-        // "hotkeys stop after a while" could not be diagnosed from up here.
-        //
-        //   await __pucaHotkeysDebug.native()      (DevTools, during a call)
-        //
-        //   hook_live false        -> the hook is not installed
-        //   watching missing a VK  -> the bind never reached the native side
-        //   events_seen stuck at 0 -> installed but receiving nothing
-        //   events_seen rising     -> the hook sees the key; a later stage drops it
-        //   rearms                 -> times the watchdog re-installed the hook
-        //
-        // Reached through this object, not window.__TAURI__: withGlobalTauri
-        // is off on purpose (it would hand full IPC to any injected script),
-        // so `invoke` only exists in module code like this.
-        native: async () => {
-            if (!isTauri()) return { platform: 'web', note: 'no native hook in a browser' };
-            const { invoke } = await import('@tauri-apps/api/core');
-            return invoke('hotkey_diag');
+        /** The native half alone — what the low-level hook itself believes. */
+        native: nativeDiag,
+        /** Everything, in one call. See the reading guide above. */
+        snapshot: async () => {
+            let host: NativeFeedHostSnapshot | null = null;
+            try {
+                host = hostProvider ? hostProvider() : null;
+            } catch (err) {
+                host = { error: String(err) };
+            }
+            return {
+                host,
+                feed: {
+                    active: nativeFeedActive,
+                    requested: lastRequested,
+                    allowed: nativeAllow ? [...nativeAllow] : null,
+                    registered: { hold: [...holdActions.keys()], press: [...pressActions.keys()] },
+                },
+                log: [...feedLog],
+                native: await nativeDiag(),
+            };
         },
     };
 }

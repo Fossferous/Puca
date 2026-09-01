@@ -217,6 +217,23 @@ export const defaultSettings = {
      * wants to keep the default combo.
      */
     globalVoiceHotkeys: false,
+    /**
+     * WHO chose each mute/deafen bind: `true` = captured by the user in
+     * Settings › Keybinds (even if the combination they picked happens to be
+     * the shipped one), `false` = put back to the shipped default with Reset,
+     * absent = unknown (a profile from before this existed).
+     *
+     * This is the provenance the desktop-global feed needs, and used to infer
+     * from the VALUE: a bind that differed from the default was "chosen", one
+     * that matched was "untouched" and therefore in-app only. That inference
+     * reclassified a deliberate choice as untouched the moment the shipped
+     * default and the user's key coincided, and the migration that writes the
+     * default back over a cleared bind produced the same state. Both surfaced
+     * as "hotkeys work in Púca and die when another window has focus", with
+     * hotkey_diag reading active:false — nothing had asked for a hook.
+     * api/hotkeyScope.ts is the ONE reader.
+     */
+    voiceBindsUserSet: {} as Partial<Record<VoiceBindField, boolean>>,
 
     // --- Clips (desktop replay buffer; api/clips/) --------------------------
     /** Seconds kept in the ring while armed. The SERVER caps how long a CLIP may
@@ -327,6 +344,16 @@ export const defaultSettings = {
 };
 
 export type Settings = typeof defaultSettings;
+
+/** The two voice binds whose system-wide scope depends on provenance. */
+export type VoiceBindField = 'toggleMuteBinding' | 'toggleDeafenBinding';
+export const VOICE_BIND_FIELDS: readonly VoiceBindField[] = ['toggleMuteBinding', 'toggleDeafenBinding'];
+
+/** Same key and modifiers (the label is presentation). Two unbound count as same. */
+export function sameCombo(a: KeyBinding | null | undefined, b: KeyBinding | null | undefined): boolean {
+    if (!a || !b) return !a && !b;
+    return a.keyCode === b.keyCode && a.ctrl === b.ctrl && a.alt === b.alt && a.shift === b.shift;
+}
 
 // Load settings from localStorage
 /**
@@ -509,17 +536,58 @@ function migrateClipArmOnJoin(parsed: Partial<Settings> | null): Partial<Setting
     return { ...parsed, clipArmOnJoin: 'prompt' };
 }
 
+/**
+ * One-time: record who chose the mute/deafen binds a profile already holds.
+ *
+ * Before `voiceBindsUserSet` existed, the desktop-global feed inferred choice
+ * from the value — a stored bind that differs from the shipped default can
+ * only have been set by the user, because every migration writes defaults.
+ * That inference is sound in this one direction, so it is converted into a
+ * record exactly once; a bind that EQUALS the default is left unmarked
+ * (genuinely unknown), which keeps it in-app only, as before. From here on
+ * the Keybinds tab writes the mark at capture time, so a user who picks the
+ * shipped combination on purpose is recorded as having chosen it.
+ *
+ * Runs after migrateDefaultVoiceKeybinds so it sees the values that will be
+ * used. Never re-fires: a later Reset writes an explicit `false`, and a
+ * migration that re-ran would undo it.
+ */
+const VOICE_BIND_PROVENANCE_KEY = 'voiceBindProvenance_v1';
+
+function migrateVoiceBindProvenance(parsed: Partial<Settings> | null): Partial<Settings> | null {
+    if (localStorage.getItem(VOICE_BIND_PROVENANCE_KEY)) return parsed;
+    let next = parsed;
+    if (parsed && parsed.voiceBindsUserSet === undefined) {
+        const marks: Partial<Record<VoiceBindField, boolean>> = {};
+        for (const field of VOICE_BIND_FIELDS) {
+            const b = parsed[field];
+            if (b && !sameCombo(b, defaultSettings[field])) marks[field] = true;
+        }
+        if (Object.keys(marks).length > 0) {
+            next = { ...parsed, voiceBindsUserSet: marks };
+            try {
+                localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...defaultSettings, ...next }));
+                console.log('[Settings] Recorded user-chosen voice binds:', Object.keys(marks).join(', '));
+            } catch { /* storage full or blocked — the in-memory value still applies */ }
+        }
+    }
+    try {
+        localStorage.setItem(VOICE_BIND_PROVENANCE_KEY, '1');
+    } catch { /* same */ }
+    return next;
+}
+
 export function loadSettings(): Settings {
     try {
         const stored = localStorage.getItem(SETTINGS_KEY);
         const parsed = stored ? (JSON.parse(stored) as Partial<Settings>) : null;
         // Called even for `null` so the migration disarms itself on a fresh
         // profile — see the note inside.
-        const migrated = migrateDefaultVoiceKeybinds(
+        const migrated = migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
             migrateRequireMediaE2ee(
                 migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
             ),
-        );
+        ));
         if (parsed) return { ...defaultSettings, ...migrated };
     } catch (e) {
         console.error('Failed to load settings:', e);
