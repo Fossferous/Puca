@@ -52,9 +52,18 @@ fn service_path() -> Option<PathBuf> {
 
 /// The installed copy under `%ProgramFiles%`, which only administrators can
 /// write. `None` until the service has been provisioned at least once.
+/// BOTH HALVES COME FROM THE SERVICE CRATE, deliberately. The first cut of this
+/// re-derived them here and guessed the filename as `puca-service.exe`; the
+/// installed binary is actually `sovereign-service.exe` — the on-disk and wire
+/// names were frozen as `sovereign-*` when the product was renamed. So the path
+/// never existed, this always returned `None`, and the hardening below
+/// degraded silently to the very behaviour it was written to replace. No test
+/// would have caught it either, because falling back to the bundled copy is a
+/// legitimate outcome on a machine with no service installed. Asking the crate
+/// that creates the directory is the only version of this that cannot drift.
 fn installed_service_path() -> Option<PathBuf> {
-    let dir = std::env::var_os("ProgramFiles").map(PathBuf::from)?;
-    let candidate = dir.join("Sovereign").join("service").join("puca-service.exe");
+    let dir = puca_service::provision::install_dir().ok()?;
+    let candidate = dir.join(puca_service::INSTALLED_SERVICE_EXE);
     candidate.exists().then_some(candidate)
 }
 
@@ -342,6 +351,36 @@ mod elevation_source_tests {
             elevation_source(ElevationSource::PreferInstalled, None, bundled()),
             bundled(),
         );
+    }
+
+    /// The bug this file shipped with for one commit: the installed path was
+    /// hand-written as `puca-service.exe`, but the installed binary is
+    /// `sovereign-service.exe`, so the admin-only copy was never found and the
+    /// whole hardening silently did nothing.
+    ///
+    /// Asserts against the CRATE'S OWN constants — the values the elevated
+    /// installer actually writes — so a rename on either side breaks this
+    /// rather than quietly reintroducing the no-op. A test that repeated the
+    /// literal would have passed while the code was wrong.
+    #[test]
+    fn the_installed_path_matches_what_the_installer_actually_writes() {
+        let dir = puca_service::provision::install_dir().expect("ProgramFiles is set on Windows");
+        let expected = dir.join(puca_service::INSTALLED_SERVICE_EXE);
+
+        assert_eq!(
+            expected.file_name().and_then(|s| s.to_str()),
+            Some(puca_service::INSTALLED_SERVICE_EXE),
+        );
+        assert_ne!(
+            puca_service::INSTALLED_SERVICE_EXE, "puca-service.exe",
+            "the installed name is frozen as sovereign-*; if this ever changes, \
+             installed_service_path and the installer must move together",
+        );
+        // And the lookup must be built from those, not from a literal: a path
+        // assembled any other way is how the no-op happened.
+        if let Some(found) = super::installed_service_path() {
+            assert_eq!(found, expected, "resolved path must be the installer's own");
+        }
     }
 
     /// A build with no service component at all (Lite, or a broken install)
