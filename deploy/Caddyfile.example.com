@@ -74,9 +74,19 @@ app.example.com {
 		# SharedArrayBuffer (see frontend/src/api/deepFilter.ts), so it is not
 		# cross-origin isolated, and COEP:require-corp would BLOCK the remote
 		# image/GIF embeds the chat relies on. img-src/media-src therefore allow
-		# https: so remote embeds load. Still VERIFY this CSP against your build
-		# (WASM 'wasm-unsafe-eval', WebRTC connect-src, blob: workers).
-		Content-Security-Policy "default-src 'self'; connect-src 'self' https://chat.example.com wss://chat.example.com; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'"
+		# https: so remote embeds load.
+		#
+		# ADD YOUR SFU TO connect-src IF YOU RUN ONE. When LIVEKIT_URL is set in
+		# the backend's .env, the browser opens a WebSocket straight to that
+		# host, and connect-src governs WebSockets. Leave it out and group voice
+		# fails in the browser ONLY — desktop is unaffected, nothing logs an
+		# error the operator sees, and the obvious suspect is the SFU rather
+		# than a header on a different vhost. Append it here exactly as it
+		# appears in .env, e.g. `wss://sfu.example.com`.
+		#
+		# STUN/TURN need no entry: ICE is not fetch or WebSocket traffic and CSP
+		# does not govern it.
+		Content-Security-Policy "default-src 'self'; connect-src 'self' https://chat.example.com wss://chat.example.com; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
 	}
 }
 
