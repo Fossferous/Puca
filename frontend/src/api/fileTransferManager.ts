@@ -13,7 +13,7 @@
  */
 import { wsClient, type ServerMessage } from './websocket';
 import { loadSettings } from '../components/settingsStore';
-import { fetchIceConfig } from './iceConfig';
+import { fetchIceConfig, withRelayOnlyIfRequested } from './iceConfig';
 import { lastSinkChoice, type PreparedSink } from './transferSinks';
 import { capacitorSinkDiag } from './capacitorSink';
 import {
@@ -741,7 +741,9 @@ class FileTransferManager {
 
     private async newConnection(t: Transfer): Promise<RTCPeerConnection> {
         const config = await fetchIceConfig();
-        const pc = new RTCPeerConnection(config);
+        // Same relay-only policy as voice: this path handed the peer the
+        // user's IP even with "Hide my IP in calls" on.
+        const pc = new RTCPeerConnection(withRelayOnlyIfRequested(config));
         t.pc = pc;
 
         pc.onicecandidate = e => {

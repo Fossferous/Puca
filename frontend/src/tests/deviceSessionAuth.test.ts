@@ -96,7 +96,7 @@ vi.mock('../api/devices/clipboard', () => ({
     isClipboardEvent: (e: unknown) => (e as { t?: string })?.t === 'clip',
     buildClipboardEvent: (data: string) => ({ t: 'clip', data }),
 }));
-vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c, fetchIceConfig: async () => ({ iceServers: [] }) }));
 vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTunnels: () => {} }));
 vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyDh: async () => new Uint8Array(32).fill(3),

@@ -33,7 +33,7 @@
  * until it exists, ANY device enrolled to the account can control any other, and
  * device revocation is enforced by the SERVER rather than cryptographically.
  */
-import { fetchIceConfig } from '../iceConfig';
+import { fetchIceConfig, withRelayOnlyIfRequested } from '../iceConfig';
 import { wsClient } from '../websocket';
 import { setControlKeepAlive } from '../mobileApp';
 import { minimiseJitterBuffer } from '../rtc/receiverLatency';
@@ -979,7 +979,7 @@ async function answerOffer(
         }
         return;
     }
-    if (!s.pc) attachPc(s, new RTCPeerConnection(await fetchIceConfig()));
+    if (!s.pc) attachPc(s, new RTCPeerConnection(withRelayOnlyIfRequested(await fetchIceConfig())));
     // THE OTHER HALF of data-only, and it was missing.
     //
     // Only the agent branch above honoured `filesOnly`; this one published the
@@ -1416,7 +1416,7 @@ const RESTART_FAILED_MSG =
  *  IMMEDIATELY because WKWebView will not start the media pipeline (or fire
  *  onunmute) until the MediaStream sits on a playing <video>. */
 async function buildControllerPc(s: Internal): Promise<RTCPeerConnection> {
-    const pc = new RTCPeerConnection(await fetchIceConfig());
+    const pc = new RTCPeerConnection(withRelayOnlyIfRequested(await fetchIceConfig()));
     attachPc(s, pc);
 
     const filesDc = pc.createDataChannel('files', { negotiated: false });

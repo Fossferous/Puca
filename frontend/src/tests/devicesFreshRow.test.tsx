@@ -31,7 +31,7 @@ vi.mock('../api/devices', () => ({
 vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyCustody: () => 'os-protected',
 }));
-vi.mock('../api/iceConfig', () => ({
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c,
     fetchIceConfig: vi.fn().mockResolvedValue({ iceServers: [], iceTransportPolicy: 'all' }),
 }));
 // The fold decrypts each row's lan_info; with these the blob is the plaintext.

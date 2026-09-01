@@ -1,5 +1,6 @@
 import { API_BASE_URL } from './config';
 import { getToken, decodeJwtPayload } from './auth';
+import { loadSettings } from '../components/settingsStore';
 
 // ICE Configuration types matching RTCConfiguration
 interface IceServer {
@@ -63,6 +64,34 @@ function tokenUserId(token: string | null): number | null {
 
 /** Drop any cached ICE config. Call on logout so the next user (or the
  *  logged-out session) never reuses the previous user's TURN credentials. */
+/**
+ * Apply the user's "Hide my IP in calls (relay only)" choice to an RTC config.
+ *
+ * ONE place, used by every path that opens a peer connection. The policy used to
+ * live inline in the mesh voice manager alone, so ticking the box hid the user's
+ * IP from a voice peer while a My Devices session and a peer-to-peer file
+ * transfer still handed it straight over — three RTCPeerConnection call sites
+ * that never consulted the setting. A privacy control that covers some of the
+ * connections is worse than none, because the user believes it covers all.
+ *
+ * Only takes effect when a TURN server is actually present: with
+ * `iceTransportPolicy: 'relay'` and no relay to use, there is no viable
+ * candidate pair and the connection simply never establishes. Failing to
+ * connect is not a privacy win, so the honest behaviour is to leave the policy
+ * alone and let the per-peer indicator report what actually happened.
+ */
+export function withRelayOnlyIfRequested(config: IceConfiguration | RTCConfiguration): RTCConfiguration {
+    const servers = (config.iceServers ?? []) as RTCIceServer[];
+    const hasTurn = servers.some((s) =>
+        (Array.isArray(s.urls) ? s.urls : [s.urls]).some(
+            (u) => typeof u === 'string' && u.startsWith('turn:'),
+        ),
+    );
+    return loadSettings().forceRelayOnly && hasTurn
+        ? ({ ...config, iceTransportPolicy: 'relay' } as RTCConfiguration)
+        : (config as RTCConfiguration);
+}
+
 export function resetIceConfigCache(): void {
     cachedIceConfig = null;
     cacheTimestamp = 0;

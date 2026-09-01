@@ -35,7 +35,7 @@ vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyDh: async () => new Uint8Array(32).fill(3),
 }));
 vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: async () => 'x25519:' + btoa('k') }));
-vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c, fetchIceConfig: async () => ({ iceServers: [] }) }));
 // async, unlike the cursorOwnership rig: restartMedia awaits closeTunnels and
 // calls .catch on the result, so a void return would throw its way into a
 // teardown and the restart test would be measuring the wrong thing.

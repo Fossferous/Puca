@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../api/iceConfig', () => ({
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c,
     fetchIceConfig: vi.fn(async () => ({
         iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
         iceTransportPolicy: 'all',

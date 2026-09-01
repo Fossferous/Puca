@@ -81,7 +81,7 @@ vi.mock('../api/devices/hostAgent', () => ({
     agentAddRemoteCandidate: (sid: string, line: string) => agentAddRemoteCandidate(sid, line),
 }));
 
-vi.mock('../api/iceConfig', () => ({ fetchIceConfig: async () => ({ iceServers: [] }) }));
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c, fetchIceConfig: async () => ({ iceServers: [] }) }));
 vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTunnels: () => {} }));
 vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyDh: async () => new Uint8Array(32).fill(3),

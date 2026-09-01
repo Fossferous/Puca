@@ -1479,12 +1479,15 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     </div>
                                     <div className="settings-option">
                                         <div className="option-info">
-                                            <label>Hide my IP in calls (relay only)</label>
+                                            <label>Hide my IP from other people (relay only)</label>
                                             <span className="option-hint">
-                                                Route your voice, video and screen share through the server's TURN relay
-                                                so other participants never see your IP address. Uses more relay bandwidth
-                                                and may reduce quality; has no effect if no relay is available, and the
-                                                server operator can still see the relayed connections.
+                                                Without this, connecting to someone puts your device in direct contact
+                                                with theirs, so they see your IP address — and roughly where you are.
+                                                This routes voice, video, screen share, remote-desktop sessions and
+                                                direct file transfers through the server's relay instead. Uses more
+                                                relay bandwidth and may reduce quality; has no effect if the server has
+                                                no relay configured, and the server operator can still see the relayed
+                                                connections.
                                             </span>
                                         </div>
                                         <input

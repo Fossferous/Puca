@@ -40,7 +40,7 @@ const connectToDevice = vi.fn();
 // the first Control click. Unmocked it is a REAL fetch to API_BASE_URL from
 // every test in this file — slow, noisy, and dependent on the machine's
 // network. The component ignores its failure by design, so a stub is enough.
-vi.mock('../api/iceConfig', () => ({
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c,
     fetchIceConfig: vi.fn().mockResolvedValue({ iceServers: [], iceTransportPolicy: 'all' }),
 }));
 vi.mock('../api/devices/session', () => ({

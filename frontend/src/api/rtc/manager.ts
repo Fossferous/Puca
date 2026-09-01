@@ -3,7 +3,7 @@ import { getRtcConfigAsync } from './config';
 import {
     CTL_STATE_LABEL, forgetControlChannels, registerControlChannel,
 } from './controlDc';
-import { loadSettings } from '../../components/settingsStore';
+import { withRelayOnlyIfRequested } from '../iceConfig';
 import { MediaManager } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
@@ -887,19 +887,12 @@ export class WebRTCManager {
 
     private async createPeerConnection(userId: UserId): Promise<RTCPeerConnection> {
         const config = await getRtcConfigAsync();
-        // Privacy: when the user opts into relay-only, force iceTransportPolicy
-        // 'relay' so no host/srflx candidate (their real IP) is emitted to peers —
-        // but ONLY when a TURN server is actually present, else the call would
-        // have no viable path and silently fail to connect.
-        const hasTurn = (config.iceServers ?? []).some((s) =>
-            (Array.isArray(s.urls) ? s.urls : [s.urls]).some(
-                (u) => typeof u === 'string' && u.startsWith('turn:'),
-            ),
-        );
-        const effectiveConfig: RTCConfiguration =
-            loadSettings().forceRelayOnly && hasTurn
-                ? { ...config, iceTransportPolicy: 'relay' }
-                : config;
+        // Privacy: "Hide my IP in calls" now lives in ONE helper used by every
+        // path that opens a peer connection — this one, My Devices sessions and
+        // peer-to-peer file transfer. It was inline here and nowhere else, so
+        // the setting hid the user's IP from a voice peer while the other two
+        // handed it over regardless.
+        const effectiveConfig: RTCConfiguration = withRelayOnlyIfRequested(config);
         // `encodedInsertableStreams` MUST be set at construction for
         // createEncodedStreams() to be available on senders/receivers.
         const pc = new RTCPeerConnection(

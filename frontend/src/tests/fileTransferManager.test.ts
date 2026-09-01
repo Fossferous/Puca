@@ -18,7 +18,7 @@ vi.mock('../api/websocket', () => ({
     },
 }));
 
-vi.mock('../api/iceConfig', () => ({
+vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c,
     fetchIceConfig: async () => ({ iceServers: [], iceTransportPolicy: 'all' }),
 }));
 
