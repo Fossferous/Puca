@@ -138,6 +138,13 @@ pub struct ResetPasswordRequest {
 /// Longest username `validate_username` will ever accept.
 pub const MAX_USERNAME_LEN: usize = 32;
 
+/// Ceiling applied to a username on the LOGIN and RECOVERY paths.
+///
+/// Deliberately far above `MAX_USERNAME_LEN`: those routes must still accept any
+/// name that could name a real account, including one created before
+/// registration enforced a length. This bounds work and memory, nothing else.
+pub const MAX_CREDENTIAL_NAME_BYTES: usize = 1024;
+
 /// A 2048-bit SRP group element is 256 bytes (512 hex chars) and the proof is 32
 /// bytes (64). Both ceilings are generous; the point is that they exist at all.
 pub const MAX_SRP_HEX_LEN: usize = 1024;
@@ -154,9 +161,17 @@ pub const MAX_SRP_HEX_LEN: usize = 1024;
 /// than the registration ceiling cannot exist, so refusing it reveals nothing
 /// about which accounts do.
 pub fn reject_oversized_username(username: &str) -> Result<(), StatusCode> {
-    // Bytes first: `chars().count()` on a 2 MiB string still walks 2 MiB, and a
-    // UTF-8 char is at most 4 bytes.
-    if username.len() > MAX_USERNAME_LEN * 4 || username.chars().count() > MAX_USERNAME_LEN {
+    // Bound RESOURCE consumption, not the registration business rule.
+    //
+    // A first cut reused MAX_USERNAME_LEN (32). That is the rule new accounts
+    // must satisfy, but it is not a rule every EXISTING account satisfies:
+    // `validate_username` only became a registration gate later, so an account
+    // created on an earlier build can carry a longer name — and capping login at
+    // 32 locked such an account out of every credential path, including recovery,
+    // with no remedy inside the product. The guard exists to stop a 2 MiB
+    // username driving a multi-pass HMAC and keying the backoff map; a ceiling
+    // two orders of magnitude above any real name does that just as well.
+    if username.len() > MAX_CREDENTIAL_NAME_BYTES {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(())
@@ -646,6 +661,36 @@ pub async fn logout(
         );
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to log out").into_response();
     }
+    // Enrolled devices too, or this endpoint does not do what it says.
+    //
+    // /devices/token is UNAUTHENTICATED by necessity (a machine at its own
+    // sign-in screen has no credential yet) and re-reads token_version at mint
+    // time, so the bump above is absorbed: a device still holding its Ed25519
+    // key mints a fresh full-account JWT immediately afterwards, and the first
+    // request renews it into a new sliding session. Revoking the account's
+    // tokens while leaving its devices able to mint more is not revocation.
+    if let Err(e) = sqlx::query(
+        "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(claims.sub as i32)
+    .execute(&state.pool)
+    .await
+    {
+        // Do not report success: the caller pressed this because they believe a
+        // token was stolen, and a partial revocation is exactly the case where
+        // silence is dangerous.
+        tracing::error!(
+            "logout: token_version bumped but device revocation FAILED for user {}: {:?}",
+            claims.sub,
+            e
+        );
+        state.disconnect_user(claims.sub);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Sessions were signed out but enrolled devices could not be revoked. Try again.",
+        )
+            .into_response();
+    }
     // The bump only refuses the next REST call or WS upgrade — an already-open
     // socket re-checks the JWT's expiry per frame but never its version, so
     // without this a revoked token kept a live, fully privileged connection for
@@ -683,6 +728,12 @@ pub async fn reset_password(
             "This recovery method is disabled. Use account recovery or email password reset instead.",
         )
             .into_response();
+    }
+
+    // The unauthenticated credential route the first bounds sweep missed. It is
+    // disabled by default (above), but the guard belongs here regardless.
+    if reject_oversized_username(&payload.username).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid username").into_response();
     }
 
     tracing::info!(">>> reset_password called for user: {}", payload.username);

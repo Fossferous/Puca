@@ -4,7 +4,7 @@ import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
-import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere } from '../api/auth';
+import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout } from '../api/auth';
 import { currentAppVersion } from '../api/appVersion';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -353,7 +353,15 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         try {
             await logoutEverywhere();
             // Every token for this account is now refused, this one included.
-            localStorage.clear();
+            //
+            // Deliberately NOT localStorage.clear(). That also destroys the
+            // trust-on-first-use anchors (verified_key_*, control_pin_*) and the
+            // anti-downgrade pins (e2ee_key_version_*, e2ee_epoch_floor_*) — so
+            // a user reacting to a suspected stolen token would hand a malicious
+            // server a clean slate to substitute peer keys and roll epochs back
+            // against, at precisely the moment they are most at risk. logout()
+            // scrubs the session and keeps the anchors, which is what is wanted.
+            logout();
             window.location.reload();
         } catch {
             setLogoutAllStatus('error');

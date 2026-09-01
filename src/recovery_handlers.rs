@@ -650,27 +650,28 @@ pub async fn recovery_reset(
             // right through the reset, until their JWT expired on its own.
             // None = no such user; same 200 as ever (M4: no enumeration oracle).
             if let Some((id,)) = uid {
-                // Enrolled devices too. /devices/token re-reads token_version at
-                // mint time, so the bump in the UPDATE above does NOT stop a
-                // device that still holds its Ed25519 key from minting fresh
-                // account JWTs. This is the "someone else has my account" path —
-                // a machine the attacker enrolled has to stop working, and the
-                // owner re-enrols their own from the Devices tab.
-                if let Err(e) = sqlx::query(
-                    "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
-                )
-                .bind(id)
-                .execute(&state.pool)
-                .await
-                {
-                    tracing::error!("recovery reset: device revocation failed for {}: {:?}", id, e);
-                }
                 state.disconnect_user(id as i64);
             }
+            // Enrolled devices are deliberately NOT revoked here.
+            //
+            // A first cut did revoke them, reasoning that this is the "someone
+            // else has my account" path. But it is overwhelmingly the "I forgot
+            // my password" path, and revoking is not symmetric with re-enrolling:
+            // an unattended remote-desktop host has no way to enrol itself, so a
+            // user who reset their password while away from home would lose
+            // access to that machine until they were physically in front of it.
+            // Stranding a powered-off desktop is the wrong default for the
+            // common case.
+            //
+            // The compromise case has its own remedy that DOES revoke devices —
+            // Settings > Account > Sessions > "Sign out on all devices" — and
+            // the response below points at it.
             tracing::info!("Recovery reset succeeded for {}", username_lower);
             (
                 StatusCode::OK,
-                "Password reset. Your history is intact — log in with your new password.",
+                "Password reset. Your history is intact — log in with your new password. \
+                 If you think someone else had access to your account, open Settings > Account \
+                 and use \"Sign out on all devices\" once you are signed in.",
             )
                 .into_response()
         }

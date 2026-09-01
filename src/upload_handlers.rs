@@ -282,7 +282,11 @@ pub async fn upload_file(
     let cap = std::env::var("UPLOAD_MAX_CONCURRENT_PER_IP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(4)
+        // 8, not 4: dragging five images onto the chat is ordinary use, and the
+        // client has no upload queue, so a lower cap turned a normal action into
+        // 503s on the extras. Still far below what a memory-exhaustion attempt
+        // needs, and the per-request 28 MiB body limit still applies.
+        .unwrap_or(8)
         .max(1);
     let _upload_guard = match state.try_acquire_ip_slot(ip, crate::state::IpSlotKind::Upload, cap) {
         Some(g) => g,

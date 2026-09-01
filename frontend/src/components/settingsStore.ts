@@ -364,6 +364,38 @@ function migrateMicProcessingToggles(parsed: Partial<Settings> | null): Partial<
  */
 const BG_DELIVERY_MIGRATION_KEY = 'mobileBackgroundDeliveryEnabled_v1';
 
+/**
+ * One-time application of the new `requireMediaE2ee: true` default.
+ *
+ * Flipping the default alone reached nobody who had ever opened Settings: any
+ * write persists the WHOLE object, so every existing profile carries an
+ * explicit `requireMediaE2ee: false`, and stored values win over defaults. The
+ * installed base would have kept the downgradable mesh calls the default change
+ * was made to close, while the settings UI said "On by default" next to an
+ * unchecked box.
+ *
+ * Same contract as the other migrations: runs once, the marker is what makes a
+ * later `false` a real choice, and the marker must never be cleared.
+ */
+const MEDIA_E2EE_MIGRATION_KEY = 'requireMediaE2eeDefaultOn_v1';
+
+function migrateRequireMediaE2ee(parsed: Partial<Settings> | null): Partial<Settings> {
+    if (localStorage.getItem(MEDIA_E2EE_MIGRATION_KEY)) return parsed ?? {};
+    const next = { ...(parsed ?? {}) };
+    const changed = parsed != null && next.requireMediaE2ee === false;
+    if (changed) next.requireMediaE2ee = true;
+    try {
+        // Marked done even with nothing stored, so a user who later turns this
+        // OFF deliberately is not re-armed on the next launch.
+        localStorage.setItem(MEDIA_E2EE_MIGRATION_KEY, '1');
+        if (changed) {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...defaultSettings, ...next }));
+            console.log('[Settings] Require-encryption-for-calls turned on (new default)');
+        }
+    } catch { /* storage full or blocked — the in-memory value below still applies */ }
+    return next;
+}
+
 function migrateBackgroundDelivery(parsed: Partial<Settings> | null): Partial<Settings> {
     if (localStorage.getItem(BG_DELIVERY_MIGRATION_KEY)) return parsed ?? {};
     const next = { ...(parsed ?? {}) };
@@ -446,7 +478,9 @@ export function loadSettings(): Settings {
         // Called even for `null` so the migration disarms itself on a fresh
         // profile — see the note inside.
         const migrated = migrateDefaultVoiceKeybinds(
-            migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
+            migrateRequireMediaE2ee(
+                migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
+            ),
         );
         if (parsed) return { ...defaultSettings, ...migrated };
     } catch (e) {

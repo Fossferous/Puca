@@ -30,17 +30,23 @@ let cachedForUser: number | null = null;
 const CACHE_DURATION_MS = 2 * 60 * 60 * 1000; // 2 hours
 const FETCH_TIMEOUT_MS = 6000; // don't let a black-holed backend stall call setup
 
+/**
+ * Used ONLY when /ice-config could not be reached and nothing is cached.
+ *
+ * Deliberately EMPTY. It used to hard-code Google's STUN servers, which meant an
+ * operator who set STUN_SERVERS (or who relies on the new default of deriving
+ * STUN from their own TURN) still had every client fall back to contacting
+ * Google the moment their own backend was briefly unreachable — the exact
+ * disclosure the server-side change was made to remove, reintroduced by a client
+ * default the operator cannot see or configure.
+ *
+ * With no ICE servers, host candidates still work (same LAN, or any peer
+ * reachable directly). A NAT-traversed call will fail instead — which is the
+ * honest outcome when we could not ask the user's own server what to use, and
+ * is recoverable as soon as it answers again.
+ */
 const STUN_ONLY_FALLBACK: IceConfiguration = {
-    iceServers: [
-        {
-            urls: [
-                'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302',
-                'stun:stun2.l.google.com:19302',
-                'stun:stun3.l.google.com:19302',
-            ],
-        },
-    ],
+    iceServers: [],
     iceTransportPolicy: 'all',
 };
 

@@ -236,6 +236,8 @@ import { clearBlobCache } from './attachments';
 // cycle with api/devices/index.ts, dragging the whole remote-control stack
 // into the main chunk of every build. See api/logoutHooks.ts.
 import { runLogoutCleanups } from './logoutHooks';
+import { isTauri, isMobile } from './platform';
+import { thisDeviceId, clearThisDeviceId } from './thisDevice';
 
 // ============ Public API ============
 
@@ -722,6 +724,28 @@ export function softExpireSession(): void {
 }
 
 export function logout(): void {
+    // Revoke this BROWSER's device row before the token goes, then forget the id.
+    //
+    // Scrubbing the web device key below without this left the server row alive:
+    // the next sign-in attested a stale id with a freshly generated key, was
+    // silently refused, and enrolled ANOTHER row — so a habitual sign-out/sign-in
+    // user walked their account toward the 64-device cap while their Devices tab
+    // filled with ghosts.
+    //
+    // WEB ONLY. On desktop and mobile the enrolled device is the MACHINE, with
+    // its key held natively rather than in localStorage; revoking that on an
+    // ordinary sign-out would tear down the user's own remote-desktop host and
+    // require physical access to restore it. Those platforms keep their identity
+    // across sign-out, which is the behaviour that was there before.
+    if (!isTauri() && !isMobile()) {
+        const devId = thisDeviceId();
+        if (devId) {
+            // Fire-and-forget: the token is still valid on this line, and a
+            // failed revoke must not block the user from signing out.
+            void apiClient.delete(`/devices/${encodeURIComponent(devId)}`).catch(() => { /* best effort */ });
+        }
+        clearThisDeviceId();
+    }
     localStorage.removeItem('auth_token');
     // An explicit sign-out has to remove this, or it is not a sign-out. Login's
     // mount effect replays the blob unconditionally, so clearing only the token
