@@ -262,7 +262,23 @@ cd frontend && npm run typecheck && npx vitest run && npm run build && npm run l
 cargo test                                   # repo root
 cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
+cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
 ```
+
+**`ice-url-real-browser.mjs` is REQUIRED and exists because every other gate is
+blind to it.** Nothing else in this repo ever constructs a real
+`RTCPeerConnection`: all 25 RTC test files mock `../api/iceConfig`, and vitest
+runs under jsdom, which has no WebRTC. Three consecutive security-review rounds
+therefore shipped an ICE defect straight past `cargo test`, `vitest`, `tsc -b`
+and `eslint` — a malformed `stun:` URL derived from the `TURN_SERVER` this
+repo's own provisioner writes, then the sibling TURN branch emitting an empty
+URL from a stray comma, then entries like `turn:` surviving the empty-filter.
+None of those is a degraded ICE server: `new RTCPeerConnection()` THROWS, so the
+failure takes out mesh voice, screen share, both My Devices paths and
+peer-to-peer file transfer at once, for every user of that deployment. This
+script hands each shape the backend can emit to a real Chromium and asserts it
+constructs, with negative controls so a browser that accepted anything would
+fail the run rather than pass it vacuously. It needs no server and no build.
 
 **The JUnit gate is REQUIRED and was missing from this list until 0.8.68.**
 `frontend/android/app/src/test/` holds the pure-Java decision logic —

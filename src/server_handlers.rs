@@ -1642,6 +1642,34 @@ fn turn_urls_from_env(turn_server: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|u| !u.is_empty())
+        .filter_map(|u| {
+            // VALIDATE, do not merely trim. Filtering empty entries is not
+            // enough: `turn:` and `turn::` are non-empty and still make
+            // RTCPeerConnection throw ("Invalid transport parameter in ICE URI",
+            // "Invalid hostname format"), which kills every call surface exactly
+            // as the malformed STUN URL did. So must the scheme-less form
+            // `host:3478`. An entry that cannot possibly work is dropped with a
+            // warning; ONE bad entry must never take the whole config down.
+            //
+            // Found by e2e/ice-url-real-browser.mjs on its first run — the Rust
+            // tests, vitest, tsc and eslint all passed with these shapes live,
+            // because nothing else in this repo ever builds a real peer
+            // connection.
+            let (scheme, rest) = u.split_once(':')?;
+            let scheme_lower = scheme.to_ascii_lowercase();
+            if scheme_lower != "turn" && scheme_lower != "turns" {
+                tracing::warn!("TURN_SERVER entry {u:?} has no turn:/turns: scheme; ignoring it");
+                return None;
+            }
+            // The host is whatever precedes the port or the query, and it has to
+            // be there.
+            let host = rest.split('?').next().unwrap_or(rest);
+            if host.split(':').next().unwrap_or("").is_empty() {
+                tracing::warn!("TURN_SERVER entry {u:?} names no host; ignoring it");
+                return None;
+            }
+            Some(u)
+        })
         .map(|u| {
             // Canonicalise the SCHEME to lowercase, keeping the host as typed.
             //
@@ -1853,10 +1881,24 @@ pub async fn get_ice_config(
         mac.update(username.as_bytes());
         let credential = BASE64.encode(mac.finalize().into_bytes());
 
+        // An IceServer with an EMPTY urls[] is rejected by the browser exactly
+        // like a malformed one — the same failure class as the round-4 Critical.
+        // The STUN side has had this guard since that fix; the TURN side did not,
+        // and filtering empty ENTRIES created the way for the LIST to be empty
+        // (a TURN_SERVER of "," or "   "). Emit no TURN server rather than a
+        // broken one; the caller's match arms already handle None.
+        let urls = turn_urls_from_env(&turn_server);
+        if urls.is_empty() {
+            tracing::warn!(
+                "TURN_SERVER is set but contains no usable URL; serving ICE without a relay"
+            );
+            return None;
+        }
+
         Some(IceServer {
             // TURN_SERVER may hold several comma-separated URLs
             // (e.g. "turn:host:3479?transport=udp,turn:host:3479?transport=tcp").
-            urls: turn_urls_from_env(&turn_server),
+            urls,
             username: Some(username),
             credential: Some(credential),
         })
@@ -1990,6 +2032,30 @@ mod stun_derivation_tests {
         );
     }
 
+    /// A non-empty entry is not automatically a USABLE one.
+    ///
+    /// Found by e2e/ice-url-real-browser.mjs on its first run: `turn:` and
+    /// `turn::` survived the empty-filter and made a real Chromium
+    /// RTCPeerConnection throw ("Invalid transport parameter in ICE URI" and
+    /// "Invalid hostname format"), which kills every call surface exactly as the
+    /// round-4 malformed STUN URL did. Every Rust test, vitest, tsc and eslint
+    /// passed with those shapes live, because nothing else in this repo builds a
+    /// real peer connection.
+    #[test]
+    fn turn_urls_drop_entries_a_browser_would_reject() {
+        for bad in ["turn:", "turn::", "turns:", ",", "   ", "garbage", "turn.example.com:3478", "https://h:1"] {
+            assert!(
+                turn_urls_from_env(bad).is_empty(),
+                "{bad:?} cannot work and must be dropped, not forwarded"
+            );
+        }
+        // One bad entry must never take the usable ones down with it.
+        assert_eq!(
+            turn_urls_from_env("turn:,turn:good.example:3478,turn::"),
+            vec!["turn:good.example:3478".to_string()]
+        );
+    }
+
     /// The scheme must leave the server in ONE canonical form, because two
     /// case-SENSITIVE consumers match on it before any browser normalises it:
     /// the relay-only privacy check and the remote-desktop agent's ICE parser.
@@ -2004,11 +2070,11 @@ mod stun_derivation_tests {
             turn_urls_from_env("TuRnS:h:5349"),
             vec!["turns:h:5349".to_string()]
         );
-        assert_eq!(
-            turn_urls_from_env("no-scheme-here"),
-            vec!["no-scheme-here".to_string()],
-            "passed through for the browser to reject, as before"
-        );
+        // A scheme-less entry is now DROPPED rather than forwarded. It could
+        // never work — a real browser rejects "host:3478" with "is not a valid
+        // stun or turn URL" — and forwarding it took the whole configuration
+        // down with it rather than just that entry.
+        assert!(turn_urls_from_env("no-scheme-here").is_empty());
     }
 
     /// The SIBLING branch. The round-4 Critical was a malformed STUN URL; the
