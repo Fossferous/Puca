@@ -72,8 +72,9 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
                         )}
                         {state === 'changed' && (
                             <div className="safety-badge changed">
-                                <WarningIcon /> This key has CHANGED since you verified it. Only re-verify if {username} reset their
-                                account — otherwise it may be an impostor.
+                                <WarningIcon /> This key has CHANGED since you verified it. Messages and screen control are
+                                blocked until you confirm the new one. Only re-verify if {username} reset their account or
+                                reinstalled — otherwise it may be an impostor.
                             </div>
                         )}
 
@@ -94,7 +95,7 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
                                 <button className="safety-btn ghost" onClick={handleUnverify}>Remove verification</button>
                             ) : (
                                 <button className="safety-btn primary" onClick={handleVerify} disabled={!safetyNumber}>
-                                    They match — mark verified
+                                    {state === 'changed' ? 'They match — trust this new key' : 'They match — mark verified'}
                                 </button>
                             )}
                             <button className="safety-btn ghost" onClick={onClose}>Close</button>

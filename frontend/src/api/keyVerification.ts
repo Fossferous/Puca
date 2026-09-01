@@ -26,13 +26,29 @@ export function getVerificationState(userId: number, currentPubEncoded: string |
     }
 }
 
-/** Record that the user confirmed this exact key belongs to the peer. */
+/**
+ * Record that the user confirmed this exact key belongs to the peer.
+ *
+ * This ALSO re-pins the TOFU identity pin to the confirmed key, and that is the
+ * point rather than a side effect. `pinServedIdentityKey` fails closed on a pin
+ * mismatch, and the messages shown when it does — dms.ts's "Verify their safety
+ * number before messaging", remoteControl's "Verify their identity" — told the
+ * user to do something that could not possibly clear the block: marking verified
+ * wrote `verified_key_` only, while the refusal came from the separate
+ * `control_pin_` store, so gates 2 and 3 of pinServedIdentityKey still held the
+ * old key. The only escape was Settings → "Clear Local Storage & Reload", which
+ * also destroys the user's own E2EE seed — i.e. wrecking your identity to fix a
+ * peer's pin. An out-of-band confirmation is a STRONGER signal than
+ * trust-on-first-use, so it supersedes the pin instead of being ignored by it.
+ */
 export function markVerified(userId: number, pubEncoded: string): void {
     try {
         localStorage.setItem(keyOf(userId), pubEncoded);
     } catch {
         /* storage unavailable — verification won't persist, but the compare still happened */
     }
+    // Declared in the pinning section below; function declarations hoist.
+    repinIdentityKey(userId, pubEncoded);
 }
 
 /** Drop a verification (e.g. after a key change the user chooses to re-verify). */
@@ -75,6 +91,29 @@ export function pinServedIdentityKey(userId: number, served: string | null): str
         /* no persistence; in-memory pin still applies */
     }
     return served;
+}
+
+/**
+ * Overwrite the identity pin for a peer with a key the user has CONFIRMED.
+ *
+ * Deliberately the only way a pin is ever replaced — `pinServedIdentityKey`
+ * writes one only when none exists, which is what makes a later substitution
+ * loud. Reached exclusively from `markVerified`, i.e. after a human compared the
+ * safety number out of band, because that is the one signal strong enough to
+ * move a pin. A peer reinstalling or resetting their account is the ordinary
+ * reason it needs to move, and before this there was no way to do it short of
+ * clearing all of localStorage.
+ *
+ * Never call this with a key the user has not confirmed: doing so would turn the
+ * fail-closed pin into a rubber stamp for whatever the server last served.
+ */
+export function repinIdentityKey(userId: number, pubEncoded: string): void {
+    memPins.set(userId, pubEncoded);
+    try {
+        localStorage.setItem(pinKeyOf(userId), pubEncoded);
+    } catch {
+        /* no persistence; the in-memory pin above still applies this run */
+    }
 }
 
 /**
