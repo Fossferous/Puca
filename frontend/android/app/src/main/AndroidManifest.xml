@@ -85,6 +85,28 @@
             </intent-filter>
         </service>
 
+        <!-- Firebase must NOT register this device with Google until the user
+             actually wants the doorbell.
+
+             Firebase Messaging auto-initialises when the process starts, and
+             that registration is itself a contact with Google's push service —
+             carrying an install identifier, before sign-in, before any consent,
+             on an app whose whole claim is that it talks only to your own
+             server. Nothing else about this phone ever reaches Google (the
+             payload is a constant, all data rides the native socket), which is
+             precisely why the one unavoidable contact should not happen until
+             it is needed.
+
+             Turned on explicitly by SovereignAppPlugin.wakeToken(), which is
+             called only once a signed-in user has background delivery enabled.
+             Analytics collection is disabled outright — nothing here uses it. -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
+        <meta-data
+            android:name="firebase_analytics_collection_enabled"
+            android:value="false" />
+
         <!-- Started only while a transfer is live, stopped with the last one.
              Not exported: nothing outside the app has any business starting it. -->
         <service

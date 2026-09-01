@@ -53,10 +53,23 @@ const config: CapacitorConfig = {
             autoDeletePrevious: true,
             resetWhenUpdate: true,
         },
-        // NO PushNotifications stanza, deliberately. Data rides no relay at
-        // all: FCM was integrated once and removed on principle (metadata
-        // through Google). Background delivery is the native in-app socket
-        // (NativeDelivery) to the user's own server.
+        // NO PushNotifications stanza, deliberately — but read on, because the
+        // previous version of this comment ("FCM was integrated once and removed
+        // on principle") stopped being true and was reassuring in a way the code
+        // does not support.
+        //
+        // TRUE: no message DATA ever rides a relay. Content, senders and
+        // recipients travel only over the native in-app socket (NativeDelivery)
+        // to the user's own server.
+        //
+        // ALSO TRUE: firebase-messaging IS a dependency (android/app/
+        // build.gradle) and FCM is used as a DOORBELL — a wake signal whose
+        // entire payload is the constant {"w":"1"}, pinned by a test, sent only
+        // when no live socket exists. Google therefore learns that some install
+        // was pinged, and when; it learns nothing about who, from whom, or what.
+        // Auto-init is disabled in AndroidManifest.xml so even that registration
+        // waits for a signed-in user to turn background delivery on, and a build
+        // without google-services.json has no doorbell at all.
     },
     ios: {
         contentInset: 'automatic',

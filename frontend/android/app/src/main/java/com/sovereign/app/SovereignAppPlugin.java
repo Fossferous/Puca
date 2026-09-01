@@ -538,6 +538,13 @@ public class SovereignAppPlugin extends Plugin {
     public void wakeToken(PluginCall call) {
         String pending = PushPrefs.takePendingWakeToken(getContext());
         try {
+            // Firebase auto-init is disabled in the manifest, so registration
+            // with Google happens HERE and nowhere else — at the first point a
+            // signed-in user has actually asked for the doorbell, rather than
+            // silently when the process starts, before sign-in and before any
+            // consent. Idempotent, and the setting persists, so later launches
+            // re-register on their own without asking again.
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().setAutoInitEnabled(true);
             com.google.firebase.messaging.FirebaseMessaging.getInstance().getToken()
                     .addOnCompleteListener(task -> {
                         JSObject ret = new JSObject();
