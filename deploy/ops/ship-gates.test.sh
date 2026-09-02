@@ -256,6 +256,82 @@ check "reports the missing label instead of dying" "$(has "$out" 'no version lab
 check "and still reaches the end of the run"       "$(has "$out" 'VERSIONS DISAGREE')" "$out"
 
 echo
+echo "--- dual-ship.sh: the download page is RENDERED and must not name a placeholder domain ---"
+# The check-versions cases above swapped in a non-logging ssh stub; restore the
+# recording one, and make scp also keep a copy of every existing file it is
+# handed, so the page that would have reached the host can be inspected.
+mkdir -p "$TMP/uploaded"
+cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+echo "ssh \$*" >> "$LOG"
+exit 0
+STUB
+chmod +x "$TMP/bin/ssh"
+cat > "$TMP/bin/scp" <<STUB
+#!/usr/bin/env bash
+echo "scp \$*" >> "$LOG"
+for a in "\$@"; do [ -f "\$a" ] && cp "\$a" "$TMP/uploaded/\$(basename "\$a")"; done
+exit 0
+STUB
+chmod +x "$TMP/bin/scp"
+
+# The tracked template's shape: the API host is a token, filled from hosts.conf.
+page_with_token() { # <version>
+	{
+		echo '<html><body>'
+		echo '<a href="/Puca-Setup.exe">Download</a><a href="/Puca-Lite-Setup.exe">Lite</a>'
+		echo "<a href=\"/mobile/Puca-$1.apk\">Android</a><a href=\"/mobile/Puca-Lite-$1.apk\">Android lite</a>"
+		echo "<div class=\"meta\">v$1 &middot; Windows</div>"
+		echo 'The app connects to <a href="https://__API_HOST__">__API_HOST__</a>.'
+		echo '</body></html>'
+	} > "$TMP/deploy/download-site/index.html"
+}
+page_with_token 9.9.9
+rm -f "$TMP/uploaded/index.html"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "the token page is not refused"                       "$([ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
+check "and the page that ships names the REAL API host"     "$(grep -q 'https://api.invalid' "$TMP/uploaded/index.html" 2>/dev/null && echo 1 || echo 0)" "$(cat "$TMP/uploaded/index.html" 2>/dev/null)"
+check "with no token left in it"                            "$([ -f "$TMP/uploaded/index.html" ] && ! grep -q '__API_HOST__' "$TMP/uploaded/index.html" && echo 1 || echo 0)"
+
+# The tracked template as it was shipped for months: a literal chat.example.com.
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+echo 'The app connects to <a href="https://chat.example.com">chat.example.com</a>.' >> "$TMP/deploy/download-site/index.html"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "REFUSES a page that still names example.com"         "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING')" = 1 ] && [ "$(has "$out" 'placeholder domain')" = 1 ] && echo 1 || echo 0)" "$out"
+check "naming the domain it found"                          "$(has "$out" 'chat.example.com')"
+check "and refuses BEFORE touching any host"                "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+out="$(ship apk "$TMP/app.apk" 9.9.9)"; rc=$?
+check "the APK path refuses the same page"                  "$([ $rc -ne 0 ] && [ "$(has "$out" 'placeholder domain')" = 1 ] && echo 1 || echo 0)" "$out"
+
+# POSITIVE CONTROL for the placeholder gate: the same page without the line ships.
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "a page naming no placeholder is not refused"         "$([ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
+echo "--- dual-ship.sh: the download directories are created on EVERY host before the first upload ---"
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+first="$(head -1 "$LOG")"
+check "the first host contact is the mkdir preflight"       "$(has "$first" 'mkdir -p')" "$first"
+check "for \$INSTALL_DIR/downloads/mobile"                  "$(has "$first" '/tmp/sandbox-install/downloads/mobile')" "$first"
+check "and it precedes the first scp"                       "$([ "$(grep -n 'mkdir -p' "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^scp' "$LOG" | head -1 | cut -d: -f1)" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+out="$(ship apk "$TMP/app.apk" 9.9.9)"
+check "the APK path preflights too"                         "$(has "$(head -1 "$LOG")" 'mkdir -p')" "$(head -1 "$LOG")"
+
+echo
+echo "--- a clone with no hosts.conf gets a sentence, not a bash error ---"
+mv "$TMP/deploy/ops/hosts.conf" "$TMP/deploy/ops/hosts.conf.away"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "dual-ship.sh exits non-zero"                          "$([ $rc -ne 0 ] && echo 1 || echo 0)" "$out"
+check "and says to copy hosts.conf.example"                  "$(has "$out" 'hosts.conf.example')" "$out"
+check "and points at the README"                             "$(has "$out" 'deploy/ops/README.md')" "$out"
+check "without a raw 'No such file' from source"             "$([ "$(has "$out" 'No such file or directory')" = 0 ] && echo 1 || echo 0)" "$out"
+out="$(versions)"; rc=$?
+check "check-versions.sh does the same"                      "$([ $rc -ne 0 ] && [ "$(has "$out" 'hosts.conf.example')" = 1 ] && echo 1 || echo 0)" "$out"
+mv "$TMP/deploy/ops/hosts.conf.away" "$TMP/deploy/ops/hosts.conf"
+
+echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

@@ -41,10 +41,24 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# hosts.conf is gitignored (it names your servers), so a fresh clone has none
+# and used to die here with a bare "No such file or directory" from `source`.
+# Say what to do instead — the prerequisites are in deploy/ops/README.md.
+if [ ! -f "$HERE/hosts.conf" ]; then
+	echo "dual-ship.sh: $HERE/hosts.conf is missing." >&2
+	echo "  Copy deploy/ops/hosts.conf.example to deploy/ops/hosts.conf and fill in your hosts and domains," >&2
+	echo "  create the deploy keypair, and seed deploy/ops/known_hosts with ssh-keyscan." >&2
+	echo "  See 'Before your first release' in deploy/ops/README.md." >&2
+	exit 78
+fi
 # shellcheck source=hosts.conf
 source "$HERE/hosts.conf"
 
 FAILED=()
+# The download page is rendered from its template into here before it ships
+# (see render_download_page); cleaned up on exit.
+PAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PAGE_DIR"' EXIT
 
 ssh_to() { ssh "${SSH_OPTS[@]}" "${1#*:}" "${@:2}"; }
 # The label:target entry is only needed by ssh_to's own stripping; every
@@ -87,17 +101,58 @@ label_of() { echo "${1%%:*}"; }
 
 # The download page to publish with whatever we are shipping.
 #
-# Prefer an untracked local page when one exists. The TRACKED page is a generic
-# template that names example.com — shipping it to a real download host would
-# tell your users to connect to a domain that is not yours, and it is the one
-# artefact here whose content end users actually read. (.gitignore covers
-# index.local.html.)
-download_page() {
+# Prefer an untracked local page when one exists (.gitignore covers
+# index.local.html). Otherwise the TRACKED template is used — it is generic,
+# so its one deployment-specific sentence ("The app connects to ...") carries
+# the token __API_HOST__, which is filled in from hosts.conf here. Either way
+# the result is RENDERED into $PAGE_DIR and then checked for a leftover
+# placeholder domain (require_no_placeholder_domain) before it goes anywhere:
+# this is the one artefact whose content end users actually read, and the
+# first version of this script shipped the template verbatim — every user of
+# a fresh deployment was told to connect to chat.example.com.
+#
+# Sets PAGE (the rendered file) and PAGE_SOURCE (which file it came from, for
+# messages). Not a $(...) function: globals set in a subshell are lost.
+render_download_page() {
 	if [ -f "$HERE/../download-site/index.local.html" ]; then
-		printf '%s' "$HERE/../download-site/index.local.html"
+		PAGE_SOURCE="$HERE/../download-site/index.local.html"
 	else
-		printf '%s' "$HERE/../download-site/index.html"
+		PAGE_SOURCE="$HERE/../download-site/index.html"
 	fi
+	PAGE="$PAGE_DIR/index.html"
+	sed "s|__API_HOST__|$API_HOST|g" "$PAGE_SOURCE" > "$PAGE"
+}
+
+# Refuse to publish a page that still names a placeholder domain. The same
+# shape as deploy/migrate/render-turn-conf.sh's placeholder guard: a page
+# that reads "connects to chat.example.com" looks finished and points every
+# user at a domain that is not yours.
+require_no_placeholder_domain() {
+	local page="$1" found
+	found="$(grep -oiE '([a-z0-9-]+\.)*example\.(com|org|net)' "$page" | sort -u | head -3 | tr '\n' ' ' || true)"
+	if [ -n "$found" ]; then
+		echo "REFUSING: $PAGE_SOURCE still names a placeholder domain: $found"
+		echo "This page is what your users read before installing. Create deploy/download-site/index.local.html"
+		echo "from the tracked template with your real hosts (or keep the __API_HOST__ token — it is filled"
+		echo "from hosts.conf), then ship again."
+		exit 1
+	fi
+}
+
+# Every host must have the directories the uploads below land in — a host
+# added to hosts.conf after provisioning, or one built by hand from the guide,
+# used to fail mid-loop with a bare `cd: no such file` AFTER the artifacts
+# were built and after some hosts had already been updated: exactly the
+# split-field state hosts.conf.example warns about. So: every host, before the
+# first upload to any of them, and the run is all-or-nothing.
+ensure_download_dirs() {
+	local entry
+	for entry in "${HOSTS[@]}"; do
+		if ! ssh_to "$entry" "mkdir -p '$INSTALL_DIR/downloads/mobile'"; then
+			echo "FAIL  $(label_of "$entry"): cannot create $INSTALL_DIR/downloads — nothing has been uploaded to any host"
+			exit 1
+		fi
+	done
 }
 
 # Refuse to ship an artifact the page does not advertise.
@@ -117,13 +172,14 @@ download_page() {
 # stop exactly that. version_on_page pins both ends.
 require_page_advertises() {
 	local page="$1" version="$2" artifact="$3" what="$4"
+	require_no_placeholder_domain "$page"
 	if ! grep -qF "$artifact" "$page"; then
-		echo "REFUSING: $page does not link $artifact."
+		echo "REFUSING: $PAGE_SOURCE does not link $artifact."
 		echo "Update the $what href there first — the page and the artifact ship together."
 		exit 1
 	fi
 	if ! version_on_page "$(cat "$page")" "$version"; then
-		echo "REFUSING: $page does not name v$version."
+		echo "REFUSING: $PAGE_SOURCE does not name v$version."
 		echo "Update the version label (the .meta line) there first, or the live page keeps"
 		echo "advertising the previous release to everyone who visits it."
 		exit 1
@@ -277,6 +333,7 @@ cmd_mobile() {
 	# either wrong silently ships an unusable OTA every installed app rejects.
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
+	ensure_download_dirs
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== mobile OTA $version -> $label ==="
@@ -326,6 +383,7 @@ cmd_mobile_lite() {
 	local bundle="${1:?enc bundle}" version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
+	ensure_download_dirs
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== mobile OTA (lite) $version -> $label ==="
@@ -492,8 +550,9 @@ cmd_installer() {
 	# has had since 0.5.56 sat on the page through six releases. The installer
 	# href carries no version, so BOTH facts are checked: the filename it links
 	# and the version label a human reads next to it.
-	local page; page="$(download_page)"
+	render_download_page; local page="$PAGE"
 	require_page_advertises "$page" "$version" "$INSTALLER_NAME" "Windows"
+	ensure_download_dirs
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -599,8 +658,9 @@ verify_cdn_exe() {
 # it twice would only risk the two ships disagreeing about its content.
 cmd_installer_lite() {
 	local exe="${1:?setup.exe}" sig_file="${2:?sig file}" version="${3:?version}" notes="${4:?notes}"
-	local page; page="$(download_page)"
+	render_download_page; local page="$PAGE"
 	require_page_advertises "$page" "$version" "$INSTALLER_NAME_LITE" "lite Windows"
+	ensure_download_dirs
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -745,12 +805,14 @@ cmd_backend() {
 # shipped.
 cmd_apk() {
 	local apk="${1:?usage: dual-ship.sh apk <APK> <version>}" version="${2:?version}"
-	local page; page="$(download_page)"
+	render_download_page; local page="$PAGE"
+	require_no_placeholder_domain "$page"
 	if ! grep -qF "$APK_PREFIX-$version.apk" "$page"; then
-		echo "REFUSING: $page does not link $APK_PREFIX-$version.apk."
+		echo "REFUSING: $PAGE_SOURCE does not link $APK_PREFIX-$version.apk."
 		echo "Update the Android href + the version label there first — the page and the APK ship together."
 		exit 1
 	fi
+	ensure_download_dirs
 	local local_sha; local_sha="$(sha256sum "$apk" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
@@ -788,12 +850,14 @@ cmd_apk() {
 # cross-gate here.
 cmd_apk_lite() {
 	local apk="${1:?usage: dual-ship.sh apk-lite <APK> <version>}" version="${2:?version}"
-	local page; page="$(download_page)"
+	render_download_page; local page="$PAGE"
+	require_no_placeholder_domain "$page"
 	if ! grep -qF "$APK_PREFIX_LITE-$version.apk" "$page"; then
-		echo "REFUSING: $page does not link $APK_PREFIX_LITE-$version.apk."
+		echo "REFUSING: $PAGE_SOURCE does not link $APK_PREFIX_LITE-$version.apk."
 		echo "Update the lite Android href + version label there first — the page and the APK ship together."
 		exit 1
 	fi
+	ensure_download_dirs
 	local local_sha; local_sha="$(sha256sum "$apk" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
