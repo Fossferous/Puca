@@ -101,6 +101,11 @@ pub async fn ws_handler(
     // keep. The query fallback exists only for installs that predate the
     // change, and refusing them here would sign out every one of them.
     let offered_protocol = bearer_from_subprotocol(&headers);
+    if offered_protocol.is_none() && query.token.is_some() {
+        // Retirement gauge for the query-string token (see WsQuery::token):
+        // when this stops appearing for a full release cycle the field goes.
+        tracing::info!("ws: query-string token used (a client older than 0.9.0)");
+    }
     let presented = match offered_protocol.as_deref().or(query.token.as_deref()) {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "Missing token").into_response(),

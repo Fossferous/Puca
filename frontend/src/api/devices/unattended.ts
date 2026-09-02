@@ -22,6 +22,7 @@
 import { argon2id } from '@noble/hashes/argon2.js';
 import { ed25519 } from '@noble/curves/ed25519';
 import { isTauri, isMobile } from '../platform';
+import { invokeTauri } from '../deviceIdentity/deviceKey';
 
 /** Domain-separation tag. MUST equal `puca_ua::DOMAIN`. */
 const DOMAIN = 'sovereign-unattended-v1';
@@ -209,7 +210,10 @@ const REMEMBER_KEY = 'sovereign-ua-remember';
 interface RememberedSeed {
     /** base64 of the host record's salt — the cache key's second half. */
     salt: string;
-    /** base64 of the 32-byte derived seed. */
+    /** On the desktop: `dpapi:` + base64 of the seed sealed by the OS (Windows
+     *  DPAPI, user scope — see ua_seed_protect in src-tauri/src/lib.rs), so
+     *  the WebView's storage never holds the signing seed in the clear. On
+     *  the phone: base64 of the 32-byte seed (app-private storage). */
     seed: string;
     /** Epoch ms after which the entry is dead. */
     expires: number;
@@ -264,21 +268,32 @@ export function rememberUaSeed(
     now: number = Date.now(),
 ): void {
     if (!isTauri() && !isMobile()) return;
-    const map = loadRemembered();
-    map[deviceId] = { salt: saltB64, seed: b64(seed), expires: now + UA_REMEMBER_MS };
-    storeRemembered(map);
+    const write = (stored: string) => {
+        const map = loadRemembered();
+        map[deviceId] = { salt: saltB64, seed: stored, expires: now + UA_REMEMBER_MS };
+        storeRemembered(map);
+    };
+    if (!isTauri()) { write(b64(seed)); return; }
+    // Desktop: seal first, store the sealed form only. Until the seal lands
+    // there is simply no entry — the next connect asks for the passphrase,
+    // which is the fallback that always works.
+    void invokeTauri<string>('ua_seed_protect', { seedB64: b64(seed) })
+        .then(blob => write(SEALED_PREFIX + blob))
+        .catch(err => console.warn('[unattended] could not seal the remembered seed; not remembering', err));
 }
+
+const SEALED_PREFIX = 'dpapi:';
 
 /**
  * The remembered seed for `deviceId`, or null. A salt mismatch (the host was
  * re-armed) and an expired entry both miss AND drop the dead entry, so the
  * store cannot accumulate seeds nothing will ever read.
  */
-export function rememberedUaSeed(
+export async function rememberedUaSeed(
     deviceId: string,
     saltB64: string,
     now: number = Date.now(),
-): Uint8Array | null {
+): Promise<Uint8Array | null> {
     const map = loadRemembered();
     const entry = map[deviceId];
     if (!entry) return null;
@@ -288,7 +303,20 @@ export function rememberedUaSeed(
         return null;
     }
     try {
-        const seed = Uint8Array.from(atob(entry.seed), c => c.charCodeAt(0));
+        let raw = entry.seed;
+        if (raw.startsWith(SEALED_PREFIX)) {
+            // Opens only for the same OS account on the same machine; anything
+            // else fails here and falls through to "ask for the passphrase".
+            raw = await invokeTauri<string>('ua_seed_unprotect', { blobB64: raw.slice(SEALED_PREFIX.length) });
+        } else if (isTauri()) {
+            // A clear entry written by a pre-0.9.1 desktop build: honour it
+            // once, and re-remember it sealed so the clear copy stops existing.
+            const legacy = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
+            if (legacy.length !== 32) throw new Error('bad seed length');
+            rememberUaSeed(deviceId, saltB64, legacy, now);
+            return legacy;
+        }
+        const seed = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
         if (seed.length !== 32) throw new Error('bad seed length');
         return seed;
     } catch {
