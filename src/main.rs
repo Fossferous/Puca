@@ -1039,26 +1039,41 @@ async fn main() -> anyhow::Result<()> {
                 // Uploads of deleted accounts whose grace period has passed:
                 // the file first, then the row, so a crash between the two
                 // leaves a row the next pass retries rather than an orphan file.
+                // Anything a SERVER asset has picked up since the stamp is
+                // skipped: those rows are referenced by servers/emoji (FKs with
+                // no ON DELETE), so deleting them would fail after the file was
+                // already gone — a broken emoji for everyone, forever.
                 let due: Vec<(String, String)> = sqlx::query_as(
-                    "SELECT id::text, stored_name FROM uploaded_files WHERE purge_after IS NOT NULL AND purge_after < NOW() ORDER BY purge_after LIMIT 200",
+                    "SELECT id::text, stored_name FROM uploaded_files \
+                     WHERE purge_after IS NOT NULL AND purge_after < NOW() \
+                       AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL) \
+                       AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL) \
+                       AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL) \
+                     ORDER BY purge_after LIMIT 200",
                 )
                 .fetch_all(&pool)
                 .await
                 .unwrap_or_default();
                 let mut purged = 0usize;
                 for (id, stored_name) in due {
-                    match tokio::fs::remove_file(format!("uploads/{}", stored_name)).await {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    // ROW FIRST, then the file. A crash between the two leaks a
+                    // blob on disk (reclaimable, harmless); the other order
+                    // destroys a file whose row survives, which is a permanent
+                    // broken attachment that no later pass can repair.
+                    match sqlx::query("DELETE FROM uploaded_files WHERE id = $1::uuid").bind(&id).execute(&pool).await {
+                        Ok(r) if r.rows_affected() == 0 => continue,
+                        Ok(_) => {}
                         Err(e) => {
-                            tracing::warn!("purge: could not remove {stored_name}: {e}");
+                            tracing::warn!("purge: could not delete row {id}: {e:?}");
                             continue;
                         }
                     }
-                    match sqlx::query("DELETE FROM uploaded_files WHERE id = $1::uuid").bind(&id).execute(&pool).await {
-                        Ok(_) => purged += 1,
-                        Err(e) => tracing::warn!("purge: could not delete row {id}: {e:?}"),
+                    match tokio::fs::remove_file(format!("uploads/{}", stored_name)).await {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => tracing::warn!("purge: row {id} deleted but its file {stored_name} remains: {e}"),
                     }
+                    purged += 1;
                 }
                 if purged > 0 {
                     tracing::info!("purge: removed {purged} upload(s) of deleted accounts past their grace period");
