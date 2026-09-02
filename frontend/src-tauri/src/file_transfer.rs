@@ -34,6 +34,9 @@ pub struct OpenPart {
     part_path: PathBuf,
     final_name: String,
     written: u64,
+    /// Where the user asked for the file in a Save As dialog. None = the
+    /// default <Downloads>/Puca with a de-duplicated name.
+    chosen: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -145,6 +148,20 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{stem} ({}){ext}", uuid_like()))
 }
 
+/// A destination the user picked in the OS Save As dialog. The dialog returns
+/// an absolute path with a file name; anything else is a caller bug and is
+/// refused rather than resolved against a working directory nobody chose.
+fn chosen_destination(s: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(s);
+    if !p.is_absolute() {
+        return Err(format!("save destination must be an absolute path: {s:?}"));
+    }
+    if p.file_name().is_none() {
+        return Err(format!("save destination has no file name: {s:?}"));
+    }
+    Ok(p)
+}
+
 /// Enough entropy to break a pathological tie, without pulling in a uuid crate.
 fn uuid_like() -> u128 {
     std::time::SystemTime::now()
@@ -165,15 +182,36 @@ pub async fn transfer_begin(
     transfer_id: String,
     file_name: String,
     sha256: String,
+    dest_path: Option<String>,
 ) -> Result<BeginResult, String> {
-    let dir = app
-        .path()
-        .download_dir()
-        .map_err(|e| format!("no downloads directory: {e}"))?
-        .join("Puca");
+    // "Ask where to save files" (Settings): the frontend already ran the OS
+    // Save As dialog and hands over the path the user picked. The partial
+    // still lives beside it (same directory, digest-keyed name) so a resume
+    // can find it.
+    let chosen = dest_path.as_deref().map(chosen_destination).transpose()?;
+    let dir = match &chosen {
+        Some(p) => p
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "chosen path has no parent directory".to_string())?,
+        None => app
+            .path()
+            .download_dir()
+            .map_err(|e| format!("no downloads directory: {e}"))?
+            .join("Puca"),
+    };
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
 
-    let safe_name = sanitize_file_name(&file_name);
+    // The chosen name is the user's own; it still goes through the sanitizer
+    // because the .part sibling is built from it.
+    let safe_name = match &chosen {
+        Some(p) => p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(sanitize_file_name)
+            .ok_or_else(|| "chosen path has no file name".to_string())?,
+        None => sanitize_file_name(&file_name),
+    };
     // Digest-keyed, so a resume reopens the right partial even if another
     // transfer shares the display name.
     // Hex-only, because this lands in a path. The digest is peer-chosen: it
@@ -201,7 +239,7 @@ pub async fn transfer_begin(
 
     state.0.lock().unwrap().insert(
         transfer_id,
-        OpenPart { file, part_path: part_path.clone(), final_name: safe_name, written: existing_bytes },
+        OpenPart { file, part_path: part_path.clone(), final_name: safe_name, written: existing_bytes, chosen },
     );
 
     Ok(BeginResult {
@@ -246,16 +284,24 @@ pub async fn transfer_finish(
     verify: bool,
 ) -> Result<FinishResult, String> {
     let part = state.0.lock().unwrap().remove(&transfer_id).ok_or("unknown transfer")?;
-    let OpenPart { mut file, part_path, final_name, .. } = part;
+    let OpenPart { mut file, part_path, final_name, chosen, .. } = part;
     file.flush().map_err(|e| format!("flush failed: {e}"))?;
     drop(file);
 
-    let dir = app
-        .path()
-        .download_dir()
-        .map_err(|e| format!("no downloads directory: {e}"))?
-        .join("Puca");
-    let final_path = unique_path(&dir, &final_name);
+    // A user-chosen destination is written exactly where they said, replacing
+    // what is there (the dialog already asked them); the default location
+    // never clobbers an existing file.
+    let final_path = match chosen {
+        Some(p) => p,
+        None => {
+            let dir = app
+                .path()
+                .download_dir()
+                .map_err(|e| format!("no downloads directory: {e}"))?
+                .join("Puca");
+            unique_path(&dir, &final_name)
+        }
+    };
     std::fs::rename(&part_path, &final_path)
         .map_err(|e| format!("could not finish {part_path:?}: {e}"))?;
 
@@ -310,14 +356,32 @@ pub async fn attachment_save(app: tauri::AppHandle, request: Request<'_>) -> Res
         _ => return Err("expected a raw body".into()),
     };
 
-    let dir = app
-        .path()
-        .download_dir()
-        .map_err(|e| format!("no downloads directory: {e}"))?
-        .join("Puca");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
-
-    let path = unique_path(&dir, &safe_name);
+    // "Ask where to save files": the frontend ran the OS dialog and sends the
+    // chosen path in a second header, percent-encoded like the name.
+    let dest = request
+        .headers()
+        .get("x-dest-path")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .map(|s| chosen_destination(&s))
+        .transpose()?;
+    let path = match dest {
+        Some(p) => {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("could not create {parent:?}: {e}"))?;
+            }
+            p
+        }
+        None => {
+            let dir = app
+                .path()
+                .download_dir()
+                .map_err(|e| format!("no downloads directory: {e}"))?
+                .join("Puca");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
+            unique_path(&dir, &safe_name)
+        }
+    };
     std::fs::write(&path, bytes).map_err(|e| format!("could not write {path:?}: {e}"))?;
     mark_as_internet_sourced(&path);
     Ok(path.to_string_lossy().to_string())
@@ -489,5 +553,28 @@ mod tests {
         // A mixed name whose cap falls INSIDE a multibyte sequence.
         let mixed = format!("a{}", "\u{20ac}".repeat(90));
         assert!(sanitize_file_name(&mixed).len() <= 200);
+    }
+}
+
+#[cfg(test)]
+mod chosen_destination_tests {
+    use super::chosen_destination;
+
+    #[test]
+    fn an_absolute_path_with_a_name_is_accepted_as_given() {
+        let p = if cfg!(windows) { r"C:\keep\report.pdf" } else { "/keep/report.pdf" };
+        assert_eq!(chosen_destination(p).unwrap().to_string_lossy(), p);
+    }
+
+    #[test]
+    fn a_relative_name_is_refused() {
+        assert!(chosen_destination("report.pdf").is_err());
+        assert!(chosen_destination("..\\report.pdf").is_err());
+    }
+
+    #[test]
+    fn a_bare_root_has_no_file_name_and_is_refused() {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        assert!(chosen_destination(root).is_err());
     }
 }

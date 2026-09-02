@@ -2760,6 +2760,23 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="settings-option">
                                             <div className="option-info">
                                                 <label>Relay transfer limit (MB)</label>
+                                    {isTauri() && (
+                                        <div className="settings-option">
+                                            <div className="option-info">
+                                                <label>Ask where to save files</label>
+                                                <span className="option-hint">
+                                                    Choose a location each time a received file or an
+                                                    attachment is saved. Off, everything goes to the Puca
+                                                    folder in Downloads.
+                                                </span>
+                                            </div>
+                                            <input
+                                                type="checkbox"
+                                                checked={settings.askWhereToSaveFiles === true}
+                                                onChange={(e) => updateSetting('askWhereToSaveFiles', e.target.checked)}
+                                            />
+                                        </div>
+                                    )}
                                                 <span className="option-hint">
                                                     When you and the other person can't connect directly, files
                                                     travel through your server twice. Direct transfers ignore this
