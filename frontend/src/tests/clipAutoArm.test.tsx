@@ -43,10 +43,10 @@ import { ClipButtons } from '../components/ClipControls';
 import { loadSettings, saveSettings, defaultSettings } from '../components/settingsStore';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
 
-const policy: ClipPolicy = { available: true, serverClipsEnabled: true, serverId: 's1', maxSeconds: 120, pinnedChannelId: null, defaultTargetChannelId: 9, voiceChannelPerms: null };
+const policy: ClipPolicy = { available: true, serverClipsEnabled: true, viewerIsOwner: false, serverId: 's1', maxSeconds: 120, pinnedChannelId: null, defaultTargetChannelId: 9, voiceChannelPerms: null };
 
 function setMode(mode: 'off' | 'prompt' | 'auto') {
-    saveSettings({ ...defaultSettings, experimentalClips: true, clipArmOnJoin: mode });
+    saveSettings({ ...defaultSettings, clipArmOnJoin: mode });
 }
 
 // Raw react-dom/client + act (the repo's component-test pattern — no testing-library).

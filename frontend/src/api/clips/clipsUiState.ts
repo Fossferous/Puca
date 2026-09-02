@@ -5,12 +5,6 @@
 import { useEffect, useState } from 'react';
 import { subscribeReplay, getReplayState, type ReplayState } from './replayBuffer';
 
-/** Phase 1 shipped without server support and ignored the server fields.
- *  Phase 2: the gate reads them — a pre-Clips server hides the buttons, a
- *  server with clips off (or a channel without CREATE_CLIPS) shows them
- *  disabled with the reason. */
-export const CLIPS_LOCAL_ONLY = false;
-
 /** Server policy for the VOICE channel's server (not the viewed one) —
  *  computed in Chat.tsx, threaded through VoicePanel to the clip controls. */
 export interface ClipPolicy {
@@ -18,6 +12,8 @@ export interface ClipPolicy {
     available: boolean;
     /** undefined ⇒ pre-Clips server (buttons hidden). */
     serverClipsEnabled: boolean | undefined;
+    /** The viewer owns that server — see clipsGate's `viewerIsOwner`. */
+    viewerIsOwner: boolean;
     serverId: string | null;
     /** clip_max_seconds (server default 120 when absent). */
     maxSeconds: number;
@@ -31,7 +27,7 @@ export interface ClipPolicy {
 
 /** A policy for "no server info" — what a caller without a voice server passes. */
 export const NO_CLIP_POLICY: ClipPolicy = {
-    available: false, serverClipsEnabled: undefined, serverId: null, maxSeconds: 120,
+    available: false, serverClipsEnabled: undefined, viewerIsOwner: false, serverId: null, maxSeconds: 120,
     pinnedChannelId: null, defaultTargetChannelId: null, voiceChannelPerms: null,
 };
 

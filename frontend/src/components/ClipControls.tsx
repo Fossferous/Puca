@@ -15,21 +15,11 @@ import { loadSettings } from './settingsStore';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { arm, armNative, disarm, seal, getReplayState, isClipCaptureSupported, discardSeal, retrySystemAudio, type ReplayState } from '../api/clips/replayBuffer';
 import { isNativeCaptureSupported } from '../api/clips/nativeCapture';
-import { CLIPS_LOCAL_ONLY, NO_CLIP_POLICY, useReplayState, type ClipPolicy } from '../api/clips/clipsUiState';
+import { NO_CLIP_POLICY, useReplayState, type ClipPolicy } from '../api/clips/clipsUiState';
 import { clipUiState, clipReasonCopy } from '../api/clips/clipsGate';
 import { clipPreset, formatClock, formatMB } from '../api/clips/clipPresets';
 import { ClipIcon, ClipOffIcon, WarningIcon } from './Icons';
 import { ClipComposerModal } from './ClipComposerModal';
-
-function useExperimentalClips(): boolean {
-    const [on, setOn] = useState<boolean>(() => loadSettings().experimentalClips === true);
-    useEffect(() => {
-        const sync = () => setOn(loadSettings().experimentalClips === true);
-        window.addEventListener('settingsChanged', sync);
-        return () => window.removeEventListener('settingsChanged', sync);
-    }, []);
-    return on;
-}
 
 interface ClipButtonsProps {
     inVoice: boolean;
@@ -46,13 +36,11 @@ const isArmedPhase = (p: ReplayState['phase']) => p === 'armed' || p === 'sealin
 
 export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy = NO_CLIP_POLICY, getDeclaredParticipants = () => [] }: ClipButtonsProps) {
     const replay = useReplayState();
-    const experimentalOn = useExperimentalClips();
     const [composerOpen, setComposerOpen] = useState(false);
     const armed = isArmedPhase(replay.phase);
     const gate = clipUiState({
         isDesktop: isTauri() && isClipCaptureSupported(), inVoice, isAfkChannel, listenOnly,
-        serverClipsEnabled: policy.serverClipsEnabled, voiceChannelPerms: policy.voiceChannelPerms, experimentalOn, armed, bufferedSeconds: replay.bufferedMs / 1000,
-        localOnly: CLIPS_LOCAL_ONLY,
+        serverClipsEnabled: policy.serverClipsEnabled, viewerIsOwner: policy.viewerIsOwner, voiceChannelPerms: policy.voiceChannelPerms, armed, bufferedSeconds: replay.bufferedMs / 1000,
     });
     const voiceChannelId = roomId.startsWith('voice_') ? Number(roomId.slice(6)) : NaN;
     // The longest clip is the SERVER's cap, bounded by the user's own buffer length.
@@ -159,7 +147,7 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
                     maxSeconds={maxSeconds}
                     // The server refuses anything over its cap; the ring must not seal past it.
                     onSeal={(secs) => seal(secs * 1000, policy.available ? policy.maxSeconds * 1000 : undefined)}
-                    localOnly={CLIPS_LOCAL_ONLY || !policy.available}
+                    localOnly={!policy.available}
                     voiceChannelId={Number.isFinite(voiceChannelId) ? voiceChannelId : null}
                     policy={policy}
                     getDeclaredParticipants={getDeclaredParticipants}

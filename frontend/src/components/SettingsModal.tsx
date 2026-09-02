@@ -2701,24 +2701,6 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     </div>
                                     <div className="settings-option">
                                         <div className="option-info">
-                                            <label>Clips (replay buffer)</label>
-                                            <span className="option-hint">
-                                                Adds Arm and Save buttons to the voice panel on desktop: keep the
-                                                last few minutes of a call (screen, system audio, your mic) in
-                                                encrypted memory and save a clip of it. Nothing is written to disk
-                                                and nothing leaves your PC in this build — the posting half, which
-                                                needs everyone in the call to approve, is not finished yet.
-                                                Everyone in the call sees a marker next to your name while it is on.
-                                            </span>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={settings.experimentalClips === true}
-                                            onChange={(e) => updateSetting('experimentalClips', e.target.checked)}
-                                        />
-                                    </div>
-                                    <div className="settings-option">
-                                        <div className="option-info">
                                             <label>DeepFilterNet noise suppression</label>
                                             <span className="option-hint">
                                                 Adds a “DeepFilter (Max)” option to the Noise Suppression Mode
@@ -2760,23 +2742,6 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="settings-option">
                                             <div className="option-info">
                                                 <label>Relay transfer limit (MB)</label>
-                                    {isTauri() && (
-                                        <div className="settings-option">
-                                            <div className="option-info">
-                                                <label>Ask where to save files</label>
-                                                <span className="option-hint">
-                                                    Choose a location each time a received file or an
-                                                    attachment is saved. Off, everything goes to the Puca
-                                                    folder in Downloads.
-                                                </span>
-                                            </div>
-                                            <input
-                                                type="checkbox"
-                                                checked={settings.askWhereToSaveFiles === true}
-                                                onChange={(e) => updateSetting('askWhereToSaveFiles', e.target.checked)}
-                                            />
-                                        </div>
-                                    )}
                                                 <span className="option-hint">
                                                     When you and the other person can't connect directly, files
                                                     travel through your server twice. Direct transfers ignore this
@@ -2792,6 +2757,23 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     'relayTransferMaxMB',
                                                     Math.max(1, Number(e.target.value) || 1),
                                                 )}
+                                            />
+                                        </div>
+                                    )}
+                                    {isTauri() && (
+                                        <div className="settings-option">
+                                            <div className="option-info">
+                                                <label>Ask where to save files</label>
+                                                <span className="option-hint">
+                                                    Choose a location each time a received file or an
+                                                    attachment is saved. Off, everything goes to the Puca
+                                                    folder in Downloads.
+                                                </span>
+                                            </div>
+                                            <input
+                                                type="checkbox"
+                                                checked={settings.askWhereToSaveFiles === true}
+                                                onChange={(e) => updateSetting('askWhereToSaveFiles', e.target.checked)}
                                             />
                                         </div>
                                     )}

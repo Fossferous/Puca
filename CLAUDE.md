@@ -439,11 +439,9 @@ has never existed.
   pinned by a test — reconnects the socket through Doze. An earlier FCM design
   that carried sender names was removed on principle the day it shipped.
   Desktop notifications still require the app running (tray keeps it so).
-- **"Save as" for received files**: downloads go to `<Downloads>/Púca/`
-  unconditionally. Needs `tauri-plugin-dialog`, which is not registered.
 - **Clips (replay buffer)** — built end to end (`docs/CLIPS.md`): desktop
   capture/seal/preview, the server presence log + approval protocol, and the
-  client prompt/composer/attachment. Still behind `experimentalClips` and
-  off per server until the owner enables it; Phase 3 (un-flag, retention
-  surfacing) is not done. The 30 s "how it works" is in `docs/CLIPS.md`; do not
+  client prompt/composer/attachment. Off per server until the owner enables
+  it (Phase 3, 2026-09-02, removed the experimental flag and surfaced
+  retention). The 30 s "how it works" is in `docs/CLIPS.md`; do not
   re-derive it from the code.

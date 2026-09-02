@@ -29,6 +29,18 @@ const MAX_USER_FILES: i64 = 5000; // attachments bucket
 fn clip_quota_bytes() -> i64 {
     std::env::var("CLIP_MAX_USER_BYTES").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(2 * 1024 * 1024 * 1024)
 }
+/// How long posted clips live, in days; 0 = until someone deletes them.
+/// One reader for the sweep AND for `GET /clips/usage`, so what the server
+/// tells users (Settings › Clips) is the number it actually enforces — a
+/// clip vanishing on day 31 with no warning anywhere was the Phase-3 gap.
+fn clip_retention_days() -> i64 {
+    parse_retention_days(std::env::var("CLIP_RETENTION_DAYS").ok())
+}
+/// Unset, unparsable or negative all mean "keep forever"; nothing here may
+/// turn a typo into a deletion schedule.
+fn parse_retention_days(raw: Option<String>) -> i64 {
+    raw.and_then(|v| v.trim().parse::<i64>().ok()).filter(|d| *d > 0).unwrap_or(0)
+}
 /// A clip is at most MAX_CLIP_PARTS (clipRef.ts) parts; the server bounds
 /// "approve once, upload forever" the same way.
 const MAX_PARTS_PER_CLIP: i64 = 64;
@@ -76,7 +88,7 @@ pub async fn sweep_clip_parts(state: &Arc<AppState>) {
         let n = delete_clip_parts(state, &cid, None).await;
         if n > 0 { tracing::info!("clip sweep: removed {n} orphaned part(s) of {cid}"); }
     }
-    let days: i64 = std::env::var("CLIP_RETENTION_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let days: i64 = clip_retention_days();
     if days > 0 {
         let rows: Vec<(String,)> = sqlx::query_as(
             "DELETE FROM uploaded_files WHERE kind = 'clip' AND created_at < NOW() - make_interval(days => $1::int) RETURNING stored_name",
@@ -159,6 +171,8 @@ pub async fn clip_usage(
     axum::Json(serde_json::json!({
         "used_bytes": used.0,
         "quota_bytes": clip_quota_bytes(),
+        // Surfaced since Phase 3 (2026-09-02); older clients ignore the key.
+        "retention_days": clip_retention_days(),
     }))
     .into_response()
 }
@@ -587,4 +601,23 @@ pub async fn get_file(
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::parse_retention_days;
+
+    #[test]
+    fn unset_unparsable_or_negative_means_keep_forever() {
+        assert_eq!(parse_retention_days(None), 0);
+        assert_eq!(parse_retention_days(Some("thirty".into())), 0);
+        assert_eq!(parse_retention_days(Some("-5".into())), 0);
+        assert_eq!(parse_retention_days(Some("0".into())), 0);
+    }
+
+    #[test]
+    fn a_positive_number_is_the_schedule() {
+        assert_eq!(parse_retention_days(Some("30".into())), 30);
+        assert_eq!(parse_retention_days(Some(" 7 ".into())), 7);
+    }
 }

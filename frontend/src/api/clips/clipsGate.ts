@@ -9,7 +9,6 @@ import { hasPerm, PERM } from '../permissionBits';
 
 export type ClipDisabledReason =
     | 'not-desktop'      // capture is a WebView2/Tauri feature; phones and browsers approve + watch only
-    | 'flag-off'         // experimentalClips is off (Phases 1–2)
     | 'old-server'       // the server predates Clips (no clips fields in GET /servers) — hidden
     | 'server-off'       // owner has not enabled Clips
     | 'no-permission'    // CREATE_CLIPS missing on the voice channel
@@ -23,15 +22,17 @@ export interface ClipUiInput {
     isAfkChannel: boolean;
     /** No mic track (listen-only / no device): arming is ALLOWED, the clip carries system audio only. */
     listenOnly: boolean;
-    /** undefined ⇒ the server predates Clips. Ignored in `localOnly` mode. */
+    /** undefined ⇒ the server predates Clips. */
     serverClipsEnabled: boolean | undefined;
+    /** The viewer owns the voice channel's server. Decides whether a server
+     *  with clips OFF shows a disabled control (the owner can act on the
+     *  reason) or nothing at all (a member cannot, and a permanent disabled
+     *  button in every such server is clutter). */
+    viewerIsOwner: boolean;
     /** channel.my_permissions for the voice channel (null/undefined ⇒ pre-migration server: allowed). */
     voiceChannelPerms: number | null | undefined;
-    experimentalOn: boolean;
     armed: boolean;
     bufferedSeconds: number;
-    /** Phase 1: no server support exists yet — arm/seal/preview locally, never propose. */
-    localOnly: boolean;
 }
 
 export interface ClipUiState {
@@ -52,12 +53,13 @@ export function clipUiState(i: ClipUiInput): ClipUiState {
     const hidden = (reason: ClipDisabledReason): ClipUiState => ({ visible: false, armEnabled: false, clipEnabled: false, reason, noMic: i.listenOnly });
     const disabled = (reason: ClipDisabledReason): ClipUiState => ({ visible: true, armEnabled: false, clipEnabled: false, reason, noMic: i.listenOnly });
     if (!i.isDesktop) return hidden('not-desktop');
-    if (!i.experimentalOn) return hidden('flag-off');
-    if (!i.localOnly) {
-        if (i.serverClipsEnabled === undefined) return hidden('old-server');
-        if (i.serverClipsEnabled !== true) return disabled('server-off');
-        if (!hasPerm(i.voiceChannelPerms, PERM.CREATE_CLIPS)) return disabled('no-permission');
-    }
+    if (i.serverClipsEnabled === undefined) return hidden('old-server');
+    // Phase 3 (2026-09-02): the experimental flag is gone, so this branch is
+    // now reachable in every server whose owner has not turned clips on. The
+    // owner sees the disabled control and its reason (they can fix it in
+    // Server Settings); everyone else sees nothing.
+    if (i.serverClipsEnabled !== true) return i.viewerIsOwner ? disabled('server-off') : hidden('server-off');
+    if (!hasPerm(i.voiceChannelPerms, PERM.CREATE_CLIPS)) return disabled('no-permission');
     if (!i.inVoice) return disabled('not-in-voice');
     if (i.isAfkChannel) return disabled('afk-channel');
     if (i.armed && i.bufferedSeconds < MIN_CLIP_SECONDS) {
@@ -69,13 +71,12 @@ export function clipUiState(i: ClipUiInput): ClipUiState {
 /** Title/help copy per reason — one map, used by both buttons and the pill. */
 export function clipReasonCopy(reason: ClipDisabledReason | null): string {
     switch (reason) {
-        case 'server-off': return 'Clips are turned off in this server.';
+        case 'server-off': return 'Clips are turned off in this server — turn them on in Server Settings.';
         case 'no-permission': return "You don't have permission to create clips in this channel.";
         case 'afk-channel': return 'Clips are not available in the AFK channel.';
         case 'not-in-voice': return 'Join a voice channel to arm the clip buffer.';
         case 'buffer-too-short': return 'Keep the buffer armed for a few more seconds.';
         case 'not-desktop': return 'Clips are recorded on the desktop app.';
-        case 'flag-off': return 'Clips are an experimental feature — enable them in Settings › Advanced.';
         case 'old-server': return 'This server is running an older version of Puca — clips are not available here.';
         default: return '';
     }

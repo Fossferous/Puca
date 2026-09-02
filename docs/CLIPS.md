@@ -7,8 +7,12 @@ prompt on every device, the request → pending → upload → post composer flo
 the posted-clip player with its consent badge, the owner's per-server switch.
 The native no-picker auto-arm SHIPPED in 0.8.108/0.8.109 (see "Arm
 automatically" below) and still needs its on-device Windows walk.
-Phase 3 (un-flag by default, retention/quota surfacing) is not done. Off per
-server until the owner turns it on.** Plan: `~/.claude/plans/would-it-be-possible-velvet-shore.md`;
+Phase 3 landed 2026-09-02: the experimental flag is gone (the owner's
+per-server switch is the only gate; members of a server with clips off see
+nothing, the owner sees the disabled control with the reason), and
+retention is surfaced — `GET /clips/usage` reports `retention_days` from
+`CLIP_RETENTION_DAYS` and Settings › Clips says how long posted clips live.
+Off per server until the owner turns it on.** Plan: `~/.claude/plans/would-it-be-possible-velvet-shore.md`;
 spike numbers: `frontend/e2e/spike-clips/README.md`.
 
 **When the clipper may see the footage (2026-08-19, twice revised — read

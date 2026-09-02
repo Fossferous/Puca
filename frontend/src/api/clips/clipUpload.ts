@@ -135,6 +135,11 @@ export function discardParts(ids: Iterable<string>, o: Pick<UploadOptions, 'base
 export interface ClipUsage {
     usedBytes: number;
     quotaBytes: number;
+    /** How long the server keeps posted clips, in days; 0 = until deleted;
+     *  null = the server predates the field (unknown). Operator-set via
+     *  CLIP_RETENTION_DAYS — surfaced because a clip vanishing on day 31
+     *  with no warning anywhere is the wrong kind of surprise. */
+    retentionDays: number | null;
 }
 
 /**
@@ -159,9 +164,13 @@ export async function getClipUsage(
             headers: { Authorization: `Bearer ${o.token}` },
         });
         if (!res.ok) return null;
-        const body = (await res.json()) as { used_bytes?: unknown; quota_bytes?: unknown };
+        const body = (await res.json()) as { used_bytes?: unknown; quota_bytes?: unknown; retention_days?: unknown };
         if (typeof body.used_bytes !== 'number' || typeof body.quota_bytes !== 'number') return null;
-        return { usedBytes: body.used_bytes, quotaBytes: body.quota_bytes };
+        return {
+            usedBytes: body.used_bytes,
+            quotaBytes: body.quota_bytes,
+            retentionDays: typeof body.retention_days === 'number' && body.retention_days >= 0 ? body.retention_days : null,
+        };
     } catch {
         return null;
     }

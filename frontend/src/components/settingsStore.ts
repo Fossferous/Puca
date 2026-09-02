@@ -303,14 +303,6 @@ export const defaultSettings = {
     experimentalP2PTransfers: false,
 
     /**
-     * Clips — the desktop replay buffer (api/clips/). OFF by default while the
-     * consent/post half is built out: this gate controls ARMING only (Arm/Save
-     * buttons in the voice bar); approving a clip request and watching a posted
-     * clip stay unconditional, exactly like P2P transfers gate SENDING only.
-     */
-    experimentalClips: false,
-
-    /**
      * DeepFilterNet noise suppression (the "max quality" tier). OFF by default:
      * the first implementation shipped audibly crackly (main-thread inference),
      * so the rebuilt off-thread pipeline (deepFilter.ts) earns its way back as
@@ -333,6 +325,14 @@ export const defaultSettings = {
 
     /**
      * Largest transfer allowed when the peers CANNOT connect directly, in MB.
+     *
+     * A relayed transfer is not peer-to-peer: every byte goes up to the TURN
+     * server and back down, so an 800 MB file costs ~1.6 GB on the host's home
+     * connection. 100 MB is a sane default guard, but refusing outright looks
+     * broken to someone deliberately sending something large — so it is theirs
+     * to raise. A DIRECT transfer ignores this entirely and stays uncapped.
+     */
+    relayTransferMaxMB: 100,
 
     /**
      * Desktop: open the OS Save As dialog before writing a received file or a
@@ -342,14 +342,6 @@ export const defaultSettings = {
      * nothing else (api/savePath.ts).
      */
     askWhereToSaveFiles: false,
-     *
-     * A relayed transfer is not peer-to-peer: every byte goes up to the TURN
-     * server and back down, so an 800 MB file costs ~1.6 GB on the host's home
-     * connection. 100 MB is a sane default guard, but refusing outright looks
-     * broken to someone deliberately sending something large — so it is theirs
-     * to raise. A DIRECT transfer ignores this entirely and stays uncapped.
-     */
-    relayTransferMaxMB: 100,
 };
 
 export type Settings = typeof defaultSettings;
