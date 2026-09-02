@@ -48,6 +48,38 @@ DB_NAME="${DB_NAME:-$SERVICE_NAME}"
 DB_USER="${DB_USER:-$SERVICE_NAME}"
 SERVICE_USER="${SERVICE_USER:-$SERVICE_NAME}"
 
+# --- The listener -------------------------------------------------------------
+#
+# PORT and BIND_ADDR are operator knobs (.env.example), and the same argument
+# this file makes about names applies to them: a probe hardcoded to
+# 127.0.0.1:3000 against a backend on PORT=8080 can never succeed, so the
+# 5-minute healthcheck would restart a perfectly healthy service forever —
+# dropping every WebSocket and every call each time. Read ONLY the two lines
+# needed, never source the file: .env also holds JWT_SECRET and the database
+# password, and sourcing it would hand both to every child process.
+#
+# `|| true` inside each substitution: restore.sh sources this under
+# `set -euo pipefail`, and a grep that finds no PORT= line exits 1 — which would
+# abort the WHOLE script, silently, before it printed a word. (Found by the
+# restore test on its first run.)
+if [ -z "${HEALTH_URL:-}" ]; then
+	_ops_port="${HEALTH_PORT:-}"
+	_ops_bind=""
+	if [ -r "$INSTALL_DIR/.env" ]; then
+		[ -n "$_ops_port" ] || _ops_port="$( { grep -m1 -E '^PORT=' "$INSTALL_DIR/.env" 2>/dev/null || true; } | cut -d= -f2- | tr -d '[:space:]"'"'")"
+		_ops_bind="$( { grep -m1 -E '^BIND_ADDR=' "$INSTALL_DIR/.env" 2>/dev/null || true; } | cut -d= -f2- | tr -d '[:space:]"'"'")"
+	fi
+	case "$_ops_port" in ''|*[!0-9]*) _ops_port=3000 ;; esac
+	case "$_ops_bind" in
+		''|0.0.0.0|127.0.0.1|localhost|::|'[::]') _ops_host=127.0.0.1 ;;
+		*:*) _ops_host="[$_ops_bind]" ;;   # a v6 literal binds only that address
+		*)   _ops_host="$_ops_bind" ;;      # a specific v4 address: loopback would not answer
+	esac
+	HEALTH_PORT="$_ops_port"
+	HEALTH_URL="http://${_ops_host}:${_ops_port}/"
+	unset _ops_port _ops_bind _ops_host
+fi
+
 # Abort loudly when the resolved deployment is not on this box. Exit 78 is
 # EX_CONFIG, and a non-zero exit is what makes cron mail the operator rather
 # than swallow it.
@@ -77,4 +109,50 @@ ops_require_db() {
 		logger -t "${SERVICE_NAME}-ops" "FATAL($what): database '$DB_NAME' missing; aborted"
 		exit 78
 	fi
+}
+
+# --- Offsite artifacts are encrypted; the restore path must be able to open them.
+#
+# backup.sh ships `<name>.age` / `<name>.gpg` offsite (and nothing else — see
+# its encrypt_for_offsite). Until this existed, neither restore.sh nor
+# restore-drill.sh could consume one: the drill's rclone filter never matched
+# the `.age` suffix and reported "no db backup found", and both piped the file
+# straight into gunzip. So the only copy that survives a disk loss was the one
+# copy the tooling could not read.
+#
+#   ops_decrypt_artifact <file> <workdir>
+#
+# Prints the plaintext path (the file itself when it is not encrypted; a copy
+# under <workdir> otherwise). Returns 1 with the reason on stderr when the
+# artifact is encrypted and this host cannot open it — the caller decides
+# whether that is fatal (restore.sh) or a drill failure (restore-drill.sh).
+#
+# The age identity comes from BACKUP_AGE_IDENTITY (a path; set it in
+# /etc/default/puca-backup or the environment). It is EXPECTED to be absent on
+# the server — the whole point of encrypting offsite is that the private half
+# lives elsewhere — so the offsite drill runs where the key lives, and on the
+# box you run `restore-drill.sh --local`. gpg uses the caller's keyring.
+ops_decrypt_artifact() {
+	local f="$1" work="$2" out
+	case "$f" in
+		*.age)
+			if [ -z "${BACKUP_AGE_IDENTITY:-}" ] || [ ! -r "${BACKUP_AGE_IDENTITY:-}" ]; then
+				echo "$(basename "$f") is age-encrypted but no identity is available on this host (BACKUP_AGE_IDENTITY unset or unreadable)" >&2
+				return 1
+			fi
+			command -v age >/dev/null 2>&1 || { echo "$(basename "$f") is age-encrypted and \`age\` is not installed here" >&2; return 1; }
+			out="$work/$(basename "${f%.age}")"
+			if ! age -d -i "$BACKUP_AGE_IDENTITY" -o "$out" "$f" 2>/dev/null; then
+				rm -f "$out"; echo "age could not decrypt $(basename "$f") with $BACKUP_AGE_IDENTITY (wrong identity?)" >&2; return 1
+			fi
+			echo "$out" ;;
+		*.gpg)
+			command -v gpg >/dev/null 2>&1 || { echo "$(basename "$f") is gpg-encrypted and \`gpg\` is not installed here" >&2; return 1; }
+			out="$work/$(basename "${f%.gpg}")"
+			if ! gpg --batch --yes --quiet --decrypt -o "$out" "$f" 2>/dev/null; then
+				rm -f "$out"; echo "gpg could not decrypt $(basename "$f") — the secret key is not in this user's keyring (it is meant to live off the box)" >&2; return 1
+			fi
+			echo "$out" ;;
+		*) echo "$f" ;;
+	esac
 }
