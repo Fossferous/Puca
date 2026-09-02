@@ -50,6 +50,64 @@ function endpointsOf(file) {
     }
 }
 
+/** Read the updater pubkey out of a config file, if it sets one. */
+function pubkeyOf(file) {
+    try {
+        return JSON.parse(readFileSync(file, 'utf8'))?.plugins?.updater?.pubkey ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The human-readable identity of a minisign public key: its untrusted-comment
+ * line, e.g. "minisign public key: D83918035B67327E". The key id is what the
+ * updater compares, so printing it is what lets an operator see at a glance
+ * whether the key they are signing with is the one being compiled in.
+ */
+function keyIdOf(pubkey) {
+    try {
+        const first = Buffer.from(pubkey, 'base64').toString('utf8').split('\n')[0].trim();
+        return first.replace(/^untrusted comment:\s*/i, '') || '(unreadable)';
+    } catch {
+        return '(unreadable)';
+    }
+}
+
+/**
+ * Say out loud which updater PUBLIC KEY this build will trust, and where it
+ * came from — the same reason the endpoint is printed.
+ *
+ * The updater accepts an update only if latest.json's signature verifies
+ * against the pubkey compiled into the app. The tracked tauri.conf.json
+ * carries the original project's key, and the overlay historically only
+ * overrode the ENDPOINT: a fork that generated its own signing key and set
+ * only that shipped installers which trusted a private key the fork does not
+ * hold — every update it signed was refused with "update could not be
+ * installed", and the only recovery is a manual reinstall by every user.
+ * Nothing errors at build time. So: print the key id, and warn loudly when it
+ * is the tracked default rather than something the overlay set.
+ */
+function reportPubkey(overlayPub, basePub, placeholderOverlay) {
+    const effective = overlayPub ?? basePub;
+    const source = overlayPub ? 'pinned by the overlay' : 'from the TRACKED tauri.conf.json';
+    console.log(`[tauri-build] updater pubkey -> ${effective ? keyIdOf(effective) : '(none)'}  (${source})`);
+    if (placeholderOverlay) {
+        throw new Error(
+            '[tauri-build] tauri.release.json still carries the placeholder pubkey from '
+            + 'tauri.release.example.json. Run `npx tauri signer generate` and paste the public '
+            + 'key it prints, or delete the pubkey line to build against the tracked key on purpose.',
+        );
+    }
+    if (!overlayPub) {
+        console.log('[tauri-build]   The installer will accept ONLY updates signed by that key. If');
+        console.log('[tauri-build]   TAURI_SIGNING_PRIVATE_KEY is not its private half, every update you');
+        console.log('[tauri-build]   publish is refused ("update could not be installed") and users must');
+        console.log('[tauri-build]   reinstall by hand. A fork must generate its own pair and put the');
+        console.log('[tauri-build]   public half in tauri.release.json — deploy/README.md section 6.');
+    }
+}
+
 /** Read productName out of a config file, if it sets one. */
 function productNameOf(file) {
     try {
@@ -239,6 +297,8 @@ if (hasOverlay) {
             pinned ? 'pinned by the overlay' : 'from the tracked config — overlay does not pin it',
         );
     }
+    const overlayPub = pubkeyOf(overlay);
+    reportPubkey(overlayPub, pubkeyOf(baseConf), /^REPLACE_WITH_/.test(overlayPub ?? ''));
     mergedDir = mkdtempSync(join(tmpdir(), 'tauri-overlay-'));
     const sanitised = join(mergedDir, 'tauri.release.json');
     writeFileSync(sanitised, JSON.stringify(raw, null, 2));
@@ -250,6 +310,7 @@ if (hasOverlay) {
     console.log('[tauri-build] If this is a release for real users, that endpoint must be YOUR');
     console.log('[tauri-build] download host. Copy tauri.release.example.json and set it, or the');
     console.log('[tauri-build] installed app will silently never find an update.');
+    reportPubkey(null, pubkeyOf(baseConf), false);
     reportProductName(productNameOf(baseConf) ?? '(unset)', 'from the tracked config');
 }
 
