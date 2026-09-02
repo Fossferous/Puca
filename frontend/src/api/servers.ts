@@ -166,7 +166,7 @@ export function toggleTaskCompletion(channelId: number, messageId: string): Prom
 }
 
 export function editMessage(channelId: number, messageId: string, content: string): Promise<void> {
-    return apiClient.patch(`/channels/${channelId}/messages/${messageId}`, { content });
+    return apiClient.patch(`/channels/${channelId}/messages/${messageId}`, { content, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
 export function deleteMessage(channelId: number, messageId: string): Promise<void> {
@@ -395,6 +395,7 @@ import {
     messageEncState,
     type MessageEncState,
 } from './e2ee';
+import { MAX_READABLE_ENVELOPE_VERSION } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
 import { isUndecryptable, ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
 import { currentUserIdFromToken } from './auth';

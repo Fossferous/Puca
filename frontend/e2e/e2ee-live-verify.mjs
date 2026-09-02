@@ -380,8 +380,19 @@ async function main() {
             check('guard/task: replacing a v3 description with a v2 one is refused (409)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV2 }, A.token)) === 409);
             check('guard/task: replacing it with plaintext is refused (409)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: 'raw text' }, A.token)) === 409);
             check('guard/task: a v3 -> v3 edit still lands (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV3 }, A.token)) === 200);
+            check('guard/task: a v3 -> v2 edit from a client that says it reads v3 is a legitimate re-seal (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV2, reads_up_to: 3 }, A.token)) === 200);
+            check('guard/task: ...and back to v3 (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV3, reads_up_to: 3 }, A.token)) === 200);
+            check('guard/task: a client that only claims v2 is still refused (409)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV2, reads_up_to: 2 }, A.token)) === 409);
+            const sideV3 = serialize(await sealV3(ckEpoch1, 1, '[{"href":"sovereign-enc:x?k=K","name":"a"}]', aad('chan-taskatt', channelId, 1, A.id)));
+            const sideV2 = serialize(await encryptChannelMessage(ckEpoch1, 1, 'stale sidecar'));
+            check('guard/sidecar: setting a v3 sidecar lands (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { attachments: sideV3, reads_up_to: 3 }, A.token)) === 200);
+            check('guard/sidecar: replacing it with a v2 sidecar without the claim is refused (409)', !!task && (await status('PATCH', `/tasks/${task.id}`, { attachments: sideV2 }, A.token)) === 409);
+            check('guard/sidecar: the v3 sidecar is still stored', sql(`SELECT attachments FROM channel_tasks WHERE id=${task ? task.id : -1};`).includes('"v":3'));
+            check('guard/message: a v3 -> v2 edit from a client that says it reads v3 lands (200)', !!mine && (await status('PATCH', `/channels/${channelId}/messages/${mine.id}`, { content: v2Body, reads_up_to: 3 }, A.token)) === 200);
+            check('guard/message: ...and back to v3 (200)', !!mine && (await status('PATCH', `/channels/${channelId}/messages/${mine.id}`, { content: v3Body, reads_up_to: 3 }, A.token)) === 200);
             check('guard/task: completing without touching the text is untouched by the guard (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { is_completed: true }, A.token)) === 200);
-            check('guard/task: clearing the attachment sidecar is a deletion, not a downgrade (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { attachments: '' }, A.token)) === 200);
+            check('guard/task: clearing a SET sidecar is a deletion, not a downgrade (200, no claim needed)', !!task && (await status('PATCH', `/tasks/${task.id}`, { attachments: '' }, A.token)) === 200);
+            check('guard/task: ...and it is gone', sql(`SELECT attachments IS NULL FROM channel_tasks WHERE id=${task ? task.id : -1};`).trim() === 't');
             const stored = sql(`SELECT description FROM channel_tasks WHERE id=${task ? task.id : -1};`);
             check('guard/task: the stored body is still the v3 one', stored.includes('"v":3') && !stored.includes('raw text'));
         }

@@ -139,8 +139,12 @@ v3 body as the raw envelope JSON with the "Not encrypted" badge until it
 updates. It cannot damage it: from 0.8.136 the server refuses an edit that
 would replace a body with an older envelope version or with non-envelope
 content (`src/envelope_version.rs`, 409), so a stale client re-sealing the
-JSON it displayed is turned away instead of overwriting the ciphertext. That
-guard is permanent and applies to every future version bump. Nothing in the
+JSON it displayed is turned away instead of overwriting the ciphertext. A
+reader-first client (reads v(N+1), still writes vN) is a legitimate editor:
+it sends `reads_up_to`, the highest version it can open, and is let through.
+0.8.135 predates that field, so its edits of v3 bodies are refused until it
+updates — a deliberate trade against permanent loss. The guard is permanent
+and applies to every future version bump. Nothing in the
 codebase can *prove* every client has updated (no client-version signal
 reaches the server); the call was made on the size of the field.
 `frontend/e2e/puca.spec.ts` pins the version the app writes.

@@ -2997,7 +2997,10 @@ export function Chat({ onLogout }: ChatProps) {
                 ));
             } catch (err) {
                 console.error('Failed to edit:', err);
-                alert(err instanceof SecureSendError ? err.message : 'Failed to edit message. Please try again.');
+                // A 409 carries the server's own explanation (an envelope-version
+                // refusal, or the body changed underneath the edit) — show it.
+                const explained = err instanceof SecureSendError || (err instanceof ApiError && err.status === 409);
+                alert(explained ? (err as Error).message : 'Failed to edit message. Please try again.');
             }
         }
     };

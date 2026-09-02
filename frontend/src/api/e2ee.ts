@@ -319,6 +319,13 @@ async function aesDecrypt(rawKey: Uint8Array, blobB64: string, aad?: Uint8Array)
  *  the client updates. The reader accepts both, forever. */
 export const EMIT_ENVELOPE_V3 = true;
 
+/** The highest envelope version this build can OPEN. Sent as `reads_up_to`
+ *  on every edit that replaces a sealed body, so the server can tell a
+ *  reader-first client (reads v(N+1), still writes vN — a legitimate edit)
+ *  from a stale one that would re-seal raw JSON over the ciphertext (refused).
+ *  Bump this with parseEnvelopeEx's accepted versions, never ahead of them. */
+export const MAX_READABLE_ENVELOPE_VERSION = 3;
+
 const AAD_PREFIX = 'puca/v3/';
 
 function aadInt(n: number, what: string): string {

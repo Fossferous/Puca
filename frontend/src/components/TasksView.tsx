@@ -13,6 +13,8 @@
  * checklist as live interactive cards — the default view when Tasks opens.
  */
 
+import { ApiError } from '../api/client';
+import { pushMessageToast } from './messageToastBus';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import {
@@ -302,6 +304,7 @@ export function TasksView() {
             await renameTaskList(selectedList.id, title);
         } catch (err) {
             console.error('Failed to rename list:', err);
+            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setLists(original);
         }
     };
@@ -355,6 +358,7 @@ export function TasksView() {
             await updateListTask(task.id, { description });
         } catch (err) {
             console.error('Failed to edit task:', err);
+            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
         }
     };
