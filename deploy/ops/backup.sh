@@ -1,15 +1,32 @@
 #!/usr/bin/env bash
-# Nightly Puca backup: Postgres dump + uploaded E2EE attachment blobs,
-# gzip'd, 14-day local rotation, with an OPTIONAL offsite copy.
+# Nightly Puca backup: Postgres dump + uploaded E2EE attachment blobs + the
+# service's configuration, gzip'd, 14-day local rotation, with an OPTIONAL
+# offsite copy.
 #
 # WHY uploads too: the DB does NOT contain the uploaded file ciphertext (it
 # lives on the local filesystem under /opt/puca/uploads). A DB-only backup
 # silently loses every shared attachment on a disk loss — the message keys
 # survive, but the blobs they decrypt do not.
 #
+# WHY the config too: /opt/puca/.env is the ONLY copy of JWT_SECRET, the
+# database password, TURN_SECRET and the LiveKit secret. A restore of the
+# database and uploads onto a rebuilt box without it gives you the data with a
+# new identity for every secret — every session invalid, every TURN credential
+# refused, the SFU unreachable. The dump is useless without it; it goes in the
+# same rotation, through the same encryption gate (a plaintext .env offsite is
+# strictly worse than a plaintext dump).
+#
 # OFFSITE IS OFF until you set OFFSITE_DEST (or OFFSITE_CMD). Local-only backups
 # sit on the SAME disk as the database — a box/disk failure takes the data AND
 # its backups together. Set an offsite target to actually be recoverable.
+#
+# THE DISK IT PROTECTS IS THE DISK IT FILLS. Every night archives the ENTIRE
+# uploads tree (E2EE ciphertext, so gzip recovers nothing), and 14 days of
+# that is ~14x the uploads footprint next to Postgres on the same partition.
+# So the uploads stage checks free space first and SKIPS itself rather than
+# filling the disk (BACKUP_MIN_FREE_BYTES below), MAX_LOCAL_UPLOAD_ARCHIVES
+# caps the local count independently of age, and every run logs the backups
+# directory size and the remaining free space so backup.log carries a trend.
 #
 # Not `set -e`: a single failing stage (e.g. an unreachable offsite host) must
 # not abort the run and skip rotation/logging of the good local artifacts.
@@ -19,6 +36,7 @@ set -uo pipefail
 # credentials/paths aren't committed; sourced here so it applies whether run by
 # cron or by hand. `set -a` exports everything it sets so the OFFSITE_CMD child
 # (ship-offsite.sh) inherits RCLONE_REMOTE etc. See deploy/ops/README.md.
+# shellcheck disable=SC1091
 if [ -f /etc/default/puca-backup ]; then set -a; . /etc/default/puca-backup; set +a; fi
 
 # Names are resolved, not hardcoded. `pg_dump` against a database that is not
@@ -32,6 +50,16 @@ DIR=$INSTALL_DIR/backups
 UPLOADS=$INSTALL_DIR/uploads
 LOG=$INSTALL_DIR/backup.log
 KEEP_DAYS="${KEEP_DAYS:-14}"
+# Keep at most this many uploads archives locally, newest first, on top of the
+# age rotation. 0 (the default) = age rotation only, i.e. today's behaviour;
+# set it on a host whose uploads tree is large relative to its disk. The DB
+# dump and config archive are small and stay on age rotation alone.
+MAX_LOCAL_UPLOAD_ARCHIVES="${MAX_LOCAL_UPLOAD_ARCHIVES:-0}"
+# The uploads archive is written only if at least this much space would
+# remain afterwards (the archive is roughly the size of the tree — ciphertext
+# does not compress). Default 1 GiB: Postgres shares the partition, and a
+# full disk takes it down.
+BACKUP_MIN_FREE_BYTES="${BACKUP_MIN_FREE_BYTES:-1073741824}"
 TS=$(date +%Y%m%d-%H%M%S)
 
 # --- Offsite target (choose ONE; leave both empty to stay local-only) ---
@@ -47,6 +75,7 @@ OFFSITE_DEST="${OFFSITE_DEST:-}"
 OFFSITE_CMD="${OFFSITE_CMD:-}"
 
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
+human(){ numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"; }
 mkdir -p "$DIR"
 # The dumps written below contain every user's SRP verifier and their
 # password-wrapped E2EE seed — the offline-attack material for the whole
@@ -68,7 +97,12 @@ fi
 # --- 2. Uploaded attachment ciphertext ---
 UP_FILE="$DIR/$DB_NAME-uploads-$TS.tar.gz"
 if [ -d "$UPLOADS" ]; then
-	if tar -czf "$UP_FILE" -C "$(dirname "$UPLOADS")" "$(basename "$UPLOADS")"; then
+	need="$(du -sb "$UPLOADS" 2>/dev/null | cut -f1)"; need="${need:-0}"
+	free="$(df -B1 --output=avail "$DIR" 2>/dev/null | tail -1 | tr -d ' ')"; free="${free:-0}"
+	if [ "$free" -lt $(( need + BACKUP_MIN_FREE_BYTES )) ] 2>/dev/null; then
+		log "ERROR insufficient free space for the uploads archive (tree is $(human "$need"), only $(human "$free") free, want $(human "$BACKUP_MIN_FREE_BYTES") left afterwards) — skipping it rather than filling the disk Postgres lives on; set MAX_LOCAL_UPLOAD_ARCHIVES, lower KEEP_DAYS, or add disk"
+		UP_FILE=""
+	elif tar -czf "$UP_FILE" -C "$(dirname "$UPLOADS")" "$(basename "$UPLOADS")"; then
 		log "uploads ok -> $(basename "$UP_FILE") ($(du -h "$UP_FILE" | cut -f1))"
 	else
 		log "ERROR uploads tar failed"; rm -f "$UP_FILE"; UP_FILE=""
@@ -77,10 +111,32 @@ else
 	log "WARN uploads dir $UPLOADS missing — skipped"; UP_FILE=""
 fi
 
-# --- 3. Offsite copy (optional, strongly recommended) ---
+# --- 3. Configuration: .env (JWT_SECRET, DB password, TURN/LiveKit secrets) ---
+# Plus /etc/default/puca when present — the names override the ops scripts
+# read, without which a restored box monitors and backs up the wrong names.
+# NOT /etc/default/puca-backup: it holds the offsite credentials, which the
+# offsite target already has by definition. Members are stored relative to /
+# so the archive restores with `tar -xzf <file> -C / <member>`, one member at
+# a time, by hand — restore.sh deliberately never applies it (see its header).
+CFG_FILE="$DIR/$DB_NAME-config-$TS.tar.gz"
+cfg_members=()
+[ -f "$INSTALL_DIR/.env" ] && cfg_members+=("${INSTALL_DIR#/}/.env")
+[ -f /etc/default/puca ]   && cfg_members+=("etc/default/puca")
+if [ ${#cfg_members[@]} -gt 0 ]; then
+	if tar -czf "$CFG_FILE" -C / "${cfg_members[@]}"; then
+		log "config ok -> $(basename "$CFG_FILE") (${cfg_members[*]})"
+	else
+		log "ERROR config tar failed"; rm -f "$CFG_FILE"; CFG_FILE=""
+	fi
+else
+	log "WARN no $INSTALL_DIR/.env to back up — a restore onto a rebuilt box will have NO secrets"; CFG_FILE=""
+fi
+
+# --- 4. Offsite copy (optional, strongly recommended) ---
 #
 # ENCRYPT BEFORE OFFSITE. The DB dump contains SRP verifiers, password-wrapped
-# E2EE seeds, and plaintext password-reset tokens; gzip is not encryption. The
+# E2EE seeds, and plaintext password-reset tokens; the config archive contains
+# JWT_SECRET, which forges a login for any account; gzip is not encryption. The
 # offsite target is a THIRD PARTY (Drive/R2/B2/a NAS), so the artifact must be
 # encrypted to a key whose PRIVATE half lives OFF this box — then a compromise
 # of the backup target (or this box) does not hand over every account's
@@ -97,7 +153,9 @@ fi
 #
 # The recipient is a PUBLIC key — no secret is stored on this box. Keep the
 # matching private key offline; without it these backups cannot be read, which
-# is the entire point. Test recovery before you rely on it.
+# is the entire point. Test recovery before you rely on it: restore-drill.sh
+# consumes the encrypted artifact where the private half lives (it needs
+# BACKUP_AGE_IDENTITY there), and `--local` on this box.
 BACKUP_AGE_RECIPIENT="${BACKUP_AGE_RECIPIENT:-}"
 BACKUP_GPG_RECIPIENT="${BACKUP_GPG_RECIPIENT:-}"
 BACKUP_ALLOW_PLAINTEXT="${BACKUP_ALLOW_PLAINTEXT:-0}"
@@ -126,7 +184,7 @@ encrypt_for_offsite(){
 		return 0
 	fi
 	if [ "$BACKUP_ALLOW_PLAINTEXT" = "1" ]; then
-		log "WARN offsite copy of $(basename "$f") is UNENCRYPTED (BACKUP_ALLOW_PLAINTEXT=1) — it contains SRP verifiers and reset tokens"
+		log "WARN offsite copy of $(basename "$f") is UNENCRYPTED (BACKUP_ALLOW_PLAINTEXT=1) — it contains SRP verifiers, reset tokens and/or JWT_SECRET"
 		echo "$f"
 		return 0
 	fi
@@ -156,9 +214,20 @@ ship(){
 if [ -z "$OFFSITE_DEST" ] && [ -z "$OFFSITE_CMD" ]; then
 	log "WARN offsite disabled (OFFSITE_DEST/OFFSITE_CMD unset) — backups are LOCAL-ONLY and will NOT survive a box/disk loss"
 else
-	ship "$DB_FILE"; ship "$UP_FILE"
+	ship "$DB_FILE"; ship "$UP_FILE"; ship "$CFG_FILE"
 fi
 
-# --- 4. Rotation (both artifact types; also sweeps legacy puca-*.sql.gz) ---
+# --- 5. Rotation (every artifact type; also sweeps legacy puca-*.sql.gz) ---
 find "$DIR" -name "$DB_NAME-*.sql.gz"         -mtime +"$KEEP_DAYS" -delete
 find "$DIR" -name "$DB_NAME-uploads-*.tar.gz" -mtime +"$KEEP_DAYS" -delete
+find "$DIR" -name "$DB_NAME-config-*.tar.gz"  -mtime +"$KEEP_DAYS" -delete
+# Count cap on the uploads archives — the artifact that scales with the data —
+# newest kept. Names carry no spaces (they are timestamps), so `ls -t` is safe.
+if [ "$MAX_LOCAL_UPLOAD_ARCHIVES" -gt 0 ] 2>/dev/null; then
+	ls -t "$DIR"/"$DB_NAME"-uploads-*.tar.gz 2>/dev/null | tail -n +$(( MAX_LOCAL_UPLOAD_ARCHIVES + 1 )) | while read -r old; do
+		rm -f "$old" && log "rotated (count cap $MAX_LOCAL_UPLOAD_ARCHIVES) -> $(basename "$old")"
+	done
+fi
+
+# --- 6. The trend line: how much the backups hold, how much room is left ---
+log "backups dir $(du -sh "$DIR" 2>/dev/null | cut -f1), free on that filesystem $(human "$(df -B1 --output=avail "$DIR" 2>/dev/null | tail -1 | tr -d ' ')")"
