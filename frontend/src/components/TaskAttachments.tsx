@@ -40,7 +40,7 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
         // Same extension fallback as chat messages: a ref recorded with
         // application/octet-stream but named *.mkv is a video (File.type is
         // routinely empty for mkv), and the blob should be media-typed.
-        decryptToBlobUrl(p.id, p.key, videoMimeFor(name, p.mime) ?? p.mime)
+        decryptToBlobUrl(p.id, p.key, videoMimeFor(name, p.mime) ?? p.mime, p.cap)
             .then(u => { if (!cancelled) setUrl(u); })
             .catch(err => {
                 console.error('Failed to decrypt task attachment:', err);

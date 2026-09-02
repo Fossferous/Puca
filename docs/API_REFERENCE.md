@@ -112,8 +112,8 @@ Quick reference for all REST API endpoints.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/upload` | ✅ | Upload file (multipart) |
-| GET | `/files/:id` | ❌ | Get file |
+| POST | `/upload` | ✅ | Upload file (multipart). With request header `X-Puca-Want-Cap: 1` the response also carries `cap`, a per-file capability returned exactly once (the server stores only its SHA-256). |
+| GET | `/files/:id` | ✅ | Get file. A file uploaded with a capability is checked against request header `X-Puca-File-Cap` when one is presented; a wrong one is a 404 (no existence oracle). With `FILES_ENFORCE_CAP=1` on the server the header is required for such files; files without a capability (older uploads, avatars, icons, sounds, emoji, clip parts) are never gated. |
 
 ---
 

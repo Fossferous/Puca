@@ -310,6 +310,14 @@ repo's history proved nothing.
 set `noEmit: true` with their `.tsbuildinfo` under `node_modules/.tmp/`, so it
 is a pure check that leaves the tree clean.
 
+**`npm run typecheck` does not type-check the tests.** `frontend/tsconfig.app.json`
+excludes `src/tests` and `*.test.ts*`, and vitest transpiles with esbuild, which
+drops types without checking them. So a test can call a function with the
+wrong number of arguments, pass every gate, and keep passing for the wrong
+reason (found 2026-09-02: four `decryptDMContent` calls with a missing required
+argument, green because the omitted context is ignored for v2 envelopes). When
+you change a signature, grep the tests for its call sites yourself.
+
 `npm run build` is still a separate gate: it also runs the agent build and
 vite, either of which can fail when the typecheck passes.
 
