@@ -55,7 +55,7 @@ pub struct AuditLogEntry {
     pub id: i64,
     pub action_type: String,
     /// NULL once the acting account is hard-deleted: `audit_log.actor_id` is
-    /// `ON DELETE SET NULL`, which migration 056 finally made reachable by
+    /// `ON DELETE SET NULL`, which migration 057 finally made reachable by
     /// dropping the contradictory NOT NULL. Serialises as `null`, and
     /// `actor_username` is filled with a placeholder in that case so an older
     /// client's "username, else `user <id>`" fallback never renders "user null".
@@ -1057,7 +1057,7 @@ pub async fn list_audit_log(
     // ids are INT4 (decode as i32, cast to i64 in the response) and created_at is a
     // timestamp (cast ::text) — see [puca-sqlx-decode-gotcha]. Otherwise query_as
     // errors and .unwrap_or_default() silently yields an empty audit log.
-    // `a.actor_id` decodes as Option<i32>, not i32: migration 056 dropped the
+    // `a.actor_id` decodes as Option<i32>, not i32: migration 057 dropped the
     // NOT NULL that made the column's own ON DELETE SET NULL unreachable, so a
     // hard user delete now anonymises the actor instead of aborting. A reader
     // that still demanded i32 would make query_as error, and the
@@ -1260,7 +1260,7 @@ pub async fn list_reports(
     // (created_at, resolved_at) are cast ::text — otherwise query_as errors and
     // .unwrap_or_default() silently returns an empty report list.
     // `r.reporter_id` decodes as Option<i32> for the same reason as the audit
-    // log's actor_id — see list_audit_log and migration 056.
+    // log's actor_id — see list_audit_log and migration 057.
     let reports: Vec<(
         i32,
         Option<i32>,
@@ -1474,7 +1474,7 @@ mod nullable_actor_tests {
 
     /// INFO-11. `audit_log.actor_id` / `reports.reporter_id` were NOT NULL with
     /// `ON DELETE SET NULL` — a contradiction that made a hard `DELETE FROM
-    /// users` abort rather than anonymise. Migration 056 drops the NOT NULL, so
+    /// users` abort rather than anonymise. Migration 057 drops the NOT NULL, so
     /// the readers have to tolerate a null actor. They decode Option<i32>; a
     /// reader still demanding i32 would make query_as error and the handlers'
     /// `.unwrap_or_default()` would serve an EMPTY audit log, indistinguishable
@@ -1548,7 +1548,7 @@ mod nullable_actor_tests {
     /// lives in.
     #[test]
     fn the_migration_drops_both_not_nulls_and_touches_no_foreign_key() {
-        let sql = include_str!("../migrations/056_nullable_audit_actors.sql");
+        let sql = include_str!("../migrations/057_nullable_audit_actors.sql");
         let stmts: String = sql
             .lines()
             .filter(|l| !l.trim_start().starts_with("--"))
@@ -1564,13 +1564,13 @@ mod nullable_actor_tests {
         );
         assert!(
             !stmts.to_uppercase().contains("CASCADE"),
-            "056 must not turn the FK into ON DELETE CASCADE: {stmts}"
+            "057 must not turn the FK into ON DELETE CASCADE: {stmts}"
         );
         // Catalogue-only: no table rewrite, no data statement.
         for destructive in ["DROP TABLE", "DELETE FROM", "UPDATE "] {
             assert!(
                 !stmts.to_uppercase().contains(destructive),
-                "056 must stay catalogue-only, found {destructive}: {stmts}"
+                "057 must stay catalogue-only, found {destructive}: {stmts}"
             );
         }
     }

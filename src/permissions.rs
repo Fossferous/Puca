@@ -50,7 +50,7 @@ bitflags! {
         // per-channel overwrite for it would mean nothing.
         //
         // In DEFAULT_MEMBER because that is today's behaviour — `create_invite`
-        // checked membership alone — and migration 055 ORs the bit onto every
+        // checked membership alone — and migration 056 ORs the bit onto every
         // existing @everyone role so nobody loses invite creation at deploy
         // time. What it buys is the ability to TAKE it away: before this,
         // the lowest-privilege member of a private server, including one with
@@ -1095,7 +1095,7 @@ mod create_invite_bit_tests {
     }
 
     /// Behaviour-preserving by default: every member could invite before, so the
-    /// bit ships in DEFAULT_MEMBER (and migration 055 backfills it onto every
+    /// bit ships in DEFAULT_MEMBER (and migration 056 backfills it onto every
     /// existing @everyone role). It is NOT overwritable per channel — invites
     /// are server-scoped and `create_invite` resolves SERVER permissions, so a
     /// channel overwrite for it would be a control that does nothing.
@@ -1113,7 +1113,7 @@ mod create_invite_bit_tests {
     /// through in SQL goes red — the same guard 051 carries.
     #[test]
     fn the_backfill_migration_grants_exactly_this_bit() {
-        let sql = include_str!("../migrations/055_backfill_create_invite.sql");
+        let sql = include_str!("../migrations/056_backfill_create_invite.sql");
         let stmt: String = sql
             .lines()
             .filter(|l| !l.trim_start().starts_with("--"))
@@ -1122,12 +1122,12 @@ mod create_invite_bit_tests {
 ");
         assert!(
             stmt.contains(&format!("permissions | {}", Permissions::CREATE_INVITE.bits())),
-            "055 must OR in {}: {stmt}",
+            "056 must OR in {}: {stmt}",
             Permissions::CREATE_INVITE.bits()
         );
         assert!(
             stmt.contains("WHERE is_default = true"),
-            "055 must be scoped to @everyone: {stmt}"
+            "056 must be scoped to @everyone: {stmt}"
         );
     }
 }
