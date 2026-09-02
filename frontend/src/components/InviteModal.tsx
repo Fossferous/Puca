@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createInvite, listInvites, deleteInvite, type Invite } from '../api/servers';
+import { fetchPublicConfig } from '../api/publicConfig';
+import { inviteLink } from '../api/pendingInvite';
+import { statusOf } from '../api/client';
 import { CheckIcon, CloseIcon, TrashIcon } from './Icons';
 import './InviteModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -17,6 +20,12 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
     const [isCreating, setIsCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [copied, setCopied] = useState<string | null>(null);
+    // The web app's PUBLIC address, from GET /config. Never
+    // window.location.origin: in the desktop app that is tauri.localhost and
+    // on Android https://localhost, which is what every copied invite carried
+    // until 0.9.2. null = the operator has not set APP_URL (or the server
+    // predates /config), and the bare code is what gets shared.
+    const [appUrl, setAppUrl] = useState<string | null>(null);
 
     // Invite options
     const [maxUses, setMaxUses] = useState<number | undefined>(undefined);
@@ -40,6 +49,13 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
         }
     }, [isOpen, serverId, loadInvites]);
 
+    useEffect(() => {
+        if (!isOpen) return;
+        let live = true;
+        void fetchPublicConfig().then(c => { if (live) setAppUrl(c.appUrl); });
+        return () => { live = false; };
+    }, [isOpen]);
+
     const handleCreateInvite = async () => {
         setIsCreating(true);
         setError(null);
@@ -51,8 +67,10 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
             setInvites(prev => [invite, ...prev]);
             // Auto-copy the new invite
             copyToClipboard(invite.code);
-        } catch {
-            setError('Failed to create invite');
+        } catch (err) {
+            setError(statusOf(err) === 403
+                ? "You don't have permission to create invites on this server."
+                : 'Failed to create invite');
         } finally {
             setIsCreating(false);
         }
@@ -67,8 +85,12 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
         }
     };
 
+    /** What gets shared: the full link when the web app's address is known,
+     *  otherwise the bare code (Join a Server accepts either). */
+    const shareText = (code: string) => inviteLink(code, appUrl) ?? code;
+
     const copyToClipboard = async (code: string) => {
-        const inviteUrl = `${window.location.origin}/invite/${code}`;
+        const inviteUrl = shareText(code);
         try {
             await navigator.clipboard.writeText(inviteUrl);
             setCopied(code);
@@ -106,7 +128,11 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
                 <button className="invite-modal-close" onClick={onClose} aria-label="Close"><CloseIcon size={18} /></button>
 
                 <h2>Invite to {serverName}</h2>
-                <p className="invite-subtitle">Share this link with others to grant access to your server</p>
+                <p className="invite-subtitle">
+                    {appUrl
+                        ? 'Share this link with others to grant access to your server'
+                        : 'Share this code with others — they paste it into "Join a Server". (This server has no public web address set, so there is no link to give out.)'}
+                </p>
 
                 {error && <div className="invite-error">{error}</div>}
 
@@ -169,7 +195,7 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
                             {invites.map(invite => (
                                 <div key={invite.code} className="invite-item">
                                     <div className="invite-item-info">
-                                        <span className="invite-code">{invite.code}</span>
+                                        <span className="invite-code" title={shareText(invite.code)}>{shareText(invite.code)}</span>
                                         <div className="invite-meta">
                                             <span>{invite.uses}{invite.max_uses ? `/${invite.max_uses}` : ''} uses</span>
                                             <span>•</span>

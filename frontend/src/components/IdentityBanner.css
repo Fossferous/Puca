@@ -1,0 +1,95 @@
+/* Sits at the top of the authed layout, under the update banner's z-order
+   so both can be read; pushes nothing (fixed), like UpdateBanner. */
+.identity-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9990;
+    background: var(--color-danger, #ed4245);
+    color: #fff;
+    padding: 10px 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    font-size: 14px;
+}
+
+.identity-banner-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.identity-banner-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.identity-banner-text {
+    flex: 1 1 240px;
+    line-height: 1.35;
+}
+
+.identity-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.identity-banner-btn {
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    background: transparent;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.identity-banner-btn.primary {
+    background: #fff;
+    color: var(--color-danger, #ed4245);
+    border-color: #fff;
+}
+
+.identity-banner-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.identity-banner-dismiss {
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.identity-banner-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.identity-banner-form input {
+    flex: 1 1 220px;
+    min-height: 36px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: none;
+    font: inherit;
+}
+
+.identity-banner-error {
+    flex-basis: 100%;
+    font-size: 13px;
+}

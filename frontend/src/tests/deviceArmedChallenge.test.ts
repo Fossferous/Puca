@@ -343,7 +343,7 @@ describe('controller: an unattended challenge that arrives before the key', () =
      * the moment the key lands, which is BEFORE `DeviceConnectAnswered` finishes
      * and arms it. The clear then hit nothing, the timer was armed a moment
      * later, and a user taking longer than thirty seconds lost the session with
-     * a message about "an older version of Puca".
+     * a message about "an older version of Púca".
      */
     it('does not time out while the passphrase dialog is still open', async () => {
         passphraseIsSlow = true;

@@ -8,6 +8,7 @@ import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import { loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
+import { MicPermissionHelp } from './MicPermissionHelp';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
 import { computeNativeWatch } from '../api/hotkeyScope';
@@ -24,7 +25,8 @@ const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is avai
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
-import { isTauri } from '../api/platform';
+import { isTauri, isAndroidApp } from '../api/platform';
+import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
@@ -57,7 +59,7 @@ import { decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import { Toast } from './Toast';
 import './VoicePanel.css';
 
@@ -516,7 +518,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => {
         isInVoiceRef.current = isInVoice;
         setSelfInVoice(isInVoice);
-        return () => setSelfInVoice(false);
+        // Android: the keep-alive service takes the `microphone` foreground
+        // type for the life of the call, so capture survives backgrounding on
+        // 14+. Declared here, at the moment the call goes live and the app is
+        // still in the foreground — the only moment the type can be taken.
+        // A no-op everywhere else (and on APKs older than the extra).
+        setVoiceKeepAlive(isInVoice);
+        return () => { setSelfInVoice(false); setVoiceKeepAlive(false); };
     }, [isInVoice]);
 
     // Properly sync self-preview video srcObject when screen sharing
@@ -1714,7 +1722,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 applyMicGate();
             }
 
-            // SFU channel: connect LiveKit as the media transport. The Puca
+            // SFU channel: connect LiveKit as the media transport. The Púca
             // WS room (JoinRoom/StartStream above/below) stays — presence, voice
             // status, and conn-scoped relays (remote control) all depend on it.
             // Publishing the SAME mic track keeps mute (track.enabled) and the
@@ -2639,7 +2647,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         }
         if (on) {
             if (!acquired) {
-                setError('Camera unavailable — check that no other app is using it and that Puca has permission.');
+                setError('Camera unavailable — check that no other app is using it and that Púca has permission.');
                 return;
             }
             const ack = await wsClient.startCameraAcked(roomId, currentUserId);
@@ -2880,81 +2888,35 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             ref={panelRef}
             className={`voice-panel-compact${isPhonePanel && isInVoice && !controlsExpanded ? ' vp-collapsed' : ''}`}
         >
-            {/* Permission Help Modal */}
+            {/* Permission Help Modal — per-platform instructions (MicPermissionHelp) */}
             {showPermissionHelp && (
-                <div className="permission-help-overlay">
-                    <div className="permission-help-modal">
-                        <h3><MicIcon /> Microphone Access Blocked</h3>
-                        <p>You'll need to allow microphone access to join voice chat.</p>
-
-                        <div className="permission-instructions">
-                            <p><strong>To fix this:</strong></p>
-                            {/* Check if running in Tauri (desktop app) - v2 uses __TAURI_INTERNALS__ */}
-                            {typeof window !== 'undefined' && ((window as unknown as { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }).__TAURI_INTERNALS__ || (window as unknown as { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }).__TAURI__) ? (
-                                // Desktop app - Windows/macOS instructions (Tauri uses Edge WebView2)
-                                <ol>
-                                    <li>Open <strong>Windows Settings</strong> (Win + I)</li>
-                                    <li>Go to <strong>Privacy & Security → Microphone</strong></li>
-                                    <li>Make sure <strong>"Microphone access"</strong> is ON</li>
-                                    <li>Make sure <strong>"Let desktop apps access your microphone"</strong> is ON</li>
-                                    <li>If still blocked, check <strong>Microsoft Edge</strong> in the app list (Puca uses Edge WebView)</li>
-                                    <li>Restart Puca and click "Try Again"</li>
-                                </ol>
-                            ) : (
-                                // Browser - standard instructions
-                                <ol>
-                                    <li>Click the <span className="icon-hint"><LockIcon /></span> icon in your browser's address bar</li>
-                                    <li>Find "Microphone" in the permissions list</li>
-                                    <li>Change it from "Block" to "Allow"</li>
-                                    <li>Refresh the page or click "Try Again" below</li>
-                                </ol>
-                            )}
-                        </div>
-
-                        <div className="permission-help-buttons">
-                            <button
-                                className="permission-retry-btn"
-                                onClick={async () => {
-                                    setShowPermissionHelp(false);
-                                    setError(null);
-                                    // Small delay then try again
-                                    setTimeout(() => joinVoice(), 100);
-                                }}
-                            >
-                                Try Again
-                            </button>
-                            {/* Reset Permissions button for desktop (clears WebView2 data) */}
-                            {typeof window !== 'undefined' && !!((window as unknown as { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }).__TAURI_INTERNALS__ || (window as unknown as { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown }).__TAURI__) && (
-                                <button
-                                    className="permission-reset-btn"
-                                    onClick={async () => {
-                                        try {
-                                            const { invoke } = await import('@tauri-apps/api/core');
-                                            const result = await invoke<string>('clear_webview_permissions');
-                                            alert(result);
-                                            // Close app after showing message
-                                            const { exit } = await import('@tauri-apps/plugin-process');
-                                            await exit(0);
-                                        } catch (e) {
-                                            alert('Failed to reset permissions: ' + e);
-                                        }
-                                    }}
-                                >
-                                    Reset Permissions & Restart
-                                </button>
-                            )}
-                            <button
-                                className="permission-dismiss-btn"
-                                onClick={() => {
-                                    setShowPermissionHelp(false);
-                                    setError(null);
-                                }}
-                            >
-                                Dismiss
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <MicPermissionHelp
+                    platform={isTauri() ? 'tauri' : isAndroidApp() ? 'android' : 'web'}
+                    onRetry={() => {
+                        setShowPermissionHelp(false);
+                        setError(null);
+                        // Small delay then try again
+                        setTimeout(() => joinVoice(), 100);
+                    }}
+                    onDismiss={() => {
+                        setShowPermissionHelp(false);
+                        setError(null);
+                    }}
+                    onOpenAndroidSettings={openMobileAppSettings}
+                    // Reset Permissions button for desktop (clears WebView2 data)
+                    onResetDesktop={async () => {
+                        try {
+                            const { invoke } = await import('@tauri-apps/api/core');
+                            const result = await invoke<string>('clear_webview_permissions');
+                            alert(result);
+                            // Close app after showing message
+                            const { exit } = await import('@tauri-apps/plugin-process');
+                            await exit(0);
+                        } catch (e) {
+                            alert('Failed to reset permissions: ' + e);
+                        }
+                    }}
+                />
             )}
 
             {/* Connection Status */}

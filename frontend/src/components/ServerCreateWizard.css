@@ -386,3 +386,33 @@
     cursor: not-allowed;
 }
 
+
+/* "List in the public directory" — explicit, off by default. */
+.wizard-public-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 12px 0 4px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    text-align: left;
+}
+
+.wizard-public-toggle input {
+    margin: 3px 0 0;
+    flex-shrink: 0;
+}
+
+.wizard-public-toggle span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.wizard-public-toggle small {
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1.35;
+}

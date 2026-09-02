@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getInviteInfo, joinViaInvite, listPublicServers, joinServer, type InviteInfo, type PublicServer, type Server } from '../api/servers';
+import { parseInviteCode } from '../api/pendingInvite';
 import { CloseIcon } from './Icons';
 import './JoinServerModal.css';
 
@@ -7,6 +8,10 @@ interface JoinServerModalProps {
     isOpen: boolean;
     onClose: () => void;
     onServerJoined: (server: Server) => void;
+    /** A code that arrived on an invite link (/invite/:code): prefilled and
+     *  looked up as soon as the modal opens, so the visitor lands on the
+     *  server's name and a Join button rather than an empty field. */
+    initialCode?: string;
 }
 
 /**
@@ -18,7 +23,7 @@ const INVITE_PLACEHOLDER = 'https://example.com/invite/aBc123Xy';
 
 type Tab = 'invite' | 'discover';
 
-export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerModalProps) {
+export function JoinServerModal({ isOpen, onClose, onServerJoined, initialCode }: JoinServerModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('invite');
     const [inviteCode, setInviteCode] = useState('');
     const [inviteInfo, setInviteInfo] = useState<InviteInfo | null>(null);
@@ -51,20 +56,20 @@ export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerM
         }
     };
 
-    const handleLookupInvite = async () => {
-        if (!inviteCode.trim()) return;
+    const handleLookupInvite = async (raw: string = inviteCode) => {
+        // A full link (any host — pre-0.9.2 desktops copied tauri.localhost
+        // links, and those must keep working) or a bare code.
+        const code = parseInviteCode(raw);
+        if (!code) {
+            if (raw.trim()) setError('That does not look like an invite link or code');
+            return;
+        }
 
         setIsLoading(true);
         setError(null);
         setInviteInfo(null);
 
         try {
-            // Extract code from URL if pasted
-            let code = inviteCode.trim();
-            if (code.includes('/invite/')) {
-                code = code.split('/invite/').pop() || code;
-            }
-
             const info = await getInviteInfo(code);
             setInviteInfo(info);
         } catch {
@@ -73,6 +78,17 @@ export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerM
             setIsLoading(false);
         }
     };
+
+    // An invite that arrived on a link: fill the field and look it up at once.
+    useEffect(() => {
+        if (!isOpen || !initialCode) return;
+        setActiveTab('invite');
+        setInviteCode(initialCode);
+        void handleLookupInvite(initialCode);
+        // handleLookupInvite is a plain closure over state setters; re-running
+        // on its identity would loop the lookup.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, initialCode]);
 
     const handleJoinViaInvite = async () => {
         if (!inviteInfo) return;
@@ -153,7 +169,7 @@ export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerM
                                     setInviteCode(e.target.value);
                                     setInviteInfo(null);
                                 }}
-                                onKeyDown={e => e.key === 'Enter' && handleLookupInvite()}
+                                onKeyDown={e => { if (e.key === 'Enter') void handleLookupInvite(); }}
                                 placeholder={INVITE_PLACEHOLDER}
                                 autoFocus
                             />
@@ -162,7 +178,7 @@ export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerM
                         {!inviteInfo ? (
                             <button
                                 className="join-btn lookup"
-                                onClick={handleLookupInvite}
+                                onClick={() => void handleLookupInvite()}
                                 disabled={!inviteCode.trim() || isLoading}
                             >
                                 {isLoading ? 'Looking up...' : 'Look Up Invite'}

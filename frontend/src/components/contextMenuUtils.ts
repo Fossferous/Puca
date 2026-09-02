@@ -292,6 +292,14 @@ export const menuItems = {
             icon: 'hash',
             onClick: () => navigator.clipboard.writeText(messageId),
         }),
+        // To this server's moderators (POST /servers/:id/reports). Only
+        // offered inside a server, on someone else's message.
+        report: (onReport: () => void): ContextMenuItem => ({
+            id: 'report-message',
+            label: 'Report Message',
+            icon: 'flag',
+            onClick: onReport,
+        }),
     },
     user: {
         profile: (onViewProfile: () => void): ContextMenuItem => ({

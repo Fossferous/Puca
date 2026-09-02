@@ -170,7 +170,7 @@ export function ClipApprovalPrompt() {
                     </p>
                     <p>If everyone approves it will be posted to <strong>#{shown.targetChannelName}</strong>.</p>
                     <p className="clip-approval-standing">
-                        <ShieldCheckIcon size={13} /> Nothing has been uploaded. The clip is only on {who}'s PC, and Puca deletes it there the moment anyone declines.
+                        <ShieldCheckIcon size={13} /> Nothing has been uploaded. The clip is only on {who}'s PC, and Púca deletes it there the moment anyone declines.
                     </p>
                     <details className="clip-approval-details">
                         <summary>Can I watch it first?</summary>

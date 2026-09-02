@@ -4,7 +4,7 @@
  * Background: WebView2 usually reports a generic surface id instead of the
  * shared window's title, so title matching (`matchedPid`) rarely fires. The
  * field-diagnosed 0.5.89 bug had the old "last app" fallback resolving to
- * Puca itself. The current logic adds the audio-activity signal
+ * Púca itself. The current logic adds the audio-activity signal
  * (has_active_audio = the app's process tree audibly playing sound), which is
  * what actually identifies the game in practice.
  */

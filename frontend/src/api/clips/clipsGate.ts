@@ -77,7 +77,7 @@ export function clipReasonCopy(reason: ClipDisabledReason | null): string {
         case 'not-in-voice': return 'Join a voice channel to arm the clip buffer.';
         case 'buffer-too-short': return 'Keep the buffer armed for a few more seconds.';
         case 'not-desktop': return 'Clips are recorded on the desktop app.';
-        case 'old-server': return 'This server is running an older version of Puca — clips are not available here.';
+        case 'old-server': return 'This server is running an older version of Púca — clips are not available here.';
         default: return '';
     }
 }

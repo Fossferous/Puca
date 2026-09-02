@@ -1,8 +1,8 @@
 /**
- * The "All system audio (except Puca)" option is REMOVED, permanently.
+ * The "All system audio (except Púca)" option is REMOVED, permanently.
  *
  * WASAPI's exclude-mode loopback only filters audio sessions created AFTER
- * the loopback client initialises. Puca's own voice call always predates
+ * the loopback client initialises. Púca's own voice call always predates
  * it (that was the whole point of the mode), so the call echoed straight back
  * into every stream and nothing on our side could prevent it. This test is
  * the tombstone: if the option ever reappears in the desktop picker, whoever

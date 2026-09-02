@@ -25,6 +25,8 @@ import { UpdateBanner } from './components/UpdateBanner';
 // lite build can alias the lot away — see components/RcGlobals.tsx.
 import { RcGlobals } from './components/RcGlobals';
 import { RecoveryCodeModal } from './components/RecoveryCodeModal';
+import { IdentityBanner } from './components/IdentityBanner';
+import { InviteLanding } from './components/InviteLanding';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
 import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipProposals } from './api/clips/clipProposals';
 import { API_BASE_URL } from './api/config';
@@ -306,7 +308,7 @@ function App() {
           <h2>{unreachable ? "Can't reach the server" : 'Live connection failed'}</h2>
           <p>
             {unreachable
-              ? "Puca couldn't reach the server. Check your internet connection — if that's fine, the server may be restarting."
+              ? "Púca couldn't reach the server. Check your internet connection — if that's fine, the server may be restarting."
               : 'Your session is valid and the server is responding, but the live connection could not be opened. This usually clears by itself.'}
           </p>
           <p className="connection-error-hint">
@@ -365,10 +367,15 @@ function App() {
         />
       } />
 
+      {/* Where an invite link lands. Stashes the code and sends the visitor
+          to sign in or straight into the join flow (InviteLanding). */}
+      <Route path="/invite/:code" element={<InviteLanding />} />
+
       <Route path="/chat" element={
         <RequireAuth>
           <div className="app">
             <UpdateBanner />
+            <IdentityBanner onSignOut={handleLogout} />
             <RecoveryCodeModal />
             <ClipApprovalPrompt />
             <RcGlobals />

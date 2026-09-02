@@ -236,9 +236,9 @@ export async function startGameAudioTrack(pid: number, onGameExited?: () => void
     return startCaptureTrack('start_app_audio_capture', { pid }, pid, onGameExited);
 }
 
-// startSystemAudioTrack ("all audio except Puca", WASAPI exclude-mode)
+// startSystemAudioTrack ("all audio except Púca", WASAPI exclude-mode)
 // is GONE. Exclude-mode only filters sessions created AFTER the loopback
-// client initialises, and Puca's own voice call always predates it — so
+// client initialises, and Púca's own voice call always predates it — so
 // the mode echoed the call into the stream and was unfixable from our side.
 // The mixer ('Selected apps') is the audio path now.
 

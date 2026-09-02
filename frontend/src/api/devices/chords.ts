@@ -6,7 +6,7 @@
  * Ctrl+Alt+Del deliberately does NOT go this way: Windows ignores injected
  * keys for the Secure Attention Sequence by design, and the old six-keystroke
  * version reported success while doing nothing. That one is a `{t:'sas'}`
- * frame the host routes to the Puca system service.
+ * frame the host routes to the Púca system service.
  */
 import { sendInput } from './session';
 

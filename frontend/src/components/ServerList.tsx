@@ -30,6 +30,12 @@ interface ServerListProps {
     showingFriends?: boolean;
     onShowFriends?: () => void;
     onInviteToServer?: (server: Server) => void;
+    /** Whether the signed-in user may create invites on the CURRENT server.
+     *  Undefined = unknown (another server's icon, channels not loaded, a
+     *  pre-permissions backend): the item stays, and the server remains the
+     *  authority. false hides it — offering an action that will 403 is not
+     *  a menu, it is a trap. */
+    canInviteCurrent?: boolean;
     onServerSettings?: (server: Server) => void;
     onLeaveServer?: (server: Server) => void;
     onDisbandServer?: (server: Server) => void;
@@ -67,6 +73,7 @@ export function ServerList({
     showingFriends = false,
     onShowFriends,
     onInviteToServer,
+    canInviteCurrent,
     onServerSettings,
     onLeaveServer,
     onDisbandServer,
@@ -409,12 +416,16 @@ export function ServerList({
                         Mark as Read
                     </div>
 
-                    <div className="context-menu-separator" />
+                    {!(contextMenu.server.id === currentServerId && canInviteCurrent === false) && (
+                        <>
+                            <div className="context-menu-separator" />
 
-                    <div className="context-menu-item" onClick={handleInvite}>
-                        <span className="menu-icon"><UserAddIcon /></span>
-                        Invite People
-                    </div>
+                            <div className="context-menu-item" onClick={handleInvite}>
+                                <span className="menu-icon"><UserAddIcon /></span>
+                                Invite People
+                            </div>
+                        </>
+                    )}
 
                     <div className="context-menu-separator" />
 

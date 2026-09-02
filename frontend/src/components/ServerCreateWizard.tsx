@@ -2,10 +2,20 @@ import { useState } from 'react';
 import { Icon, type IconName, ArrowLeftIcon, ChevronRightIcon, CloseIcon, GlobeIcon, ImageIcon, MembersIcon } from './Icons';
 import './ServerCreateWizard.css';
 
+/** Everything the wizard collected. Every field is acted on (api/serverTemplates.ts). */
+export interface WizardResult {
+    name: string;
+    /** A key of SERVER_TEMPLATES; 'custom' keeps the stock channels. */
+    template: string;
+    /** List in the public directory — explicit, default off. */
+    isPublic: boolean;
+    iconFile: File | null;
+}
+
 interface ServerCreateWizardProps {
     isOpen: boolean;
     onClose: () => void;
-    onComplete: (serverName: string, template: string, audience: string) => void;
+    onComplete: (result: WizardResult) => void;
     /** "Have an invite already?" — close this wizard and open the join modal. */
     onJoinInstead: () => void;
 }
@@ -33,6 +43,10 @@ export function ServerCreateWizard({ isOpen, onClose, onComplete, onJoinInstead 
     const [audience, setAudience] = useState<'community' | 'friends'>('friends');
     const [serverName, setServerName] = useState('');
     const [serverIcon, setServerIcon] = useState<string | null>(null);
+    const [iconFile, setIconFile] = useState<File | null>(null);
+    // "For a club or community" does not publish anything by itself: listing
+    // a server in the public directory is a separate, explicit tick.
+    const [listPublicly, setListPublicly] = useState(false);
 
     const resetWizard = () => {
         setStep('template');
@@ -40,6 +54,8 @@ export function ServerCreateWizard({ isOpen, onClose, onComplete, onJoinInstead 
         setAudience('friends');
         setServerName('');
         setServerIcon(null);
+        setIconFile(null);
+        setListPublicly(false);
     };
 
     const handleClose = () => {
@@ -69,14 +85,20 @@ export function ServerCreateWizard({ isOpen, onClose, onComplete, onJoinInstead 
 
     const handleCreate = () => {
         if (serverName.trim()) {
-            onComplete(serverName.trim(), selectedTemplate, audience);
+            onComplete({
+                name: serverName.trim(),
+                template: selectedTemplate,
+                isPublic: audience === 'community' && listPublicly,
+                iconFile,
+            });
             handleClose();
         }
     };
 
     const handleIconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
-        if (file) {
+        if (file && file.type.startsWith('image/')) {
+            setIconFile(file);
             const reader = new FileReader();
             reader.onload = (event) => {
                 setServerIcon(event.target?.result as string);
@@ -205,9 +227,19 @@ export function ServerCreateWizard({ isOpen, onClose, onComplete, onJoinInstead 
                             />
                         </div>
 
-                        <p className="terms-note">
-                            By creating a server, you agree to our Community Guidelines.
-                        </p>
+                        {audience === 'community' && (
+                            <label className="wizard-public-toggle">
+                                <input
+                                    type="checkbox"
+                                    checked={listPublicly}
+                                    onChange={e => setListPublicly(e.target.checked)}
+                                />
+                                <span>
+                                    <strong>List in the public directory</strong>
+                                    <small>Anyone on this server's instance can find and join it. Off, it stays invite-only. You can change this in Server Settings.</small>
+                                </span>
+                            </label>
+                        )}
 
                         <div className="wizard-actions">
                             <button className="back-btn" onClick={handleBack}>Back</button>

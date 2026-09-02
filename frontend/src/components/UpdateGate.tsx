@@ -244,7 +244,7 @@ export function UpdateGate({ children }: UpdateGateProps) {
             setState(s => ({
                 ...s,
                 status: 'error',
-                error: 'This update could not be installed. On Windows this usually means the installer could not replace the running app — close Puca and run the installer yourself, as administrator if it asks. You can also continue on the current version.',
+                error: 'This update could not be installed. On Windows this usually means the installer could not replace the running app — close Púca and run the installer yourself, as administrator if it asks. You can also continue on the current version.',
             }));
         } finally {
             clearInterval(stallWatchdog);
@@ -504,7 +504,7 @@ export function UpdateGate({ children }: UpdateGateProps) {
             <div className="update-gate">
                 <div className="update-gate-content">
                     <div className="update-logo"><CrownIcon size={64} /></div>
-                    <h2>Puca</h2>
+                    <h2>Púca</h2>
                     <div className="update-spinner" />
                     <p>Checking for updates...</p>
                 </div>

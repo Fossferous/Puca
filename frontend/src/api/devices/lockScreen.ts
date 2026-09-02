@@ -1,7 +1,7 @@
 /**
  * Lock-screen access — the opt-in.
  *
- * OFF UNLESS SOMEBODY TURNS IT ON. Installing Puca registers no service,
+ * OFF UNLESS SOMEBODY TURNS IT ON. Installing Púca registers no service,
  * creates nothing under Program Files, and raises no elevation prompt. This
  * module is the only route to any of that, and it exists behind a switch the
  * owner has to find and flip. A LocalSystem service arriving with a routine app
@@ -304,7 +304,7 @@ export async function enrolLockScreenAccess(name?: string): Promise<string | nul
 
     const identity = getActiveIdentity();
     if (!identity) {
-        return 'Unlock Puca on this computer first — enrolling has to sign with your account key.';
+        return 'Unlock Púca on this computer first — enrolling has to sign with your account key.';
     }
     const token = getToken();
     if (!token) return 'Sign in first: this computer needs a copy of the session to connect.';

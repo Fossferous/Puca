@@ -115,3 +115,16 @@
 .recovery-done-btn:not(:disabled):hover {
     background: #4752c4;
 }
+
+.recovery-reminder-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+.recovery-reminder-actions .recovery-copy-btn,
+.recovery-reminder-actions .recovery-done-btn {
+    width: auto;
+    margin: 0;
+}

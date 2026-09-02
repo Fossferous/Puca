@@ -160,7 +160,7 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                 </div>
             )}
             <p className="settings-description">
-                While the buffer is armed, everyone in the call sees a marker next to your name. The buffer lives in this app’s memory, encrypted, and is never written to disk. Closing Puca, disarming, leaving the call, or the system locking or sleeping erases it. Nothing is uploaded until every person in the clip approves.
+                While the buffer is armed, everyone in the call sees a marker next to your name. The buffer lives in this app’s memory, encrypted, and is never written to disk. Closing Púca, disarming, leaving the call, or the system locking or sleeping erases it. Nothing is uploaded until every person in the clip approves.
             </p>
         </div>
     );

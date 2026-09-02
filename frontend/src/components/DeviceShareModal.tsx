@@ -48,7 +48,7 @@ function statusLabel(s: DeviceShare, onHost: boolean): string {
         // there, not for the device to "come online and self-sign".
         return onHost
             ? 'Accepted — confirm below to activate'
-            : 'Accepted — open Puca on the shared device to activate';
+            : 'Accepted — open Púca on the shared device to activate';
     }
     return 'Active';
 }
@@ -277,7 +277,7 @@ export function DeviceShareModal({ device, onClose }: { device: VerifiedDevice; 
                         {!onHost && (
                             <p className="share-modal-hint">
                                 You are inviting from a different device. After they accept,
-                                open Puca on “{device.name}” and confirm the share there —
+                                open Púca on “{device.name}” and confirm the share there —
                                 only that device can activate it.
                             </p>
                         )}

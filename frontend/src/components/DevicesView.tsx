@@ -41,7 +41,7 @@
  *   - waking needs a SECOND machine already awake on that subnet;
  *   - a phone or browser tab can press the button but cannot be the waker;
  *   - autostart fires at USER SIGN-IN, not at boot, so a machine that was
- *     fully shut down stops at the Windows sign-in screen with Puca not
+ *     fully shut down stops at the Windows sign-in screen with Púca not
  *     running — resume-from-sleep is the case that works end to end;
  *   - nobody at the keyboard means unattended access must already be armed on
  *     that machine.
@@ -1072,7 +1072,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                 <span className="devices-empty-icon" aria-hidden="true"><MonitorIcon size={40} /></span>
                                 <strong>No devices enrolled yet.</strong>
                                 <p>
-                                    Sign in to Puca on another computer or phone and it will
+                                    Sign in to Púca on another computer or phone and it will
                                     appear here — each device gets its own key, so you can revoke
                                     one without touching the others.
                                 </p>
@@ -1101,7 +1101,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                 // reachable, and this device cannot wake itself.
                                 //
                                 // A MAC IS ALSO REQUIRED. Without one `planWake`
-                                // can only dead-end on "Puca has not
+                                // can only dead-end on "Púca has not
                                 // recorded its network details yet", so the
                                 // button was offered on rows where it could
                                 // never do anything — which is exactly what the
@@ -1491,10 +1491,10 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                         one in the larger type. What it actually writes is
                                         HKCU\...\Run, which by construction cannot run before
                                         somebody signs in to that account. */}
-                                    <label htmlFor="device-autostart">Start Puca when you sign in to this computer</label>
+                                    <label htmlFor="device-autostart">Start Púca when you sign in to this computer</label>
                                     <span className="option-hint">
                                         Required for this device to be reachable without someone opening
-                                        Puca first. It starts minimised to the tray, and the tray icon
+                                        Púca first. It starts minimised to the tray, and the tray icon
                                         shows whenever a session is active. It does not run at boot &mdash;
                                         see &ldquo;to reach this computer after a restart&rdquo; below.
                                     </span>
@@ -1540,7 +1540,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                         {/* THE COLD-BOOT GAP, stated where someone can act on it.
                             Autostart writes HKCU\...\Run, so it cannot fire before a
                             sign-in; a fully shut-down machine therefore sits at the
-                            sign-in screen with Puca not running, and no amount of
+                            sign-in screen with Púca not running, and no amount of
                             waking changes that. The two settings below close it by
                             leaving the machine SIGNED IN; the lock-screen option further
                             down closes it while the machine stays LOCKED, which is why
@@ -1554,7 +1554,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                             <div className="dv-card device-wake-note">
                                 <strong>To reach this computer after a restart</strong>
                                 <br />
-                                Puca starts when you sign in, so a computer that was fully shut
+                                Púca starts when you sign in, so a computer that was fully shut
                                 down waits at the Windows sign-in screen with nothing running. Two
                                 Windows settings close that gap, and neither can be changed from
                                 here:
@@ -1569,7 +1569,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                 <strong>After a full shutdown.</strong> Turn on Windows automatic
                                 sign-in (run <code>netplwiz</code> and untick &ldquo;Users must enter
                                 a user name and password&rdquo;). Windows then signs in by itself at
-                                boot and Puca starts with it.
+                                boot and Púca starts with it.
                                 <br /><br />
                                 <strong>What both of these cost.</strong> The computer ends up sitting
                                 at an unlocked desktop, so anyone who can physically reach it has your
@@ -1585,7 +1585,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
 
                         {/* LOCK-SCREEN ACCESS — the opt-in.
                             Nothing about this feature exists on a machine until
-                            this switch is turned on. Installing Puca
+                            this switch is turned on. Installing Púca
                             registers no service, writes nothing to Program
                             Files, and raises no elevation prompt.
 
@@ -1600,7 +1600,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                         Let me reach this computer&rsquo;s lock screen
                                     </label>
                                     <span className="option-hint">
-                                        Normally Puca cannot see the Windows lock screen,
+                                        Normally Púca cannot see the Windows lock screen,
                                         the sign-in screen, or administrator prompts &mdash; Windows
                                         puts those out of reach of ordinary programs, deliberately.
                                         Turning this on installs a small Windows service that can,
@@ -1782,7 +1782,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                     <label>Sign-in-screen service update</label>
                                     <span className="option-hint">
                                         This computer&rsquo;s sign-in-screen service is from an
-                                        older version of Puca than the app. Some newer
+                                        older version of Púca than the app. Some newer
                                         features &mdash; like showing this PC as one device
                                         instead of two, and waking it from fully off &mdash;
                                         need them to match. Updating keeps the connection,
@@ -1813,7 +1813,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                         place. You will be asked for it on the device you
                                         connect FROM, every time.
                                         <br /><br />
-                                        It is not your Windows password and not your Puca
+                                        It is not your Windows password and not your Púca
                                         password. It never leaves the device you type it on
                                         &mdash; this computer only stores enough to check it.
                                         There is no way to recover it: if you forget it, set a
