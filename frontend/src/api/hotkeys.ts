@@ -20,15 +20,35 @@
  *
  * Two feeds, one registry:
  *  - the in-app window keydown/keyup pair below (always on), and
- *  - the NATIVE feed (desktop only): a Rust WH_KEYBOARD_LL hook that reports
- *    watched-key transitions system-wide, so push-to-talk keeps working while
- *    a fullscreen game has focus. startNativeFeed()/stopNativeFeed() manage
- *    it; events are dropped while Púca has focus (the in-app listener
- *    already saw the same physical keys — processing both would double-fire).
+ *  - the NATIVE feed (desktop only): the Rust hooks plus key-state poll in
+ *    src-tauri/src/hotkeys.rs report watched-key transitions system-wide, so
+ *    push-to-talk keeps working while a fullscreen game has focus.
+ *    startNativeFeed()/stopNativeFeed() manage it.
+ *
+ * Who owns what while the native feed is LIVE. It sees every transition of
+ * a watched key, including the ones typed into this window, so:
+ *  - PRESS actions it covers are dispatched from the native feed ONLY; the
+ *    in-app listener still swallows the keystroke (preventDefault) but does
+ *    not fire the action. One owner, so a toggle can never fire twice for
+ *    one keystroke — and no focus test decides anything. The previous rule
+ *    dropped native events while `document.hasFocus()` was true, an answer
+ *    the WebView gives from its own bookkeeping (forced true under a
+ *    debugger, not the OS's view of the foreground window); whenever it was
+ *    wrong, every hotkey was dead in the game. The native event now carries
+ *    `foreground` from GetForegroundWindow, used only for the editable-
+ *    target rule (a plain key typed into the composer is typing).
+ *  - HOLD actions are dispatched by both feeds; `held` makes that
+ *    idempotent, and a release is honoured from whichever feed sees it
+ *    (press in the game, release after alt-tabbing back, or the reverse).
+ *
+ * The native feed also reports when capture is IMPOSSIBLE: the foreground
+ * window belongs to a process running above ours (a game launched "as
+ * administrator"), whose input Windows routes to no lower process by any
+ * method. captureBlocker()/onCaptureBlockerChange() expose that to the UI.
  */
 import type { KeyBinding } from '../components/settingsStore';
 import { isTauri } from './platform';
-import { BUTTON_TO_VK, VK_LBUTTON } from './inputCodes';
+import { BUTTON_TO_VK, VK_LBUTTON, isMouseVk } from './inputCodes';
 
 type HoldHandler = {
     onDown: () => void;
@@ -145,7 +165,7 @@ function onKeyDown(e: KeyboardEvent): void {
         }
     }
     if (e.repeat) return;
-    for (const entry of pressActions.values()) {
+    for (const [id, entry] of pressActions) {
         const b = entry.getBinding();
         // eventMatchesBinding already rejects an unbound action, so b is real
         // past this point — but narrow it explicitly rather than assert.
@@ -156,9 +176,37 @@ function onKeyDown(e: KeyboardEvent): void {
         const hasModifier = b.ctrl || b.alt;
         if (isEditableTarget(e.target) && !hasModifier) continue;
         e.preventDefault();
+        // The keystroke is still swallowed above; the ACTION belongs to the
+        // native feed when it is live, which saw this very key-down through
+        // the hook. Firing here too would toggle twice.
+        if (nativeOwnsPress(id)) continue;
         entry.onPress();
     }
 }
+
+/**
+ * Whether a live native feed dispatches this press action — in which case
+ * the in-app listeners must not, or one keystroke fires it twice.
+ *
+ * `nativeAllow` is the set the native side has CONFIRMED it is watching, not
+ * the set we asked for: a start widens it only once the hook is really
+ * looking at those keys, so the in-app feed keeps a press it would otherwise
+ * hand to a hook that has not been told about it yet.
+ */
+function nativeOwnsPress(id: string): boolean {
+    const owned = nativeFeedActive && nativeAllow !== null && nativeAllow.has(id);
+    if (owned) ownershipDeferrals++;
+    return owned;
+}
+
+/**
+ * Presses the in-app feed stood down from, and presses the native feed
+ * actually dispatched. In the diag side by side: if the first climbs while
+ * the second does not, the native side has gone silent and the ownership
+ * rule is eating keystrokes — the one failure this design can have.
+ */
+let ownershipDeferrals = 0;
+let nativeDispatches = 0;
 
 function onKeyUp(e: KeyboardEvent): void {
     if (captureMode) return;
@@ -211,10 +259,10 @@ function onMouseDown(e: MouseEvent): void {
             matched = true;
         }
     }
-    for (const entry of pressActions.values()) {
+    for (const [id, entry] of pressActions) {
         if (eventMatchesBinding(evt, entry.getBinding())) {
-            entry.onPress();
-            matched = true;
+            matched = true; // swallowed either way; fired by ONE owner
+            if (!nativeOwnsPress(id)) entry.onPress();
         }
     }
     if (!matched) {
@@ -335,7 +383,10 @@ export function unregisterPress(id: string): void {
  */
 export function nativeKeyEvent(kind: 'down' | 'up', key: {
     keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean;
-}, only?: Set<string>): void {
+}, only?: Set<string>, opts?: {
+    /** Our window was the OS foreground window when the edge was delivered. */
+    foreground?: boolean;
+}): void {
     // Same suspension as the in-app feed: a key pressed to BE a binding must
     // not also run the action it is replacing.
     if (captureMode) return;
@@ -359,7 +410,30 @@ export function nativeKeyEvent(kind: 'down' | 'up', key: {
             // "hotkeys sometimes work, sometimes don't". Same rationale as
             // the hold actions' long-standing subset rule, applied to the
             // same situation.
-            if (eventMatchesBinding(key, entry.getBinding(), 'subset')) entry.onPress();
+            const b = entry.getBinding();
+            // SUBSET only when the app is NOT in front. Subset exists for the
+            // game case above; applied while Púca is the foreground window it
+            // makes this feed fire bindings the in-app listener would have
+            // rejected — press Ctrl+Shift+D for a Ctrl+Shift+D action and a
+            // bare-D action fires too, so one keystroke runs two commands.
+            // In front, match exactly what the in-app listener would.
+            if (!b || !eventMatchesBinding(key, b, opts?.foreground ? 'exact' : 'subset')) continue;
+            // The in-app listener's editable-target rule, decided from the
+            // OS's answer about the foreground window rather than from the
+            // WebView's idea of focus: with Púca in front and the caret in
+            // the composer, a plain bound letter is typing, not a command.
+            // Ctrl/Alt combos fire regardless, exactly as in-app.
+            //
+            // MOUSE BUTTONS ARE EXEMPT. A button never types a character, so
+            // the rule has nothing to say about it — and the in-app mouse
+            // path has no such rule either. Applying it here made a
+            // mouse-bound toggle dead whenever the caret sat in the
+            // composer: in-app deferred to this feed, and this feed vetoed
+            // it as "typing", so neither owner fired.
+            if (opts?.foreground && !isMouseVk(b.keyCode) && typeof document !== 'undefined'
+                && isEditableTarget(document.activeElement) && !(b.ctrl || b.alt)) continue;
+            nativeDispatches++;
+            entry.onPress();
         }
     } else {
         for (const [id, entry] of holdActions) {
@@ -376,7 +450,67 @@ export function nativeKeyEvent(kind: 'down' | 'up', key: {
 
 let nativeFeedActive = false;
 let nativeUnlisten: (() => void) | null = null;
+let blockedUnlisten: (() => void) | null = null;
 let nativeAllow: Set<string> | null = null;
+
+// --- Capture blocker (UIPI) --------------------------------------------------
+//
+// The native side polls the foreground process while the feed is live and
+// reports the executable name when that process runs ABOVE our integrity
+// level (launched "as administrator"). Windows routes none of its input to
+// a lower process — hooks, raw input and the key-state table are all blind
+// — so voice hotkeys cannot work while it is in front, and nothing here can
+// change that. The UI shows it (HotkeyBlockedBanner) so the user learns the
+// cause the moment they come back to Púca asking why the mic stayed shut.
+
+let captureBlockerName = '';
+const blockerListeners = new Set<(process: string) => void>();
+
+function setCaptureBlocker(process: string): void {
+    if (process === captureBlockerName) return;
+    captureBlockerName = process;
+    if (process) {
+        console.warn(`[hotkeys] ${process} runs above our integrity level: Windows hides its input from every capture method; voice hotkeys cannot work while it is in front`);
+    } else {
+        console.log('[hotkeys] foreground input reachable again');
+    }
+    for (const cb of blockerListeners) cb(process);
+}
+
+/**
+ * What the `global-hotkey` listener does with one payload — a named function
+ * so the rule can be tested without a Tauri runtime. The old focus gate lived
+ * exactly here (`if (document.hasFocus()) return;`), where no test could see
+ * it; that is why every hotkey could die in a game with the suite green.
+ *
+ * Nothing is dropped for focus. Events are dropped only when the feed is not
+ * live, or before a start has been confirmed — `nativeAllow === null` there,
+ * and dispatching with no allow-list would fire EVERY registered action,
+ * including the in-app-only ones this feed must never touch.
+ */
+export function handleNativeHotkeyPayload(payload: {
+    keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean;
+    down: boolean; foreground?: boolean;
+}): void {
+    if (!nativeFeedActive || nativeAllow === null) return;
+    // Low-volume by construction (watched keys only, edges only): this line
+    // is the observable a live verification reads.
+    console.log('[hotkeys] native', payload.down ? 'down' : 'up', payload.keyCode,
+        payload.foreground ? '(app in front)' : '');
+    nativeKeyEvent(payload.down ? 'down' : 'up', payload, nativeAllow,
+        { foreground: payload.foreground === true });
+}
+
+/** The foreground process whose input is invisible to us (runs elevated), or ''. */
+export function captureBlocker(): string {
+    return captureBlockerName;
+}
+
+/** Subscribe to blocker changes; returns the unsubscribe. */
+export function onCaptureBlockerChange(cb: (process: string) => void): () => void {
+    blockerListeners.add(cb);
+    return () => { blockerListeners.delete(cb); };
+}
 /** In-flight start, so overlapping calls can't double-register a listener. */
 let nativeStartInFlight: Promise<void> | null = null;
 /** Bumped per start; a call superseded while awaiting the previous one bails. */
@@ -431,7 +565,14 @@ export function setNativeFeedHost(provider: (() => NativeFeedHostSnapshot) | nul
 export async function startNativeFeed(actionIds: string[], watchedKeys: number[]): Promise<void> {
     if (!isTauri()) return;
     lastRequested = { ids: [...actionIds], keys: [...watchedKeys] };
-    nativeAllow = new Set(actionIds);
+    // NARROW now, WIDEN on acknowledgement. An action that is no longer
+    // covered must return to the in-app feed immediately; one that is newly
+    // covered must stay with the in-app feed until the hook has actually
+    // been told to watch its key, or the in-app listener stands down for a
+    // press nothing else is listening for (the clip key gaining coverage
+    // mid-call, a rebind, a reconfigure — all real paths).
+    const wanted = new Set(actionIds);
+    if (nativeAllow) nativeAllow = new Set([...nativeAllow].filter(id => wanted.has(id)));
     // Serialize overlapping starts. A settings save can fire start #1 while a
     // React effect re-run fires stop + start #2 in the same task, and both
     // would see nativeUnlisten === null across their awaits and register a
@@ -457,26 +598,42 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
             nativeFeedActive = false;
             return;
         }
-        if (!nativeUnlisten) {
-            const { listen } = await import('@tauri-apps/api/event');
-            nativeUnlisten = await listen<{
-                keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; down: boolean;
-            }>('global-hotkey', (e) => {
-                if (!nativeFeedActive) return;
-                // Log BEFORE the focus gate (low-volume by construction:
-                // watched keys only, edges only). This is the observable a live
-                // verification needs — and note a CDP-attached debugger
-                // (Playwright) force-emulates focus, which makes hasFocus()
-                // lie `true`; keep that in mind when reading these lines.
-                const suppressed = document.hasFocus();
-                console.log('[hotkeys] native', e.payload.down ? 'down' : 'up', e.payload.keyCode,
-                    suppressed ? '(suppressed: app focused)' : '');
-                // Focus dedupe: while Púca has focus the in-app listener
-                // saw the same physical key — process each press exactly once.
-                if (suppressed) return;
-                nativeKeyEvent(e.payload.down ? 'down' : 'up', e.payload, nativeAllow ?? undefined);
-            });
+        // Superseded while the command was in flight (a stop, or a newer
+        // start): this request owns nothing. Without this the IIFE ran on
+        // past its own stop — resurrecting nativeFeedActive over a torn-down
+        // hook, and registering a listener nothing could ever remove.
+        if (gen !== nativeFeedGeneration) {
+            recordFeed('start', 'superseded after invoke', { ids: actionIds, keys: watchedKeys }, 'skipped');
+            return;
         }
+        if (!nativeUnlisten || !blockedUnlisten) {
+            const { listen } = await import('@tauri-apps/api/event');
+            if (!nativeUnlisten) {
+                const un = await listen<{
+                    keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean;
+                    down: boolean; foreground: boolean;
+                }>('global-hotkey', (e) => handleNativeHotkeyPayload(e.payload));
+                // Never overwrite a live handle: the overwritten one stays
+                // subscribed and unreachable, and every key is then
+                // dispatched twice — a toggle mutes and instantly unmutes.
+                if (gen !== nativeFeedGeneration || nativeUnlisten) un();
+                else nativeUnlisten = un;
+            }
+            if (!blockedUnlisten) {
+                const un = await listen<{ process: string }>('global-hotkey-blocked', (e) => {
+                    setCaptureBlocker(typeof e.payload?.process === 'string' ? e.payload.process : '');
+                });
+                if (gen !== nativeFeedGeneration || blockedUnlisten) un();
+                else blockedUnlisten = un;
+            }
+            if (gen !== nativeFeedGeneration) {
+                recordFeed('start', 'superseded while subscribing', { ids: actionIds, keys: watchedKeys }, 'skipped');
+                return;
+            }
+        }
+        // Acknowledged: the hook is watching these keys, so the native feed
+        // may now own their press actions.
+        nativeAllow = wanted;
         nativeFeedActive = true;
         // Pairs, not bare VKs: the reader wants to know WHICH action a key is for.
         console.log('[hotkeys] native feed watching:', actionIds.map((id, i) => `${id}=${watchedKeys[i]}`).join(' '));
@@ -512,6 +669,13 @@ export async function stopNativeFeed(reason = 'unspecified'): Promise<void> {
         nativeUnlisten();
         nativeUnlisten = null;
     }
+    if (blockedUnlisten) {
+        blockedUnlisten();
+        blockedUnlisten = null;
+    }
+    // The native side forgets the blocker with the feed; so do we, or the
+    // banner would outlive the call it was about.
+    setCaptureBlocker('');
     // No feed can see further keyups — never leave a hold stuck.
     releaseAll();
     try {
@@ -530,6 +694,31 @@ export function resetHotkeysForTest(): void {
     nativeFeedActive = false;
     nativeAllow = null;
     captureMode = false;
+    setCaptureBlocker('');
+    // Module state that outlived a reset and leaked between tests: a
+    // subscriber for an unmounted banner, a mouse follow-up window, a
+    // start still in flight.
+    blockerListeners.clear();
+    recentMouseMatch.clear();
+    nativeStartInFlight = null;
+    lastRequested = null;
+    feedLog.length = 0;
+    ownershipDeferrals = 0;
+    nativeDispatches = 0;
+}
+
+/**
+ * Test hook: pretend the native feed is live for these action ids (or not),
+ * without a Tauri runtime. What startNativeFeed() sets on success.
+ */
+export function setNativeFeedStateForTest(active: boolean, allow: string[] | null): void {
+    nativeFeedActive = active;
+    nativeAllow = allow ? new Set(allow) : null;
+}
+
+/** Test hook: what the `global-hotkey-blocked` listener does with a payload. */
+export function setCaptureBlockerForTest(process: string): void {
+    setCaptureBlocker(process);
 }
 
 // Read-only diagnostics for live verification (devtools/CDP): whether the
@@ -592,6 +781,14 @@ if (typeof window !== 'undefined') {
                     requested: lastRequested,
                     allowed: nativeAllow ? [...nativeAllow] : null,
                     registered: { hold: [...holdActions.keys()], press: [...pressActions.keys()] },
+                    // Non-empty: the app in front runs elevated; no capture
+                    // method can see its keys. Not a fault in the feed.
+                    blocker: captureBlockerName,
+                    // Presses the in-app feed handed to the native feed, and
+                    // presses the native feed actually fired. The first
+                    // climbing alone means the native side went quiet.
+                    ownershipDeferrals,
+                    nativeDispatches,
                 },
                 log: [...feedLog],
                 native: await nativeDiag(),

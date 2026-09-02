@@ -8,6 +8,11 @@ import {
     registerPress,
     resetHotkeysForTest,
     nativeKeyEvent,
+    setNativeFeedStateForTest,
+    handleNativeHotkeyPayload,
+    captureBlocker,
+    onCaptureBlockerChange,
+    setCaptureBlockerForTest,
 } from '../api/hotkeys';
 import type { KeyBinding } from '../components/settingsStore';
 
@@ -253,8 +258,244 @@ describe('unbound keybinds', () => {
     it('ignores the native feed for an unbound action', () => {
         let downs = 0;
         registerHold('test.unboundNative', () => null, { onDown: () => downs++, onUp: () => { } });
-        nativeKeyEvent({ keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false, down: true });
+        // (Was called with the wrong signature — one object — which routed
+        // to the 'up' branch and could never have fired anything.)
+        nativeKeyEvent('down', { keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false });
         expect(downs).toBe(0);
         unregisterHold('test.unboundNative');
+    });
+});
+
+describe('press ownership while the native feed is live', () => {
+    afterEach(() => resetHotkeysForTest());
+
+    it('positive control: without a native feed, the in-app keydown fires a press', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => CTRL_M, () => presses++);
+        key('keydown', 77, { ctrlKey: true });
+        expect(presses).toBe(1);
+    });
+
+    it('the in-app keydown swallows the key but leaves the ACTION to the native feed', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => CTRL_M, () => presses++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ctrlKey: true });
+        Object.defineProperty(e, 'keyCode', { value: 77 });
+        window.dispatchEvent(e);
+        expect(presses, 'one keystroke must not toggle twice: native owns it').toBe(0);
+        expect(e.defaultPrevented, 'the keystroke is still swallowed in-app').toBe(true);
+        // The native feed then delivers the same key-down: exactly one fire.
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false },
+            new Set(['voice.toggleMute']), { foreground: true });
+        expect(presses).toBe(1);
+    });
+
+    it('a press the native feed does NOT cover still fires in-app', () => {
+        let presses = 0;
+        registerPress('app.other', () => CTRL_M, () => presses++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        key('keydown', 77, { ctrlKey: true });
+        expect(presses).toBe(1);
+    });
+
+    it('holds are dispatched by both feeds and stay idempotent', () => {
+        let downs = 0, ups = 0;
+        registerHold('voice.ptt', () => SPACE, { onDown: () => downs++, onUp: () => ups++ });
+        setNativeFeedStateForTest(true, ['voice.ptt']);
+        key('keydown', 32);                       // in-app sees the press first
+        nativeKeyEvent('down', { keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false },
+            new Set(['voice.ptt']), { foreground: true });
+        expect(downs).toBe(1);
+        // Released after alt-tabbing away: only the native feed sees it.
+        nativeKeyEvent('up', { keyCode: 32, ctrlKey: false, altKey: false, shiftKey: false },
+            new Set(['voice.ptt']), { foreground: false });
+        expect(ups).toBe(1);
+        key('keyup', 32);                         // a late in-app keyup is harmless
+        expect(ups).toBe(1);
+    });
+
+    it('a native press is NEVER dropped for the app being in front (the old focus rule)', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => CTRL_M, () => presses++);
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false },
+            undefined, { foreground: true });
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false },
+            undefined, { foreground: false });
+        expect(presses).toBe(2);
+    });
+
+    it('in front with the caret in an editable field, a PLAIN bound key is typing', () => {
+        const M: KeyBinding = { keyCode: 77, ctrl: false, alt: false, shift: false, label: 'M' };
+        let presses = 0;
+        registerPress('voice.toggleMute', () => M, () => presses++);
+        const input = document.createElement('input');
+        document.body.appendChild(input);
+        input.focus();
+        expect(document.activeElement).toBe(input);
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: false, altKey: false, shiftKey: false },
+            undefined, { foreground: true });
+        expect(presses, 'typing an M into the composer must not toggle the mic').toBe(0);
+        // The same key from a game (not in front) is the hotkey.
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: false, altKey: false, shiftKey: false },
+            undefined, { foreground: false });
+        expect(presses).toBe(1);
+        // And a Ctrl combo fires even from the composer, as in-app.
+        registerPress('voice.toggleDeafen', () => CTRL_M, () => presses++);
+        nativeKeyEvent('down', { keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false },
+            undefined, { foreground: true });
+        expect(presses).toBe(2);
+        input.remove();
+    });
+});
+
+describe('capture blocker (elevated foreground process)', () => {
+    afterEach(() => resetHotkeysForTest());
+
+    it('reports the process, notifies on change only, and clears', () => {
+        const seen: string[] = [];
+        const off = onCaptureBlockerChange(p => seen.push(p));
+        expect(captureBlocker()).toBe('');
+        setCaptureBlockerForTest('game.exe');
+        setCaptureBlockerForTest('game.exe'); // same answer: no second notification
+        expect(captureBlocker()).toBe('game.exe');
+        setCaptureBlockerForTest('');
+        expect(captureBlocker()).toBe('');
+        expect(seen).toEqual(['game.exe', '']);
+        off();
+        setCaptureBlockerForTest('other.exe');
+        expect(seen, 'unsubscribed').toEqual(['game.exe', '']);
+    });
+});
+
+// The two rules above, exercised through the PAYLOAD HANDLER the Tauri
+// listener actually calls, and on MOUSE bindings — the two places where the
+// suite could previously go green over a broken feed. The old focus gate
+// lived inside the listener callback, not in nativeKeyEvent, so a test that
+// called nativeKeyEvent directly could not see it come back.
+describe('the native payload handler (what the Tauri listener calls)', () => {
+    afterEach(() => resetHotkeysForTest());
+
+    const payload = (over: Partial<{ keyCode: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; down: boolean; foreground: boolean }> = {}) => ({
+        keyCode: 77, ctrlKey: true, altKey: false, shiftKey: false, down: true, foreground: false, ...over,
+    });
+
+    it('dispatches whether or not Púca is the foreground window', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => CTRL_M, () => presses++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        handleNativeHotkeyPayload(payload({ foreground: false }));
+        handleNativeHotkeyPayload(payload({ foreground: true }));
+        expect(presses, 'a focus test here is exactly what killed hotkeys in a game').toBe(2);
+    });
+
+    it('drops everything while the feed is not live', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => CTRL_M, () => presses++);
+        setNativeFeedStateForTest(false, ['voice.toggleMute']);
+        handleNativeHotkeyPayload(payload());
+        expect(presses).toBe(0);
+    });
+
+    it('drops everything before a start is acknowledged (no allow-list)', () => {
+        // nativeAllow null with the feed live would dispatch to EVERY
+        // registered action — including in-app-only ones this feed must
+        // never touch.
+        let presses = 0;
+        registerPress('app.openSettings', () => CTRL_M, () => presses++);
+        setNativeFeedStateForTest(true, null);
+        handleNativeHotkeyPayload(payload());
+        expect(presses).toBe(0);
+    });
+
+    it('only fires the actions the feed covers', () => {
+        let mine = 0, theirs = 0;
+        registerPress('voice.toggleMute', () => CTRL_M, () => mine++);
+        registerPress('app.openSettings', () => CTRL_M, () => theirs++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        handleNativeHotkeyPayload(payload());
+        expect(mine).toBe(1);
+        expect(theirs, 'an in-app-only action must never fire from the global hook').toBe(0);
+    });
+});
+
+describe('mouse-bound press actions and the native feed', () => {
+    afterEach(() => resetHotkeysForTest());
+
+    const MOUSE4: KeyBinding = { keyCode: 5, ctrl: false, alt: false, shift: false, label: 'Mouse 4' };
+    const clickMouse4 = () => {
+        const e = new MouseEvent('mousedown', { button: 3, bubbles: true, cancelable: true });
+        window.dispatchEvent(e);
+        return e;
+    };
+
+    it('positive control: with no native feed, a click fires the press', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => MOUSE4, () => presses++);
+        clickMouse4();
+        expect(presses).toBe(1);
+    });
+
+    it('one click does not toggle twice while the feed is live', () => {
+        let presses = 0;
+        registerPress('voice.toggleMute', () => MOUSE4, () => presses++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        const e = clickMouse4();
+        expect(presses, 'the in-app path must leave the action to the native feed').toBe(0);
+        expect(e.defaultPrevented, 'the button must still not double as UI input').toBe(true);
+        handleNativeHotkeyPayload({ keyCode: 5, ctrlKey: false, altKey: false, shiftKey: false, down: true, foreground: true });
+        expect(presses).toBe(1);
+    });
+
+    it('fires with the caret in the composer — a button is not typing', () => {
+        // The editable-target rule is about a letter that would be typed.
+        // Applied to a mouse button it made the bind dead: in-app deferred
+        // to the native feed, and the native feed vetoed it as typing.
+        let presses = 0;
+        registerPress('voice.toggleMute', () => MOUSE4, () => presses++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        const input = document.createElement('input');
+        document.body.appendChild(input);
+        input.focus();
+        expect(document.activeElement).toBe(input);
+        clickMouse4();
+        handleNativeHotkeyPayload({ keyCode: 5, ctrlKey: false, altKey: false, shiftKey: false, down: true, foreground: true });
+        expect(presses, 'a mouse hotkey must work while the composer has focus').toBe(1);
+        input.remove();
+    });
+});
+
+describe('modifier matching depends on who is in front', () => {
+    afterEach(() => resetHotkeysForTest());
+
+    const D: KeyBinding = { keyCode: 68, ctrl: false, alt: false, shift: false, label: 'D' };
+    const CTRL_SHIFT_D: KeyBinding = { keyCode: 68, ctrl: true, alt: false, shift: true, label: 'D' };
+
+    it('in front, a modified keystroke does not also fire the plain-key action', () => {
+        let mute = 0, deafen = 0;
+        registerPress('voice.toggleMute', () => D, () => mute++);
+        registerPress('voice.toggleDeafen', () => CTRL_SHIFT_D, () => deafen++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute', 'voice.toggleDeafen']);
+        handleNativeHotkeyPayload({ keyCode: 68, ctrlKey: true, altKey: false, shiftKey: true, down: true, foreground: true });
+        expect(deafen).toBe(1);
+        expect(mute, 'one keystroke must not run two commands').toBe(0);
+    });
+
+    it('in a game, extra modifiers still do not veto a plain binding', () => {
+        // The whole reason the native path subset-matches: crouch on Ctrl,
+        // sprint on Shift, and the toggle must still work.
+        let mute = 0;
+        registerPress('voice.toggleMute', () => D, () => mute++);
+        setNativeFeedStateForTest(true, ['voice.toggleMute']);
+        handleNativeHotkeyPayload({ keyCode: 68, ctrlKey: true, altKey: false, shiftKey: true, down: true, foreground: false });
+        expect(mute).toBe(1);
+    });
+
+    it('holds keep subset matching whoever is in front', () => {
+        let downs = 0;
+        registerHold('voice.ptt', () => SPACE, { onDown: () => downs++, onUp: () => { } });
+        setNativeFeedStateForTest(true, ['voice.ptt']);
+        handleNativeHotkeyPayload({ keyCode: 32, ctrlKey: true, altKey: false, shiftKey: true, down: true, foreground: true });
+        expect(downs, 'push-to-talk must never need bare modifiers').toBe(1);
     });
 });

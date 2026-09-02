@@ -25,6 +25,7 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { RcGlobals } from './components/RcGlobals';
 import { RecoveryCodeModal } from './components/RecoveryCodeModal';
 import { IdentityBanner } from './components/IdentityBanner';
+import { HotkeyBlockedBanner } from './components/HotkeyBlockedBanner';
 import { InviteLanding } from './components/InviteLanding';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
 import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipProposals } from './api/clips/clipProposals';
@@ -369,6 +370,7 @@ function App() {
           <div className="app">
             <UpdateBanner />
             <IdentityBanner onSignOut={handleLogout} />
+            <HotkeyBlockedBanner />
             <RecoveryCodeModal />
             <ClipApprovalPrompt />
             <RcGlobals />

@@ -2429,9 +2429,23 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         window.addEventListener('settingsChanged', sync);
         return () => {
             window.removeEventListener('settingsChanged', sync);
-            void stopNativeFeed('voice hotkey effect cleanup');
+            // NOT stopNativeFeed. This effect re-runs for every input the
+            // watch list depends on — and clipArmed flips when a game goes
+            // fullscreen, mid-call. Stopping here tore the hook thread down,
+            // released a held push-to-talk (the mic shut mid-sentence) and
+            // rebuilt everything a moment later, with the key's eventual
+            // release then unseen. sync() swaps the watch list in place; the
+            // feed's lifetime is the call's, in the effect below.
         };
     }, [isInVoice, voiceInputMode, isAfkChannel, listenOnly, clipArmed]);
+
+    // The feed lives exactly as long as the call. Declared AFTER the sync
+    // effect, so its cleanup runs after that one's on leave: listener off,
+    // then the feed down.
+    useEffect(() => {
+        if (!isInVoice || !isTauri()) return;
+        return () => { void stopNativeFeed('left voice'); };
+    }, [isInVoice]);
 
     // React to Settings changes mid-call: input-mode swaps apply immediately;
     // mic CONSTRAINT changes (echo cancellation, native noise suppression,

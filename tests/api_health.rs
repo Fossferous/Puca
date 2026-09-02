@@ -104,16 +104,52 @@ fn there_is_no_health_route() {
 /// the probe silently checks nothing that is listening.
 #[test]
 fn healthcheck_probes_the_port_the_server_binds() {
+    // The probe URL used to be the literal `127.0.0.1:3000` inside
+    // healthcheck.sh, and this test asserted that literal. It is now derived
+    // per host in names.sh from the deployment's own `.env`, which is
+    // strictly better — a host that runs on another PORT is probed on that
+    // port instead of being declared unhealthy — so the contract to hold is
+    // the derivation, not the constant.
     let hc = read("deploy/ops/healthcheck.sh");
     assert!(
-        hc.contains("127.0.0.1:3000"),
-        "healthcheck.sh no longer probes 127.0.0.1:3000; confirm it matches PORT in the .env"
+        hc.contains("\"$HEALTH_URL\""),
+        "healthcheck.sh no longer probes $HEALTH_URL; if the probe moved, this contract moved with it"
     );
+
+    let names = read("deploy/ops/names.sh");
+    assert!(
+        names.contains("HEALTH_URL=") && names.contains("'^PORT='"),
+        "names.sh no longer derives HEALTH_URL from the PORT in the deployment .env"
+    );
+    assert!(
+        names.contains("_ops_port=3000"),
+        "names.sh no longer falls back to 3000 when the .env has no PORT"
+    );
+
     let provision = read("deploy/migrate/provision.sh");
     assert!(
         provision.contains("PORT=3000"),
-        "provision.sh writes a different PORT than healthcheck.sh probes"
+        "provision.sh writes a PORT that names.sh would not fall back to"
     );
+}
+
+/// The probe must not quietly go back to a hard-coded API port: a host
+/// provisioned on another PORT would then be restarted in a loop over a
+/// probe that was never pointed at it. (The livekit and coturn probes in
+/// that file are other services and keep their own defaults.)
+#[test]
+fn the_api_probe_is_not_hard_coded_to_a_port() {
+    let hc = read("deploy/ops/healthcheck.sh");
+    for line in hc.lines() {
+        let l = line.trim_start();
+        if l.starts_with('#') {
+            continue;
+        }
+        assert!(
+            !(l.contains("curl") && l.contains("127.0.0.1:")),
+            "healthcheck.sh curls a hard-coded address: {l}"
+        );
+    }
 }
 
 #[test]
