@@ -4,8 +4,9 @@
  * wrappers, exactly what that buys — and, as importantly, that v2 history still
  * opens under the new reader, since a mistake there is permanent.
  *
- * EMIT_ENVELOPE_V3 is off in this release (reader-only rollout), so v3 is
- * produced here through the explicit-version seal functions.
+ * EMIT_ENVELOPE_V3 has been ON since 0.8.136 (0.8.135 shipped the reader
+ * alone). The explicit-version seal functions still mint v2 where a test needs
+ * the old format on purpose.
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
@@ -17,8 +18,8 @@ import { ENC_UNSUPPORTED_VERSION, ENC_CONTEXT_MISMATCH, ENC_CANNOT_DECRYPT, ENC_
 import kat from './fixtures/e2ee-wire-format-kat.json';
 
 // Wrap (not replace) the channel producer so the wrapper tests can see WHICH
-// context each send path seals under — with EMIT_ENVELOPE_V3 off the envelope
-// is v2 and a decrypt cannot observe the context, so the call is the evidence.
+// context each send path seals under: the call is direct evidence of the
+// context, independent of whether a decrypt round-trip would have caught it.
 vi.mock('../api/e2ee', async (orig) => {
     const m = await orig<typeof import('../api/e2ee')>();
     return { ...m, encryptChannelMessage: vi.fn(m.encryptChannelMessage) };
@@ -55,10 +56,10 @@ describe('v2 history survives the new reader (the permanent-loss canary)', () =>
     it('opens the frozen v2 DM whatever direction is supplied', async () => {
         expect(await decryptDM(B(), kat.pubA, kat.dm.envelope as Envelope, { senderId: 9, recipientId: 9 })).toBe(kat.dm.plaintext);
     });
-    it('the default producers still emit v2 while EMIT_ENVELOPE_V3 is off', async () => {
-        expect(EMIT_ENVELOPE_V3).toBe(false);
-        expect((await encryptChannelMessage(CK, 3, 'x', ctx)).v).toBe(2);
-        expect((await encryptDM(A(), B().publicKeyEncoded, 'x', { senderId: 1, recipientId: 2 }))?.v).toBe(2);
+    it('the default producers emit v3 now that EMIT_ENVELOPE_V3 is on', async () => {
+        expect(EMIT_ENVELOPE_V3).toBe(true);
+        expect((await encryptChannelMessage(CK, 3, 'x', ctx)).v).toBe(3);
+        expect((await encryptDM(A(), B().publicKeyEncoded, 'x', { senderId: 1, recipientId: 2 }))?.v).toBe(3);
     });
 });
 
@@ -150,7 +151,7 @@ describe('the channel message wrapper (servers.decryptChannelContent)', () => {
         const sent = await sendChannelMessageEncrypted(7, 'hello');
         expect(sent.keyEpoch).toBe(3);
         const env = JSON.parse(sent.wireContent) as Envelope;
-        expect(env.v).toBe(2); // reader-only release
+        expect(env.v).toBe(3); // emitting since 0.8.136
         expect(await decryptChannelMessage(CK, env, ctx)).toBe('hello');
         // v2 cannot show the context, so check the call the producer received.
         expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, 'hello', { kind: 'chan-msg', channelId: 7, senderId: 41 });

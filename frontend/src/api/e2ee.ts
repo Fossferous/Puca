@@ -309,11 +309,12 @@ async function aesDecrypt(rawKey: Uint8Array, blobB64: string, aad?: Uint8Array)
 
 /** Emit v3 (context-bound) envelopes for channel messages and DMs.
  *
- *  OFF for the reader-only release: a client that predates v3 shows a v3
- *  message as ENC_UNSUPPORTED_VERSION, so every client must be able to READ
- *  v3 before any client WRITES it. Flip to true in a later release, once the
- *  reader has shipped on every surface. The reader accepts both, forever. */
-export const EMIT_ENVELOPE_V3 = false;
+ *  ON since 0.8.136. 0.8.135 shipped the reader alone (this was false) so
+ *  that every client could READ v3 before any client WROTE it. A client that
+ *  predates 0.8.135 shows a v3 body as ENC_UNSUPPORTED_VERSION until it
+ *  updates — nothing is lost, the ciphertext is intact and opens once it
+ *  does. The reader accepts both, forever. */
+export const EMIT_ENVELOPE_V3 = true;
 
 const AAD_PREFIX = 'puca/v3/';
 

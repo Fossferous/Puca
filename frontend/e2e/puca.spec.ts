@@ -716,14 +716,14 @@ test.describe('Puca End-to-End Chat App Tests', () => {
     test('6. E2EE Cryptographic verification & Forward Secrecy', async () => {
         // 6.1 DM Secrecy DB Check
         const dbDMContent = runQuery("SELECT content FROM dm_messages ORDER BY created_at DESC LIMIT 1;");
-        expect(dbDMContent).toContain('{"v":2');
+        expect(dbDMContent).toContain('{"v":3');
         expect(dbDMContent).toContain('"ct"');
         expect(dbDMContent).not.toContain('DM from User A');
         console.log('[E2E] DB DM message content is secure (encrypted):', dbDMContent);
 
         // 6.2 Channel Secrecy DB Check
         const dbChannelMsg = runQuery("SELECT content, key_epoch FROM messages WHERE key_epoch IS NOT NULL ORDER BY created_at DESC LIMIT 1;");
-        expect(dbChannelMsg).toContain('{"v":2');
+        expect(dbChannelMsg).toContain('{"v":3');
         expect(dbChannelMsg).toContain('"ct"');
         expect(dbChannelMsg).not.toContain('API owner slowmode 2');
         console.log('[E2E] DB channel message content is secure (encrypted):', dbChannelMsg);

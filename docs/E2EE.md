@@ -132,14 +132,13 @@ v2 for now.
 An envelope-shaped body with any *other* `v` is `[Encrypted — unsupported
 version, update the app]`, never plaintext.
 
-**Rollout is two releases.** 0.8.135 ships the reader only
-(`EMIT_ENVELOPE_V3 = false` in `frontend/src/api/e2ee.ts`); a client that
-predates it would render a v3 body as raw JSON, so nothing writes v3 until the
-field has moved. Flip checklist, all in one commit: set the constant; change
-`frontend/e2e/puca.spec.ts`'s `{"v":2` pins; nothing in the codebase can
-*prove* every client updated (no client-version signal reaches the server), so
-confirm through the desktop/mobile update gates and the operator's own
-knowledge of the field first.
+**Rollout was two releases.** 0.8.135 shipped the reader alone
+(`EMIT_ENVELOPE_V3 = false`); 0.8.136 turned emission on. A client that
+predates 0.8.135 renders a v3 body as the unsupported-version marker until it
+updates — the ciphertext is intact and opens once it does. Nothing in the
+codebase can *prove* every client has updated (no client-version signal reaches
+the server); the call was made on the size of the field and the update gates.
+`frontend/e2e/puca.spec.ts` pins the version the app writes.
 
 ### Key rotation & membership
 

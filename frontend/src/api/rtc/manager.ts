@@ -874,7 +874,7 @@ export class WebRTCManager {
                     // channel from the dead connection with its capability
                     // still armed, and the rebuilt pc inherited a hello its
                     // far end never sent.
-                    forgetControlChannels(userId);
+                    if (__RC_ENABLED__) forgetControlChannels(userId);
                 }
                 await this.callUser(userId);
             } catch {
@@ -909,7 +909,10 @@ export class WebRTCManager {
         // gates real input on a sealed app-level HELLO, never on these being
         // open — an open channel proves SCTP, not that the peer understands
         // the frames.
-        try {
+        // Behind the FOLDED LITERAL: a lite build has no remote control, so it
+        // neither opens the lane nor carries rtc/controlDc (rc-exclusion-guard
+        // fails the build if the real module enters the graph).
+        if (__RC_ENABLED__) try {
             registerControlChannel(userId, pc.createDataChannel(CTL_STATE_LABEL, { ordered: true }));
         } catch (e) {
             // A runtime without data channels keeps the relay path — the
@@ -917,7 +920,7 @@ export class WebRTCManager {
             console.warn('[WebRTC] control data channels unavailable:', e);
         }
         pc.ondatachannel = (ev) => {
-            if (ev.channel.label === CTL_STATE_LABEL) registerControlChannel(userId, ev.channel);
+            if (__RC_ENABLED__ && ev.channel.label === CTL_STATE_LABEL) registerControlChannel(userId, ev.channel);
         };
 
         pc.onicecandidate = (event) => {
@@ -1453,7 +1456,7 @@ export class WebRTCManager {
         // The control lanes die with the pc; forget them so a rebuilt peer
         // starts from "no capability" rather than inheriting a hello that
         // belonged to a connection that no longer exists.
-        forgetControlChannels(userId);
+        if (__RC_ENABLED__) forgetControlChannels(userId);
         if (!keepSignalingChain) this.signalingChains.delete(userId);
         this.pendingCandidates.delete(userId);
         this.peerCreation.delete(userId);
