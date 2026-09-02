@@ -396,7 +396,7 @@ import {
     type MessageEncState,
 } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
-import { ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
+import { isUndecryptable, ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
 import { currentUserIdFromToken } from './auth';
 
 /**
@@ -451,6 +451,9 @@ export async function editChannelMessageEncrypted(
     messageId: string,
     content: string
 ): Promise<{ wireContent: string; keyEpoch: number }> {
+    // A message that failed to decrypt shows a marker as its text; saving an
+    // edit prefilled from it would seal the marker over the real ciphertext.
+    if (isUndecryptable(content)) throw new SecureSendError("This message couldn't be decrypted, so it can't be edited — saving would replace the original.");
     const keyInfo = await ensureChannelKey(channelId);
     if (!keyInfo) {
         throw new SecureSendError("Can't save the edit securely — this channel's encryption key isn't available. Try again in a moment.");

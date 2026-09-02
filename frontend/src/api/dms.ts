@@ -88,7 +88,7 @@ import {
 } from './e2ee';
 import { resolvePinnedIdentityKey } from './keyVerification';
 import { currentUserIdFromToken } from './auth';
-import { ENC_SIGN_IN, ENC_UNVERIFIED_SENDER, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
+import { isUndecryptable, ENC_SIGN_IN, ENC_UNVERIFIED_SENDER, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
 
 /** Signed-in user id, straight from the JWT (no verification needed here —
  *  this only decides which key shape to use for our OWN conversation). */
@@ -142,6 +142,9 @@ export async function getCachedPublicKey(userId: number): Promise<string | null>
  * substituted key. Callers surface the message and block the send.
  */
 export async function encryptDMContent(content: string, recipientUserId: number): Promise<string> {
+    // A message that failed to decrypt shows a marker; editing it would seal
+    // the marker's words over the real ciphertext. Refuse before any key work.
+    if (isUndecryptable(content)) throw new SecureSendError("This message couldn't be decrypted, so it can't be edited or re-sent — saving would replace the original.");
     const identity = getActiveIdentity();
     if (!identity) {
         throw new SecureSendError("Can't send securely — your encryption identity is unavailable. Sign in again to restore it.");
@@ -193,6 +196,8 @@ export async function decryptDMContent(content: string, partnerUserId: number, s
         // thread and have it render as content of that thread. Outside the
         // self-DM there is no honest 'self' message, so refuse to decrypt one.
         if (partnerUserId !== currentUserId()) return ENC_CANNOT_DECRYPT;
+        // Self envelopes are defined at v2 only (no self context grammar yet).
+        if (env.v !== 2) return ENC_UNSUPPORTED_VERSION;
         const mine = await decryptSelf(identity, env);
         return mine ?? ENC_CANNOT_DECRYPT;
     }
