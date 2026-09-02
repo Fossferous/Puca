@@ -72,4 +72,6 @@ export const PERMISSIONS = {
     MANAGE_TASKS: 1 << 25,
     // Clips
     CREATE_CLIPS: 1 << 26,
+    // Membership (server-scoped: not overwritable per channel)
+    CREATE_INVITE: 1 << 27,
 } as const;

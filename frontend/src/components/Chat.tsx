@@ -206,6 +206,7 @@ interface DisplayMessage {
      *  page boundary. */
     created_at?: string;
     edited?: boolean;
+    edited_at?: string | null;
     reply_to_id?: string;
     reply_to?: { id: string; username: string; display_name?: string | null; content: string };
     // For collection view - track which channel the message is from
@@ -5265,7 +5266,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                 })()}
                                                 <div className={`message-content ${msg.is_task && msg.is_completed ? 'task-completed' : ''}`}>
                                                     <MessageContent content={msg.content} members={allMembers} channels={channels} onChannelClick={handleChannelClick} clipConsent={msg.clip_consent} />
-                                                    {msg.edited && <span className="edited-tag" title="Edited">(edited)</span>}
+                                                    {(msg.edited || !!msg.edited_at) && <span className="edited-tag" title="Edited">(edited)</span>}
                                                     <NotEncryptedBadge encState={msg.encState} />
                                                 </div>
                                                 <LinkPreview content={msg.content} />

@@ -65,6 +65,8 @@ export interface ChannelFeedResponse {
 }
 
 export interface Message {
+    /** Set by the server once a message has been edited (0.9.0+). */
+    edited_at?: string | null;
     id: string;
     channel_id: number;
     user_id: number;

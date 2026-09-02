@@ -221,7 +221,10 @@ console.log(`\n=== L8-AUTHZ-6 — the default-server auto-join endpoint is GONE 
     const banned = mkUser('defban');
     const before = psql1(`SELECT count(*) FROM server_members WHERE user_id = ${banned.id}`);
     const res = await api('GET', '/servers/default', null, banned.t);
-    check('GET /servers/default is 404', res.status === 404, `status=${res.status}`);
+    // 404 or 405: axum answers 405 when the path still matches a route for
+    // another method. Either proves the auto-join handler is gone; the
+    // membership assertion below is the real check.
+    check('GET /servers/default is gone (404/405)', res.status === 404 || res.status === 405, `status=${res.status}`);
     const after = psql1(`SELECT count(*) FROM server_members WHERE user_id = ${banned.id}`);
     check('and it joined the caller to nothing', after === before, `before=${before} after=${after}`);
 

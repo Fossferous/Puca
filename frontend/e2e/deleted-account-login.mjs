@@ -14,8 +14,16 @@
  * Run:  API=http://127.0.0.1:3000 node e2e/deleted-account-login.mjs
  */
 import { webcrypto, randomFillSync } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 const crypto = webcrypto;
 const API = process.env.API || 'http://127.0.0.1:3000';
+// Storage residue assertions need the database: set PGDB (+ PGPORT) to the
+// THROWAWAY db the backend runs against; without it that section is skipped.
+const PGDB = process.env.PGDB || null;
+const PGPORT = process.env.PGPORT || '5432';
+const PSQL = process.env.PSQL || 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
+const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', '127.0.0.1', '-p', PGPORT, '-d', PGDB, '-t', '-A', '-c', sql],
+    { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
 
 const results = [];
 const check = (stage, ok, detail) => {
@@ -101,8 +109,41 @@ async function main() {
     check('squat/registering a "deleted#<id>" name is rejected', squat.status === 400, `status=${squat.status}`);
 
     // Delete the account.
+    // Plant the rows the tombstone must scrub, and one it must KEEP (the
+    // documented decision: uploaded blobs survive because their ids live inside
+    // other people's E2EE content). Positive control for every assertion below.
+    let planted = false;
+    if (PGDB) {
+        const other = `bystander_${RUN}`;
+        const osalt = randBytes(32);
+        const oid = bytesToBig(await shaBytes(osalt, await shaBytes(enc.encode(`${other.toLowerCase()}:${P}`))));
+        await api('POST', '/auth/register', { username: other, salt_hex: toHex(osalt), verifier_hex: padHex(modpow(g, oid, N), N_BYTES), public_key: 'x25519:' + Buffer.from(randBytes(32)).toString('base64') });
+        const ownerId = psql(`SELECT id FROM users WHERE username='${other}'`);
+        const srv = `srv_${RUN}`;
+        psql(`INSERT INTO servers (id, name, owner_id) VALUES ('${srv}', 'residue-${RUN}', ${ownerId})`);
+        const ch = psql(`INSERT INTO channels (name, type, position, server_id) VALUES ('general', 0, 0, '${srv}') RETURNING id`);
+        psql(`INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, sender_public_key, member_generation, sender_user_id) VALUES (${ch}, 1, ${uid}, 'w', 'p', 1, ${uid})`);
+        psql(`INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig, host_enabled) VALUES ('dev_${RUN}', ${uid}, 'dp', 'sp', 'Victim Laptop', 'windows', 'ar', 'as', false)`);
+        psql(`INSERT INTO device_share_invites (host_device, owner_user, grantee_user, capabilities, status) VALUES ('dev_${RUN}', ${uid}, ${ownerId}, '{}', 'pending')`);
+        psql(`INSERT INTO uploaded_files (id, uploader_id, original_name, stored_name, mime_type, size_bytes, kind) VALUES (gen_random_uuid(), ${uid}, 'a.enc', 'residue-${RUN}.enc', 'application/octet-stream', 1, 'attachment')`);
+        planted = psql(`SELECT count(*) FROM channel_keys WHERE recipient_id=${uid}`) === '1'
+            && psql(`SELECT count(*) FROM device_share_invites WHERE owner_user=${uid}`) === '1'
+            && psql(`SELECT count(*) FROM devices WHERE user_id=${uid} AND name='Victim Laptop'`) === '1';
+        check('residue/rows planted before the delete (positive control)', planted);
+    }
+
     const del = await api('DELETE', '/account', { confirm_username: U }, token);
     check('delete/succeeds', del.status === 200, `status=${del.status}`);
+
+    if (PGDB && planted) {
+        check('residue/wrapped channel keys for the user are gone', psql(`SELECT count(*) FROM channel_keys WHERE recipient_id=${uid}`) === '0');
+        check('residue/device share invites (either direction) are gone', psql(`SELECT count(*) FROM device_share_invites WHERE owner_user=${uid} OR grantee_user=${uid}`) === '0');
+        check('residue/device row kept for integrity, name wiped', psql(`SELECT count(*) FROM devices WHERE user_id=${uid} AND name='removed' AND lan_info IS NULL`) === '1');
+        check("residue/uploaded blob KEPT (referenced from others' E2EE content, by decision)", psql(`SELECT count(*) FROM uploaded_files WHERE uploader_id=${uid}`) === '1');
+        check('residue/user row is a tombstone, not deleted', psql(`SELECT count(*) FROM users WHERE id=${uid} AND deleted_at IS NOT NULL`) === '1');
+    } else if (!PGDB) {
+        console.log('(PGDB not set: storage residue section skipped)');
+    }
 
     // THE BYPASS: step 1 against the tombstone must not expose a usable handle,
     // and the forged-proof step 2 must fail.

@@ -248,8 +248,8 @@ console.log(`\n=== CREATE_INVITE (1<<27) — POST /servers/:id/invites ===`);
     check('an absurd expires_in_hours is accepted, not 500', huge.status < 300, `status=${huge.status}`);
     if (huge.status < 300 && huge.body?.code) {
         const within = psql1(`SELECT count(*) FROM server_invites
-            WHERE code='${huge.body.code}' AND expires_at::timestamp <= NOW() + INTERVAL '367 days'
-              AND expires_at::timestamp > NOW()`);
+            WHERE code='${huge.body.code}' AND expires_at::timestamptz <= NOW() + INTERVAL '367 days'
+              AND expires_at::timestamptz > NOW()`);
         check('the clamped expiry lands inside a year', within === '1', `rows=${within}`);
     }
 
@@ -257,7 +257,7 @@ console.log(`\n=== CREATE_INVITE (1<<27) — POST /servers/:id/invites ===`);
     const neg = await api('POST', `/servers/${srvId}/invites`, { max_uses: 0, expires_in_hours: -5 }, allowed.t);
     if (neg.status < 300 && neg.body?.code) {
         const live = psql1(`SELECT count(*) FROM server_invites
-            WHERE code='${neg.body.code}' AND expires_at::timestamp > NOW()`);
+            WHERE code='${neg.body.code}' AND expires_at::timestamptz > NOW()`);
         check('a negative expires_in_hours is clamped forward, not born expired', live === '1', `rows=${live}`);
     } else {
         check('a negative expires_in_hours is handled', false, `status=${neg.status}`);
