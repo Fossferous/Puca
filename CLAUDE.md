@@ -267,6 +267,7 @@ cd frontend && npm run typecheck && npx vitest run && npm run build && npm run l
 cargo test                                   # repo root
 cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
+cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
 ```
 

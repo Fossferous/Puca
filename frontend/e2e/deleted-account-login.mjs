@@ -24,6 +24,8 @@ const PGPORT = process.env.PGPORT || '5432';
 const PSQL = process.env.PSQL || 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
 const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', '127.0.0.1', '-p', PGPORT, '-d', PGDB, '-t', '-A', '-c', sql],
     { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
+// First line only: psql prints the command tag ("INSERT 0 1") after a RETURNING row.
+const psql1 = (sql) => psql(sql).split(/\r?\n/)[0] ?? '';
 
 const results = [];
 const check = (stage, ok, detail) => {
@@ -118,10 +120,10 @@ async function main() {
         const osalt = randBytes(32);
         const oid = bytesToBig(await shaBytes(osalt, await shaBytes(enc.encode(`${other.toLowerCase()}:${P}`))));
         await api('POST', '/auth/register', { username: other, salt_hex: toHex(osalt), verifier_hex: padHex(modpow(g, oid, N), N_BYTES), public_key: 'x25519:' + Buffer.from(randBytes(32)).toString('base64') });
-        const ownerId = psql(`SELECT id FROM users WHERE username='${other}'`);
+        const ownerId = psql1(`SELECT id FROM users WHERE username='${other}'`);
         const srv = `srv_${RUN}`;
         psql(`INSERT INTO servers (id, name, owner_id) VALUES ('${srv}', 'residue-${RUN}', ${ownerId})`);
-        const ch = psql(`INSERT INTO channels (name, type, position, server_id) VALUES ('general', 0, 0, '${srv}') RETURNING id`);
+        const ch = psql1(`INSERT INTO channels (name, type, position, server_id) VALUES ('general', 0, 0, '${srv}') RETURNING id`);
         psql(`INSERT INTO channel_keys (channel_id, epoch, recipient_id, wrapped_key, sender_public_key, member_generation, sender_user_id) VALUES (${ch}, 1, ${uid}, 'w', 'p', 1, ${uid})`);
         psql(`INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig, host_enabled) VALUES ('dev_${RUN}', ${uid}, 'dp', 'sp', 'Victim Laptop', 'windows', 'ar', 'as', false)`);
         psql(`INSERT INTO device_share_invites (host_device, owner_user, grantee_user, capabilities, status) VALUES ('dev_${RUN}', ${uid}, ${ownerId}, '{}', 'pending')`);

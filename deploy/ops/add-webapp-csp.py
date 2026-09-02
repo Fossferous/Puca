@@ -8,7 +8,12 @@ has to name this deployment's API host AND its SFU, and the SFU URL only exists
 in the backend's .env on this machine. Reading it locally keeps infrastructure
 identity on the box instead of travelling through an operator's shell history.
 
-Usage:  add-webapp-csp.py <caddyfile> <env-file> <app-host> <api-host> [--dry-run]
+Usage:  add-webapp-csp.py <caddyfile> <env-file> <app-host> <api-host> [--dry-run] [--no-sfu]
+
+--no-sfu: this deployment has no LiveKit SFU (mesh voice only), so connect-src
+names the API host alone. Explicit on purpose: a missing LIVEKIT_URL is
+otherwise refused, because guessing "no SFU" is the failure mode that silently
+breaks voice for every browser user.
 """
 import datetime
 import re
@@ -18,10 +23,11 @@ import sys
 
 def main() -> int:
     if len(sys.argv) < 5:
-        print("usage: add-webapp-csp.py <caddyfile> <env-file> <app-host> <api-host> [--dry-run]")
+        print("usage: add-webapp-csp.py <caddyfile> <env-file> <app-host> <api-host> [--dry-run] [--no-sfu]")
         return 2
     caddyfile, envfile, app_host, api_host = sys.argv[1:5]
     dry = "--dry-run" in sys.argv
+    no_sfu = "--no-sfu" in sys.argv
 
     text = open(caddyfile, encoding="utf-8").read()
 
@@ -53,12 +59,17 @@ def main() -> int:
     except OSError as e:
         print(f"REFUSING: cannot read {envfile}: {e}")
         return 1
-    if not livekit:
+    if not livekit and not no_sfu:
         print(f"REFUSING: no LIVEKIT_URL in {envfile}. A connect-src without the "
-              f"SFU would break voice for every browser user; refusing to guess.")
+              f"SFU would break voice for every browser user; refusing to guess. "
+              f"If this deployment really has no SFU, pass --no-sfu.")
+        return 1
+    if livekit and no_sfu:
+        print(f"REFUSING: --no-sfu given but {envfile} sets LIVEKIT_URL={livekit}; "
+              f"drop the flag or the variable.")
         return 1
 
-    connect = f"'self' https://{api_host} wss://{api_host} {livekit}"
+    connect = f"'self' https://{api_host} wss://{api_host}" + (f" {livekit}" if livekit else "")
     csp = (
         "default-src 'self'; "
         f"connect-src {connect}; "
@@ -94,7 +105,8 @@ def main() -> int:
     shutil.copy2(caddyfile, backup)
     open(caddyfile, "w", encoding="utf-8").write(updated)
     print(f"backed up to {backup}")
-    print(f"added CSP to {app_host} (connect-src names the API host and the SFU)")
+    sfu_note = " and the SFU" if livekit else ", no SFU"
+    print(f"added CSP to {app_host} (connect-src names the API host{sfu_note})")
     return 0
 
 

@@ -161,6 +161,38 @@ mod log_filter_tests {
     }
 }
 
+/// A JWT secret that must not protect an exposed server: too short, a
+/// placeholder in any of the words the docs and examples have ever used
+/// (so the guard no longer depends on which wording a copied line carried),
+/// or so repetitive it cannot be random.
+fn jwt_secret_is_weak(secret: &str) -> bool {
+    let lower = secret.to_lowercase();
+    let placeholder = ["change", "generate", "placeholder", "example", "here", "for-local", "secret_key"]
+        .iter()
+        .any(|w| lower.contains(w));
+    let distinct = {
+        let mut seen = std::collections::HashSet::new();
+        secret.chars().filter(|c| seen.insert(*c)).count()
+    };
+    secret.len() < 32 || placeholder || distinct < 16
+}
+
+#[cfg(test)]
+mod jwt_secret_tests {
+    use super::jwt_secret_is_weak;
+
+    #[test]
+    fn placeholders_and_low_entropy_are_weak_and_a_real_secret_is_not() {
+        assert!(jwt_secret_is_weak("sovereign_default_secret_change_me"));
+        assert!(jwt_secret_is_weak("GENERATE_A_LONG_RANDOM_STRING_HERE_PLEASE_OK"), "the retired deployment doc's line");
+        assert!(jwt_secret_is_weak("any-long-random-string-for-local-testing-use"), "the local testing doc's line");
+        assert!(jwt_secret_is_weak("puca_super_secret_key_change_in_production"), "the harness secret");
+        assert!(jwt_secret_is_weak("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "44 chars of one letter");
+        assert!(jwt_secret_is_weak("0123456789abcdef0123456789abcde"), "31 chars");
+        assert!(!jwt_secret_is_weak("3f9a1c7e5b2d8046a9e1f3c5d7b9a0e2c4f6a8b0d2e4f6a8c0b2d4e6f8a0c2e4"), "openssl rand -hex 32");
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
@@ -203,9 +235,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|ip| !ip.is_loopback())
         .unwrap_or(false);
 
-    let secret_is_weak = jwt_secret.len() < 32
-        || jwt_secret.to_lowercase().contains("change")
-        || jwt_secret == "sovereign_default_secret_change_me";
+    let secret_is_weak = jwt_secret_is_weak(&jwt_secret);
     if secret_is_weak {
         if is_production || bind_is_exposed {
             panic!("JWT_SECRET is weak or a placeholder (needs >=32 chars and no 'change' placeholder) and this server is exposed (APP_ENV=production or a non-loopback BIND_ADDR). Anyone could forge auth tokens. Generate one with `openssl rand -hex 32`.");
