@@ -144,8 +144,9 @@ pub(crate) fn decode_public_key(encoded: &str) -> Option<[u8; 32]> {
 fn require_password_proof(
     state: &Arc<AppState>,
     user_id: i64,
+    session_start: i64,
 ) -> Result<(), axum::response::Response> {
-    if state.password_recently_proven(user_id) {
+    if state.password_recently_proven(user_id, session_start) {
         return Ok(());
     }
     tracing::warn!(
@@ -203,7 +204,7 @@ pub async fn set_wrap_material(
     // their own identity seed. Both callers (the login-time v2->v3 migration
     // and the KDF rewrap) run immediately after login_step_2, so the proof is
     // always fresh for them.
-    if let Err(r) = require_password_proof(&state, claims.sub) {
+    if let Err(r) = require_password_proof(&state, claims.sub, claims.sst) {
         return r;
     }
     if let Err(msg) = validate_pw_kdf_iterations(m.pw_kdf_iterations) {
@@ -248,7 +249,7 @@ pub async fn rewrap_password(
 ) -> impl IntoResponse {
     // Same rule as set_wrap_material: this replaces the password-wrapped seed.
     // Its only caller is the login-time KDF upgrade, so the proof is fresh.
-    if let Err(r) = require_password_proof(&state, claims.sub) {
+    if let Err(r) = require_password_proof(&state, claims.sub, claims.sst) {
         return r;
     }
     if let Err(msg) = validate_pw_kdf_iterations(Some(m.pw_kdf_iterations)) {
@@ -314,7 +315,7 @@ pub async fn change_password(
     // bump below) evict the real owner. Require the server's OWN proof. The
     // client re-runs SRP with the current password it already collected for the
     // form, so this costs one round-trip and no extra UI.
-    if let Err(r) = require_password_proof(&state, claims.sub) {
+    if let Err(r) = require_password_proof(&state, claims.sub, claims.sst) {
         return r;
     }
     if let Err(msg) = validate_pw_kdf_iterations(req.new_pw_kdf_iterations) {

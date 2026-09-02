@@ -220,7 +220,7 @@ async function computeM2(A: bigint, M1: Uint8Array, K: Uint8Array): Promise<Uint
 }
 
 import {
-    deriveIdentity, setActiveIdentity, clearActiveIdentity,
+    setActiveIdentity, clearActiveIdentity,
     generateIdentitySeed, makeIdentity, buildWrapMaterial,
     unwrapSeedWithPassword, unwrapSeedWithRecovery, rewrapForNewPassword,
     passwordWrapNeedsUpgrade, upgradePasswordWrap,
@@ -464,21 +464,15 @@ export async function login(username: string, password: string): Promise<string>
                 }
             }
         } else {
-            // Legacy v2 → derive the old password-derived identity...
-            const identity = await deriveIdentity(password, salt_hex);
-            setActiveIdentity(identity);
-            await apiClient.patch('/keys/public', { public_key: identity.publicKeyEncoded });
-            // ...then freeze it under v3 wrap material (same seed = same keys).
-            const { material, recoveryCode } = await buildWrapMaterial(identity.privateKey, password);
-            await apiClient.post('/keys/migrate-v3', {
-                wrap_salt: material.wrapSalt,
-                recovery_salt: material.recoverySalt,
-                seed_wrapped_pw: material.seedWrappedPw,
-                seed_wrapped_rc: material.seedWrappedRc,
-                pw_kdf_iterations: material.pwKdfIterations,
-                pw_kdf: material.pwKdf,
-            });
-            setPendingRecoveryCode(recoveryCode); // shown once by RecoveryCodeModal
+            // Legacy (key_version < 3) custody derived the identity from the
+            // PASSWORD at 210k PBKDF2 — cheap to attack offline given the row.
+            // Every account was migrated (0 legacy rows in the field on
+            // 2026-09-02) and registration has minted random v3 seeds for a
+            // long time, so the derivation is no longer a login path: an
+            // account that still reports it is not silently re-derived here.
+            throw new Error(
+                'This account uses a retired key format — reset it with your recovery code, or ask the operator',
+            );
         }
     } catch (e) {
         console.warn('E2EE identity setup failed; messaging may be unavailable until next login', e);

@@ -16,7 +16,6 @@ use tracing;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::ws::create_token;
 
 /// Cap on users.display_name. It rides on every message row the client renders,
 /// so it is fanned out far more than it is written; 64 matches the server
@@ -605,11 +604,14 @@ pub async fn login_step_2(
     // rewrite credentials or key custody require a recent one, which is what
     // stops a stolen bearer token from setting a new SRP verifier or clobbering
     // the wrapped identity seed.
-    state.record_password_proof(user_id);
+    // The proof is bound to THIS session: the token minted here carries the
+    // same session start, and only a token with it can spend the proof.
+    let session_start = chrono::Utc::now().timestamp();
+    state.record_password_proof(user_id, session_start);
 
     // 5. Create JWT token instead of session, stamped with the current
     // token_version (M1) so a later logout/reset can revoke it.
-    let token = create_token(user_id, &username, token_version, &state.jwt_secret)
+    let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &state.jwt_secret)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // 6. Also store session in DB for reference

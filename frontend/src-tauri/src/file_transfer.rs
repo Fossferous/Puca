@@ -304,6 +304,10 @@ pub async fn transfer_finish(
     };
     std::fs::rename(&part_path, &final_path)
         .map_err(|e| format!("could not finish {part_path:?}: {e}"))?;
+    // After the rename, never on the .part: an abandoned partial is deleted,
+    // and a stream written before a cross-volume rename would not follow. One
+    // call covers both the default folder and a Save As destination.
+    mark_as_internet_sourced(&final_path);
 
     let sha256 = if verify { Some(hash_file(&final_path)?) } else { None };
     Ok(FinishResult { path: final_path.to_string_lossy().to_string(), sha256 })
@@ -576,5 +580,30 @@ mod chosen_destination_tests {
     fn a_bare_root_has_no_file_name_and_is_refused() {
         let root = if cfg!(windows) { r"C:\" } else { "/" };
         assert!(chosen_destination(root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mark_of_the_web_tests {
+    use super::mark_as_internet_sourced;
+
+    #[test]
+    fn a_finished_transfer_is_marked_on_windows_and_untouched_elsewhere() {
+        let dir = std::env::temp_dir().join(format!("puca-motw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("x.part");
+        std::fs::write(&part, b"hi").unwrap();
+        let fin = dir.join("x.bin");
+        std::fs::rename(&part, &fin).unwrap();
+        mark_as_internet_sourced(&fin);
+        #[cfg(windows)]
+        {
+            let mut ads = fin.as_os_str().to_os_string();
+            ads.push(":Zone.Identifier");
+            let zone = std::fs::read_to_string(&ads).expect("the Zone.Identifier stream exists");
+            assert!(zone.contains("ZoneId=3"), "{zone}");
+        }
+        assert_eq!(std::fs::read(&fin).unwrap(), b"hi", "the file body is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

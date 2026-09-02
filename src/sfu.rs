@@ -452,6 +452,34 @@ struct VideoGrant<'a> {
     can_subscribe: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     can_publish_data: bool,
+    /// Which sources a member may publish, from their channel permissions.
+    /// LiveKit's default for an ABSENT list is "every source", so an empty
+    /// list is only ever emitted alongside `can_publish: false` — see
+    /// `publish_sources`, which returns the pair together.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    can_publish_sources: Vec<&'static str>,
+}
+
+/// The publish grant a member's channel permissions allow: SPEAK → microphone,
+/// VIDEO → camera, STREAM → screen share (+ its audio); ADMINISTRATOR gets
+/// all four. Returned as (can_publish, sources) so the two are never set
+/// inconsistently: no sources means no publishing at all, explicitly.
+pub(crate) fn publish_sources(perms: Permissions) -> (bool, Vec<&'static str>) {
+    if perms.has(Permissions::ADMINISTRATOR) {
+        return (true, vec!["microphone", "camera", "screen_share", "screen_share_audio"]);
+    }
+    let mut sources = Vec::new();
+    if perms.has(Permissions::SPEAK) {
+        sources.push("microphone");
+    }
+    if perms.has(Permissions::VIDEO) {
+        sources.push("camera");
+    }
+    if perms.has(Permissions::STREAM) {
+        sources.push("screen_share");
+        sources.push("screen_share_audio");
+    }
+    (!sources.is_empty(), sources)
 }
 
 #[derive(Serialize)]
@@ -473,7 +501,13 @@ fn mint_join_token(
     room: &str,
     identity: &str,
     display_name: &str,
+    perms: Permissions,
 ) -> Result<String, jsonwebtoken::errors::Error> {
+    // Enforced by LiveKit itself — the one place a publish gate holds
+    // server-side in the SFU tier (the mesh gates live in ws.rs and are
+    // advisory to a modified client). A demotion mid-call takes effect at
+    // the next token (TOKEN_TTL_SECS) unless the member is evicted.
+    let (can_publish, can_publish_sources) = publish_sources(perms);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -491,9 +525,10 @@ fn mint_join_token(
             room_join: true,
             room_create: false,
             room_admin: false,
-            can_publish: true,
+            can_publish,
             can_subscribe: true,
             can_publish_data: true,
+            can_publish_sources,
         },
     };
     jsonwebtoken::encode(
@@ -526,6 +561,7 @@ fn mint_admin_token(cfg: &SfuConfig, room: &str) -> Result<String, jsonwebtoken:
             can_publish: false,
             can_subscribe: false,
             can_publish_data: false,
+            can_publish_sources: Vec::new(),
         },
     };
     jsonwebtoken::encode(
@@ -643,16 +679,16 @@ pub async fn get_sfu_token(
     // gates it in ws.rs JoinRoom, and this is the SFU tier's equivalent. Gating
     // only one would leave the other as the bypass — an sfu_mode channel is
     // joined by minting a token here, never by JoinRoom alone.
-    match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
+    let perms = match get_user_channel_permissions(&state.pool, channel_id, claims.sub).await {
         ChannelPermAccess::Allowed { perms, .. }
-            if perms.has(Permissions::VIEW_CHANNEL) && perms.has(Permissions::CONNECT) => {}
+            if perms.has(Permissions::VIEW_CHANNEL) && perms.has(Permissions::CONNECT) => perms,
         ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotFound => {
             return (StatusCode::NOT_FOUND, "Channel not found").into_response()
         }
         ChannelPermAccess::NotMember => {
             return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
         }
-    }
+    };
 
     let row: Option<(i32, bool)> =
         sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
@@ -749,7 +785,7 @@ pub async fn get_sfu_token(
     let nonce: u32 = rand::random();
     let identity = format!("u{}#{:08x}", claims.sub, nonce);
 
-    let token = match mint_join_token(&cfg, &room, &identity, &claims.username) {
+    let token = match mint_join_token(&cfg, &room, &identity, &claims.username, perms) {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("failed to mint LiveKit token: {e}");
@@ -1044,5 +1080,34 @@ livekit_packet_bytes{direction=\"outgoing\",transmission=\"initial\"} 4242\n";
         assert_eq!(unmeasured_room_kbps(6, 5, 1), 0);
         // Nobody settled (fresh room): identical to the full worst-case model.
         assert_eq!(unmeasured_room_kbps(0, 5, 0), room_egress_kbps(5, 0));
+    }
+}
+
+#[cfg(test)]
+mod publish_sources_tests {
+    use super::publish_sources;
+    use crate::permissions::Permissions;
+
+    #[test]
+    fn no_voice_bits_means_no_publishing_explicitly() {
+        let (can, sources) = publish_sources(Permissions::VIEW_CHANNEL | Permissions::CONNECT);
+        assert!(!can, "an empty source list must travel with can_publish=false, or LiveKit defaults to every source");
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn each_bit_maps_to_its_sources() {
+        assert_eq!(publish_sources(Permissions::SPEAK), (true, vec!["microphone"]));
+        assert_eq!(publish_sources(Permissions::VIDEO), (true, vec!["camera"]));
+        assert_eq!(publish_sources(Permissions::STREAM), (true, vec!["screen_share", "screen_share_audio"]));
+        assert_eq!(
+            publish_sources(Permissions::SPEAK | Permissions::VIDEO | Permissions::STREAM),
+            (true, vec!["microphone", "camera", "screen_share", "screen_share_audio"])
+        );
+    }
+
+    #[test]
+    fn administrator_gets_everything() {
+        assert_eq!(publish_sources(Permissions::ADMINISTRATOR).1.len(), 4);
     }
 }
