@@ -36,6 +36,15 @@ fn main() {
     println!("cargo:rustc-env=PUCA_GIT_COMMIT={commit}");
     println!("cargo:rerun-if-changed=SOURCE_COMMIT");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    // A commit on a branch changes the branch's ref file, not .git/HEAD (which
+    // holds "ref: refs/heads/<branch>"), so name that file too — or the
+    // embedded commit goes stale until an unrelated rebuild.
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(r) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{r}");
+        }
+    }
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     println!("cargo:rerun-if-env-changed=PUCA_GIT_COMMIT");
     // Any change under migrations/ (a new file, or an edit to an existing one)
     // re-runs this script, and a build-script re-run recompiles the crate.
