@@ -149,6 +149,9 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                         <span className="option-hint">
                             {formatMB(usage.usedBytes)} of {formatMB(usage.quotaBytes)} used by posted clips.
                             Deleting a clip message frees its share.
+                            {usage.retentionDays === null ? null
+                                : usage.retentionDays === 0 ? ' Posted clips are kept until someone deletes them.'
+                                : ` Posted clips are deleted after ${usage.retentionDays} day${usage.retentionDays === 1 ? '' : 's'}.`}
                         </span>
                     </div>
                     <div className="slider-row" aria-hidden="true">

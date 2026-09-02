@@ -4626,6 +4626,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 return {
                                     available: clipsAvailable(vs),
                                     serverClipsEnabled: vs && typeof vs.clip_max_seconds === 'number' ? vs.clips_enabled === true : undefined,
+                                    viewerIsOwner: !!vs && vs.owner_id === currentUser?.sub,
                                     serverId: vs?.id ?? null,
                                     maxSeconds: vs?.clip_max_seconds ?? 120,
                                     pinnedChannelId: vs?.clip_channel_id ?? null,

@@ -4,8 +4,8 @@ import { PERM } from '../api/permissionBits';
 
 const ok: ClipUiInput = {
     isDesktop: true, inVoice: true, isAfkChannel: false, listenOnly: false,
-    serverClipsEnabled: true, voiceChannelPerms: PERM.VIEW_CHANNEL | PERM.CREATE_CLIPS,
-    experimentalOn: true, armed: false, bufferedSeconds: 0, localOnly: false,
+    serverClipsEnabled: true, viewerIsOwner: false, voiceChannelPerms: PERM.VIEW_CHANNEL | PERM.CREATE_CLIPS,
+    armed: false, bufferedSeconds: 0,
 };
 
 describe('clipsGate', () => {
@@ -14,16 +14,19 @@ describe('clipsGate', () => {
         expect(s).toEqual({ visible: true, armEnabled: true, clipEnabled: false, reason: null, noMic: false });
         expect(clipUiState({ ...ok, armed: true, bufferedSeconds: 30 }).clipEnabled).toBe(true);
     });
-    it('hidden off desktop, when the flag is off, and on an old server', () => {
+    it('hidden off desktop and on an old server', () => {
         expect(clipUiState({ ...ok, isDesktop: false })).toMatchObject({ visible: false, reason: 'not-desktop' });
-        expect(clipUiState({ ...ok, experimentalOn: false })).toMatchObject({ visible: false, reason: 'flag-off' });
         expect(clipUiState({ ...ok, serverClipsEnabled: undefined })).toMatchObject({ visible: false, reason: 'old-server' });
     });
-    it('localOnly (Phase 1) ignores the server fields entirely', () => {
-        expect(clipUiState({ ...ok, localOnly: true, serverClipsEnabled: undefined, voiceChannelPerms: 0 })).toMatchObject({ visible: true, armEnabled: true, reason: null });
+    it('Phase 3: no experimental flag — the input has no such field', () => {
+        expect('experimentalOn' in ok).toBe(false);
+        expect('localOnly' in ok).toBe(false);
     });
-    it('server-off and no-permission render disabled with their reasons', () => {
-        expect(clipUiState({ ...ok, serverClipsEnabled: false })).toMatchObject({ visible: true, armEnabled: false, reason: 'server-off' });
+    it('server-off: hidden for a member (nothing they can do), disabled with the reason for the owner', () => {
+        expect(clipUiState({ ...ok, serverClipsEnabled: false })).toMatchObject({ visible: false, reason: 'server-off' });
+        expect(clipUiState({ ...ok, serverClipsEnabled: false, viewerIsOwner: true })).toMatchObject({ visible: true, armEnabled: false, reason: 'server-off' });
+    });
+    it('no-permission renders disabled with its reason', () => {
         expect(clipUiState({ ...ok, voiceChannelPerms: PERM.VIEW_CHANNEL })).toMatchObject({ visible: true, armEnabled: false, reason: 'no-permission' });
         // pre-migration server (null perms) is allowed, matching hasPerm's contract
         expect(clipUiState({ ...ok, voiceChannelPerms: null }).armEnabled).toBe(true);
@@ -43,7 +46,7 @@ describe('clipsGate', () => {
         expect(clipUiState({ ...ok, armed: true, bufferedSeconds: MIN_CLIP_SECONDS }).clipEnabled).toBe(true);
     });
     it('every reason has copy', () => {
-        for (const r of ['not-desktop', 'flag-off', 'old-server', 'server-off', 'no-permission', 'afk-channel', 'not-in-voice', 'buffer-too-short'] as const) {
+        for (const r of ['not-desktop', 'old-server', 'server-off', 'no-permission', 'afk-channel', 'not-in-voice', 'buffer-too-short'] as const) {
             expect(clipReasonCopy(r).length).toBeGreaterThan(10);
         }
         expect(clipReasonCopy(null)).toBe('');

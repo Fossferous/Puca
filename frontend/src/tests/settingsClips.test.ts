@@ -11,7 +11,8 @@ describe('clip settings', () => {
         expect(defaultSettings.clipArmOnJoin).toBe('off');
         expect(defaultSettings.clipArmPromptOnJoin).toBe(false); // legacy key, migrated by loadSettings
         expect(defaultSettings.saveClipBinding).toBeNull();
-        expect(defaultSettings.experimentalClips).toBe(false);
+        // Phase 3: the experimental flag is gone; the server's own switch is the only gate.
+        expect('experimentalClips' in defaultSettings).toBe(false);
     });
     it('the save-clip binding is in the collision list AND rendered in the Keybinds tab (one list, one place)', () => {
         expect(BIND_FIELDS.map(([f]) => f)).toContain('saveClipBinding');
