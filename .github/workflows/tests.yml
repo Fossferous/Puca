@@ -32,6 +32,44 @@ jobs:
         run: npm run build           # tsc -b && vite build
       - name: Unit tests (vitest)
         run: npm test                 # vitest run — offline, ~125 cases
+      # Two classes of defect that are invisible to tsc, vitest and eslint,
+      # because the code is correct and the WORDS in it are wrong. Both have
+      # shipped: a user-facing diagnostic telling people to install the APK
+      # from download.example.com, and a "TODO: Replace with your production
+      # server URL" sitting above the line that already did it, on the most
+      # security-relevant configuration point in the client.
+      - name: Source hygiene (placeholder domains, unowned TODO markers)
+        run: node scripts/check-source-hygiene.mjs
+      # docs/GETTING_STARTED.md pointed every new self-hoster at
+      # `.agent/HANDOFF.md`, a directory scrubbed for the public repo. Needs the
+      # git checkout (it asks git which paths are tracked and which are ignored
+      # on purpose), which actions/checkout already provides.
+      - name: Docs links resolve
+        run: node ../scripts/check-docs-links.mjs
+      # NON-BLOCKING on purpose: the registry's answer changes daily, so gating
+      # merges on it makes CI fail for reasons no commit caused. The triage
+      # lives in docs/NPM_ADVISORIES.md; this step is what makes drift from it
+      # visible. If the log and that file disagree, the file is out of date.
+      - name: npm audit (advisory drift — never blocks)
+        run: npm audit --audit-level=high || true
+
+  # The deploy scripts run once, as root, on a box that has already been paid
+  # for, and their failures are silent: a backup that restores nothing, a config
+  # world-readable for the moment it holds a secret, a download page advertising
+  # last release. Each of these tests runs offline against fixtures and stubs —
+  # no host is contacted and no real hosts.conf is read.
+  deploy-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: coturn config rendering
+        run: bash deploy/migrate/render-turn-conf.test.sh
+      - name: provision.sh (file modes, secrets off argv)
+        run: bash deploy/migrate/provision.test.sh
+      - name: backup-keys.sh (the key/password split, and its file modes)
+        run: bash deploy/ops/backup-keys.test.sh
+      - name: dual-ship.sh / check-versions.sh refusal gates
+        run: bash deploy/ops/ship-gates.test.sh
 
   backend:
     runs-on: ubuntu-latest
