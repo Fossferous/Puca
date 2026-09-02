@@ -122,5 +122,61 @@ console.log(`\n=== M-f: a negative pagination limit must not swallow the query i
         `len=${Array.isArray(negA.body) ? negA.body.length : 'n/a'}`);
 }
 
+console.log(`\n=== L8-DOS-2: edit history is capped, and edited_at is written ===`);
+{
+    // Unbounded before: every successful edit wrote a full copy of the previous
+    // body (up to 8000 bytes) with no cap and no pruning anywhere, and
+    // get_message_edits then returned all of them in one response.
+    const msgId = randomUUID();
+    psql(`INSERT INTO messages (id, channel_id, user_id, content) VALUES ('${msgId}', ${srv.channelId}, ${O.id}, 'v0')`);
+
+    let lastStatus = 0;
+    for (let i = 1; i <= 25; i++) {
+        const r = await api('PATCH', `/channels/${srv.channelId}/messages/${msgId}`, { content: `v${i}` }, O.t);
+        lastStatus = r.status;
+        if (r.status >= 300) break;
+    }
+    check('25 consecutive edits all succeed', lastStatus < 300, `last status=${lastStatus}`);
+
+    const rows = psql1(`SELECT count(*) FROM message_edits WHERE message_id='${msgId}'`);
+    check('edit history is capped at 10 rows', rows === '10', `rows=${rows}`);
+
+    // The rows kept must be the NEWEST — a cap that kept the ten OLDEST would
+    // also read as "10" above.
+    const newest = psql1(`SELECT old_content FROM message_edits WHERE message_id='${msgId}'
+                          ORDER BY edited_at DESC, id DESC LIMIT 1`);
+    check('the ten kept are the most recent', newest === 'v24', `newest=${newest}`);
+
+    // The API view agrees with the table and is DESC.
+    const hist = await api('GET', `/channels/${srv.channelId}/messages/${msgId}/edits`, null, O.t);
+    check('GET .../edits returns the capped history', Array.isArray(hist.body) && hist.body.length === 10,
+        `status=${hist.status} len=${Array.isArray(hist.body) ? hist.body.length : 'n/a'}`);
+
+    // edited_at: dead schema since migrations/001, now written.
+    const stamped = psql1(`SELECT count(*) FROM messages WHERE id='${msgId}' AND edited_at IS NOT NULL`);
+    check('messages.edited_at is stamped by an edit', stamped === '1', `rows=${stamped}`);
+
+    // ...and it is ADDITIVE: an UNEDITED message must carry no edited_at key at
+    // all, so the field cannot change what an old client already parses.
+    const freshId = randomUUID();
+    psql(`INSERT INTO messages (id, channel_id, user_id, content) VALUES ('${freshId}', ${srv.channelId}, ${O.id}, 'never-edited')`);
+    const page = await api('GET', `/channels/${srv.channelId}/messages?limit=50`, null, O.t);
+    const fresh = Array.isArray(page.body) ? page.body.find(m => m.id === freshId) : null;
+    check('an unedited message serialises with no edited_at key',
+        fresh !== null && fresh !== undefined && !('edited_at' in fresh),
+        `found=${fresh ? 'yes' : 'no'} keys=${fresh ? Object.keys(fresh).join(',') : 'n/a'}`);
+    const edited = Array.isArray(page.body) ? page.body.find(m => m.id === msgId) : null;
+    check('an edited message DOES carry edited_at', typeof edited?.edited_at === 'string',
+        `edited_at=${edited?.edited_at}`);
+
+    // A REFUSED edit must leave no trace: the history insert and the message
+    // update are now one transaction, so a conflict rolls both back.
+    const before = psql1(`SELECT count(*) FROM message_edits WHERE message_id='${msgId}'`);
+    psql(`UPDATE messages SET content='raced' WHERE id='${msgId}'`);
+    const conflict = await api('PATCH', `/channels/${srv.channelId}/messages/${msgId}`, { content: 'v26' }, O.t);
+    const after = psql1(`SELECT count(*) FROM message_edits WHERE message_id='${msgId}'`);
+    check('an edit that affects zero rows writes no history row', after === before,
+        `status=${conflict.status} before=${before} after=${after}`);
+}
 console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
