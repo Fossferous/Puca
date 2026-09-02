@@ -1083,7 +1083,7 @@ async fn main() -> anyhow::Result<()> {
         "listening on http://{} (local bind — expected behind a TLS-terminating reverse proxy)",
         addr
     );
-    tracing::info!("WebSocket path: /ws?token=YOUR_JWT — reachable locally as ws://{addr}/ws, or wss://<public-host>/ws through the reverse proxy in production");
+    tracing::info!("WebSocket path: /ws, authenticating with the Sec-WebSocket-Protocol header `bearer, YOUR_JWT` (?token= is still accepted for pre-0.9.0 installs, but lands in access logs) — reachable locally as ws://{addr}/ws, or wss://<public-host>/ws through the reverse proxy in production");
     tracing::info!("💡 Production deployments MUST sit behind a reverse proxy (nginx/Caddy) terminating TLS — this process itself never speaks TLS/WSS");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

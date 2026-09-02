@@ -31,6 +31,17 @@ pub struct WsQuery {
     /// replacement is `Sec-WebSocket-Protocol` (see `bearer_from_subprotocol`),
     /// which no proxy logs by default. Remove this once no shipped client sends
     /// it — until then, dropping it would sign out every existing install.
+    ///
+    /// RETIREMENT PLAN (L8-XPORT-5). As of 0.9.0 every client in this tree sends
+    /// the subprotocol: the browser/desktop/mobile app (websocket.ts), the
+    /// Android delivery socket (NativeDelivery.java) and, new in this release,
+    /// both native background services (puca-service's link.rs and puca-waker's
+    /// net.rs). So this field now serves only installs that have not updated.
+    /// It can be deleted a full release cycle after 0.9.0 has gone out — NOT in
+    /// the same one. The waker is the reason for the caution: an un-updated
+    /// waker that silently stops reconnecting means missed wake doorbells, i.e.
+    /// messages that never arrive on a sleeping machine. "Update to fix" is
+    /// acceptable here; a flag day is not.
     #[serde(default)]
     pub token: Option<String>,
     /// `delivery` marks a background notification socket (the phone's native

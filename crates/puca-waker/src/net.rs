@@ -139,7 +139,11 @@ pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), String> {
     ws_config.max_message_size = Some(MAX_WS_MESSAGE);
     ws_config.max_frame_size = Some(MAX_WS_MESSAGE);
     let (mut ws, _) =
-        tokio_tungstenite::connect_async_with_config(cfg.ws_url(token), Some(ws_config), false)
+        tokio_tungstenite::connect_async_with_config(
+            cfg.ws_request(token)?,
+            Some(ws_config),
+            false,
+        )
             .await
             .map_err(|e| format!("connect failed: {e}"))?;
     eprintln!("[waker] connected; waiting for the attestation challenge");
