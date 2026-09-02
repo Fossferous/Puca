@@ -19,6 +19,7 @@ const SOMEONE_ELSE = 99;
 vi.mock('../api/auth', () => ({
     getToken: () => 'header.payload.sig',
     decodeJwtPayload: () => ({ sub: ME, username: 'me' }),
+    currentUserIdFromToken: () => ME,
 }));
 
 // Record which encryption path was taken.
@@ -31,6 +32,9 @@ vi.mock('../api/e2ee', () => ({
     decryptSelf: async () => 'self-plaintext',
     parseEnvelope: (s: string) => {
         try { return JSON.parse(s); } catch { return null; }
+    },
+    parseEnvelopeEx: (s: string) => {
+        try { const e = JSON.parse(s); return e ? { kind: 'envelope', env: e } : { kind: 'plaintext' }; } catch { return { kind: 'plaintext' }; }
     },
     serializeEnvelope: (e: unknown) => JSON.stringify(e),
     SecureSendError: class extends Error {},
@@ -64,16 +68,16 @@ describe('self-DM encryption', () => {
 
     it('decrypts a self envelope without needing any public key', async () => {
         const env = JSON.stringify({ v: 2, t: 'self', ct: 'SELF-CIPHERTEXT' });
-        expect(await decryptDMContent(env, ME)).toBe('self-plaintext');
+        expect(await decryptDMContent(env, ME, ME)).toBe('self-plaintext');
     });
 
     it('still decrypts ordinary dm envelopes', async () => {
         const env = JSON.stringify({ v: 2, t: 'dm', ct: 'DM-CIPHERTEXT' });
-        expect(await decryptDMContent(env, SOMEONE_ELSE)).toBe('dm-plaintext');
+        expect(await decryptDMContent(env, SOMEONE_ELSE, SOMEONE_ELSE)).toBe('dm-plaintext');
     });
 
     it('passes through content that is not an envelope at all', async () => {
         // Legacy plaintext rows must not be mangled into an error string.
-        expect(await decryptDMContent('just text', ME)).toBe('just text');
+        expect(await decryptDMContent('just text', ME, ME)).toBe('just text');
     });
 });

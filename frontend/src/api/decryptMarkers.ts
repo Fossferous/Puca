@@ -18,6 +18,14 @@ export const ENC_CANNOT_DECRYPT = '[Encrypted — cannot decrypt]';
  *  key-substitution). We refuse to decrypt with an unverifiable key rather
  *  than present forged content as authentic. */
 export const ENC_UNVERIFIED_SENDER = '[Encrypted — sender key unverified]';
+/** A v3 envelope opened with the right key but the wrong CONTEXT: the row's
+ *  channel / sender / epoch (or DM direction) is not what the sender sealed
+ *  it under. Distinct from ENC_KEY_UNAVAILABLE on purpose — "the server
+ *  moved this" and "your key has not arrived yet" must not look alike. */
+export const ENC_CONTEXT_MISMATCH = '[Encrypted — does not belong here]';
+/** An envelope whose version this build does not implement. Shown instead
+ *  of the raw JSON a too-old parser used to render as plaintext. */
+export const ENC_UNSUPPORTED_VERSION = '[Encrypted — unsupported version, update the app]';
 /** Task-side wording (predates the shared marker set; kept for compatibility). */
 export const TASK_DECRYPT_FAILED = '[Unable to decrypt]';
 export const TASK_IDENTITY_LOCKED = '[Locked — log in again to decrypt]';
@@ -28,6 +36,8 @@ export const DECRYPT_FAILURE_MARKERS: ReadonlySet<string> = new Set([
     ENC_KEY_UNAVAILABLE,
     ENC_CANNOT_DECRYPT,
     ENC_UNVERIFIED_SENDER,
+    ENC_CONTEXT_MISMATCH,
+    ENC_UNSUPPORTED_VERSION,
     TASK_DECRYPT_FAILED,
     TASK_IDENTITY_LOCKED,
 ]);
