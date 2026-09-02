@@ -566,6 +566,31 @@ pub async fn update_task(
     // update flags.
     let set_attachments = payload.attachments.is_some();
     let new_attachments = payload.attachments.as_deref().filter(|a| !a.is_empty());
+
+    // A stale client that rendered a newer envelope as text and re-sealed it
+    // under its older format would destroy the item (there is no task edit
+    // history). Refuse the downgrade — see envelope_version.rs. Clearing the
+    // sidecar (empty string) is a deletion and stays allowed.
+    if payload.description.is_some() || new_attachments.is_some() {
+        let current: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT description, attachments FROM channel_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_optional(&state.pool)
+                .await
+                .unwrap_or(None);
+        if let Some((cur_desc, cur_att)) = current {
+            if let Some(desc) = payload.description.as_deref().map(str::trim) {
+                if crate::envelope_version::edit_is_downgrade(&cur_desc, desc) {
+                    return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+                }
+            }
+            if let (Some(cur), Some(new)) = (cur_att.as_deref(), new_attachments) {
+                if crate::envelope_version::edit_is_downgrade(cur, new) {
+                    return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+                }
+            }
+        }
+    }
     let set_due = payload.due_at.is_some();
     let new_due = match payload.due_at.as_deref() {
         Some(raw) => match parse_due(raw) {

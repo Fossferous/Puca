@@ -134,10 +134,15 @@ version, update the app]`, never plaintext.
 
 **Rollout was two releases.** 0.8.135 shipped the reader alone
 (`EMIT_ENVELOPE_V3 = false`); 0.8.136 turned emission on. A client that
-predates 0.8.135 renders a v3 body as the unsupported-version marker until it
-updates — the ciphertext is intact and opens once it does. Nothing in the
-codebase can *prove* every client has updated (no client-version signal reaches
-the server); the call was made on the size of the field and the update gates.
+predates 0.8.135 has no notion of v3: its parser returns null, so it renders a
+v3 body as the raw envelope JSON with the "Not encrypted" badge until it
+updates. It cannot damage it: from 0.8.136 the server refuses an edit that
+would replace a body with an older envelope version or with non-envelope
+content (`src/envelope_version.rs`, 409), so a stale client re-sealing the
+JSON it displayed is turned away instead of overwriting the ciphertext. That
+guard is permanent and applies to every future version bump. Nothing in the
+codebase can *prove* every client has updated (no client-version signal
+reaches the server); the call was made on the size of the field.
 `frontend/e2e/puca.spec.ts` pins the version the app writes.
 
 ### Key rotation & membership

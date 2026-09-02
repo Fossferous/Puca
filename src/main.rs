@@ -22,6 +22,7 @@ mod device_token;
 mod dm_handlers;
 mod email;
 mod email_handlers;
+mod envelope_version;
 mod friend_handlers;
 mod handlers;
 mod invite_handlers;
