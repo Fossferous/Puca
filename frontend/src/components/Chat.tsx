@@ -821,7 +821,9 @@ export function Chat({ onLogout }: ChatProps) {
      *  abandoned while the upload flew, in which case the freshly stored
      *  ciphertext is discarded on arrival (see abandonedUploadsRef). */
     const settleUpload = useCallback((localId: string, file: File) => {
-        void encryptAndUploadRef(file)
+        // Name the channel so the server can honour ATTACH_FILES at the upload
+        // door; a DM (no current channel) is not gated.
+        void encryptAndUploadRef(file, { channelId: currentChannelIdRef.current ?? undefined })
             .then(ref => {
                 if (abandonedUploadsRef.current.delete(localId)) {
                     const fileId = parseEncAttachment(ref.href)?.id;

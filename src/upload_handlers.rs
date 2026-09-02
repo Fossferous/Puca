@@ -306,6 +306,36 @@ async fn clip_upload_gate(state: &AppState, claims: &Claims, clip_id: Option<&st
     None
 }
 
+/// The ATTACH_FILES door.
+///
+/// Message content is end-to-end encrypted, so the server never sees which
+/// message (or channel) an uploaded blob is attached to; the honest place to
+/// honour the role bit is the upload itself, keyed by the channel the client
+/// SAYS it is attaching to — the `X-Puca-Channel` header the stock client sends
+/// for chat and task attachments. A header, not a multipart field, so an older
+/// server (whose field loop takes any unknown field as the file body) ignores
+/// it. A modified client can omit it, so this honours the setting for stock
+/// clients rather than being a security boundary — and the role editor's
+/// wording says so. Uploads that name no channel (avatars, emoji, sounds, DM
+/// attachments) are not gated here.
+pub(crate) fn attach_gate(
+    access: Option<&crate::permissions::ChannelPermAccess>,
+) -> Result<(), (StatusCode, &'static str)> {
+    use crate::permissions::{ChannelPermAccess, Permissions};
+    match access {
+        None => Ok(()),
+        Some(ChannelPermAccess::Allowed { perms, .. }) if perms.has(Permissions::ATTACH_FILES) => Ok(()),
+        Some(ChannelPermAccess::Allowed { .. }) => Err((
+            StatusCode::FORBIDDEN,
+            "You don't have permission to attach files in this channel",
+        )),
+        Some(ChannelPermAccess::NotMember) | Some(ChannelPermAccess::NotFound) => Err((
+            StatusCode::FORBIDDEN,
+            "You can't attach files in that channel",
+        )),
+    }
+}
+
 /// Upload a file.
 ///
 /// Multipart is read FIELD BY FIELD, in the order sent. Ordinary clients send a
@@ -348,6 +378,20 @@ pub async fn upload_file(
                 .into_response()
         }
     };
+
+    // ATTACH_FILES, before a single body byte is read (same reasoning as the
+    // clip gate below: a refusal must not cost 25 MiB of server RAM first).
+    let attach_channel = headers
+        .get("x-puca-channel")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<i64>().ok());
+    let attach_access = match attach_channel {
+        Some(cid) => Some(crate::permissions::get_user_channel_permissions(&state.pool, cid, claims.sub).await),
+        None => None,
+    };
+    if let Err((code, msg)) = attach_gate(attach_access.as_ref()) {
+        return (code, msg).into_response();
+    }
 
     let mut kind = String::from("attachment");
     let mut clip_id: Option<String> = None;
@@ -725,5 +769,40 @@ mod file_cap_tests {
         let (_, hash) = minted();
         assert!(file_cap_allows(Some(&hash), None, false), "phase 1: old clients still fetch");
         assert!(!file_cap_allows(Some(&hash), None, true), "phase 2: the capability is required");
+    }
+}
+
+#[cfg(test)]
+mod attach_gate_tests {
+    use super::attach_gate;
+    use crate::permissions::{ChannelPermAccess, Permissions};
+    use axum::http::StatusCode;
+
+    fn allowed(perms: Permissions) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed { server_id: "srv".to_string(), perms }
+    }
+
+    #[test]
+    fn an_upload_naming_no_channel_is_not_gated() {
+        assert!(attach_gate(None).is_ok());
+    }
+
+    #[test]
+    fn the_bit_admits_and_its_absence_refuses() {
+        assert!(attach_gate(Some(&allowed(Permissions::ATTACH_FILES | Permissions::VIEW_CHANNEL))).is_ok());
+        let refused = attach_gate(Some(&allowed(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES))).unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        assert!(refused.1.contains("attach files"));
+    }
+
+    #[test]
+    fn an_administrator_passes_without_the_literal_bit() {
+        assert!(attach_gate(Some(&allowed(Permissions::ADMINISTRATOR))).is_ok());
+    }
+
+    #[test]
+    fn a_stranger_or_a_missing_channel_is_refused_not_admitted() {
+        assert_eq!(attach_gate(Some(&ChannelPermAccess::NotMember)).unwrap_err().0, StatusCode::FORBIDDEN);
+        assert_eq!(attach_gate(Some(&ChannelPermAccess::NotFound)).unwrap_err().0, StatusCode::FORBIDDEN);
     }
 }

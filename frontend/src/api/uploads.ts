@@ -63,17 +63,24 @@ export function assertUploadable(file: File, overhead = 0): void {
 /**
  * Upload a file
  */
-export function uploadFile(file: File, opts?: { wantCap?: boolean }): Promise<UploadedFile> {
+export function uploadFile(file: File, opts?: { wantCap?: boolean; channelId?: number }): Promise<UploadedFile> {
     assertUploadable(file);
 
     const formData = new FormData();
     formData.append('file', file);
 
-    // A HEADER, not a multipart field: an older server's field loop treats
-    // any unknown field as the file body, whereas an unknown header is simply
+    // HEADERS, not multipart fields: an older server's field loop treats any
+    // unknown field as the file body, whereas an unknown header is simply
     // ignored — so a new client uploads fine against an old server and just
-    // gets no capability back.
-    return apiClient.post('/upload', formData, opts?.wantCap ? { headers: { 'X-Puca-Want-Cap': '1' } } : undefined);
+    // gets no capability back / no attach-files check.
+    // `channelId` names the channel a chat or task attachment is for, so the
+    // server can honour the ATTACH_FILES role bit at the upload door (content
+    // is E2EE, so the upload is the only place it can). Omitted for avatars,
+    // emoji, sounds and DM attachments.
+    const headers: Record<string, string> = {};
+    if (opts?.wantCap) headers['X-Puca-Want-Cap'] = '1';
+    if (opts?.channelId != null) headers['X-Puca-Channel'] = String(opts.channelId);
+    return apiClient.post('/upload', formData, Object.keys(headers).length ? { headers } : undefined);
 }
 
 /**
