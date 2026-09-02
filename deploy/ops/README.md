@@ -56,7 +56,15 @@ OFFSITE_CMD="rclone copy --config /root/.config/rclone/rclone.conf --to b2:bucke
 ```
 
 Until one is set, `backup.log` prints a `WARN offsite disabled … LOCAL-ONLY` line
-every night. **Uploads are E2EE ciphertext, so an offsite host never sees
+every night.
+
+**The offsite copy is encrypted or it is not shipped.** The dump holds every
+account's SRP verifier and every live password-reset token, so set a
+recipient whose private key lives OFF the box — `BACKUP_AGE_RECIPIENT="age1…"`
+(preferred) or `BACKUP_GPG_RECIPIENT="ops@example.com"` — in the same config
+file. With neither set the local dumps still happen and `backup.log` records
+`ERROR offsite copy … WITHHELD` nightly; `BACKUP_ALLOW_PLAINTEXT=1` is the
+only way to ship an unencrypted copy, and it says so in the log every time. **Uploads are E2EE ciphertext, so an offsite host never sees
 plaintext** — the keys stay on clients — making cheap untrusted storage (a VPS,
 object storage) perfectly safe as a destination.
 

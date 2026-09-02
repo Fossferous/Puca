@@ -32,9 +32,18 @@ share (`getDisplayMedia`), attachments, reactions, tasks.
            Strict-Transport-Security "max-age=31536000; includeSubDomains"
            X-Content-Type-Options "nosniff"
            X-Frame-Options "SAMEORIGIN"
+           Content-Security-Policy "default-src 'self'; connect-src 'self' https://chat.example.com wss://chat.example.com wss://sfu.example.com; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
        }
    }
    ```
+   Do not hand-write the `Content-Security-Policy` line: run
+   `deploy/ops/add-webapp-csp.py /etc/caddy/Caddyfile /opt/puca/.env app.example.com chat.example.com --dry-run`
+   and then without `--dry-run`. `connect-src` must name the API host and,
+   if the deployment has one, the SFU (`LIVEKIT_URL`) — a policy without the
+   SFU silently breaks voice for every browser user, which is why the tool
+   reads it from the backend's `.env` rather than taking it as an argument
+   (`--no-sfu` for a mesh-only deployment). `deploy/ops/check-versions.sh`
+   fails on `webapp-csp` until the header is live.
    `systemctl reload caddy`.
 4. Add `https://app.example.com` to `CORS_ORIGINS` in `/opt/puca/.env`,
    `systemctl restart puca`.
@@ -51,7 +60,4 @@ is decoupled from the desktop/mobile version line — it always serves whatever
 `dist` was last deployed here.
 
 ## Follow-ups (not done)
-- Content-Security-Policy header (left off initially — the app uses WASM,
-  AudioWorklets, and blob: URLs, so a wrong CSP silently breaks it; add + test
-  deliberately).
 - PWA manifest + service worker for installability/offline.

@@ -84,18 +84,23 @@ fi
 # offsite target is a THIRD PARTY (Drive/R2/B2/a NAS), so the artifact must be
 # encrypted to a key whose PRIVATE half lives OFF this box — then a compromise
 # of the backup target (or this box) does not hand over every account's
-# credentials. Opt-in, like offsite itself: set ONE recipient and the offsite
-# copy is encrypted; set neither and behaviour is exactly as before (with a
-# loud warning, since shipping these unencrypted is a real exposure).
+# credentials. Set ONE recipient and the offsite copy is encrypted. Set
+# neither and NOTHING is shipped: the local dumps still happen, and backup.log
+# says every night why the offsite copy was withheld. A plaintext offsite copy
+# is available only by saying so explicitly (BACKUP_ALLOW_PLAINTEXT=1) — the
+# dump holds every account's SRP verifier and every live reset token, so the
+# default cannot be "ship it and warn".
 #
 #   BACKUP_AGE_RECIPIENT="age1..."          # preferred; `age -r`
 #   BACKUP_GPG_RECIPIENT="ops@example.com"  # `gpg --encrypt -r`
+#   BACKUP_ALLOW_PLAINTEXT=1                # accept an UNENCRYPTED offsite copy
 #
 # The recipient is a PUBLIC key — no secret is stored on this box. Keep the
 # matching private key offline; without it these backups cannot be read, which
 # is the entire point. Test recovery before you rely on it.
 BACKUP_AGE_RECIPIENT="${BACKUP_AGE_RECIPIENT:-}"
 BACKUP_GPG_RECIPIENT="${BACKUP_GPG_RECIPIENT:-}"
+BACKUP_ALLOW_PLAINTEXT="${BACKUP_ALLOW_PLAINTEXT:-0}"
 
 # Echo a path to ship for `$1`: the encrypted copy when a recipient is set (and
 # the tool is present and succeeds), else the original. Encryption failures are
@@ -120,8 +125,13 @@ encrypt_for_offsite(){
 			log "ERROR gpg encryption failed for $(basename "$f") — not shipping"; rm -f "$f.gpg"; fi
 		return 0
 	fi
-	log "WARN offsite copy of $(basename "$f") is UNENCRYPTED (set BACKUP_AGE_RECIPIENT or BACKUP_GPG_RECIPIENT) — it contains SRP verifiers and reset tokens"
-	echo "$f"
+	if [ "$BACKUP_ALLOW_PLAINTEXT" = "1" ]; then
+		log "WARN offsite copy of $(basename "$f") is UNENCRYPTED (BACKUP_ALLOW_PLAINTEXT=1) — it contains SRP verifiers and reset tokens"
+		echo "$f"
+		return 0
+	fi
+	# Fail closed: print nothing, and ship() skips the upload.
+	log "ERROR offsite copy of $(basename "$f") WITHHELD — it would be unencrypted; set BACKUP_AGE_RECIPIENT or BACKUP_GPG_RECIPIENT (or BACKUP_ALLOW_PLAINTEXT=1 to accept the exposure)"
 }
 
 ship(){
