@@ -1245,3 +1245,84 @@
 }
 /* (Arrow tail removed: placement is dynamic now — above or below the badge —
    so a fixed-direction arrow would point the wrong way half the time.) */
+
+/* --- Collapsed mobile voice bar ------------------------------------------
+   Gate mirrors mobile.css exactly (DESIGN_PHILOSOPHY §2/§6): these rules
+   restyle the fixed bottom bar that mobile.css creates, and a narrow desktop
+   window must never hit them. `.vp-collapsed` is set by VoicePanel.tsx under
+   the same gate; collapsed is the DEFAULT while in voice on phones — the
+   full two-row panel plus disconnect stood ~230px tall, which with the soft
+   keyboard up left no room for the message list at all. */
+@media (pointer: coarse) and (max-width: 1024px) {
+
+    /* One row: status (channel name + E2EE badge) left, essential controls
+       (mic / deafen / expand chevron / hang-up) right. wrap, because the
+       panel root has more children than the bar: the mic-health / listen-only
+       notices below must land on their OWN full-width row, not be squeezed
+       sideways next to the buttons. */
+    .voice-panel-compact.vp-collapsed {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 10px 8px 14px;
+    }
+
+    /* Full-width rows under the bar: error/mic notices and (touch-laptop
+       only) the clip status line. The bar itself stays one row because
+       info (flex:1) + the four buttons always fit at 320px and up. */
+    .voice-panel-compact.vp-collapsed .voice-error-mini,
+    .voice-panel-compact.vp-collapsed .voice-clip-status {
+        flex-basis: 100%;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-connection-info {
+        flex: 1;
+        min-width: 0;
+        padding: 0;
+        border-bottom: none;
+    }
+
+    /* The green signal icon already says "connected"; the shouty label row is
+       what a one-row bar cannot afford. Channel name + E2EE badge stay — the
+       badge is the at-a-glance encrypted notice, tap/focus for the details. */
+    .voice-panel-compact.vp-collapsed .voice-connected-label {
+        display: none;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-channel-name {
+        font-size: 0.85rem;
+        color: var(--text-normal);
+    }
+
+    /* The channel name ellipsizes; the encryption badge must not be the thing
+       that gets crushed on a 320px screen. */
+    .voice-panel-compact.vp-collapsed .voice-e2ee {
+        flex-shrink: 0;
+    }
+
+    .voice-panel-compact.vp-collapsed .voice-controls-compact {
+        flex-wrap: nowrap;
+        gap: 6px;
+        padding: 0;
+        background: transparent;
+    }
+
+    /* The hang-up button's flex-basis:100% gives it a full-width row in the
+       EXPANDED panel; in the one-row bar it must be an ordinary round
+       button, or it stretches and pushes the row off-screen. */
+    .voice-panel-compact.vp-collapsed .voice-btn.disconnect {
+        flex-basis: auto;
+    }
+
+    /* Secondary controls live behind the expand chevron while collapsed.
+       Clip buttons never render on phones (isTauri gate) but a coarse-pointer
+       touch laptop under 1024px does reach here — hide them the same way. */
+    .voice-panel-compact.vp-collapsed .voice-dropdown,
+    .voice-panel-compact.vp-collapsed .vp-camera,
+    .voice-panel-compact.vp-collapsed .vp-screenshare,
+    .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-arm,
+    .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-save {
+        display: none;
+    }
+}

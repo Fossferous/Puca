@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, isUserSpeaking, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, upsertVoiceUser } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, isUserSpeaking, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus } from './voiceState';
 import './FileUpload.css';
@@ -4816,6 +4816,33 @@ export function Chat({ onLogout }: ChatProps) {
                     </button>
                 </header>
 
+                {/* Mobile: the stream mini-player DOCKS here, between header and
+                    messages, as a normal flex row of .chat-main. The floating
+                    StreamPip (rendered near the end of this component for
+                    desktop) is mouse-only and floated over the composer and
+                    voice bar on phones; docked, the video reserves its own row
+                    so you can watch, read replies and type at the same time.
+                    Same component either way — it is the chat-view audio path,
+                    and only ONE instance ever mounts (isMobile picks which). */}
+                {isMobile && showPip && viewMode === 'chat' && (
+                    <StreamPip
+                        docked
+                        onExpand={() => {
+                            setShowPip(false);
+                            setViewMode('stream');
+                        }}
+                        onClose={() => setShowPip(false)}
+                        onStopWatching={() => {
+                            // Deselecting every stream also closes the pip via
+                            // the stream-state effect (no streams → showPip off).
+                            getSelectedStreams().forEach(id => deselectStream(id));
+                        }}
+                        poppedStreams={poppedStreams}
+                        onTogglePopout={togglePopout}
+                        hidden={usingDocPip && poppedStreams.length > 0}
+                    />
+                )}
+
                 <div
                     ref={messagesContainerRef}
                     onScroll={handleMessagesScroll}
@@ -4848,6 +4875,15 @@ export function Chat({ onLogout }: ChatProps) {
                     ) : viewMode === 'stream' ? (
                         <StreamStage
                             onBackToChat={() => setViewMode('chat')}
+                            // Mobile: leaving the fullscreen stage KEEPS the
+                            // streams playing in the docked mini-player over
+                            // chat — the desktop button deselects everything,
+                            // which on a phone made "go type something" mean
+                            // "stop watching".
+                            onMinimize={isMobile ? () => {
+                                setShowPip(true);
+                                setViewMode('chat');
+                            } : undefined}
                             poppedStreams={poppedStreams}
                             onTogglePopout={togglePopout}
                         />
@@ -5770,8 +5806,10 @@ export function Chat({ onLogout }: ChatProps) {
                 />
             )}
 
-            {/* PiP Stream overlay - shows when viewing chat but streams are active */}
-            {showPip && viewMode === 'chat' && (
+            {/* PiP Stream overlay - shows when viewing chat but streams are
+                active. Desktop only: on mobile the SAME component mounts
+                docked inside .chat-main instead (see below the chat header). */}
+            {!isMobile && showPip && viewMode === 'chat' && (
                 <StreamPip
                     onExpand={() => {
                         setShowPip(false);

@@ -540,6 +540,9 @@ mod tests {
         assert!(err.contains("absolute"), "{err}");
     }
 
+    // The premise is literally Windows: install_dir() resolves %ProgramFiles%,
+    // which no other OS sets — off Windows the expect() fails by design.
+    #[cfg(windows)]
     #[test]
     fn the_install_directory_is_under_program_files() {
         let dir = install_dir().expect("ProgramFiles is set on any Windows machine");
