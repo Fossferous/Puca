@@ -54,9 +54,110 @@ ssh_to() { ssh "${SSH_OPTS[@]}" "${1#*:}" "${@:2}"; }
 # target too, corrupting the scp invocation into "src dest bare-host" — three
 # positional args scp cannot make sense of.
 scp_to() { shift; scp "${SSH_OPTS[@]}" "$@"; }
+# TLS on the loopback self-checks: `-k` unless hosts.conf pins a CA.
+#
+# Every self-check below is `curl --resolve <host>:443:127.0.0.1` run over SSH
+# ON the target box, against that box's own Caddy. `-k` is load-bearing rather
+# than lazy: a deployment fronted by Cloudflare serves an Origin CA certificate
+# on the origin, and that CA is deliberately not in any system trust store — so
+# dropping the flag outright would fail every check on every host.
+#
+# What that means for a reader, spelled out because nothing here used to say it:
+# the trust boundary on these checks is the SSH SESSION, not TLS. The connection
+# never leaves the box's loopback interface, and the property the checks
+# actually establish is a sha256 of the served bytes against the local artifact,
+# which TLS was not providing anyway. Do not copy `-k` into a check that runs
+# over a network — the CDN verification in verify_cdn_exe runs from the
+# operator's machine and correctly does NOT use it.
+#
+# Set ORIGIN_CA in hosts.conf (see hosts.conf.example) to a CA bundle present on
+# every host and these checks verify the certificate instead. The negative
+# control for that pin is trivial and worth running once: point ORIGIN_CA at an
+# unrelated CA and confirm the checks FAIL. If they still pass, the pin is doing
+# nothing.
+if [ -n "${ORIGIN_CA:-}" ]; then
+	CURL_TLS="--cacert '$ORIGIN_CA'"
+else
+	CURL_TLS="-k"
+fi
+
 
 # label:target -> just the label, for readable output.
 label_of() { echo "${1%%:*}"; }
+
+# The download page to publish with whatever we are shipping.
+#
+# Prefer an untracked local page when one exists. The TRACKED page is a generic
+# template that names example.com — shipping it to a real download host would
+# tell your users to connect to a domain that is not yours, and it is the one
+# artefact here whose content end users actually read. (.gitignore covers
+# index.local.html.)
+download_page() {
+	if [ -f "$HERE/../download-site/index.local.html" ]; then
+		printf '%s' "$HERE/../download-site/index.local.html"
+	else
+		printf '%s' "$HERE/../download-site/index.html"
+	fi
+}
+
+# Refuse to ship an artifact the page does not advertise.
+#
+# The APK gate has existed since the page sat on 0.5.56 through six releases of
+# OTAs. The installer had no such gate, and the page's own comment conceded it:
+# "the installer link is not, so keep it in step by hand." So a Windows-only
+# release published a new installer while the live page kept advertising the
+# previous version number — the identical failure, in the other column. Both
+# facts are checked: the exact installer filename being uploaded, and the
+# version label a human reads before clicking it.
+#
+# grep -F for the filename: a version is full of dots and `0.8.136` as a REGEX
+# also matches `0X8Y136`. The version label needs a real regex, though — a plain
+# substring test for "v0.8.13" MATCHES a page that says "v0.8.136", so shipping
+# an older build past a newer page would sail through the gate that exists to
+# stop exactly that. version_on_page pins both ends.
+require_page_advertises() {
+	local page="$1" version="$2" artifact="$3" what="$4"
+	if ! grep -qF "$artifact" "$page"; then
+		echo "REFUSING: $page does not link $artifact."
+		echo "Update the $what href there first — the page and the artifact ship together."
+		exit 1
+	fi
+	if ! version_on_page "$(cat "$page")" "$version"; then
+		echo "REFUSING: $page does not name v$version."
+		echo "Update the version label (the .meta line) there first, or the live page keeps"
+		echo "advertising the previous release to everyone who visits it."
+		exit 1
+	fi
+}
+
+# Does this text name exactly v<version>, not a longer version that starts with
+# it? `v0.8.13` must not match `v0.8.136`. The dots are escaped so they are not
+# regex wildcards, and the match must end at a character that cannot continue a
+# version number.
+version_on_page() {
+	local text="$1" version="$2" escaped
+	escaped="${version//./\\.}"
+	# grep -c, never -q: -q exits at the first match and SIGPIPEs the writer,
+	# which under `pipefail` reads as a failed pipeline.
+	[ "$(printf '%s\n' "$text" | grep -cE "v${escaped}([^0-9.]|\$)" || true)" -gt 0 ]
+}
+
+# Publish the page alongside the artifact, and confirm the LIVE page names the
+# version — the served page, not the file we uploaded, because a correct file
+# in the wrong place looks identical to a successful deploy.
+ship_download_page() {
+	local entry="$1" page="$2" version="$3" label="$4" tag="$5"
+	scp_to "$entry" "$page" "${entry#*:}:$INSTALL_DIR/downloads/index.html"
+	ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/index.html"
+	local served
+	served="$(remote_body "$entry" "$DOWNLOAD_HOST" / || true)"
+	if version_on_page "$served" "$version"; then
+		echo "PASS  $label download page advertises v$version"
+	else
+		echo "FAIL  $label download page does not name v$version"
+		FAILED+=("$label:$tag-page")
+	fi
+}
 
 # Run curl ON the target host against ITS OWN loopback, not from wherever
 # this script happens to execute.
@@ -79,19 +180,38 @@ label_of() { echo "${1%%:*}"; }
 # tester's own machine is on.
 remote_body() {
 	local entry="$1" host="$2" path="$3"
-	ssh_to "$entry" "curl -sk --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 20"
+	ssh_to "$entry" "curl -s $CURL_TLS --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 20"
 }
 # Confirms the box we just shipped to is the one whose Caddy answers, by
 # reading the $HOST_HEADER label it sets on itself. Catches a host whose
 # Caddy is serving a DIFFERENT vhost config than expected.
 remote_host_label() {
 	local entry="$1"
-	ssh_to "$entry" "curl -sk -I --resolve '$API_HOST:443:127.0.0.1' https://$API_HOST/ --max-time 20 \
+	ssh_to "$entry" "curl -s $CURL_TLS -I --resolve '$API_HOST:443:127.0.0.1' https://$API_HOST/ --max-time 20 \
 		| grep -i '^$HOST_HEADER:' | cut -d' ' -f2- | tr -d '\r\n'"
 }
+# The one property `-k` throws away: WHICH certificate the box is serving.
+#
+# The self-checks deliberately skip verification (see the CURL_TLS block), so
+# nothing else here would notice a host answering on 443 with a certificate for
+# somebody else's name — a stray vhost, a half-finished migration, a box that
+# was re-imaged and picked up a default. This asserts the name without needing
+# the issuing CA in a trust store, which is exactly the gap.
+#
+# A wildcard is accepted, because that is what a Cloudflare Origin CA
+# certificate normally carries: `example.com, *.example.com` covers
+# `chat.example.com` and matching only the exact name would fail every
+# perfectly healthy host of that shape.
+remote_cert_names() {
+	local entry="$1" host="$2"
+	ssh_to "$entry" "command -v openssl >/dev/null 2>&1 || exit 3
+		echo | openssl s_client -connect 127.0.0.1:443 -servername '$host' 2>/dev/null \
+			| openssl x509 -noout -subject -ext subjectAltName 2>/dev/null"
+}
+
 remote_code() {
 	local entry="$1" host="$2" path="$3"
-	ssh_to "$entry" "curl -sk -o /dev/null -w '%{http_code}' --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 20"
+	ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 20"
 }
 
 cmd_webapp() {
@@ -135,9 +255,9 @@ cmd_webapp() {
 		# script (see remote_body's header for why that was unreliable).
 		local served_sha local_entry_sha entry_js
 		served_sha="$(ssh_to "$entry" '
-			JS=$(curl -sk --resolve '"$APP_HOST"':443:127.0.0.1 https://'"$APP_HOST"'/ --max-time 20 \
+			JS=$(curl -s '"$CURL_TLS"' --resolve '"$APP_HOST"':443:127.0.0.1 https://'"$APP_HOST"'/ --max-time 20 \
 				| grep -oE "assets/index-[A-Za-z0-9_-]+\.js" | head -1)
-			curl -sk --resolve '"$APP_HOST"':443:127.0.0.1 "https://'"$APP_HOST"'/$JS" --max-time 20 | sha256sum | cut -d" " -f1
+			curl -s '"$CURL_TLS"' --resolve '"$APP_HOST"':443:127.0.0.1 "https://'"$APP_HOST"'/$JS" --max-time 20 | sha256sum | cut -d" " -f1
 			echo "$JS" >&2
 		' 2>/tmp/dual-ship-entry-js)"
 		entry_js="$(cat /tmp/dual-ship-entry-js 2>/dev/null)"; rm -f /tmp/dual-ship-entry-js
@@ -368,6 +488,12 @@ with open(os.environ["PUCA_OUT"], "w", encoding="utf-8", newline="\n") as f:
 
 cmd_installer() {
 	local exe="${1:?setup.exe}" sig_file="${2:?sig file}" version="${3:?version}" notes="${4:?notes}"
+	# The page ships with the installer, and refuses first — same rule the APK
+	# has had since 0.5.56 sat on the page through six releases. The installer
+	# href carries no version, so BOTH facts are checked: the filename it links
+	# and the version label a human reads next to it.
+	local page; page="$(download_page)"
+	require_page_advertises "$page" "$version" "$INSTALLER_NAME" "Windows"
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -407,8 +533,9 @@ cmd_installer() {
 			mv /tmp/puca-latest-dual.json latest.json
 			mv /tmp/puca-appver-dual.json $INSTALL_DIR/app-version.json
 			chmod 644 latest.json $INSTALL_DIR/app-version.json"
+		ship_download_page "$entry" "$page" "$version" "$label" "installer"
 		local served_sha
-		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME --max-time 120 | sha256sum | cut -d' ' -f1")"
+		served_sha="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
 			echo "PASS  $label installer hash matches"
 		else
@@ -472,6 +599,8 @@ verify_cdn_exe() {
 # it twice would only risk the two ships disagreeing about its content.
 cmd_installer_lite() {
 	local exe="${1:?setup.exe}" sig_file="${2:?sig file}" version="${3:?version}" notes="${4:?notes}"
+	local page; page="$(download_page)"
+	require_page_advertises "$page" "$version" "$INSTALLER_NAME_LITE" "lite Windows"
 	local sig; sig="$(cat "$sig_file")"
 	local local_sha; local_sha="$(sha256sum "$exe" | cut -d' ' -f1)"
 	local pub_date; pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -497,8 +626,9 @@ cmd_installer_lite() {
 			chmod 644 $INSTALLER_NAME_LITE $versioned
 			mv /tmp/puca-latest-lite-dual.json latest-lite.json
 			chmod 644 latest-lite.json"
+		ship_download_page "$entry" "$page" "$version" "$label" "installer-lite"
 		local served_sha
-		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME_LITE --max-time 120 | sha256sum | cut -d' ' -f1")"
+		served_sha="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 https://$DOWNLOAD_HOST/$INSTALLER_NAME_LITE --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
 			echo "PASS  $label lite installer hash matches"
 		else
@@ -615,13 +745,8 @@ cmd_backend() {
 # shipped.
 cmd_apk() {
 	local apk="${1:?usage: dual-ship.sh apk <APK> <version>}" version="${2:?version}"
-	# Prefer an untracked local page when one exists. The TRACKED page is a
-	# generic template that names example.com — shipping it to a real download
-	# host would tell your users to connect to a domain that is not yours, and
-	# it is the one artefact here whose content end users actually read.
-	local page="$HERE/../download-site/index.html"
-	[ -f "$HERE/../download-site/index.local.html" ] && page="$HERE/../download-site/index.local.html"
-	if ! grep -q "$APK_PREFIX-$version.apk" "$page"; then
+	local page; page="$(download_page)"
+	if ! grep -qF "$APK_PREFIX-$version.apk" "$page"; then
 		echo "REFUSING: $page does not link $APK_PREFIX-$version.apk."
 		echo "Update the Android href + the version label there first — the page and the APK ship together."
 		exit 1
@@ -631,10 +756,10 @@ cmd_apk() {
 		local label; label="$(label_of "$entry")"
 		echo "=== apk $version -> $label ==="
 		scp_to "$entry" "$apk" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$APK_PREFIX-$version.apk"
-		scp_to "$entry" "$page" "${entry#*:}:$INSTALL_DIR/downloads/index.html"
-		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/mobile/$APK_PREFIX-$version.apk $INSTALL_DIR/downloads/index.html"
+		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/mobile/$APK_PREFIX-$version.apk"
+		ship_download_page "$entry" "$page" "$version" "$label" "apk"
 		local served_sha
-		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/mobile/$APK_PREFIX-$version.apk' --max-time 120 | sha256sum | cut -d' ' -f1")"
+		served_sha="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/mobile/$APK_PREFIX-$version.apk' --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
 			echo "PASS  $label apk hash matches"
 		else
@@ -663,9 +788,8 @@ cmd_apk() {
 # cross-gate here.
 cmd_apk_lite() {
 	local apk="${1:?usage: dual-ship.sh apk-lite <APK> <version>}" version="${2:?version}"
-	local page="$HERE/../download-site/index.html"
-	[ -f "$HERE/../download-site/index.local.html" ] && page="$HERE/../download-site/index.local.html"
-	if ! grep -q "$APK_PREFIX_LITE-$version.apk" "$page"; then
+	local page; page="$(download_page)"
+	if ! grep -qF "$APK_PREFIX_LITE-$version.apk" "$page"; then
 		echo "REFUSING: $page does not link $APK_PREFIX_LITE-$version.apk."
 		echo "Update the lite Android href + version label there first — the page and the APK ship together."
 		exit 1
@@ -675,10 +799,10 @@ cmd_apk_lite() {
 		local label; label="$(label_of "$entry")"
 		echo "=== apk (lite) $version -> $label ==="
 		scp_to "$entry" "$apk" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$APK_PREFIX_LITE-$version.apk"
-		scp_to "$entry" "$page" "${entry#*:}:$INSTALL_DIR/downloads/index.html"
-		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/mobile/$APK_PREFIX_LITE-$version.apk $INSTALL_DIR/downloads/index.html"
+		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/mobile/$APK_PREFIX_LITE-$version.apk"
+		ship_download_page "$entry" "$page" "$version" "$label" "apk-lite"
 		local served_sha
-		served_sha="$(ssh_to "$entry" "curl -sk --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/mobile/$APK_PREFIX_LITE-$version.apk' --max-time 120 | sha256sum | cut -d' ' -f1")"
+		served_sha="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/mobile/$APK_PREFIX_LITE-$version.apk' --max-time 120 | sha256sum | cut -d' ' -f1")"
 		if [ "$served_sha" = "$local_sha" ]; then
 			echo "PASS  $label lite apk hash matches"
 		else
@@ -723,6 +847,20 @@ main() {
 		else
 			echo "FAIL  $label reports $HOST_HEADER '${seen:-<none>}'"
 			FAILED+=("$label:identity")
+		fi
+		local certnames rc=0 wildcard
+		certnames="$(remote_cert_names "$entry" "$API_HOST")" || rc=$?
+		wildcard="*.${API_HOST#*.}"
+		if [ "$rc" = "3" ]; then
+			echo "INFO  $label no openssl on the box — served certificate name unchecked"
+		elif [ -z "$certnames" ]; then
+			echo "INFO  $label could not read the served certificate — name unchecked"
+		elif [ "$(printf '%s\n' "$certnames" | grep -cF -e "$API_HOST" -e "$wildcard" || true)" -gt 0 ]; then
+			echo "PASS  $label serves a certificate naming $API_HOST"
+		else
+			echo "FAIL  $label serves a certificate for something else:"
+			printf '%s\n' "$certnames" | sed 's/^/        /'
+			FAILED+=("$label:cert-name")
 		fi
 	done
 	# Double quotes, NOT single: inside $( ) the quoting restarts, so a

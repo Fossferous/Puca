@@ -75,6 +75,32 @@ INSTALLER_NAME_LITE="Puca-Lite-Setup.exe"
 MOBILE_BUNDLE_PREFIX_LITE="puca-web-lite"
 APK_PREFIX_LITE="Puca-Lite"
 
+# ------------------------------------------------------------- loopback TLS --
+#
+# The post-ship self-checks all run `curl --resolve <host>:443:127.0.0.1` ON
+# the target box, against its own Caddy. They have always passed `-k`, because
+# a Cloudflare Origin CA certificate is not in any system trust store, so an
+# honest fetch would fail on every host that uses one.
+#
+# Set this to a CA bundle PRESENT ON THE BOX that signs whatever Caddy serves
+# on the loopback, and the checks verify the certificate instead of skipping
+# verification:
+#
+#   Cloudflare Origin CA:  download origin_ca_rsa_root.pem from Cloudflare's
+#                          docs and place it on each host, e.g.
+#                          /etc/ssl/cloudflare/origin_ca.pem
+#   Let's Encrypt vhost:   the system store already works — set this to
+#                          /etc/ssl/certs/ca-certificates.crt
+#
+# LEAVE IT UNSET and the checks keep `-k` with the trust boundary being the
+# SSH session, not TLS: the connection never leaves the box's loopback, and
+# what the checks actually assert is a sha256 of the served bytes against the
+# local artifact, which TLS was never providing. Do NOT set it to a path that
+# does not exist on every host — every self-check then fails, which either
+# blocks a release or (worse) teaches someone to add `|| true`.
+#
+# ORIGIN_CA="/etc/ssl/cloudflare/origin_ca.pem"
+
 # ------------------------------------------------------------------ ssh ----
 #
 # StrictHostKeyChecking=yes, NOT accept-new.
