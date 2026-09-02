@@ -84,8 +84,14 @@ export function fetchFileUrl(fileId: string): Promise<string | null> {
             // `safeBlobType` is the same normalisation the decrypted-attachment
             // path applies; every type these callers actually render survives
             // it unchanged.
-            const raw = await res.blob();
-            const url = URL.createObjectURL(new Blob([raw], { type: safeBlobType(raw.type) }));
+            // Bytes, not `res.blob()`: wrapping one runtime's Blob in another's
+            // constructor (undici's Response inside jsdom's Blob, on Node 20)
+            // stringifies it to "[object Blob]" — 13 bytes of nothing. The
+            // browser never hits that, but CI did, and bytes are the same
+            // everywhere. The type comes from the header, parameters dropped.
+            const bytes = await res.arrayBuffer();
+            const declared = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+            const url = URL.createObjectURL(new Blob([bytes], { type: safeBlobType(declared) }));
             remember(fileId, url);
             return url;
         } catch {
