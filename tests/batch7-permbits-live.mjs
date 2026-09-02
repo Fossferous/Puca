@@ -103,7 +103,7 @@ const clearDeny = (channelId) =>
     psql(`DELETE FROM channel_permission_overwrites WHERE channel_id = ${channelId} AND role_id = ${deniedRole}`);
 
 const wsJoin = (user, roomId, extraMsg) => new Promise((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:3000/ws?token=${user.t}`);
+    const ws = new WebSocket(`ws://127.0.0.1:3000/ws`, ['bearer', user.t]);
     let err = null, joined = false;
     const done = () => { try { ws.close(); } catch { } resolve({ joined, err }); };
     ws.addEventListener('message', (ev) => {

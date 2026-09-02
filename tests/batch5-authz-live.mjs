@@ -130,7 +130,7 @@ console.log(`\n=== M-a: leave_server force-evicts the leaver from a live voice r
     psql(`INSERT INTO server_members (server_id, user_id) VALUES ('${srvV.id}', ${M.id})`);
     const voiceRoom = `voice_${srvV.channelId}`;
 
-    const ws = new WebSocket(`ws://127.0.0.1:3000/ws?token=${M.t}`);
+    const ws = new WebSocket(`ws://127.0.0.1:3000/ws`, ['bearer', M.t]);
     let gotRoomLeft = false;
     ws.addEventListener('message', (ev) => {
         let m; try { m = JSON.parse(ev.data.toString()); } catch { return; }
@@ -184,7 +184,7 @@ console.log(`\n=== M-b: StreamStarted must reach channel VIEWERS only, not every
     const voiceRoom = `voice_${cid}`;
 
     const openWs = async (user) => {
-        const ws = new WebSocket(`ws://127.0.0.1:3000/ws?token=${user.t}`);
+        const ws = new WebSocket(`ws://127.0.0.1:3000/ws`, ['bearer', user.t]);
         ws.__got = false;
         ws.addEventListener('message', (ev) => {
             let m; try { m = JSON.parse(ev.data.toString()); } catch { return; }

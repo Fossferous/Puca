@@ -103,7 +103,7 @@ async function loginUser(username, password) {
 // ---------- tiny WS client ----------
 function connectWs(token) {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`${API.replace('http', 'ws')}/ws?token=${token}`);
+        const ws = new WebSocket(`${API.replace('http', 'ws')}/ws`, ['bearer', token]);
         const timer = setTimeout(() => reject(new Error('ws connect timeout')), 5000);
         ws.on('open', () => { clearTimeout(timer); resolve(ws); });
         ws.on('error', reject);

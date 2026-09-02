@@ -127,7 +127,7 @@ console.log(`S=${S} T1=${T1} T2=${T2} V1=${V1} V2=${V2}  S2=${S2} T3=${T3}\n`);
 
 // ---- ws helpers -----------------------------------------------------------------
 const connect = (u, opts = {}) => new Promise((res, rej) => {
-    const ws = new WebSocket(`${API.replace(/^http/, 'ws')}/ws?token=${u.token}${opts.delivery ? '&mode=delivery' : ''}`);
+    const ws = new WebSocket(`${API.replace(/^http/, 'ws')}/ws${opts.delivery ? '?mode=delivery' : ''}`, ['bearer', u.token]);
     ws.inbox = [];
     ws.on('message', (d) => { try { ws.inbox.push(JSON.parse(d.toString())); } catch { /* ignore */ } });
     ws.on('open', () => res(ws));
