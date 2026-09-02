@@ -793,6 +793,18 @@ export function mediaReadyTag(rawStaticMediaKey: Uint8Array, ephemeralPubEncoded
 }
 
 /**
+ * The DTLS pin tag: HMAC over (label || fingerprint) under the STATIC pairwise
+ * media key, advertised in the same SDP that carries the fingerprint. The
+ * server relays SDP and can answer with a connection of its own (terminating
+ * DTLS in the middle); it cannot produce this tag for ITS fingerprint, so the
+ * peer detects the swap. Independent of frame encryption: an engine without
+ * insertable streams still pins the connection it accepts.
+ */
+export function dtlsPinTag(rawStaticMediaKey: Uint8Array, fingerprint: string): string {
+    return toBase64(hmac(sha256, rawStaticMediaKey, concat(utf8('sovereign-dtls-pin-v1|'), utf8(fingerprint))));
+}
+
+/**
  * Per-call media session key with forward secrecy: HKDF over an ephemeral DH
  * (fresh per connection) plus the static identity DH. The static half keeps
  * confidentiality even if the server tampers with the ephemeral (it holds no

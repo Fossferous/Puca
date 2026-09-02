@@ -30,6 +30,10 @@ export function mediaE2eeExplanation(reason: MediaE2eeReason, peerName: string, 
             // One wording regardless of `enforced`: the SFU receive path refuses
             // unencrypted publications unconditionally.
             return `${peerName} is sending media that isn’t end-to-end encrypted (an out-of-date or modified app). Their audio and video are blocked here.`;
+        case 'fingerprint-mismatch':
+            return enforced
+                ? `The connection to ${peerName} is not the one their app authenticated — something on the path substituted it. Because encryption is required for this call, their media is blocked.`
+                : `The connection to ${peerName} is not the one their app authenticated — something on the path substituted it. Media is flowing over that connection; treat this call as not private.`;
         case 'verification-failed':
             return enforced
                 ? `Couldn’t verify encryption with ${peerName} — the handshake didn’t check out (an out-of-date client, or something on the network altering the connection). Because encryption is required for this call, their media is blocked.`

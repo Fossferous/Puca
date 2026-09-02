@@ -1,3 +1,5 @@
+import { sdpFingerprints } from '../dtlsFingerprint';
+import { dtlsPinTag } from '../e2ee';
 /**
  * End-to-end encryption for WebRTC media (voice + screen share).
  *
@@ -237,6 +239,49 @@ export function advertiseE2ee(sdp: string, tag: string | null, ephemeralPubEncod
     const idx = sdp.indexOf('m=');
     if (idx === -1) return sdp;
     return sdp.slice(0, idx) + SDP_PREFIX + tag + '|' + ephB64 + '\r\n' + sdp.slice(idx);
+}
+
+// --- DTLS fingerprint pin (every engine, with or without frame encryption) ---
+//
+// `a=sovereign-dtls:<tag>` where tag = dtlsPinTag(static pairwise key, the
+// canonical a=fingerprint of THIS description). A relaying server that
+// substitutes the peer connection presents its own certificate, so the
+// fingerprint in the SDP it forwards no longer matches the tag it cannot
+// re-mint. Absent on older peers: 'unbound' (today's behaviour), never a
+// refusal, or the first client to update would stop connecting to everyone.
+const DTLS_PREFIX = 'a=sovereign-dtls:';
+const DTLS_RE = /a=sovereign-dtls:([A-Za-z0-9+/=]+)/;
+
+export type DtlsPinResult = 'bound' | 'mismatch' | 'unbound';
+
+/** The canonical fingerprint an SDP presents, or null when it presents none
+ *  or more than one distinct value (a second fingerprint under another hash
+ *  could be the one selected, so disagreement is a mismatch, not a choice). */
+export function sdpSoleFingerprint(sdp: string): string | null {
+    const fps = sdpFingerprints(sdp);
+    if (fps.length === 0 || fps.some(f => f === null)) return null;
+    const first = fps[0] as string;
+    return fps.every(f => f === first) ? first : null;
+}
+
+/** Add the pin for this description's own fingerprint. No-op without the
+ *  pairwise key (peer key unresolved) or a fingerprint (a stack without one). */
+export function advertiseDtlsPin(sdp: string, rawStaticMediaKey: Uint8Array | null): string {
+    if (!rawStaticMediaKey || sdp.includes(DTLS_PREFIX)) return sdp;
+    const fp = sdpSoleFingerprint(sdp);
+    if (!fp) return sdp;
+    const idx = sdp.indexOf('m=');
+    if (idx === -1) return sdp;
+    return sdp.slice(0, idx) + DTLS_PREFIX + dtlsPinTag(rawStaticMediaKey, fp) + '\r\n' + sdp.slice(idx);
+}
+
+/** Verify a remote description's pin against the fingerprint it presents. */
+export function verifyDtlsPin(sdp: string, rawStaticMediaKey: Uint8Array): DtlsPinResult {
+    const m = DTLS_RE.exec(sdp);
+    if (!m) return 'unbound';
+    const fp = sdpSoleFingerprint(sdp);
+    if (!fp) return 'mismatch';
+    return m[1] === dtlsPinTag(rawStaticMediaKey, fp) ? 'bound' : 'mismatch';
 }
 
 /** Extract the peer's advertised media capability (tag + ephemeral), or null. */
