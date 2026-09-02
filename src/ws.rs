@@ -1100,6 +1100,31 @@ fn parse_voice_room(room_id: &str) -> Option<i64> {
         .and_then(|s| s.parse::<i64>().ok())
 }
 
+/// The channel behind a room id, whichever of the two legal shapes it is —
+/// `channel_<id>` (text) or `voice_<id>` (voice/stream). `None` means the id is
+/// not a room this server recognises AT ALL, which is now a refusal at JoinRoom
+/// rather than a fall-through that mints an arbitrary room (L8-AUTHZ-5).
+///
+/// Named so the join gate and the mutate gate resolve through the SAME function:
+/// they disagreed before (join covered both shapes, mutate covered voice only),
+/// and a gate pair that can drift is a gate pair that will.
+fn room_channel_id(room_id: &str) -> Option<i64> {
+    parse_channel_room(room_id).or_else(|| parse_voice_room(room_id))
+}
+
+/// The refusal message a JoinRoom for an unrecognised room id gets. Identical
+/// for every bad shape — it tells a prober nothing.
+const UNKNOWN_ROOM: &str = "unknown room";
+
+/// The room a JoinRoom may target, or the refusal. THIS is the L8-AUTHZ-5 gate:
+/// `Err` for anything that is not `channel_<id>` / `voice_<id>`, so the handler
+/// cannot fall through to `state.join_room` with an arbitrary string. Written as
+/// a `Result`-returning function rather than an `if let` in the arm so the
+/// refusal is the function's own contract and a unit test can hold it.
+fn join_target(room_id: &str) -> Result<i64, &'static str> {
+    room_channel_id(room_id).ok_or(UNKNOWN_ROOM)
+}
+
 /// True if `a` and `b` are both currently joined to the same in-memory VOICE
 /// room (`voice_<channelId>` — also the home of screen-share / camera / remote
 /// control). Used to authorize peer-to-peer relays (WebRTC signaling,
@@ -1446,6 +1471,34 @@ async fn can_mutate_room(state: &Arc<AppState>, room_id: &str, user_id: UserId) 
     can_mutate_room_with(state, room_id, user_id, None).await
 }
 
+/// The channel `can_mutate_room_with` must resolve permissions against, and the
+/// EXTRA media bit that applies there — or `None` for a room with no channel
+/// behind it.
+///
+/// L8-AUTHZ-4: this used to be `parse_voice_room` alone, so every NON-voice room
+/// fell through to membership only. The one non-voice caller is `Typing`, and
+/// the residual was a stale typing indicator surviving the window between a
+/// permission change and `broadcast_perms_changed_and_evict`'s sweep — or a kick
+/// that never runs one. Resolving BOTH shapes makes the mutate gate agree with
+/// the join gate, at the cost of one indexed lookup per typing frame (already
+/// metered by the per-connection token bucket).
+///
+/// `extra` (STREAM / VIDEO) is voice semantics and is dropped for a text room:
+/// a text channel has no media to gate. Every caller that passes one passes a
+/// voice room, but that is dropped explicitly rather than relied upon.
+fn mutate_gate_target(
+    room_id: &str,
+    extra: Option<Permissions>,
+) -> Option<(i64, Option<Permissions>)> {
+    let cid = room_channel_id(room_id)?;
+    let extra = if parse_voice_room(room_id).is_some() {
+        extra
+    } else {
+        None
+    };
+    Some((cid, extra))
+}
+
 /// As [`can_mutate_room`], plus an optional EXTRA permission bit the caller must
 /// hold on the voice room's channel — used to gate the specific media a member
 /// is starting (STREAM for a screen share, VIDEO for a camera), which are
@@ -1469,7 +1522,7 @@ async fn can_mutate_room_with(
     if !is_member {
         return false;
     }
-    if let Some(cid) = parse_voice_room(room_id) {
+    if let Some((cid, extra)) = mutate_gate_target(room_id, extra) {
         return matches!(
             get_user_channel_permissions(&state.pool, cid, user_id).await,
             ChannelPermAccess::Allowed { perms, .. }
@@ -1477,6 +1530,8 @@ async fn can_mutate_room_with(
                     && extra.is_none_or(|bit| perms.has(bit))
         );
     }
+    // Unreachable for any room a client can join (JoinRoom refuses every id that
+    // is not `channel_`/`voice_`); kept as the defensive floor.
     true
 }
 
@@ -1654,30 +1709,50 @@ async fn handle_message(
             // rejected as before. DM rooms are governed elsewhere. The error is
             // deliberately identical for not-found / non-member / VIEW-denied
             // so the channel's existence is not leaked.
-            if let Some(cid) = parse_channel_room(&room_id).or_else(|| parse_voice_room(&room_id)) {
-                // A VOICE room additionally requires CONNECT: it is an editable
-                // role bit ("Join voice channels") that nothing enforced, so a
-                // member explicitly denied CONNECT could still join the call.
-                // Text rooms need VIEW only — CONNECT is a voice permission.
-                let need_connect = parse_voice_room(&room_id).is_some();
-                let allowed = matches!(
-                    get_user_channel_permissions(&state.pool, cid, user_id).await,
-                    ChannelPermAccess::Allowed { perms, .. }
-                        if perms.has(Permissions::VIEW_CHANNEL)
-                            && (!need_connect || perms.has(Permissions::CONNECT))
+            //
+            // The gate is EXHAUSTIVE, not an allowlist-by-omission (L8-AUTHZ-5).
+            // Anything that was neither shape used to fall through and create a
+            // room in the global map, which handed two authenticated clients who
+            // agreed on a made-up id a server-mediated presence channel: joining
+            // one returns a `RoomJoined` roster, so a joiner learned the
+            // usernames of everyone else who guessed the same string. Verified
+            // before flipping this that no shipped client sends another shape —
+            // the only senders are `channel_${id}` (Chat.tsx, ChecklistBody.tsx),
+            // `voice_${id}` (Chat.tsx → VoicePanel), and websocket.ts's onopen
+            // replay, which re-sends only ids it was given; the two native crates
+            // send no JoinRoom at all. `state.join_room` has exactly one caller,
+            // this arm, so nothing server-side conjures another namespace either.
+            let cid = join_target(&room_id).map_err(|refusal| {
+                tracing::warn!(
+                    "JoinRoom refused for user {} ({}): unknown room shape {:?}",
+                    user_id,
+                    username,
+                    room_id
                 );
-                if !allowed {
-                    // Warn-level: a legitimate client rejoining after reconnect
-                    // that lands here is silently cut off from live channel
-                    // traffic — this must be visible in prod logs.
-                    tracing::warn!(
-                        "JoinRoom rejected for user {} ({}): no VIEW/CONNECT access for room {}",
-                        user_id,
-                        username,
-                        room_id
-                    );
-                    return Err("Not a member of this channel's server".to_string());
-                }
+                refusal.to_string()
+            })?;
+            // A VOICE room additionally requires CONNECT: it is an editable
+            // role bit ("Join voice channels") that nothing enforced, so a
+            // member explicitly denied CONNECT could still join the call.
+            // Text rooms need VIEW only — CONNECT is a voice permission.
+            let need_connect = parse_voice_room(&room_id).is_some();
+            let allowed = matches!(
+                get_user_channel_permissions(&state.pool, cid, user_id).await,
+                ChannelPermAccess::Allowed { perms, .. }
+                    if perms.has(Permissions::VIEW_CHANNEL)
+                        && (!need_connect || perms.has(Permissions::CONNECT))
+            );
+            if !allowed {
+                // Warn-level: a legitimate client rejoining after reconnect
+                // that lands here is silently cut off from live channel
+                // traffic — this must be visible in prod logs.
+                tracing::warn!(
+                    "JoinRoom rejected for user {} ({}): no VIEW/CONNECT access for room {}",
+                    user_id,
+                    username,
+                    room_id
+                );
+                return Err("Not a member of this channel's server".to_string());
             }
 
             // VOICE EXCLUSIVITY: one voice room per USER across all devices.
@@ -4085,5 +4160,103 @@ mod hidden_members_fail_direction_tests {
         ];
         members.retain(|m| m.id == 7 || !hidden.contains(&m.id));
         assert_eq!(members.iter().map(|m| m.id).collect::<Vec<_>>(), vec![7, 11]);
+    }
+}
+
+#[cfg(test)]
+mod room_id_gate_tests {
+    use super::{
+        join_target, mutate_gate_target, parse_channel_room, parse_voice_room, room_channel_id,
+        Permissions,
+    };
+
+    /// L8-AUTHZ-5. `room_channel_id` is the whole gate: `None` is a REFUSAL at
+    /// JoinRoom now, so anything that is not one of the two canonical shapes
+    /// must resolve to None. Before the fix these strings fell through the
+    /// `if let` and minted a room in the global map.
+    #[test]
+    fn only_the_two_canonical_shapes_resolve() {
+        for bad in [
+            "dm_1",             // a shape the server never broadcasts to
+            "",                 // empty
+            "channel_",         // prefix with no id
+            "voice_",           // ditto
+            "CHANNEL_1",        // case matters
+            "Voice_1",
+            "channel_1x",       // trailing junk
+            "channel_ 1",
+            "room1",            // the signaling test's ad-hoc name
+            "channel_1/2",
+            "lobby",
+        ] {
+            assert!(
+                room_channel_id(bad).is_none(),
+                "{bad:?} must not resolve to a channel — JoinRoom refuses it"
+            );
+        }
+
+        assert_eq!(room_channel_id("channel_1"), Some(1));
+        assert_eq!(room_channel_id("voice_1"), Some(1));
+        assert_eq!(room_channel_id("channel_987654321"), Some(987654321));
+        // Negative ids parse as i64 but no channel has one; they reach the
+        // permission resolver, which answers NotFound. That is the intended
+        // path — refusal by authorization, not by string shape.
+        assert_eq!(room_channel_id("voice_-3"), Some(-3));
+    }
+
+    /// The two shapes stay DISTINCT: `same_voice_room` and the presence carve-out
+    /// both key off `parse_voice_room` alone, so a text room must never answer it.
+    /// The gate itself, as the handler calls it: `join_target` REFUSES every id
+    /// that is not one of the two shapes, and the two shapes reach the
+    /// permission resolver with a channel id. Reverting the gate — making this
+    /// function hand back a channel (or the handler fall through) — turns this
+    /// test red, which is what makes it worth having.
+    #[test]
+    fn join_target_refuses_every_shape_the_server_does_not_own() {
+        for bad in ["dm_1", "", "channel_", "voice_", "CHANNEL_1", "room1", "lobby"] {
+            assert_eq!(
+                join_target(bad),
+                Err("unknown room"),
+                "JoinRoom must refuse {bad:?}"
+            );
+        }
+        assert_eq!(join_target("channel_1"), Ok(1));
+        assert_eq!(join_target("voice_1"), Ok(1));
+    }
+
+    /// L8-AUTHZ-4. A TEXT room must now resolve a channel, so the mutate gate
+    /// re-checks VIEW on it exactly as the join gate does. Reverting
+    /// `mutate_gate_target` to `parse_voice_room` alone makes the first
+    /// assertion red — which is the point of asserting it here rather than on
+    /// `room_channel_id`, which was always both-shapes.
+    #[test]
+    fn the_mutate_gate_resolves_text_rooms_too_and_scopes_extra_to_voice() {
+        assert_eq!(
+            mutate_gate_target("channel_5", None),
+            Some((5, None)),
+            "a text room must reach the permission resolver"
+        );
+        // STREAM/VIDEO are voice semantics: dropped for a text room, kept for voice.
+        assert_eq!(
+            mutate_gate_target("channel_5", Some(Permissions::STREAM)),
+            Some((5, None)),
+            "a text channel has no media bit to enforce"
+        );
+        assert_eq!(
+            mutate_gate_target("voice_5", Some(Permissions::STREAM)),
+            Some((5, Some(Permissions::STREAM))),
+        );
+        assert_eq!(mutate_gate_target("voice_5", None), Some((5, None)));
+        // No channel behind it → the defensive membership-only floor.
+        assert_eq!(mutate_gate_target("dm_1", None), None);
+        assert_eq!(mutate_gate_target("", Some(Permissions::VIDEO)), None);
+    }
+
+    #[test]
+    fn a_text_room_is_not_a_voice_room() {
+        assert!(parse_voice_room("channel_5").is_none());
+        assert!(parse_channel_room("voice_5").is_none());
+        assert_eq!(parse_channel_room("channel_5"), Some(5));
+        assert_eq!(parse_voice_room("voice_5"), Some(5));
     }
 }
