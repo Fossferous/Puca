@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -594,7 +593,9 @@ pub async fn login_step_2(
     }
 
     let hamk = verifier_instance.proof();
-    let session_key = verifier_instance.key();
+    // The SRP session key is deliberately NOT bound to anything: it used to be
+    // INSERTed into `sessions` and read by nothing (see step 6 below).
+    let _session_key = verifier_instance.key();
 
     // Successful auth — clear this username's failure streak (M3).
     state.clear_login_failures(&payload.username);
@@ -614,23 +615,30 @@ pub async fn login_step_2(
     let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &state.jwt_secret)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // 6. Also store session in DB for reference
-    let session_id = Uuid::new_v4().to_string();
-    let expires_at = Utc::now() + Duration::hours(24);
-
-    sqlx::query(
-        "INSERT INTO sessions (id, user_id, session_key, expires_at) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&session_id)
-    .bind(user_id)
-    .bind(session_key.as_ref())
-    .bind(expires_at.naive_utc())
-    .execute(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to create session: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // 6. NOTHING is written to the `sessions` table (L8-DATA-2).
+    //
+    // This used to INSERT the raw SRP session key — `session_key.as_ref()` into
+    // a `BYTEA NOT NULL` column — on every successful login, justified by a
+    // comment reading "Also store session in DB for reference". Nothing ever
+    // read it: a grep for `FROM sessions`, `DELETE FROM sessions` and
+    // `UPDATE sessions` across src/ returns nothing, the `session_id` local
+    // never left this function (LoginStep2Response is `{hamk_hex, token}`), and
+    // `expires_at` was written but never consulted. Authentication is JWT-based,
+    // right above. So the table was a monotonically growing store of one live
+    // cryptographic secret per successful login, for the life of the
+    // deployment, with no consumer — and it survived account deletion, since
+    // the tombstone is an UPDATE and the table's ON DELETE CASCADE never fires.
+    //
+    // Removing the write also removes a failure mode: the `?` on that query was
+    // the only way a healthy login could 500 on a database hiccup.
+    //
+    // DROPPING THE TABLE IS A SEPARATE, LATER RELEASE. It must land only after
+    // a release in which nothing writes it, or a rollback to the previous
+    // binary hits a missing relation on every login. The existing rows are
+    // historical secrets, and that migration is the point at which they stop
+    // existing — which is the entire benefit. A login audit trail, if wanted, is
+    // a different table with a different shape (user_id, timestamp, IP hash) and
+    // explicitly no key material; do not repurpose this one.
 
     // 7. Clean up THIS attempt row (row-scoped, so a concurrent device's live
     // attempt survives).
