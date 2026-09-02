@@ -167,13 +167,17 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
     return (
         <div
             ref={pipRef}
-            className={`stream-pip${docked ? ' docked' : ''}`}
+            className={`stream-pip${docked ? ' docked' : ''}${docked && hidden ? ' is-hidden' : ''}`}
             // Docked: no inline geometry at all — StreamPip.css's .docked rules
             // size it (in-flow, aspect-ratio). Inline left/top/width/height
             // would win over any stylesheet and drag the desktop float's stale
-            // coordinates onto the phone layout.
+            // coordinates onto the phone layout. Hidden is a CLASS here too: the
+            // strip is in-flow, so an inline visibility:hidden kept its whole
+            // ~32dvh row as a blank band above the messages while a stream was
+            // popped out; .is-hidden collapses the row and keeps the element
+            // laid out (a display:none <video> can pause — see the prop doc).
             style={docked
-                ? (hidden ? { visibility: 'hidden' as const } : undefined)
+                ? undefined
                 : {
                     left: position.x,
                     top: position.y,
