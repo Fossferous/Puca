@@ -573,6 +573,19 @@ async fn handle_socket(
     // room or the room wouldn't be in vacated_rooms). Audiences mirror the
     // clean-path handlers: StreamStopped is viewer-scoped to the room's
     // channel, screen-share and camera are room-scoped.
+    // REJOIN GRACE. A socket that drops and comes straight back (a network
+    // blip, a laptop lid, a throttled webview missing one heartbeat) used to
+    // cost the whole room a leave chime and then a join chime — "random
+    // pings" — because the departure was announced the instant the old socket
+    // died. Every announcement below re-validates against LIVE room state, so
+    // waiting here first means a user who is back inside the window is never
+    // announced as gone at all: peers keep their roster entry and hear
+    // nothing. Media itself was released at unregister time (a stale pc is
+    // rebuilt by the connId protocol either way); only the ANNOUNCEMENTS wait.
+    // An explicit LeaveRoom never comes through here and stays immediate.
+    if vacated_rooms.iter().any(|v| v.fully_left) {
+        tokio::time::sleep(rejoin_grace()).await;
+    }
     if vacated_rooms.iter().any(|v| v.was_streamer) {
         for v in vacated_rooms.iter().filter(|v| v.was_streamer) {
             // RE-VALIDATE against LIVE state: the await above opened a window
@@ -1487,6 +1500,21 @@ fn users_share_room(state: &Arc<AppState>, a: UserId, b: UserId) -> bool {
 /// member who lost access mid-session can't keep mutating room state.
 async fn can_mutate_room(state: &Arc<AppState>, room_id: &str, user_id: UserId) -> bool {
     can_mutate_room_with(state, room_id, user_id, None).await
+}
+
+/// How long a dropped voice socket may be silent before its departure is
+/// announced to the room (WS_REJOIN_GRACE_SECS, default 8; 0 = announce at
+/// once). The client's reconnect backoff starts at one second, so a genuine
+/// blip is back well inside this; a real departure is simply reported eight
+/// seconds late, which nobody notices.
+fn rejoin_grace() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("WS_REJOIN_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|s| s.min(60))
+            .unwrap_or(8),
+    )
 }
 
 /// Refusals the client shows verbatim when the server declines a media

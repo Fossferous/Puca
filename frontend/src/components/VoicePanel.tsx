@@ -3229,6 +3229,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 onClose={() => setShowStreamSettings(false)}
                 onCancelAfterCapture={() => {
                     // User backed out after the OS picker; drop the captured surface.
+                    stopHidingCaptureBar();
                     webrtcManager.stopScreenShare();
                 }}
                 onCaptureScreen={async ({ resolution, fps }) => {
@@ -3261,6 +3262,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         // Desktop captures video-only (native audio is attached later);
                         // browsers must request audio at getDisplayMedia time.
                         const shareStream = await webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop });
+                        // WebView2's "… is sharing a window" bar appears a beat after
+                        // the picker resolves, i.e. NOW — long before go-live. Hide it
+                        // from capture, not from the announce/publish round trip (the
+                        // effect on isScreenSharing keeps it hidden for the share, and
+                        // every abandoned path below releases it again).
+                        startHidingCaptureBar();
 
                         if (isDesktop) {
                             const { matchAppByWindowTitle } = await import('../api/appAudio');
@@ -3338,6 +3345,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // put the tracks on the wire for a share the server is
                     // about to refuse.
                     if (!isInVoiceRef.current) {
+                        stopHidingCaptureBar();
                         webrtcManager.stopScreenShare();
                         return;
                     }
@@ -3347,6 +3355,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         console.warn('[VoicePanel] screen share refused by the server:', ack.message);
                         setError(ack.message);
                         wsClient.stopScreenShare(roomId); // retract: a timeout may still have been accepted
+                        stopHidingCaptureBar();
                         webrtcManager.stopScreenShare();
                         return;
                     }
@@ -3361,7 +3370,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             console.warn('[VoicePanel] SFU screen share refused:', shareErr);
                             setError((shareErr as Error).message || 'Screen share failed');
                             wsClient.stopScreenShare(roomId); // retract the announcement
-                            webrtcManager.stopScreenShare();
+                            stopHidingCaptureBar();
+                        webrtcManager.stopScreenShare();
                             return;
                         }
                     } else {
@@ -3373,6 +3383,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // the camera path — release and bail.
                     if (!isInVoiceRef.current) {
                         void sfuManager.stopScreenShare();
+                        stopHidingCaptureBar();
                         webrtcManager.stopScreenShare();
                         return;
                     }
