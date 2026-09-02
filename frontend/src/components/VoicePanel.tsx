@@ -24,7 +24,8 @@ const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is avai
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
-import { isTauri, isMobile as isNativeMobile } from '../api/platform';
+import { isTauri } from '../api/platform';
+import { phonePanelQuery } from '../utils/phonePanel';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
@@ -155,13 +156,24 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Detect mobile for hiding screen share option
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
-    // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: mirrors mobile.css's media
-    // query exactly, plus the native shell. This decides whether the compact
-    // panel is the fixed bottom bar (collapsible, height-reserved); the
-    // UA-sniff `isMobile` above answers a different question ("no screen-share
-    // picker on this device") and must not gate layout.
-    const isPhonePanel = isNativeMobile() || (typeof window !== 'undefined'
-        && window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches);
+    // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: it IS mobile.css's media
+    // query (utils/phonePanel.ts), and nothing else. This decides whether the
+    // compact panel is the fixed bottom bar (collapsible, height-reserved).
+    // It used to add `|| isNativeMobile()`, which made the JS gate wider than
+    // the CSS one: the native shell above 1024 CSS px (an iPad in landscape)
+    // rendered an expand chevron that toggled nothing, because every collapse
+    // rule lives inside the media query. Live-subscribed so rotating across
+    // the boundary re-renders; the UA-sniff `isMobile` answers a different
+    // question ("no screen-share picker on this device") and must not gate
+    // layout.
+    const [isPhonePanel, setIsPhonePanel] = useState(() => phonePanelQuery()?.matches ?? false);
+    useEffect(() => {
+        const mq = phonePanelQuery();
+        if (!mq) return;
+        const onChange = () => setIsPhonePanel(mq.matches);
+        mq.addEventListener('change', onChange);
+        return () => mq.removeEventListener('change', onChange);
+    }, []);
 
     // Mobile: the full control set is behind an expand chevron. Collapsed is
     // the DEFAULT — the full panel is ~230px tall, which with the soft
@@ -259,6 +271,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // the only input signal a web build can see). A ref write per event; no
     // state, no re-renders, no throttling needed.
     const lastAppInputRef = useRef<number | null>(null);
+    /** Watching someone else's stream — presence on the no-OS-probe AFK path
+     *  only (utils/afkIdle.ts). Fed from the stream-state subscription below. */
+    const watchingStreamRef = useRef(false);
     useEffect(() => {
         const mark = () => { lastAppInputRef.current = Date.now(); };
         const opts = { capture: true, passive: true } as AddEventListenerOptions;
@@ -403,6 +418,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 const d = decideAfk({
                     timeoutMs,
                     broadcasting: isScreenSharingRef.current || isCameraOnRef.current,
+                    // A phone viewer in the docked mini-player touches nothing;
+                    // without this the mini-player moved its own viewer to AFK.
+                    // Ignored wherever an OS probe answered (desktop).
+                    watching: watchingStreamRef.current,
                     osIdleSecs,
                     lastAppInputMs: lastAppInputRef.current,
                     nowMs: Date.now(),
@@ -543,8 +562,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // stream-state bus because every selection path notifies it. Own id is
     // excluded: we never subscribe to our own publications.
     useEffect(() => {
-        const sync = () =>
-            sfuManager.setWatchedVideo([...globalSelectedStreams].filter(id => id !== currentUserId));
+        const sync = () => {
+            const others = [...globalSelectedStreams].filter(id => id !== currentUserId);
+            watchingStreamRef.current = others.length > 0;
+            sfuManager.setWatchedVideo(others);
+        };
         sync();
         return subscribeToStreamState(sync);
     }, [currentUserId]);

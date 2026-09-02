@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { decideAfk, AFK_TIMEOUT_CHOICES_MIN, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 
 // The Discord copy (see afkIdle.ts's header): idle for the window = moved,
-// with NO exemption for muted / deafened / listen-only / watching — those
-// aren't even parameters of the decision, which is the strongest pin this
-// suite has. If someone re-adds such an exemption they must widen the
-// signature, and this comment is here to make them read the header first.
+// with NO exemption for muted / deafened / listen-only — those aren't even
+// parameters of the decision, which is the strongest pin this suite has. If
+// someone re-adds such an exemption they must widen the signature, and this
+// comment is here to make them read the header first. `watching` WAS widened
+// in, deliberately (2026-09-02), and is pinned below to the no-probe path.
 const NOW = 1_000_000_000;
 const T = 15 * 60 * 1000;
 
@@ -55,6 +56,16 @@ describe('decideAfk — Discord AFK rules', () => {
     it('a recheck is never scheduled closer than 1s (probe jitter must not spin)', () => {
         const d = decideAfk({ timeoutMs: T, broadcasting: false, osIdleSecs: (T - 10) / 1000, lastAppInputMs: null, nowMs: NOW });
         expect(d).toEqual({ action: 'wait', recheckInMs: 1000 });
+    });
+
+    it('watching a stream keeps a viewer who has NO OS probe (a phone in the docked mini-player)', () => {
+        expect(decideAfk({ timeoutMs: T, broadcasting: false, watching: true, osIdleSecs: null, lastAppInputMs: null, nowMs: NOW }))
+            .toEqual({ action: 'wait', recheckInMs: T });
+    });
+
+    it('watching does NOT outrank the OS probe — a silent desktop viewer is still moved at Discord\'s line', () => {
+        expect(decideAfk({ timeoutMs: T, broadcasting: false, watching: true, osIdleSecs: 15 * 60, lastAppInputMs: null, nowMs: NOW }))
+            .toEqual({ action: 'move' });
     });
 
     it('exposes exactly Discord\'s five timeout choices and the legacy default', () => {
