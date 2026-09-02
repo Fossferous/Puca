@@ -1,4 +1,11 @@
 [package]
+# The package name is NOT the shipped executable's name: tauri.conf.json sets
+# mainBinaryName = "Puca" (tauri.lite.conf.json: "Puca-Lite"), which is what
+# the installed exe, Task Manager, the firewall prompt and AV alerts show. The
+# two variants get DIFFERENT names on purpose — installer-migrate.nsh kills the
+# OTHER variant by its binary name when switching — and 0.8.x installs of both
+# still run app.exe. Do not add "//" comment keys at the top level of
+# tauri.conf.json: tauri-build parses it with deny_unknown_fields.
 name = "app"
 version = "0.1.0"
 description = "Puca desktop shell: the self-hosted, end-to-end encrypted chat client (full and lite variants)"
