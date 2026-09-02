@@ -9,6 +9,25 @@ one-line summary; this file is the full story. Versions follow
 Everything the launch-readiness pass found, in one update.
 
 ### Fixed
+- **Voice hotkeys that worked about half the time.** Push-to-talk, mute and
+  deafen from inside a game now come from two independent sources: the
+  system hook, and a 20 ms check of the physical key state that catches a
+  press or release the hook missed (Windows silently removes a hook under
+  load; a key released on a UAC prompt was never seen). A lost release used
+  to leave push-to-talk open AND swallow the next press. Hotkeys pressed
+  while Púca itself was in front were also being dropped by a focus test the
+  WebView answers unreliably; the OS's answer is used now. Keys delivered
+  by a gaming mouse's own software (G HUB, Synapse) or AutoHotkey used to be
+  ignored as "injected"; only Púca's own remote-control input is now.
+  A game going fullscreen mid-call (which arms the clip buffer) used to
+  restart the whole hotkey feed, closing a held push-to-talk. A Ctrl or Shift
+  pressed in the same instant as its key could go unseen by a toggle A
+  hotkey bound to a mouse button no longer stops working while the message
+  box has focus, and a rapid settings change can no longer leave the same
+  keypress being handled twice.
+  If a game runs as administrator, Windows hides its keys from every
+  program that does not, and Púca now says so in a banner instead of
+  failing silently.
 - **Taskbar pins and shortcuts left dead by the 0.9.0 rename.** 0.9.0 renamed
   the program file from `app.exe` to `Puca.exe` (`Puca-Lite.exe` for Lite), and
   a taskbar pin you made yourself kept pointing at the old name. This update's
@@ -19,6 +38,12 @@ Everything the launch-readiness pass found, in one update.
   server; a database dump no longer contains a usable reset link.
 - The obsolete `sessions` table (raw login session keys, written by nothing
   since 0.9.0) is dropped.
+
+### Security
+- Keystrokes sent by someone controlling this machine through My Devices
+  still cannot trigger its owner's hotkeys. The new key-state check added
+  for reliability reads the same table Windows fills for injected input, so
+  it is explicitly blinded to keys Púca itself is injecting.
 
 ### Changed
 - **Deleting your account now also removes the files you uploaded** —

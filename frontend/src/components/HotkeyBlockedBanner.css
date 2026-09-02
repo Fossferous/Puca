@@ -1,0 +1,46 @@
+/* Same placement as the identity banner (fixed, top, pushes nothing); one
+   step below it in z-order so the rarer, graver one wins if both show. */
+.hotkey-blocked-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9989;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: var(--color-warning, #e8a33d);
+    color: #1b1b1b;
+    padding: 10px 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    font-size: 14px;
+}
+
+.hotkey-blocked-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.hotkey-blocked-text {
+    flex: 1 1 240px;
+    line-height: 1.35;
+}
+
+.hotkey-blocked-dismiss {
+    width: 36px;
+    height: 36px;
+    margin-left: auto;
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.hotkey-blocked-dismiss:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}
