@@ -10,17 +10,33 @@
 # runs sanity queries (table count, row counts for key tables), extracts the
 # uploads tar to a temp dir and counts files, then DROPS the scratch DB and
 # removes the temp dir. The live DB and uploads are never touched.
+#
+# THE OFFSITE COPY IS ENCRYPTED, and the drill must be able to say so. backup.sh
+# ships `.age`/`.gpg` artifacts (and nothing else — see its encrypt_for_offsite),
+# so the default no-argument run fetches one of those and decrypts it first.
+# That needs the private half, which is EXPECTED to live off the server: run the
+# offsite drill wherever the identity lives (BACKUP_AGE_IDENTITY, a path, in
+# /etc/default/puca-backup or the environment), and on the box itself run
+# `--local`. A host that cannot decrypt reports exactly that and FAILS — it does
+# not report "no backup found", which is what it used to say when the rclone
+# filter simply never matched the `.age` suffix.
+#
+# The scratch database is created with the SAME statement restore.sh runs
+# (`createdb -O $DB_USER`), so a host where the real restore would fail on a
+# missing role can no longer produce a PASSED drill.
 set -uo pipefail
 
 # Names are resolved, not hardcoded — a drill that looks for backups under the
 # wrong prefix finds none and would otherwise report a clean run. See names.sh.
+# shellcheck disable=SC1091
+[ -f /etc/default/puca-backup ] && { set -a; . /etc/default/puca-backup; set +a; }
 . "$(dirname "$0")/names.sh"
 
 BACKUP_DIR=$INSTALL_DIR/backups
 DRILL_DB="${DB_NAME}_drill_$(date +%s)"
+umask 077
 TMP=$(mktemp -d)
-CONF=/root/.config/rclone/rclone.conf
-[ -f /etc/default/puca-backup ] && . /etc/default/puca-backup
+CONF="${RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
 
 fail=0
@@ -44,15 +60,17 @@ case "${1:-}" in
 		note "using newest LOCAL backup from $BACKUP_DIR"
 		;;
 	"" )
-		# Offsite: fetch the newest db + uploads from the remote.
+		# Offsite: fetch the newest db + uploads from the remote. The filter
+		# must name the encrypted suffixes explicitly — an rclone pattern
+		# matches the WHOLE name, so `*.sql.gz` alone never sees `*.sql.gz.age`.
 		[ -n "$RCLONE_REMOTE" ] || { echo "OFFSITE not configured (RCLONE_REMOTE unset); try --local"; exit 1; }
 		note "fetching newest backup from offsite: $RCLONE_REMOTE"
-		DBN=$(rclone --config "$CONF" lsf "$RCLONE_REMOTE" --include "$DB_NAME-db-*.sql.gz" | sort | tail -1)
-		UPN=$(rclone --config "$CONF" lsf "$RCLONE_REMOTE" --include "$DB_NAME-uploads-*.tar.gz" | sort | tail -1)
+		DBN=$(rclone --config "$CONF" lsf "$RCLONE_REMOTE" --include "$DB_NAME-db-*.sql.gz{,.age,.gpg}" | sort | tail -1)
+		UPN=$(rclone --config "$CONF" lsf "$RCLONE_REMOTE" --include "$DB_NAME-uploads-*.tar.gz{,.age,.gpg}" | sort | tail -1)
 		[ -n "$DBN" ] || { echo "no db backup found on offsite remote"; exit 1; }
 		rclone --config "$CONF" copy "$RCLONE_REMOTE/$DBN" "$TMP/"
 		[ -n "$UPN" ] && rclone --config "$CONF" copy "$RCLONE_REMOTE/$UPN" "$TMP/"
-		DB_GZ="$TMP/$DBN"; UP_TGZ="$TMP/$UPN"
+		DB_GZ="$TMP/$DBN"; UP_TGZ="${UPN:+$TMP/$UPN}"
 		;;
 	* )
 		DB_GZ="$1"; UP_TGZ="${2:-}"
@@ -61,14 +79,48 @@ case "${1:-}" in
 esac
 [ -n "$DB_GZ" ] && [ -f "$DB_GZ" ] && ok "db backup located: $(basename "$DB_GZ") ($(du -h "$DB_GZ" | cut -f1))" || bad "db backup not found"
 
+# --- 1b. Decrypt offsite artifacts ---
+# A drill that cannot open the artifact has found something real: on THIS host
+# the offsite copy is unrestorable. Say so as a FAIL with the reason, rather
+# than letting gzip -t fail on ciphertext with a misleading "corrupt".
+if [ -n "$DB_GZ" ] && [ -f "$DB_GZ" ]; then
+	case "$DB_GZ" in
+		*.age|*.gpg)
+			if plain="$(ops_decrypt_artifact "$DB_GZ" "$TMP" 2>"$TMP/decrypt.err")"; then
+				ok "db artifact decrypted ($(basename "$DB_GZ"))"; DB_GZ="$plain"
+			else
+				bad "offsite db artifact is encrypted but cannot be opened here: $(cat "$TMP/decrypt.err") — run the offsite drill where the identity lives; on the box use --local"
+				DB_GZ=""
+			fi ;;
+	esac
+fi
+if [ -n "$UP_TGZ" ] && [ -f "$UP_TGZ" ]; then
+	case "$UP_TGZ" in
+		*.age|*.gpg)
+			if plain="$(ops_decrypt_artifact "$UP_TGZ" "$TMP" 2>"$TMP/decrypt.err")"; then
+				ok "uploads artifact decrypted ($(basename "$UP_TGZ"))"; UP_TGZ="$plain"
+			else
+				bad "offsite uploads artifact is encrypted but cannot be opened here: $(cat "$TMP/decrypt.err")"
+				UP_TGZ=""
+			fi ;;
+	esac
+fi
+
 # --- 2. Integrity of the archives ---
-gzip -t "$DB_GZ" 2>/dev/null && ok "db gzip integrity" || bad "db gzip corrupt"
+if [ -n "$DB_GZ" ]; then
+	gzip -t "$DB_GZ" 2>/dev/null && ok "db gzip integrity" || bad "db gzip corrupt"
+fi
 if [ -n "$UP_TGZ" ] && [ -f "$UP_TGZ" ]; then
 	tar -tzf "$UP_TGZ" >/dev/null 2>&1 && ok "uploads tar integrity" || bad "uploads tar corrupt"
 fi
 
 # --- 3. Restore into a THROWAWAY database ---
-if sudo -u postgres createdb "$DRILL_DB" 2>/dev/null; then
+# `-O "$DB_USER"` on purpose: the real restore.sh creates the database with
+# exactly this statement, so a host missing the role fails HERE, in the
+# rehearsal, instead of after restore.sh has already dropped the live database.
+if [ -z "$DB_GZ" ]; then
+	bad "no db dump to restore"
+elif sudo -u postgres createdb -O "$DB_USER" "$DRILL_DB" 2>"$TMP/createdb.err"; then
 	# ON_ERROR_STOP for the same reason as restore.sh: without it psql exits 0
 	# after individual statements fail, so a half-restored dump would print
 	# "restored into scratch db" and go on to pass the checks below. The tool
@@ -132,7 +184,7 @@ if sudo -u postgres createdb "$DRILL_DB" 2>/dev/null; then
 		bad "restore into scratch db failed"
 	fi
 else
-	bad "could not create scratch db"
+	bad "could not create scratch db as owner '$DB_USER': $(tr -d '\n' < "$TMP/createdb.err") — restore.sh would fail the same way AFTER dropping the live database; create the role or set DB_USER in /etc/default/puca"
 fi
 
 # --- 4. Uploads restore sanity ---

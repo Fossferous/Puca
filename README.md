@@ -177,7 +177,10 @@ document is actually trying to make.
 - 🗝️ **Recoverable key custody** — a random per-account seed wrapped under
   your password (Argon2id) *and* independently under a 12-word recovery
   code, so a password reset keeps your message history instead of destroying
-  it. See [docs/E2EE_RECOVERY.md](docs/E2EE_RECOVERY.md).
+  it. The code is shown once, at sign-up — save it;
+  [docs/LOST_RECOVERY_CODE.md](docs/LOST_RECOVERY_CODE.md) is the honest
+  account of what happens without it. See
+  [docs/E2EE_RECOVERY.md](docs/E2EE_RECOVERY.md).
 - 💬 **Real-time messaging** — WebSocket-based delivery, threads, reactions,
   edits, search.
 - 🎙️ **Voice & video** — WebRTC voice channels with native noise
@@ -192,8 +195,13 @@ document is actually trying to make.
   channels, categories, and a public-server discovery list.
 - 🎭 **Roles & permissions** — granular, per-server role-based access
   control with a permission-overwrite system per channel.
-- 📱 **Desktop and mobile** — native Windows/macOS/Linux app via Tauri, and
-  Android/iOS via Capacitor, from one codebase; also runs in a browser.
+- 📱 **Desktop, mobile and browser** — a Windows desktop app (Tauri; Full
+  and Lite builds), an Android app (Capacitor), and the same app in a
+  browser, from one codebase. macOS, Linux and iOS builds exist in the tree
+  but are not released or tested. The interface is English-only for now.
+- 🔍 **No telemetry** — nothing reports to anyone but the server you joined;
+  [docs/PRIVACY.md](docs/PRIVACY.md) lists what that server can see and the
+  few third parties the apps ever contact.
 
 ## Tech stack
 

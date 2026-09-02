@@ -245,6 +245,13 @@ deploy/download-site/index.local.html
 # Nothing in the tree links to any of them.
 docs/AUDIT_2026-07-24.md
 docs/AUDIT_2026-07-24_STATUS.md
+# Retired for the launch: FEATURES.md was a 2025-12 manual QA audit ("Not
+# tested"/"Broken" rows, an internal fix list) and AUTO_UPDATER_GUIDE.md
+# described a CURRENT_VERSION constant, a get_platform_info() and a plain-zip
+# OTA that no longer exist. Deleted from the tree; listed so they cannot
+# drift back in from a stale checkout.
+docs/FEATURES.md
+docs/AUTO_UPDATER_GUIDE.md
 docs/SETTINGS_AUDIT_2026-07-26.md
 docs/REMEDIATION_PLAN.md
 docs/SECURITY-REMAINING-2026-08-10.md

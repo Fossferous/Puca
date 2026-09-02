@@ -24,5 +24,11 @@ download.example.com {
 	header /Puca-Setup-*.exe Content-Disposition attachment
 	header /Puca-Lite-Setup-*.exe Content-Disposition attachment
 	header /mobile/*.apk Content-Disposition attachment
+	# Plain text for the two documents dual-ship.sh uploads beside the
+	# installers (release notes, privacy statement) — as text/markdown a
+	# browser downloads them instead of showing them. SHA256SUMS.txt is
+	# already text/plain by extension.
+	header /CHANGELOG.md Content-Type "text/plain; charset=utf-8"
+	header /PRIVACY.md Content-Type "text/plain; charset=utf-8"
 	encode gzip
 }

@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Download Puca</title>
+<title>Download Púca</title>
+<meta name="description" content="Download Púca — self-hosted, end-to-end encrypted chat, voice and video — for Windows and Android. Full and Lite builds.">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -62,7 +63,7 @@
 </head>
 <body>
   <div class="card">
-    <div class="logo">Puca</div>
+    <div class="logo">Púca</div>
     <div class="tag">Self-hosted, end-to-end encrypted chat</div>
 
     <!-- The FULL panel and its tab are pre-selected in the markup (class
@@ -73,11 +74,11 @@
          re-applies or overrides the selection the moment it runs. -->
     <div class="variant-picker" role="tablist" aria-label="Choose a build">
       <button type="button" class="variant-btn active" id="tab-full" onclick="selectVariant('full')">
-        Full
+        Púca (Full)
         <span class="sub">chat, voice &amp; remote device access</span>
       </button>
       <button type="button" class="variant-btn" id="tab-lite" onclick="selectVariant('lite')">
-        Lite
+        Púca Lite
         <span class="sub">chat &amp; voice — no remote control</span>
       </button>
     </div>
@@ -94,7 +95,7 @@
         <a class="btn" href="/Puca-Setup.exe" download>Download for Windows</a>
         <a class="btn secondary" href="/mobile/Puca-0.9.0.apk" download>Download for Android (.apk)</a>
       </div>
-      <div class="meta">v0.9.0 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; iOS via TestFlight</div>
+      <div class="meta">v0.9.0 &middot; Windows 10/11 (64-bit) &middot; Android 7+</div>
       <p class="apk-note">
         The Android app keeps itself up to date: each time it starts it fetches the
         current version from this server and applies it before opening. There is no
@@ -122,15 +123,32 @@
     <div class="steps">
       <b>Getting started</b><br>
       1. Download and run the installer (Windows) or the .apk (Android).<br>
-      2. Open <b>Puca</b>.<br>
+      2. Open <b>Púca</b>.<br>
       3. Click <b>Register</b>, enter your invite code, choose a username &amp; password, and you're in.<br>
       <br>
       <span style="opacity:.8">Registration is invite-only — ask the server owner for a code.</span><br>
       <br>
-      The app connects to <a class="link" href="https://chat.example.com">chat.example.com</a>.
+      <!-- __API_HOST__ is filled in from API_HOST in deploy/ops/hosts.conf by
+           dual-ship.sh when this template ships (an index.local.html beside it
+           is used instead when present). dual-ship.sh REFUSES to publish a page
+           that still names a placeholder domain, so a fork cannot ship a page
+           telling its users to connect to somebody else's server. -->
+      The app connects to <a class="link" href="https://__API_HOST__">__API_HOST__</a>.
       Windows SmartScreen may warn on first run (unsigned app) &mdash; choose
       <b>More info &rarr; Run anyway</b>. On Android, allow install from your browser
       and accept the app's own signature.<br>
+      <br>
+      <b>Check the file before you run it.</b> The Windows installer is not
+      code-signed; instead every file on this page is listed with its SHA-256 in
+      <a class="link" href="/SHA256SUMS.txt">SHA256SUMS.txt</a>. On Windows, open a
+      command prompt in your Downloads folder and run
+      <code>certutil -hashfile Puca-Setup.exe SHA256</code>; on Linux or Android,
+      <code>sha256sum &lt;file&gt;</code>. The hash printed must match the line for
+      that file. If it does not, the download is not what this server published
+      &mdash; do not run it.<br>
+      <br>
+      What changed in each Púca version: <a class="link" href="/CHANGELOG.md">release notes</a>.
+      What Púca does and does not collect: <a class="link" href="/PRIVACY.md">privacy statement</a>.<br>
       <br>
       <span data-variant-panel="full" class="shown" style="opacity:.8">Antivirus may also quarantine the remote-access
       components (a generic detection such as <b>Trojan:Win32/Bearfoos.B!ml</b>).

@@ -208,7 +208,7 @@ pointer**. DevTools responsive mode is not enough (it doesn't flip
 which drives real touch emulation against the local stack:
 
 ```bash
-# backend: ./target/release/sovereign.exe   frontend: npm run dev
+# backend: ./target/release/puca   frontend: npm run dev
 cd frontend
 node e2e/mobile-walk.mjs  <outdir>                    # register + core panels
 node e2e/mobile-walk2.mjs <outdir> <user> <pass>      # server/channel/checklist creation
