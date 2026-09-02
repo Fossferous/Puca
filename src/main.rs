@@ -245,7 +245,15 @@ async fn main() -> anyhow::Result<()> {
     // Run database migrations on startup.
     // NOTE: sqlx::migrate! embeds the migrations dir at COMPILE time — when you
     // add a migration, this file must be recompiled for the macro to re-expand
-    // (an incremental build that skips main.rs won't pick it up). Latest: 042.
+    // (an incremental build that skips main.rs won't pick it up). Latest: 056.
+    //
+    // Read migrations/README.md before adding or editing anything in there: an
+    // APPLIED migration is frozen bytes (sqlx checksums the file and compares it
+    // against _sqlx_migrations, so editing one — comments and line endings
+    // included — crash-loops this call), and two already-applied files carry
+    // dormant landmines that are documented there rather than patched.
+    // Non-.sql files in that directory are ignored by the resolver, which is
+    // what makes the README safe to keep next to them.
     tracing::info!("Running database migrations...");
     sqlx::migrate!("./migrations")
         .run(&pool)
