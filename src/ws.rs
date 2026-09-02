@@ -2466,7 +2466,10 @@ async fn handle_message(
                 // device revokes this token too (token_sessions.device_id) — from
                 // a proof, never from the `?device=` claim.
                 if let Some(sid) = state.session_sid(user_id, conn_id) {
-                    let _ = sqlx::query("UPDATE token_sessions SET device_id = $1 WHERE sid = $2 AND user_id = $3")
+                    // First writer wins: a session proved by one device stays bound to it, so a
+                    // token copied elsewhere cannot re-point its session away from the device
+                    // the owner is about to revoke.
+                    let _ = sqlx::query("UPDATE token_sessions SET device_id = $1 WHERE sid = $2 AND user_id = $3 AND (device_id IS NULL OR device_id = $1)")
                         .bind(&device_id)
                         .bind(&sid)
                         .bind(user_id as i32)

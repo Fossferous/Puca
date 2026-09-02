@@ -353,6 +353,16 @@ async function proveCurrentPassword(username: string, password: string): Promise
     await srpExchange(username, password);
 }
 
+/** login() refuses a key_version < 3 account. Its own error type so the
+ *  identity-setup catch below can let it through: swallowed, the user was
+ *  signed in with no E2EE identity and no message. */
+export class RetiredKeyFormatError extends Error {
+    constructor() {
+        super('This account uses a retired key format — reset it with your recovery code, or ask the operator');
+        this.name = 'RetiredKeyFormatError';
+    }
+}
+
 export async function login(username: string, password: string): Promise<string> {
     // Step 1: Generate ephemeral and send A
     const { a, A } = generateClientEphemeral();
@@ -470,11 +480,15 @@ export async function login(username: string, password: string): Promise<string>
             // 2026-09-02) and registration has minted random v3 seeds for a
             // long time, so the derivation is no longer a login path: an
             // account that still reports it is not silently re-derived here.
-            throw new Error(
-                'This account uses a retired key format — reset it with your recovery code, or ask the operator',
-            );
+            throw new RetiredKeyFormatError();
         }
     } catch (e) {
+        if (e instanceof RetiredKeyFormatError) {
+            // Not a degraded sign-in: the token stored above would otherwise
+            // sign the account in silently on the next load, identity-less.
+            localStorage.removeItem('auth_token');
+            throw e;
+        }
         console.warn('E2EE identity setup failed; messaging may be unavailable until next login', e);
     }
 

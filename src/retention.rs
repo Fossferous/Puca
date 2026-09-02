@@ -18,7 +18,9 @@ pub fn retention_days(var: &str, default: i64) -> Option<i64> {
     let days = std::env::var(var)
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|d| *d >= 0)
+        // Bounded: the sweep binds the window as i32 days, and a value past
+        // 2^31 would wrap negative and delete everything. A century is plenty.
+        .filter(|d| (0..=36_500).contains(d))
         .unwrap_or(default);
     if days == 0 { None } else { Some(days) }
 }
@@ -36,6 +38,8 @@ mod tests {
         assert_eq!(retention_days(var, 180), Some(30));
         std::env::set_var(var, "-5");
         assert_eq!(retention_days(var, 180), Some(180), "negative: default, not prune-all");
+        std::env::set_var(var, "2147483648");
+        assert_eq!(retention_days(var, 180), Some(180), "past i32: default, not a wrapped window");
         std::env::set_var(var, "soon");
         assert_eq!(retention_days(var, 180), Some(180));
         std::env::remove_var(var);

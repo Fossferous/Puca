@@ -704,8 +704,11 @@ class FileTransferManager {
             id: p.transfer_id, from: p.from_user, to: myId ?? -1,
             name: p.name, size: p.size, mime: p.mime, sha256: p.sha256, fp, ts: p.ts,
         }) : null;
-        const authed = !!authKey && myId != null && p.auth_v === FILE_OFFER_AUTH_VERSION && !!fp && fp === p.fp && fresh
+        const macOk = !!authKey && myId != null && p.auth_v === FILE_OFFER_AUTH_VERSION && !!fp && fp === p.fp
             && !!record && !!p.auth && verifyFileOffer(authKey, record, p.auth);
+        // Freshness is checked separately so a clock that is merely wrong is
+        // reported as a clock, not as an impersonation attempt.
+        const authed = macOk && fresh;
         if (!authed) {
             // Tell the sender we refused (so it stops waiting) — inline rather
             // than via reject(), which DELETES the transfer, because we also
@@ -719,7 +722,10 @@ class FileTransferManager {
                 state: 'failed', bytes: 0,
                 error: p.auth_v === undefined
                     ? 'refused: their app is older than yours — ask them to update, then try again'
-                    : `refused: could not verify this transfer really came from ${p.from_username}`,
+                    : macOk && !fresh
+                        ? `refused: this offer is stamped ${Math.max(1, Math.round(Math.abs(Date.now() - (p.ts as number)) / 60000))} minutes `
+                            + `${(p.ts as number) > Date.now() ? 'ahead of' : 'behind'} this device's clock — check the date and time on both machines, then try again`
+                        : `refused: could not verify this transfer really came from ${p.from_username}`,
                 abort: { aborted: false }, pendingCandidates: [],
             });
             this.emit();
@@ -796,7 +802,9 @@ class FileTransferManager {
         const authKey = identity && peerPub ? deriveFileOfferAuthKey(identity, peerPub) : null;
         const cert = await this.makeCertificate();
         if (!authKey || myId == null || !cert) {
-            this.reject(id, 'could not authenticate the accept');
+            // Inline, not reject(): reject() DELETES the card, and the failure
+            // written after it had nothing left to land on.
+            wsClient.send({ type: 'FileReject', payload: { transfer_id: id, reason: 'could not authenticate the accept' } });
             this.fail(t, "can't accept securely — encryption key or connection certificate unavailable");
             return;
         }

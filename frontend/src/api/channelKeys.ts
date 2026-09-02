@@ -252,8 +252,24 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         };
         // The row's OWN channel and epoch, and our own id: a v3 wrap opens under
         // exactly that context and no other (a row lifted from elsewhere is null).
+        //
+        // Wrap-version floor (the epoch floor's sibling): a v2 wrap is bound to
+        // nothing, so the binding above is only worth something once unbound
+        // wraps stop being accepted. From the first v3 wrap this device opens
+        // for the channel, an unprefixed wrap at that epoch or later is refused
+        // — every 0.9.0 client publishes v3, so such a row is an older client
+        // (update to fix) or a substitution. Earlier epochs stay readable.
+        const isV3Wrap = row.wrapped_key.startsWith('v3.');
+        const v3Since = wrapV3Since(channelId);
+        if (!isV3Wrap && v3Since !== null && row.epoch >= v3Since) {
+            console.warn(`[e2ee] channel ${channelId} epoch ${row.epoch}: refusing an unbound (v2) wrap at or above the v3 floor (${v3Since})`);
+            continue;
+        }
         const ck = await unwrapChannelKey(identity, wrapped, { channelId, epoch: row.epoch, recipientId: me });
-        if (ck) keys.set(row.epoch, ck);
+        if (ck) {
+            keys.set(row.epoch, ck);
+            if (isV3Wrap && (v3Since === null || row.epoch < v3Since)) setWrapV3Since(channelId, row.epoch);
+        }
     }
     // Epoch floor. `current_epoch` is whatever the untrusted server says it is,
     // and nothing remembered the highest this channel had already reached — so
@@ -513,6 +529,21 @@ export async function getChannelKeyForEpoch(
     // Maybe a peer just published a key for us; reload once.
     state = await getState(channelId, true);
     return state.keys.get(epoch) ?? null;
+}
+
+/** The lowest epoch this device has opened a v3 (context-bound) wrap for in
+ *  `channelId`, or null when it has never seen one. Persists like the epoch
+ *  floor; storage disabled = no floor, no false alarms. */
+function wrapV3Since(channelId: number): number | null {
+    try {
+        const v = localStorage.getItem(`e2ee_wrap_v3_since_${channelId}`);
+        return v === null ? null : (Number(v) || null);
+    } catch {
+        return null;
+    }
+}
+function setWrapV3Since(channelId: number, epoch: number): void {
+    try { localStorage.setItem(`e2ee_wrap_v3_since_${channelId}`, String(epoch)); } catch { /* no floor without storage */ }
 }
 
 /** Drop all cached channel keys (e.g. on logout). */

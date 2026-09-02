@@ -209,15 +209,23 @@ pub async fn jwt_auth_middleware(
     // Computed before `claims` moves into the extensions. A legacy token (no
     // sid) is given one here, with its row, so revocation reaches it from now.
     let renew_sid = if claims.sid.is_empty() { uuid::Uuid::new_v4().to_string() } else { claims.sid.clone() };
-    let renewed = renew_if_stale(&claims, &renew_sid, &state.jwt_secret);
+    let mut renewed = renew_if_stale(&claims, &renew_sid, &state.jwt_secret);
     if renewed.is_some() {
-        let _ = if claims.sid.is_empty() {
+        let recorded = if claims.sid.is_empty() {
             sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
                 .bind(&renew_sid).bind(claims.sub as i32).execute(&state.pool).await
         } else {
             sqlx::query("UPDATE token_sessions SET last_seen_at = NOW() WHERE sid = $1")
                 .bind(&renew_sid).execute(&state.pool).await
         };
+        if let Err(e) = recorded {
+            // A renewed token whose session row could not be written would be
+            // a live session nothing can revoke. Keep the caller on its current
+            // token instead (it still expires on its own clock) and try again
+            // on a later request.
+            tracing::warn!("renewal: could not record session for user {}: {:?} — not renewing", claims.sub, e);
+            renewed = None;
+        }
     }
     let user_id = claims.sub;
 

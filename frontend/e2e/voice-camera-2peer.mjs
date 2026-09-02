@@ -16,7 +16,7 @@ import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 
 const PSQL = 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
-const APP = process.env.APP || APP;
+const APP = process.env.APP || 'http://localhost:5173';
 const PASS = 'Password123!';
 const stamp = Date.now().toString(36);
 const AUSER = 'camowner_' + stamp;

@@ -210,6 +210,12 @@ console.log(`\n=== ATTACH_FILES (1<<4) — POST /upload naming a channel ===`);
         const text = await res.text(); let body; try { body = JSON.parse(text); } catch { body = text; }
         return { status: res.status, body };
     };
+    // The browser sends a CORS preflight for a custom header; node fetch does
+    // not. Ask the question the browser would, or a header missing from the
+    // allow-list passes here and fails for every real client.
+    const pre = await fetch(`${BASE}/upload`, { method: 'OPTIONS', headers: { Origin: 'https://app.example', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization, x-puca-channel' } });
+    const allowHeaders = (pre.headers.get('access-control-allow-headers') || '').toLowerCase();
+    check('preflight admits X-Puca-Channel', allowHeaders.includes('x-puca-channel'), `status=${pre.status} allow-headers=${allowHeaders}`);
     const ok = await upload(allowed, textCh);
     check('member WITH attach-files can upload for the channel', ok.status < 300, `status=${ok.status} ${JSON.stringify(ok.body).slice(0, 80)}`);
     denyBit(textCh, P.ATTACH_FILES);
