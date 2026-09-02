@@ -65,19 +65,24 @@ export interface ClipManifest {
 }
 
 export function isClipRef(href: string | null | undefined): boolean {
-    return typeof href === 'string' && href.startsWith(CLIP_PREFIX);
+    // Case-INSENSITIVE on the prefix, deliberately. URL schemes are
+    // case-insensitive and `utils/messageParser.ts`'s isSafeUrl lowercases
+    // before consulting its allowlist, so a case-sensitive test here let
+    // `SOVEREIGN-CLIP:v1?<manifest>` be judged safe, miss this recogniser, and
+    // be emitted as a live <a href> carrying the clip key. (docs/CLIPS.md)
+    return typeof href === 'string' && href.slice(0, CLIP_PREFIX.length).toLowerCase() === CLIP_PREFIX;
 }
 
 /** Does this message body carry a clip ref anywhere? (Forward is refused for
  *  such a message: the body carries the clip key — docs/CLIPS.md.) */
 export function hasClipRef(content: string | null | undefined): boolean {
-    return typeof content === 'string' && content.includes(CLIP_PREFIX);
+    return typeof content === 'string' && content.toLowerCase().includes(CLIP_PREFIX);
 }
 
 /** A clip ref whose manifest was scrubbed (Copy Text / Quote — see
  *  contextMenuUtils.stripAttachmentKeys): renders as "clip removed", never as a link. */
 export function isScrubbedClipRef(href: string | null | undefined): boolean {
-    return href === 'sovereign-clip:v1';
+    return typeof href === 'string' && href.toLowerCase() === 'sovereign-clip:v1';
 }
 
 function b64urlEncode(u8: Uint8Array): string {

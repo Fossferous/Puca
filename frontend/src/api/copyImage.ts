@@ -74,12 +74,15 @@ export function canCopyImages(): boolean {
  *
  * The first version excluded `blob:` and `data:` and allowed everything else,
  * which let `sovereign-enc:` through — and those hrefs carry the per-file
- * AES-256-GCM key in `?k=`. That is not hypothetical: `isEncAttachment` matches
- * case-SENSITIVELY (`href.startsWith('sovereign-enc:')`) while `isSafeUrl`
- * lowercases the scheme before testing its allowlist, so `SOVEREIGN-ENC:id?k=…`
- * is diverted away from the decrypting component and rendered as a plain
- * `<img src>`. Copying that "link" would have put a live decryption key on the
- * OS clipboard — precisely the escape `stripAttachmentKeys` exists to stop.
+ * AES-256-GCM key in `?k=`. That was not hypothetical: `isEncAttachment` used to
+ * match case-SENSITIVELY while `isSafeUrl` lowercases the scheme before testing
+ * its allowlist, so `SOVEREIGN-ENC:id?k=…` was diverted away from the decrypting
+ * component and rendered as a plain `<img src>`. Copying that "link" would have
+ * put a live decryption key on the OS clipboard — precisely the escape
+ * `stripAttachmentKeys` exists to stop. The prefix recognisers are now
+ * case-insensitive (`encPrefixMatch` in api/attachments.ts), so that particular
+ * divergence is closed; this allowlist stays because it is the control that does
+ * not depend on two functions agreeing.
  *
  * A link is only shareable if it is http(s), so nothing else is offered. Any
  * future scheme is excluded by default rather than by remembering to add it.

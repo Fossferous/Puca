@@ -14,6 +14,14 @@
 # before it is replaced.
 set -euo pipefail
 
+# NO GLOBAL `umask 077` HERE, DELIBERATELY — write_file below gives every
+# generated file its exact mode BEFORE any byte lands, which is the whole of
+# the problem a restrictive umask was meant to cover. A blanket umask would
+# also apply to `mkdir -p /opt/puca/...` a few steps down, making /opt/puca
+# 0700; Caddy runs as its own user and serves /opt/puca/webapp and
+# /opt/puca/downloads out of it, so a freshly provisioned box would answer 403
+# on the web app and the download site with nothing in any log to explain it.
+
 PUBLIC_IP=""
 UPLINK_MBPS=1000
 REALM="example.com"
@@ -60,8 +68,16 @@ write_file() {
 		return
 	fi
 	[ -f "$path" ] && cp -a "$path" "$path.bak-$STAMP"
+	# install-then-fill, NOT write-then-chmod. `cat > "$path"` followed by
+	# `chmod` leaves a window — however short — in which a file containing
+	# JWT_SECRET and the database password exists at whatever the ambient umask
+	# allows. `install -m` creates it with the final mode before a single byte
+	# is written, so there is no such window at all. (The umask at the top of
+	# this script covers the same hazard for everything else; this covers the
+	# case where the caller wants a WIDER mode than the umask, which is exactly
+	# what /etc/turnserver.conf at 640 is.)
+	install -m "$mode" /dev/null "$path"
 	cat > "$path"
-	chmod "$mode" "$path"
 }
 
 # --- Does this host hold the public IP directly, or is it 1:1 NAT? ----------
@@ -148,7 +164,14 @@ else
 		echo "  role exists — leaving its password alone (re-run safe)"
 		DB_PASS=""
 	else
-		sudo -u postgres psql -q -c "CREATE ROLE puca LOGIN PASSWORD '$DB_PASS'"
+		# The password goes in on STDIN, never in argv: an argument is visible
+		# in /proc/<pid>/cmdline to any local process for the life of the
+		# command, and is captured verbatim by execve auditing (auditd, any
+		# EDR). DB_PASS comes from `openssl rand -hex 24` above, so it is
+		# hex-only and cannot contain the quote that would break out of the
+		# literal — worth stating, because that is the property being relied on.
+		printf "CREATE ROLE puca LOGIN PASSWORD '%s'\n" "$DB_PASS" \
+			| sudo -u postgres psql -q -f -
 	fi
 	sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='puca'" | grep -q 1 \
 		|| sudo -u postgres createdb -O puca puca
@@ -194,6 +217,16 @@ printf '%s\n' "$TURN_CONF" | write_file /etc/turnserver.conf 640
 # This one is nastier than it looks: nothing about it is visible until a real
 # user behind strict NAT actually needs the relay, because everyone whose
 # connection succeeds peer-to-peer never touches TURN at all.
+# ARGV EXPOSURE, ACCEPTED AND STATED. turnadmin has no way to take the secret
+# on stdin or from a file — `-s` is the only interface — so for the life of this
+# one command the TURN secret is readable in /proc/<pid>/cmdline by any local
+# process and is captured by execve auditing. It is not removable without
+# writing coturn's SQLite turn_secret table directly, which would mean
+# reimplementing an internal schema this script would then silently depend on.
+# Bounded by: the command runs once, on a FRESH box (the guard at the top
+# refuses a deployed one), before any untrusted process exists on it; and the
+# same secret is in /etc/turnserver.conf mode 640 anyway. Rotating it means
+# rewriting both, so a leak here is recoverable rather than permanent.
 run turnadmin -s "$TURN_SECRET" -r "$REALM" -b /var/lib/turn/turndb
 
 # The coturn PACKAGE auto-starts the service during `apt-get install` above,

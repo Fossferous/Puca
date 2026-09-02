@@ -6,6 +6,23 @@ download.example.com {
 	root * /opt/puca/downloads
 	file_server
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	# This vhost serves attacker-reachable static files (anyone can fetch them)
+	# and had no hardening beyond HSTS. nosniff stops a browser deciding for
+	# itself that a download is HTML; DENY framing stops the page being used
+	# as clickjacking bait for the installer links.
+	header X-Content-Type-Options nosniff
+	header X-Frame-Options DENY
+	# Every downloadable artifact, not just the full Windows installer:
+	# without this the browser handles the file according to its own type
+	# guess, and the one that had the header was the only one that reliably
+	# SAVED rather than being opened.
 	header /Puca-Setup.exe Content-Disposition "attachment; filename=\"Puca-Setup.exe\""
+	header /Puca-Lite-Setup.exe Content-Disposition "attachment; filename=\"Puca-Lite-Setup.exe\""
+	# The versioned installer names dual-ship.sh uploads beside the stable
+	# ones (the desktop updater manifest points at those, never the stable
+	# name -- see dual-ship.sh cmd_installer).
+	header /Puca-Setup-*.exe Content-Disposition attachment
+	header /Puca-Lite-Setup-*.exe Content-Disposition attachment
+	header /mobile/*.apk Content-Disposition attachment
 	encode gzip
 }

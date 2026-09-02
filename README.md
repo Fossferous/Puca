@@ -98,11 +98,22 @@ Two things you don't have to take on faith, because you can rerun them:
   before the next message is sent. Tests fail if that distinction regresses.
 
   The full write-up — including the residual limitation the fix does *not*
-  close — is **deliberately held back until the deployment this was found on is
-  confirmed running a build that contains the fix**, because it is
-  exploit-level detail about a flaw that may still be live somewhere. That is
-  the one place where publishing everything immediately would make users less
-  safe rather than more. It will be added as `docs/AUDIT_2026-08-20.md`.
+  close — is **deliberately held back**, because it is exploit-level detail
+  about a flaw that may still be live on a deployment nobody here can see. That
+  is the one place where publishing everything immediately would make users less
+  safe rather than more.
+
+  **Status, 2026-09-02:** still withheld, and there is no file to link yet — on
+  purpose, rather than a promise left hanging. Withheld: the exploitation detail
+  (how a fabricated key-wrap was attributed) and the residual limitation of the
+  fix. Published already, and enough to audit the fix: the paragraph above, and
+  `frontend/src/api/channelKeys.ts` with the tests that pin the read/write
+  distinction. Why it is still withheld: this is self-hosted software, so
+  "everyone has the fix" is not a fact any release can establish — a server
+  running a build from before it is a third party's machine, not this project's.
+  Revisit: at the 1.0 release, or sooner if the deployment it was found on is
+  confirmed past the fix. The actionable part is not withheld and is the whole
+  of it: run a current release.
 
   This is what "radical transparency" is meant to buy you: not a claim that the
   crypto is perfect, and not a promise to publish faster than is responsible,

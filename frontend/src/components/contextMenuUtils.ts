@@ -42,7 +42,10 @@ export function buildForwardText(content: string): string {
 /** Drop the payload of every clip ref (the packed manifest IS the key). The
  *  bare `sovereign-clip:v1` left behind renders as "clip removed", never a link. */
 export function scrubClipRefs(content: string): string {
-    return content.replace(/sovereign-clip:v1\?[^\s)]*/g, 'sovereign-clip:v1');
+    // `i`: the scheme is case-insensitive to the browser and to isSafeUrl, so a
+    // case-sensitive scrub left `SOVEREIGN-CLIP:v1?<manifest>` — the clip key —
+    // intact on the clipboard, which is precisely what this exists to prevent.
+    return content.replace(/sovereign-clip:v1\?[^\s)]*/gi, 'sovereign-clip:v1');
 }
 
 /**
@@ -51,13 +54,13 @@ export function scrubClipRefs(content: string): string {
  * carries the key. Anything else is sliced with an ellipsis like before.
  */
 export function replyPreviewText(content: string, max: number): string {
-    const m = /sovereign-clip:v1\?[A-Za-z0-9_-]+/.exec(content);
+    const m = /sovereign-clip:v1\?[A-Za-z0-9_-]+/i.exec(content);
     if (m) {
         const manifest = decodeClipRef(m[0]);
         if (manifest) return `Clip · ${formatClock(manifest.durationMs / 1000)}`;
         return 'Clip';
     }
-    if (/sovereign-clip:v1(?![?])/.test(content)) return 'Clip (removed)';
+    if (/sovereign-clip:v1(?![?])/i.test(content)) return 'Clip (removed)';
     return content.length > max ? `${content.slice(0, max)}...` : content;
 }
 
@@ -71,15 +74,20 @@ export function replyPreviewText(content: string, max: number): string {
  */
 export function stripAttachmentKeys(content: string): string {
     return content
-        .replace(/sovereign-enc:([^\s)?]+)\?([^\s)]*)/g, (_full, id, query) => {
+        // Every regex here is `i`: URL schemes are case-insensitive, isSafeUrl
+        // lowercases before checking its allowlist, and the recognisers in
+        // api/attachments.ts and api/clips/clipRef.ts now match the same way. A
+        // case-sensitive scrub let an uppercase-scheme ref carry the file key and
+        // the fetch capability straight to the OS clipboard.
+        .replace(/sovereign-enc:([^\s)?]+)\?([^\s)]*)/gi, (_full, id, query) => {
             // k= is the file key, c= the fetch capability: either one outside the
             // envelope is access to the blob, so neither reaches the clipboard.
-            const kept = (query as string).split('&').filter(kv => kv.length > 0 && !/^[kc]=/.test(kv));
+            const kept = (query as string).split('&').filter(kv => kv.length > 0 && !/^[kc]=/i.test(kv));
             return kept.length ? `sovereign-enc:${id}?${kept.join('&')}` : `sovereign-enc:${id}`;
         })
         // A clip ref (docs/CLIPS.md) is one packed blob whose key cannot be
         // separated from the rest: drop the whole payload (scrubClipRefs).
-        .replace(/sovereign-clip:v1\?[^\s)]*/g, 'sovereign-clip:v1');
+        .replace(/sovereign-clip:v1\?[^\s)]*/gi, 'sovereign-clip:v1');
 }
 
 /**

@@ -9,6 +9,13 @@ interface JoinServerModalProps {
     onServerJoined: (server: Server) => void;
 }
 
+/**
+ * The SHAPE of an invite link, not a host anyone can reach: a real domain
+ * here would be one deployment's server baked into every fork's UI.
+ * hygiene-lint:allow-placeholder-domain — illustrative input placeholder
+ */
+const INVITE_PLACEHOLDER = 'https://example.com/invite/aBc123Xy';
+
 type Tab = 'invite' | 'discover';
 
 export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerModalProps) {
@@ -147,7 +154,7 @@ export function JoinServerModal({ isOpen, onClose, onServerJoined }: JoinServerM
                                     setInviteInfo(null);
                                 }}
                                 onKeyDown={e => e.key === 'Enter' && handleLookupInvite()}
-                                placeholder="https://example.com/invite/aBc123Xy"
+                                placeholder={INVITE_PLACEHOLDER}
                                 autoFocus
                             />
                         </div>

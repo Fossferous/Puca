@@ -202,7 +202,7 @@ input hook in it:
 rg -c 'SetWindowsHookEx|WH_KEYBOARD|WH_MOUSE|RegisterRawInput' crates/puca-agent/src/ crates/puca-input/src/
 ```
 
-Returns nothing. (Low-level hooks do exist — in the *app* process, `src-tauri/hotkeys.rs` —
+Returns nothing. (Low-level hooks do exist — in the *app* process, `frontend/src-tauri/src/hotkeys.rs` —
 serving push-to-talk and the remote-control kill switch.)
 
 ### The agent is dormant, and it cannot survive you closing the app
