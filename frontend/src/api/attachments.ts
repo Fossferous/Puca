@@ -9,7 +9,12 @@
  * `attachment.enc`).
  *
  * Wire format of the href embedded in a message:
- *   sovereign-enc:<fileId>?k=<base64url key>&m=<url-encoded mime>
+ *   sovereign-enc:<fileId>?k=<base64url key>&m=<url-encoded mime>[&c=<capability>]
+ * `c` is the per-file capability the server minted at upload (0.8.134+):
+ * presented on fetch, it is what lets the server refuse a blob to someone
+ * who merely learned its id, without ever learning which channel the file
+ * belongs to. Absent on refs from older clients; those blobs stay fetchable
+ * by id, as before.
  * The display name (which may contain spaces) lives in the markdown alt/label.
  * Stored blob = nonce(12) || AES-256-GCM ciphertext.
  */
@@ -73,13 +78,19 @@ export function videoMimeFor(name: string, mime: string): string | null {
     return VIDEO_EXT_MIME[ext] ?? null;
 }
 
-export function parseEncAttachment(href: string): { id: string; key: string; mime: string } | null {
+export function parseEncAttachment(href: string): { id: string; key: string; mime: string; cap?: string } | null {
     if (!href.startsWith(PREFIX)) return null;
     const [id, query = ''] = href.slice(PREFIX.length).split('?');
     const params = new URLSearchParams(query);
     const key = params.get('k');
     if (!id || !key) return null;
-    return { id, key, mime: params.get('m') ? decodeURIComponent(params.get('m')!) : 'application/octet-stream' };
+    const cap = params.get('c');
+    return {
+        id,
+        key,
+        mime: params.get('m') ? decodeURIComponent(params.get('m')!) : 'application/octet-stream',
+        ...(cap ? { cap } : {}),
+    };
 }
 
 /**
@@ -99,7 +110,7 @@ export async function encryptAndUploadRef(file: File): Promise<{ href: string; n
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, raw as BufferSource));
     const blob = new Blob([nonce, ct], { type: 'application/octet-stream' });
-    const uploaded = await uploadFile(new File([blob], 'attachment.enc', { type: 'application/octet-stream' }));
+    const uploaded = await uploadFile(new File([blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true });
 
     // The browser's guess first; when it has none (mkv famously reports ""),
     // infer video types from the extension so the ref records something the
@@ -108,7 +119,8 @@ export async function encryptAndUploadRef(file: File): Promise<{ href: string; n
     const mime = file.type
         || videoMimeFor(file.name || '', '')
         || 'application/octet-stream';
-    const href = `${PREFIX}${uploaded.id}?k=${b64url(keyBytes)}&m=${encodeURIComponent(mime)}`;
+    const href = `${PREFIX}${uploaded.id}?k=${b64url(keyBytes)}&m=${encodeURIComponent(mime)}`
+        + (uploaded.cap ? `&c=${encodeURIComponent(uploaded.cap)}` : '');
     // Strip markdown-breaking chars from the display name (href has the real ref).
     const name = (file.name || 'attachment').replace(/[[\]()\n]/g, '_');
     return { href, name, mime };
@@ -156,7 +168,7 @@ export function safeBlobType(mime: string): string {
  *  when the link has no headroom. Same shape as authedMedia's inflight map. */
 const inflight = new Map<string, Promise<string>>();
 
-export async function decryptToBlobUrl(id: string, keyB64url: string, mime: string): Promise<string> {
+export async function decryptToBlobUrl(id: string, keyB64url: string, mime: string, cap?: string): Promise<string> {
     const cached = blobCache.get(id);
     if (cached) return cached;
     const pending = inflight.get(id);
@@ -165,8 +177,13 @@ export async function decryptToBlobUrl(id: string, keyB64url: string, mime: stri
         // /files is authenticated now — a bare fetch here 401s and every
         // attachment in the app fails to open.
         const token = getToken();
+        // The capability rides in a header, never the URL: URLs land in server
+        // and proxy logs, headers on this authenticated route do not.
         const resp = await fetch(`${API_BASE_URL}/files/${id}`, {
-            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            headers: {
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                ...(cap ? { 'X-Puca-File-Cap': cap } : {}),
+            },
         });
         if (!resp.ok) throw new Error(`fetch ${id} failed: ${resp.status}`);
         const buf = new Uint8Array(await resp.arrayBuffer());

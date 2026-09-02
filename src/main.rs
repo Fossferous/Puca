@@ -308,7 +308,16 @@ async fn main() -> anyhow::Result<()> {
                 Method::PUT,
                 Method::OPTIONS,
             ])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            // The file-capability headers (upload_handlers.rs). Every client is
+            // cross-origin (app.<domain>, tauri://, capacitor://), so a custom request
+            // header that is not listed here fails preflight and the fetch never happens.
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                header::HeaderName::from_static("x-puca-file-cap"),
+                header::HeaderName::from_static("x-puca-want-cap"),
+            ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
             .expose_headers([header::HeaderName::from_static(
@@ -333,7 +342,16 @@ async fn main() -> anyhow::Result<()> {
                 Method::PUT,
                 Method::OPTIONS,
             ])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            // The file-capability headers (upload_handlers.rs). Every client is
+            // cross-origin (app.<domain>, tauri://, capacitor://), so a custom request
+            // header that is not listed here fails preflight and the fetch never happens.
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                header::HeaderName::from_static("x-puca-file-cap"),
+                header::HeaderName::from_static("x-puca-want-cap"),
+            ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
             .expose_headers([header::HeaderName::from_static(

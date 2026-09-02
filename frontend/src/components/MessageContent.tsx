@@ -98,7 +98,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
         let retryTimer: ReturnType<typeof setTimeout> | undefined;
         // Type the blob with the resolved video MIME so <video> gets a
         // media-typed source even when the ref said octet-stream.
-        decryptToBlobUrl(info.id, info.key, videoMime ?? info.mime)
+        decryptToBlobUrl(info.id, info.key, videoMime ?? info.mime, info.cap)
             .then((u) => { if (alive) setUrl(u); })
             .catch(() => {
                 if (!alive) return;

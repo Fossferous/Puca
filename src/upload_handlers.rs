@@ -15,6 +15,9 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
+use base64::Engine;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 
 use crate::auth::Claims;
 use crate::state::AppState;
@@ -247,6 +250,38 @@ pub struct UploadedFileResponse {
     pub mime_type: String,
     pub size_bytes: i64,
     pub url: String,
+    /// The per-file capability (base64url, 32 random bytes), returned ONCE
+    /// and only when the upload asked for one (`X-Puca-Want-Cap: 1`). The
+    /// server keeps its SHA-256 — see migrations/054_file_capabilities.sql.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<String>,
+}
+
+/// FILES_ENFORCE_CAP=1 turns on phase 2: a row that carries a capability
+/// hash is served only to a caller who presents the capability. Off by
+/// default — phase 1 stores it, CHECKS one when presented, and does not yet
+/// require it, so clients that predate the feature keep working until every
+/// client in the field sends the capability it holds. NULL rows (older
+/// uploads, avatars, icons, sounds, emoji, clip parts) are never gated.
+fn files_enforce_cap() -> bool {
+    std::env::var("FILES_ENFORCE_CAP").map(|v| v == "1").unwrap_or(false)
+}
+
+/// The GET /files decision, kept pure for its tests. `stored` is the SHA-256
+/// of the minted capability (None = the row has none); `presented` is the
+/// caller's base64url capability, if any. A wrong capability is refused in
+/// BOTH phases: nothing legitimate presents one that does not match.
+fn file_cap_allows(stored: Option<&[u8]>, presented: Option<&str>, enforce: bool) -> bool {
+    let Some(hash) = stored else { return true };
+    match presented {
+        Some(p) => {
+            let Ok(raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p) else { return false };
+            let digest = Sha256::digest(&raw);
+            // Constant-time: a mismatch must not say how many leading bytes matched.
+            digest.len() == hash.len() && digest.iter().zip(hash).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        }
+        None => !enforce,
+    }
 }
 
 // --- Handlers ---
@@ -384,7 +419,9 @@ pub async fn upload_file(
             .bind(cid).bind(idx).bind(claims.sub as i32)
             .fetch_optional(&state.pool).await.unwrap_or(None);
             if let Some((id, original_name, mime_type, size_bytes)) = existing {
-                return axum::Json(UploadedFileResponse { url: format!("/files/{}", id), id, original_name, mime_type, size_bytes }).into_response();
+                // An idempotent retry returns the row that already exists; a capability
+                // is returned exactly once at mint time, and clip parts never mint one.
+                return axum::Json(UploadedFileResponse { url: format!("/files/{}", id), id, original_name, mime_type, size_bytes, cap: None }).into_response();
             }
         }
     }
@@ -425,6 +462,21 @@ pub async fn upload_file(
 
     // Generate unique file ID and storage name
     let file_id = Uuid::new_v4().to_string();
+    // A per-file capability, minted only when the client asks: attachments
+    // do (the capability rides inside the encrypted message beside the file
+    // key); avatars, icons, sounds, emoji and clip parts do not (their
+    // consumers hold no secret). Stored hashed, returned once, never logged.
+    let want_cap = headers.get("x-puca-want-cap").and_then(|v| v.to_str().ok()) == Some("1");
+    let (cap_b64, cap_hash): (Option<String>, Option<Vec<u8>>) = if want_cap {
+        let mut raw = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut raw);
+        (
+            Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)),
+            Some(Sha256::digest(raw).to_vec()),
+        )
+    } else {
+        (None, None)
+    };
     let extension = original_name
         .rsplit('.')
         .next()
@@ -451,7 +503,7 @@ pub async fn upload_file(
     // uploader_id is INTEGER (i32) in PostgreSQL
     let result = sqlx::query(
         // id column is uuid — cast the text binding or Postgres rejects with 42804.
-        "INSERT INTO uploaded_files (id, uploader_id, original_name, stored_name, mime_type, size_bytes, kind, clip_id, clip_part_index) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, $9)",
+        "INSERT INTO uploaded_files (id, uploader_id, original_name, stored_name, mime_type, size_bytes, kind, clip_id, clip_part_index, cap_hash) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, $9, $10)",
     )
     .bind(&file_id)
     .bind(claims.sub as i32)
@@ -462,6 +514,7 @@ pub async fn upload_file(
     .bind(if is_clip { "clip" } else { "attachment" })
     .bind(if is_clip { clip_id.clone() } else { None })
     .bind(if is_clip { part_index } else { None })
+    .bind(cap_hash)
     .execute(&state.pool)
     .await;
 
@@ -482,6 +535,7 @@ pub async fn upload_file(
         mime_type,
         size_bytes,
         url: format!("/files/{}", file_id),
+        cap: cap_b64,
     })
     .into_response()
 }
@@ -516,19 +570,26 @@ pub async fn get_file(
     };
 
     // Get file metadata
-    let file_info: Option<(String, String, String)> = sqlx::query_as(
+    let file_info: Option<(String, String, String, Option<Vec<u8>>)> = sqlx::query_as(
         // id is uuid; cast the binding (an invalid uuid string errors -> None -> 404).
-        "SELECT stored_name, original_name, mime_type FROM uploaded_files WHERE id = $1::uuid",
+        "SELECT stored_name, original_name, mime_type, cap_hash FROM uploaded_files WHERE id = $1::uuid",
     )
     .bind(&file_id)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
-    let (stored_name, original_name, mime_type) = match file_info {
+    let (stored_name, original_name, mime_type, cap_hash) = match file_info {
         Some(info) => info,
         None => return (StatusCode::NOT_FOUND, "File not found").into_response(),
     };
+    // Per-object capability (migrations/054). 404, never 403: a file this
+    // caller may not fetch must look like one that does not exist, the
+    // same existence oracle delete_file deliberately withholds.
+    let presented = headers.get("x-puca-file-cap").and_then(|v| v.to_str().ok());
+    if !file_cap_allows(cap_hash.as_deref(), presented, files_enforce_cap()) {
+        return (StatusCode::NOT_FOUND, "File not found").into_response();
+    }
 
     // Open the file
     let file_path = format!("uploads/{}", stored_name);
@@ -619,5 +680,50 @@ mod retention_tests {
     fn a_positive_number_is_the_schedule() {
         assert_eq!(parse_retention_days(Some("30".into())), 30);
         assert_eq!(parse_retention_days(Some(" 7 ".into())), 7);
+    }
+}
+
+#[cfg(test)]
+mod file_cap_tests {
+    use super::file_cap_allows;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    fn minted() -> (String, Vec<u8>) {
+        let raw = [7u8; 32];
+        (base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw), Sha256::digest(raw).to_vec())
+    }
+
+    #[test]
+    fn a_row_without_a_capability_is_never_gated() {
+        for enforce in [false, true] {
+            assert!(file_cap_allows(None, None, enforce));
+            assert!(file_cap_allows(None, Some("anything"), enforce));
+        }
+    }
+
+    #[test]
+    fn the_right_capability_is_accepted_in_both_phases() {
+        let (cap, hash) = minted();
+        assert!(file_cap_allows(Some(&hash), Some(&cap), false));
+        assert!(file_cap_allows(Some(&hash), Some(&cap), true));
+    }
+
+    #[test]
+    fn a_wrong_or_malformed_capability_is_refused_in_both_phases() {
+        let (_, hash) = minted();
+        let other = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
+        for enforce in [false, true] {
+            assert!(!file_cap_allows(Some(&hash), Some(&other), enforce));
+            assert!(!file_cap_allows(Some(&hash), Some("not base64!!"), enforce));
+            assert!(!file_cap_allows(Some(&hash), Some(""), enforce));
+        }
+    }
+
+    #[test]
+    fn a_missing_capability_is_the_phase_switch() {
+        let (_, hash) = minted();
+        assert!(file_cap_allows(Some(&hash), None, false), "phase 1: old clients still fetch");
+        assert!(!file_cap_allows(Some(&hash), None, true), "phase 2: the capability is required");
     }
 }

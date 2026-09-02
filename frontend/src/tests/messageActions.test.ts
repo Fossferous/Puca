@@ -35,6 +35,11 @@ describe('formatQuote', () => {
 });
 
 describe('buildForwardText', () => {
+    it('KEEPS the key and the capability — a forward must still open and fetch', () => {
+        const ref = 'sovereign-enc:abc123?k=SECRETKEY&m=image%2Fpng&c=CAPABILITY';
+        expect(buildForwardText(`![photo](${ref})`)).toBe(`> ↪ Forwarded
+![photo](${ref})`);
+    });
     it('prefixes content with the quoted Forwarded marker line', () => {
         expect(buildForwardText('hi there')).toBe('> ↪ Forwarded\nhi there');
     });
@@ -54,6 +59,13 @@ describe('buildForwardText', () => {
 });
 
 describe('stripAttachmentKeys', () => {
+    it('strips the fetch capability (c=) with the key — either alone is access to the blob', () => {
+        const ref = 'sovereign-enc:abc123?k=SECRETKEY&m=image%2Fpng&c=CAPABILITY';
+        const out = stripAttachmentKeys(`![photo](${ref})`);
+        expect(out).not.toContain('SECRETKEY');
+        expect(out).not.toContain('CAPABILITY');
+        expect(out).toContain('m=image%2Fpng');
+    });
     it('removes the embedded AES key from a sovereign-enc ref, keeping id + mime', () => {
         const ref = 'sovereign-enc:abc123?k=SECRETKEY&m=image%2Fpng';
         expect(stripAttachmentKeys(`![photo](${ref})`))

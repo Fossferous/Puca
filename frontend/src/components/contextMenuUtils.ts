@@ -72,7 +72,9 @@ export function replyPreviewText(content: string, max: number): string {
 export function stripAttachmentKeys(content: string): string {
     return content
         .replace(/sovereign-enc:([^\s)?]+)\?([^\s)]*)/g, (_full, id, query) => {
-            const kept = (query as string).split('&').filter(kv => kv.length > 0 && !/^k=/.test(kv));
+            // k= is the file key, c= the fetch capability: either one outside the
+            // envelope is access to the blob, so neither reaches the clipboard.
+            const kept = (query as string).split('&').filter(kv => kv.length > 0 && !/^[kc]=/.test(kv));
             return kept.length ? `sovereign-enc:${id}?${kept.join('&')}` : `sovereign-enc:${id}`;
         })
         // A clip ref (docs/CLIPS.md) is one packed blob whose key cannot be

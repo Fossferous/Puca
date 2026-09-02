@@ -9,6 +9,10 @@ export interface UploadedFile {
     mime_type: string;
     size_bytes: number;
     url: string;
+    /** Per-file capability (base64url), present only when the upload asked
+     *  for one and the server is new enough to mint it. Carried inside the
+     *  encrypted message next to the file key; presented on fetch. */
+    cap?: string;
 }
 
 // --- Upload API ---
@@ -59,13 +63,17 @@ export function assertUploadable(file: File, overhead = 0): void {
 /**
  * Upload a file
  */
-export function uploadFile(file: File): Promise<UploadedFile> {
+export function uploadFile(file: File, opts?: { wantCap?: boolean }): Promise<UploadedFile> {
     assertUploadable(file);
 
     const formData = new FormData();
     formData.append('file', file);
 
-    return apiClient.post('/upload', formData);
+    // A HEADER, not a multipart field: an older server's field loop treats
+    // any unknown field as the file body, whereas an unknown header is simply
+    // ignored — so a new client uploads fine against an old server and just
+    // gets no capability back.
+    return apiClient.post('/upload', formData, opts?.wantCap ? { headers: { 'X-Puca-Want-Cap': '1' } } : undefined);
 }
 
 /**
