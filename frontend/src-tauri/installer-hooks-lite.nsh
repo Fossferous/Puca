@@ -36,6 +36,7 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  !insertmacro RepairShortcutsToRenamedBinary
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
