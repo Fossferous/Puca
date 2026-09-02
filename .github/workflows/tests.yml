@@ -32,6 +32,8 @@ jobs:
         run: npm run build           # tsc -b && vite build
       - name: Unit tests (vitest)
         run: npm test                 # vitest run — offline, ~125 cases
+      - name: Lite bundle (rc-exclusion-guard must pass)
+        run: node scripts/build-lite.mjs   # VITE_ENABLE_RC=false: fails if remote-control code is in the graph
       # Two classes of defect that are invisible to tsc, vitest and eslint,
       # because the code is correct and the WORDS in it are wrong. Both have
       # shipped: a user-facing diagnostic telling people to install the APK
