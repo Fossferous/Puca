@@ -88,6 +88,12 @@ pub struct ParkedOffer {
     /// The offer MAC, carried through so a parked offer delivered later still
     /// arrives authenticated (see FileOffered.auth).
     pub auth: Option<String>,
+    /// The record version, the sender's DTLS fingerprint and the offer time —
+    /// inside the MAC, so a parked offer must carry them too or it fails
+    /// authentication on delivery while the live path passes.
+    pub auth_v: Option<u8>,
+    pub fp: Option<String>,
+    pub ts: Option<u64>,
 }
 
 impl FileTransfer {
@@ -1672,6 +1678,9 @@ impl AppState {
                 mime: p.mime,
                 sha256: p.sha256,
                 auth: p.auth,
+                auth_v: p.auth_v,
+                fp: p.fp,
+                ts: p.ts,
             });
         }
         for (id, from) in dead {
@@ -3070,6 +3079,9 @@ mod crash_resistance_tests {
             sha256: "ab".repeat(32),
             target_device: dev.map(String::from),
             auth: None,
+            auth_v: None,
+            fp: None,
+            ts: None,
         }
     }
 

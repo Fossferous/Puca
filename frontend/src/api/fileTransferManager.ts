@@ -33,6 +33,7 @@ import {
     verifyFileOffer,
 } from './e2ee';
 import { resolvePinnedIdentityKey } from './keyVerification';
+import { certificateFingerprint, parseFingerprint, sdpBoundTo } from './dtlsFingerprint';
 import { getToken, decodeJwtPayload } from './auth';
 
 /** Signed-in user id from the JWT, or null. Used only to bind the offer MAC to
@@ -44,18 +45,49 @@ function myUserId(): number | null {
     return typeof p?.sub === 'number' ? p.sub : null;
 }
 
+/** Version of the offer/accept authentication records. v2 (0.9.0) binds each
+ *  side's DTLS certificate fingerprint — so the server cannot substitute the
+ *  PEER (terminate DTLS itself) any more than the file — and stamps the offer.
+ *  Since 0.9.0 both are REQUIRED: the field is friends-only and every client
+ *  is a receiver, so an older sender is told to update rather than trusted. */
+export const FILE_OFFER_AUTH_VERSION = 2;
+/** How old an offer may be when it arrives. The server's 120 s TTL is the
+ *  server's word; a captured FileOffered would otherwise replay forever. */
+const OFFER_FRESHNESS_MS = 15 * 60_000;
+const SEEN_OFFER_CAP = 256;
+
 /**
  * The bytes both peers MAC to authenticate a transfer offer. Built identically
  * on each side (canonical, so field order can't matter) from the fields the
  * receiver would otherwise trust from the server verbatim. `from`/`to` are the
  * numeric user ids (sender→receiver), binding the offer to this direction and
- * pair on top of the pair-specific MAC key.
+ * pair on top of the pair-specific MAC key. `fp` is the SENDER's DTLS
+ * fingerprint ("<alg> <HEX>"), `ts` the offer time in ms. `v` and `t` live
+ * INSIDE the MAC'd bytes: strip them on the wire and the tag no longer
+ * verifies — a break, never a silent downgrade.
  */
-function fileOfferRecord(fields: {
+export function fileOfferRecord(fields: {
     id: string; from: number; to: number;
     name: string; size: number; mime: string; sha256: string;
+    fp: string; ts: number;
 }): string {
-    return canonicalJson(fields);
+    return canonicalJson({ v: FILE_OFFER_AUTH_VERSION, t: 'offer', ...fields });
+}
+
+/** The accept record: the RECEIVER's fingerprint, the direction flipped
+ *  (`from` is the accepter), and the resume offset it asked for. A different
+ *  `t` means an offer tag can never be replayed as an accept tag. */
+export function fileAcceptRecord(fields: { id: string; from: number; to: number; fp: string; resume: number }): string {
+    return canonicalJson({ v: FILE_OFFER_AUTH_VERSION, t: 'accept', ...fields });
+}
+
+/** The peer's identity key for the MAC. A self-transfer's peer is US: use the
+ *  local key, never the server's copy of it (X25519(myPriv, myPub) is the
+ *  same value either way on an honest server, and only this way on a
+ *  dishonest one). */
+async function peerKeyFor(identity: NonNullable<ReturnType<typeof getActiveIdentity>>, myId: number | null, peerId: number): Promise<string | null> {
+    if (myId !== null && peerId === myId) return identity.publicKeyEncoded;
+    return resolvePinnedIdentityKey(peerId);
 }
 
 export type TransferState =
@@ -172,6 +204,15 @@ interface Transfer extends TransferView {
     pendingCandidates: RTCIceCandidateInit[];
     /** Sender side: resolves when the receiver reports the file complete. */
     ackResolve?: () => void;
+    /** Our DTLS certificate, generated BEFORE the record that names its
+     *  fingerprint and pinned on the connection, so what the peer verified is
+     *  what DTLS presents. */
+    cert?: RTCCertificate;
+    /** Our fingerprint, as authenticated to the peer. */
+    localFp?: string;
+    /** The peer's fingerprint, from the record that verified. The remote
+     *  description must present exactly this. */
+    peerFp?: string;
 }
 
 /**
@@ -219,6 +260,17 @@ function newTransferId(): string {
 }
 
 class FileTransferManager {
+    /** Offer ids already handled, so a re-delivered FileOffered can neither
+     *  clobber a live receive record nor re-prompt. Bounded. */
+    private seenOfferIds: string[] = [];
+    private rememberOffer(id: string): boolean {
+        if (this.seenOfferIds.includes(id)) return false;
+        this.seenOfferIds.push(id);
+        if (this.seenOfferIds.length > SEEN_OFFER_CAP) this.seenOfferIds.shift();
+        return true;
+    }
+    /** Forget handled offer ids (sign-out, or a test rig that reuses ids). */
+    forgetSeenOffers(): void { this.seenOfferIds.length = 0; }
     private transfers = new Map<string, Transfer>();
     private listeners = new Set<Listener>();
     /** Supplies somewhere to put received bytes; set by the platform layer. */
@@ -378,17 +430,25 @@ class FileTransferManager {
         // useless anyway.
         const identity = getActiveIdentity();
         const myId = myUserId();
-        const peerPub = identity ? await resolvePinnedIdentityKey(peerId) : null;
+        const peerPub = identity ? await peerKeyFor(identity, myId, peerId) : null;
         const authKey = identity && peerPub ? deriveFileOfferAuthKey(identity, peerPub) : null;
-        if (!authKey || myId == null) {
+        // Our DTLS certificate comes first: its fingerprint is part of what the
+        // record authenticates, and the connection later pins this exact cert.
+        const cert = await this.makeCertificate();
+        if (!authKey || myId == null || !cert) {
             t.state = 'failed';
-            t.error = "can't send securely — this person's encryption key is unavailable or unverified";
+            t.error = !cert
+                ? "can't send securely — this device could not create a connection certificate"
+                : "can't send securely — this person's encryption key is unavailable or unverified";
             this.emit();
             return id;
         }
+        t.cert = cert.cert;
+        t.localFp = cert.fp;
+        const ts = Date.now();
         const auth = authenticateFileOffer(
             authKey,
-            fileOfferRecord({ id, from: myId, to: peerId, name: t.name, size: t.size, mime: t.mime, sha256: t.sha256 }),
+            fileOfferRecord({ id, from: myId, to: peerId, name: t.name, size: t.size, mime: t.mime, sha256: t.sha256, fp: cert.fp, ts }),
         );
 
         t.state = 'offered';
@@ -397,16 +457,39 @@ class FileTransferManager {
             payload: {
                 target_user: peerId, transfer_id: id,
                 name: t.name, size: t.size, mime: t.mime, sha256: t.sha256,
-                auth,
+                auth, auth_v: FILE_OFFER_AUTH_VERSION, fp: cert.fp, ts,
             },
         });
         this.emit();
         return id;
     }
 
+    /** A fresh DTLS certificate and its canonical fingerprint. */
+    private async makeCertificate(): Promise<{ cert: RTCCertificate; fp: string } | null> {
+        try {
+            const cert = await RTCPeerConnection.generateCertificate({ name: 'ECDSA', namedCurve: 'P-256' } as AlgorithmIdentifier);
+            const fp = await certificateFingerprint(cert);
+            return fp ? { cert, fp } : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** Refuse a transfer the other side (or the server) could not authenticate:
+     *  tell the peer, mark it failed, tear down — WITHOUT fail()'s FileComplete,
+     *  which the server would answer "Unknown transfer" after the cancel. */
+    private refuse(t: Transfer, error: string): void {
+        wsClient.send({ type: 'FileCancel', payload: { transfer_id: t.id, reason: 'authentication failed' } });
+        t.abort.aborted = true;
+        t.state = 'failed';
+        t.error = error;
+        this.teardown(t, true);
+        this.emit();
+    }
+
     /** Recipient accepted: build the connection and start pushing bytes. */
     private async onAccepted(msg: ServerMessage): Promise<void> {
-        const p = msg.payload as { transfer_id: string; resume_from: number };
+        const p = msg.payload as { from_user: number; transfer_id: string; resume_from: number; auth?: string; auth_v?: number; fp?: string };
         const t = this.transfers.get(p.transfer_id);
         if (!t || t.direction !== 'send' || !t.file) return;
         // Single-shot. A replayed FileAccept used to build a fresh
@@ -415,6 +498,24 @@ class FileTransferManager {
         // file from disk. The server refuses a second accept too; this is the
         // half that protects a client talking to a modified server.
         if (t.state !== 'offered') return;
+
+        // The accept is authenticated too: it names the RECEIVER's DTLS
+        // fingerprint, so a server that answers our offer with a connection of
+        // its own is refused before any bytes flow.
+        const identity = getActiveIdentity();
+        const myId = myUserId();
+        const peerPub = identity ? await peerKeyFor(identity, myId, t.peerId) : null;
+        const authKey = identity && peerPub ? deriveFileOfferAuthKey(identity, peerPub) : null;
+        const fp = p.fp ? parseFingerprint(p.fp) : null;
+        const accepted = !!authKey && myId != null && p.auth_v === FILE_OFFER_AUTH_VERSION && !!fp && fp === p.fp && !!p.auth
+            && verifyFileOffer(authKey, fileAcceptRecord({ id: t.id, from: p.from_user, to: myId, fp, resume: p.resume_from ?? 0 }), p.auth);
+        if (!accepted) {
+            this.refuse(t, p.auth_v === undefined
+                ? 'refused: their app is older than yours — ask them to update, then try again'
+                : 'refused: could not verify that the accept came from them');
+            return;
+        }
+        t.peerFp = fp;
 
         t.state = 'connecting';
         // The accept proves the offer reached them — the parked note is done.
@@ -577,8 +678,11 @@ class FileTransferManager {
         const p = msg.payload as {
             from_user: number; from_username: string; transfer_id: string;
             name: string; size: number; mime: string; sha256: string;
-            auth?: string;
+            auth?: string; auth_v?: number; fp?: string; ts?: number;
         };
+        // A re-delivered offer must not clobber a live receive record or
+        // re-prompt; an id we have already handled is ignored outright.
+        if (this.transfers.has(p.transfer_id) || !this.rememberOffer(p.transfer_id)) return;
 
         // Authenticate the offer against the SENDER's pinned identity key before
         // it is ever shown or accepted. Without this the server relaying the
@@ -592,13 +696,16 @@ class FileTransferManager {
         // senders to be compatible with.
         const identity = getActiveIdentity();
         const myId = myUserId();
-        const senderPub = identity ? await resolvePinnedIdentityKey(p.from_user) : null;
+        const senderPub = identity ? await peerKeyFor(identity, myId, p.from_user) : null;
         const authKey = identity && senderPub ? deriveFileOfferAuthKey(identity, senderPub) : null;
-        const record = fileOfferRecord({
+        const fp = p.fp ? parseFingerprint(p.fp) : null;
+        const fresh = typeof p.ts === 'number' && Math.abs(Date.now() - p.ts) <= OFFER_FRESHNESS_MS;
+        const record = fp && typeof p.ts === 'number' ? fileOfferRecord({
             id: p.transfer_id, from: p.from_user, to: myId ?? -1,
-            name: p.name, size: p.size, mime: p.mime, sha256: p.sha256,
-        });
-        const authed = !!authKey && myId != null && !!p.auth && verifyFileOffer(authKey, record, p.auth);
+            name: p.name, size: p.size, mime: p.mime, sha256: p.sha256, fp, ts: p.ts,
+        }) : null;
+        const authed = !!authKey && myId != null && p.auth_v === FILE_OFFER_AUTH_VERSION && !!fp && fp === p.fp && fresh
+            && !!record && !!p.auth && verifyFileOffer(authKey, record, p.auth);
         if (!authed) {
             // Tell the sender we refused (so it stops waiting) — inline rather
             // than via reject(), which DELETES the transfer, because we also
@@ -610,7 +717,9 @@ class FileTransferManager {
                 peerId: p.from_user, peerName: p.from_username,
                 name: p.name, size: p.size, mime: p.mime, sha256: p.sha256,
                 state: 'failed', bytes: 0,
-                error: `refused: could not verify this transfer really came from ${p.from_username}`,
+                error: p.auth_v === undefined
+                    ? 'refused: their app is older than yours — ask them to update, then try again'
+                    : `refused: could not verify this transfer really came from ${p.from_username}`,
                 abort: { aborted: false }, pendingCandidates: [],
             });
             this.emit();
@@ -622,6 +731,7 @@ class FileTransferManager {
             peerId: p.from_user, peerName: p.from_username,
             name: p.name, size: p.size, mime: p.mime, sha256: p.sha256,
             state: 'offered', bytes: 0,
+            peerFp: fp ?? undefined,
             abort: { aborted: false }, pendingCandidates: [],
         });
         this.emit();
@@ -677,8 +787,24 @@ class FileTransferManager {
         // cold/slow ICE-config fetch here used to lose the race with the
         // sender's offer, and onSignal drops descriptions that arrive before
         // t.pc exists — wedging the transfer in 'connecting' forever.
+        // Our certificate and its fingerprint go into the accept record the
+        // sender verifies, then onto the connection, so what the sender
+        // authenticated is what DTLS presents.
+        const identity = getActiveIdentity();
+        const myId = myUserId();
+        const peerPub = identity ? await peerKeyFor(identity, myId, t.peerId) : null;
+        const authKey = identity && peerPub ? deriveFileOfferAuthKey(identity, peerPub) : null;
+        const cert = await this.makeCertificate();
+        if (!authKey || myId == null || !cert) {
+            this.reject(id, 'could not authenticate the accept');
+            this.fail(t, "can't accept securely — encryption key or connection certificate unavailable");
+            return;
+        }
+        t.cert = cert.cert;
+        t.localFp = cert.fp;
+        const auth = authenticateFileOffer(authKey, fileAcceptRecord({ id, from: myId, to: t.peerId, fp: cert.fp, resume: resumeFrom }));
         await this.newConnection(t);
-        wsClient.send({ type: 'FileAccept', payload: { transfer_id: id, resume_from: resumeFrom } });
+        wsClient.send({ type: 'FileAccept', payload: { transfer_id: id, resume_from: resumeFrom, auth, auth_v: FILE_OFFER_AUTH_VERSION, fp: cert.fp } });
     }
 
     reject(id: string, reason = 'declined'): void {
@@ -743,7 +869,10 @@ class FileTransferManager {
         const config = await fetchIceConfig();
         // Same relay-only policy as voice: this path handed the peer the
         // user's IP even with "Hide my IP in calls" on.
-        const pc = new RTCPeerConnection(withRelayOnlyIfRequested(config));
+        // The certificate whose fingerprint the peer authenticated. Never a
+        // fresh one: then the peer's check would fail and read as an attack.
+        if (!t.cert) throw new Error('transfer has no DTLS certificate — the record was built without one');
+        const pc = new RTCPeerConnection({ ...withRelayOnlyIfRequested(config), certificates: [t.cert] });
         t.pc = pc;
 
         pc.onicecandidate = e => {
@@ -844,15 +973,27 @@ class FileTransferManager {
         const pc = t.pc;
         if (!pc) return;
 
-        if (body.kind === 'offer' && body.sdp) {
-            await pc.setRemoteDescription({ type: 'offer', sdp: body.sdp });
+        if ((body.kind === 'offer' || body.kind === 'answer') && body.sdp) {
+            // A receiver only ever takes an offer, a sender only an answer: a
+            // reflected or misdirected description is dropped, not negotiated.
+            const want = t.direction === 'receive' ? 'offer' : 'answer';
+            if (body.kind !== want) return;
+            // One negotiation per transfer: a second description is a replay.
+            if (pc.remoteDescription) return;
+            // THE binding: the description must present exactly the DTLS
+            // fingerprint the peer authenticated in its record. Anything else is
+            // the server (or anyone on the path) terminating DTLS itself.
+            if (!t.peerFp || !sdpBoundTo(body.sdp, t.peerFp)) {
+                this.refuse(t, 'refused: the connection did not match the key the other side authenticated');
+                return;
+            }
+            await pc.setRemoteDescription({ type: body.kind, sdp: body.sdp });
             await this.flushCandidates(t);
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            this.signal(t, { kind: 'answer', sdp: answer.sdp });
-        } else if (body.kind === 'answer' && body.sdp) {
-            await pc.setRemoteDescription({ type: 'answer', sdp: body.sdp });
-            await this.flushCandidates(t);
+            if (body.kind === 'offer') {
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                this.signal(t, { kind: 'answer', sdp: answer.sdp });
+            }
         } else if (body.kind === 'ice' && body.candidate) {
             // Candidates can arrive before the description they belong to;
             // adding one then throws, so hold them until there is a remote.

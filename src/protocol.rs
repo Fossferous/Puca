@@ -225,6 +225,16 @@ pub enum ClientMessage {
         /// on the wire for forward-compat, but the receiver requires it.
         #[serde(default)]
         auth: Option<String>,
+        /// Record version the MAC covers (2 = binds the sender's DTLS fingerprint
+        /// and a timestamp). Relayed verbatim; the receiver decides.
+        #[serde(default)]
+        auth_v: Option<u8>,
+        /// The sender's DTLS certificate fingerprint ("<alg> <HEX>"), inside the MAC.
+        #[serde(default)]
+        fp: Option<String>,
+        /// Offer time (ms since epoch), inside the MAC: bounds replay.
+        #[serde(default)]
+        ts: Option<u64>,
     },
 
     /// Recipient -> sender: begin. `resume_from` is 0 for a fresh transfer, or
@@ -233,6 +243,14 @@ pub enum ClientMessage {
         transfer_id: String,
         #[serde(default)]
         resume_from: u64,
+        /// The accept MAC: binds the RECEIVER's DTLS fingerprint and `resume_from`
+        /// to the pair, so the sender knows whose connection will answer.
+        #[serde(default)]
+        auth: Option<String>,
+        #[serde(default)]
+        auth_v: Option<u8>,
+        #[serde(default)]
+        fp: Option<String>,
     },
 
     /// Recipient -> sender: refuse (declined, no room on disk, unsupported).
@@ -706,6 +724,12 @@ pub enum ServerMessage {
         /// the recipient verifies against the sender's pinned identity key.
         #[serde(default)]
         auth: Option<String>,
+        #[serde(default)]
+        auth_v: Option<u8>,
+        #[serde(default)]
+        fp: Option<String>,
+        #[serde(default)]
+        ts: Option<u64>,
     },
 
     /// The recipient accepted; start negotiating and sending from `resume_from`.
@@ -713,6 +737,12 @@ pub enum ServerMessage {
         from_user: UserId,
         transfer_id: String,
         resume_from: u64,
+        #[serde(default)]
+        auth: Option<String>,
+        #[serde(default)]
+        auth_v: Option<u8>,
+        #[serde(default)]
+        fp: Option<String>,
     },
 
     /// The recipient refused.
