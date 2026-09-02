@@ -14,7 +14,6 @@ import {
     decryptSelf,
     encryptChannelMessage,
     decryptChannelMessage,
-    parseEnvelope,
     parseEnvelopeEx,
     serializeEnvelope,
     type ChannelAadKind,
@@ -263,11 +262,15 @@ async function sealSelf(plaintext: string): Promise<string> {
 /** Decrypt stored owner-only text. Plaintext passes through (legacy rows);
  *  undecryptable envelopes become a visible marker rather than an error. */
 async function openSelf(stored: string): Promise<string> {
-    const envelope = parseEnvelope(stored);
-    if (!envelope) return stored;
+    const parsed = parseEnvelopeEx(stored);
+    // Same three-way split as every other reader: a version this build does
+    // not implement is a failure marker, never raw JSON shown as the item.
+    if (parsed.kind === 'unsupported-version') return MARKERS.ENC_UNSUPPORTED_VERSION;
+    if (parsed.kind !== 'envelope') return stored;   // legacy plaintext row
+    if (parsed.env.t !== 'self') return DECRYPT_FAILED;   // a channel/DM envelope has no business here
     const identity = getActiveIdentity();
     if (!identity) return IDENTITY_LOCKED;
-    return (await decryptSelf(identity, envelope)) ?? DECRYPT_FAILED;
+    return (await decryptSelf(identity, parsed.env)) ?? DECRYPT_FAILED;
 }
 
 /** Get (or lazily create) the single "Notes to self" personal list that backs

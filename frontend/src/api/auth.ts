@@ -687,10 +687,6 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | null 
     }
 }
 
-/** Whether a JWT's `exp` has passed (with a small clock-skew margin). Local
- *  decode only — no verification needed; the server is the authority, this
- *  just lets the client stop hammering a token it can SEE is dead. Returns
- *  false for tokens it can't parse (server rejection then signals expiry). */
 /** The signed-in user's id from the stored JWT's `sub`. No verification —
  *  the server verifies tokens; this only decides which side of a pairwise or
  *  context binding we are. null when signed out or the token is malformed. */
@@ -701,6 +697,10 @@ export function currentUserIdFromToken(): number | null {
     return typeof p?.sub === 'number' ? p.sub : null;
 }
 
+/** Whether a JWT's `exp` has passed (with a small clock-skew margin). Local
+ *  decode only — no verification needed; the server is the authority, this
+ *  just lets the client stop hammering a token it can SEE is dead. Returns
+ *  false for tokens it can't parse (server rejection then signals expiry). */
 export function isTokenExpired(token: string | null): boolean {
     if (!token) return false;
     try {

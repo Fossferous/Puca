@@ -122,7 +122,7 @@ describe('v3 recovery: password change preserves the identity', { timeout: 30_00
         const aliceBefore = makeIdentity(aliceSeed);
 
         // Bob sends Alice a DM under Alice's pre-reset identity.
-        const env = await encryptDM(bob, aliceBefore.publicKeyEncoded, 'secret history');
+        const env = await encryptDM(bob, aliceBefore.publicKeyEncoded, 'secret history', { senderId: 2, recipientId: 1 });
         expect(env).not.toBeNull();
 
         // Alice resets her password (recover seed via code, re-wrap under new pw).
@@ -133,7 +133,7 @@ describe('v3 recovery: password change preserves the identity', { timeout: 30_00
         const aliceAfter = makeIdentity(aliceAfterSeed!);
 
         // The post-reset identity still decrypts the pre-reset message.
-        const pt = await decryptDM(aliceAfter, bob.publicKeyEncoded, env!);
+        const pt = await decryptDM(aliceAfter, bob.publicKeyEncoded, env!, { senderId: 2, recipientId: 1 });
         expect(pt).toBe('secret history');
     });
 

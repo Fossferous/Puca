@@ -66,7 +66,7 @@ describe('remote-control per-session crypto (ephemeral handshake)', () => {
 
     it('is domain-separated from the DM key (a DM ciphertext cannot open as control)', async () => {
         const { host, viewer, hostKey } = await handshake();
-        const dm = await encryptDM(viewer, host.publicKeyEncoded, 'secret dm');
+        const dm = await encryptDM(viewer, host.publicKeyEncoded, 'secret dm', { senderId: 1, recipientId: 2 });
         expect(await openControl(hostKey, dm!.ct)).toBeNull();
     });
 

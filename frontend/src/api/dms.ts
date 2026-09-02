@@ -177,8 +177,10 @@ export async function decryptDMContent(content: string, partnerUserId: number, s
     const parsed = parseEnvelopeEx(content);
     if (parsed.kind === 'unsupported-version') return ENC_UNSUPPORTED_VERSION;
     // Accept BOTH shapes: 'self' for your own conversation, 'dm' for everyone
-    // else. Anything unrecognised passes through as-is (legacy plaintext).
-    if (parsed.kind !== 'envelope' || (parsed.env.t !== 'dm' && parsed.env.t !== 'self')) return content;
+    // else. Non-envelope content passes through as-is (legacy plaintext); a
+    // channel envelope in a DM row is a failure, not content.
+    if (parsed.kind !== 'envelope') return content;
+    if (parsed.env.t !== 'dm' && parsed.env.t !== 'self') return ENC_CANNOT_DECRYPT;
     const env = parsed.env;
 
     const identity = getActiveIdentity();

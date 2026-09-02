@@ -344,7 +344,12 @@ export interface DmContext {
     recipientId: number;
 }
 
+const CHANNEL_AAD_KINDS: ReadonlySet<string> = new Set(['chan-msg', 'chan-task', 'chan-taskatt']);
+
 export function channelAad(ctx: ChannelContext, epoch: number): Uint8Array {
+    // The type says the kind is one of three tokens; the runtime check makes
+    // the grammar's no-escaping argument hold even for an `as never` caller.
+    if (!CHANNEL_AAD_KINDS.has(ctx.kind)) throw new SecureSendError(`E2EE context: unknown kind ${String(ctx.kind)}`);
     return utf8(`${AAD_PREFIX}${ctx.kind}/${aadInt(ctx.channelId, 'channelId')}/${aadInt(epoch, 'epoch')}/${aadInt(ctx.senderId, 'senderId')}`);
 }
 

@@ -25,7 +25,7 @@ import {
 describe('messageEncState (H-1 encryption indicator)', () => {
     it('classifies a real envelope as secure', async () => {
         const ck = generateChannelKey();
-        const wire = serializeEnvelope(await encryptChannelMessage(ck, 1, 'hello'));
+        const wire = serializeEnvelope(await encryptChannelMessage(ck, 1, 'hello', { kind: 'chan-msg', channelId: 1, senderId: 1 }));
         // Decrypted output is the plaintext (not a failure marker) -> secure.
         expect(messageEncState(wire, 'hello')).toBe('secure');
     });
