@@ -48,7 +48,11 @@ mod tunnel_pump;
 mod tunnel_cmd;
 #[cfg(all(windows, feature = "remote-control"))]
 mod lock_screen;
-#[cfg(feature = "remote-control")]
+// Both conditions. The SCM/ProgramFiles helper is Windows-only AND RC-only: a
+// duplicated #[cfg(windows)] once left it ungated (broke the Linux build), and
+// the lite split then gated it on the feature alone, which breaks Linux with
+// default features. Neither half is enough on its own.
+#[cfg(all(windows, feature = "remote-control"))]
 mod service_cmd;
 #[cfg(all(windows, feature = "remote-control"))]
 mod service_link;
@@ -1313,9 +1317,9 @@ pub fn run() {
             service_cmd::service_disable,
             #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_disable_and_forget,
-            #[cfg(feature = "remote-control")]
+            #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_update,
-            #[cfg(feature = "remote-control")]
+            #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_bundled_fingerprint,
             set_close_to_tray,
             get_running_apps,

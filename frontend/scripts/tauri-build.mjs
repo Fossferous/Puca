@@ -32,6 +32,14 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tauriDir = join(here, '..', 'src-tauri');
+// tauri.windows.conf.json (beside the base config) is a PLATFORM overlay that
+// Tauri loads and merges BY ITSELF, unsanitised: it names puca-service as a
+// sidecar only on Windows, because build-agent.mjs only builds and stages the
+// Windows service on win32 and a Linux/macOS bundle must not demand a binary
+// that never exists there. Two consequences: it must not carry "//" comment
+// keys (the schema rejects unknown fields and the whole Windows build fails),
+// and JSON merge REPLACES arrays, so it lists every Windows sidecar, agent
+// included. The lite config passed via --config overrides it with [].
 const overlay = join(tauriDir, 'tauri.release.json');
 const baseConf = join(tauriDir, 'tauri.conf.json');
 

@@ -50,8 +50,7 @@
       }
     },
     "externalBin": [
-      "binaries/puca-agent",
-      "binaries/puca-service"
+      "binaries/puca-agent"
     ]
   },
   "plugins": {

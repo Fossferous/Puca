@@ -130,6 +130,46 @@
     border-radius: 4px;
 }
 
+/* --- Docked mini-player (mobile stream watching) -------------------------
+   Only the mobile render path in Chat.tsx ever sets `.docked`, so these rules
+   need no media guard — desktop keeps the floating box untouched. The dock is
+   an in-flow flex child of .chat-main between the header and the message
+   list: the video reserves its own row, so it can never sit on top of the
+   composer or voice bar the way the floating PiP did on phones. */
+.stream-pip.docked {
+    position: relative;
+    left: auto;
+    top: auto;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    /* Cap against the LAYOUT viewport so the video yields room when the soft
+       keyboard resizes it — typing keeps video + a few messages visible. */
+    max-height: 32dvh;
+    min-height: 110px;
+    flex-shrink: 0;
+    z-index: auto;
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0;
+    box-shadow: none;
+    cursor: default;
+}
+
+/* Touch has no hover: the dock's controls are always visible (§5). */
+.stream-pip.docked .pip-header {
+    opacity: 1;
+}
+
+/* Compact-but-tappable, a scoped exception to mobile.css's 44px blanket rule
+   (which would otherwise inflate these into half the video's height). */
+.stream-pip.docked .pip-btn {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    min-height: 38px;
+    font-size: 16px;
+}
+
 /* --- Document PiP grid (W4): rendered INTO the always-on-top OS window --- */
 .doc-pip-body {
     margin: 0;

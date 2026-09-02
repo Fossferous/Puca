@@ -16,13 +16,25 @@
 //! Whether DXGI reports the pointer in panel or desktop coordinates is not
 //! something a test can assert without a rotated monitor attached, and getting
 //! it wrong puts a perfectly drawn cursor a thousand pixels from the mouse.
+#[cfg(windows)]
 use puca_capture::{outputs, ScreenCapture};
 
+// Windows-only end to end: it PARKS THE POINTER with user32's SetCursorPos,
+// and the coordinate question it answers (panel vs desktop space) is a DXGI
+// one. Off Windows this must still COMPILE (cargo test builds every example),
+// so the whole probe is gated rather than half-stubbed.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("cursor_probe drives the Windows pointer (SetCursorPos) over DXGI capture; run it on Windows.");
+}
+
+#[cfg(windows)]
 #[link(name = "user32")]
 extern "system" {
     fn SetCursorPos(x: i32, y: i32) -> i32;
 }
 
+#[cfg(windows)]
 fn main() {
     let outs = outputs();
     for o in &outs {
