@@ -176,7 +176,10 @@ async function registerUser(username, password) {
     return { username, password, seed, identity };
 }
 
-async function loginUser(username, password) {
+// `bearer`: re-prove the password FROM an existing session (change password,
+// delete account). The server then binds the proof to that session and hands
+// the same token back instead of opening a second session.
+async function loginUser(username, password, bearer) {
     const a = bytesToBig(randomBytes(32));
     const A = modpow(g, a, N);
     const s1 = await apiFetch('POST', '/auth/login/step1', { username, a_pub_hex: padHex(A, N_BYTES) });
@@ -191,7 +194,7 @@ async function loginUser(username, password) {
     const S = modpow(base, a + u * x, N);
     const K = minimalBytes(S);
     const M1 = await shaBytes(minimalBytes(A), minimalBytes(B), K);
-    const s2 = await apiFetch('POST', '/auth/login/step2', { username, m_hex: toHex(M1) });
+    const s2 = await apiFetch('POST', '/auth/login/step2', { username, m_hex: toHex(M1) }, bearer);
     return { token: s2.token, salt_hex: s1.salt_hex };
 }
 
@@ -537,6 +540,55 @@ async function main() {
         const histDec = freshIdentity && await decryptSelf(freshIdentity, JSON.parse(selfRow));
         check('recovery/seed re-derivable from server blob yields SAME identity key', !!samePubkey);
         check('recovery/re-derived identity decrypts pre-existing history', histDec === PLAIN_TASK);
+    }
+
+    // --- Stage: the password proof is bound to the session that spends it ---
+    // 0.8.136 bound the proof to `sst` but recorded it under a FRESH session on
+    // every SRP exchange, so an in-app password change (re-prove, then write)
+    // was always refused. A re-proof that carries the caller's bearer must bind
+    // to THAT session and open no second one.
+    section('Stage: password proof is bound to the session that spends it');
+    {
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const D = await registerUser(`dave_${RUN}`, 'passwordDave1!');
+        const uid = sql(`SELECT id FROM users WHERE username='${D.username}';`);
+        const rows = () => parseInt(sql(`SELECT COUNT(*) FROM token_sessions WHERE user_id=${uid};`), 10);
+        const refusedWith = async (token) => {
+            try { await apiFetch('DELETE', '/account', { confirm_username: D.username }, token); return 'accepted'; }
+            catch (e) { return /→ 401/.test(e.message) ? '401' : e.message; }
+        };
+        const t1 = (await loginUser(D.username, D.password)).token;   // proof -> session 1
+        const n1 = rows();
+        await sleep(1100);                                              // sst has 1 s granularity
+        const t2 = (await loginUser(D.username, D.password)).token;   // a second device: proof -> session 2
+        check('proof/a fresh sign-in opens its own session row', rows() === n1 + 1, `${n1} -> ${rows()}`);
+        const r1 = await refusedWith(t1);
+        check('proof/a proof made by ANOTHER sign-in does not serve this session', r1 === '401', r1);
+        const re = await loginUser(D.username, D.password, t1);       // re-prove FROM session 1
+        check('proof/re-proving under a bearer hands the same token back', re.token === t1);
+        check('proof/re-proving opens no second session', rows() === n1 + 1, `${rows()}`);
+        const r2 = await refusedWith(t2);
+        check('proof/the re-proof moved the proof off the other session', r2 === '401', r2);
+        const r3 = await refusedWith(t1);
+        const gone = sql(`SELECT deleted_at IS NOT NULL FROM users WHERE id=${uid};`);
+        check('proof/delete-account succeeds from the session that proved', r3 === 'accepted' && gone === 't', `${r3} deleted_at=${gone}`);
+    }
+
+    // --- Stage: per-session revocation (the `sid` claim, migration 055) ---
+    section('Stage: per-session revocation');
+    {
+        const E = await registerUser(`erin_${RUN}`, 'passwordErin1!');
+        const e1 = (await loginUser(E.username, E.password)).token;
+        const e2 = (await loginUser(E.username, E.password)).token;
+        const works = async (token) => { try { await apiFetch('GET', '/keys/wrap', undefined, token); return true; } catch (e) { return /→ 401/.test(e.message) ? false : e.message; } };
+        check('session/both sign-ins work before any sign-out', (await works(e1)) === true && (await works(e2)) === true);
+        await apiFetch('POST', '/auth/logout-session', {}, e1);
+        check('session/signing out ONE session refuses that token', (await works(e1)) === false);
+        check('session/its sibling keeps working', (await works(e2)) === true);
+        const revoked = sql(`SELECT COUNT(*) FROM token_sessions s JOIN users u ON u.id=s.user_id WHERE u.username='${E.username}' AND s.revoked_at IS NOT NULL;`);
+        check('session/exactly one session row is marked revoked', revoked === '1', revoked);
+        await apiFetch('POST', '/auth/logout', {}, e2);
+        check('session/sign-out-everywhere refuses the survivor too', (await works(e2)) === false);
     }
 
     // --- Stage: server-wide plaintext sweep ---

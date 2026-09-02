@@ -421,8 +421,23 @@ pub async fn login_step_1(
     }))
 }
 
+/// The claims of a still-valid bearer token on a request that does not run
+/// behind the auth middleware (login step 2). Signature and expiry only: the
+/// caller decides what a matching bearer is allowed to mean.
+fn bearer_claims(headers: &axum::http::HeaderMap, secret: &str) -> Option<(crate::auth::Claims, String)> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?
+        .trim();
+    let claims = crate::auth::validate_token(raw, secret).ok()?;
+    Some((claims, raw.to_string()))
+}
+
 pub async fn login_step_2(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<LoginStep2Request>,
 ) -> Result<Json<LoginStep2Response>, StatusCode> {
     // Bound the caller-supplied fields FIRST. Everything below — the lowercase
@@ -604,33 +619,61 @@ pub async fn login_step_2(
     // rewrite credentials or key custody require a recent one, which is what
     // stops a stolen bearer token from setting a new SRP verifier or clobbering
     // the wrapped identity seed.
-    // The proof is bound to THIS session: the token minted here carries the
-    // same session start, and only a token with it can spend the proof.
-    let session_start = chrono::Utc::now().timestamp();
-    state.record_password_proof(user_id, session_start);
+    //
+    // The proof is bound to ONE session (`sst`), and only a token carrying that
+    // session start can spend it. A caller that is ALREADY signed in re-proves
+    // the password for a key-custody write (change password, regenerate the
+    // recovery code, delete the account) from the session it will spend the
+    // proof in — so when a valid bearer for this same user accompanies the
+    // exchange, the proof binds to THAT session and the caller gets its own
+    // token back. Minting a fresh session here instead (what 0.8.136 did)
+    // bound the proof to a token the client threw away, so every in-app
+    // password change was refused with "confirm your password" — and it would
+    // now also leave an unheld, unrevokable session row behind.
+    let reproving = bearer_claims(&headers, &state.jwt_secret).filter(|(c, _)| c.sub == user_id);
+    let token = if let Some((claims, raw)) = reproving {
+        state.record_password_proof(user_id, claims.sst);
+        raw
+    } else {
+        let session_start = chrono::Utc::now().timestamp();
+        state.record_password_proof(user_id, session_start);
 
-    // 5. Create JWT token instead of session, stamped with the current
-    // token_version (M1) so a later logout/reset can revoke it.
-    let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &state.jwt_secret)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        // 5. Create JWT token instead of session, stamped with the current
+        // token_version (M1) so a later logout/reset can revoke it, and with a
+        // fresh session id so THIS sign-in can be revoked on its own.
+        let sid = Uuid::new_v4().to_string();
+        let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &sid, &state.jwt_secret)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)")
+            .bind(&sid)
+            .bind(user_id as i32)
+            .execute(&state.pool)
+            .await
+        {
+            // The token still works (no row = nothing to revoke); it just cannot be
+            // signed out on its own until a renewal records it.
+            tracing::warn!("login: could not record session for user {}: {:?}", user_id, e);
+        }
 
-    // 6. Also store session in DB for reference
-    let session_id = Uuid::new_v4().to_string();
-    let expires_at = Utc::now() + Duration::hours(24);
+        // 6. Also store session in DB for reference
+        let session_id = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + Duration::hours(24);
 
-    sqlx::query(
-        "INSERT INTO sessions (id, user_id, session_key, expires_at) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&session_id)
-    .bind(user_id)
-    .bind(session_key.as_ref())
-    .bind(expires_at.naive_utc())
-    .execute(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to create session: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        sqlx::query(
+            "INSERT INTO sessions (id, user_id, session_key, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&session_id)
+        .bind(user_id)
+        .bind(session_key.as_ref())
+        .bind(expires_at.naive_utc())
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create session: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        token
+    };
 
     // 7. Clean up THIS attempt row (row-scoped, so a concurrent device's live
     // attempt survives).
@@ -648,6 +691,34 @@ pub async fn login_step_2(
 /// POST /auth/logout — bump the caller's token_version, invalidating every
 /// outstanding JWT for this account (M1). The client should also discard its
 /// local token. Idempotent; a 24h bearer token that leaked can now be revoked.
+/// Sign out THIS session only: revoke the caller's session id and hang up its
+/// sockets. Other devices stay signed in — the per-session half of "sign out"
+/// that token_version (per user) could never express. A legacy token has no
+/// session id; the client drops it locally and that is all there is to do.
+pub async fn logout_session(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<crate::auth::Claims>,
+) -> impl IntoResponse {
+    if claims.sid.is_empty() {
+        return StatusCode::OK.into_response();
+    }
+    match sqlx::query("UPDATE token_sessions SET revoked_at = NOW() WHERE sid = $1 AND user_id = $2 AND revoked_at IS NULL")
+        .bind(&claims.sid)
+        .bind(claims.sub as i32)
+        .execute(&state.pool)
+        .await
+    {
+        Ok(_) => {
+            state.kill_sid_sessions(claims.sub, &claims.sid);
+            StatusCode::OK.into_response()
+        }
+        Err(e) => {
+            tracing::error!("logout-session: revocation failed for user {}: {:?}", claims.sub, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to sign out this session").into_response()
+        }
+    }
+}
+
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -685,6 +756,16 @@ pub async fn logout(
     // key mints a fresh full-account JWT immediately afterwards, and the first
     // request renews it into a new sliding session. Revoking the account's
     // tokens while leaving its devices able to mint more is not revocation.
+    if let Err(e) = sqlx::query(
+        "UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(claims.sub as i32)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!("logout: session revocation failed for user {}, rolling back: {:?}", claims.sub, e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Could not sign out everywhere. Nothing was changed — try again.").into_response();
+    }
     if let Err(e) = sqlx::query(
         "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
     )
@@ -1271,6 +1352,11 @@ pub async fn update_public_key(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(payload): Json<UpdatePublicKeyRequest>,
 ) -> impl IntoResponse {
+    // A bare bearer token must not be enough for this: it is a key-custody
+    // write like every other, and a stolen token is the threat model.
+    if let Err(r) = crate::recovery_handlers::require_password_proof(&state, claims.sub, claims.sst) {
+        return r;
+    }
     // Reject anything that isn't a well-formed identity key: a garbage value
     // permanently disables recovery (the decoder returns None -> uniform 401)
     // and breaks DM addressing.
@@ -1358,6 +1444,11 @@ pub async fn delete_account(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(payload): Json<DeleteAccountRequest>,
 ) -> impl IntoResponse {
+    // A bare bearer token must not be enough for this: it is as irreversible as a
+    // credential rewrite, and a stolen token is the threat model.
+    if let Err(r) = crate::recovery_handlers::require_password_proof(&state, claims.sub, claims.sst) {
+        return r;
+    }
     let row: Option<(String,)> = sqlx::query_as("SELECT username FROM users WHERE id = $1")
         .bind(claims.sub as i32)
         .fetch_optional(&state.pool)

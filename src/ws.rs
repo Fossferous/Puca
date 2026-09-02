@@ -100,17 +100,13 @@ pub async fn ws_handler(
         Ok(claims) => {
             // M1 revocation: reject a token whose `tv` no longer matches the
             // user's token_version (logout / password change / recovery reset).
-            let current_tv: Option<(i32,)> =
-                sqlx::query_as("SELECT token_version FROM users WHERE id = $1")
-                    .bind(claims.sub as i32)
-                    .fetch_optional(&state.pool)
-                    .await
-                    .unwrap_or(None);
-            match current_tv {
-                Some((tv,)) if tv == claims.tv => {}
+            // ...and a token whose session was revoked (same rule as the REST
+            // middleware): a socket must not outlive a device revocation.
+            match crate::auth::token_session_live(&state.pool, &claims).await {
+                Ok(true) => {}
                 _ => {
                     tracing::warn!(
-                        "WS upgrade refused: stale/invalid token_version for user {}",
+                        "WS upgrade refused: stale token_version or revoked session for user {}",
                         claims.sub
                     );
                     return (StatusCode::UNAUTHORIZED, "Token revoked").into_response();
@@ -228,7 +224,7 @@ async fn handle_socket(
     // connection; is_first tells us whether to announce the user online —
     // "first" meaning first VISIBLE connection; a delivery socket never is).
     let (conn_id, is_first_session, kill) =
-        state.register_session(user_id, username.clone(), tx, delivery, claimed_device);
+        state.register_session(user_id, username.clone(), tx, delivery, claimed_device, claims.sid.clone());
 
     tracing::info!(
         "User {} ({}) connected{}",
@@ -2324,6 +2320,17 @@ async fn handle_message(
 
             if verify_device_attestation(&sign_pub, device_nonce, user_id, &sig) {
                 state.attest_device(user_id, conn_id, device_id.clone());
+                // Bind the SESSION to the device it just proved, so revoking the
+                // device revokes this token too (token_sessions.device_id) — from
+                // a proof, never from the `?device=` claim.
+                if let Some(sid) = state.session_sid(user_id, conn_id) {
+                    let _ = sqlx::query("UPDATE token_sessions SET device_id = $1 WHERE sid = $2 AND user_id = $3")
+                        .bind(&device_id)
+                        .bind(&sid)
+                        .bind(user_id as i32)
+                        .execute(&state.pool)
+                        .await;
+                }
                 // A parked offer PINNED to this device could not match until
                 // the id was proven; sweep again now that it is.
                 let parked = state.deliver_parked_offers(user_id, conn_id);
@@ -3681,24 +3688,6 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
     }
 }
 
-/// Helper function to create a JWT token (for login endpoint). `token_version`
-/// is the user's current users.token_version — stamped into the `tv` claim so a
-/// later bump (logout / password change / recovery reset) invalidates this token.
-pub fn create_token(
-    user_id: UserId,
-    username: &str,
-    token_version: i32,
-    secret: &str,
-) -> Result<String, String> {
-    // A real sign-in starts a new session clock.
-    create_token_with_start(
-        user_id,
-        username,
-        token_version,
-        Utc::now().timestamp(),
-        secret,
-    )
-}
 
 /// Mint a token that inherits an EXISTING session start (`sst`). Used by the
 /// sliding-renewal path so extending a session never resets its absolute cap.
@@ -3707,6 +3696,7 @@ pub fn create_token_with_start(
     username: &str,
     token_version: i32,
     session_start: i64,
+    sid: &str,
     secret: &str,
 ) -> Result<String, String> {
     use jsonwebtoken::{encode, EncodingKey, Header};
@@ -3722,6 +3712,7 @@ pub fn create_token_with_start(
         exp: expiration,
         tv: token_version,
         sst: session_start,
+        sid: sid.to_string(),
     };
 
     encode(

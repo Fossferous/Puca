@@ -276,6 +276,10 @@ pub struct Session {
     /// notify drops the socket immediately and its ordinary disconnect cleanup
     /// runs (rooms reaped, UserLeft/UserOffline broadcast).
     pub kill: Arc<Notify>,
+    /// The JWT session id this socket authenticated with ("" for a legacy
+    /// token). DeviceAttest binds it to the proven device in token_sessions;
+    /// `kill_sid_sessions` hangs it up when that one session is signed out.
+    pub sid: String,
     /// Set once this connection has proved possession of a registered device's
     /// signing key (see the DeviceChallenge/DeviceAttest exchange in ws.rs).
     ///
@@ -1348,6 +1352,7 @@ impl AppState {
         tx: mpsc::Sender<ServerMessage>,
         delivery: bool,
         claimed_device_id: Option<String>,
+        sid: String,
     ) -> (u64, bool, Arc<Notify>) {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let kill = Arc::new(Notify::new());
@@ -1515,11 +1520,31 @@ impl AppState {
             tx,
             conn_id,
             kill: Arc::clone(&kill),
+            sid,
             device_id: None,
             delivery,
             claimed_device_id,
         });
         (conn_id, is_first, kill)
+    }
+
+    /// The non-empty session id `conn_id` authenticated with, if any.
+    pub fn session_sid(&self, user_id: UserId, conn_id: u64) -> Option<String> {
+        self.sessions.get(&user_id).and_then(|sessions| {
+            sessions.iter().find(|s| s.conn_id == conn_id).map(|s| s.sid.clone()).filter(|s| !s.is_empty())
+        })
+    }
+
+    /// Hang up every live socket of `user_id` that authenticated with `sid` —
+    /// the socket half of signing out ONE session. Returns how many.
+    pub fn kill_sid_sessions(&self, user_id: UserId, sid: &str) -> usize {
+        let Some(sessions) = self.sessions.get(&user_id) else { return 0 };
+        let mut killed = 0;
+        for s in sessions.iter().filter(|s| !sid.is_empty() && s.sid == sid) {
+            s.kill.notify_one();
+            killed += 1;
+        }
+        killed
     }
 
     /// Record that `conn_id` proved possession of `device_id`'s signing key.
@@ -2522,7 +2547,7 @@ mod crash_resistance_tests {
     async fn delivery_sessions_are_invisible_to_presence() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (_, first, _) = state.register_session(1, "u".into(), tx, true, None);
+        let (_, first, _) = state.register_session(1, "u".into(), tx, true, None, String::new());
         assert!(!first, "a delivery socket must never announce the user online");
         assert!(
             !state.is_user_visibly_online(1),
@@ -2533,14 +2558,14 @@ mod crash_resistance_tests {
         // POSITIVE CONTROL, and the suppression half: the first REAL client
         // arriving alongside the delivery socket must still announce.
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (_, first2, _) = state.register_session(1, "u".into(), tx2, false, None);
+        let (_, first2, _) = state.register_session(1, "u".into(), tx2, false, None, String::new());
         assert!(first2, "the delivery socket must not eat the real client's announce");
         assert!(state.is_user_visibly_online(1));
         assert_eq!(state.visible_session_count(1), 1);
 
         // A second real client is NOT first — unchanged semantics.
         let (tx3, _rx3) = mpsc::channel::<ServerMessage>(8);
-        let (_, first3, _) = state.register_session(1, "u".into(), tx3, false, None);
+        let (_, first3, _) = state.register_session(1, "u".into(), tx3, false, None, String::new());
         assert!(!first3);
     }
 
@@ -2548,7 +2573,7 @@ mod crash_resistance_tests {
     async fn a_claimed_device_id_is_killable_but_never_attested() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        state.register_session(2, "u".into(), tx, true, Some("dev-abc".into()));
+        state.register_session(2, "u".into(), tx, true, Some("dev-abc".into()), String::new());
         // "Sign out this device" reaches the delivery socket via the CLAIM —
         // it never attests (the signing key lives in the WebView).
         assert_eq!(state.kill_device_sessions(2, "dev-abc"), 1);
@@ -2588,7 +2613,7 @@ mod crash_resistance_tests {
         // Open far more connections than the cap for one user.
         for _ in 0..50 {
             let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-            state.register_session(7, "mallory".into(), tx, false, None);
+            state.register_session(7, "mallory".into(), tx, false, None, String::new());
         }
         let live = state.sessions.get(&7).map(|v| v.len()).unwrap_or(0);
         assert!(live <= 10, "sessions per user must be capped, got {live}");
@@ -2601,7 +2626,7 @@ mod crash_resistance_tests {
     async fn unclean_disconnect_reports_held_media_state() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (conn_id, _first, _) = state.register_session(1, "streamer".into(), tx, false, None);
+        let (conn_id, _first, _) = state.register_session(1, "streamer".into(), tx, false, None, String::new());
 
         let mut room = Room::new("voice:v1".into(), "voice:v1".into());
         room.add_member(1, conn_id);
@@ -2627,8 +2652,8 @@ mod crash_resistance_tests {
         let state = test_state();
         let (tx1, _rx1) = mpsc::channel::<ServerMessage>(8);
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (conn1, _, _) = state.register_session(2, "dual".into(), tx1, false, None);
-        let (conn2, _, _) = state.register_session(2, "dual".into(), tx2, false, None);
+        let (conn1, _, _) = state.register_session(2, "dual".into(), tx1, false, None, String::new());
+        let (conn2, _, _) = state.register_session(2, "dual".into(), tx2, false, None, String::new());
 
         let mut room = Room::new("voice:v2".into(), "voice:v2".into());
         room.add_member(2, conn1);
@@ -2657,8 +2682,8 @@ mod crash_resistance_tests {
         let state = test_state();
         let (tx1, _rx1) = mpsc::channel::<ServerMessage>(8);
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (conn1, _, _) = state.register_session(3, "roamer".into(), tx1, false, None);
-        let (_conn2, _, _) = state.register_session(3, "roamer".into(), tx2, false, None);
+        let (conn1, _, _) = state.register_session(3, "roamer".into(), tx1, false, None, String::new());
+        let (_conn2, _, _) = state.register_session(3, "roamer".into(), tx2, false, None, String::new());
 
         let mut room = Room::new("voice:v3".into(), "voice:v3".into());
         room.add_member(3, conn1);
@@ -2682,8 +2707,8 @@ mod crash_resistance_tests {
         let state = test_state();
         let (tx1, _rx1) = mpsc::channel::<ServerMessage>(8);
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (old_conn, _, _) = state.register_session(4, "resharer".into(), tx1, false, None);
-        let (new_conn, _, _) = state.register_session(4, "resharer".into(), tx2, false, None);
+        let (old_conn, _, _) = state.register_session(4, "resharer".into(), tx1, false, None, String::new());
+        let (new_conn, _, _) = state.register_session(4, "resharer".into(), tx2, false, None, String::new());
 
         let mut room = Room::new("voice:v4".into(), "voice:v4".into());
         room.add_member(4, old_conn);
@@ -2728,8 +2753,8 @@ mod crash_resistance_tests {
         let state = test_state();
         let (tx1, _rx1) = mpsc::channel::<ServerMessage>(8);
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (old_conn, _, _) = state.register_session(6, "blipper".into(), tx1, false, None);
-        let (new_conn, _, _) = state.register_session(6, "blipper".into(), tx2, false, None);
+        let (old_conn, _, _) = state.register_session(6, "blipper".into(), tx1, false, None, String::new());
+        let (new_conn, _, _) = state.register_session(6, "blipper".into(), tx2, false, None, String::new());
 
         let mut room = Room::new("voice:v6".into(), "voice:v6".into());
         room.add_member(6, old_conn);
@@ -2835,7 +2860,7 @@ mod crash_resistance_tests {
         // Register a session but NEVER drain its receiver (a client that stopped
         // reading its socket). Keep _rx alive so the channel isn't closed.
         let (tx, _rx) = mpsc::channel::<ServerMessage>(4);
-        state.register_session(9, "slow".into(), tx, false, None);
+        state.register_session(9, "slow".into(), tx, false, None, String::new());
         // Push far more than the channel capacity.
         let mut delivered = 0;
         for _ in 0..1000 {
@@ -2944,7 +2969,7 @@ mod crash_resistance_tests {
     async fn transfers_are_released_when_the_user_goes_fully_offline() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (conn, _, _) = state.register_session(21, "sender".into(), tx, false, None);
+        let (conn, _, _) = state.register_session(21, "sender".into(), tx, false, None, String::new());
         state
             .file_transfers
             .insert("xfer-a1b2c3d4".into(), transfer(21, 22, true));
@@ -2970,8 +2995,8 @@ mod crash_resistance_tests {
         let state = test_state();
         let (tx1, _rx1) = mpsc::channel::<ServerMessage>(8);
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (conn1, _, _) = state.register_session(23, "dual".into(), tx1, false, None);
-        let (_conn2, _, _) = state.register_session(23, "dual".into(), tx2, false, None);
+        let (conn1, _, _) = state.register_session(23, "dual".into(), tx1, false, None, String::new());
+        let (_conn2, _, _) = state.register_session(23, "dual".into(), tx2, false, None, String::new());
         state
             .file_transfers
             .insert("stillrunning1".into(), transfer(23, 24, true));
@@ -3108,7 +3133,7 @@ mod crash_resistance_tests {
     async fn parked_self_offer_reaches_the_second_device_exactly_once() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         park(&state, "parked1", 1, 1, sender_conn, None);
 
         // The offering socket itself must never collect the offer — that is
@@ -3119,7 +3144,7 @@ mod crash_resistance_tests {
         );
 
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (second_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None);
+        let (second_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None, String::new());
         let delivered = state.deliver_parked_offers(1, second_conn);
         assert_eq!(delivered.offers.len(), 1, "the second device collects the parked offer");
         assert!(
@@ -3151,7 +3176,7 @@ mod crash_resistance_tests {
         // with it the file bytes; nothing can honour an accept.
         park(&state, "orphan1", 1, 2, 999, None);
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (conn, _, _) = state.register_session(2, "them".into(), tx, false, None);
+        let (conn, _, _) = state.register_session(2, "them".into(), tx, false, None, String::new());
         let delivery = state.deliver_parked_offers(2, conn);
         assert!(
             delivery.offers.is_empty(),
@@ -3174,11 +3199,11 @@ mod crash_resistance_tests {
     async fn device_pinned_offer_waits_for_the_named_device_to_attest() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         park(&state, "pinned1", 1, 1, sender_conn, Some("dev-laptop"));
 
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (second_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None);
+        let (second_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None, String::new());
         // Connected but not yet attested: the pin cannot match.
         assert!(
             state.deliver_parked_offers(1, second_conn).offers.is_empty(),
@@ -3206,12 +3231,12 @@ mod crash_resistance_tests {
         // device id can say this is the same physical machine.
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (old_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (old_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         state.attest_device(1, old_conn, "dev-pc".into());
         park(&state, "selfdup1", 1, 1, old_conn, None);
 
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (new_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None);
+        let (new_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None, String::new());
         state.attest_device(1, new_conn, "dev-pc".into()); // SAME device, new socket
         assert!(
             state.deliver_parked_offers(1, new_conn).offers.is_empty(),
@@ -3219,7 +3244,7 @@ mod crash_resistance_tests {
         );
         // A genuinely different device still qualifies.
         let (tx3, _rx3) = mpsc::channel::<ServerMessage>(8);
-        let (phone_conn, _, _) = state.register_session(1, "me".into(), tx3, false, None);
+        let (phone_conn, _, _) = state.register_session(1, "me".into(), tx3, false, None, String::new());
         state.attest_device(1, phone_conn, "dev-phone".into());
         assert_eq!(
             state.deliver_parked_offers(1, phone_conn).offers.len(),
@@ -3232,10 +3257,10 @@ mod crash_resistance_tests {
     async fn parked_two_party_offer_reaches_the_target_on_connect() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         park(&state, "friend1", 1, 2, sender_conn, None);
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
-        let (their_conn, _, _) = state.register_session(2, "them".into(), tx2, false, None);
+        let (their_conn, _, _) = state.register_session(2, "them".into(), tx2, false, None, String::new());
         assert_eq!(
             state.deliver_parked_offers(2, their_conn).offers.len(),
             1,
@@ -3249,7 +3274,7 @@ mod crash_resistance_tests {
         // never reached them" — different facts, different next actions.
         let state = test_state();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
-        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (sender_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         park(&state, "expired1", 1, 2, sender_conn, None);
         // Age it past the offer TTL.
         state
@@ -3532,9 +3557,9 @@ mod device_session_tests {
     async fn an_idle_session_is_spared_only_while_both_sockets_are_registered() {
         let state = test_state();
         let (tx, _rx_ctl) = mpsc::channel::<ServerMessage>(8);
-        let (ctl_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (ctl_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         let (tx, _rx_host) = mpsc::channel::<ServerMessage>(8);
-        let (host_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (host_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
 
         // Everything is stamped NOW and the reaper is run 181s later, so the
         // same relative gaps hold with arithmetic that cannot underflow.
@@ -3601,9 +3626,9 @@ mod device_session_tests {
     async fn the_reprieve_cannot_spare_a_session_forever() {
         let state = test_state();
         let (tx, _rx_ctl) = mpsc::channel::<ServerMessage>(8);
-        let (ctl_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (ctl_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
         let (tx, _rx_host) = mpsc::channel::<ServerMessage>(8);
-        let (host_conn, _, _) = state.register_session(1, "me".into(), tx, false, None);
+        let (host_conn, _, _) = state.register_session(1, "me".into(), tx, false, None, String::new());
 
         // Shift the REAP MOMENT forward instead of rewinding the timestamps:
         // rewinding a real Instant by 24h panics on a machine booted more
@@ -3695,7 +3720,7 @@ mod device_session_tests {
     async fn device_of_conn_reports_only_after_attestation() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel(4);
-        let (conn_id, _, _) = state.register_session(1, "u".into(), tx, false, None);
+        let (conn_id, _, _) = state.register_session(1, "u".into(), tx, false, None, String::new());
         assert_eq!(
             state.device_of_conn(1, conn_id),
             None,
@@ -3718,11 +3743,11 @@ mod device_session_tests {
     async fn a_device_stays_resolvable_after_its_older_socket_unregisters() {
         let state = test_state();
         let (tx_old, _rx_old) = mpsc::channel(4);
-        let (old, _, _) = state.register_session(1, "u".into(), tx_old, false, None);
+        let (old, _, _) = state.register_session(1, "u".into(), tx_old, false, None, String::new());
         state.attest_device(1, old, "devA".into());
 
         let (tx_new, _rx_new) = mpsc::channel(4);
-        let (new, _, _) = state.register_session(1, "u".into(), tx_new, false, None);
+        let (new, _, _) = state.register_session(1, "u".into(), tx_new, false, None, String::new());
         state.attest_device(1, new, "devA".into());
 
         // The old socket is what the disconnect path is about to unregister;
@@ -3771,6 +3796,7 @@ mod session_cap_tests {
             tx,
             delivery,
             claim.map(|s| s.to_string()),
+            String::new(),
         );
         (conn_id, rx)
     }
@@ -3974,7 +4000,7 @@ mod session_cap_tests {
         // of user 1's sockets happened to share that number.
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (first, _, _) = state.register_session(1, "one".into(), tx, false, None);
+        let (first, _, _) = state.register_session(1, "one".into(), tx, false, None, String::new());
         // A session belonging ENTIRELY to user 2, recording user 1's conn id
         // in the slot that is not user 1's.
         let mut s = device_session(555_555, first);
@@ -4033,7 +4059,7 @@ mod session_cap_tests {
                 for _ in 0..40 {
                     let (tx, rx) = mpsc::channel::<ServerMessage>(4);
                     let (conn, _, _) =
-                        st.register_session(u as UserId, "u".into(), tx, false, None);
+                        st.register_session(u as UserId, "u".into(), tx, false, None, String::new());
                     held.push((conn, rx));
                     // Interleave the reaper's own access pattern.
                     st.device_sessions.retain(|_, s| {
@@ -4240,7 +4266,7 @@ mod presence_log_tests {
     async fn an_empty_voice_rooms_log_is_kept_and_restored() {
         let state = test_state();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (conn, _, _) = state.register_session(1, "u".into(), tx, false, None);
+        let (conn, _, _) = state.register_session(1, "u".into(), tx, false, None, String::new());
         state.join_room("voice_42", 1, conn);
         state.join_room("voice_42", 2, 999); // a second user, one socket
         state.leave_room("voice_42", 2, 999);

@@ -396,6 +396,15 @@ pub async fn revoke_device(
         return Err((StatusCode::NOT_FOUND, "device not found".to_string()));
     }
 
+    // The sessions this device PROVED (DeviceAttest / the device-token mint)
+    // die with it: their JWTs are refused by the middleware and the WS upgrade
+    // from here on, not just their currently open sockets.
+    sqlx::query("UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL")
+        .bind(user_id)
+        .bind(&device_id)
+        .execute(&state.pool)
+        .await
+        .map_err(db_error)?;
     sqlx::query(
         "UPDATE devices SET revoked_at = NOW() \
          WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",

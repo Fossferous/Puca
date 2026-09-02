@@ -215,8 +215,20 @@ pub async fn device_token(
         return Err(bad("that device could not be verified"));
     }
 
-    let token = mint_device_token(user_id, &username, token_version, &state.jwt_secret)
+    // The session is bound to the device at mint: this route just verified the
+    // device's signature, so revoking the device revokes this token.
+    let sid = uuid::Uuid::new_v4().to_string();
+    let token = mint_device_token(user_id, &username, token_version, &sid, &state.jwt_secret)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id) VALUES ($1, $2, $3)")
+        .bind(&sid)
+        .bind(user_id as i32)
+        .bind(&payload.device_id)
+        .execute(&state.pool)
+        .await
+    {
+        tracing::warn!("device token: could not record session for user {}: {:?}", user_id, e);
+    }
 
     Ok(Json(TokenResponse { token, expires_in: DEVICE_TOKEN_TTL_HOURS * 3600 }))
 }
@@ -231,6 +243,7 @@ pub fn mint_device_token(
     user_id: UserId,
     username: &str,
     token_version: i32,
+    sid: &str,
     secret: &str,
 ) -> Result<String, String> {
     use jsonwebtoken::{encode, EncodingKey, Header};
@@ -241,6 +254,7 @@ pub fn mint_device_token(
         exp: now + DEVICE_TOKEN_TTL_HOURS * 3600,
         tv: token_version,
         sst: now,
+        sid: sid.to_string(),
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
         .map_err(|e| format!("token creation failed: {e}"))
@@ -288,7 +302,7 @@ mod tests {
         // machine — it would come back and immediately be unable to renew again.
         const SECRET: &str = "test-secret";
         let before = chrono::Utc::now().timestamp();
-        let token = mint_device_token(7, "alice", 3, SECRET).expect("mint");
+        let token = mint_device_token(7, "alice", 3, "sid-test", SECRET).expect("mint");
         let claims = crate::auth::validate_token(&token, SECRET).expect("valid");
 
         assert_eq!(claims.sub, 7);
