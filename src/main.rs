@@ -366,10 +366,6 @@ async fn main() -> anyhow::Result<()> {
         // Server endpoints
         .route("/servers", post(server_handlers::create_server))
         .route("/servers", get(server_handlers::list_servers))
-        .route(
-            "/servers/default",
-            get(server_handlers::get_or_create_default_server),
-        )
         // Per-user server-rail drag-and-drop order (static segment beats :server_id)
         .route("/servers/reorder", patch(server_handlers::reorder_servers))
         .route(

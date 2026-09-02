@@ -207,3 +207,54 @@ async fn test_api_integration_template() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+/// L8-AUTHZ-6. The route table must not carry `/servers/default`.
+///
+/// `main.rs` is a BINARY, so its router cannot be imported and asserted against
+/// directly. This reads the routing source instead — from a different file than
+/// the one the assertion lives in, so it is not the tautology a same-file
+/// `include_str!` grep would be — and pins the absence of the route string.
+///
+/// What was removed and why: `GET /servers/default` auto-joined any valid JWT
+/// to a hardcoded well-known server with no invite and NO BAN CHECK, while both
+/// legitimate join paths check bans; and its create branch produced a server
+/// with no roles at all, so every non-owner member of it resolved to no
+/// VIEW_CHANNEL. No shipped client calls it.
+#[test]
+fn there_is_no_default_server_route() {
+    let main_rs = include_str!("../src/main.rs");
+    assert!(
+        !main_rs.contains("/servers/default"),
+        "the ban-bypassing default-server auto-join route is back in main.rs"
+    );
+    assert!(
+        !main_rs.contains("get_or_create_default_server"),
+        "the default-server handler is wired into the router again"
+    );
+
+    // Positive control for the reading itself: the file really is main.rs and
+    // really does contain the sibling routes, so a bad path (or an empty read)
+    // cannot make the two assertions above pass vacuously.
+    assert!(
+        main_rs.contains("/servers/reorder"),
+        "include_str! did not read the real route table"
+    );
+    assert!(main_rs.contains("server_handlers::list_servers"));
+}
+
+/// And the handler itself is gone, not merely unrouted — an unrouted handler is
+/// a re-wiring away from being live again.
+#[test]
+fn the_default_server_handler_is_deleted() {
+    let handlers = include_str!("../src/server_handlers.rs");
+    assert!(
+        !handlers.contains("pub async fn get_or_create_default_server"),
+        "the default-server handler still exists in server_handlers.rs"
+    );
+    assert!(
+        !handlers.contains("00000000-0000-0000-0000-000000000001"),
+        "the hardcoded default server id is still in server_handlers.rs"
+    );
+    // Positive control: the file is the real one.
+    assert!(handlers.contains("pub async fn create_server"));
+}
