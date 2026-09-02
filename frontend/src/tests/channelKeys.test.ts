@@ -124,6 +124,29 @@ describe('channelKeys manager', () => {
         expect(fake.currentEpoch).toBe(1);
     });
 
+    it('M-g: a minted epoch is published as a v3 wrap that only opens in its own channel', async () => {
+        const res = await ensureChannelKey(42);
+        expect(res!.epoch).toBe(1);
+        expect(fake.published).toHaveLength(1);
+        // Every case above this one exercises hand-built v2 rows; this is the
+        // one place that asserts what mintEpoch actually PRODUCES.
+        expect(fake.published[0].wrapped_key.startsWith('v3.')).toBe(true);
+
+        // loadKeys must hand unwrap the same {channelId, epoch, recipient}
+        // context the wrap was sealed under, or the row is unreadable.
+        clearChannelKeyCache();
+        const reloaded = await getChannelKeyForEpoch(42, 1);
+        expect(reloaded).not.toBeNull();
+        expect(Buffer.from(reloaded!)).toEqual(Buffer.from(res!.key));
+
+        // The identical row served for ANOTHER channel must not open: the
+        // AAD names the channel, so a server that copies a wrap across
+        // channels gets a refusal, not a shared key.
+        clearChannelKeyCache();
+        const other = await getChannelKeyForEpoch(43, 1);
+        expect(other).toBeNull();
+    });
+
     it('returns the cached key without re-minting when generation is unchanged', async () => {
         const first = await ensureChannelKey(42);
         clearChannelKeyCache();
