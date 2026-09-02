@@ -8,39 +8,9 @@ import { MediaManager } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
+import { AnnouncedVideoGate } from './announcedVideo';
 
-/**
- * Which kind of video a mesh peer just sent. PURE, so the matrix is testable
- * without a peer connection — the bug this closes only appears with a
- * listen-only sharer toggling their camera mid-share, which no jsdom rig can
- * produce end-to-end.
- *
- * When the sharer ANNOUNCED a stream id (new client + new server), identity
- * decides outright: the announced stream is the share, anything else is a
- * camera. Without an id (old peer or old server) the pre-id elimination
- * heuristic is preserved bit-for-bit: the voice stream is never a share; a
- * peer with no pinned mic and no announced share is a camera; everything
- * else is a share — which keeps its one known misfile (that listen-only
- * sharer's camera) rather than invent new behaviour for old peers.
- */
-export function classifyRemoteVideo(i: {
-    /** id of the MediaStream the video track arrived in */
-    streamId: string;
-    /** the arriving stream IS the peer's pinned voice stream */
-    isVoiceStream: boolean;
-    /** the peer's mic stream has been pinned (they are not listen-only) */
-    micPinned: boolean;
-    /** a ScreenShareStarted for this peer is in effect */
-    sharing: boolean;
-    /** the stream id that announcement carried, if any */
-    announcedShareId: string | null;
-}): 'camera' | 'screen' {
-    if (i.sharing && i.announcedShareId !== null) {
-        return i.streamId === i.announcedShareId ? 'screen' : 'camera';
-    }
-    if (i.isVoiceStream || (!i.micPinned && !i.sharing)) return 'camera';
-    return 'screen';
-}
+export { classifyRemoteVideo } from './announcedVideo';
 import {
     isMediaE2eeSupported,
     importMediaKey,
@@ -133,11 +103,11 @@ export class WebRTCManager {
     /** Users the WS says are screen-sharing right now. Authoritative for
      *  classifying an incoming video track when the peer sends no audio (a
      *  listen-only sender never pins a "voice stream"). */
-    /** Peers currently screen-sharing per the WS announcements, mapped to the
-     *  MediaStream id they ANNOUNCED — or null when the announce carried none
-     *  (an old peer or an old server), which drops classifyRemoteVideo back
-     *  to the elimination heuristic. */
-    private sharingPeers = new Map<UserId, string | null>();
+    /** Which peers the server has announced as sharing / on camera, plus any
+     *  video that arrived ahead of its announcement. Mesh receivers render
+     *  only announced video (B7): the VIDEO/STREAM bits are enforced on the
+     *  announcement, so a track with none behind it is held, never shown. */
+    private videoGate = new AnnouncedVideoGate<{ stream: MediaStream; receiver: RTCRtpReceiver }>();
 
     /** Our own user id — set on joining voice. Used for deterministic
      *  perfect-negotiation politeness (higher id = polite = yields on glare). */
@@ -507,8 +477,65 @@ export class WebRTCManager {
      *  announced share stream id, when the sharer's client and the server are
      *  new enough to carry it. */
     setPeerSharing(userId: UserId, sharing: boolean, streamId: string | null = null): void {
-        if (sharing) this.sharingPeers.set(userId, streamId);
-        else this.sharingPeers.delete(userId);
+        if (sharing) this.videoGate.announceShare(userId, streamId);
+        else this.videoGate.stopShare(userId);
+        this.releaseHeldVideo(userId);
+    }
+
+    /** Driven by the CameraStarted/Stopped WS events — a peer's camera video
+     *  is rendered only while one is in effect (B7). */
+    setPeerCamera(userId: UserId, on: boolean): void {
+        if (on) this.videoGate.announceCamera(userId);
+        else this.videoGate.stopCamera(userId);
+        this.releaseHeldVideo(userId);
+    }
+
+    private deliverVideo(userId: UserId, kind: 'camera' | 'screen', stream: MediaStream, receiver: RTCRtpReceiver): void {
+        if (kind === 'camera') {
+            this.onCameraStream?.(userId, stream);
+            return;
+        }
+        // Remote control drops this receiver's jitter buffer while the share
+        // is being driven; ontrack is the mesh path's only moment with the
+        // receiver in hand. With an announced id, only the REAL share's
+        // receiver can land here — the listen-only-sharer's camera no longer
+        // overwrites it.
+        registerScreenReceiver(userId, receiver);
+        this.onScreenShareStream?.(userId, stream);
+    }
+
+    /** An announcement changed for this peer: hand over any video that was
+     *  held for it (see AnnouncedVideoGate). */
+    private releaseHeldVideo(userId: UserId): void {
+        const voiceId = this.peers.get(userId)?.remoteStream?.id ?? null;
+        const released = this.videoGate.release(userId, (sid) => ({
+            isVoiceStream: voiceId !== null && sid === voiceId,
+            micPinned: voiceId !== null,
+        }));
+        for (const r of released) {
+            console.log(`[WebRTC] releasing held ${r.kind} video from ${userId} — now announced`);
+            this.deliverVideo(userId, r.kind, r.payload.stream, r.payload.receiver);
+        }
+    }
+
+    /** Acquire the camera WITHOUT publishing it: the track reaches peers only
+     *  after the server accepts the CameraStart announcement (B7). Returns the
+     *  live camera track — the existing one if the camera is already on. */
+    async acquireCamera(): Promise<MediaStreamTrack | null> {
+        const existing = this.media.getLocalStreamSync()?.getVideoTracks().find(t => t.readyState === 'live');
+        if (existing) return existing;
+        return this.media.toggleVideo(true);
+    }
+
+    /** Publish an acquired camera track to every peer that does not carry it yet. */
+    publishCameraTrack(track: MediaStreamTrack): void {
+        const localStream = this.media.getLocalStreamSync();
+        if (!localStream) return;
+        for (const [userId, peer] of this.peers) {
+            if (peer.connection.getSenders().some(s => s.track === track)) continue;
+            // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
+            this.wireSender(userId, peer.connection.addTrack(track, localStream));
+        }
     }
 
     async getLocalStream(audio = true, video = false): Promise<MediaStream> {
@@ -1058,24 +1085,20 @@ export class WebRTCManager {
             const isVoiceStream = peer.remoteStream !== null && stream.id === peer.remoteStream.id;
 
             if (event.track.kind === 'video') {
-                const share = this.sharingPeers.get(userId);
-                const kind = classifyRemoteVideo({
-                    streamId: stream.id,
-                    isVoiceStream,
-                    micPinned: peer.remoteStream !== null,
-                    sharing: share !== undefined,
-                    announcedShareId: share ?? null,
-                });
-                if (kind === 'camera') {
-                    this.onCameraStream?.(userId, stream);
+                // Render only what the server has ANNOUNCED for this peer
+                // (B7): the VIDEO/STREAM bits are enforced on the
+                // announcement, so a track with no announcement behind it is
+                // held — and released the moment the announcement lands (the
+                // reload/reconnect race where the track beats the frame).
+                const kind = this.videoGate.offer(
+                    userId,
+                    { streamId: stream.id, isVoiceStream, micPinned: peer.remoteStream !== null },
+                    { stream, receiver: event.receiver },
+                );
+                if (kind === 'held') {
+                    console.log(`[WebRTC] holding video from ${userId} until the server announces it`);
                 } else {
-                    // Remote control drops this receiver's jitter buffer while
-                    // the share is being driven; ontrack is the mesh path's
-                    // only moment with the receiver in hand. With an announced
-                    // id, only the REAL share's receiver can land here — the
-                    // listen-only-sharer's camera no longer overwrites it.
-                    registerScreenReceiver(userId, event.receiver);
-                    this.onScreenShareStream?.(userId, stream);
+                    this.deliverVideo(userId, kind, stream, event.receiver);
                 }
             } else if (event.track.kind === 'audio') {
                 // An ANNOUNCED share stream is never the voice stream,
@@ -1085,7 +1108,7 @@ export class WebRTCManager {
                 // stream — and once the video branch above started filing
                 // their share correctly, the same audio played through BOTH
                 // the voice element and the share tile's graph, doubled.
-                const announcedShare = this.sharingPeers.get(userId);
+                const announcedShare = this.videoGate.shareId(userId);
                 if (announcedShare != null && stream.id === announcedShare) {
                     this.onScreenShareStream?.(userId, stream);
                 } else if (peer.remoteStream === null || isVoiceStream) {
@@ -1498,6 +1521,8 @@ export class WebRTCManager {
             peer.connection.close();
             this.peers.delete(userId);
         }
+        // Held video rode this pc; the announcements are server state and stay.
+        this.videoGate.forgetHeld(userId);
         // The control lanes die with the pc; forget them so a rebuilt peer
         // starts from "no capability" rather than inheriting a hello that
         // belonged to a connection that no longer exists.
@@ -1517,6 +1542,7 @@ export class WebRTCManager {
 
     closeAll() {
         this.inVoice = false;
+        this.videoGate.reset();
         this.voiceEpoch++;
         this.peers.forEach((peer) => peer.connection.close());
         this.peers.clear();

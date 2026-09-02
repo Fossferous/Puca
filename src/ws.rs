@@ -1418,6 +1418,12 @@ async fn can_mutate_room(state: &Arc<AppState>, room_id: &str, user_id: UserId) 
     can_mutate_room_with(state, room_id, user_id, None).await
 }
 
+/// Refusals the client shows verbatim when the server declines a media
+/// announcement (the stock client announces BEFORE it publishes, so these are
+/// what the user sees instead of a silently invisible share).
+pub const SHARE_DENIED: &str = "You don't have permission to share your screen in this channel";
+pub const CAMERA_DENIED: &str = "You don't have permission to turn on your camera in this channel";
+
 /// As [`can_mutate_room`], plus an optional EXTRA permission bit the caller must
 /// hold on the voice room's channel — used to gate the specific media a member
 /// is starting (STREAM for a screen share, VIDEO for a camera), which are
@@ -2179,8 +2185,14 @@ async fn handle_message(
             // screen-share entry point; StartStream below is voice PRESENCE (the
             // roster claim a plain voice join makes), so it must NOT be gated on
             // STREAM or every member would vanish from the voice roster.
-            if !can_mutate_room_with(state, &room_id, user_id, Some(Permissions::STREAM)).await {
+            // Two answers, because the stock client now waits for its own
+            // ScreenShareStarted before publishing any track: a member without
+            // the bit must get a message they can show, not the membership one.
+            if !can_mutate_room(state, &room_id, user_id).await {
                 return Err("Not in this room".to_string());
+            }
+            if !can_mutate_room_with(state, &room_id, user_id, Some(Permissions::STREAM)).await {
+                return Err(SHARE_DENIED.to_string());
             }
             // Client-chosen and relayed verbatim to every member, so it is
             // bounded like every other relayed string. It is only ever
@@ -2246,8 +2258,11 @@ async fn handle_message(
             // M9: only a current member of the room may mutate camera state,
             // plus VIDEO ("Share video in voice channels") — an editable role
             // bit that nothing checked until now.
-            if !can_mutate_room_with(state, &room_id, user_id, Some(Permissions::VIDEO)).await {
+            if !can_mutate_room(state, &room_id, user_id).await {
                 return Err("Not in this room".to_string());
+            }
+            if !can_mutate_room_with(state, &room_id, user_id, Some(Permissions::VIDEO)).await {
+                return Err(CAMERA_DENIED.to_string());
             }
             if let Some(mut room) = state.rooms.get_mut(&room_id) {
                 room.set_media(crate::state::MediaKind::Camera, user_id, conn_id, true);

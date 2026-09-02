@@ -13,6 +13,9 @@ export interface ServerMessage {
 
 export type MessageHandler = (message: ServerMessage) => void;
 
+/** Outcome of an announce-then-publish request (see awaitAnnouncement). */
+export type AnnounceResult = { ok: true } | { ok: false; message: string };
+
 class WebSocketClient {
     private ws: WebSocket | null = null;
     private token: string | null = null;
@@ -467,7 +470,7 @@ class WebSocketClient {
         // instead of by elimination (see rtc/manager.ts classifyRemoteVideo).
         // Optional: an old server ignores the extra field, and peers then
         // keep the old heuristic.
-        this.send({ type: 'ScreenShareStart', payload: { room_id: roomId, stream_id: streamId ?? null } });
+        return this.send({ type: 'ScreenShareStart', payload: { room_id: roomId, stream_id: streamId ?? null } });
     }
 
     stopScreenShare(roomId: string) {
@@ -475,7 +478,59 @@ class WebSocketClient {
     }
 
     startCamera(roomId: string) {
-        this.send({ type: 'CameraStart', payload: { room_id: roomId } });
+        return this.send({ type: 'CameraStart', payload: { room_id: roomId } });
+    }
+
+    /**
+     * Announce-then-publish (B7). The server enforces the VIDEO / STREAM role
+     * bits on the ANNOUNCEMENT and broadcasts an accepted one to every member,
+     * sender included — that echo is the ack, and only then does the caller
+     * put a track on the wire. An Error frame while we wait is the refusal
+     * (the server's own wording, shown to the user). Silence counts as a
+     * refusal too: publishing on a guess is exactly what this replaces.
+     */
+    private awaitAnnouncement(
+        type: 'ScreenShareStarted' | 'CameraStarted',
+        roomId: string,
+        me: number,
+        fire: () => boolean,
+        timeoutMs = 8000,
+    ): Promise<AnnounceResult> {
+        return new Promise((resolve) => {
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            const finish = (r: AnnounceResult) => {
+                if (timer !== null) clearTimeout(timer);
+                this.off(type, onAck);
+                this.off('Error', onErr);
+                resolve(r);
+            };
+            const onAck = (msg: ServerMessage) => {
+                const p = msg.payload as { room_id?: string; streamer?: { id: number }; user?: { id: number } } | undefined;
+                const who = p?.streamer?.id ?? p?.user?.id;
+                if (p?.room_id === roomId && who === me) finish({ ok: true });
+            };
+            const onErr = (msg: ServerMessage) => {
+                const text = (msg.payload as { message?: string } | undefined)?.message ?? 'The server refused that.';
+                finish({ ok: false, message: text });
+            };
+            this.on(type, onAck);
+            this.on('Error', onErr);
+            if (!fire()) {
+                finish({ ok: false, message: 'Not connected to the server — try again in a moment.' });
+                return;
+            }
+            timer = setTimeout(() => finish({ ok: false, message: 'No answer from the server — try again.' }), timeoutMs);
+        });
+    }
+
+    /** Announce a screen share and resolve once the server has accepted it. */
+    startScreenShareAcked(roomId: string, streamId: string | undefined, me: number): Promise<AnnounceResult> {
+        return this.awaitAnnouncement('ScreenShareStarted', roomId, me, () => this.startScreenShare(roomId, streamId));
+    }
+
+    /** Announce the camera and resolve once the server has accepted it. */
+    startCameraAcked(roomId: string, me: number): Promise<AnnounceResult> {
+        return this.awaitAnnouncement('CameraStarted', roomId, me, () => this.startCamera(roomId));
     }
 
     stopCamera(roomId: string) {

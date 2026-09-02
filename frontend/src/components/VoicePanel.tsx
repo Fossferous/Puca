@@ -1135,8 +1135,24 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             announceLeave(payload.user_id);
         };
 
+        // Mesh receivers render only ANNOUNCED video (B7): keep the manager's
+        // camera announcements current from this always-on handler, so the
+        // join-time replay counts even before the in-call handlers mount.
+        const handleCameraStartedAlways = (msg: ServerMessage) => {
+            const payload = msg.payload as { room_id: string; user: { id: number } };
+            if (payload.room_id !== roomId) return;
+            webrtcManager.setPeerCamera(payload.user.id, true);
+        };
+        const handleCameraStoppedAlways = (msg: ServerMessage) => {
+            const payload = msg.payload as { room_id: string; user_id: number };
+            if (payload.room_id !== roomId) return;
+            webrtcManager.setPeerCamera(payload.user_id, false);
+        };
+
         wsClient.on('StreamStarted', handleStreamStarted);
         wsClient.on('StreamStopped', handleStreamStopped);
+        wsClient.on('CameraStarted', handleCameraStartedAlways);
+        wsClient.on('CameraStopped', handleCameraStoppedAlways);
         wsClient.on('ChatMessage', handleChatMessage);
         wsClient.on('UserJoined', handleUserJoined);
         wsClient.on('UserLeft', handleUserLeft);
@@ -1147,6 +1163,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         return () => {
             wsClient.off('StreamStarted', handleStreamStarted);
             wsClient.off('StreamStopped', handleStreamStopped);
+            wsClient.off('CameraStarted', handleCameraStartedAlways);
+            wsClient.off('CameraStopped', handleCameraStoppedAlways);
             wsClient.off('ChatMessage', handleChatMessage);
             wsClient.off('UserJoined', handleUserJoined);
             wsClient.off('UserLeft', handleUserLeft);
@@ -2604,7 +2622,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      * icon (and the video) until the user left — a ghost camera.
      */
     const setCameraEnabled = useCallback(async (on: boolean) => {
-        await webrtcManager.toggleVideo(on);
+        // ON acquires only: the track reaches peers after the server accepts
+        // the announcement (B7 — announce first, publish on the echo — so a
+        // camera the server refuses never puts a frame on the wire, and peers
+        // now render only announced video anyway). OFF is unchanged.
+        const acquired = on ? await webrtcManager.acquireCamera() : null;
+        if (!on) await webrtcManager.toggleVideo(false);
         // The camera-permission prompt can hold the await open indefinitely.
         // If we left voice (or switched channels) meanwhile, bail BEFORE the
         // SFU block: getLocalStream would RE-ACQUIRE a hot microphone into a
@@ -2613,6 +2636,24 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (!isInVoiceRef.current) {
             if (on) await webrtcManager.toggleVideo(false);
             return;
+        }
+        if (on) {
+            if (!acquired) {
+                setError('Camera unavailable — check that no other app is using it and that Puca has permission.');
+                return;
+            }
+            const ack = await wsClient.startCameraAcked(roomId, currentUserId);
+            if (!ack.ok) {
+                console.warn('[VoicePanel] camera refused by the server:', ack.message);
+                setError(ack.message);
+                await webrtcManager.toggleVideo(false);
+                return;
+            }
+            if (!isInVoiceRef.current) {
+                await webrtcManager.toggleVideo(false);
+                return;
+            }
+            webrtcManager.publishCameraTrack(acquired);
         }
         if (sfuMode) {
             if (on) {
@@ -2641,7 +2682,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             if (stream && stream.getVideoTracks().some(t => t.readyState === 'live')) {
                 globalCameraStreams.set(currentUserId, stream);
             }
-            wsClient.startCamera(roomId);
+            // Announced (and acknowledged) above, before the track was published.
         } else {
             globalCameraUsers.delete(currentUserId);
             globalCameraStreams.delete(currentUserId);
@@ -3325,6 +3366,24 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         setError('Audio capture failed — streaming video only.');
                     }
 
+                    // Announce FIRST, publish on the server's echo (B7): the
+                    // STREAM bit is enforced on the announcement, and peers
+                    // render only announced video — publishing first would
+                    // put the tracks on the wire for a share the server is
+                    // about to refuse.
+                    if (!isInVoiceRef.current) {
+                        webrtcManager.stopScreenShare();
+                        return;
+                    }
+                    const announcedStream = webrtcManager.getScreenShareStreamForPreview();
+                    const ack = await wsClient.startScreenShareAcked(roomId, announcedStream?.id, currentUserId);
+                    if (!ack.ok) {
+                        console.warn('[VoicePanel] screen share refused by the server:', ack.message);
+                        setError(ack.message);
+                        webrtcManager.stopScreenShare();
+                        return;
+                    }
+
                     if (sfuMode) {
                         // SFU path: publish the captured stream (video + any game/system
                         // audio) to LiveKit — capped bitrate, refuses past the share cap.
@@ -3334,6 +3393,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         } catch (shareErr) {
                             console.warn('[VoicePanel] SFU screen share refused:', shareErr);
                             setError((shareErr as Error).message || 'Screen share failed');
+                            wsClient.stopScreenShare(roomId); // retract the announcement
                             webrtcManager.stopScreenShare();
                             return;
                         }
@@ -3350,7 +3410,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         return;
                     }
                     const stream = webrtcManager.getScreenShareStreamForPreview();
-                    wsClient.startScreenShare(roomId, stream?.id);
+                    // Announced (and acknowledged) above, before any track was published.
                     setIsScreenSharing(true); // the effect below keeps WebView2's redundant "is sharing" bar hidden
                     setCurrentStreamingUser(currentUserId);
                     if (selfPreviewRef.current && stream) selfPreviewRef.current.srcObject = stream;
