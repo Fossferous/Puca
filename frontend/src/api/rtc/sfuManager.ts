@@ -483,6 +483,25 @@ export class SfuManager {
         return false;
     }
 
+    /**
+     * Every user with a live participant in the LiveKit room right now — the
+     * people whose media can be reaching this client regardless of what the
+     * WS roster says. The clip buffer's declared-participants record unions
+     * this with the roster on every observation, so a peer whose LiveKit
+     * session outlives their roster row (the `hasParticipant` case above)
+     * keeps an OPEN presence span for as long as they are actually audible.
+     * Empty outside an SFU room.
+     */
+    participantUserIds(): number[] {
+        if (!this.room) return [];
+        const out = new Set<number>();
+        for (const p of this.room.remoteParticipants.values()) {
+            const uid = userIdFromIdentity(p.identity);
+            if (uid !== null) out.add(uid);
+        }
+        return [...out];
+    }
+
     /** Whether the user still has a live CAMERA publication in the LiveKit
      *  room. Used to ignore a CameraStopped that was really just the sender's
      *  WS blipping (server releases media claims on disconnect) — tearing the
