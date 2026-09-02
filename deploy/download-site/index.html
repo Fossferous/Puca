@@ -86,9 +86,11 @@
       <div class="downloads">
         <!-- These filenames must match INSTALLER_NAME and APK_PREFIX in
              deploy/ops/hosts.conf: they are what dual-ship.sh's `installer`
-             and `apk` subcommands upload. The APK link is checked at ship
-             time and refuses to publish on a mismatch; the installer link
-             is not, so keep it in step by hand. -->
+             and `apk` subcommands upload. BOTH are checked at ship time now
+             and refuse to publish on a mismatch, and both subcommands also
+             require the .meta version below to name the release being
+             shipped — the installer href carries no version of its own, so
+             that label is the only thing a human reads to tell them apart. -->
         <a class="btn" href="/Puca-Setup.exe" download>Download for Windows</a>
         <a class="btn secondary" href="/mobile/Puca-0.8.136.apk" download>Download for Android (.apk)</a>
       </div>
@@ -109,7 +111,8 @@
         <!-- These filenames must match INSTALLER_NAME_LITE and APK_PREFIX_LITE
              in deploy/ops/hosts.conf: what dual-ship.sh's `installer-lite`
              and `apk-lite` subcommands upload. Same refuse-until-linked rule
-             as the full APK applies to this one too. -->
+             as the full pair applies to both of these, and the .meta version
+             below must name the release being shipped. -->
         <a class="btn" href="/Puca-Lite-Setup.exe" download>Download for Windows</a>
         <a class="btn secondary" href="/mobile/Puca-Lite-0.8.136.apk" download>Download for Android (.apk)</a>
       </div>

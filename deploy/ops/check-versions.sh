@@ -61,13 +61,40 @@ if [ -z "$EXPECTED" ]; then
 fi
 
 ssh_to() { ssh "${SSH_OPTS[@]}" "${1#*:}" "${@:2}"; }
+# TLS on the loopback self-checks: `-k` unless hosts.conf pins a CA.
+#
+# Every self-check below is `curl --resolve <host>:443:127.0.0.1` run over SSH
+# ON the target box, against that box's own Caddy. `-k` is load-bearing rather
+# than lazy: a deployment fronted by Cloudflare serves an Origin CA certificate
+# on the origin, and that CA is deliberately not in any system trust store — so
+# dropping the flag outright would fail every check on every host.
+#
+# What that means for a reader, spelled out because nothing here used to say it:
+# the trust boundary on these checks is the SSH SESSION, not TLS. The connection
+# never leaves the box's loopback interface, and the property the checks
+# actually establish is a sha256 of the served bytes against the local artifact,
+# which TLS was not providing anyway. Do not copy `-k` into a check that runs
+# over a network — the CDN verification in verify_cdn_exe runs from the
+# operator's machine and correctly does NOT use it.
+#
+# Set ORIGIN_CA in hosts.conf (see hosts.conf.example) to a CA bundle present on
+# every host and these checks verify the certificate instead. The negative
+# control for that pin is trivial and worth running once: point ORIGIN_CA at an
+# unrelated CA and confirm the checks FAIL. If they still pass, the pin is doing
+# nothing.
+if [ -n "${ORIGIN_CA:-}" ]; then
+	CURL_TLS="--cacert '$ORIGIN_CA'"
+else
+	CURL_TLS="-k"
+fi
+
 
 # curl ON the host against its own loopback — never from here. The origin
 # lock drops non-Cloudflare traffic, so an external check depends on the
 # caller's current source IP being exempt, which it is not.
 body() {
 	local entry="$1" host="$2" path="$3"
-	ssh_to "$entry" "curl -sk --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 25" 2>/dev/null || true
+	ssh_to "$entry" "curl -s $CURL_TLS --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 25" 2>/dev/null || true
 }
 
 ver_of() { grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1; }
@@ -163,7 +190,7 @@ for entry in "${HOSTS[@]}"; do
 		printf 'FAIL  %-22s no Android link on the download page\n' "download-page APK"
 		FAILED+=("$label/apk-link")
 	else
-		apk_code="$(ssh_to "$entry" "curl -sk -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$apk_href' --max-time 25" 2>/dev/null || true)"
+		apk_code="$(ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$apk_href' --max-time 25" 2>/dev/null || true)"
 		apk_ver="$(printf '%s' "$apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 		if [ "$apk_code" = "200" ]; then
 			if [ "$apk_ver" = "$EXPECTED" ]; then
@@ -176,6 +203,59 @@ for entry in "${HOSTS[@]}"; do
 			printf 'FAIL  %-22s %s linked but serves HTTP %s\n' "download-page APK" "$apk_href" "${apk_code:-<none>}"
 			FAILED+=("$label/apk-file")
 		fi
+	fi
+
+	# The download PAGE carries a version label of its own, and until now only
+	# the APK hrefs on it were ever checked. So a Windows-only release could
+	# publish a new installer while the live page kept advertising the previous
+	# number to every human who visited it — the same failure the APK gate was
+	# built to stop, in the other column. dual-ship.sh now refuses to ship an
+	# installer the page does not advertise; this catches a stale page even
+	# when someone shipped out of band.
+	#
+	# Asserted, not reported: unlike the APK (which legitimately trails on an
+	# OTA-only release), the label describes the release the page is OFFERING,
+	# and every release ships the desktop installer.
+	#
+	# What is asserted is that $EXPECTED APPEARS, not that it is the only
+	# version on the page. Both variant panels carry a label, and an operator's
+	# own page may name an older release in prose ("what's new since v0.8.130")
+	# — a check that failed on that would be crying wolf about a page that is
+	# perfectly correct. Absence is the real failure: it means the page is still
+	# advertising only the previous release.
+	#
+	# `|| true` is load-bearing: with `set -e` and pipefail, a page carrying no
+	# version at all makes grep exit 1 and takes the whole script down BEFORE it
+	# can report the failure — the empty branch below would be unreachable.
+	page_vers="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | tr -d v | tr '\n' ' ' | sed 's/ *$//' || true)"
+	if [ -z "$page_vers" ]; then
+		printf 'FAIL  %-22s no version label on the download page\n' "download-page version"
+		FAILED+=("$label/page-version")
+	elif [ "$page_vers" = "$EXPECTED" ]; then
+		printf 'PASS  %-22s %s\n' "download-page version" "$page_vers"
+	elif printf '%s\n' "$page_vers" | tr ' ' '\n' | grep -qx "$EXPECTED"; then
+		printf 'PASS  %-22s %s (page also names: %s)\n' "download-page version" "$EXPECTED" "$page_vers"
+	else
+		printf 'FAIL  %-22s %s (expected %s — update deploy/download-site/index.html, or index.local.html, and re-ship installer/apk)\n' \
+			"download-page version" "$page_vers" "$EXPECTED"
+		FAILED+=("$label/page-version")
+	fi
+
+	# The API origin sets COOP/COEP and the hardening headers but deliberately
+	# no CSP: the web app is served from a DIFFERENT origin, so a strict policy
+	# belongs on that host (src/main.rs says so where it sets them). The tooling
+	# to install it exists — deploy/ops/add-webapp-csp.py — but whether it has
+	# actually been run on a given box is an ops fact this repo cannot assert,
+	# because the applied policy lives only in /etc/caddy/Caddyfile. So probe
+	# for the header instead, and turn a one-time manual step into a standing
+	# invariant. grep -c, not -q: -q SIGPIPEs the writer under pipefail.
+	csp_hdr="$(ssh_to "$entry" "curl -s $CURL_TLS -I --resolve '$APP_HOST:443:127.0.0.1' 'https://$APP_HOST/' --max-time 25" 2>/dev/null | grep -ci '^content-security-policy:' || true)"
+	if [ "${csp_hdr:-0}" -gt 0 ]; then
+		printf 'PASS  %-22s present on %s\n' "webapp CSP header" "$APP_HOST"
+	else
+		printf 'FAIL  %-22s %s serves no Content-Security-Policy (run deploy/ops/add-webapp-csp.py --dry-run, review, then apply)\n' \
+			"webapp CSP header" "$APP_HOST"
+		FAILED+=("$label/webapp-csp")
 	fi
 
 	# --- LITE surfaces (the build with no remote control) -------------------
@@ -217,7 +297,7 @@ for entry in "${HOSTS[@]}"; do
 				printf 'FAIL  %-22s no lite Android link on the download page\n' "download-page liteAPK"
 				FAILED+=("$label/lite-apk-link")
 			else
-				lite_apk_code="$(ssh_to "$entry" "curl -sk -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$lite_apk_href' --max-time 25" 2>/dev/null || true)"
+				lite_apk_code="$(ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$lite_apk_href' --max-time 25" 2>/dev/null || true)"
 				lite_apk_ver="$(printf '%s' "$lite_apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 				if [ "$lite_apk_code" = "200" ]; then
 					if [ "$lite_apk_ver" = "$EXPECTED" ]; then
