@@ -1,8 +1,10 @@
 # VPS migration tooling
 
-Scripts for moving Puca off a home server onto a rented one, or for standing
-up a fresh host from scratch. `provision.sh` builds the box; `verify.sh`
-checks the things whose failure is silent, before you trust it with data.
+Scripts for standing up a fresh host from scratch — a brand-new self-hosted
+deployment ([`deploy/README.md`](../README.md) section 0 is the guided path)
+or the target of a move off a home server onto a rented one. `provision.sh`
+builds the box; `verify.sh` checks the things whose failure is silent, before
+you trust it with data.
 
 | File | Runs on | Purpose |
 | --- | --- | --- |

@@ -1463,7 +1463,13 @@ pub struct DeleteAccountRequest {
 /// Server assets are excluded: a server icon or a custom emoji the account
 /// uploaded belongs to the SERVER now (its members still see it), so it is
 /// not the account's to take away.
-const UPLOAD_GRACE_STAMP_SQL: &str = "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => $2)      WHERE uploader_id = $1 AND purge_after IS NULL        AND id NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL)        AND id NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL)        AND id NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL)";
+/// `id::text` on BOTH sides of every comparison: `uploaded_files.id` is a uuid
+/// and every column that references it (`servers.icon_file_id`,
+/// `custom_emojis.file_id`, `server_emojis.file_id`) is TEXT, so an
+/// unqualified `id NOT IN (...)` is `uuid = text` — which Postgres refuses at
+/// parse time, failing the whole deletion with a 500. Caught by
+/// frontend/e2e/deleted-account-login.mjs.
+const UPLOAD_GRACE_STAMP_SQL: &str = "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => $2)      WHERE uploader_id = $1 AND purge_after IS NULL        AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL)        AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL)        AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL)";
 
 /// DELETED_ACCOUNT_FILE_GRACE_DAYS: how long a deleted account's uploads stay
 /// before the sweep removes them. Default 30; 0 purges at the next sweep.

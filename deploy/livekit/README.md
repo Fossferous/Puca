@@ -9,7 +9,7 @@ key system — the SFU can never read frames). Design + verified corrections:
 Spike-verified on livekit-server **v1.13.4**: E2EE ✕ 3-layer simulcast ✕
 dynacast layer pause/switch all work together on the single-UDP-port mux.
 
-## Ports (chosen around this site's existing forwards)
+## Ports
 
 | Port | Proto | What | Exposure |
 |---|---|---|---|
@@ -17,12 +17,16 @@ dynacast layer pause/switch all work together on the single-UDP-port mux.
 | 7881 | TCP | ICE/TCP fallback | router-forward → the SFU host + ufw allow |
 | 7882 | UDP | ALL media (single-port mux) | router-forward → the SFU host + ufw allow |
 
-Already taken at the router — do NOT move onto: 3478/5349 (Matrix TURN),
-3479 + 49180–49220 (Puca coturn), 49152–49172 and **50000–60000 (LiveKit's
-default range — Matrix owns it here; the yaml's `udp_port: 7882` mux is
-mandatory)**.
+The yaml's single-port mux (`udp_port: 7882`) is mandatory: LiveKit's default
+is a 50000–60000 range, which is both hard to forward on a home router and
+likely to collide with something you already run. Keep 7881/7882 clear of
+your coturn ports (3479 + 49180–49220 as shipped) and of any other forward.
 
 ## Install
+
+`deploy/migrate/provision.sh` does steps 1–4 (pinned version, account, config
+rendered for the host's address model, unit enabled and probed on :7880). By
+hand:
 
 ```bash
 # 1. Binary (pin the spike-verified version; verify the checksum)
@@ -118,9 +122,11 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
 - **Version pinning:** E2EE/FrameCryptor behavior moves between LiveKit minor
   versions. v1.13.4 is spike-verified; retest E2EE+simulcast+dynacast (and the
   rapid share-churn case, client-sdk-js issue #973) before bumping.
-- **Healthcheck cron:** deploy/ops/healthcheck.sh does not supervise coturn
-  and does not supervise livekit either (systemd Restart= is the recovery
-  path, matching the coturn precedent). Add it there if that changes.
+- **Healthcheck cron:** deploy/ops/healthcheck.sh supervises the livekit
+  unit once it is enabled — restarts it when inactive, reports a crash loop,
+  and probes `http://127.0.0.1:7880/` every 5 minutes with a distinct
+  "active but not answering" line. It does NOT check that the backend's
+  `LIVEKIT_URL` matches a Caddy vhost; `deploy/migrate/verify.sh` does.
 - **Kick/ban mid-call (known gap, v1):** LiveKit authorizes at token mint
   (20-min TTL). A user kicked from the server keeps receiving the CURRENT call
   epoch until they disconnect or the key rotates; they cannot rejoin (token

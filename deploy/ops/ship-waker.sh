@@ -21,6 +21,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# hosts.conf is gitignored (it names your servers); a fresh clone has none.
+if [ ! -f "$HERE/hosts.conf" ]; then
+	echo "ship-waker.sh: $HERE/hosts.conf is missing — copy deploy/ops/hosts.conf.example to hosts.conf" >&2
+	echo "  and fill it in; see 'Before your first release' in deploy/ops/README.md." >&2
+	exit 78
+fi
 # shellcheck source=hosts.conf
 source "$HERE/hosts.conf"
 
