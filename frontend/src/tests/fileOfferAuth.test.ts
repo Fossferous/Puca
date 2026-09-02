@@ -69,3 +69,20 @@ describe('file-offer authentication (H-2)', () => {
         expect(deriveFileOfferAuthKey(alice, 'not-a-key')).toBeNull();
     });
 });
+
+describe('v2 records (0.9.0): fingerprints and the accept direction are inside the MAC', async () => {
+    const { fileOfferRecord, fileAcceptRecord, FILE_OFFER_AUTH_VERSION } = await import('../api/fileTransferManager');
+    const fp = 'sha-256 ' + 'AB:'.repeat(31) + 'AB';
+    it('the offer record carries v, t, the fingerprint and the timestamp, canonically ordered', () => {
+        const r = fileOfferRecord({ id: 'x', from: 1, to: 2, name: 'n', size: 3, mime: 'm', sha256: 's', fp, ts: 10 });
+        expect(FILE_OFFER_AUTH_VERSION).toBe(2);
+        expect(JSON.parse(r)).toEqual({ v: 2, t: 'offer', id: 'x', from: 1, to: 2, name: 'n', size: 3, mime: 'm', sha256: 's', fp, ts: 10 });
+        expect(r).toBe(JSON.stringify(JSON.parse(r), Object.keys(JSON.parse(r)).sort()));
+    });
+    it('an accept record is a different record from an offer with the same fields, and the direction is flipped', () => {
+        const a = fileAcceptRecord({ id: 'x', from: 2, to: 1, fp, resume: 0 });
+        expect(JSON.parse(a).t).toBe('accept');
+        expect(a).not.toBe(fileAcceptRecord({ id: 'x', from: 1, to: 2, fp, resume: 0 }));
+        expect(a).not.toBe(fileAcceptRecord({ id: 'x', from: 2, to: 1, fp, resume: 1024 }));
+    });
+});

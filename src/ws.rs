@@ -2928,6 +2928,9 @@ async fn handle_message(
             sha256,
             target_device,
             auth,
+            auth_v,
+            fp,
+            ts,
         } => {
             // Sending to yourself IS allowed — PC to phone is the main reason
             // to move something large peer-to-peer. It is routed by CONNECTION
@@ -2950,6 +2953,10 @@ async fn handle_message(
             // the server only passes it through to the recipient, who verifies
             // it against the sender's pinned key.
             if auth.as_ref().is_some_and(|a| a.len() > 128) {
+                return Err("Invalid offer authentication".to_string());
+            }
+            // A DTLS fingerprint is ~100 chars; relayed, never interpreted here.
+            if fp.as_ref().is_some_and(|f| f.len() > 256) {
                 return Err("Invalid offer authentication".to_string());
             }
             // Bound how many transfers one user can have in flight, so offers
@@ -3028,6 +3035,9 @@ async fn handle_message(
                     sha256: sha256.clone(),
                     target_device: if to_self { target_device.clone() } else { None },
                     auth: auth.clone(),
+                    auth_v,
+                    fp: fp.clone(),
+                    ts,
                 })
             };
             let parked = parked_offer.is_some();
@@ -3073,6 +3083,9 @@ async fn handle_message(
                 mime,
                 sha256,
                 auth,
+                auth_v,
+                fp,
+                ts,
             };
             if to_self {
                 match named_device_conn {
@@ -3095,7 +3108,13 @@ async fn handle_message(
         ClientMessage::FileAccept {
             transfer_id,
             resume_from,
+            auth,
+            auth_v,
+            fp,
         } => {
+            if auth.as_ref().is_some_and(|a| a.len() > 128) || fp.as_ref().is_some_and(|f| f.len() > 256) {
+                return Err("Invalid accept authentication".to_string());
+            }
             // Only the RECIPIENT may accept, and only a transfer they were
             // actually offered.
             let sender = match state.file_transfers.get_mut(&transfer_id) {
@@ -3128,6 +3147,9 @@ async fn handle_message(
                 from_user: user_id,
                 transfer_id,
                 resume_from,
+                auth,
+                auth_v,
+                fp,
             };
             match sender_conn {
                 // Self-transfer: answer the offering socket specifically.

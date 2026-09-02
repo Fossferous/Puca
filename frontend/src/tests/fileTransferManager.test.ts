@@ -50,9 +50,21 @@ vi.mock('../api/auth', async (importOriginal) => {
     return { ...actual, getToken: () => 'tok', decodeJwtPayload: () => ({ sub: 99 }) };
 });
 
+/** The fingerprint every fake certificate reports, and the one a remote SDP
+ *  must carry to be accepted. */
+const FAKE_HEX = 'AB:'.repeat(31) + 'AB';
+export const PEER_FP = `sha-256 ${FAKE_HEX}`;
+/** A minimal data-channel SDP presenting `fp`. */
+const fakeSdp = (fp: string) => ['v=0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel', `a=fingerprint:${fp}`].join('\r\n');
+
 /** Records what the code asked of a peer connection, and lets a test drive it. */
 class FakePeerConnection {
     static last: FakePeerConnection | null = null;
+    static async generateCertificate() {
+        return { getFingerprints: () => [{ algorithm: 'sha-256', value: FAKE_HEX }] };
+    }
+    /** The configuration the manager built: the certificate must be pinned. */
+    config: RTCConfiguration | undefined;
     remoteDescription: unknown = null;
     connectionState = 'new';
     addedCandidates: RTCIceCandidateInit[] = [];
@@ -72,7 +84,7 @@ class FakePeerConnection {
     /** ICE settled: the refusal path trusts the reading without polling. */
     iceConnectionState = 'completed';
 
-    constructor() { FakePeerConnection.last = this; }
+    constructor(config?: RTCConfiguration) { this.config = config; FakePeerConnection.last = this; }
 
     /** The channel the manager created, so tests can fire its events. */
     lastChannel: ReturnType<FakePeerConnection['createDataChannel']> | null = null;
@@ -91,8 +103,8 @@ class FakePeerConnection {
         this.lastChannel = ch;
         return ch;
     }
-    async createOffer() { return { type: 'offer', sdp: 'FAKE-OFFER' }; }
-    async createAnswer() { return { type: 'answer', sdp: 'FAKE-ANSWER' }; }
+    async createOffer() { return { type: 'offer', sdp: fakeSdp(PEER_FP) }; }
+    async createAnswer() { return { type: 'answer', sdp: fakeSdp(PEER_FP) }; }
     async setLocalDescription() { /* no-op */ }
     async setRemoteDescription(d: unknown) { this.remoteDescription = d; }
     async addIceCandidate(c: RTCIceCandidateInit) {
@@ -150,6 +162,7 @@ const flush = () => new Promise(r => setTimeout(r, 0));
 
 beforeEach(() => {
     sent.length = 0;
+    fileTransferManager.forgetSeenOffers();
     FakePeerConnection.last = null;
     fileTransferManager.wire();
 });
@@ -222,7 +235,7 @@ describe('offering a file', () => {
         // The phone comes online, collects the held offer, accepts.
         handlers.get('FileAccepted')!({
             type: 'FileAccepted',
-            payload: { from_user: 7, transfer_id: id, resume_from: 0 },
+            payload: { from_user: 7, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         t = fileTransferManager.list().find(x => x.id === id)!;
@@ -271,7 +284,7 @@ describe('ICE candidate ordering', () => {
         // Recipient accepts -> the manager builds its connection.
         handlers.get('FileAccepted')!({
             type: 'FileAccepted',
-            payload: { from_user: 7, transfer_id: id, resume_from: 0 },
+            payload: { from_user: 7, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         const pc = FakePeerConnection.last!;
@@ -287,7 +300,7 @@ describe('ICE candidate ordering', () => {
 
         handlers.get('FileSignal')!({
             type: 'FileSignal',
-            payload: { from_user: 7, transfer_id: id, payload: JSON.stringify({ kind: 'answer', sdp: 'A' }) },
+            payload: { from_user: 7, transfer_id: id, payload: JSON.stringify({ kind: 'answer', sdp: fakeSdp(PEER_FP) }) },
         });
         await flush();
         expect(pc.addedCandidates.map(c => c.candidate)).toEqual(['early']);
@@ -324,7 +337,7 @@ describe('relay policy', () => {
 
         handlers.get('FileAccepted')!({
             type: 'FileAccepted',
-            payload: { from_user: 9, transfer_id: id, resume_from: 0 },
+            payload: { from_user: 9, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         const pc = FakePeerConnection.last!;
@@ -373,7 +386,7 @@ describe('relay policy', () => {
             type: 'FileAccepted',
             // Nearly everything already on disk from the previous attempt: a
             // kilobyte left, far under the cap.
-            payload: { from_user: 13, transfer_id: id, resume_from: RELAY_MAX_BYTES * 12 - 1024 },
+            payload: { from_user: 13, transfer_id: id, resume_from: RELAY_MAX_BYTES * 12 - 1024, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         const pc = FakePeerConnection.last!;
@@ -403,7 +416,7 @@ describe('relay policy', () => {
 
         handlers.get('FileAccepted')!({
             type: 'FileAccepted',
-            payload: { from_user: 11, transfer_id: id, resume_from: 0 },
+            payload: { from_user: 11, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         const pc = FakePeerConnection.last!;
@@ -425,7 +438,7 @@ describe('relay policy', () => {
 
         handlers.get('FileAccepted')!({
             type: 'FileAccepted',
-            payload: { from_user: 12, transfer_id: id, resume_from: 0 },
+            payload: { from_user: 12, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         const pc = FakePeerConnection.last!;
@@ -445,7 +458,7 @@ describe('relay policy', () => {
 
         handlers.get('FileAccepted')!({
             type: 'FileAccepted',
-            payload: { from_user: 9, transfer_id: id, resume_from: 0 },
+            payload: { from_user: 9, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP },
         });
         await flush();
         const pc = FakePeerConnection.last!;
@@ -467,7 +480,7 @@ describe('incoming offers', () => {
             payload: {
                 from_user: 3, from_username: 'eve', transfer_id: 'incoming1',
                 name: 'photo.png', size: 1234, mime: 'image/png', sha256: 'a'.repeat(64),
-                auth: 'TESTMAC',
+                auth: 'TESTMAC', auth_v: 2, fp: PEER_FP, ts: Date.now(),
             },
         });
         // onOffered verifies the offer's MAC asynchronously (it awaits the
@@ -485,7 +498,7 @@ describe('incoming offers', () => {
             payload: {
                 from_user: 3, from_username: 'eve', transfer_id: 'incoming2',
                 name: 'x.bin', size: 10, mime: '', sha256: 'b'.repeat(64),
-                auth: 'TESTMAC',
+                auth: 'TESTMAC', auth_v: 2, fp: PEER_FP, ts: Date.now(),
             },
         });
         await flush();
@@ -504,7 +517,7 @@ describe('dismissing finished cards', () => {
             payload: {
                 from_user: 3, from_username: 'eve', transfer_id: id,
                 name: 'x.bin', size: 10, mime: '', sha256: 'c'.repeat(64),
-                auth: 'TESTMAC',
+                auth: 'TESTMAC', auth_v: 2, fp: PEER_FP, ts: Date.now(),
             },
         });
         await flush();
@@ -543,5 +556,109 @@ describe('dismissing finished cards', () => {
         fileTransferManager.clearFinished();
         expect(fileTransferManager.list().find(x => x.id === 'sweep-done')).toBeFalsy();
         expect(fileTransferManager.list().find(x => x.id === 'sweep-live')?.state).toBe('offered');
+    });
+});
+
+describe('DTLS fingerprint binding (the server cannot substitute the peer)', () => {
+    const offered = (over: Record<string, unknown> = {}) => ({
+        type: 'FileOffered',
+        payload: {
+            from_user: 7, from_username: 'ann', transfer_id: 'offer-' + Math.random().toString(36).slice(2, 10),
+            name: 'f.bin', size: 8, mime: 'application/octet-stream', sha256: 'ab'.repeat(32),
+            auth: 'TESTMAC', auth_v: 2, fp: PEER_FP, ts: Date.now(),
+            ...over,
+        },
+    });
+
+    it('the offer names our certificate: auth_v 2, the fingerprint and a timestamp', async () => {
+        const file = new File([new Uint8Array(8)], 'f.bin');
+        const id = await fileTransferManager.offerFile(7, 'ann', file);
+        const offer = sent.find(m => m.type === 'FileOffer' && m.payload.transfer_id === id)!;
+        expect(offer.payload.auth_v).toBe(2);
+        expect(offer.payload.fp).toBe(PEER_FP);
+        expect(Math.abs(Date.now() - offer.payload.ts)).toBeLessThan(5000);
+    });
+
+    it('the connection pins the certificate the record named', async () => {
+        const file = new File([new Uint8Array(8)], 'f.bin');
+        const id = await fileTransferManager.offerFile(7, 'ann', file);
+        handlers.get('FileAccepted')!({ type: 'FileAccepted', payload: { from_user: 7, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP } });
+        await flush();
+        expect(FakePeerConnection.last!.config?.certificates).toHaveLength(1);
+    });
+
+    it('an accept from an older app (no auth_v) is refused with an update message, and the peer is told', async () => {
+        const file = new File([new Uint8Array(8)], 'f.bin');
+        const id = await fileTransferManager.offerFile(7, 'ann', file);
+        handlers.get('FileAccepted')!({ type: 'FileAccepted', payload: { from_user: 7, transfer_id: id, resume_from: 0 } });
+        await flush();
+        const t = fileTransferManager.list().find(x => x.id === id)!;
+        expect(t.state).toBe('failed');
+        expect(t.error).toContain('older than yours');
+        expect(sent.some(m => m.type === 'FileCancel' && m.payload.transfer_id === id)).toBe(true);
+        expect(sent.some(m => m.type === 'FileComplete' && m.payload.transfer_id === id)).toBe(false); // not fail()
+    });
+
+    it('an answer whose DTLS fingerprint is not the one the receiver authenticated is refused before negotiation', async () => {
+        const file = new File([new Uint8Array(8)], 'f.bin');
+        const id = await fileTransferManager.offerFile(7, 'ann', file);
+        handlers.get('FileAccepted')!({ type: 'FileAccepted', payload: { from_user: 7, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP } });
+        await flush();
+        const pc = FakePeerConnection.last!;
+        const mitm = `sha-256 ${'FF:'.repeat(31)}FF`;
+        handlers.get('FileSignal')!({ type: 'FileSignal', payload: { from_user: 7, transfer_id: id, payload: JSON.stringify({ kind: 'answer', sdp: fakeSdp(mitm) }) } });
+        await flush();
+        expect(pc.remoteDescription).toBeNull();
+        const t = fileTransferManager.list().find(x => x.id === id)!;
+        expect(t.state).toBe('failed');
+        expect(t.error).toContain('did not match');
+        expect(sent.some(m => m.type === 'FileCancel' && m.payload.transfer_id === id)).toBe(true);
+    });
+
+    it('a sender ignores a reflected offer, and a second description after the first', async () => {
+        const file = new File([new Uint8Array(8)], 'f.bin');
+        const id = await fileTransferManager.offerFile(7, 'ann', file);
+        handlers.get('FileAccepted')!({ type: 'FileAccepted', payload: { from_user: 7, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP } });
+        await flush();
+        const pc = FakePeerConnection.last!;
+        handlers.get('FileSignal')!({ type: 'FileSignal', payload: { from_user: 7, transfer_id: id, payload: JSON.stringify({ kind: 'offer', sdp: fakeSdp(PEER_FP) }) } });
+        await flush();
+        expect(pc.remoteDescription).toBeNull();   // a sender takes answers only
+        handlers.get('FileSignal')!({ type: 'FileSignal', payload: { from_user: 7, transfer_id: id, payload: JSON.stringify({ kind: 'answer', sdp: fakeSdp(PEER_FP) }) } });
+        await flush();
+        const first = pc.remoteDescription;
+        expect(first).not.toBeNull();
+        handlers.get('FileSignal')!({ type: 'FileSignal', payload: { from_user: 7, transfer_id: id, payload: JSON.stringify({ kind: 'answer', sdp: fakeSdp(PEER_FP) + '\r\na=x' }) } });
+        await flush();
+        expect(pc.remoteDescription).toBe(first);   // replay: not renegotiated
+    });
+
+    it('a v2 offer is shown with the sender\'s fingerprint remembered; an old-format offer is refused with the update message', async () => {
+        const fresh = offered();
+        handlers.get('FileOffered')!(fresh);
+        await flush();
+        const t = fileTransferManager.list().find(x => x.id === fresh.payload.transfer_id)!;
+        expect(t.state).toBe('offered');
+        const old = offered({ auth_v: undefined, fp: undefined, ts: undefined });
+        handlers.get('FileOffered')!(old);
+        await flush();
+        const o = fileTransferManager.list().find(x => x.id === old.payload.transfer_id)!;
+        expect(o.state).toBe('failed');
+        expect(o.error).toContain('older than yours');
+    });
+
+    it('a stale offer (outside the freshness window) and a re-delivered id are not accepted', async () => {
+        const stale = offered({ ts: Date.now() - 16 * 60_000 });
+        handlers.get('FileOffered')!(stale);
+        await flush();
+        expect(fileTransferManager.list().find(x => x.id === stale.payload.transfer_id)!.state).toBe('failed');
+        const fresh = offered();
+        handlers.get('FileOffered')!(fresh);
+        await flush();
+        const before = fileTransferManager.list().length;
+        handlers.get('FileOffered')!({ ...fresh, payload: { ...fresh.payload, name: 'clobber.bin' } });
+        await flush();
+        expect(fileTransferManager.list().length).toBe(before);
+        expect(fileTransferManager.list().find(x => x.id === fresh.payload.transfer_id)!.name).toBe('f.bin');
     });
 });
