@@ -353,8 +353,22 @@ Escape declines; expiry never approves; oldest first with a "1 of N" chip and a
 outcomes keep their Close). `ClipComposerModal` runs request → pending →
 approved (preview + optional trim) → upload → post: `duration_ms` is the
 SEALED length, `ended_ago_ms` counts from the seal, `declared_participants`
-is everyone this client saw in the room while armed (the server can only ADD
-approvers from it); the target is a text channel of the VOICE server (pinned,
+is everyone this client saw in the room whose presence OVERLAPS the clip's
+window — `api/clips/clipParticipants.ts` keeps join/leave spans per user
+while armed, mirroring the server's `PresenceLog`, and declares against
+`[sealedAt − duration − 2 s, sealedAt]` with a 2-minute slack after a
+departure and an SFU still-audible override (the server can only ADD
+approvers from it, so the window bound has to be applied here: before
+2026-09-02 this was a set that only grew from the arm, which with auto-arm
+made everyone who had been in the call since you joined a required
+approver, and an offline one blocked the clip for its whole 30-minute TTL —
+2026-09-02). Each `ApproverView` now carries `in_window`: whether the
+SERVER's log saw that person in the window, or they are required only
+because this client declared them; the composer and the approver's own
+prompt show it, `propose_clip` logs identity-free counts of each, and
+`__pucaClipDiag()` dumps the spans and the live proposal (in memory only —
+nothing about who was in which call is ever written down); the target is a
+text channel of the VOICE server (pinned,
 or a picker defaulting to the viewed channel); trim snaps outward to the
 nearest keyframes (~2 s GOPs), Apply re-muxes and the preview re-attaches to
 the new footage, and the readout then states the real new length (or that

@@ -205,12 +205,16 @@ try {
     {
         const r0 = await api('PATCH', `/servers/${S}/settings`, { clips_enabled: true }, B.token);
         ck('settings: non-owner PATCH is 403', r0.status === 403, `status=${r0.status}`);
-        const r1 = await api('PATCH', `/servers/${S}/settings`, { clips_enabled: true, clip_max_seconds: 120 }, A.token);
+        // S1 (0.8.118+): clips cannot be turned on without a pinned text channel —
+        // this harness predated the rule and enabled first, which now 400s.
+        const r1u = await api('PATCH', `/servers/${S}/settings`, { clips_enabled: true, clip_max_seconds: 120 }, A.token);
+        ck('settings: enabling clips with no pinned channel → 400 (S1)', r1u.status === 400, `status=${r1u.status} ${r1u.text}`);
+        const r1 = await api('PATCH', `/servers/${S}/settings`, { clips_enabled: true, clip_max_seconds: 120, clip_channel_id: T1 }, A.token);
         ck('settings: owner PATCH 200', r1.status === 200, `status=${r1.status} ${r1.text}`);
         const list = await api('GET', '/servers', null, A.token);
         const me = (list.body || []).find(s => s.id === S);
-        ck('settings: read back clips_enabled=true, clip_max_seconds=120, clip_channel_id=null',
-            me?.clips_enabled === true && me?.clip_max_seconds === 120 && me?.clip_channel_id === null,
+        ck('settings: read back clips_enabled=true, clip_max_seconds=120, clip_channel_id=T1',
+            me?.clips_enabled === true && me?.clip_max_seconds === 120 && me?.clip_channel_id === T1,
             JSON.stringify({ e: me?.clips_enabled, m: me?.clip_max_seconds, c: me?.clip_channel_id }));
         const other = (list.body || []).find(s => s.id === S2);
         ck('settings: untouched server reads clips_enabled=false, clip_max_seconds=120 (default)',
@@ -236,9 +240,11 @@ try {
         // The pin is enforced (before the log, before the rate limiter).
         const pinned = await propose(A, V1, { target_channel_id: T2 });
         ck('propose: pinned server refuses another target with 403', pinned.status === 403, `status=${pinned.status} ${pinned.text}`);
+        // S1: clearing the pin while clips are ON is refused and the pin is kept
+        // (before the rule this cleared it, and every later proposal here relies on it).
         const clear = await api('PATCH', `/servers/${S}/settings`, { clip_channel_id: 0 }, A.token);
         const me3 = ((await api('GET', '/servers', null, A.token)).body || []).find(s => s.id === S);
-        ck('settings: clip_channel_id 0 clears the pin', clear.status === 200 && me3?.clip_channel_id === null, `${clear.status} pin=${me3?.clip_channel_id}`);
+        ck('settings: clip_channel_id 0 while enabled → 400, pin kept (S1)', clear.status === 400 && me3?.clip_channel_id === T1, `${clear.status} pin=${me3?.clip_channel_id}`);
     }
 
     // presence: everybody has been in V1 long enough for a 5 s window
@@ -313,8 +319,10 @@ try {
         drain(b); drain(c);
         const r = await propose(A, V1);
         ck('presence: C left before the Clip but was in the window → approvers exactly {B, C}', r.status === 201 && same(approverIds(r), [B.id, C.id]), `${r.status} ${JSON.stringify(approverIds(r))}`);
+        ck('provenance: both are log hits → in_window=true on every ApproverView', (r.body?.approvers || []).length === 2 && (r.body?.approvers || []).every(a => a.in_window === true), JSON.stringify(r.body?.approvers));
         const gc = await getClip(C, r.body?.clip_id);
         ck('GET as C: still_in_call=false after leaving', gc.status === 200 && gc.body?.you?.still_in_call === false, `${gc.status} ${JSON.stringify(gc.body?.you)}`);
+        ck('GET as C: you.in_window=true (the log saw C in the window)', gc.body?.you?.in_window === true, JSON.stringify(gc.body?.you));
         await cancel(A, r.body?.clip_id);
     }
     // let C's span fall out of any later 5 s window
@@ -330,6 +338,13 @@ try {
         clipA3 = r.body?.clip_id;
         ck('union: declared co-members added (C offline, D never in room), stranger + unknown dropped → {B, C, D}',
             r.status === 201 && same(approverIds(r), [B.id, C.id, D.id]), `${r.status} ${JSON.stringify(approverIds(r))} ${r.text}`);
+        {
+            const byId = Object.fromEntries((r.body?.approvers || []).map(a => [a.id, a]));
+            ck('provenance: B is a log hit (in_window=true); C and D are declared-only (in_window=false)',
+                byId[B.id]?.in_window === true && byId[C.id]?.in_window === false && byId[D.id]?.in_window === false, JSON.stringify(r.body?.approvers));
+            const gd = await getClip(D, r.body?.clip_id);
+            ck('GET as D: you.in_window=false — the approver is told the server did not see them', gd.status === 200 && gd.body?.you?.in_window === false, `${gd.status} ${JSON.stringify(gd.body?.you)}`);
+        }
         const pd = await waitFor(d0, m => m.type === 'ClipProposed' && m.payload?.clip_id === clipA3);
         ck('union: D (declared, not in room) is prompted live', !!pd);
         // C is offline: the doorbell is parked as a CONTENT-FREE ClipPending for the delivery socket.
@@ -591,7 +606,10 @@ try {
         const tv = await propose(E, V1, { target_channel_id: V1 });
         const tx = await propose(E, V1, { target_channel_id: T3 });
         const tn = await propose(E, V1, { target_channel_id: 999999999 });
-        ck('target: voice channel 400, other-server channel (E is a member there) 400, unknown 404', tv.status === 400 && tx.status === 400 && tn.status === 404, `${tv.status}/${tx.status}/${tn.status} ${tx.text}`);
+        // S1: the pin is checked BEFORE any target lookup, so on a pinned server every
+        // other target is a flat 403 — the type/server/existence validation of a
+        // target now lives on the PIN setting (checked in section 1), not here.
+        ck('target: voice channel / other-server channel / unknown → all 403 (pin enforced first, S1)', tv.status === 403 && tx.status === 403 && tn.status === 403, `${tv.status}/${tx.status}/${tn.status} ${tx.text}`);
         const txX = await propose(D, V1, { target_channel_id: T3 });
         ck('target: other-server channel the proposer cannot see → 403/404 (no cross-server oracle)', txX.status === 403 || txX.status === 404, `${txX.status} ${txX.text}`);
         const strangerP = await propose(X, V1);
