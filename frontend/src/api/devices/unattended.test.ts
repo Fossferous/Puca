@@ -1,13 +1,26 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
 import { argon2id } from '@noble/hashes/argon2.js';
 import kat from '../../tests/fixtures/unattended-ua-kat.json';
 import {
     buildUaRecord,
     challengeMessage,
+    clearRememberedUaSeeds,
+    confirmUaSeed,
     passphraseMatches,
+    rememberUaSeed,
+    rememberedUaSeed,
     signUaChallenge,
+    UA_REMEMBER_MS,
 } from './unattended';
+
+/** Which shell this rig plays. The remembered-seed store is written ONLY
+ *  inside the native shells, so the web case has to be drivable too. */
+let nativeShell = true;
+vi.mock('../platform', () => ({
+    isTauri: () => nativeShell,
+    isMobile: () => false,
+}));
 
 const unhex = (s: string) => Uint8Array.from(s.match(/../g)!.map((h) => parseInt(h, 16)));
 const hex = (b: Uint8Array) => Array.from(b).map((x) => x.toString(16).padStart(2, '0')).join('');
@@ -86,5 +99,88 @@ describe('unattended passphrase — controller side', () => {
 
     it('rejects a nonce that is not 32 bytes rather than framing garbage', () => {
         expect(() => challengeMessage('ctx', new Uint8Array(31))).toThrow(/32 bytes/);
+    });
+});
+
+/**
+ * THE REMEMBERED SEED — a signing key in cleartext localStorage (L8-NATIVE-8).
+ *
+ * What is stored is the Argon2id-stretched Ed25519 SEED, which IS the
+ * unattended capability for that host until it is re-armed. These pin the three
+ * things that bound it: it is never written outside a native shell, it expires,
+ * and it dies when the host's salt changes.
+ */
+describe('remembering a proved unattended seed', () => {
+    const SEED = new Uint8Array(32).fill(5);
+    const SALT = 'c2FsdA==';
+
+    /**
+     * A REAL localStorage for this file.
+     *
+     * `src/tests/setup.ts` replaces window.localStorage with bare `vi.fn()`s
+     * that store nothing and return `undefined` — so a test written against it
+     * would assert "nothing was stored" in a world where nothing CAN be
+     * stored, and would pass just as happily with the native-shell gate
+     * deleted. Backing it with a Map is what makes the assertions mean
+     * something.
+     */
+    const store = new Map<string, string>();
+    beforeEach(() => {
+        store.clear();
+        const ls = localStorage as unknown as {
+            getItem: Mock; setItem: Mock; removeItem: Mock;
+        };
+        ls.getItem.mockImplementation((k: string) => store.get(k) ?? null);
+        ls.setItem.mockImplementation((k: string, v: string) => { store.set(k, v); });
+        ls.removeItem.mockImplementation((k: string) => { store.delete(k); });
+        nativeShell = true;
+        clearRememberedUaSeeds();
+    });
+
+    afterEach(() => {
+        const ls = localStorage as unknown as {
+            getItem: Mock; setItem: Mock; removeItem: Mock;
+        };
+        ls.getItem.mockReset();
+        ls.setItem.mockReset();
+        ls.removeItem.mockReset();
+    });
+
+    it('is NOT written in a shared browser', () => {
+        // A later user of the same profile would otherwise hold unattended
+        // control of someone else's machine.
+        nativeShell = false;
+        rememberUaSeed('dev-host', SALT, SEED);
+        expect(rememberedUaSeed('dev-host', SALT)).toBeNull();
+        expect(
+            localStorage.getItem('sovereign-ua-remember'),
+            'nothing at all may be written outside a native shell',
+        ).toBeNull();
+
+        // POSITIVE CONTROL: the same call in a native shell DOES write, so the
+        // assertion above is about the shell and not about a broken rig.
+        nativeShell = true;
+        rememberUaSeed('dev-host', SALT, SEED);
+        expect(rememberedUaSeed('dev-host', SALT)).toEqual(SEED);
+    });
+
+    it('lives for seven days, not thirty, and the expiry slides on use', () => {
+        // The TTL is client-side housekeeping rather than a security bound, but
+        // a month is a long time for a cleartext signing key to sit unused. It
+        // costs an active user nothing because confirmUaSeed renews it.
+        expect(UA_REMEMBER_MS).toBe(7 * 24 * 60 * 60 * 1000);
+
+        const t0 = 1_700_000_000_000;
+        rememberUaSeed('dev-host', SALT, SEED, t0);
+        expect(rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS - 1)).toEqual(SEED);
+        expect(rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS)).toBeNull();
+
+        // Sliding: a host that accepted the signature renews the entry.
+        rememberUaSeed('dev-host', SALT, SEED, t0);
+        confirmUaSeed('dev-host', t0 + UA_REMEMBER_MS - 1);
+        expect(
+            rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS + 1),
+            'an actively used machine never notices the shorter window',
+        ).toEqual(SEED);
     });
 });

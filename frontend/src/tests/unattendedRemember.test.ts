@@ -9,7 +9,16 @@
  * expires without use, and both miss paths must DROP the dead entry rather
  * than leave seeds in storage that nothing will ever read again.
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+
+// THIS RIG IS A NATIVE SHELL. `rememberUaSeed` refuses to write outside Tauri
+// or Capacitor — what it stores is a signing key for someone's machine, and in
+// a shared browser profile a later user could lift it. Under jsdom neither
+// detector is true, so without this every assertion below would be about an
+// empty store rather than about what the store KEEPS. The refusal itself is
+// pinned in api/devices/unattended.test.ts.
+vi.mock('../api/platform', () => ({ isTauri: () => true, isMobile: () => false }));
+
 import {
     deriveUaSeed,
     signUaChallenge,
