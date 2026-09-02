@@ -37,6 +37,14 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# hosts.conf is gitignored (it names your servers); a fresh clone has none.
+# Say what to do rather than dying on a bare `source` error.
+if [ ! -f "$HERE/hosts.conf" ]; then
+	echo "check-versions.sh: $HERE/hosts.conf is missing." >&2
+	echo "  Copy deploy/ops/hosts.conf.example to deploy/ops/hosts.conf and fill it in;" >&2
+	echo "  see 'Before your first release' in deploy/ops/README.md." >&2
+	exit 78
+fi
 # shellcheck source=hosts.conf
 source "$HERE/hosts.conf"
 

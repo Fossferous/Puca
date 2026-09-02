@@ -15,12 +15,33 @@ Welcome! This guide will help you set up and start using Púca.
 
 1. Open the application at `http://localhost:5173`
 2. Click **"Don't have an account? Register"**
-3. Enter a username and password
+3. Enter a username and password (and the server's invite code, if the owner
+   set one)
 4. Click **Register**
 
-You'll be automatically logged in after registration.
+You'll be logged in after registration — as soon as you have dealt with the
+next step.
 
-### 2. Explore the Interface
+### 2. Save your recovery code
+
+Right after registering, the app shows a **12-word recovery code** and will
+not continue until you confirm you have saved it. Take that seriously:
+
+- It is shown **once**. It is not stored anywhere, and nobody — not the
+  server owner, not the developers — can look it up or generate it again for
+  you.
+- It is the **only** way to reset a forgotten password without losing your
+  message history. Your messages are encrypted with keys only your devices
+  hold; the code is the spare key.
+- Write it down somewhere that is not the device you are signing up on, or put
+  it in a password manager next to your password.
+
+If you skipped past it: as long as you still know your password you can make
+a new one under **Settings › My Account › Recovery code** (the old one stops
+working at that moment). [`LOST_RECOVERY_CODE.md`](LOST_RECOVERY_CODE.md)
+explains the other cases.
+
+### 3. Explore the Interface
 
 After logging in, you'll see:
 
@@ -29,7 +50,7 @@ After logging in, you'll see:
 - **Center**: Chat messages
 - **Right sidebar**: Member list
 
-### 3. Send Your First Message
+### 4. Send Your First Message
 
 1. Click on a text channel (e.g., `# general`)
 2. Type in the message box at the bottom
@@ -178,6 +199,8 @@ Your avatar now appears in:
 
 ## Need Help?
 
+- **Lost your recovery code or your password:** [`docs/LOST_RECOVERY_CODE.md`](LOST_RECOVERY_CODE.md)
+- **What is collected and who can see what:** [`docs/PRIVACY.md`](PRIVACY.md)
 - **Endpoints and wire formats:** [`docs/API_REFERENCE.md`](API_REFERENCE.md)
 - **Setting up a server (canonical):** [`deploy/README.md`](../deploy/README.md)
 - **What the encryption does and does not protect:**

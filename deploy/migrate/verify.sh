@@ -143,6 +143,34 @@ else
 	fail "$LK missing"
 fi
 
+# Config read back proves nothing (this file's own header). If the backend's
+# .env names the SFU, the unit must be enabled, running and ANSWERING, and
+# Caddy must front the hostname clients will open a WebSocket to — otherwise
+# the backend mints join tokens for a server nobody can reach and every SFU
+# join fails at the WebSocket with nothing in any server log.
+lk_url="$(sed -n 's/^LIVEKIT_URL=wss\{0,1\}:\/\/\([^/[:space:]]*\).*/\1/p' /opt/puca/.env 2>/dev/null | head -1)"
+if [ -n "$lk_url" ]; then
+	systemctl is-enabled --quiet livekit 2>/dev/null \
+		&& pass "livekit unit enabled" \
+		|| fail "livekit unit not enabled" ".env names LIVEKIT_URL=$lk_url; the backend will mint tokens for a server that never starts"
+	systemctl is-active --quiet livekit 2>/dev/null \
+		&& pass "livekit unit active" \
+		|| fail "livekit unit not active" "journalctl -u livekit"
+	lk_port="$(sed -n 's/^port:[[:space:]]*\([0-9]*\).*/\1/p' "$LK" 2>/dev/null | head -1)"
+	curl -sf --max-time 5 "http://127.0.0.1:${lk_port:-7880}/" >/dev/null 2>&1 \
+		&& pass "livekit answers on 127.0.0.1:${lk_port:-7880}" \
+		|| fail "nothing answers on 127.0.0.1:${lk_port:-7880}" "the unit may be up but the signalling port is not"
+	if [ -f /etc/caddy/Caddyfile ]; then
+		grep -qE "^[[:space:]]*$lk_url[[:space:]]*\{" /etc/caddy/Caddyfile \
+			&& pass "Caddy has a site block for $lk_url" \
+			|| fail "no Caddy site block for $lk_url" "clients open wss://$lk_url; nothing terminates it (deploy/livekit/README.md step 7)"
+	else
+		warn "no /etc/caddy/Caddyfile" "cannot check that $lk_url is fronted; clients open wss://$lk_url"
+	fi
+else
+	warn "LIVEKIT_URL not set in /opt/puca/.env" "SFU tier off; mesh calls only"
+fi
+
 echo
 echo "=== firewall ==="
 if ufw status | grep -q '^Status: active'; then
@@ -229,6 +257,12 @@ if [ -f "$ENVF" ]; then
 	perms="$(stat -c '%a' "$ENVF")"
 	[ "$perms" = "600" ] && pass ".env mode 600" || fail ".env mode $perms" "secrets world-readable"
 	grep -q 'SET_ME' "$ENVF" && fail "unfilled value in .env" || pass "no unfilled values"
+	# Directories Caddy serves and dual-ship.sh uploads into. Their absence is
+	# a 403 on the download site and a mid-loop `cd: no such file` on the
+	# first release, neither of which names the cause.
+	for d in /opt/puca/downloads/mobile /opt/puca/webapp /opt/puca/uploads; do
+		[ -d "$d" ] && pass "$d exists" || fail "$d missing" "Caddy/dual-ship.sh need it (provision.sh creates it)"
+	done
 	budget="$(sed -n 's/^SFU_EGRESS_BUDGET_MBPS=\([0-9]*\)/\1/p' "$ENVF")"
 	[ -n "$budget" ] && pass "SFU egress budget ${budget} Mbps" || warn "SFU_EGRESS_BUDGET_MBPS unset" "falls back to the built-in default"
 else

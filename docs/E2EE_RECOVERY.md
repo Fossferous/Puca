@@ -5,8 +5,8 @@ live since 0.6.x and is what the product runs today (`src/recovery_handlers.rs`,
 `frontend/src/api/auth.ts`). Read it as the design record, not as a proposal —
 the open decisions in §9 were all resolved, and how they landed is recorded
 there. Two deltas from the original draft are called out inline: the password
-wrap is **Argon2id**, not PBKDF2 (§4), and recovery-code **rotation is not
-reachable** in the shipped UI (§8).
+wrap is **Argon2id**, not PBKDF2 (§4), and recovery-code rotation, which
+was not reachable in the UI for a long time, shipped in 0.9.1 (§8).
 **Scope:** let a user who forgot their password reset it **without losing access
 to their encrypted history**, while keeping the server zero-knowledge.
 
@@ -222,14 +222,14 @@ wrap columns. **Same seed, same public key, history preserved.**
 freshly-wrapped blobs; lets users regenerate a lost-but-not-yet-needed code or
 change password losslessly.
 
-> **AS SHIPPED (delta from this draft): recovery-code rotation is NOT
-> reachable.** Changing your password losslessly works — `changePassword` re-wraps
-> the seed. But `/keys/rewrap`, the endpoint that would mint a *new recovery
-> code*, has **no caller in the shipped UI** (`grep '/keys/rewrap' frontend/src`
-> finds only `/keys/rewrap-pw`, the login-time KDF upgrade). So a user who
-> believes their twelve words leaked has no way to replace them. The endpoint is
-> live and gated by a recent-password proof; only the UI is missing. Tracked in
-> the 2026-08-20 audit, §3 (write-up withheld for now — see the README).
+> **AS SHIPPED: recovery-code rotation reached the UI in 0.9.1.** Settings ›
+> My Account › Recovery code proves the current password (seed unwrap locally,
+> then the SRP re-proof with the bearer, as `changePassword` does), mints a new
+> 12-word code, re-wraps the SAME seed under it and POSTs the custody row to the
+> proof-gated `/keys/rewrap` (`regenerateRecoveryCode`, `frontend/src/api/auth.ts`).
+> The old code stops working the instant the write lands. Between 0.6.x and
+> 0.9.0 the endpoint was live with no caller, so a user who believed their
+> twelve words had leaked had no way to replace them; that gap is closed.
 
 ## 9. Open decisions (need your call before implementation)
 
