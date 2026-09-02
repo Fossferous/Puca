@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Provision a fresh Ubuntu 24.04 VPS to run Sovereign. Run as root ON THE NEW
-# BOX. Installs packages, writes coturn/LiveKit/firewall config with this
-# host's addresses substituted in, and creates an empty database.
+# Provision a fresh Ubuntu 24.04 host to run Puca — a brand-new deployment or
+# the target of a migration, it is the same script. Run as root ON THE NEW BOX.
+# Installs packages (Postgres, Caddy from its own repo, coturn, LiveKit, the
+# Rust toolchain), creates the service user, the directory layout Caddy and
+# the ship scripts expect, a least-privilege Postgres role and an empty
+# database, writes coturn/LiveKit/firewall config with this host's addresses
+# substituted in, enables coturn and LiveKit, and writes an .env skeleton.
+# This is the supported path for a fresh self-host: deploy/README.md section 0.
 #
 # It does NOT migrate anything: no data is copied, no DNS is changed, no
-# backend is started. Restoring data is deploy/ops/restore.sh, and only after
-# the soak in deploy/migrate/README.md says this host can carry media at all.
+# backend is started. Restoring data is deploy/ops/restore.sh (a migration),
+# or you build the backend and start the unit (a fresh install) — see
+# deploy/README.md for what comes after this script.
 #
 #   ./provision.sh --public-ip 203.0.113.10 --uplink-mbps 1000
 #   ./provision.sh --public-ip 203.0.113.10 --uplink-mbps 1000 --dry-run
@@ -149,7 +155,12 @@ fi
 # --- Users and directories --------------------------------------------------
 echo "[2/7] service account and directories"
 id puca >/dev/null 2>&1 || run useradd --system --home /opt/puca --shell /usr/sbin/nologin puca
-run mkdir -p /opt/puca/uploads /opt/puca/releases /opt/livekit
+# downloads/ and webapp/ are what Caddy serves (deploy/download-site/,
+# deploy/webapp/) and what dual-ship.sh uploads into; downloads/mobile holds
+# the APKs and OTA bundles. None of the three used to be created here, so the
+# download site 403'd and the first `dual-ship.sh installer` died on
+# `cd: no such file` after building everything.
+run mkdir -p /opt/puca/uploads /opt/puca/releases /opt/puca/downloads/mobile /opt/puca/webapp /opt/livekit
 run chown -R puca:puca /opt/puca
 
 # --- Database ---------------------------------------------------------------
@@ -319,7 +330,9 @@ else
 		echo "DATABASE_URL=postgres://puca:${DB_PASS:-SET_ME}@127.0.0.1/puca"
 		echo "JWT_SECRET=$(openssl rand -hex 32)"
 		echo "RUST_LOG=puca=info,tower_http=warn"
-		echo "DATABASE_MAX_CONNECTIONS=10"
+		# DATABASE_MAX_CONNECTIONS is deliberately NOT written: the code default
+		# (20, src/main.rs) is the one source of truth; this used to pin 10 here
+		# while .env.example said 5 — three values for one setting.
 		echo "APP_URL=https://app.${REALM}"
 		# The desktop (Tauri) and mobile (Capacitor) clients send their own
 		# origins, NOT the web one. Listing only app.<realm> CORS-blocks every
@@ -350,7 +363,47 @@ else
 fi
 
 [ "$DRY_RUN" = 1 ] || cp "$REPO/deploy/puca.service" /etc/systemd/system/puca.service
+
+# Memory ceilings sized to THIS host. The shipped unit says MemoryMax=1G
+# under a comment telling the reader to tune it, and nothing ever did — every
+# install ran with a 1 GB cap regardless of RAM, and hitting it is a cgroup
+# OOM-kill plus a restart that drops every WebSocket. A drop-in survives a
+# unit-file update, which a hand-edited unit does not. 75% / 60% of MemTotal,
+# floored so a tiny host is not capped below what the backend needs to boot.
+MEM_KB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+MEM_MAX_MB=$(( MEM_KB / 1024 * 75 / 100 )); [ "$MEM_MAX_MB" -ge 768 ] || MEM_MAX_MB=768
+MEM_HIGH_MB=$(( MEM_KB / 1024 * 60 / 100 )); [ "$MEM_HIGH_MB" -ge 512 ] || MEM_HIGH_MB=512
+run mkdir -p /etc/systemd/system/puca.service.d
+{
+	echo "# Written by deploy/migrate/provision.sh from this host's MemTotal ($(( MEM_KB / 1024 )) MB)."
+	echo "# Re-run provision, or edit, after a RAM change. Overrides deploy/puca.service."
+	echo "[Service]"
+	echo "MemoryHigh=${MEM_HIGH_MB}M"
+	echo "MemoryMax=${MEM_MAX_MB}M"
+} | write_file /etc/systemd/system/puca.service.d/limits.conf 644
+
 run systemctl daemon-reload
+
+# LiveKit is configured above and .env below names it (LIVEKIT_URL), so the
+# backend WILL mint SFU join tokens for it — but nothing here ever started
+# it: the unit was copied and never enabled, so "configured" and "running"
+# disagreed and every SFU join failed at the WebSocket. Enable it, and prove
+# it answers on its signalling port before calling the box provisioned.
+# (After daemon-reload, or systemd does not know the unit yet.)
+run systemctl enable --now livekit
+if [ "$DRY_RUN" != 1 ]; then
+	lk_ok=0
+	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+		if curl -sf --max-time 2 http://127.0.0.1:7880/ >/dev/null 2>&1; then lk_ok=1; break; fi
+		sleep 1
+	done
+	if [ "$lk_ok" != 1 ]; then
+		echo "livekit did not answer on 127.0.0.1:7880 within 15s — journalctl -u livekit" >&2
+		echo "Not finishing: .env names LIVEKIT_URL, so leaving this box with the SFU down" >&2
+		echo "would hand every client a join token for a server that is not there." >&2
+		exit 1
+	fi
+fi
 
 cat <<EOF
 
@@ -358,14 +411,25 @@ Provisioned. Nothing is serving yet, and no data has moved.
 
 Written:
   /etc/turnserver.conf        listen $LISTEN_IP, $( [ "$BEHIND_NAT" = 1 ] && echo "external-ip set for NAT" || echo "no external-ip (public IP on NIC)" )
-  /opt/livekit/livekit.yaml   use_external_ip: $LK_EXTERNAL
-  /opt/puca/.env         SFU budget $(( UPLINK_MBPS * 60 / 100 )) Mbps, coturn cap $(( CAP_BYTES * 8 / 1000000 )) Mbps
+  /opt/livekit/livekit.yaml   use_external_ip: $LK_EXTERNAL  (unit enabled and answering on :7880)
+  /opt/puca/.env              SFU budget $(( UPLINK_MBPS * 60 / 100 )) Mbps, coturn cap $(( CAP_BYTES * 8 / 1000000 )) Mbps
+  /opt/puca/{uploads,releases,downloads/mobile,webapp}
+  puca.service + limits.conf  MemoryHigh=${MEM_HIGH_MB}M MemoryMax=${MEM_MAX_MB}M (from this host's RAM)
   ufw                         22/80/443 + media ports; postgres/metrics/signalling closed
 
-Next, in order:
+NOT written — Caddy has no site config yet. You need blocks for:
+  chat.$REALM      -> reverse_proxy 127.0.0.1:3000   (deploy/Caddyfile)
+  sfu.$REALM       -> reverse_proxy 127.0.0.1:7880   (deploy/livekit/README.md step 7)
+  download.$REALM  -> /opt/puca/downloads            (deploy/download-site/Caddyfile.snippet)
+  app.$REALM       -> /opt/puca/webapp               (deploy/webapp/README.md)
+and DNS: chat/app/download/sfu to this host; turn.$REALM DNS-only (UDP cannot be proxied).
+
+Next, in order (deploy/README.md has the full path):
   1. node deploy/migrate/udp-sink.mjs        (here, and soak from your machine)
      Do not go further until the soak passes. If this host's DDoS mitigation
      eats sustained UDP, everything after this is wasted work.
   2. deploy/migrate/verify.sh                (here, checks what was configured)
-  3. Only then: DNS, certificates, restore.sh, cutover.
+  3. Then: Caddy + DNS, build and start the backend (fresh install) or
+     deploy/ops/restore.sh + cutover (migration), and the ops scripts
+     (deploy/ops/README.md) for backups and the health check.
 EOF

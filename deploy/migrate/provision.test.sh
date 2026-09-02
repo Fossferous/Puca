@@ -96,6 +96,24 @@ else
 fi
 
 echo
+echo "--- the box it builds is one the rest of deploy/ can use ---"
+# provision.sh cannot run here (root + a fresh box, by design), so these pin
+# the script text for the three gaps that each took a real ship to notice:
+# the download/webapp directories Caddy serves and dual-ship.sh writes into,
+# LiveKit actually being enabled (and only after daemon-reload knows the
+# unit), and the pool size no longer pinned to a third value.
+mk="$(grep -E '^run mkdir -p ' "$SCRIPT" | grep -F '/opt/puca/uploads' || true)"
+check "creates downloads/mobile beside uploads" "$(printf '%s' "$mk" | grep -qF '/opt/puca/downloads/mobile' && echo 1 || echo 0)" "$mk"
+check "creates webapp/ too"                     "$(printf '%s' "$mk" | grep -qF '/opt/puca/webapp' && echo 1 || echo 0)" "$mk"
+reload_line="$(grep -n '^run systemctl daemon-reload' "$SCRIPT" | head -1 | cut -d: -f1)"
+enable_line="$(grep -n '^run systemctl enable --now livekit' "$SCRIPT" | head -1 | cut -d: -f1)"
+check "enables livekit"                          "$([ -n "$enable_line" ] && echo 1 || echo 0)"
+check "AFTER daemon-reload (systemd must know the unit first)" "$([ -n "$enable_line" ] && [ -n "$reload_line" ] && [ "$enable_line" -gt "$reload_line" ] && echo 1 || echo 0)" "reload at ${reload_line:-?}, enable at ${enable_line:-?}"
+check "and probes 127.0.0.1:7880 before finishing" "$(grep -q 'curl -sf --max-time 2 http://127.0.0.1:7880/' "$SCRIPT" && echo 1 || echo 0)"
+check "does not pin DATABASE_MAX_CONNECTIONS (the code default is the one truth)" "$(grep -q 'echo "DATABASE_MAX_CONNECTIONS=' "$SCRIPT" && echo 0 || echo 1)"
+check "writes a memory drop-in sized from MemTotal" "$(grep -q 'puca.service.d/limits.conf' "$SCRIPT" && grep -q 'MemTotal' "$SCRIPT" && echo 1 || echo 0)"
+
+echo
 echo "--- argument handling ---"
 # A real run is impossible off a fresh root box (the guard is deliberate), so
 # this proves the refusal, which is what it can honestly prove.
