@@ -512,3 +512,57 @@ git log --format='%an' | sort | uniq -c | sort -rn
 
 If any of it doesn't say what this document says it says, that is a bug in this document.
 Report it — it is the kind of error that matters most here.
+
+---
+
+## 11. What "delete my account" actually deletes
+
+Deletion is a **tombstone**, not a `DELETE FROM users`. The row survives with
+every identifying and cryptographic field cleared, because messages, tasks and
+moderation records reference it by foreign key and a hard delete would either
+fail or take other people's history with it. Concretely
+(`delete_account`, `src/handlers.rs`), all inside one transaction:
+
+**Cleared on your row.** Username becomes `deleted#<id>`; display name, avatar,
+join/leave sounds, email, public key, both wrapped identity seeds and both KDF
+salts are nulled; the SRP salt and verifier are replaced with fresh RANDOM bytes
+(not zeroes — a zero verifier is forgeable); `deleted_at` is set and
+`token_version` is bumped, which revokes every outstanding JWT. Every live
+socket for the account is hung up after the commit.
+
+**Deleted outright.** Push/device tokens, notification preferences, friends,
+friend requests, blocks, role assignments, server memberships, per-server
+nicknames, email-verification and password-reset tokens, cross-user device
+shares in both directions, and your wrapped channel keys. The role and
+membership rows matter more than they look: leaving them behind would silently
+restore your old grants — an Admin role included — if the account ever rejoined.
+
+**Kept, deliberately.**
+
+- **Your messages and tasks**, as ciphertext attributed to the tombstone. They
+  are other people's conversations too, and the server cannot read them to
+  decide otherwise.
+- **Your enrolled devices**, REVOKED rather than deleted, because device shares
+  reference those rows and "a revoked device stays revoked" is what stops a
+  machine that still holds its Ed25519 key from minting fresh account tokens.
+  The user-chosen machine NAME and the encrypted LAN details are wiped; the
+  public keys and platform remain.
+- **Moderation records** — audit-log and report rows — with the actor
+  anonymised rather than removed. Erasing them on request would let an account
+  delete the record of what it did.
+
+**Kept, and this is the open question: your uploaded files.** Avatars, server
+icons and every encrypted attachment you posted stay on the operator's disk
+indefinitely. This is not an oversight that a one-line `DELETE` fixes. The file
+id lives *inside* end-to-end-encrypted message content, so the server cannot
+tell which blobs are still referenced by conversations other people can still
+read. Deleting them is therefore irreversible AND cross-user: an attachment you
+posted into a shared channel would disappear for everyone who could still see
+it, with no way to warn them in advance.
+
+If that changes, it needs to change as a product decision with three parts: the
+deletion confirmation must say what happens to files you shared, there should be
+a grace period (mark for deletion, purge after N days) so an accidental deletion
+is recoverable, and the release notes have to say so. Until then, the honest
+statement is the one above: **your account becomes unusable and unidentifiable,
+your files do not go away.**
