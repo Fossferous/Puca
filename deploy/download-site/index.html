@@ -137,6 +137,18 @@
       <b>More info &rarr; Run anyway</b>. On Android, allow install from your browser
       and accept the app's own signature.<br>
       <br>
+      <b>Check the file before you run it.</b> The Windows installer is not
+      code-signed; instead every file on this page is listed with its SHA-256 in
+      <a class="link" href="/SHA256SUMS.txt">SHA256SUMS.txt</a>. On Windows, open a
+      command prompt in your Downloads folder and run
+      <code>certutil -hashfile Puca-Setup.exe SHA256</code>; on Linux or Android,
+      <code>sha256sum &lt;file&gt;</code>. The hash printed must match the line for
+      that file. If it does not, the download is not what this server published
+      &mdash; do not run it.<br>
+      <br>
+      What changed in each version: <a class="link" href="/CHANGELOG.md">release notes</a>.
+      What this software does and does not collect: <a class="link" href="/PRIVACY.md">privacy statement</a>.<br>
+      <br>
       <span data-variant-panel="full" class="shown" style="opacity:.8">Antivirus may also quarantine the remote-access
       components (a generic detection such as <b>Trojan:Win32/Bearfoos.B!ml</b>).
       It's a false positive, but an understandable one: those files capture the
