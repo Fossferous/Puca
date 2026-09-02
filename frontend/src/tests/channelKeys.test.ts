@@ -24,6 +24,9 @@ const fake = {
     },
 };
 
+// The rig IS user 1 (fake.members lists user 1 with `me`'s key): a v3 wrap is
+// bound to the recipient's id, and the unwrap side takes ours from the token.
+vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), currentUserIdFromToken: () => 1 }));
 vi.mock('../api/client', () => ({
     apiClient: {
         get: vi.fn(async (url: string) => {
