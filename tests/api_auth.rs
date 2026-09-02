@@ -258,3 +258,64 @@ fn the_default_server_handler_is_deleted() {
     // Positive control: the file is the real one.
     assert!(handlers.contains("pub async fn create_server"));
 }
+
+/// L8-DATA-2. The `sessions` table must have NO writer and NO reader.
+///
+/// It stored the raw SRP session key — one live cryptographic secret per
+/// successful login — in a BYTEA column, forever, justified by a comment reading
+/// "Also store session in DB for reference". Nothing read it: authentication is
+/// JWT-based, the `session_id` never left the login handler, and `expires_at`
+/// was written but never consulted. It also survived account deletion, since the
+/// tombstone is an UPDATE and the table's ON DELETE CASCADE never fires.
+///
+/// This is a source sweep rather than a DB assertion because the claim being
+/// pinned is "no code touches this table", which is a property of the tree. The
+/// files read are all DIFFERENT from the file this assertion lives in.
+#[test]
+fn nothing_reads_or_writes_the_sessions_table() {
+    // Every module that ever mentioned it, plus the login path itself.
+    let sources: [(&str, &str); 4] = [
+        ("src/handlers.rs", include_str!("../src/handlers.rs")),
+        ("src/auth.rs", include_str!("../src/auth.rs")),
+        ("src/ws.rs", include_str!("../src/ws.rs")),
+        ("src/device_token.rs", include_str!("../src/device_token.rs")),
+    ];
+    // Strip comments first: this very finding is DESCRIBED in a comment in
+    // handlers.rs, quoting the SQL it removed, and a sweep that cannot tell code
+    // from prose would fire on the explanation of its own fix. Rust SQL literals
+    // never contain `//`.
+    let code_only = |src: &str| -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("
+")
+    };
+    for (name, src) in sources {
+        let src = code_only(src);
+        for forbidden in [
+            "INSERT INTO sessions",
+            "FROM sessions",
+            "UPDATE sessions",
+            "DELETE FROM sessions",
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "{name} still runs `{forbidden}` — the table is meant to have no consumer"
+            );
+        }
+    }
+
+    // Positive control: the reads really are the login path, so an empty or
+    // wrong include cannot make the loop above pass vacuously.
+    let handlers = sources[0].1;
+    assert!(
+        handlers.contains("LoginStep2Response"),
+        "include_str! did not read the real login handler"
+    );
+    assert!(
+        handlers.contains("INSERT INTO login_attempts")
+            || handlers.contains("DELETE FROM login_attempts"),
+        "the login path should still be touching login_attempts"
+    );
+}

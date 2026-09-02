@@ -205,5 +205,24 @@ console.log(`\n=== the SAME calls SUCCEED right after a real SRP login ===`);
     check('a second rewrite in the same window is refused (proof consumed)', again.status === 401, `status=${again.status}`);
 }
 
+console.log(`\n=== L8-DATA-2: a successful login stores NO session-key row ===`);
+{
+    // login_step_2 used to INSERT the raw SRP session key into `sessions`
+    // (BYTEA, never read, never pruned, surviving account deletion) on every
+    // successful login. The write is gone; the login response must be exactly
+    // what it was.
+    const before = psql1(`SELECT count(*) FROM sessions`);
+    const u = await registerUser(`b10_sess_${RUN}`, 'CorrectHorse1!');
+    const token = await loginUser(u.username, 'CorrectHorse1!');
+    check('SRP login still succeeds and returns a token',
+        typeof token === 'string' && token.split('.').length === 3, `token=${String(token).slice(0, 24)}`);
+    const after = psql1(`SELECT count(*) FROM sessions`);
+    check('no sessions row was written by the login', after === before, `before=${before} after=${after}`);
+
+    // Positive control: the token really authenticates, so "no row written"
+    // cannot be passing because the login silently failed.
+    const me = await api('GET', '/servers', null, token);
+    check('the token from that login is accepted', me.status === 200, `status=${me.status}`);
+}
 console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
