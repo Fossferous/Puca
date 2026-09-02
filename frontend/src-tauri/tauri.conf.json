@@ -18,7 +18,7 @@
         "height": 800,
         "resizable": true,
         "fullscreen": false,
-        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI"
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI --disable-background-timer-throttling --disable-renderer-backgrounding"
       }
     ],
     "security": {
