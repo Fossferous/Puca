@@ -399,6 +399,12 @@ pub async fn revoke_device(
     // The sessions this device PROVED (DeviceAttest / the device-token mint)
     // die with it: their JWTs are refused by the middleware and the WS upgrade
     // from here on, not just their currently open sockets.
+    // Reach: sessions the device PROVED (DeviceAttest binds sid -> device). A
+    // token minted before 0.9.0 carries no sid and so no row; it is not
+    // revoked here, but it either renews (which mints a sid, revocable from
+    // then on) or expires on its own clock within a day — a bounded residual
+    // that a token_version bump would close only by signing out every OTHER
+    // device of the user, which is the wrong trade for a lost phone.
     sqlx::query("UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL")
         .bind(user_id)
         .bind(&device_id)

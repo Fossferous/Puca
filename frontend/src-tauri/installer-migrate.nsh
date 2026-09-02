@@ -76,6 +76,7 @@
 ; macro BODY expands where the macro is inserted (the generated .nsi, which
 ; lives under target/), not where the macro was written.
 !define PUCA_HOOKS_DIR "${__FILEDIR__}"
+!include "FileFunc.nsh"
 
 !macro MigrateRenamedInstall OLD_NAME OLD_BINARY
   ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${OLD_NAME}" "UninstallString"
@@ -91,6 +92,22 @@
     ; Strip the wrapping quotes Tauri's own installer writes around this value.
     StrCpy $R1 $R1 "" 1
     StrCpy $R1 $R1 -1
+    ${If} $R1 == ""
+      ; No InstallLocation (an entry written by a very old build). Derive the
+      ; folder from the uninstaller's own path rather than run it with an
+      ; EMPTY _?= — that makes the uninstaller delete relative to whatever
+      ; directory it happens to start in.
+      StrCpy $R3 $R0
+      StrCpy $R4 $R3 1
+      ${If} $R4 == '"'
+        StrCpy $R3 $R3 "" 1
+        StrCpy $R3 $R3 -1
+      ${EndIf}
+      ${GetParent} "$R3" $R1
+    ${EndIf}
+    ${If} $R1 == ""
+      DetailPrint "Could not determine where '${OLD_NAME}' is installed; leaving it in place."
+    ${Else}
 
     ; The OLD install's main binary may still be running (e.g. the tray app
     ; kept alive for background notifications -- see CLAUDE.md). A locked file
@@ -107,6 +124,7 @@
     !endif
 
     ExecWait '$R0 /S _?=$R1' $R2
+    ${EndIf}
     ; Belt and braces: the uninstaller above already does this, but if an
     ; older build's uninstaller predates that logic, or the run above failed
     ; partway, a stale Run value would try to launch a now-deleted exe on
