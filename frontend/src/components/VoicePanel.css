@@ -27,6 +27,27 @@
     cursor: not-allowed;
 }
 
+/* "This browser cannot join encrypted" — visible before Join, not a tooltip.
+   Same palette as the red E2EE badge so it reads as the same subject. */
+.voice-e2ee-blocked {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: #ffc4c4;
+    background: rgba(191, 60, 60, 0.15);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.voice-e2ee-blocked-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: 16px;
+    margin-top: 1px;
+}
+
 /* Connection Info */
 .voice-connection-info {
     padding: 8px 10px;
