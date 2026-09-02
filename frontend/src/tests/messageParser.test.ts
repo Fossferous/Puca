@@ -159,4 +159,41 @@ describe('link scheme safety (H7)', () => {
         expect(isSafeUrl('sovereign-enc:abc?k=key&m=image%2Fpng')).toBe(true);
         expect(isSafeUrl('/relative/path')).toBe(true); // scheme-less → same-origin
     });
+
+    /**
+     * `//evil.com/x` has NO scheme, so the scheme allowlist never sees it — but
+     * the browser resolves it against the page's own scheme and loads it
+     * cross-origin. The old comment on that branch claimed scheme-less meant
+     * same-origin; for a protocol-relative authority that is simply false, and
+     * it made `[x](//evil.com)` a live target=_blank anchor and
+     * `![x](//evil.com/a.png)` a remote image request.
+     */
+    it('refuses a protocol-relative authority, which is NOT same-origin', () => {
+        expect(isSafeUrl('//evil.com')).toBe(false);
+        expect(isSafeUrl('//evil.com/a.png')).toBe(false);
+        // The control-character skip must not smuggle one past either.
+        expect(isSafeUrl('\t//evil.com')).toBe(false);
+        expect(isSafeUrl('\n\r  //evil.com')).toBe(false);
+        // A scheme-relative URL is still refused when it carries credentials.
+        expect(isSafeUrl('//user:pw@evil.com/x')).toBe(false);
+    });
+
+    it('still allows genuinely relative hrefs (the regression this must not cause)', () => {
+        expect(isSafeUrl('/x')).toBe(true);
+        expect(isSafeUrl('x.png')).toBe(true);
+        expect(isSafeUrl('./a/b')).toBe(true);
+        expect(isSafeUrl('../up')).toBe(true);
+        expect(isSafeUrl('#anchor')).toBe(true);
+        expect(isSafeUrl('?q=1')).toBe(true);
+        expect(isSafeUrl('')).toBe(true);
+    });
+
+    it('a protocol-relative link or image degrades to plain text', () => {
+        const link = parseMessage('[x](//evil.com)');
+        expect(link.some((n) => n.type === 'link')).toBe(false);
+        expect(link).toEqual([{ type: 'text', value: 'x' }]);
+        const img = parseMessage('![x](//evil.com/a.png)');
+        expect(img.some((n) => n.type === 'image')).toBe(false);
+        expect(JSON.stringify(img)).not.toContain('evil.com');
+    });
 });

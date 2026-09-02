@@ -37,8 +37,22 @@ function fromB64url(s: string): Uint8Array {
     return out;
 }
 
+/**
+ * True when `href` starts with the attachment scheme, comparing the SCHEME
+ * case-insensitively.
+ *
+ * URL schemes are case-insensitive and `utils/messageParser.ts`'s `isSafeUrl`
+ * lowercases before testing its allowlist. A case-SENSITIVE test here therefore
+ * used to let `SOVEREIGN-ENC:id?k=KEY` be judged safe, skip `EncryptedAttachment`
+ * entirely, and be emitted as a live `<a href>`/`<img src>` carrying the per-file
+ * AES key in the DOM. One canonicalisation, used by every recogniser.
+ */
+export function encPrefixMatch(href: string): boolean {
+    return href.slice(0, PREFIX.length).toLowerCase() === PREFIX;
+}
+
 export function isEncAttachment(href: string): boolean {
-    return href.startsWith(PREFIX);
+    return encPrefixMatch(href);
 }
 
 /**
@@ -79,7 +93,7 @@ export function videoMimeFor(name: string, mime: string): string | null {
 }
 
 export function parseEncAttachment(href: string): { id: string; key: string; mime: string; cap?: string } | null {
-    if (!href.startsWith(PREFIX)) return null;
+    if (!encPrefixMatch(href)) return null;
     const [id, query = ''] = href.slice(PREFIX.length).split('?');
     const params = new URLSearchParams(query);
     const key = params.get('k');
@@ -135,8 +149,31 @@ export async function encryptAndUpload(file: File): Promise<string> {
     return `${mime.startsWith('image/') ? '!' : ''}[${name}](${href})`;
 }
 
-// Decrypted blob URLs are cached by file id so an attachment shown in multiple
-// places decrypts once. (Bounded by the 25 MB upload cap.)
+// Decrypted blob URLs are cached so an attachment shown in multiple places
+// decrypts once.
+//
+// The key is `id:key:type`, NOT the bare file id, and that matters for
+// correctness as well as freshness. Keyed on the id alone, a cache hit skipped
+// both the fetch and `crypto.subtle.decrypt`, so the AES key stopped being
+// verified: anyone who learned a file id could post
+// `![x](sovereign-enc:<id>?k=<garbage>&m=image/png)` and, in any session that
+// had already opened that file, the real plaintext rendered inside the
+// attacker's message under their chosen name and MIME. The stored Blob type was
+// likewise frozen by whichever ref decrypted first, so a later ref with a
+// different `m=` got a URL whose type contradicted how the renderer treated it.
+// Everything that determines the bytes and their type is in the key.
+//
+// STILL UNBOUNDED, deliberately, and this is the second thing to know about it.
+// An LRU here is not a local change: evicting an entry is only worth anything
+// if the object URL is revoked with it (an un-revoked blob: URL pins its bytes
+// for the life of the document whether or not a Map still names it), and
+// revoking breaks a URL that is already live. `EncryptedAttachment`
+// (components/MessageContent.tsx) puts the URL in component state and only
+// re-derives it when `href` or its retry counter changes — so a revoked URL is
+// a permanently broken image in a row the user can still see, with no path back
+// short of a remount. Bounding this needs a consumer that can notice a dead URL
+// and ask again; until then the cache is cleared on logout (clearBlobCache) and
+// on reload, which is what it has always relied on.
 const blobCache = new Map<string, string>();
 
 /** Fetch + decrypt an encrypted attachment, returning an object URL for the plaintext. */
@@ -169,9 +206,10 @@ export function safeBlobType(mime: string): string {
 const inflight = new Map<string, Promise<string>>();
 
 export async function decryptToBlobUrl(id: string, keyB64url: string, mime: string, cap?: string): Promise<string> {
-    const cached = blobCache.get(id);
+    const cacheKey = `${id}:${keyB64url}:${safeBlobType(mime)}`;
+    const cached = blobCache.get(cacheKey);
     if (cached) return cached;
-    const pending = inflight.get(id);
+    const pending = inflight.get(cacheKey);
     if (pending) return pending;
     const p = (async () => {
         // /files is authenticated now — a bare fetch here 401s and every
@@ -192,14 +230,14 @@ export async function decryptToBlobUrl(id: string, keyB64url: string, mime: stri
         const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
         const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
         const url = URL.createObjectURL(new Blob([pt], { type: safeBlobType(mime) }));
-        blobCache.set(id, url);
+        blobCache.set(cacheKey, url);
         return url;
     })();
-    inflight.set(id, p);
+    inflight.set(cacheKey, p);
     try {
         return await p;
     } finally {
-        inflight.delete(id);
+        inflight.delete(cacheKey);
     }
 }
 

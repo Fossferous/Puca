@@ -21,6 +21,7 @@
  */
 import { API_BASE_URL } from './config';
 import { getToken } from './auth';
+import { safeBlobType } from './attachments';
 
 /** Resolved object URLs, keyed by file id. */
 const cache = new Map<string, string>();
@@ -73,7 +74,18 @@ export function fetchFileUrl(fileId: string): Promise<string | null> {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (!res.ok) return null;
-            const url = URL.createObjectURL(await res.blob());
+            // Re-type the blob before it becomes an object URL. `res.blob()`
+            // inherits the response Content-Type, and that value is chosen by
+            // whoever uploaded the file — `src/upload_handlers.rs` stores the
+            // multipart part's content_type verbatim and echoes it back. A
+            // `blob:` document inherits THIS app's origin, so a `text/html`
+            // avatar is one careless consumer (an <a href> or window.open)
+            // away from script execution beside the JWT and the E2EE seed.
+            // `safeBlobType` is the same normalisation the decrypted-attachment
+            // path applies; every type these callers actually render survives
+            // it unchanged.
+            const raw = await res.blob();
+            const url = URL.createObjectURL(new Blob([raw], { type: safeBlobType(raw.type) }));
             remember(fileId, url);
             return url;
         } catch {
