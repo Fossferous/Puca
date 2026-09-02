@@ -67,17 +67,17 @@ function decodePub(encoded) {
     if (!encoded || !encoded.startsWith(PUBKEY_PREFIX)) return null;
     try { const b = fromB64(encoded.slice(PUBKEY_PREFIX.length)); return b.length === 32 ? b : null; } catch { return null; }
 }
-async function aesEncrypt(key, plaintext) {
+async function aesEncrypt(key, plaintext, aad) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const k = await crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt']);
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, enc.encode(plaintext)));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, ...(aad ? { additionalData: aad } : {}) }, k, enc.encode(plaintext)));
     const out = new Uint8Array(iv.length + ct.length); out.set(iv); out.set(ct, iv.length);
     return toB64(out);
 }
-async function aesDecrypt(key, b64) {
+async function aesDecrypt(key, b64, aad) {
     const raw = fromB64(b64); const iv = raw.slice(0, 12); const ct = raw.slice(12);
     const k = await crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['decrypt']);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, k, ct);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, ...(aad ? { additionalData: aad } : {}) }, k, ct);
     return new TextDecoder().decode(pt);
 }
 const deriveSym = (shared, info) => hkdf(sha256, shared, undefined, info, 32);
@@ -85,14 +85,15 @@ const deriveSym = (shared, info) => hkdf(sha256, shared, undefined, info, 32);
 function makeIdentity(seed) {
     return { privateKey: seed, publicKey: x25519.getPublicKey(seed), publicKeyEncoded: encodePub(x25519.getPublicKey(seed)) };
 }
-async function encryptDM(identity, recipientPubEnc, plaintext) {
+// `aad` present = a v3 (context-bound) envelope, exactly as api/e2ee.ts writes since 0.8.136.
+async function encryptDM(identity, recipientPubEnc, plaintext, aad) {
     const pub = decodePub(recipientPubEnc); if (!pub) return null;
     const key = deriveSym(x25519.getSharedSecret(identity.privateKey, pub), HKDF_DM_INFO);
-    return { v: 2, t: 'dm', ct: await aesEncrypt(key, plaintext) };
+    return { v: aad ? 3 : 2, t: 'dm', ct: await aesEncrypt(key, plaintext, aad) };
 }
-async function decryptDM(identity, senderPubEnc, env2) {
+async function decryptDM(identity, senderPubEnc, env2, aad) {
     const pub = decodePub(senderPubEnc); if (!pub) return null;
-    try { const key = deriveSym(x25519.getSharedSecret(identity.privateKey, pub), HKDF_DM_INFO); return await aesDecrypt(key, env2.ct); } catch { return null; }
+    try { const key = deriveSym(x25519.getSharedSecret(identity.privateKey, pub), HKDF_DM_INFO); return await aesDecrypt(key, env2.ct, aad); } catch { return null; }
 }
 const generateChannelKey = () => crypto.getRandomValues(new Uint8Array(32));
 async function wrapChannelKeyForMembers(identity, ck, members) {
@@ -258,6 +259,21 @@ async function main() {
         // Third party C cannot decrypt (wrong key pair)
         const cDec = await decryptDM(C.identity, aPub, JSON.parse(bLast.content));
         check('DM/third-party C cannot decrypt (returns null)', cDec === null);
+
+        // --- v3 DM (what the app writes since 0.8.136): direction-bound --------
+        {
+            const dmAad = (from, to) => enc.encode(`puca/v3/dm/${from}/${to}`);
+            const PLAIN_V3 = `SECRET-DM-V3-${RUN}-` + Math.random().toString(36).slice(2);
+            const env3 = await encryptDM(A.identity, bPub, PLAIN_V3, dmAad(A.id, B.id));
+            await apiFetch('POST', `/dms/${convId}/messages`, { content: serialize(env3) }, A.token);
+            const rows = await apiFetch('GET', `/dms/${convId}/messages`, null, B.token);
+            const row = rows.find(m => typeof m.content === 'string' && m.content.includes('"v":3'));
+            check('v3-dm/server stores the v3 envelope verbatim under its sender', !!row && row.sender_id === A.id && !row.content.includes(PLAIN_V3));
+            const got = row ? JSON.parse(row.content) : null;
+            check('v3-dm/recipient B opens it under the row\'s own sender -> me direction', !!got && (await decryptDM(B.identity, aPub, got, dmAad(row.sender_id, B.id))) === PLAIN_V3);
+            check('v3-dm/the same bytes FAIL with the direction flipped (sender_id re-attribution)', !!got && (await decryptDM(B.identity, aPub, got, dmAad(B.id, A.id))) === null);
+            check('v3-dm/the same bytes FAIL with no context at all (a v2 reader)', !!got && (await decryptDM(B.identity, aPub, got)) === null);
+        }
         // Tamper rejection
         const tampered = JSON.parse(bLast.content); const raw = fromB64(tampered.ct); raw[raw.length - 1] ^= 0xff; tampered.ct = toB64(raw);
         const tDec = await decryptDM(B.identity, aPub, tampered);
@@ -335,6 +351,39 @@ async function main() {
             check('v3/the same bytes FAIL under another sender (re-attribution)', !!got && (await openV3(bCk, got, aad('chan-msg', channelId, 1, B.id))) === null);
             check('v3/the same bytes FAIL under another channel', !!got && (await openV3(bCk, got, aad('chan-msg', channelId + 1, 1, A.id))) === null);
             check('v3/the same bytes FAIL under another epoch label', !!got && (await openV3(bCk, got, aad('chan-msg', channelId, 2, A.id))) === null);
+        }
+
+        // --- the server refuses an envelope-version DOWNGRADE on edit ---------
+        // A client older than the reader renders a v3 body as raw JSON and, on
+        // edit, would re-seal that JSON under v2 over the real ciphertext. The
+        // server (src/envelope_version.rs) turns that write away with 409.
+        {
+            const aad = (kind, ch, epoch, sender) => enc.encode(`puca/v3/${kind}/${ch}/${epoch}/${sender}`);
+            const sealV3 = async (ck, epoch, pt, ad) => {
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const k = await crypto.subtle.importKey('raw', ck, 'AES-GCM', false, ['encrypt']);
+                const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: ad }, k, enc.encode(pt)));
+                const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
+                return { v: 3, t: 'ch', epoch, ct: toB64(out) };
+            };
+            const status = async (method, path, body, token) => { try { await apiFetch(method, path, body, token); return 200; } catch (e) { const m = /\u2192 (\d{3})/.exec(String(e.message)); return m ? Number(m[1]) : -1; } };
+            const rows = await apiFetch('GET', `/channels/${channelId}/messages`, null, A.token);
+            const mine = rows.find(m => typeof m.content === 'string' && m.content.includes('"v":3') && m.user_id === A.id);
+            const v2Body = serialize(await encryptChannelMessage(ckEpoch1, 1, 'stale client re-seal'));
+            const v3Body = serialize(await sealV3(ckEpoch1, 1, 'fresh client edit', aad('chan-msg', channelId, 1, A.id)));
+            check('guard/message: replacing a v3 body with a v2 body is refused (409)', !!mine && (await status('PATCH', `/channels/${channelId}/messages/${mine.id}`, { content: v2Body }, A.token)) === 409);
+            check('guard/message: replacing a v3 body with plaintext is refused (409)', !!mine && (await status('PATCH', `/channels/${channelId}/messages/${mine.id}`, { content: 'raw text' }, A.token)) === 409);
+            check('guard/message: a v3 -> v3 edit still lands (200)', !!mine && (await status('PATCH', `/channels/${channelId}/messages/${mine.id}`, { content: v3Body }, A.token)) === 200);
+            const taskV3 = serialize(await sealV3(ckEpoch1, 1, 'buy milk', aad('chan-task', channelId, 1, A.id)));
+            const task = await apiFetch('POST', `/channels/${channelId}/tasks`, { description: taskV3, parent_id: null }, A.token);
+            const taskV2 = serialize(await encryptChannelMessage(ckEpoch1, 1, 'stale client re-seal'));
+            check('guard/task: replacing a v3 description with a v2 one is refused (409)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV2 }, A.token)) === 409);
+            check('guard/task: replacing it with plaintext is refused (409)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: 'raw text' }, A.token)) === 409);
+            check('guard/task: a v3 -> v3 edit still lands (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { description: taskV3 }, A.token)) === 200);
+            check('guard/task: completing without touching the text is untouched by the guard (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { is_completed: true }, A.token)) === 200);
+            check('guard/task: clearing the attachment sidecar is a deletion, not a downgrade (200)', !!task && (await status('PATCH', `/tasks/${task.id}`, { attachments: '' }, A.token)) === 200);
+            const stored = sql(`SELECT description FROM channel_tasks WHERE id=${task ? task.id : -1};`);
+            check('guard/task: the stored body is still the v3 one', stored.includes('"v":3') && !stored.includes('raw text'));
         }
 
         // --- Key PROVENANCE (migration 037) -------------------------------

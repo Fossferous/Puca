@@ -22,7 +22,7 @@ import kat from './fixtures/e2ee-wire-format-kat.json';
 // context, independent of whether a decrypt round-trip would have caught it.
 vi.mock('../api/e2ee', async (orig) => {
     const m = await orig<typeof import('../api/e2ee')>();
-    return { ...m, encryptChannelMessage: vi.fn(m.encryptChannelMessage) };
+    return { ...m, encryptChannelMessage: vi.fn(m.encryptChannelMessage), encryptDM: vi.fn(m.encryptDM) };
 });
 vi.mock('../api/keyVerification', () => ({
     // The DM wrapper resolves the partner's key through the pin path; user 8 is A.
@@ -233,6 +233,11 @@ describe('the DM wrapper (dms.decryptDMContent) with the real primitives', () =>
             expect(await decryptDMContent(JSON.stringify({ v: 3, t: 'self', ct: 'AAAA' }), 41, 41)).toBe(ENC_UNSUPPORTED_VERSION);
             const { encryptDMContent } = await import('../api/dms');
             await expect(encryptDMContent(ENC_CONTEXT_MISMATCH, 8)).rejects.toThrow(/can't be edited or re-sent/);
+            // The send path seals under me -> partner, the direction the reader recomputes.
+            const wire = await encryptDMContent('hi there', 8);
+            expect(vi.mocked(encryptDM)).toHaveBeenLastCalledWith(expect.anything(), A().publicKeyEncoded, 'hi there', { senderId: 41, recipientId: 8 });
+            expect((JSON.parse(wire) as Envelope).v).toBe(3);
+            expect(await decryptDMContent(wire, 8, 41)).toBe('hi there'); // my own echo, read back
         } finally {
             clearActiveIdentity();
         }

@@ -311,9 +311,12 @@ async function aesDecrypt(rawKey: Uint8Array, blobB64: string, aad?: Uint8Array)
  *
  *  ON since 0.8.136. 0.8.135 shipped the reader alone (this was false) so
  *  that every client could READ v3 before any client WROTE it. A client that
- *  predates 0.8.135 shows a v3 body as ENC_UNSUPPORTED_VERSION until it
- *  updates — nothing is lost, the ciphertext is intact and opens once it
- *  does. The reader accepts both, forever. */
+ *  predates 0.8.135 has no notion of v3: its parser returns null, so it
+ *  renders a v3 body as the raw envelope JSON with the "Not encrypted"
+ *  badge until it updates. It cannot overwrite it: since 0.8.136 the server
+ *  refuses an edit that would replace a body with an OLDER envelope version
+ *  (src/envelope_version.rs), so the ciphertext stays intact and opens once
+ *  the client updates. The reader accepts both, forever. */
 export const EMIT_ENVELOPE_V3 = true;
 
 const AAD_PREFIX = 'puca/v3/';
@@ -382,9 +385,9 @@ export async function encryptDM(
     return sealDmEnvelope(identity, recipientPublicKeyEncoded, plaintext, ctx, EMIT_ENVELOPE_V3 ? 3 : 2);
 }
 
-/** The DM seal with an explicit version — tests reach v3 through this while
- *  EMIT_ENVELOPE_V3 is off. `ctx` is required even for v2 so every send
- *  site is already threaded when the flip comes. */
+/** The DM seal with an explicit version. The default producer follows
+ *  EMIT_ENVELOPE_V3; tests reach the frozen v2 format (and v3 explicitly)
+ *  through this. `ctx` is required for both versions. */
 export async function sealDmEnvelope(
     identity: Identity,
     recipientPublicKeyEncoded: string,

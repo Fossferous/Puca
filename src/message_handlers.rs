@@ -530,6 +530,11 @@ pub async fn edit_message(
 
     match msg {
         Some((user_id, old_content)) if user_id == claims.sub as i32 => {
+            // A stale client re-sealing the raw envelope JSON it could not read
+            // must not replace the real ciphertext — see envelope_version.rs.
+            if crate::envelope_version::edit_is_downgrade(&old_content, &payload.content) {
+                return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+            }
             // Save old content to edit history
             let _ =
                 sqlx::query("INSERT INTO message_edits (message_id, old_content) VALUES ($1, $2)")
