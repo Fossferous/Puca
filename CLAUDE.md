@@ -206,10 +206,15 @@ them against a single host as the normal path.
    download host — it prints the endpoint it baked in, every time, because a
    build against the tracked placeholder silently never finds an update. The
    Tauri signing key is **not** loose in the keys directory — it is inside the
-   `key-backups/*.tar` bundle as `tauri-updater.key` + `.password`. Extract it, export
+   `key-backups/` bundles, and since 2026-09-02 there are **TWO**, deliberately:
+   `puca-keys-<ts>.tar` holds `tauri-updater.key`, `puca-key-passwords-<ts>.tar`
+   holds its `.password`. A key and its passphrase in one archive is a key with
+   no passphrase, so `backup-keys.sh` splits them and refuses to write a bundle
+   that carries both. Extract from both, export
    `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, build,
-   then delete the extracted copy. Without it `npm run tauri:build` fails
-   (`createUpdaterArtifacts: true`).
+   then delete the extracted copies. Without it `npm run tauri:build` fails
+   (`createUpdaterArtifacts: true`). Bundles made before that date are single
+   tars and still restore fine — nothing reads them programmatically.
 3. Webapp: build locally and ship as a tarball — **there is no npm on the
    container**.
 4. Mobile OTA: every bundle must go through `deploy/mobile/encrypt-bundle.mjs`.
@@ -291,6 +296,20 @@ modern JDK, which Git Bash does not default to:
 JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" ./gradlew testDebugUnitTest
 ```
 
+**The root `build.rs` is what keeps migrations from going stale in a warm
+`target/`.** `src/main.rs` calls `sqlx::migrate!("./migrations")`, which reads
+that directory at COMPILE time; Cargo cannot see a proc macro's file reads, so
+a rebuild reused an object file whose embedded migration set stopped wherever
+it last compiled. Measured here on 2026-09-02: with no build script, adding a
+migration and running `cargo build` finished in 0.49s and the new file was NOT
+in the binary; with `build.rs` the same step recompiles (~16s) and it IS. The
+server would have booted, reported the migrations it knew about as applied, and
+failed at runtime on every query naming a missing column. This replaces the old
+hand-bumped `// Force rebuild for migrations` comment at the top of `main.rs`,
+which had gone three migrations stale before anyone noticed. Do not delete
+`build.rs`, and do not add a `rerun-if-changed` for a path you have not tested —
+naming any path opts out of Cargo's "rerun on any change" default.
+
 **`cargo test` at the repo root covers ONLY the root package.** The root
 `Cargo.toml` declares no `[workspace]`, so nothing under `crates/` (the whole
 capture/input/encode/agent layer, `unsafe` included) and none of the
@@ -334,6 +353,19 @@ React #310 on the first click of "Edit Profile" and the root ErrorBoundary
 replaced the ENTIRE app with the crash screen — every user, every platform,
 recoverable only by reloading (which drops any live call). Only the review
 caught it.
+
+`npm run lint` is four checks chained, not just eslint: eslint, then
+`scripts/check-no-ui-emoji.mjs` (no emoji in chrome — docs/ICON_LANGUAGE.md),
+then `scripts/check-source-hygiene.mjs`, then `../scripts/check-docs-links.mjs`.
+The last two were added 2026-09-02 and each exists because of something that
+shipped: a user-facing diagnostic told people to install the APK from
+`download.example.com`, a `TODO: Replace with your production server URL` sat
+above the line that already did it, and `docs/GETTING_STARTED.md` pointed every
+<!-- docs-lint:allow-missing — naming the reference that was REMOVED is the point -->
+new self-hoster at `.agent/HANDOFF.md` — a directory scrubbed for the public
+repo. All three are invisible to a type checker and to every test. Both new
+checks take an inline escape hatch (`hygiene-lint:allow-placeholder-domain — reason`,
+a `TODO(owner)` tag) and both REQUIRE a reason.
 
 **`npm run lint` now EXITS 0. Treat any non-zero exit as a failed gate.**
 
@@ -427,9 +459,15 @@ Never commit `.env`, `*.key`, `*.pem`, keystores or `google-services.json` —
 `.gitignore` covers these, and nothing sensitive is currently tracked. Keys live
 in your keys directory (outside this repo) and are backed up off-machine.
 
-Losing that directory's `key-backups/*.tar` bundle would permanently break
+Losing that directory's `key-backups/*.tar` bundles would permanently break
 desktop auto-update and the mobile OTA: no validly signed release could ever be
 produced again and every user would need a manual reinstall.
+
+`backup-keys.sh` writes **two** bundles — key material, and the passphrases that
+unlock it — and they are only a real separation if you store them in DIFFERENT
+places. Both in one vault is the single-artifact backup the split replaced.
+`deploy/ops/backup-keys.test.sh` exercises the whole script against fixture
+files, so it is safe to run any time.
 
 ---
 
