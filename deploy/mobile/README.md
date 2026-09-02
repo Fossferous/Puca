@@ -59,14 +59,22 @@ validly signed.** Therefore:
   bundles** — everyone must install the **new signed APK once** to make the
   transition. After that, OTA continues seamlessly.
 
-## Publish steps (replaces the plain-zip step in HANDOVER §5.3)
+## Publish steps
+
+`deploy/ops/dual-ship.sh mobile <enc.zip> <version> <sessionKey> <checksum>`
+uploads the bundle to every host, writes the manifest where the backend reads
+it, and verifies through the endpoint. The bundle it uploads is renamed to
+`<MOBILE_BUNDLE_PREFIX>-<version>.enc.zip` from `deploy/ops/hosts.conf`
+(`puca-web` by default), so the local filename below does not matter — but
+if you publish by hand, use that same prefix in the manifest URL or the two
+paths produce different names for the same release.
 
 ```bash
 cd frontend && npm run build
-( cd dist && zip -r ../sovereign-web-<ver>.zip . )        # plaintext bundle
+( cd dist && zip -r ../puca-web-<ver>.zip . )        # plaintext bundle
 node deploy/mobile/encrypt-bundle.mjs \
-    sovereign-web-<ver>.zip ~/.puca/mobile-updater-rsa.key \
-    sovereign-web-<ver>.enc.zip                            # prints {ivSessionKey, checksum}
+    puca-web-<ver>.zip ~/.puca/mobile-updater-rsa.key \
+    puca-web-<ver>.enc.zip                            # prints {ivSessionKey, checksum}
 ```
 
 Upload the **`.enc.zip`** as the bundle, and write `mobile-update.json`:
@@ -74,7 +82,7 @@ Upload the **`.enc.zip`** as the bundle, and write `mobile-update.json`:
 ```json
 {
   "version": "<ver>",
-  "url": "https://download.example.com/mobile/sovereign-web-<ver>.enc.zip",
+  "url": "https://download.example.com/mobile/puca-web-<ver>.enc.zip",
   "sessionKey": "<ivSessionKey from the script>",
   "checksum": "<checksum from the script>",
   "notes": "..."

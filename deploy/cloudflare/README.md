@@ -23,8 +23,8 @@ highest-leverage, zero-cost hardening step for a self-hosted deployment.
 
 ## Prerequisites
 
-- The domain's DNS must be served by Cloudflare (free). Today DNS is on Porkbun
-  (see `deploy/webapp/README.md`); moving nameservers to Cloudflare is required
+- The domain's DNS must be served by Cloudflare (free): moving the
+  nameservers from your current registrar/DNS host to Cloudflare is required
   for the orange-cloud proxy to work. Cloudflare imports existing records during
   onboarding — verify every record carried over before switching nameservers.
 
@@ -32,7 +32,7 @@ highest-leverage, zero-cost hardening step for a self-hosted deployment.
 
 ### 1. Add the site to Cloudflare
 Create a free account, add `example.com`, let it import records, then change the
-nameservers at Porkbun to the two Cloudflare gives you. Wait for activation.
+nameservers at your registrar to the two Cloudflare gives you. Wait for activation.
 
 ### 2. Proxy the web/API records (orange cloud), keep TURN grey
 - `chat` (API/WS)  → **Proxied** (orange)

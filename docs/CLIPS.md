@@ -1,19 +1,14 @@
 # Clips — the replay buffer, and the consent gate in front of it
 
-**Status (2026-08-20): Phases 1 + 2 built — desktop capture and seal (behind
-Settings › Advanced › "Clips (replay buffer)"), the server presence log +
-approval protocol (live-tested, 131 checks), and the client half: the approval
-prompt on every device, the request → pending → upload → post composer flow,
-the posted-clip player with its consent badge, the owner's per-server switch.
-The native no-picker auto-arm SHIPPED in 0.8.108/0.8.109 (see "Arm
-automatically" below) and still needs its on-device Windows walk.
-Phase 3 landed 2026-09-02: the experimental flag is gone (the owner's
-per-server switch is the only gate; members of a server with clips off see
-nothing, the owner sees the disabled control with the reason), and
-retention is surfaced — `GET /clips/usage` reports `retention_days` from
-`CLIP_RETENTION_DAYS` and Settings › Clips says how long posted clips live.
-Off per server until the owner turns it on.** Plan: `~/.claude/plans/would-it-be-possible-velvet-shore.md`;
-spike numbers: `frontend/e2e/spike-clips/README.md`.
+Clips are a desktop replay buffer: the app keeps the last few minutes of a
+voice call in memory, sealed, and a clip is posted to the channel only after
+**every participant** has approved it. The owner's per-server switch is the
+only gate (off until the owner turns it on; members of a server with clips
+off see nothing), and `GET /clips/usage` reports the retention the operator
+configured (`CLIP_RETENTION_DAYS`) so Settings › Clips can say how long a
+posted clip lives. Spike measurements:
+`frontend/e2e/spike-clips/README.md`; the build history is at the end of
+this page.
 
 **When the clipper may see the footage (2026-08-19, twice revised — read
 this, not your memory of the previous rule).** Nobody — not the clipper, not
@@ -236,7 +231,7 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 | Upload fails | the seal is KEPT until the proposal's TTL; "Try again" re-sends only the missing parts |
 | Posted | the sealed copy is zeroed; the ring keeps running |
 
-## Settings (Voice & Video › Clips) and the experimental gate
+## Settings (Voice & Video › Clips)
 
 Quality preset (its resolution cap applies only to manual/prompt arms — see
 below), buffer length, memory limit (slider max derived from the machine's
@@ -244,7 +239,9 @@ memory budget so the ring clamp can never reject it), mic level in clips,
 "When I join a voice call" — `clipArmOnJoin`: *Do nothing* / *Remind me to
 arm* (highlights the Arm button for ~12 s) / **Arm automatically**, and the
 **Save clip** hotkey (works from a fullscreen game via the native hook).
-Settings › Advanced › "Clips (replay buffer)" gates ARMING only.
+Arming is gated only by the server owner's per-server clips switch — there
+is no client-side experimental toggle (`settingsClips.test.ts` pins its
+absence).
 
 **Arm automatically genuinely has no popup** (SHIPPED in 0.8.108, hotfixed in
 0.8.109 — the force-keyframe fix, without which a native clip could not be
@@ -319,19 +316,6 @@ needs no picker).
   been exercised against real hardware — only unit tests (pure logic), a
   headless-browser e2e that stands in a real WebCodecs Annex-B stream for
   the Rust encoder's output, and the headless pacing bench.
-
-## Manual verifications (record date + machine here)
-
-| what | how | last |
-|---|---|---|
-| system audio track from the WebView2 picker | real shell, toggle ON | 2026-08-18, desktop (spike S1) |
-| hardware encoder engaged | encode call ≈0.02 ms/frame, keyframes 2 s | 2026-08-18 (spike S2, headless Edge) |
-| A/V sync | flash/beep pairing, −42 ms → `AUDIO_OFFSET_US = 40_000` | 2026-08-18 (spike S4) |
-| 10-min ring memory plateau | ~500 MB renderer working set, flat through eviction | 2026-08-18 (spike S6) |
-| no clip-sized files in the profile | profile scan | 2026-08-18 (spike S9) |
-| Android WebView plays the sealed MP4 | on-device | — (Phase 2) |
-| decline ⇒ private bytes drop | Task Manager | — |
-| lock the session while armed ⇒ disarmed | real shell | — |
 
 ## Phase 2 — the consent protocol
 
@@ -419,3 +403,36 @@ the 30 Rust unit tests could not: two queries naming the `channels` column
 `channel_type` (the schema says `type`), which made EVERY proposal a 404 and
 pinning a channel impossible; and the approver view reporting the padded
 window as the clip length. Run it after any change to the handlers.
+
+---
+
+## Development history (not product documentation)
+
+The status record the feature was built under, kept for whoever maintains it:
+
+**Status (2026-08-20): Phases 1 + 2 built — desktop capture and seal (originally behind a
+Settings › Advanced toggle, removed in Phase 3), the server presence log +
+approval protocol (live-tested, 131 checks), and the client half: the approval
+prompt on every device, the request → pending → upload → post composer flow,
+the posted-clip player with its consent badge, the owner's per-server switch.
+The native no-picker auto-arm SHIPPED in 0.8.108/0.8.109 (see "Arm
+automatically" below) and still needs its on-device Windows walk.
+Phase 3 landed 2026-09-02: the experimental flag is gone (the owner's
+per-server switch is the only gate; members of a server with clips off see
+nothing, the owner sees the disabled control with the reason), and
+retention is surfaced — `GET /clips/usage` reports `retention_days` from
+`CLIP_RETENTION_DAYS` and Settings › Clips says how long posted clips live.
+Off per server until the owner turns it on.** spike numbers: `frontend/e2e/spike-clips/README.md`.
+
+## Manual verifications (record date + machine here)
+
+| what | how | last |
+|---|---|---|
+| system audio track from the WebView2 picker | real shell, toggle ON | 2026-08-18, desktop (spike S1) |
+| hardware encoder engaged | encode call ≈0.02 ms/frame, keyframes 2 s | 2026-08-18 (spike S2, headless Edge) |
+| A/V sync | flash/beep pairing, −42 ms → `AUDIO_OFFSET_US = 40_000` | 2026-08-18 (spike S4) |
+| 10-min ring memory plateau | ~500 MB renderer working set, flat through eviction | 2026-08-18 (spike S6) |
+| no clip-sized files in the profile | profile scan | 2026-08-18 (spike S9) |
+| Android WebView plays the sealed MP4 | on-device | — (Phase 2) |
+| decline ⇒ private bytes drop | Task Manager | — |
+| lock the session while armed ⇒ disarmed | real shell | — |

@@ -2519,9 +2519,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     )}
                                 </div>
 
-                                {/* Clips — the desktop replay buffer (api/clips/). Shown
-                                    even while the experimental gate is off so the settings
-                                    exist before the buttons do; the gate lives in Advanced. */}
+                                {/* Clips — the desktop replay buffer (api/clips/). There is
+                                    no experimental gate any more (settingsClips.test.ts pins
+                                    its absence): arming is gated only by the server owner's
+                                    per-server clips switch, so these settings always show. */}
                                 <h3>Clips</h3>
                                 <ClipSettings
                                     settings={settings}
