@@ -449,7 +449,7 @@ pub async fn login_step_2(
         reject_oversized_hex(aid)?;
     }
 
-    tracing::info!(">>> login_step_2 called for user: {}", payload.username);
+    tracing::info!("login_step_2 called (account {})", crate::logtag::user_tag(&payload.username));
 
     // M3: per-username exponential backoff. Apply the delay owed from prior
     // consecutive failures BEFORE doing any work, throttling online guessing
@@ -602,7 +602,7 @@ pub async fn login_step_2(
     // Attempt verification. Note: never log the derived session key, verifier,
     // or client proof — that is secret cryptographic material.
     if let Err(e) = verifier_instance.verify_client(&m_proof) {
-        tracing::warn!("SRP verify_client failed for {}: {:?}", payload.username, e);
+        tracing::warn!("SRP verify_client failed (account {}): {:?}", crate::logtag::user_tag(&payload.username), e);
         state.record_login_failure(&payload.username);
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -859,7 +859,7 @@ pub async fn reset_password(
     }
 
 
-    tracing::info!(">>> reset_password called for user: {}", payload.username);
+    tracing::info!("reset_password called (account {})", crate::logtag::user_tag(&payload.username));
 
     // Decode hex values
     let salt = match hex::decode(&payload.salt_hex) {
@@ -907,7 +907,7 @@ pub async fn reset_password(
 
             match result {
                 Ok(_) => {
-                    tracing::info!("Password reset successful for user: {}", payload.username);
+                    tracing::info!("Password reset successful (account {})", crate::logtag::user_tag(&payload.username));
                     (
                         StatusCode::OK,
                         "Password reset successful. You can now login.",

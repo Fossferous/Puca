@@ -23,7 +23,17 @@ use crate::auth::Claims;
 use crate::state::AppState;
 
 /// Per-user upload quota (M15). Coarse abuse ceilings, not exact accounting.
-const MAX_USER_STORAGE_BYTES: i64 = 512 * 1024 * 1024; // 512 MB per user (attachments bucket)
+const DEFAULT_MAX_USER_STORAGE_BYTES: i64 = 512 * 1024 * 1024; // 512 MB per user (attachments bucket)
+
+/// UPLOAD_MAX_USER_BYTES: the per-user attachment quota, bytes. Default 512 MiB;
+/// bounded below at 1 MiB so a typo cannot lock every upload out.
+pub(crate) fn max_user_storage_bytes() -> i64 {
+    std::env::var("UPLOAD_MAX_USER_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|b| *b >= 1024 * 1024)
+        .unwrap_or(DEFAULT_MAX_USER_STORAGE_BYTES)
+}
 const MAX_USER_FILES: i64 = 5000; // attachments bucket
 
 /// Clip parts (docs/CLIPS.md) count against their OWN per-user budget, so a
@@ -182,7 +192,7 @@ pub async fn clip_usage(
 
 /// `DELETE /files/:file_id` — let a user reclaim their own upload quota.
 ///
-/// The quota (`MAX_USER_STORAGE_BYTES`) is computed by summing `uploaded_files`
+/// The quota (`max_user_storage_bytes()`) is computed by summing `uploaded_files`
 /// for the uploader, and until this route existed NOTHING could remove a row
 /// except avatar replacement. So the quota was a one-way ratchet: ~21 max-size
 /// attachments and every upload path for that account — attachment, avatar,
@@ -528,7 +538,7 @@ pub async fn upload_file(
             tracing::warn!("clip quota exceeded for user {} ({} bytes)", claims.sub, usage.2);
             return (StatusCode::INSUFFICIENT_STORAGE, "Clip storage quota exceeded — delete older clips").into_response();
         }
-    } else if usage.1 >= MAX_USER_FILES || usage.0 + size_bytes > MAX_USER_STORAGE_BYTES {
+    } else if usage.1 >= MAX_USER_FILES || usage.0 + size_bytes > max_user_storage_bytes() {
         tracing::warn!(
             "upload quota exceeded for user {} ({} bytes / {} files)",
             claims.sub,

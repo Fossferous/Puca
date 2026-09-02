@@ -197,6 +197,23 @@ if (/versionCode\s+\d+\s*$/m.test(gradle)) {
     ok.push('android versionCode: base*10 + variant (differs, so Capgo resets the bundle store)');
 }
 
+// The Android version is a hand-maintained duplicate of tauri.conf.json's:
+// versionName must equal it and baseVersionCode must be minor*10000+patch
+// (0.9.0 -> 90000, 0.8.136 -> 80136). A mismatch ships an APK that reports
+// one version and installs as another, and the download page/OTA checks
+// compare the two.
+{
+    const v = String(base.version || '');
+    const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+    const nameMatch = new RegExp('versionName\\s+"' + v.replace(/\./g, '\\.') + '"').test(gradle);
+    const baseMatch = /def\s+baseVersionCode\s*=\s*(\d+)/.exec(gradle);
+    const expectedBase = m ? String(Number(m[2]) * 10000 + Number(m[3])) : null;
+    if (!m) fail(`tauri.conf.json version "${v}" is not MAJOR.MINOR.PATCH`);
+    else if (!nameMatch) fail(`android/app/build.gradle versionName is not "${v}" (tauri.conf.json) — bump both or ship an APK that lies about its version`);
+    else if (!baseMatch || baseMatch[1] !== expectedBase) fail(`android/app/build.gradle baseVersionCode must be ${expectedBase} for ${v} (minor*10000+patch); found ${baseMatch ? baseMatch[1] : 'none'}`);
+    else ok.push(`android version in step with tauri.conf.json: ${v} / baseVersionCode ${expectedBase}`);
+}
+
 if (!/buildConfigField\s+"String",\s*"PUCA_VARIANT"/.test(gradle)) {
     fail('android/app/build.gradle no longer emits BuildConfig.PUCA_VARIANT — the native layer would have '
         + 'no way to know which variant it is, which is what left the widget advertising a Devices button');

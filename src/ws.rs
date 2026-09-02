@@ -496,7 +496,7 @@ async fn handle_socket(
     }
 
     // Cleanup on disconnect
-    tracing::info!("User {} ({}) disconnected", username, user_id);
+    tracing::info!("User {} disconnected", user_id);
     // Which device this socket had attested as, read BEFORE unregister_session
     // removes the record. `None` for a socket that never attested (an ordinary
     // web tab, a delivery-mode socket that only CLAIMED an id) — nothing to
@@ -2002,7 +2002,7 @@ async fn handle_message(
                 }
             }
 
-            tracing::info!("User {} joined room {}", username, room_id);
+            tracing::info!("User {} joined room {}", user_id, room_id);
         }
 
         ClientMessage::LeaveRoom { room_id } => {
@@ -2040,7 +2040,7 @@ async fn handle_message(
                 );
             }
 
-            tracing::info!("User {} left room {}", username, room_id);
+            tracing::info!("User {} left room {}", user_id, room_id);
         }
 
         ClientMessage::ChatMessage { room_id, content } => {
