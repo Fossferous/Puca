@@ -17,7 +17,7 @@ const PASS = 'Password123!';
 const stamp = Date.now().toString(36);
 const A = 'pnA_' + stamp, B = 'pnB_' + stamp;
 const PGDB = process.env.PGDB || 'puca';
-const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-d', PGDB, '-t', '-A', '-c', sql],
+const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-p', process.env.PGPORT || '5432', '-d', PGDB, '-t', '-A', '-c', sql],
     { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
 
 let fail = 0;

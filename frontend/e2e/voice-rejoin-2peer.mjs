@@ -22,10 +22,11 @@ import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 
 const PSQL = 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
+const APP = process.env.APP || APP;
 const PASS = 'Password123!';
 const stamp = Date.now().toString(36);
 const A = 'rjA_' + stamp, B = 'rjB_' + stamp;
-const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-d', 'puca', '-t', '-A', '-c', sql],
+const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-p', process.env.PGPORT || '5432', '-d', process.env.PGDB || 'puca', '-t', '-A', '-c', sql],
     { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
 
 let fail = 0;
@@ -46,7 +47,7 @@ async function reg(ctx, u, bucket) {
     p.on('console', m => {
         if (m.type() === 'error' && isGlare(m.text())) { bucket.push(m.text()); console.log(`  [${u} GLARE]`, m.text().slice(0, 140)); }
     });
-    await p.goto('http://localhost:5173/login');
+    await p.goto(APP + '/login');
     await p.waitForSelector('#username', { timeout: 10000 });
     await p.click('.toggle-mode'); await p.waitForSelector('#inviteCode', { timeout: 5000 });
     await p.fill('#username', u); await p.fill('#password', PASS); await p.click('button[type="submit"]');
