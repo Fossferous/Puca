@@ -254,3 +254,13 @@
     transform: rotate(360deg);
   }
 }
+/* "You've been invited to a server" — shown when an invite link led here. */
+.login-invite-note {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: rgba(88, 101, 242, 0.15);
+    border: 1px solid rgba(88, 101, 242, 0.4);
+    font-size: 14px;
+    line-height: 1.4;
+}

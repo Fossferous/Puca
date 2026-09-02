@@ -23,6 +23,10 @@ export const PERM = {
     // Clips (replay buffer). Gated additionally by servers.clips_enabled, so
     // this bit alone grants nothing. Backend: permissions.rs CREATE_CLIPS.
     CREATE_CLIPS: 1 << 26,
+    // Server-scoped, but resolved into every channel's effective bits, so a
+    // channel's my_permissions is where the client reads it (Server carries
+    // no resolved bits of its own). Backend: invite_handlers::create_invite.
+    CREATE_INVITE: 1 << 27,
 } as const;
 
 /**
