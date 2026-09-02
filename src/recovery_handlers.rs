@@ -667,7 +667,7 @@ pub async fn recovery_reset(
             // The compromise case has its own remedy that DOES revoke devices —
             // Settings > Account > Sessions > "Sign out on all devices" — and
             // the response below points at it.
-            tracing::info!("Recovery reset succeeded for {}", username_lower);
+            tracing::info!("Recovery reset succeeded (account {})", crate::logtag::user_tag(&username_lower));
             (
                 StatusCode::OK,
                 "Password reset. Your history is intact — log in with your new password. \

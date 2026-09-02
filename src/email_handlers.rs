@@ -555,7 +555,7 @@ pub async fn reset_password(
     // already established (they are only re-checked at upgrade time).
     state.disconnect_user(user_id as i64);
 
-    tracing::info!("Password reset successful for user {}", db_username);
+    tracing::info!("Password reset successful for user {}", user_id);
 
     (
         StatusCode::OK,

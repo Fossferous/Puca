@@ -128,7 +128,7 @@ impl EmailService {
             .await
             .map_err(|e| format!("Failed to send email: {}", e))?;
 
-        tracing::info!("Verification email sent to {}", to_email);
+        tracing::info!("Verification email sent (domain {})", crate::logtag::mail_domain(&to_email));
         Ok(())
     }
 
@@ -191,7 +191,7 @@ impl EmailService {
             .await
             .map_err(|e| format!("Failed to send email: {}", e))?;
 
-        tracing::info!("Password reset email sent to {}", to_email);
+        tracing::info!("Password reset email sent (domain {})", crate::logtag::mail_domain(&to_email));
         Ok(())
     }
 }

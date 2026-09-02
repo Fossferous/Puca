@@ -25,6 +25,8 @@ mod envelope_version;
 mod friend_handlers;
 mod handlers;
 mod invite_handlers;
+mod logtag;
+mod source_offer;
 mod key_handlers;
 mod message_handlers;
 mod middleware;
@@ -1104,6 +1106,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws", get(ws::ws_handler))
         // ICE configuration for WebRTC (no auth needed)
         .route("/ice-config", get(server_handlers::get_ice_config))
+        .route("/source", get(source_offer::get_source))
         // UNAUTHENTICATED BY NECESSITY: a machine at its own sign-in screen has
         // no credential yet — obtaining one is the point. Both steps are bounded
         // (single-use nonce, capped pending map) and neither reveals whether a

@@ -16,6 +16,27 @@
 //! the file is embedded. The convention this replaces was a hand-bumped comment
 //! at the top of `src/main.rs`, which had gone three migrations stale.
 fn main() {
+    // The commit this binary was built from, for GET /source (AGPL §13). A
+    // release tarball has no .git, so the ship step writes SOURCE_COMMIT beside
+    // Cargo.toml; a checkout asks git; anything else is "unknown".
+    let commit = std::env::var("PUCA_GIT_COMMIT")
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| std::fs::read_to_string("SOURCE_COMMIT").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=PUCA_GIT_COMMIT={commit}");
+    println!("cargo:rerun-if-changed=SOURCE_COMMIT");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-env-changed=PUCA_GIT_COMMIT");
     // Any change under migrations/ (a new file, or an edit to an existing one)
     // re-runs this script, and a build-script re-run recompiles the crate.
     println!("cargo:rerun-if-changed=migrations");

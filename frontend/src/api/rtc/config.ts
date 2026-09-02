@@ -1,12 +1,13 @@
 import { fetchIceConfig } from '../iceConfig';
 
-// Fallback config used before backend fetch completes
-const FALLBACK_STUN_SERVERS: RTCIceServer[] = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-];
+// ICE servers used before the backend's /ice-config answers, or when it never
+// does. EMPTY on purpose: the operator decides what the clients talk to
+// (STUN_SERVERS / TURN_SERVER on the server), and a built-in Google STUN list
+// here overrode that decision and disclosed every user's public address to a
+// third party whenever the fetch failed — which is also the one time the app
+// cannot signal a call anyway, so the fallback never bought a working call.
+// Host candidates still work on a LAN without any server.
+const FALLBACK_STUN_SERVERS: RTCIceServer[] = [];
 
 // Cached ICE configuration from backend
 let cachedRtcConfig: RTCConfiguration = {
