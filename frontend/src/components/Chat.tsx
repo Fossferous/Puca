@@ -815,7 +815,11 @@ export function Chat({ onLogout }: ChatProps) {
             // never succeed. Say what is actually wrong and what fixes it.
             : err instanceof ApiError && err.status === 507
                 ? `Your upload storage is full, so "${file.name}" couldn't be sent. Delete some older attachments, emojis or images to free space.`
-                : `Couldn't upload "${file.name}". Please try again.`;
+                // 403 is the channel's Attach Files permission: say so, in the
+                // server's words. Retry stays — a role change makes it work.
+                : err instanceof ApiError && err.status === 403
+                    ? `"${file.name}" wasn't sent: ${err.message}`
+                    : `Couldn't upload "${file.name}". Please try again.`;
     }, []);
 
     /** Shared tail of enqueue/retry: mark ready — unless the chip was

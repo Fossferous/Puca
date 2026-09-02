@@ -1732,20 +1732,17 @@ pub async fn get_ice_config(
         .and_then(|v| v.strip_prefix("Bearer "))
         .and_then(|t| crate::auth::validate_token(t, &state.jwt_secret).ok())
     {
-        Some(c) => {
-            let current_tv: Option<(i32,)> =
-                sqlx::query_as("SELECT token_version FROM users WHERE id = $1")
-                    .bind(c.sub as i32)
-                    .fetch_optional(&state.pool)
-                    .await
-                    .unwrap_or(None);
-            match current_tv {
-                Some((tv,)) if tv == c.tv => Some(c),
-                // Fail closed: unknown user, revoked token, or a failed lookup
-                // falls back to the public STUN-only response below.
-                _ => None,
-            }
-        }
+        // The same acceptance rule as the middleware and the WS upgrade —
+        // token_version AND the per-session revocation (0.9.0). This was the
+        // third validate_token site and the one that kept the old check alone,
+        // so a session revoked from the Devices tab kept minting relay
+        // credentials for the rest of the token's life.
+        Some(c) => match crate::auth::token_session_live(&state.pool, &c).await {
+            Ok(true) => Some(c),
+            // Fail closed: unknown user, revoked token or session, or a failed
+            // lookup falls back to the public STUN-only response below.
+            _ => None,
+        },
         None => None,
     };
 

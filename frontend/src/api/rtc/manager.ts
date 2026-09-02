@@ -167,9 +167,12 @@ export class WebRTCManager {
     private verifyRemoteDtls(userId: UserId, sdp: string): void {
         const peer = this.peers.get(userId);
         if (!peer) return;
+        // Latched for the life of the peer: a later description that merely
+        // drops the attribute must not clear a substitution already seen.
+        if (peer.dtlsPin === 'mismatch') return;
         if (!peer.mediaStaticKeyRaw) { peer.dtlsPin = 'unverified'; return; }
         const result = verifyDtlsPin(sdp, peer.mediaStaticKeyRaw);
-        if (result === 'mismatch' && peer.dtlsPin !== 'mismatch') {
+        if (result === 'mismatch') { // first sighting: the latch above returns on every later call
             console.warn(`[media-e2ee] peer ${userId}: the DTLS fingerprint in the description does not match the pin — connection substituted on the path`);
         }
         peer.dtlsPin = result;
@@ -194,10 +197,15 @@ export class WebRTCManager {
         const peer = this.peers.get(userId);
         if (!peer) return null;
         // A local inability to do insertable streams overrides everything —
-        // no peer can be encrypted if we can't run the transforms at all.
-        const reason: MediaE2eeReason = !isMediaE2eeSupported()
-            ? 'local-unsupported'
-            : peer.mediaE2eeReason;
+        // no peer can be encrypted if we can't run the transforms at all —
+        // EXCEPT a substituted connection: the DTLS pin exists precisely for
+        // the engines without frame encryption, so a mismatch must outrank
+        // "this device can't encrypt" or it would be invisible where it matters.
+        const reason: MediaE2eeReason = peer.dtlsPin === 'mismatch'
+            ? 'fingerprint-mismatch'
+            : !isMediaE2eeSupported()
+                ? 'local-unsupported'
+                : peer.mediaE2eeReason;
         return { userId, encrypted: peer.mediaCrypto.enabled, reason, enforced: this.requireMediaE2ee, dtls: peer.dtlsPin };
     }
 

@@ -60,8 +60,13 @@ const fakeSdp = (fp: string) => ['v=0', 'm=application 9 UDP/DTLS/SCTP webrtc-da
 /** Records what the code asked of a peer connection, and lets a test drive it. */
 class FakePeerConnection {
     static last: FakePeerConnection | null = null;
+    /** The last certificate handed out, so a test can assert the connection
+     *  pinned THAT object and not merely "one certificate". */
+    static lastCert: unknown = null;
     static async generateCertificate() {
-        return { getFingerprints: () => [{ algorithm: 'sha-256', value: FAKE_HEX }] };
+        const cert = { getFingerprints: () => [{ algorithm: 'sha-256', value: FAKE_HEX }] };
+        FakePeerConnection.lastCert = cert;
+        return cert;
     }
     /** The configuration the manager built: the certificate must be pinned. */
     config: RTCConfiguration | undefined;
@@ -585,6 +590,7 @@ describe('DTLS fingerprint binding (the server cannot substitute the peer)', () 
         handlers.get('FileAccepted')!({ type: 'FileAccepted', payload: { from_user: 7, transfer_id: id, resume_from: 0, auth: 'TESTMAC', auth_v: 2, fp: PEER_FP } });
         await flush();
         expect(FakePeerConnection.last!.config?.certificates).toHaveLength(1);
+        expect(FakePeerConnection.last!.config?.certificates?.[0]).toBe(FakePeerConnection.lastCert);
     });
 
     it('an accept from an older app (no auth_v) is refused with an update message, and the peer is told', async () => {

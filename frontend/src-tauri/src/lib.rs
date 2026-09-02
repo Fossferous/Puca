@@ -1138,6 +1138,20 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 0.9.0 renamed the executable (app.exe -> Puca.exe / Puca-Lite.exe).
+            // The autostart Run value stores a PATH, so an entry written by an
+            // older install points at a file that no longer exists while the
+            // toggle still reads "enabled". enable() is an idempotent write of
+            // the current executable's path: re-pin whenever the entry exists.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let launcher = app.autolaunch();
+                if launcher.is_enabled().unwrap_or(false) {
+                    if let Err(e) = launcher.enable() {
+                        eprintln!("autostart: could not re-pin the Run entry to this executable: {e}");
+                    }
+                }
+            }
             #[cfg(windows)]
             app.manage(Arc::new(AudioCaptureState::default()));
             app.manage(TrayTipState::default());

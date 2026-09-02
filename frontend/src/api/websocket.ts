@@ -16,6 +16,16 @@ export type MessageHandler = (message: ServerMessage) => void;
 /** Outcome of an announce-then-publish request (see awaitAnnouncement). */
 export type AnnounceResult = { ok: true } | { ok: false; message: string };
 
+/** The server's refusals for a media announcement — src/ws.rs SHARE_DENIED,
+ *  CAMERA_DENIED and the membership gate, verbatim. These are the only Error
+ *  frames that end an announce-ack wait; any other Error is unrelated (a DM
+ *  rejection racing in, say) and the echo or the timeout decides. */
+export const MEDIA_ANNOUNCE_REFUSALS: readonly string[] = [
+    "You don't have permission to share your screen in this channel",
+    "You don't have permission to turn on your camera in this channel",
+    'Not in this room',
+];
+
 class WebSocketClient {
     private ws: WebSocket | null = null;
     private token: string | null = null;
@@ -510,7 +520,8 @@ class WebSocketClient {
                 if (p?.room_id === roomId && who === me) finish({ ok: true });
             };
             const onErr = (msg: ServerMessage) => {
-                const text = (msg.payload as { message?: string } | undefined)?.message ?? 'The server refused that.';
+                const text = (msg.payload as { message?: string } | undefined)?.message ?? '';
+                if (!MEDIA_ANNOUNCE_REFUSALS.includes(text)) return; // not ours
                 finish({ ok: false, message: text });
             };
             this.on(type, onAck);

@@ -23,6 +23,7 @@ import {
 const INDENT_PX = 24;
 import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
+import { ApiError } from '../api/client';
 import { TaskAttachments } from './TaskAttachments';
 import { useDragReorder } from '../hooks/useDragReorder';
 import {
@@ -348,6 +349,9 @@ export function TaskTree({
         setUploadingIds(prev => new Set(prev).add(task.id));
         const added: TaskAttachmentRef[] = [];
         const failures: string[] = [];
+        // A 403 is the ATTACH_FILES role gate: the server's own sentence says
+        // why, and "under 10 MB" would be a lie.
+        let refusal: string | null = null;
         // Sequential: each file is encrypted + uploaded on its own, and failures
         // (over the 10 MB cap, network) are surfaced per file at the end.
         for (const file of files) {
@@ -357,6 +361,7 @@ export function TaskTree({
             } catch (err) {
                 console.error('Failed to attach file:', file.name, err);
                 failures.push(file.name);
+                if (err instanceof ApiError && err.status === 403) refusal = err.message;
             }
         }
         setUploadingIds(prev => { const n = new Set(prev); n.delete(task.id); return n; });
@@ -374,7 +379,7 @@ export function TaskTree({
             onSetAttachments(task, Array.from(byHref.values()).slice(0, MAX_TASK_ATTACHMENTS));
         }
         if (failures.length > 0) {
-            alert(`Failed to attach: ${failures.join(', ')}. Files must be under 10 MB.`);
+            alert(`Failed to attach: ${failures.join(', ')}. ${refusal ?? 'Files must be under 10 MB.'}`);
         }
     };
 

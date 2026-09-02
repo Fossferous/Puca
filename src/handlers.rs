@@ -707,8 +707,14 @@ pub async fn logout_session(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    // A token minted before the sid claim existed cannot be revoked on its
+    // own (there is no row to mark); the client still clears its local state,
+    // exactly as sign-out worked before 0.9.0, and the token dies on its own
+    // clock — or at its next renewal, which mints a sid. Say so in the body
+    // rather than pretending: `revoked: false`.
     if claims.sid.is_empty() {
-        return StatusCode::OK.into_response();
+        tracing::info!("logout-session: user {} holds a pre-sid token; nothing to revoke", claims.sub);
+        return Json(serde_json::json!({ "revoked": false, "reason": "legacy-token" })).into_response();
     }
     match sqlx::query("UPDATE token_sessions SET revoked_at = NOW() WHERE sid = $1 AND user_id = $2 AND revoked_at IS NULL")
         .bind(&claims.sid)
@@ -716,9 +722,9 @@ pub async fn logout_session(
         .execute(&state.pool)
         .await
     {
-        Ok(_) => {
+        Ok(done) => {
             state.kill_sid_sessions(claims.sub, &claims.sid);
-            StatusCode::OK.into_response()
+            Json(serde_json::json!({ "revoked": done.rows_affected() > 0 })).into_response()
         }
         Err(e) => {
             tracing::error!("logout-session: revocation failed for user {}: {:?}", claims.sub, e);

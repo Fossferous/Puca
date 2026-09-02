@@ -2646,6 +2646,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             if (!ack.ok) {
                 console.warn('[VoicePanel] camera refused by the server:', ack.message);
                 setError(ack.message);
+                // Retract too: on a timeout the server may have accepted the
+                // announcement and told everyone; a stop is a harmless no-op
+                // when it never did.
+                wsClient.stopCamera(roomId);
                 await webrtcManager.toggleVideo(false);
                 return;
             }
@@ -3380,6 +3384,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     if (!ack.ok) {
                         console.warn('[VoicePanel] screen share refused by the server:', ack.message);
                         setError(ack.message);
+                        wsClient.stopScreenShare(roomId); // retract: a timeout may still have been accepted
                         webrtcManager.stopScreenShare();
                         return;
                     }

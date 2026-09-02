@@ -326,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
                 header::ACCEPT,
                 header::HeaderName::from_static("x-puca-file-cap"),
                 header::HeaderName::from_static("x-puca-want-cap"),
+                header::HeaderName::from_static("x-puca-channel"),
             ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
@@ -360,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
                 header::ACCEPT,
                 header::HeaderName::from_static("x-puca-file-cap"),
                 header::HeaderName::from_static("x-puca-want-cap"),
+                header::HeaderName::from_static("x-puca-channel"),
             ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.

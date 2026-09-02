@@ -446,11 +446,12 @@ struct VideoGrant<'a> {
     /// Server-side room management (RemoveParticipant). Only set on admin tokens.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     room_admin: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    // NEVER skipped when false: LiveKit's default for an ABSENT canPublish /
+    // canSubscribe / canPublishData is TRUE, so skipping the false value
+    // handed a member with no media permission the full grant (the deny case
+    // of `publish_sources` serialised to nothing).
     can_publish: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     can_subscribe: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     can_publish_data: bool,
     /// Which sources a member may publish, from their channel permissions.
     /// LiveKit's default for an ABSENT list is "every source", so an empty
@@ -1109,5 +1110,26 @@ mod publish_sources_tests {
     #[test]
     fn administrator_gets_everything() {
         assert_eq!(publish_sources(Permissions::ADMINISTRATOR).1.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod grant_serialization_tests {
+    use super::VideoGrant;
+
+    /// The deny case must be visible on the wire: an absent `canPublish` is
+    /// "true" to LiveKit, so a grant that means "no media" has to say false.
+    #[test]
+    fn a_denied_publish_grant_says_so_on_the_wire() {
+        let g = VideoGrant {
+            room: "r", room_join: true, room_create: false, room_admin: false,
+            can_publish: false, can_subscribe: true, can_publish_data: true,
+            can_publish_sources: vec![],
+        };
+        let json = serde_json::to_string(&g).unwrap();
+        assert!(json.contains("\"canPublish\":false"), "{json}");
+        assert!(json.contains("\"canSubscribe\":true"), "{json}");
+        assert!(!json.contains("canPublishSources"), "an empty list is omitted; canPublish:false is what denies — {json}");
+        assert!(!json.contains("roomCreate"), "false room flags stay absent (LiveKit defaults them to false) — {json}");
     }
 }

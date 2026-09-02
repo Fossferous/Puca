@@ -147,6 +147,26 @@ describe('channelKeys manager', () => {
         expect(other).toBeNull();
     });
 
+    it('M-g: once a v3 wrap has been opened, an unbound (v2) wrap at a later epoch is refused', async () => {
+        const first = await ensureChannelKey(42); // v3, epoch 1: sets the floor
+        expect(first!.epoch).toBe(1);
+        // The server now serves an unbound v2 wrap for epoch 2 — what a row
+        // lifted from another channel or an older client looks like.
+        const me = await testIdentity(...ME);
+        const lifted = await wrapChannelKeyForMembers(me, generateChannelKey(), [{ userId: 1, publicKey: me.publicKeyEncoded }]);
+        fake.currentEpoch = 2;
+        fake.epochGeneration = 0;
+        fake.published.push({ epoch: 2, wrapped_key: lifted[0].wrappedKey, sender_public_key: lifted[0].senderPublicKey, member_generation: 0, sender_user_id: 1 });
+        expect(lifted[0].wrappedKey.startsWith('v3.')).toBe(false);
+        clearChannelKeyCache();
+        expect(await getChannelKeyForEpoch(42, 2)).toBeNull();
+        // Positive control: a channel that has never seen a v3 wrap still opens
+        // the identical row (the epoch-1 v3 row is bound to 42, so it refuses
+        // in 43 and sets no floor there).
+        clearChannelKeyCache();
+        expect(await getChannelKeyForEpoch(43, 2)).not.toBeNull();
+    });
+
     it('returns the cached key without re-minting when generation is unchanged', async () => {
         const first = await ensureChannelKey(42);
         clearChannelKeyCache();
