@@ -1,6 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Púca",
+  "//mainBinaryName": "The installed executable, Task Manager entry, firewall prompt and AV alerts all show this filename. Without it Tauri names the binary after the Cargo package (app.exe). The two variants get DIFFERENT names on purpose: installer-migrate.nsh kills the OTHER variant by its own binary name when switching, so the names must not collide.",
+  "mainBinaryName": "Puca",
   "version": "0.8.136",
   "identifier": "com.sovereign.chat",
   "build": {
