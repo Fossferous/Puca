@@ -86,7 +86,7 @@ function PlacePicker({ task, onDone }: { task: Task; onDone: () => void }) {
         const fix = await currentPosition();
         if (!fix) {
             setBusy(false);
-            setError('No location fix — check location is on and Puca is allowed to use it.');
+            setError('No location fix — check location is on and Púca is allowed to use it.');
             return;
         }
         // An approximate-only grant (Android 12+) fixes at ~2 km: a place
@@ -95,7 +95,7 @@ function PlacePicker({ task, onDone }: { task: Task; onDone: () => void }) {
         if (fix.accuracy > 200) {
             setBusy(false);
             setError(`Location fix too imprecise (±${Math.round(fix.accuracy)} m) — `
-                + 'allow PRECISE location for Puca and try again.');
+                + 'allow PRECISE location for Púca and try again.');
             return;
         }
         const place = createPlace(label, fix.lat, fix.lon, radius);

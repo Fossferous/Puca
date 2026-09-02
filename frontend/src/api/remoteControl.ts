@@ -1117,7 +1117,7 @@ export function initRemoteControl() {
                     if (await isPermissionGranted()) {
                         sendNotification({
                             title: `${p.from_username} wants control of your screen`,
-                            body: 'Switch to Puca to allow or deny.',
+                            body: 'Switch to Púca to allow or deny.',
                         });
                     }
                 } catch { /* notification is best-effort */ }
@@ -1272,7 +1272,7 @@ export function initRemoteControl() {
             if (state.controlledBy || state.controlling) resetRemoteControl();
         });
 
-        // Emergency hotkeys while the Puca window has focus: Escape always
+        // Emergency hotkeys while the Púca window has focus: Escape always
         // revokes, and the user's configured kill-switch combo does too (this is
         // a fail-safe mirror of the native hook, which also covers the case
         // where a controlled GAME has focus and this listener can't fire).

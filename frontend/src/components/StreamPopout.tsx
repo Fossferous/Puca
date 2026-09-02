@@ -1,6 +1,6 @@
 /**
  * StreamPopout — puts a watched stream into the OS picture-in-picture window,
- * so it stays on top of everything when Puca is tabbed out or minimised
+ * so it stays on top of everything when Púca is tabbed out or minimised
  * (desktop), or when the phone goes to another app (mobile).
  *
  * WHY A SEPARATE HOST ELEMENT. The in-app tile <video>s do not survive

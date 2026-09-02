@@ -42,6 +42,10 @@ public final class PushFrames {
      *  proposer, no channel, no call — a lock screen learns nothing.
      *  src/protocol.rs pins these four strings across all three languages. */
     static final String CLIP_TITLE = "Approval needed";
+    // Spelled without the fada ON PURPOSE: src/protocol.rs pins this literal
+    // byte-for-byte across PushFrames.java, clipProposals.ts and its own test,
+    // so the two delivery paths share one notification body. Rename all three
+    // together or not at all.
     static final String CONSENT_BODY = "Open Puca to approve or decline";
 
     /** Author id for a frame that names nobody — the same "-1" the author-ful

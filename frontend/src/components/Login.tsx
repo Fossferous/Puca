@@ -3,6 +3,8 @@ import { useLocation } from 'react-router-dom';
 import { login, register, resetPasswordMigration, REMEMBER_ME_KEY } from '../api/auth';
 import { wsClient } from '../api/websocket';
 import { isTauri, isMobile } from '../api/platform';
+import { fetchPublicConfig } from '../api/publicConfig';
+import { peekPendingInvite } from '../api/pendingInvite';
 import './Login.css';
 
 interface LoginProps {
@@ -33,6 +35,14 @@ export function Login({ onLoginSuccess }: LoginProps) {
     const [isRegistering, setIsRegistering] = useState(false);
     const [inviteCode, setInviteCode] = useState('');
     const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
+    // Does THIS server gate sign-up behind an invite code? From GET /config.
+    // null = not known yet, or the probe failed (an older server): then the
+    // field is SHOWN — a wrongly hidden field makes registration impossible,
+    // a wrongly shown one is only noise. Until 0.9.2 it was always shown,
+    // labelled "Required to sign up", on every open-registration server.
+    const [inviteRequired, setInviteRequired] = useState<boolean | null>(null);
+    // An invite link brought the visitor here: say so, and carry it through.
+    const pendingInvite = peekPendingInvite();
 
     // Password reset state
     const [showResetForm, setShowResetForm] = useState(false);
@@ -79,6 +89,13 @@ export function Login({ onLoginSuccess }: LoginProps) {
         }
         setAutoLoginAttempted(true);
     }, []);
+
+    useEffect(() => {
+        if (!isRegistering) return;
+        let live = true;
+        void fetchPublicConfig().then(c => { if (live) setInviteRequired(c.registrationInviteRequired); });
+        return () => { live = false; };
+    }, [isRegistering]);
 
     const handleResetPassword = async (e: FormEvent) => {
         e.preventDefault();
@@ -169,7 +186,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
         return (
             <div className="login-container">
                 <div className="login-card">
-                    <h1 className="login-title">Puca</h1>
+                    <h1 className="login-title">Púca</h1>
                     <p className="login-subtitle">Logging in...</p>
                     <div className="auto-login-spinner"></div>
                 </div>
@@ -304,8 +321,15 @@ export function Login({ onLoginSuccess }: LoginProps) {
     return (
         <div className="login-container">
             <div className="login-card">
-                <h1 className="login-title">Puca</h1>
+                <h1 className="login-title">Púca</h1>
                 <p className="login-subtitle">Self-Hosted Communication</p>
+
+                {pendingInvite && (
+                    <p className="login-message login-invite-note">
+                        You've been invited to a server. {isRegistering ? 'Create an account' : 'Sign in'} and
+                        you'll be taken straight to it.
+                    </p>
+                )}
 
                 {/*
                   * Browser only, and shown BEFORE the password field.
@@ -327,7 +351,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
                   */}
                 {!isTauri() && !isMobile() && (
                     <p className="login-trust-note">
-                        You are using Puca in a browser, so this server sends your browser the code
+                        You are using Púca in a browser, so this server sends your browser the code
                         that encrypts your messages — every time you open it. That means its operator
                         <em> could</em> read what you send here if they chose to. The desktop app
                         ships its own code and is not affected.{' '}
@@ -370,16 +394,19 @@ export function Login({ onLoginSuccess }: LoginProps) {
                         />
                     </div>
 
-                    {isRegistering && (
+                    {isRegistering && inviteRequired !== false && (
                         <div className="form-group">
-                            <label htmlFor="inviteCode">Invite code</label>
+                            <label htmlFor="inviteCode">
+                                {inviteRequired ? 'Invite code' : 'Invite code (only if this server requires one)'}
+                            </label>
                             <input
                                 id="inviteCode"
                                 type="text"
                                 value={inviteCode}
                                 onChange={(e) => setInviteCode(e.target.value)}
-                                placeholder="Required to sign up"
+                                placeholder={inviteRequired ? 'From your server admin' : 'Leave blank unless you were given one'}
                                 autoComplete="off"
+                                required={inviteRequired === true}
                                 disabled={loading}
                             />
                         </div>

@@ -304,7 +304,7 @@ export function notifyTasksDue(count: number): void {
     const body = count === 1 ? 'A task is due' : `${count} tasks are due`;
 
     if (isMobile() && mobileNative) {
-        void postMobileNotification('tasks-due', 'Puca Tasks', body, 'tasks');
+        void postMobileNotification('tasks-due', 'Púca Tasks', body, 'tasks');
         return;
     }
 
@@ -316,7 +316,7 @@ export function notifyTasksDue(count: number): void {
                 let granted = await isPermissionGranted();
                 if (!granted) granted = (await requestPermission()) === 'granted';
                 if (!granted) return;
-                sendNotification({ title: 'Puca Tasks', body });
+                sendNotification({ title: 'Púca Tasks', body });
             } catch (err) {
                 console.warn('[notify] task reminder failed:', err);
             }
@@ -328,7 +328,7 @@ export function notifyTasksDue(count: number): void {
     try {
         // No `silent`: there is no in-app sound for reminders, so the OS
         // default chime is the only audible cue.
-        const n = new Notification('Puca Tasks', { body, tag: 'tasks-due' });
+        const n = new Notification('Púca Tasks', { body, tag: 'tasks-due' });
         n.onclick = () => {
             void focusApp();
             try { window.dispatchEvent(new CustomEvent('sovereign:open-tasks')); } catch { /* non-DOM env */ }
@@ -359,7 +359,7 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
         const granted = await requestMobileNotificationPermission();
         if (!granted) return { ok: false, reason: 'permission denied by Android' };
         await postMobileNotification(
-            'test', 'Puca',
+            'test', 'Púca',
             'Test notification — this is what a new message looks like.',
         );
         return { ok: true };
@@ -370,7 +370,7 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
             if (perm !== 'granted') return { ok: false, reason: 'permission denied' };
         }
         try {
-            new Notification('Puca', { body: 'Test notification — this is what a new message looks like.' });
+            new Notification('Púca', { body: 'Test notification — this is what a new message looks like.' });
             return { ok: true };
         } catch (err) {
             return { ok: false, reason: String(err) };
@@ -383,7 +383,7 @@ export async function sendTestNotification(): Promise<{ ok: boolean; reason?: st
         if (!granted) granted = (await requestPermission()) === 'granted';
         if (!granted) return { ok: false, reason: 'permission denied by the OS' };
         sendNotification({
-            title: 'Puca',
+            title: 'Púca',
             body: 'Test notification — this is what a new message looks like.',
         });
         return { ok: true };

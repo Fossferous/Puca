@@ -170,7 +170,7 @@ export async function agentAnswerOffer(
 ): Promise<string> {
     const { fps, bitrateKbps, dataOnly } = opts ?? {};
     // THE AGENT CANNOT FETCH THESE ITSELF — it holds no account token and never
-    // speaks to the Puca server, which is the property that makes it safe
+    // speaks to the Púca server, which is the property that makes it safe
     // to run headless. So the app has to hand them over, and until 0.8.6 it did
     // not: the webview host built its RTCPeerConnection from fetchIceConfig()
     // and the agent path was simply never told, so it offered host candidates

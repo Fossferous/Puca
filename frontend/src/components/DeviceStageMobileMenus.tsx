@@ -84,7 +84,7 @@ export function MoreMenu({ session, onClose, onOpenFiles, onNotice, controlEnabl
         {
             // ONE frame, `{t:'sas'}`, not three keystrokes. Windows will not
             // raise the Secure Attention Sequence for injected keys; the host
-            // asks the Puca system service (LocalSystem) to call SendSAS,
+            // asks the Púca system service (LocalSystem) to call SendSAS,
             // and a refusal comes back as a visible notice (input-failed).
             label: 'Insert Ctrl + Alt + Del',
             icon: 'keyboard',

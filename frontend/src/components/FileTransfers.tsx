@@ -194,8 +194,8 @@ function TransferCard({ t }: { t: TransferView }) {
                         // Blunter on a phone because the failure is likelier and
                         // less obvious: the webview is suspended on screen lock,
                         // which stalls the transfer with no visible cause.
-                        ? 'Keep Puca open and your screen on — locking the phone or switching apps pauses the transfer, and closing the app loses it.'
-                        : 'Keep Puca open until this finishes — there is no server copy, so closing the app loses the transfer.'}
+                        ? 'Keep Púca open and your screen on — locking the phone or switching apps pauses the transfer, and closing the app loses it.'
+                        : 'Keep Púca open until this finishes — there is no server copy, so closing the app loses the transfer.'}
                 </div>
             )}
 

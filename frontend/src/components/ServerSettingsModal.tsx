@@ -5,6 +5,9 @@ import {
     listBans, unbanMember, listReports, resolveReport, listAuditLog,
 } from '../api/servers';
 import { uploadFile, discardUpload } from '../api/uploads';
+import { fetchPublicConfig } from '../api/publicConfig';
+import { inviteLink } from '../api/pendingInvite';
+import { statusOf } from '../api/client';
 import type { Invite, Ban, Report, AuditLogEntry, Channel } from '../api/servers';
 import { RoleSettingsModal } from './RoleSettingsModal';
 import { EmojiSettings } from './EmojiSettings';
@@ -100,6 +103,10 @@ export function ServerSettingsModal({
     const [invites, setInvites] = useState<Invite[]>([]);
     const [invitesLoading, setInvitesLoading] = useState(false);
     const [copiedCode, setCopiedCode] = useState<string | null>(null);
+    // The web app's PUBLIC address (GET /config), fetched on open so the copy
+    // below can run synchronously inside the click — never this webview's
+    // origin, which is tauri.localhost on the desktop. See InviteModal.
+    const [appUrl, setAppUrl] = useState<string | null>(null);
 
     // Moderation state
     const [modSection, setModSection] = useState<'bans' | 'reports' | 'audit'>('bans');
@@ -306,8 +313,10 @@ export function ServerSettingsModal({
             const invite = await createInvite(serverId, { expires_in_hours: 24 });
             setInvites([invite, ...invites]);
             copyToClipboard(invite.code);
-        } catch {
-            setError('Failed to create invite');
+        } catch (err) {
+            setError(statusOf(err) === 403
+                ? "You don't have permission to create invites on this server."
+                : 'Failed to create invite');
         }
     };
 
@@ -320,9 +329,15 @@ export function ServerSettingsModal({
         }
     };
 
+    useEffect(() => {
+        if (!isOpen) return;
+        let live = true;
+        void fetchPublicConfig().then(c => { if (live) setAppUrl(c.appUrl); });
+        return () => { live = false; };
+    }, [isOpen]);
+
     const copyToClipboard = (code: string) => {
-        const url = `${window.location.origin}/invite/${code}`;
-        navigator.clipboard.writeText(url);
+        navigator.clipboard.writeText(inviteLink(code, appUrl) ?? code);
         setCopiedCode(code);
         setTimeout(() => setCopiedCode(null), 2000);
     };

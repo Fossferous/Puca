@@ -205,6 +205,15 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--header-primary);
+    /* A full link (not just the code) lives here since 0.9.2. */
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.invite-item-info {
+    min-width: 0;
 }
 
 .invite-meta {

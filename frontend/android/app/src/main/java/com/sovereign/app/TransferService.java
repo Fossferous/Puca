@@ -113,7 +113,7 @@ public class TransferService extends Service {
         if (nm != null) {
             nm.notify(NOTIFICATION_ID, buildNotification(
                     "Transfer paused",
-                    "Android stopped background transfers. Open Puca to finish.",
+                    "Android stopped background transfers. Open Púca to finish.",
                     -1));
         }
         stopForeground(Service.STOP_FOREGROUND_DETACH);

@@ -15,7 +15,7 @@
  *     is offline exactly when you need it (locked, or at the sign-in screen);
  *   - the service's row is reachable at the sign-in screen, but nothing ever
  *     wrote its `lan_info`, so it could never be woken — and its refusal said
- *     "open Puca on that device once", which publishes to the OTHER row.
+ *     "open Púca on that device once", which publishes to the OTHER row.
  *
  * So the reachable half could not be woken and the wakeable half could not be
  * reached, and the user hit both ends of that.

@@ -819,14 +819,14 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         );
                                     })()}
                                     {/* OS-level picture-in-picture: stays on top when
-                                        Puca is tabbed out. Only where the API exists. */}
+                                        Púca is tabbed out. Only where the API exists. */}
                                     {onTogglePopout && (pipSupported() || docPipSupported()) && (
                                         <button
                                             className={`tile-btn ${poppedStreams.includes(userId) ? 'active' : ''}`}
                                             onClick={(e) => { e.stopPropagation(); onTogglePopout(userId); }}
                                             title={poppedStreams.includes(userId)
                                                 ? 'Bring back from picture-in-picture'
-                                                : 'Pop out (stays on top when Puca is tabbed out)'}
+                                                : 'Pop out (stays on top when Púca is tabbed out)'}
                                         >
                                             <PopOutIcon />
                                         </button>
@@ -922,7 +922,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     onPointerDown={(e) => {
                                         // Escape hatch: let the browser produce its
                                         // normal contextmenu sequence so the tile
-                                        // handler can open Puca's menu, and send
+                                        // handler can open Púca's menu, and send
                                         // nothing to the host.
                                         if (e.button === 2 && e.shiftKey) return;
                                         e.preventDefault();
@@ -984,7 +984,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     }}
                                     onContextMenu={(e) => {
                                         // Shift+right-click is the escape hatch to
-                                        // Puca's own stream menu; a plain
+                                        // Púca's own stream menu; a plain
                                         // right-click belongs to the remote machine.
                                         // Without stopPropagation the tile's handler
                                         // popped our menu over the video even though

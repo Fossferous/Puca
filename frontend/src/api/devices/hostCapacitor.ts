@@ -147,7 +147,7 @@ export function capacitorHostBackend(): HostBackend {
             let limitation = files
                 ? 'This phone can share its files, but not its screen.'
                 : Capacitor.getPlatform() === 'android'
-                    ? 'Update the Puca app on this phone to share its files.'
+                    ? 'Update the Púca app on this phone to share its files.'
                     : 'This device can control others, but cannot be controlled itself.';
             if (files) {
                 const status = await allFilesAccessStatus();

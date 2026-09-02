@@ -595,6 +595,31 @@ export interface Report {
     resolved_at?: string;
 }
 
+/** The server's allow-list (moderation_handlers::create_report), verbatim. */
+export type ReportType = 'spam' | 'harassment' | 'inappropriate' | 'other';
+
+/** The server refuses a longer reason with 413 (moderation_handlers.rs). */
+export const REPORT_REASON_MAX = 1000;
+
+/** What ReportModal offers — exactly the server's four types, in the order
+ *  a person being harassed would look for them. */
+export const REPORT_TYPES: ReadonlyArray<{ id: ReportType; label: string; hint: string }> = [
+    { id: 'spam', label: 'Spam', hint: 'Unwanted advertising, floods, or scams' },
+    { id: 'harassment', label: 'Harassment', hint: 'Targeting, threats, or abuse towards someone' },
+    { id: 'inappropriate', label: 'Inappropriate content', hint: 'Content that should not be on this server' },
+    { id: 'other', label: 'Something else', hint: 'Explain below' },
+];
+
+/** File a report with this server's moderators. The server bounds `reason`
+ *  at 1000 characters and throttles at 15 reports per reporter per server
+ *  per hour (429); ReportModal mirrors both. */
+export function createReport(
+    serverId: string,
+    report: { report_type: ReportType; reason: string; reported_user_id?: number; reported_message_id?: string },
+): Promise<{ id: number }> {
+    return apiClient.post(`/servers/${serverId}/reports`, report);
+}
+
 export function listReports(serverId: string, status?: string): Promise<Report[]> {
     const params = status ? `?status=${status}` : '';
     return apiClient.get(`/servers/${serverId}/reports${params}`);

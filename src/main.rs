@@ -34,6 +34,7 @@ mod models;
 mod moderation_handlers;
 mod permissions;
 mod protocol;
+mod public_config;
 mod push_handlers;
 mod reaction_handlers;
 mod recovery_handlers;
@@ -930,6 +931,7 @@ async fn main() -> anyhow::Result<()> {
     let public_api_routes = Router::new()
         .route("/invites/:code", get(invite_handlers::get_invite_info))
         .route("/discover", get(server_handlers::list_public_servers))
+        .route("/config", get(public_config::get_public_config))
         .with_state(app_state.clone());
 
     // Create rate limit layers and spawn a periodic GC that prunes each limiter's

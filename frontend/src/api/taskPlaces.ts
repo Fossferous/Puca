@@ -9,7 +9,7 @@
  *
  * WHY DEVICE-LOCAL, DELIBERATELY: due_at ships to the server as plaintext
  * because the server must serve /task-reminders — "the server learns WHEN,
- * never WHAT". That trade does NOT transfer to WHERE. Puca instances
+ * never WHAT". That trade does NOT transfer to WHERE. Púca instances
  * are operated by someone who is frequently not the user, and a saved-places
  * table (home, work, clinic) is the most re-identifying dataset this app
  * could hold — while the server has NO functional need for it: the fence is

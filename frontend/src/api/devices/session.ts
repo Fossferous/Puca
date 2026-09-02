@@ -3350,7 +3350,7 @@ export function installDeviceSessions(): void {
                                 title: fromUsername
                                     ? `${fromUsername} wants to connect to this screen`
                                     : 'A device wants to connect to this screen',
-                                body: 'Switch to Puca to allow or deny.',
+                                body: 'Switch to Púca to allow or deny.',
                             });
                         }
                     } catch { /* notification is best-effort */ }
@@ -3794,7 +3794,7 @@ export function installDeviceSessions(): void {
                             }
                             // Ctrl+Alt+Del is the one input the user presses
                             // ONCE and expects a visible answer to. It can only
-                            // be raised by the Puca system service, so a
+                            // be raised by the Púca system service, so a
                             // refusal ("service not installed", "policy not
                             // set") must reach the controller — silently
                             // dropping it is how this control shipped for

@@ -433,12 +433,16 @@ public class SovereignAppPlugin extends Plugin {
         // Location reminders (task place fences). Absent from older JS —
         // getBoolean's default keeps those senders meaning what they said.
         boolean geofence = Boolean.TRUE.equals(call.getBoolean("geofence", false));
+        // A live voice call: the service takes the microphone foreground type
+        // so capture survives backgrounding on 14+. Same default rule.
+        boolean voice = Boolean.TRUE.equals(call.getBoolean("voice", false));
         try {
-            if (control || notify || geofence) {
+            if (control || notify || geofence || voice) {
                 Intent i = new Intent(getContext(), KeepAliveService.class);
                 i.putExtra(KeepAliveService.EXTRA_CONTROL, control);
                 i.putExtra(KeepAliveService.EXTRA_NOTIFY, notify);
                 i.putExtra(KeepAliveService.EXTRA_GEOFENCE, geofence);
+                i.putExtra(KeepAliveService.EXTRA_VOICE, voice);
                 if (Build.VERSION.SDK_INT >= 26) {
                     getContext().startForegroundService(i);
                 } else {
@@ -471,7 +475,7 @@ public class SovereignAppPlugin extends Plugin {
         SovereignNotifier.post(
                 getContext(),
                 call.getString("key", "puca"),
-                call.getString("title", "Puca"),
+                call.getString("title", "Púca"),
                 call.getString("body", ""),
                 call.getString("nav", ""));
         call.resolve();
@@ -828,6 +832,25 @@ public class SovereignAppPlugin extends Plugin {
             call.resolve();
         } catch (Exception e) {
             call.reject("could not open notification settings: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Deep-link to this app's own Settings page (Permissions live under it).
+     * The one recovery once a runtime permission — the microphone, for voice
+     * — has been refused with "Don't allow": Android stops asking, and the
+     * WebView's getUserMedia then fails forever with no prompt.
+     */
+    @PluginMethod
+    public void openAppSettings(PluginCall call) {
+        try {
+            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:" + getContext().getPackageName()))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("could not open app settings: " + e.getMessage());
         }
     }
 

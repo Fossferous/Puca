@@ -224,7 +224,7 @@ export function webviewHostBackend(): HostBackend {
                 files: false,
                 monitors,
                 limitation: input
-                    ? 'This device must be unlocked and running Puca to be controlled. ' +
+                    ? 'This device must be unlocked and running Púca to be controlled. ' +
                       'It cannot wake itself into a session, and cannot be driven through ' +
                       'UAC prompts or the lock screen.'
                     : 'Screen sharing works, but keyboard and mouse control is Windows-only ' +
