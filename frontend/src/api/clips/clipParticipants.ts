@@ -16,24 +16,30 @@
  * the server's 32-approver cap and the request fails outright.
  *
  * This mirrors the server's `PresenceLog`: one or more spans per user, opened
- * when they appear in the roster and closed when they disappear, and a clip
- * declares everyone whose span OVERLAPS its window. Every rounding decision
- * errs toward declaring someone:
+ * when they appear and closed when they disappear, and a clip declares
+ * everyone whose span OVERLAPS its window. "Appear" is deliberately wider
+ * than the WS roster: the callers feed `observe()` the roster UNIONED with
+ * the SFU's live participants (`sfuManager.participantUserIds()`), because a
+ * peer whose app socket blipped has their roster row deleted by the server's
+ * StreamStopped while their LiveKit session — and their audio into our ring
+ * — carries on (VoicePanel keeps their audio element for exactly that
+ * reason). Their span therefore stays open for as long as they are actually
+ * audible, and closes only when BOTH the roster and the SFU have dropped
+ * them. Every remaining rounding decision errs toward declaring someone:
  *
- *  - a span closes when the ROSTER drops them, which happens on the server's
- *    StreamStopped/UserLeft — stamped at its idle reap, 75–90 s after a dead
- *    uplink actually went quiet, plus the wire latency. Our `leftAt` is
- *    therefore never earlier than the server's own `left_ms`;
+ *  - `leftAt` is stamped when THIS client learns of the departure (the
+ *    server's StreamStopped/UserLeft arriving, or the SFU participant going),
+ *    so it is never earlier than the server's own `left_ms` for that leave;
  *  - `LEAVE_SLACK_MS` extends every closed span forward, so someone who left
- *    just before the window is still asked. It exists for the one case where
- *    their voice outlives their roster row: on an SFU call a WS blip on THEIR
- *    side makes the server broadcast StreamStopped (VoicePanel deletes the
- *    row) while their LiveKit session — and their audio into our ring —
- *    survives for a while. LiveKit drops a dead participant well inside two
- *    minutes;
- *  - `stillAudible` closes that gap exactly rather than by slack: a user
- *    whose SFU participant is still live at proposal time is treated as
- *    present regardless of what the roster says;
+ *    shortly before the window is still asked. It is a heuristic margin for
+ *    whatever the two liveness signals above miss, not a measured property
+ *    of LiveKit; the continuous SFU observation is the real guarantee;
+ *  - `stillAudible` is a belt-and-braces re-check at proposal time: a user
+ *    with a live SFU participant is treated as present through now if ANY
+ *    span of theirs started at or before the window end — keyed on the
+ *    user, not on their latest span, so a roster row that heals after the
+ *    seal (a new, post-window span) cannot cancel the rescue of the one
+ *    that covered the footage;
  *  - the window's END is not padded, matching the server: someone who joined
  *    after the clip ended is not in it, and asking them would name people who
  *    arrived after the footage stopped;
@@ -53,6 +59,17 @@ export const LEAVE_SLACK_MS = 120_000;
 /** > MAX_ENDED_AGO (10 min) + MAX_CLIP (10 min) + pad + slack. */
 export const RETENTION_MS = 25 * 60_000;
 export const MAX_SPANS_PER_USER = 64;
+
+/**
+ * The window a clip sealed at `sealedAt` covers, on this client's clock — the
+ * same one the server computes from `duration_ms` + `ended_ago_ms` (start
+ * padded by `PAD_MS`, end not padded). The composer passes exactly this to
+ * `getDeclaredParticipants`, and the unit tests build their windows with it,
+ * so the arithmetic under test IS the arithmetic in production.
+ */
+export function clipWindowFor(sealedAt: number, durationMs: number): { start: number; end: number } {
+    return { start: sealedAt - durationMs - CLIP_PAD_MS, end: sealedAt };
+}
 
 export interface PresenceSpan {
     joinedAt: number;
@@ -107,14 +124,19 @@ export class DeclaredParticipants {
         const out: number[] = [];
         for (const [id, list] of this.spans) {
             if (id === opts.self) continue;
-            const audible = opts.stillAudible?.(id) === true;
-            const hit = list.some((s, i) => {
-                if (s.joinedAt > windowEndMs) return false;
-                // Still in the roster, or still audible on the SFU despite the
-                // roster: they have not gone, whatever the last span says.
-                if (s.leftAt === null || (audible && i === list.length - 1)) return true;
-                return s.leftAt + LEAVE_SLACK_MS >= windowStartMs;
-            });
+            const startedByEnd = (s: PresenceSpan) => s.joinedAt <= windowEndMs;
+            // Still audible on the SFU right now: they have not gone, whatever
+            // the roster did in between — treat them as present from any span
+            // that started by the window's end through now. User-level on
+            // purpose: a row that healed after the seal adds a post-window
+            // span, and keying the rescue on "the latest span" would let that
+            // new span cancel it (review finding, 2026-09-02).
+            if (opts.stillAudible?.(id) === true && list.some(startedByEnd)) {
+                out.push(id);
+                continue;
+            }
+            const hit = list.some(s =>
+                startedByEnd(s) && (s.leftAt === null || s.leftAt + LEAVE_SLACK_MS >= windowStartMs));
             if (hit) out.push(id);
         }
         return out.sort((a, b) => a - b);

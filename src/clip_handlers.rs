@@ -620,7 +620,10 @@ mod tests {
         assert!(by(2).in_window && by(3).in_window, "log hits are in_window");
         assert!(!by(4).in_window, "a declared-only id is NOT in_window");
         assert!(by(3).had_camera && !by(3).had_share);
-        assert!(!by(4).had_camera && !by(4).had_share, "no media for someone the log never saw in the window");
+        // The fixture has no media entry for 4; at the call site media comes from
+        // overlapping_media over the same spans as log_hits, so a declared-only
+        // id never has one — build_voters itself just applies the (false, false) default.
+        assert!(!by(4).had_camera && !by(4).had_share, "no media entry → (false, false)");
         assert!(votes.iter().all(|v| v.vote == ClipVote::Pending));
         assert_eq!(votes.iter().filter(|v| !v.in_window).count(), 1);
     }

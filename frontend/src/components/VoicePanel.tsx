@@ -103,6 +103,22 @@ interface VoicePanelProps {
 // (voiceState) and render INSIDE each participant's voice-stage tile
 // (VoiceStage.tsx) — where profile/stream tiles already live.
 
+/**
+ * Who the clip buffer's presence record treats as PRESENT right now: the WS
+ * roster UNIONED with the SFU's live participants. A peer whose app socket
+ * blipped loses their roster row on the server's StreamStopped while their
+ * LiveKit session — and their audio into our ring — carries on (the
+ * StreamStopped handler keeps their audio element for the same reason), so
+ * the roster alone would close their span while they are still audible.
+ * Outside an SFU room the second set is empty. Module-level and pure so the
+ * effects that call it need no extra hook dependencies.
+ */
+function clipPresence(roomId: string): number[] {
+    const ids = new Set<number>(globalVoiceUsers.get(roomId)?.keys() ?? []);
+    for (const id of sfuManager.participantUserIds()) ids.add(id);
+    return [...ids];
+}
+
 export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy }: VoicePanelProps) {
     const [isInVoice, setIsInVoice] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
@@ -334,7 +350,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             if (armed && !wasArmed) {
                 // A fresh arm: the presence record starts from the room as it
                 // is right now.
-                declaredRef.current.reset(globalVoiceUsers.get(roomId)?.keys() ?? [], Date.now());
+                declaredRef.current.reset(clipPresence(roomId), Date.now());
             } else if (armed) {
                 // A re-assert while ALREADY armed (armNative fires once when
                 // native capture starts and again when the worker confirms a
@@ -342,7 +358,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 // between the two notifications is already in the ring and
                 // must keep their span, or the client under-declares a person
                 // whose footage it holds (the server union can only ADD).
-                declaredRef.current.observe(globalVoiceUsers.get(roomId)?.keys() ?? [], Date.now());
+                declaredRef.current.observe(clipPresence(roomId), Date.now());
             }
             setClipArmed(armed);
             broadcastStatusRef.current(isMutedRef.current, isDeafenedRef.current);
@@ -651,15 +667,16 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const refreshVoiceUsersList = useCallback(() => {
         const roomUsers = globalVoiceUsers.get(roomId);
         if (!roomUsers) {
-            // The room map is gone: everyone's span closes now.
-            if (isBufferingRef.current) declaredRef.current.observe([], Date.now());
+            // The room map is gone: only whoever the SFU still carries stays open.
+            if (isBufferingRef.current) declaredRef.current.observe(clipPresence(roomId), Date.now());
             setVoiceUsers([]);
             return;
         }
         // Every roster render while armed: opens spans for newcomers, closes
-        // the span of anyone who dropped out (StreamStopped / UserLeft / the
-        // REST rebuild all end up here).
-        if (isBufferingRef.current) declaredRef.current.observe(roomUsers.keys(), Date.now());
+        // the span of anyone BOTH the roster and the SFU have dropped
+        // (StreamStopped / UserLeft / the REST rebuild / the SFU's terminal
+        // peer-disconnect all end up here).
+        if (isBufferingRef.current) declaredRef.current.observe(clipPresence(roomId), Date.now());
 
         const userList: VoiceUser[] = [];
         for (const [userId, status] of roomUsers) {
@@ -3059,13 +3076,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 // reached refreshVoiceUsersList (Chat.tsx's
                                 // REST rebuild) is stamped now, which is LATER
                                 // than reality and so errs toward declaring.
-                                declaredRef.current.observe(globalVoiceUsers.get(roomId)?.keys() ?? [], Date.now());
+                                declaredRef.current.observe(clipPresence(roomId), Date.now());
                                 return declaredRef.current.declaredFor(windowStartMs, windowEndMs, {
                                     self: currentUserId,
-                                    // Their LiveKit session outliving their roster row
-                                    // (a WS blip on their side) means their voice is
-                                    // still going into the ring — see the StreamStopped
-                                    // handler's identical guard.
+                                    // Belt and braces over clipPresence(): a peer
+                                    // the SFU still carries is present through now
+                                    // whatever their spans say — see the
+                                    // StreamStopped handler's identical guard.
                                     stillAudible: (id) => sfuManager.hasParticipant(id),
                                 });
                             }}

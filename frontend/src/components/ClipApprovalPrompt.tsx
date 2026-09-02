@@ -165,9 +165,8 @@ export function ClipApprovalPrompt() {
                     </p>
                     <p>
                         <strong>It records {who}'s whole screen plus the call audio.</strong> It includes {includesClause(shown.you)} — and anything else that was visible on {who}'s screen.
-                        {!shown.you.stillInCall && (shown.you.inWindow
-                            ? <> You were in that call at the time.</>
-                            : <> The server did not see you in that call during the clip; {who}'s app listed you as there.</>)}
+                        {!shown.you.stillInCall && shown.you.inWindow && <> You were in that call at the time.</>}
+                        {!shown.you.inWindow && <> The server did not see you in that call during the clip; {who}'s app listed you as there.</>}
                     </p>
                     <p>If everyone approves it will be posted to <strong>#{shown.targetChannelName}</strong>.</p>
                     <p className="clip-approval-standing">
