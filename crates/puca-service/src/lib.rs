@@ -94,6 +94,28 @@ pub const INSTALLED_SERVICE_EXE: &str = "sovereign-service.exe";
 /// See [`INSTALLED_SERVICE_EXE`].
 pub const INSTALLED_AGENT_EXE: &str = "sovereign-agent.exe";
 
+/// The environment variable a launcher hands the agent's launch token in.
+///
+/// NOT THE COMMAND LINE, which is where it used to go. Full command lines are
+/// captured by Sysmon/EDR process-create events and by Windows 4688 auditing
+/// wherever that is enabled, and those records travel off the box — so the
+/// secret that authorises driving this machine's input and screen was being
+/// copied into a log the machine's owner does not control. An environment
+/// block is not recorded by process-create auditing by default.
+///
+/// Be honest about what this does NOT buy: an administrator who can open the
+/// process can still read its environment. That party can generally already
+/// open the agent's pipe, which is the thing the token protects, so the
+/// exposure this removes is the LOGGING one specifically.
+///
+/// TWO OTHER PLACES SPELL THIS STRING. `frontend/src-tauri/src/agent_ipc.rs`
+/// uses this constant directly; `crates/puca-agent/src/main.rs` cannot (it does
+/// not depend on this crate) and carries its own copy, pinned by a test there
+/// that names this one. A mismatch is loud rather than silent — the agent finds
+/// no token, says `--token` is required and exits 2, and the service's restart
+/// policy logs the give-up — but it is still a mismatch, so change both.
+pub const AGENT_TOKEN_ENV: &str = "PUCA_AGENT_TOKEN";
+
 #[cfg(test)]
 mod frozen_identity {
     /// Change-detector. These three strings are what an already-installed
@@ -105,6 +127,18 @@ mod frozen_identity {
         assert_eq!(super::SERVICE_NAME, "SovereignRemote");
         assert_eq!(super::INSTALLED_SERVICE_EXE, "sovereign-service.exe");
         assert_eq!(super::INSTALLED_AGENT_EXE, "sovereign-agent.exe");
+    }
+
+    /// The launch-token env var name, pinned on this side of the handoff.
+    ///
+    /// `crates/puca-agent/src/main.rs` carries the same literal and pins it
+    /// with the mirror of this test, because the agent does not depend on this
+    /// crate and cannot share the constant. Neither test can see the other's
+    /// copy — what they buy is that a rename sweep has to change two things it
+    /// was told about rather than one it was not.
+    #[test]
+    fn the_launch_token_env_name_is_unchanged() {
+        assert_eq!(super::AGENT_TOKEN_ENV, "PUCA_AGENT_TOKEN");
     }
 }
 

@@ -26,11 +26,15 @@
   ; guard is compile-time: the migration only exists in builds that actually
   ; rename.
   !if "${PRODUCTNAME}" != "Sovereign"
-    !insertmacro MigrateRenamedInstall "Sovereign"
+    ; "app" is this product's pre-rename binary name, and the ONLY call that
+    ; still names it -- genuinely once per machine. See installer-migrate.nsh.
+    !insertmacro MigrateRenamedInstall "Sovereign" "app"
   !endif
   ; The lite variant. No guard needed: this file is used only by the full
-  ; build, whose productName is never "Púca Lite".
-  !insertmacro MigrateRenamedInstall "Púca Lite"
+  ; build, whose productName is never "Púca Lite". The binary name is the LITE
+  ; build's mainBinaryName, not this build's -- see installer-migrate.nsh for
+  ; why that distinction is the whole fix.
+  !insertmacro MigrateRenamedInstall "Púca Lite" "Puca-Lite"
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

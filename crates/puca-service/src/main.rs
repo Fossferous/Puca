@@ -293,6 +293,47 @@ mod windows_impl {
         }
     }
 
+    /// The agent's command line, in ONE place so a test can assert what it
+    /// carries — and, more to the point, what it does not.
+    ///
+    /// THERE IS NO TOKEN PARAMETER, and that is the fix for L8-NATIVE-5 rather
+    /// than a tidy-up: the launch secret used to be an argv pair here, and full
+    /// command lines are captured by Sysmon/EDR process-create events and by
+    /// Windows 4688 auditing where it is enabled — records that leave the
+    /// machine. It travels in the child's environment now (see
+    /// `puca_service::AGENT_TOKEN_ENV`), and a function that cannot be handed a
+    /// token cannot put one back on the command line by accident.
+    fn agent_args<'a>(
+        session_s: &'a str,
+        flavour_arg: &'a str,
+        pipe: &'a str,
+        allow_sid: Option<&'a str>,
+        ua_record: &'a str,
+        log: Option<&'a str>,
+    ) -> Vec<&'a str> {
+        let mut args = vec![
+            "--service-session",
+            session_s,
+            "--flavour",
+            flavour_arg,
+            "--pipe",
+            pipe,
+        ];
+        if let Some(sid) = allow_sid {
+            args.push("--allow-sid");
+            args.push(sid);
+        }
+        if !ua_record.is_empty() {
+            args.push("--ua-record");
+            args.push(ua_record);
+        }
+        if let Some(l) = log {
+            args.push("--log");
+            args.push(l);
+        }
+        args
+    }
+
     /// Launch an agent of `flavour` in `session`. Returns None on a launch error
     /// (e.g. the user logged off between the decision and the launch — a race the
     /// liveness check and the next event will recover from).
@@ -301,10 +342,16 @@ mod windows_impl {
             AgentFlavour::SystemInteractive => "system",
         };
 
-        // The agent REQUIRES --token and exits immediately without one. Omitting
-        // it meant the service could never start the real agent — every launch
-        // would exit instantly and the restart policy would give up after five.
-        // The install checkpoint missed this because it ran a stub.
+        // The agent REQUIRES a token and exits immediately without one.
+        // Omitting it meant the service could never start the real agent —
+        // every launch would exit instantly and the restart policy would give
+        // up after five. The install checkpoint missed this because it ran a
+        // stub.
+        //
+        // IT NO LONGER TRAVELS IN ARGV. See puca_service::AGENT_TOKEN_ENV: a
+        // full command line is captured by Sysmon/EDR process-create events and
+        // by 4688 auditing, and those records leave the machine. It is handed
+        // to launch_as_system_in_session as an environment entry instead.
         let token = match launch_id::generate_token() {
             Ok(t) => t,
             Err(e) => {
@@ -343,30 +390,12 @@ mod windows_impl {
             ),
         }
 
-        let mut args = vec![
-            "--service-session",
-            &session_s,
-            "--flavour",
-            flavour_arg,
-            "--token",
-            &token,
-            "--pipe",
-            &pipe,
-        ];
-        if let Some(sid) = allow_sid.as_deref() {
-            args.push("--allow-sid");
-            args.push(sid);
-        }
         // The machine-scope unattended record. Passed as a PATH, and passed
         // even when the file does not exist yet: the agent re-reads it on every
         // connection, so arming later must not need a relaunch.
         let ua_record = puca_service::arming::record_path()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if !ua_record.is_empty() {
-            args.push("--ua-record");
-            args.push(&ua_record);
-        }
         // WHERE THE AGENT'S OWN STORY GOES. The agent is launched with
         // CREATE_NO_WINDOW, so without this flag every one of its eprintln
         // lines — the capture-blocked notices, the desktop follows, the ICE
@@ -382,11 +411,22 @@ mod windows_impl {
         let agent_log = agent_log_path();
         if let Some(ref log) = agent_log {
             rotate_agent_log(std::path::Path::new(log));
-            args.push("--log");
-            args.push(log);
         }
+        let args = agent_args(
+            &session_s,
+            flavour_arg,
+            &pipe,
+            allow_sid.as_deref(),
+            &ua_record,
+            agent_log.as_deref(),
+        );
         let result = match flavour {
-            AgentFlavour::SystemInteractive => launch_as_system_in_session(session, exe, &args),
+            AgentFlavour::SystemInteractive => launch_as_system_in_session(
+                session,
+                exe,
+                &args,
+                Some((puca_service::AGENT_TOKEN_ENV, &token)),
+            ),
         };
         match result {
             Ok(agent) => {
@@ -394,10 +434,10 @@ mod windows_impl {
                     "launched {flavour_arg} agent pid {} in session {session}",
                     agent.pid
                 ));
-                // Nothing is published. The token stays in this process and on
-                // the child's command line, and dies with them: the only party
-                // that ever needed to read it from disk was a user-flavour
-                // agent's app, and that flavour no longer exists.
+                // Nothing is published. The token stays in this process and
+                // in the child's environment, and dies with them: the only
+                // party that ever needed to read it from disk was a
+                // user-flavour agent's app, and that flavour no longer exists.
                 Some(agent)
             }
             Err(e) => {
@@ -711,5 +751,60 @@ mod windows_impl {
         status_handle
             .set_service_status(set_state(ServiceState::Stopped, ServiceControlAccept::empty()))?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// L8-NATIVE-5, asserted against the command line the service ACTUALLY
+        /// builds rather than a hand-written copy of it — a test that assembled
+        /// its own argv would keep passing after someone put `--token` back.
+        #[test]
+        fn the_agent_command_line_carries_no_launch_secret() {
+            let token = puca_service::launch_id::generate_token().expect("RNG");
+            assert_eq!(token.len(), 64, "the fixture must be a real token");
+
+            // Every optional argument present, so nothing is missed by being
+            // absent from the default shape.
+            let args = agent_args(
+                "1",
+                "system",
+                r"\.\pipe\sovereign-agent-1",
+                Some("S-1-5-21-1-2-3-1001"),
+                r"C:\ProgramData\Puca\unattended.json",
+                Some(r"C:\ProgramData\Puca\agent.log"),
+            );
+            let line = args.join(" ");
+            assert!(!args.iter().any(|a| *a == "--token"), "{line}");
+            assert!(!line.contains(&token), "{line}");
+            assert!(
+                longest_hex_run(&line) < 64,
+                "no 64-hex-character run may appear on an agent command line: {line}",
+            );
+
+            // POSITIVE CONTROL: the detector sees a token when one IS there, so
+            // the assertion above is not passing because it cannot fail.
+            assert!(longest_hex_run(&format!("--token {token}")) >= 64);
+            // ...and the builder really does emit the arguments it should, so
+            // "no token" is not passing because it emits nothing at all.
+            assert!(args.contains(&"--pipe"));
+            assert!(args.contains(&"--allow-sid"));
+            assert!(args.contains(&"--ua-record"));
+            assert!(args.contains(&"--log"));
+        }
+
+        fn longest_hex_run(s: &str) -> usize {
+            let (mut best, mut run) = (0usize, 0usize);
+            for c in s.chars() {
+                if c.is_ascii_hexdigit() {
+                    run += 1;
+                    best = best.max(run);
+                } else {
+                    run = 0;
+                }
+            }
+            best
+        }
     }
 }

@@ -62,6 +62,12 @@ import {
     signUaChallengeSeed,
 } from './unattended';
 import { requestUnattendedPassphrase } from './unattendedPrompt';
+import {
+    armControlGuard,
+    noteControlActivity,
+    releaseControlGuard,
+    DEVICE_CONTROL_IDLE_MS,
+} from './controlGuard';
 import { appIsBackgrounded } from '../pagePainting';
 
 /** How long a controller has to answer the unattended challenge before the
@@ -1195,6 +1201,12 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     // deadline timer, a 'failed' connection state) reaches into whichever
     // session holds that id now and closes ITS ports and capture.
     const owns = sessions.get(s.id) === s;
+    // Before anything that can fail: a kill-switch hook and an idle timer that
+    // outlive their session would fire into whatever holds that id next, and
+    // the hook is a low-level input hook — not a thing to leave running for a
+    // session that has ended. Keyed by id, so a superseded object tearing down
+    // late must not release the live session's guard.
+    if (owns) releaseControlGuard(s.id);
     if (tellPeer && s.phase !== 'ended') {
         // Silently a no-op when the socket is down — and that is fine, not a
         // leak. A down socket is one whose server-side close marks this
@@ -3698,6 +3710,11 @@ export function installDeviceSessions(): void {
             // authoritative gate on what touches its own desktop.
             if (s.share && !s.share.capabilities.includes('control')) return;
 
+            // AUTHORISED input is what resets the inactivity clock — below
+            // every gate above, so a peer that is being refused cannot keep an
+            // abandoned unattended session alive by hammering the channel.
+            noteControlActivity(s.id);
+
             // A CAPTURE-LESS HOST TAKES NO INPUT OF ANY KIND — including the
             // clipboard, which is neither capture nor input and therefore sits
             // outside every other guard here.
@@ -4044,6 +4061,38 @@ export function installDeviceSessions(): void {
             }
         }
     });
+}
+
+/**
+ * Arm the host's kill switch (and, for an unattended session, its inactivity
+ * revoke) for a session that is now capable of being controlled.
+ *
+ * CALLED AFTER answerOffer, not at `phase = 'active'`, because `filesOnly` is
+ * only known once the offer arrives — arming a file-browsing session would put
+ * a kill-switch hook on a session that never touches the screen or the pointer.
+ *
+ * The hazard here is over-triggering, not under-: the ANY-INPUT half of the
+ * guard is read from the user's own setting and is off by default (a stray
+ * mouse nudge must not kick out a friend mid-game), so arming this for device
+ * sessions respects that default exactly. The hotkey half is always on.
+ */
+function armHostControlGuard(s: Internal): void {
+    if (s.role !== 'host' || s.filesOnly) return;
+    // A share that grants no control cannot be driven, so the host is not
+    // trapped behind somebody else's pointer and needs no physical escape.
+    if (s.share && !s.share.capabilities.includes('control')) return;
+    // The idle revoke bounds "armed and forgotten" — an UNATTENDED session,
+    // where nobody is at this machine to press Stop. An ATTENDED one had a
+    // human consent to it at this keyboard, and cutting that off after half an
+    // hour would disconnect a friend who is watching rather than typing.
+    armControlGuard(
+        s.id,
+        (reason, deliberate) => {
+            const live = sessions.get(s.id);
+            if (live) teardown(live, reason, true, deliberate);
+        },
+        s.uaRequired ? DEVICE_CONTROL_IDLE_MS : null,
+    );
 }
 
 /**
@@ -4426,6 +4475,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         if (data.kind === 'set-monitor' && typeof data.monitor === 'number') {
             // Only a HOST acts on this — it changes what is captured.
             if (s.role !== 'host') return;
+            // Same gate as input and privacy: an armed host does nothing for
+            // a controller that never proved the passphrase.
+            if (s.uaRequired && !s.uaVerified) return;
             const wanted = data.monitor;
             void (async () => {
                 try {
@@ -4458,6 +4510,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'update-stream') {
             if (s.role !== 'host') return;
+            // Same gate as input and privacy: an armed host does nothing for
+            // a controller that never proved the passphrase.
+            if (s.uaRequired && !s.uaVerified) return;
             void (async () => {
                 try {
                     const backend = await getHostBackend();
@@ -4831,6 +4886,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'query_stream_quality') {
             if (s.role !== 'host') return;
+            // Same gate as input and privacy: an armed host does nothing for
+            // a controller that never proved the passphrase.
+            if (s.uaRequired && !s.uaVerified) return;
             void (async () => {
                 try {
                     const backend = await getHostBackend();
@@ -5087,6 +5145,7 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
           }
           try {
               await answerOffer(s, data.sdp);
+              armHostControlGuard(s);
           } catch (e) {
               console.warn('[device-session] offer failed:', e);
               teardown(s, `Offer failed: ${e instanceof Error ? e.message : String(e)}`, true);

@@ -496,11 +496,18 @@ fn ensure_started(connect_attempts: u32) -> Result<(), String> {
     let my_pid = std::process::id().to_string();
     let log = agent_log_path();
     cmd.args([
-        "--token", &token,
         "--pipe", &pipe_name,
         "--parent-pid", &my_pid,
         "--log", &log,
     ]);
+    // THE LAUNCH TOKEN RIDES THE ENVIRONMENT, NOT ARGV. Full command lines are
+    // captured by Sysmon/EDR process-create events and by Windows 4688 auditing
+    // where it is enabled, and those records leave the machine — so the secret
+    // that authorises driving this machine's input and screen was being copied
+    // into a log its owner does not control. The agent reads this variable
+    // first and still accepts `--token` for one release, so a half-applied
+    // update does not leave it with no token at all.
+    cmd.env(puca_service::AGENT_TOKEN_ENV, &token);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

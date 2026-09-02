@@ -168,6 +168,49 @@ fn after_flag(args: &[&str], flag: &str) -> String {
         .unwrap_or_default()
 }
 
+/// This process's environment plus one extra variable, as the UTF-16,
+/// double-NUL-terminated block `CreateProcessAsUserW` wants.
+///
+/// BUILT rather than inherited, because there is no way to ADD a variable to an
+/// inherited environment and the launch token has to travel somewhere that is
+/// not the command line — see [`crate::AGENT_TOKEN_ENV`] for why.
+///
+/// `encode_wide` rather than `to_string_lossy`: an environment value that is
+/// not valid UTF-16 must reach the child unchanged, and a lossy conversion
+/// would corrupt it silently. Sorted because that is what the API documents;
+/// Windows is forgiving about it in practice, and depending on forgiveness is
+/// how a launch works on one machine and not another.
+fn env_block_with(name: &str, value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut entries: Vec<Vec<u16>> = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        // Ours wins if the parent already carries one by this name, rather
+        // than the child seeing two entries and the OS choosing.
+        if k.to_string_lossy().eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let mut e: Vec<u16> = k.encode_wide().collect();
+        e.push(u16::from(b'='));
+        e.extend(v.encode_wide());
+        entries.push(e);
+    }
+    let mut mine: Vec<u16> = name.encode_utf16().collect();
+    mine.push(u16::from(b'='));
+    mine.extend(value.encode_utf16());
+    entries.push(mine);
+
+    entries.sort();
+    let mut out = Vec::new();
+    for e in entries {
+        out.extend(e);
+        out.push(0);
+    }
+    // The block ends with an empty string, i.e. a second NUL.
+    out.push(0);
+    out
+}
+
 fn to_wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -214,6 +257,7 @@ unsafe fn spawn_with_token(
     exe: &Path,
     args: &[&str],
     use_user_env: bool,
+    secret_env: Option<(&str, &str)>,
 ) -> Result<AgentProcess, String> {
     enable_privilege(SE_ASSIGNPRIMARYTOKEN_NAME);
     enable_privilege(SE_INCREASE_QUOTA_NAME);
@@ -230,12 +274,35 @@ unsafe fn spawn_with_token(
 
     // Optional user-profile environment. Without it a user agent inherits the
     // SERVICE's (SYSTEM's) %APPDATA%/%TEMP%, which is the wrong profile.
+    let mut user_block: *mut c_void = core::ptr::null_mut();
     let mut env_block: *mut c_void = core::ptr::null_mut();
     let mut flags = CREATE_NO_WINDOW;
-    if use_user_env && CreateEnvironmentBlock(&mut env_block, token, false).is_ok() {
+    if use_user_env && CreateEnvironmentBlock(&mut user_block, token, false).is_ok() {
         flags |= CREATE_UNICODE_ENVIRONMENT;
+        env_block = user_block;
     } else {
-        env_block = core::ptr::null_mut();
+        user_block = core::ptr::null_mut();
+    }
+
+    // THE LAUNCH SECRET RIDES THE ENVIRONMENT, NOT ARGV. Process-create
+    // auditing and EDR record full command lines and ship them off the box;
+    // they do not record environment blocks by default. Built from OUR
+    // environment, which is what the SYSTEM agent would otherwise have
+    // inherited, so nothing else about the child changes.
+    //
+    // The user-profile block is not combined with it: the only live caller is
+    // the SYSTEM path (`launch_as_user_in_session` was deleted), so there is no
+    // case to combine, and inventing one silently would be worse than the
+    // assertion below.
+    let secret_block: Vec<u16>;
+    if let Some((name, value)) = secret_env {
+        debug_assert!(
+            !use_user_env,
+            "a user-profile environment block and a launch secret are not combined",
+        );
+        secret_block = env_block_with(name, value);
+        env_block = secret_block.as_ptr() as *mut c_void;
+        flags |= CREATE_UNICODE_ENVIRONMENT;
     }
 
     let created = CreateProcessAsUserW(
@@ -252,8 +319,8 @@ unsafe fn spawn_with_token(
         &mut pi,
     );
 
-    if !env_block.is_null() {
-        let _ = DestroyEnvironmentBlock(env_block);
+    if !user_block.is_null() {
+        let _ = DestroyEnvironmentBlock(user_block);
     }
 
     created.map_err(|e| format!("CreateProcessAsUser failed for session {session}: {e}"))?;
@@ -263,20 +330,28 @@ unsafe fn spawn_with_token(
         pid: pi.dwProcessId,
         session,
         // Recovered from the argv we were handed rather than passed separately,
-        // so the recorded values are BY CONSTRUCTION the ones the child was
-        // actually started with. Passing them alongside would let the two drift
+        // so the recorded value is BY CONSTRUCTION the one the child was
+        // actually started with. Passing it alongside would let the two drift
         // and hand the app a pipe name the agent never opened.
         pipe: after_flag(args, "--pipe"),
-        token: after_flag(args, "--token"),
+        // The token is no longer IN argv, so it comes from the same tuple the
+        // environment block was built from — the same "one source" rule, moved
+        // to where the value now lives.
+        token: secret_env.map(|(_, v)| v.to_string()).unwrap_or_default(),
     })
 }
 
 /// Start an agent as **SYSTEM in the interactive session** — the S5 path. Reaches
 /// the login/lock/secure desktop.
+///
+/// `secret_env` is the launch token, handed over as `(NAME, VALUE)` for the
+/// child's environment block rather than as an argv pair — see
+/// [`crate::AGENT_TOKEN_ENV`].
 pub fn launch_as_system_in_session(
     session: u32,
     exe: &Path,
     args: &[&str],
+    secret_env: Option<(&str, &str)>,
 ) -> Result<AgentProcess, String> {
     unsafe {
         let mut src = HANDLE::default();
@@ -310,7 +385,7 @@ pub fn launch_as_system_in_session(
             return Err(format!("SetTokenInformation(session {session}) failed: {e}"));
         }
 
-        let out = spawn_with_token(dup, session, exe, args, false);
+        let out = spawn_with_token(dup, session, exe, args, false, secret_env);
         let _ = CloseHandle(dup);
         let _ = CloseHandle(src);
         out
@@ -374,5 +449,42 @@ mod tests {
     fn build_command_line_leaves_simple_args_bare() {
         let exe = PathBuf::from("agent.exe");
         assert_eq!(build_command_line(&exe, &["--hidden"]), "agent.exe --hidden");
+    }
+
+    /// The environment block is the place the token DOES appear, and it has to
+    /// be well formed or `CreateProcessAsUserW` fails with a useless error.
+    #[test]
+    fn the_environment_block_carries_the_secret_and_is_terminated() {
+        let block = env_block_with("PUCA_AGENT_TOKEN", "abc123");
+        let text = String::from_utf16_lossy(&block);
+        assert!(text.contains("PUCA_AGENT_TOKEN=abc123"));
+        assert_eq!(block[block.len() - 1], 0, "the block ends with a NUL");
+        assert_eq!(block[block.len() - 2], 0, "preceded by the entry's own NUL");
+
+        // Sorted, as the API documents. Depending on Windows being forgiving
+        // is how a launch works on one machine and not another.
+        let mut entries: Vec<Vec<u16>> = Vec::new();
+        let mut cur: Vec<u16> = Vec::new();
+        for &u in &block {
+            if u == 0 {
+                if cur.is_empty() {
+                    break;
+                }
+                entries.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(u);
+            }
+        }
+        let mut sorted = entries.clone();
+        sorted.sort();
+        assert_eq!(entries, sorted, "the block must be sorted");
+
+        // And exactly one entry for our name, even though the parent may have
+        // one already — two would let the OS pick.
+        let mine = entries
+            .iter()
+            .filter(|e| String::from_utf16_lossy(e).starts_with("PUCA_AGENT_TOKEN="))
+            .count();
+        assert_eq!(mine, 1);
     }
 }
