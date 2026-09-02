@@ -20,6 +20,7 @@
     "build:lite": "node scripts/build-lite.mjs",
     "check:no-rc": "node scripts/check-no-rc.mjs",
     "check:lite-identity": "node scripts/check-lite-identity.mjs",
+    "check:installer-hooks": "node scripts/check-installer-hooks.mjs",
     "tauri:build:lite": "node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs && node scripts/tauri-build.mjs --no-default-features --config src-tauri/tauri.lite.conf.json",
     "cap:build:android:lite": "node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync android",
     "cap:build:ios:lite": "node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync ios",
