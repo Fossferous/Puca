@@ -18,6 +18,8 @@
  *    returns to the foreground. The UI warns rather than refusing outright.
  */
 import { isTauri, isMobile } from './platform';
+import { loadSettings } from '../components/settingsStore';
+import { chooseSavePath } from './savePath';
 import { safeBlobType } from './attachments';
 import { capacitorFileSink } from './capacitorSink';
 import type { ByteSink } from './fileTransfer';
@@ -61,13 +63,24 @@ export interface PreparedSink {
     abort?: (keep: boolean) => Promise<void>;
 }
 
-/** Desktop: append into `<Downloads>/Puca/<name>.part`, rename on success. */
-async function tauriSink(t: TransferView): Promise<PreparedSink> {
+/** Desktop: append into `<Downloads>/Puca/<name>.part`, rename on success —
+ *  or, with "Ask where to save files" on, into the place the user picks.
+ *  null = they cancelled that dialog: the caller's "declined". */
+async function tauriSink(t: TransferView): Promise<PreparedSink | null> {
+    // The dialog comes FIRST, before the sender is answered, so a cancel
+    // costs nobody a byte.
+    let destPath: string | undefined;
+    if (loadSettings().askWhereToSaveFiles === true) {
+        const chosen = await chooseSavePath(t.name);
+        if (chosen === null) return null;
+        destPath = chosen;
+    }
     const { invoke } = await import('@tauri-apps/api/core');
     const begun = await invoke<{ existing_bytes: number; path: string }>('transfer_begin', {
         transferId: t.id,
         fileName: t.name,
         sha256: t.sha256 ?? '',
+        destPath,
     });
 
     let finalPath = begun.path;

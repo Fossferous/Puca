@@ -93,6 +93,7 @@ function TaskFileDownload({ url, name }: { url: string; name: string }) {
                 setState('saving');
                 try {
                     const res = await saveAttachment(url, name);
+                    if (res.cancelled) { setState('idle'); return; } // the Save As dialog was dismissed
                     setWhere(res.where);
                     setState('saved');
                 } catch (err) {

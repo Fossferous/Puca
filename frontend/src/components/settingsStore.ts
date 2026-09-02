@@ -333,6 +333,15 @@ export const defaultSettings = {
 
     /**
      * Largest transfer allowed when the peers CANNOT connect directly, in MB.
+
+    /**
+     * Desktop: open the OS Save As dialog before writing a received file or a
+     * downloaded attachment, instead of dropping everything into
+     * <Downloads>/Puca. OFF keeps the old behaviour exactly. The dialog is
+     * tauri-plugin-dialog's `save`, registered for that one permission and
+     * nothing else (api/savePath.ts).
+     */
+    askWhereToSaveFiles: false,
      *
      * A relayed transfer is not peer-to-peer: every byte goes up to the TURN
      * server and back down, so an 800 MB file costs ~1.6 GB on the host's home

@@ -109,6 +109,7 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
             const blob = await downloadClipBytes(manifest, setDlProgress);
             url = URL.createObjectURL(blob);
             const res = await saveAttachment(url, `puca-clip-${manifest.clipId.slice(0, 8)}.mp4`);
+            if (res.cancelled) { setDlState('idle'); return; } // the Save As dialog was dismissed
             setSavedWhere(res.onDisk ? res.where : null);
             setDlState('saved');
         } catch (e) {

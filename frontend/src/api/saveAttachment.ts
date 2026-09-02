@@ -24,6 +24,8 @@
  * task attachment lists never got the same treatment.
  */
 import { isTauri } from './platform';
+import { loadSettings } from '../components/settingsStore';
+import { chooseSavePath } from './savePath';
 
 /** Where a saved file ended up, for the "Saved to …" line. */
 export interface SaveResult {
@@ -31,6 +33,8 @@ export interface SaveResult {
     where: string;
     /** True when the bytes are definitely on disk (desktop). */
     onDisk: boolean;
+    /** The user cancelled the Save As dialog; nothing was written. */
+    cancelled?: true;
 }
 
 /**
@@ -44,13 +48,25 @@ export async function saveAttachment(blobUrl: string, name: string): Promise<Sav
     const safeName = name || 'attachment';
 
     if (isTauri()) {
+        // "Ask where to save files": the dialog comes first, before the bytes
+        // are even read, so a cancel is free.
+        let dest: string | undefined;
+        if (loadSettings().askWhereToSaveFiles === true) {
+            const chosen = await chooseSavePath(safeName);
+            if (chosen === null) return { where: '', onDisk: false, cancelled: true };
+            dest = chosen;
+        }
         const resp = await fetch(blobUrl);
         const bytes = new Uint8Array(await resp.arrayBuffer());
         const { invoke } = await import('@tauri-apps/api/core');
-        // The header must be ASCII; the Rust side percent-decodes and then
-        // sanitizes, since a file name from another user is untrusted input.
+        // The headers must be ASCII; the Rust side percent-decodes and then
+        // sanitizes the NAME, since a file name from another user is untrusted
+        // input. The destination is the user's own choice and is used as given.
         const path = await invoke<string>('attachment_save', bytes, {
-            headers: { 'x-file-name': encodeURIComponent(safeName) },
+            headers: {
+                'x-file-name': encodeURIComponent(safeName),
+                ...(dest ? { 'x-dest-path': encodeURIComponent(dest) } : {}),
+            },
         });
         return { where: path, onDisk: true };
     }
