@@ -48,7 +48,9 @@ const PERMISSION_CATEGORIES = [
         name: 'General Permissions',
         permissions: [
             { key: 'VIEW_CHANNEL', label: 'View Channels', desc: 'See channels and read messages' },
-            { key: 'ATTACH_FILES', label: 'Attach Files', desc: 'Upload images and files' },
+            // Honoured at the upload door (the client names the channel it is
+            // attaching to; content is E2EE so that is the only place it can be).
+            { key: 'ATTACH_FILES', label: 'Attach Files', desc: 'Upload images and files to messages and checklists' },
             { key: 'ADD_REACTIONS', label: 'Add Reactions', desc: 'React to messages with emoji' },
         ],
     },
