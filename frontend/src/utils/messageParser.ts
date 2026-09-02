@@ -74,8 +74,15 @@ export function isSafeUrl(href: string): boolean {
     // a safe relative URL), mirroring how a browser fails to parse it.
     let start = 0;
     while (start < href.length && href.charCodeAt(start) <= 0x20) start++;
-    const m = /^([a-z][a-z0-9+.-]*):/i.exec(href.slice(start));
-    if (!m) return true; // relative / scheme-less -> same-origin, safe
+    const rest = href.slice(start);
+    const m = /^([a-z][a-z0-9+.-]*):/i.exec(rest);
+    if (!m) {
+        // Scheme-less is NOT automatically same-origin: `//evil.com/x` is a
+        // protocol-relative URL, which the browser resolves against the page's
+        // scheme and loads cross-origin. Only a true relative path is safe.
+        if (rest.startsWith('//')) return false;
+        return true;
+    }
     return SAFE_URL_SCHEMES.has(m[1].toLowerCase());
 }
 
