@@ -10,7 +10,10 @@ import './FileUpload.css';
 import { StreamStage } from './StreamStage';
 import { VoiceStage } from './VoiceStage';
 import { ServerList } from './ServerList';
-import { ServerCreateWizard } from './ServerCreateWizard';
+import { ServerCreateWizard, type WizardResult } from './ServerCreateWizard';
+import { finishServerCreation } from '../api/serverTemplates';
+import { consumePendingInvite } from '../api/pendingInvite';
+import { ReportModal, type ReportTarget } from './ReportModal';
 import { JoinServerModal } from './JoinServerModal';
 import { InviteModal } from './InviteModal';
 import { ServerSettingsModal } from './ServerSettingsModal';
@@ -642,6 +645,21 @@ export function Chat({ onLogout }: ChatProps) {
     const currentUser = token ? decodeJwt(token) : null;
     const currentUserId = currentUser?.sub ?? 0;
 
+    // May this user create invites on the CURRENT server? Server carries no
+    // resolved bits, but every channel's my_permissions is resolved from the
+    // server-level set, so CREATE_INVITE shows up there. Three-valued:
+    // undefined = cannot tell (channels not loaded, or a backend that sends
+    // no my_permissions) and the menu item stays — the server is the
+    // authority either way; the client only stops OFFERING what it knows
+    // will 403.
+    const canCreateInvite: boolean | undefined = (() => {
+        if (!currentServer) return undefined;
+        if (currentServer.owner_id === currentUserId) return true;
+        if (!channelsFetched || channels.length === 0) return undefined;
+        if (channels.every(c => c.my_permissions == null)) return undefined;
+        return channels.some(c => hasPerm(c.my_permissions, PERM.CREATE_INVITE));
+    })();
+
 
     const [initError] = useState<string | null>(null);
 
@@ -656,6 +674,11 @@ export function Chat({ onLogout }: ChatProps) {
     // Server wizard state
     const [showServerModal, setShowServerModal] = useState(false);
     const [showJoinModal, setShowJoinModal] = useState(false);
+    // A code that arrived on an invite link (/invite/:code → InviteLanding),
+    // possibly across a sign-in or registration. Consumed once, here.
+    const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(null);
+    // Report-to-moderators dialog (message or member); null = closed.
+    const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
     const [showInviteModal, setShowInviteModal] = useState(false);
     const [showSettingsModal, setShowSettingsModal] = useState(false);
     // Devices is a first-class view (the FriendsPanel pattern), not a modal.
@@ -3605,12 +3628,30 @@ export function Chat({ onLogout }: ChatProps) {
         return () => window.removeEventListener('settingsChanged', sync);
     }, [dmConversations, dmsLoaded]);
 
-    // Handle server creation from wizard
-    const handleWizardComplete = async (serverName: string, _template: string, _audience: string) => {
+    // An invite link's code, stashed by InviteLanding before sign-in: open
+    // the join flow with it looked up. Once, on mount — a later link opens a
+    // fresh navigation and remounts.
+    useEffect(() => {
+        const code = consumePendingInvite();
+        if (!code) return;
+        setPendingInviteCode(code);
+        setShowJoinModal(true);
+        setShowWelcomePopup(false);
+    }, []);
+
+    // Handle server creation from wizard. Everything it collected is acted on
+    // (api/serverTemplates.ts): the template's channel set, the icon, and the
+    // explicit public listing. Until 0.9.2 only the name survived the call.
+    const handleWizardComplete = async ({ name: serverName, template, isPublic, iconFile }: WizardResult) => {
         try {
             const newServer = await createServer(serverName) as Server;
             queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => [...(old || []), newServer]);
             setShowServerModal(false);
+            const warnings = await finishServerCreation(newServer.id, { template, iconFile, isPublic });
+            if (warnings.length > 0) showToast(warnings.join(' '));
+            // The template renamed/added channels after the server was cached.
+            void queryClient.invalidateQueries({ queryKey: keys.channels(newServer.id) });
+            void queryClient.invalidateQueries({ queryKey: keys.servers });
 
             // Switch to the new server. Close the Friends dashboard too — the
             // wizard is reachable from the Friends home (always, for a fresh
@@ -3850,14 +3891,21 @@ export function Chat({ onLogout }: ChatProps) {
             {/* Join Server Modal */}
             <JoinServerModal
                 isOpen={showJoinModal}
-                onClose={() => setShowJoinModal(false)}
+                initialCode={pendingInviteCode ?? undefined}
+                onClose={() => { setShowJoinModal(false); setPendingInviteCode(null); }}
                 onServerJoined={(server) => {
+                    setPendingInviteCode(null);
                     queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => [...(old || []), server]);
                     setShowFriendsPanel(false);
                     setShowDevicesView(false);
                     switchServer(server);
                 }}
             />
+
+            {/* Report a message or member to this server's moderators */}
+            {reportTarget && (
+                <ReportModal target={reportTarget} onClose={() => setReportTarget(null)} />
+            )}
 
             {/* Invite Modal */}
             {currentServer && (
@@ -4007,6 +4055,13 @@ export function Chat({ onLogout }: ChatProps) {
                     position={userContextMenuTarget.position}
                     currentUserId={currentUserId}
                     canModerate={currentServer?.owner_id === currentUser?.sub}
+                    onReport={currentServer && userContextMenuTarget.userId !== currentUserId
+                        ? () => setReportTarget({
+                            serverId: currentServer.id,
+                            userId: userContextMenuTarget.userId,
+                            username: userContextMenuTarget.username,
+                        })
+                        : undefined}
                     customSoundsDisabled={allMembers.find(m => m.id === userContextMenuTarget.userId)?.custom_sounds_disabled ?? false}
                     // Voice moderation. Offered only when the menu was opened
                     // from the voice list AND we can locate the channel they are
@@ -4185,6 +4240,7 @@ export function Chat({ onLogout }: ChatProps) {
                     if (server.id !== currentServer?.id) switchServer(server);
                     setShowInviteModal(true);
                 }}
+                canInviteCurrent={canCreateInvite}
                 onOpenNotes={openTasksView}
                 notesActive={showFriendsPanel && friendsTab === 'tasks'}
                 showingFriends={showFriendsPanel && friendsTab !== 'tasks'}
@@ -4913,7 +4969,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 setShowPip(false);
                                 setViewMode('stream');
                             }}
-                            onInvite={currentServer && currentServer.id === currentVoiceChannel.server_id
+                            onInvite={currentServer && currentServer.id === currentVoiceChannel.server_id && canCreateInvite !== false
                                 ? () => setShowInviteModal(true)
                                 : undefined}
                             onUserMenu={(user, pos) => setUserContextMenuTarget({
@@ -5151,6 +5207,16 @@ export function Chat({ onLogout }: ChatProps) {
                                                     menuItems.message.copy(msg.content),
                                                     // Local hide, any persisted message — deletes nothing.
                                                     ...(!isLocal ? [menuItems.message.hide(() => hideMessageForMe(msg.id))] : []),
+                                                    // Report to this server's moderators: someone
+                                                    // else's persisted message, inside a server.
+                                                    ...(!isLocal && currentServer && msg.sender.id !== currentUserId
+                                                        ? [menuItems.message.report(() => setReportTarget({
+                                                            serverId: currentServer.id,
+                                                            userId: msg.sender.id,
+                                                            username: msg.sender.username,
+                                                            messageId: msg.id,
+                                                        }))]
+                                                        : []),
                                                     menuItems.separator(),
                                                 ];
                                                 // Edit is author-only (matches the server); pin and

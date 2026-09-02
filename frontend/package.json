@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run build:agent && tsc -b && vite build",
+    "build": "node scripts/check-api-url.mjs && npm run build:agent && tsc -b && vite build",
     "typecheck": "tsc -b",
     "lint": "eslint . && node scripts/check-no-ui-emoji.mjs && node scripts/check-source-hygiene.mjs && node ../scripts/check-docs-links.mjs",
     "lint:icons": "node scripts/check-no-ui-emoji.mjs",
@@ -16,14 +16,14 @@
     "test:coverage": "vitest run --coverage",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "node scripts/build-agent.mjs && node scripts/tauri-build.mjs",
-    "build:lite": "node scripts/build-lite.mjs",
+    "tauri:build": "node scripts/check-api-url.mjs && node scripts/build-agent.mjs && node scripts/tauri-build.mjs",
+    "build:lite": "node scripts/check-api-url.mjs && node scripts/build-lite.mjs",
     "check:no-rc": "node scripts/check-no-rc.mjs",
     "check:lite-identity": "node scripts/check-lite-identity.mjs",
     "check:installer-hooks": "node scripts/check-installer-hooks.mjs",
-    "tauri:build:lite": "node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs && node scripts/tauri-build.mjs --no-default-features --config src-tauri/tauri.lite.conf.json",
-    "cap:build:android:lite": "node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync android",
-    "cap:build:ios:lite": "node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync ios",
+    "tauri:build:lite": "node scripts/check-api-url.mjs && node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs && node scripts/tauri-build.mjs --no-default-features --config src-tauri/tauri.lite.conf.json",
+    "cap:build:android:lite": "node scripts/check-api-url.mjs && node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync android",
+    "cap:build:ios:lite": "node scripts/check-api-url.mjs && node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync ios",
     "cap:sync": "npx cap sync",
     "cap:ios": "npm run build && npx cap sync ios && npx cap open ios",
     "cap:android": "npm run build && npx cap sync android && npx cap open android",
@@ -35,7 +35,8 @@
     "verify:e2ee": "node e2e/e2ee-live-verify.mjs",
     "build:agent": "node scripts/build-agent.mjs",
     "lint:hygiene": "node scripts/check-source-hygiene.mjs",
-    "lint:docs": "node ../scripts/check-docs-links.mjs"
+    "lint:docs": "node ../scripts/check-docs-links.mjs",
+    "check:api-url": "node scripts/check-api-url.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.0.0",

@@ -29,6 +29,7 @@ import {
     DisconnectIcon,
     ForwardIcon,
     MoonIcon,
+    FlagIcon,
 } from './Icons';
 
 export interface UserContextMenuProps {
@@ -62,6 +63,9 @@ export interface UserContextMenuProps {
     onVoiceMove?: (channelId: number) => void;
     onRoleToggle?: (roleId: number, add: boolean) => void;
     onToggleCustomSounds?: (disable: boolean) => void;
+    /** Report this member to the server's moderators. Passed only inside a
+     *  server (reports are per-server) and never for yourself. */
+    onReport?: () => void;
 }
 
 export function UserContextMenu({
@@ -85,6 +89,7 @@ export function UserContextMenu({
     onVoiceMove,
     onRoleToggle,
     onToggleCustomSounds,
+    onReport,
 }: UserContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null);
     const [volume, setVolume] = useState(() => getLocalUserVolumes()[userId] ?? 100);
@@ -334,6 +339,15 @@ export function UserContextMenu({
                                 friendRequestStatus === 'sending' ? 'Sending...' :
                                     friendRequestStatus === 'error' ? 'Failed' : 'Add Friend'}
                         </button>
+                        {onReport && (
+                            <button
+                                className="context-item"
+                                onClick={() => { onReport(); onClose(); }}
+                            >
+                                <span className="context-icon"><FlagIcon /></span>
+                                Report {username}
+                            </button>
+                        )}
                         {blocked ? (
                             <button
                                 className="context-item"
