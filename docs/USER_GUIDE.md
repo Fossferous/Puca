@@ -9,8 +9,19 @@ Welcome to Púca! This guide covers all features.
 ### Creating an Account
 1. Open `http://localhost:5173` in your browser
 2. Click **"Don't have an account? Register"**
-3. Enter username and password
-4. Click **Register** - you're logged in!
+3. Enter username and password (and the invite code, if the server owner set one)
+4. Click **Register**
+5. **Save the 12-word recovery code** the app now shows. It appears exactly
+   once and cannot be recovered by anyone; it is the only way to reset a
+   forgotten password *without losing your encrypted messages*. Write it down
+   or store it in a password manager, then confirm — and you're logged in.
+
+### Forgot your password?
+On the sign-in screen, choose **"Forgot your password? Use your recovery
+code"**: enter your username, the twelve words, and a new password. Your keys
+and history are kept. Without the code, see
+[`LOST_RECOVERY_CODE.md`](LOST_RECOVERY_CODE.md) — an email reset (if the
+server has email set up) gets you back in but does not recover old messages.
 
 ### Interface Overview
 ```

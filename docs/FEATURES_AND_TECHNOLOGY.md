@@ -40,7 +40,7 @@ Púca is a **self‑hosted, end‑to‑end‑encrypted** communication app: serv
 **One app, three shells.** The interface is a single **React + TypeScript** app (built with **Vite**). It's loaded three ways:
 
 - **Desktop** — wrapped in **Tauri 2** (a Rust shell around the OS webview). Windows is the fully‑featured target.
-- **Mobile** — wrapped in **Capacitor 8** (Android/iOS).
+- **Mobile** — wrapped in **Capacitor 8** (Android; an iOS project exists in the tree but is not released or tested).
 - **Browser** — the same build served as a plain website.
 
 A small module (`frontend/src/api/platform.ts`) detects which shell it's in and lights up or hides native‑only features accordingly.
@@ -150,7 +150,7 @@ A small module (`frontend/src/api/platform.ts`) detects which shell it's in and 
 
 **How it works.**
 - **Mesh peer‑to‑peer (WebRTC).** Each participant opens a direct `RTCPeerConnection` to every other participant. The Rust server is only a **dumb signaling relay** — it forwards the call‑setup messages (SDP/ICE) and never inspects the media. This keeps ~4 participants comfortable (a full mesh; not a central media server).
-- **Connectivity (STUN/TURN).** To punch through home routers, clients use Google **STUN** for address discovery and, when direct connection fails, a **self‑hosted TURN relay** (coturn) that only relays. TURN credentials are **time‑limited and issued only to signed‑in users** (a 12‑hour HMAC token tied to your account); anonymous callers fall back to a public relay. Even when media flows through TURN, the relay only ever sees ciphertext.
+- **Connectivity (STUN/TURN).** To punch through home routers, clients use **STUN** for address discovery (the operator's own relay when one is configured; Google's public STUN only as a last resort on a deployment without one) and, when direct connection fails, the operator's **self‑hosted TURN relay** (coturn) that only relays. There is no third‑party relay fallback: TURN credentials are **time‑limited and issued only to signed‑in users** (a 4‑hour HMAC token tied to your account), and anonymous callers get STUN only. Even when media flows through TURN, the relay only ever sees ciphertext.
 - **End‑to‑end media encryption.** On top of WebRTC's built‑in transport encryption (DTLS‑SRTP), Púca encrypts **each audio/video frame itself** with AES‑256‑GCM using **Insertable Streams**, so a compromised or malicious relay can't watch or listen. Each call also negotiates a **forward‑secret** key from fresh per‑call ephemeral keys, so a future compromise of your identity key can't decrypt a past recorded call. The voice panel shows **🔒 Encrypted / 🔓 Partial / 🔓 Not E2EE** so any downgrade is visible. (Frame E2EE needs a Chromium‑based browser; Firefox/Safari fall back to transport‑only and say so.)
 - **Screen‑share tuning.** Up to 8 Mbps / 60 fps, biased toward keeping framerate smooth for gaming.
 
@@ -190,7 +190,7 @@ This is the heart of Púca. Everything below happens **on your device**; the ser
 
 **Files.** Each attachment is encrypted on your device with its own random AES‑256‑GCM key and uploaded as an anonymous blob (`attachment.enc`) — the server never sees the filename, type, or contents. The key travels *inside* the (already‑encrypted) message. Only people who can read the message can open the file.
 
-**Account recovery (without weakening encryption).** Because the identity seed is random (not derived from your password), Púca stores **two encrypted copies** of it: one unlocked by your password, one unlocked by a **12‑word recovery phrase** (BIP39) shown once at sign‑up. Forgetting your password no longer means losing your history — recover with the phrase, set a new password, keep your keys. The password‑unlock uses **PBKDF2‑SHA256 at 600,000 iterations** (the 2026 OWASP floor; older accounts auto‑upgrade from 210k on next login), run natively for speed, with a clamp so a hostile server can't stall your login. A **proof‑of‑possession** step stops a database thief from resetting anyone's password without actually holding their key.
+**Account recovery (without weakening encryption).** Because the identity seed is random (not derived from your password), Púca stores **two encrypted copies** of it: one unlocked by your password, one unlocked by a **12‑word recovery phrase** (BIP39) shown once at sign‑up. Forgetting your password no longer means losing your history — recover with the phrase, set a new password, keep your keys. The password‑unlock uses **Argon2id** (m=19 MiB, t=2, p=1 — the 2026 OWASP minimum, memory‑hard so a GPU farm gains little); accounts created under the older PBKDF2‑SHA256 wrap are upgraded transparently on their next login, with a clamp so a hostile server can't stall your login by demanding an absurd work factor. A **proof‑of‑possession** step stops a database thief from resetting anyone's password without actually holding their key.
 
 **Verifying there's no man‑in‑the‑middle (safety numbers).** Two people can compare an **8×5‑digit safety number** (a hash of both their public keys) out loud. If they match, no one swapped a key in the middle. Púca also **pins** each contact's key the first time it sees it and refuses to proceed if it ever silently changes (trust‑on‑first‑use, fail‑closed).
 
@@ -210,13 +210,13 @@ This is the heart of Púca. Everything below happens **on your device**; the ser
 
 ## 17. How it's hosted
 
-Everything runs **self‑hosted** on a single small server (a Proxmox LXC container). **Caddy** sits in front and automatically provisions HTTPS certificates for `chat.example.com` (API/WebSocket), `download.example.com` (installers/updates), and `app.example.com` (the web app). The Rust backend runs as a hardened **systemd** service against **PostgreSQL**; database migrations apply automatically on startup. There are nightly database backups and a 5‑minute health‑check that restarts the service if it ever stops responding. Auth endpoints and the general API are **rate‑limited**, CORS is locked to the known origins, and the server refuses to boot in production without a strong secret.
+A deployment is **self‑hosted** and fits on a single small server — a VPS or a container on a home machine. **Caddy** sits in front and automatically provisions HTTPS certificates for `chat.example.com` (API/WebSocket), `download.example.com` (installers/updates), and `app.example.com` (the web app), with **coturn** beside it as the media relay. The Rust backend runs as a hardened **systemd** service against **PostgreSQL**; database migrations apply automatically on startup. The shipped ops scripts give you nightly backups (database, attachments and configuration, encrypted offsite) and a 5‑minute health‑check that restarts the service if it ever stops responding. Auth endpoints and the general API are **rate‑limited**, CORS is locked to the known origins, and the server refuses to boot in production without a strong secret. The full path is `deploy/README.md`.
 
 ---
 
 ## 18. Technology reference
 
-**Frontend:** React 19, TypeScript, Vite, TanStack Query, React Router. Crypto: `@noble/curves` (X25519), `@noble/hashes` (PBKDF2/HKDF/HMAC/SHA‑256), `@scure/bip39` (recovery phrase), Web Crypto (`crypto.subtle`) for AES‑GCM and native PBKDF2. Audio: `@sapphi-red/web-noise-suppressor` (RNNoise) + an in‑repo DeepFilterNet WebAssembly build.
+**Frontend:** React 19, TypeScript, Vite, TanStack Query, React Router. Crypto: `@noble/curves` (X25519), `@noble/hashes` (Argon2id, HKDF/HMAC/SHA‑256, PBKDF2 for legacy wraps), `@scure/bip39` (recovery phrase), Web Crypto (`crypto.subtle`) for AES‑GCM and native PBKDF2. Audio: `@sapphi-red/web-noise-suppressor` (RNNoise) + an in‑repo DeepFilterNet WebAssembly build.
 
 **Backend:** Rust, axum, sqlx (PostgreSQL), tokio, dashmap; `srp` (SRP‑6a), `x25519-dalek` + `hkdf`/`hmac`/`sha1` (recovery DH proof + TURN credentials), `jsonwebtoken`, `tower_governor` (rate limiting), `lettre` (email).
 
@@ -233,24 +233,24 @@ Everything runs **self‑hosted** on a single small server (a Proxmox LXC contai
 | Files | AES‑256‑GCM (per‑file random key) |
 | Media frames | AES‑256‑GCM (Insertable Streams) + per‑call forward secrecy |
 | Remote control | AES‑256‑GCM over an ephemeral X25519 handshake, sequence‑numbered |
-| Password → key wrap | PBKDF2‑SHA256, 600,000 iterations |
+| Password → key wrap | Argon2id (m=19 MiB, t=2, p=1); legacy accounts on PBKDF2‑SHA256 migrate on next login |
 | Recovery phrase | BIP39 (128‑bit) |
 | Safety number | SHA‑256 of both public keys |
 | Desktop update | minisign signature |
 | Mobile update | AES‑128‑CBC bundle + RSA‑signed SHA‑256 |
-| TURN credentials | HMAC‑SHA1, 12‑hour expiry, per‑user |
+| TURN credentials | HMAC‑SHA1, 4‑hour expiry, per‑user |
 
 ---
 
-## 19. Known rough edges
+## 19. Known limitations
 
-Honest notes for whoever maintains this:
+Things a reader should know before relying on them:
 
-- **Unread counts** are unreliable — the read path queries a table that no migration creates while the write path uses a different one. Effectively cosmetic/broken until reconciled.
-- **Per‑channel permission overrides** exist in the schema and a resolver function, but aren't wired into live channel checks (server‑level permission + membership are used instead).
-- **@mentions** are presentational only — parsed and highlighted client‑side, with no server‑side mention record or push.
-- Several **legacy `001` tables** (`roles`, `reactions`, `invites`, …) are superseded by later‑migration tables and are effectively dead.
-- Media E2EE and self‑hosted TURN are verified in the lab but benefit from a real two‑person call check on production.
+- **@mentions** are highlighted on your device only. Message bodies are ciphertext to the server, so it cannot see a mention and cannot send a mention‑specific notification; the notification preferences still offer the setting, and it applies to what the app itself can detect.
+- **Frame‑level media encryption needs a Chromium‑based browser** (Insertable Streams). Firefox and Safari fall back to transport encryption only and the call indicator says so.
+- **Mesh voice is comfortable for about four participants**; larger rooms need the optional LiveKit SFU, which is a separate service the operator runs.
+- **Calls across the internet need the operator's TURN relay** — there is no third‑party fallback, by design.
+- Several **legacy `001` tables** (`roles`, `reactions`, `invites`, …) are superseded by later‑migration tables and are effectively dead; they are kept because applied migrations are frozen.
 
 ---
 
