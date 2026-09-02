@@ -229,6 +229,8 @@ frontend/src-tauri/tauri.release.json
 # example.com; dual-ship.sh prefers this file when it exists so a real release
 # never publishes the placeholder domain to actual users.
 deploy/download-site/index.local.html
+# ...and any copy of it kept aside: it holds this deployment's real host.
+deploy/download-site/index.local.html.*
 
 # Internal QA/verification reports — working artefacts, not deliverables.
 # They cite file:line for security-sensitive logic and read as findings even
