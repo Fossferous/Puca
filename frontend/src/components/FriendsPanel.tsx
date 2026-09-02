@@ -10,6 +10,7 @@ import {
 } from '../api/friends';
 import type { Friend, FriendRequest, OutgoingRequest } from '../api/friends';
 import { startDMConversation, listDMConversations, searchUsers } from '../api/dms';
+import { isNetworkError, statusOf } from '../api/client';
 import type { DMConversation, SearchUserResult } from '../api/dms';
 import { TasksView } from './TasksView';
 import { HomeSidebar } from './HomeSidebar';
@@ -44,6 +45,18 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
     const [addFriendUsername, setAddFriendUsername] = useState('');
     const [addFriendStatus, setAddFriendStatus] = useState<{ success?: string; error?: string } | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
+    const [pendingQuery, setPendingQuery] = useState('');
+    // Outcome of the last Accept / Decline / Remove / Message, rendered above
+    // the list. These used to fail into console.error only: a tap that did
+    // nothing, and 15 s later the row came back with no explanation.
+    const [panelStatus, setPanelStatus] = useState<string | null>(null);
+
+    const explainFailure = (what: string, err: unknown): string =>
+        isNetworkError(err)
+            ? `${what} — you appear to be offline. Check your connection and try again.`
+            : statusOf(err) === 404
+                ? `${what} — that request no longer exists. It may have been withdrawn.`
+                : `${what} — the server refused. Try again in a moment.`;
 
     const loadData = useCallback(async (background = false) => {
         if (!background) setLoading(true);
@@ -82,34 +95,41 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
             onClose();
         } catch (error) {
             console.error('Failed to start DM:', error);
+            setPanelStatus(explainFailure(`Couldn't open a conversation with ${user.username}`, error));
         }
     };
 
     const handleAccept = async (requestId: number) => {
+        setPanelStatus(null);
         try {
             await acceptFriendRequest(requestId);
             await loadData();
         } catch (error) {
             console.error('Failed to accept request:', error);
+            setPanelStatus(explainFailure("Couldn't accept the request", error));
         }
     };
 
     const handleReject = async (requestId: number) => {
+        setPanelStatus(null);
         try {
             await rejectFriendRequest(requestId);
             setIncoming(prev => prev.filter(r => r.id !== requestId));
         } catch (error) {
             console.error('Failed to reject request:', error);
+            setPanelStatus(explainFailure("Couldn't decline the request", error));
         }
     };
 
     const handleRemoveFriend = async (userId: number) => {
         if (!confirm('Remove this friend?')) return;
+        setPanelStatus(null);
         try {
             await removeFriend(userId);
             setFriends(prev => prev.filter(f => f.id !== userId));
         } catch (error) {
             console.error('Failed to remove friend:', error);
+            setPanelStatus(explainFailure("Couldn't remove this friend", error));
         }
     };
 
@@ -120,6 +140,7 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
             onClose();
         } catch (error) {
             console.error('Failed to start DM:', error);
+            setPanelStatus(explainFailure(`Couldn't open a conversation with ${friend.username}`, error));
         }
     };
 
@@ -146,9 +167,13 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
             setAddFriendUsername('');
             loadData();
         } catch (err: unknown) {
-            const status = (err as { response?: { status?: number } })?.response?.status;
+            // ApiError carries a flat `.status`; the axios-shaped
+            // `.response.status` this read before was never set, so the
+            // 409 branch was dead and every duplicate showed the generic line.
+            const status = statusOf(err);
             setAddFriendStatus({
-                error: status === 409 ? 'Already friends or a request is already pending.'
+                error: status === 409 ? `You're already friends with ${name}, or a request is already pending.`
+                    : isNetworkError(err) ? 'You appear to be offline — check your connection and try again.'
                     : 'Failed to send friend request.',
             });
         }
@@ -163,6 +188,12 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
             searchQuery === '' ||
             f.username.toLowerCase().includes(searchQuery.toLowerCase())
         );
+    // The Pending tab's search box used to be an inert uncontrolled input —
+    // a visible control that ignored every keystroke. Same rule as the
+    // friends filter, over both directions.
+    const pq = pendingQuery.trim().toLowerCase();
+    const filteredIncoming = pq ? incoming.filter(r => r.sender_username.toLowerCase().includes(pq)) : incoming;
+    const filteredOutgoing = pq ? outgoing.filter(r => r.receiver_username.toLowerCase().includes(pq)) : outgoing;
 
     return (
         <div className={`friends-dashboard ${activeTab === 'tasks' ? 'tasks-active' : ''}`}>
@@ -249,6 +280,14 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                 </div>
 
                 <div className="friends-content">
+                    {panelStatus && (
+                        <div className="add-status error friends-panel-status" role="alert">
+                            {panelStatus}
+                            <button className="friends-panel-status-dismiss" onClick={() => setPanelStatus(null)} aria-label="Dismiss">
+                                <CloseIcon size={14} />
+                            </button>
+                        </div>
+                    )}
                     {loading ? (
                         <div className="loading">Loading...</div>
                     ) : activeTab === 'add' ? (
@@ -276,13 +315,18 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                     ) : activeTab === 'pending' ? (
                         <div className="pending-section">
                             <div className="search-bar">
-                                <input type="text" placeholder="Search" />
+                                <input
+                                    type="text"
+                                    placeholder="Search"
+                                    value={pendingQuery}
+                                    onChange={e => setPendingQuery(e.target.value)}
+                                />
                             </div>
 
-                            {incoming.length > 0 && (
+                            {filteredIncoming.length > 0 && (
                                 <>
-                                    <div className="section-header">Incoming — {incoming.length}</div>
-                                    {incoming.map(request => (
+                                    <div className="section-header">Incoming — {filteredIncoming.length}</div>
+                                    {filteredIncoming.map(request => (
                                         <div key={request.id} className="friend-row">
                                             <div className="friend-avatar">
                                                 {request.sender_username.charAt(0).toUpperCase()}
@@ -300,10 +344,10 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                                 </>
                             )}
 
-                            {outgoing.length > 0 && (
+                            {filteredOutgoing.length > 0 && (
                                 <>
-                                    <div className="section-header">Outgoing — {outgoing.length}</div>
-                                    {outgoing.map(request => (
+                                    <div className="section-header">Outgoing — {filteredOutgoing.length}</div>
+                                    {filteredOutgoing.map(request => (
                                         <div key={request.id} className="friend-row outgoing">
                                             <div className="friend-avatar">
                                                 {request.receiver_username.charAt(0).toUpperCase()}
@@ -320,8 +364,10 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                                 </>
                             )}
 
-                            {incoming.length === 0 && outgoing.length === 0 && (
-                                <div className="empty-state">No pending requests</div>
+                            {filteredIncoming.length === 0 && filteredOutgoing.length === 0 && (
+                                <div className="empty-state">
+                                    {pq && (incoming.length > 0 || outgoing.length > 0) ? 'No pending requests match' : 'No pending requests'}
+                                </div>
                             )}
                         </div>
                     ) : (

@@ -450,7 +450,7 @@ export async function followToDesktop(
         },
         timeoutMessage: () =>
             `${name} was signed in, but its desktop app did not come online within two minutes. ` +
-            'If Puca is not set to start with Windows on that computer, open it there — ' +
+            'If Púca is not set to start with Windows on that computer, open it there — ' +
             'or press Control here once it is running.',
         openFailedMessage: why => `${name} is signed in, but the session could not be opened: ${why}`,
         // Poll immediately: after an unlock of an already-running desktop the
@@ -693,7 +693,7 @@ export function timeoutMessage(name: string, watchedSignIn: boolean): string {
             'screen — a timeout here means the packet did not wake it.';
     }
     return head +
-        'A machine that was fully shut down comes back at the Windows sign-in screen, where Puca has not started ' +
+        'A machine that was fully shut down comes back at the Windows sign-in screen, where Púca has not started ' +
         'yet — so it may have woken and simply be unreachable. Turn on "Reach this computer after it restarts" on it ' +
         'to be able to connect there.';
 }

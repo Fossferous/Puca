@@ -1,5 +1,5 @@
 /**
- * WebRTC Manager for Puca
+ * WebRTC Manager for Púca
  * 
  * Manages peer-to-peer connections for voice/video communication.
  * Refactored into modular components in ./rtc/

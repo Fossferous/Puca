@@ -88,7 +88,7 @@ export async function pairWaker(
 ): Promise<WakerBootstrap> {
     const identity = getActiveIdentity();
     if (!identity) {
-        throw new Error('Unlock Puca on this computer first — pairing has to sign with your account key.');
+        throw new Error('Unlock Púca on this computer first — pairing has to sign with your account key.');
     }
     const token = getToken();
     if (!token) throw new Error('Sign in first: the waker needs a copy of this session to connect.');

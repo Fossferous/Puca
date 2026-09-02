@@ -1,5 +1,5 @@
 /**
- * Puca Icon System
+ * Púca Icon System
  *
  * One outline set, drawn to one grid, in one colour. See
  * `docs/ICON_LANGUAGE.md` for the construction rules and the reasoning; the

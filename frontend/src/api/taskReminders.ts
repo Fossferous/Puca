@@ -1,7 +1,7 @@
 /**
  * Client-side due-time reminders for checklist tasks.
  *
- * There is deliberately no push transport in Puca (see CLAUDE.md
+ * There is deliberately no push transport in Púca (see CLAUDE.md
  * "Known-unbuilt"), and task content is E2EE, so a server-side scheduler
  * could neither push nor say anything useful. Instead the RUNNING client
  * fires local notifications — which is exactly what keeps every other

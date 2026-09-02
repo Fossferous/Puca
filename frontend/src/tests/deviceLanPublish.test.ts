@@ -5,7 +5,7 @@
  * else, so a PC with sign-in-screen access enrolled had a MAC on the row that
  * is offline while it is locked, and NO MAC at all on the row that is the only
  * way in at the sign-in screen. Wake was therefore refused on the very row the
- * user needs, with advice ("open Puca on that device once") that publishes
+ * user needs, with advice ("open Púca on that device once") that publishes
  * to the other row and can never help.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';

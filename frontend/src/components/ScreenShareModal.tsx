@@ -7,8 +7,8 @@ import './ScreenShareModal.css';
 
 // 'browser' is the WEB build's marker for "the picker's own Share-audio
 // toggle was ticked". The old desktop 'system' mode ("all audio except
-// Puca") is GONE: WASAPI's exclude-mode loopback only filters sessions
-// created after the client initialises, and Puca's own voice call always
+// Púca") is GONE: WASAPI's exclude-mode loopback only filters sessions
+// created after the client initialises, and Púca's own voice call always
 // predates it — so the mode echoed the call back into the stream and could
 // not be fixed from our side. Renamed rather than reusing 'system' so a
 // desktop system-audio path is unrepresentable, not merely unreachable.

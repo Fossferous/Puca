@@ -16,7 +16,7 @@
  * WATCHING live (voice screen share, device-control host capture). The armed
  * clip replay buffer hides the capture bar too, yet must NOT boost: nobody
  * sees that capture live, and taking CPU from the game to feed it would trade
- * this bug for the "Puca makes games choppy" one.
+ * this bug for the "Púca makes games choppy" one.
  */
 import { isTauri } from './platform';
 

@@ -36,7 +36,7 @@ import './UpdateBanner.css';
 // published just after launch shouldn't sit unseen for long). The /app-version
 // fetch is a few hundred bytes and Cloudflare passes it straight through, so
 // this is cheap. The MAIN way a release surfaces is the focus recheck below:
-// tab back to Puca and it rechecks near-instantly (a small 30 s gap just
+// tab back to Púca and it rechecks near-instantly (a small 30 s gap just
 // stops rapid alt-tab flicker from hammering it). Together: fronting the app
 // after any absence shows a new build within a second; even if you keep it
 // focused on a second screen, worst case is 10 min.
@@ -167,7 +167,7 @@ export function UpdateBanner() {
                 <div className="update-text">
                     <strong>Update available!</strong>
                     <span>
-                        Puca v{update.version} is out.
+                        Púca v{update.version} is out.
                         {update.notes && (
                             <span className="update-notes"> — {update.notes.substring(0, 100)}{update.notes.length > 100 ? '…' : ''}</span>
                         )}
@@ -179,7 +179,7 @@ export function UpdateBanner() {
                 <div className="update-failure" role="alert">
                     <span>
                         {failure} This usually means the installer could not replace the
-                        running app — try closing Puca and running the installer
+                        running app — try closing Púca and running the installer
                         yourself, as administrator if it asks.
                     </span>
                     <button

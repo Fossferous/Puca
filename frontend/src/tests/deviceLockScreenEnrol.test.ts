@@ -95,8 +95,8 @@ describe('enrolLockScreenAccess', () => {
     it('publishes the fresh row\'s LAN details immediately', async () => {
         // Without this the row waits for the NEXT socket attestation — days
         // away on a desktop that stays up — sitting un-wakeable the whole
-        // time while its own error text tells the user to open Puca on a
-        // machine where Puca is already open.
+        // time while its own error text tells the user to open Púca on a
+        // machine where Púca is already open.
         expect(await enrolLockScreenAccess()).toBeNull();
         expect(published).toBe(1);
     });
