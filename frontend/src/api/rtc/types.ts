@@ -15,7 +15,8 @@ export type MediaE2eeReason =
     | 'local-unsupported'  // THIS device/browser lacks insertable streams (e.g. iOS/Safari/Firefox)
     | 'peer-unsupported'   // the other peer didn't advertise media-E2EE capability
     | 'peer-unencrypted'   // SFU: participant PUBLISHED media not flagged E2EE (modified/foreign client) — refused, not rendered
-    | 'verification-failed'; // peer advertised, but the tag didn't verify (possible tampering)
+    | 'verification-failed'  // peer advertised, but the tag didn't verify (possible tampering)
+    | 'fingerprint-mismatch'; // the DTLS certificate the connection presents is not the one the peer pinned (a connection substituted on the path)
 
 export interface MediaE2eeStatus {
     userId: UserId;
@@ -24,6 +25,13 @@ export interface MediaE2eeStatus {
     /** Require-E2EE (fail-closed) is active: when true AND encrypted is false,
      *  this peer's media is BLOCKED (muted) rather than carried unencrypted. */
     enforced: boolean;
+    /** Whether the DTLS certificate this connection presents is the one the
+     *  peer pinned under the pairwise key: 'bound' (verified), 'unbound' (the
+     *  peer's app predates the pin), 'mismatch' (substituted on the path), or
+     *  'unverified' (our own key material not ready). Independent of frame
+     *  encryption. Absent on the SFU tier, where the server terminates DTLS by
+     *  design and frames carry the end-to-end guarantee instead. */
+    dtls?: 'bound' | 'unbound' | 'mismatch' | 'unverified';
 }
 
 export interface PeerConnection {
@@ -63,6 +71,8 @@ export interface PeerConnection {
     mediaEph: ControlEphemeral | null;
     /** Our media-ready MAC over our own ephemeral — advertised in SDP. */
     mediaReadyTag: string | null;
+    /** See MediaE2eeStatus.dtls. */
+    dtlsPin: 'bound' | 'unbound' | 'mismatch' | 'unverified';
     /** Why media is / isn't E2E encrypted for this peer (drives the UI badge). */
     mediaE2eeReason: MediaE2eeReason;
 }

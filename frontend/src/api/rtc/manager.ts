@@ -50,6 +50,7 @@ import {
     extractE2ee,
     type MediaCryptoState,
     type RemoteMediaCap,
+    advertiseDtlsPin, verifyDtlsPin,
 } from './mediaCrypto';
 import type {
     UserId,
@@ -161,9 +162,13 @@ export class WebRTCManager {
      *  itself is derived later, once we've verified the peer's ephemeral (see
      *  enableMediaWithRemote). Best-effort — any failure leaves media transport-only. */
     private async setupMediaKey(userId: UserId): Promise<void> {
-        if (!isMediaE2eeSupported()) return;
         const existing = this.peers.get(userId);
-        if (!existing || existing.mediaReadyTag) return; // already set up
+        if (!existing) return;
+        // The pairwise key is derived on EVERY engine: it pins the DTLS certificate
+        // (advertiseDtlsPin) whether or not frames can be encrypted here. The
+        // ephemeral and the media-ready tag only exist where they can.
+        const wantFrames = isMediaE2eeSupported();
+        if (existing.mediaStaticKeyRaw && (!wantFrames || existing.mediaReadyTag)) return; // already set up
         try {
             const identity = getActiveIdentity();
             // TOFU-pinned key (fails closed if the server swapped it since first use).
@@ -171,14 +176,38 @@ export class WebRTCManager {
             const raw = identity && pub ? deriveMediaKey(identity, pub) : null;
             const peer = this.peers.get(userId);
             if (!raw || !pub || !peer) return;
-            if (!peer.mediaEph) peer.mediaEph = generateControlEphemeral(); // per-connection, in-memory only
             peer.mediaStaticPub = pub;
             peer.mediaStaticKeyRaw = raw;
+            if (!wantFrames) return;
+            if (!peer.mediaEph) peer.mediaEph = generateControlEphemeral(); // per-connection, in-memory only
             // Tag binds OUR ephemeral under the static key; advertising it proves we
             // hold the identity key AND lets the peer detect a tampered ephemeral.
             peer.mediaReadyTag = mediaReadyTag(raw, peer.mediaEph.pubEncoded);
         } catch (e) {
             console.warn('[media-e2ee] key setup failed (staying transport-only):', e);
+        }
+    }
+
+    /**
+     * Verify the DTLS pin in a remote description against the fingerprint it
+     * presents. 'unbound' (an older peer) keeps today's behaviour; 'mismatch'
+     * is a connection substituted on the path and is remembered on the peer
+     * so enableMediaWithRemote never enables over it.
+     */
+    private verifyRemoteDtls(userId: UserId, sdp: string): void {
+        const peer = this.peers.get(userId);
+        if (!peer) return;
+        if (!peer.mediaStaticKeyRaw) { peer.dtlsPin = 'unverified'; return; }
+        const result = verifyDtlsPin(sdp, peer.mediaStaticKeyRaw);
+        if (result === 'mismatch' && peer.dtlsPin !== 'mismatch') {
+            console.warn(`[media-e2ee] peer ${userId}: the DTLS fingerprint in the description does not match the pin — connection substituted on the path`);
+        }
+        peer.dtlsPin = result;
+        if (result === 'mismatch') {
+            peer.mediaCrypto.enabled = false;
+            peer.mediaCrypto.key = null;
+            peer.mediaE2eeReason = 'fingerprint-mismatch';
+            this.emitMediaE2ee(userId);
         }
     }
 
@@ -199,7 +228,7 @@ export class WebRTCManager {
         const reason: MediaE2eeReason = !isMediaE2eeSupported()
             ? 'local-unsupported'
             : peer.mediaE2eeReason;
-        return { userId, encrypted: peer.mediaCrypto.enabled, reason, enforced: this.requireMediaE2ee };
+        return { userId, encrypted: peer.mediaCrypto.enabled, reason, enforced: this.requireMediaE2ee, dtls: peer.dtlsPin };
     }
 
     /** Fail-closed enforcement: when on, media is exchanged only with peers
@@ -259,6 +288,17 @@ export class WebRTCManager {
     private async enableMediaWithRemote(userId: UserId, remote: RemoteMediaCap | null): Promise<void> {
         const peer = this.peers.get(userId);
         if (!peer) return;
+        if (peer.dtlsPin === 'mismatch') {
+            // Never derive a session key over a connection that is not the one
+            // the peer authenticated. Under enforcement every frame is dropped
+            // (mediaCrypto fails closed on enabled=false); without it the status
+            // says loudly that this call is not private.
+            peer.mediaCrypto.enabled = false;
+            peer.mediaCrypto.key = null;
+            peer.mediaE2eeReason = 'fingerprint-mismatch';
+            this.emitMediaE2ee(userId);
+            return;
+        }
         // The peer never advertised a media-E2EE capability → it can't decrypt
         // our frames, so we stay transport-only. Distinguish "peer can't" from
         // "we can't": if OUR own key material is missing while we DO support
@@ -354,6 +394,7 @@ export class WebRTCManager {
         // onnegotiationneeded if tracks still need negotiating.
         if (pc.signalingState !== 'stable') return;
         try {
+            await this.setupMediaKey(userId); // the DTLS pin (and media tag) ride the offer
             peer.makingOffer = true;
             await pc.setLocalDescription(); // implicit offer; safe under glare
             // The peer may have been REPLACED while we awaited (connId rebuild,
@@ -371,7 +412,7 @@ export class WebRTCManager {
             }
             // Advertise the media-E2EE tag in the SDP we SEND (munging the string,
             // not the local description — some stacks strip unknown attributes).
-            const sdp = advertiseE2ee(local.sdp, peer.mediaReadyTag, peer.mediaEph?.pubEncoded ?? null);
+            const sdp = advertiseDtlsPin(advertiseE2ee(local.sdp, peer.mediaReadyTag, peer.mediaEph?.pubEncoded ?? null), peer.mediaStaticKeyRaw);
             console.log(`[WebRTC] offer -> ${userId} connId=${peer.connId.slice(0, 8)} mlines=${(sdp.match(/^m=/gm) ?? []).length}`);
             wsClient.sendOffer(userId, JSON.stringify({ type: local.type, sdp, connId: peer.connId }));
             // Offerer-side watchdog: if no answer ever lands (peer wedged
@@ -1108,7 +1149,7 @@ export class WebRTCManager {
             userId, connection: pc, connId: newConnId(), remoteConnId: null,
             remoteStream: null, makingOffer: false, mediaCrypto,
             polite: this.isPolite(userId), isSettingRemoteAnswerPending: false, ignoreOffer: false,
-            mediaStaticPub: null, mediaStaticKeyRaw: null, mediaEph: null, mediaReadyTag: null,
+            mediaStaticPub: null, mediaStaticKeyRaw: null, mediaEph: null, mediaReadyTag: null, dtlsPin: 'unverified',
             mediaE2eeReason: isMediaE2eeSupported() ? 'negotiating' : 'local-unsupported',
         });
         // Derive the pairwise media key in the background (best-effort; also
@@ -1345,7 +1386,7 @@ export class WebRTCManager {
                     this.scheduleStuckPeerRecovery(fromUser);
                     return;
                 }
-                const sdp = advertiseE2ee(local.sdp, peer.mediaReadyTag, peer.mediaEph?.pubEncoded ?? null);
+                const sdp = advertiseDtlsPin(advertiseE2ee(local.sdp, peer.mediaReadyTag, peer.mediaEph?.pubEncoded ?? null), peer.mediaStaticKeyRaw);
                 // answerTo echoes the offer's connId so the offerer can drop
                 // this answer if it has replaced that pc in the meantime.
                 wsClient.sendAnswer(fromUser, JSON.stringify({
@@ -1354,6 +1395,9 @@ export class WebRTCManager {
             }
         }
 
+        // The DTLS pin first: a substituted connection is decided here, before
+        // frame encryption is even considered.
+        this.verifyRemoteDtls(fromUser, description.sdp || '');
         // Verify the peer's ephemeral-bound tag and, if valid, derive the
         // forward-secret session key and enable — see enableMediaWithRemote.
         await this.enableMediaWithRemote(fromUser, remoteCap);
@@ -1408,11 +1452,12 @@ export class WebRTCManager {
                 this.scheduleStuckPeerRecovery(fromUser);
                 return;
             }
-            const sdp = advertiseE2ee(local.sdp, peer.mediaReadyTag, peer.mediaEph?.pubEncoded ?? null);
+            const sdp = advertiseDtlsPin(advertiseE2ee(local.sdp, peer.mediaReadyTag, peer.mediaEph?.pubEncoded ?? null), peer.mediaStaticKeyRaw);
             wsClient.sendAnswer(fromUser, JSON.stringify({
                 type: local.type, sdp, connId: peer.connId, answerTo: envelope.connId,
             }));
         }
+        this.verifyRemoteDtls(fromUser, envelope.sdp || '');
         await this.enableMediaWithRemote(fromUser, extractE2ee(envelope.sdp || ''));
     }
 
