@@ -1112,6 +1112,23 @@ fn room_channel_id(room_id: &str) -> Option<i64> {
     parse_channel_room(room_id).or_else(|| parse_voice_room(room_id))
 }
 
+/// What a WS handler returns when a database call fails.
+///
+/// `handle_message` returns `Result<(), String>` and the socket loop sends that
+/// string straight back as `ServerMessage::Error { message }`. Two sites folded
+/// raw sqlx errors in via `.map_err(|e| e.to_string())?`, which puts table and
+/// constraint names — schema reconnaissance — on the wire. Every OTHER `Err` in
+/// `handle_message` is a fixed literal (enumerated when this was written), so
+/// fixing the producers makes the boundary safe without classifying errors
+/// there; a `WsError { Client, Internal }` enum would be the fuller answer and
+/// is not worth the churn while the producer set stays this small.
+///
+/// `ctx` names the call site for the log and is NEVER sent.
+fn ws_db_error(ctx: &str, e: sqlx::Error) -> String {
+    tracing::error!("ws db error [{ctx}]: {e}");
+    "internal error".to_string()
+}
+
 /// The refusal message a JoinRoom for an unrecognised room id gets. Identical
 /// for every bad shape — it tells a prober nothing.
 const UNKNOWN_ROOM: &str = "unknown room";
@@ -2414,7 +2431,7 @@ async fn handle_message(
             .bind(user_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ws_db_error("device_attest lookup", e))?;
 
             let Some((sign_pub,)) = row else {
                 tracing::debug!("device attest: unknown/revoked device {}", device_id);
@@ -2534,7 +2551,7 @@ async fn handle_message(
             .bind(user_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ws_db_error("device_session host lookup", e))?;
             // One refusal for "no such device", "someone else's device" and
             // "no grant": a probing client must not learn which it was.
             let Some((host_owner, share_caps)) = host_row else {
@@ -4160,6 +4177,57 @@ mod hidden_members_fail_direction_tests {
         ];
         members.retain(|m| m.id == 7 || !hidden.contains(&m.id));
         assert_eq!(members.iter().map(|m| m.id).collect::<Vec<_>>(), vec![7, 11]);
+    }
+}
+
+#[cfg(test)]
+mod ws_error_leak_tests {
+    use super::ws_db_error;
+
+    /// L8-ERR-1. `handle_message` returns `Result<(), String>` and the socket
+    /// loop sends that string verbatim as `ServerMessage::Error`. Two sites
+    /// folded raw sqlx errors in with `.map_err(|e| e.to_string())?`, putting
+    /// table and constraint names on the wire. The replacement must return a
+    /// FIXED token for every error shape.
+    #[test]
+    fn a_db_error_never_reaches_the_wire() {
+        let cases = [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::ColumnNotFound("sign_pub".into()),
+            sqlx::Error::Protocol("relation \"devices\" does not exist".into()),
+        ];
+        for e in cases {
+            // Capture what the raw string WOULD have been, so this test also
+            // proves the leak was real rather than only that the new string is
+            // tidy.
+            let raw = e.to_string();
+            let sent = ws_db_error("test", e);
+            assert_eq!(sent, "internal error", "the wire message must be fixed");
+            assert!(
+                !sent.contains(&raw) || raw == sent,
+                "the raw error text must not survive: {raw}"
+            );
+            let lowered = sent.to_lowercase();
+            for word in ["sqlx", "relation", "column", "constraint", "devices", "postgres"] {
+                assert!(!lowered.contains(word), "leaked {word:?}: {sent}");
+            }
+        }
+    }
+
+    /// Positive control for the assertion above: the RAW text of at least one of
+    /// those errors really does carry SQL vocabulary, so "contains no SQL words"
+    /// is a property of the mapping and not of sqlx being coy.
+    #[test]
+    fn the_raw_error_really_would_have_leaked() {
+        let raw = sqlx::Error::ColumnNotFound("sign_pub".into()).to_string();
+        assert!(
+            raw.to_lowercase().contains("column") || raw.contains("sign_pub"),
+            "expected the raw error to name the column: {raw}"
+        );
+        let raw = sqlx::Error::Protocol("relation \"devices\" does not exist".into()).to_string();
+        assert!(raw.contains("relation"), "expected the raw error to leak: {raw}");
     }
 }
 

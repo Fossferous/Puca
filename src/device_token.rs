@@ -124,6 +124,23 @@ fn bad(msg: &str) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, msg.to_string())
 }
 
+/// A database fault on this endpoint answers EXACTLY like a bad signature.
+///
+/// `/devices/token` is UNAUTHENTICATED, and it used to return
+/// `format!("database error: {e}")` — raw sqlx text, which carries table and
+/// constraint names and, for some error kinds, connection detail, to an
+/// anonymous caller. Worse than the leak: a distinguishable answer turns the
+/// endpoint into an oracle. Every other failure here is deliberately the same
+/// `bad("that device could not be verified")` so a prober cannot measure which
+/// device ids exist; a DB fault answering differently undid that. Same body,
+/// detail to the log. (Mirrors `db_error` in device_handlers.rs, which returns
+/// a 500 — this one keeps the 400 the endpoint's other refusals use, because
+/// the indistinguishability is the point.)
+fn db_error(e: sqlx::Error) -> (StatusCode, String) {
+    tracing::error!("device_token db error: {e}");
+    bad("that device could not be verified")
+}
+
 /// Step one: ask for something to sign.
 ///
 /// Deliberately answers the same way for a device that exists and one that does
@@ -202,7 +219,7 @@ pub async fn device_token(
     .bind(&payload.device_id)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("database error: {e}")))?;
+    .map_err(db_error)?;
 
     // Same answer as a bad signature: whether a device id exists is not
     // something an unauthenticated caller should be able to measure.
@@ -215,8 +232,14 @@ pub async fn device_token(
         return Err(bad("that device could not be verified"));
     }
 
+    // The mint error carries jsonwebtoken's own text. Same rule as the DB arm:
+    // an unauthenticated caller gets the endpoint's one refusal, the detail goes
+    // to the log.
     let token = mint_device_token(user_id, &username, token_version, &state.jwt_secret)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| {
+            tracing::error!("device_token mint failed: {e}");
+            bad("that device could not be verified")
+        })?;
 
     Ok(Json(TokenResponse { token, expires_in: DEVICE_TOKEN_TTL_HOURS * 3600 }))
 }
@@ -259,6 +282,42 @@ mod tests {
         c.issue("dev-1", "n1".into()).expect("issued");
         assert_eq!(c.take("n1").as_deref(), Some("dev-1"));
         assert_eq!(c.take("n1"), None, "a nonce must not be reusable");
+    }
+
+    /// L8-ERR-1. A DB fault and a bad signature must be BYTE-IDENTICAL to an
+    /// anonymous caller: this endpoint is unauthenticated, and every other
+    /// refusal here is deliberately the same string so a prober cannot measure
+    /// which device ids exist. It used to answer `format!("database error:
+    /// {e}")` — raw sqlx text (table and constraint names, and connection
+    /// detail for some error kinds) AND a distinguishable answer.
+    #[test]
+    fn a_database_fault_is_indistinguishable_from_a_bad_signature() {
+        let bad_sig = bad("that device could not be verified");
+        let db = db_error(sqlx::Error::RowNotFound);
+        assert_eq!(db, bad_sig, "a DB fault must not be distinguishable");
+
+        // ...for every shape of sqlx error, not just the tidy one.
+        let pool = db_error(sqlx::Error::PoolTimedOut);
+        assert_eq!(pool, bad_sig);
+        let col = db_error(sqlx::Error::ColumnNotFound("sign_pub".into()));
+        assert_eq!(col, bad_sig);
+    }
+
+    /// And the body carries no SQL vocabulary at all — the leak this closes was
+    /// schema reconnaissance, not just an oracle.
+    #[test]
+    fn the_refusal_body_names_nothing_about_the_database() {
+        let (_, body) = db_error(sqlx::Error::ColumnNotFound("devices.sign_pub".into()));
+        let lowered = body.to_lowercase();
+        for word in [
+            "sqlx", "relation", "column", "constraint", "sign_pub", "devices",
+            "postgres", "database", "syntax",
+        ] {
+            assert!(
+                !lowered.contains(word),
+                "the refusal body leaked {word:?}: {body}"
+            );
+        }
     }
 
     #[test]
