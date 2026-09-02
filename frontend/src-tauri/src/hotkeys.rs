@@ -31,7 +31,7 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW,
         UnhookWindowsHookEx,
-        KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
+        KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
         WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN,
         WM_XBUTTONUP,
@@ -199,8 +199,15 @@ mod imp {
     unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 && ACTIVE.load(Ordering::SeqCst) {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let injected = info.flags.0 & LLKHF_INJECTED.0 != 0;
-            if !injected && info.vkCode != 0 {
+            // Only OUR OWN synthetic input is ignored — the remote-control
+            // agent stamps every INPUT it sends with PUCA_INJECT_TAG, and that
+            // is the self-trigger this filter exists for. The old rule skipped
+            // everything with LLKHF_INJECTED, which is also how a gaming
+            // mouse's driver (G HUB, Synapse) delivers a remapped side button
+            // and how AutoHotkey delivers anything: exactly the keys people
+            // bind push-to-talk to, silently dead in every game profile.
+            let ours = info.dwExtraInfo == puca_input::PUCA_INJECT_TAG;
+            if !ours && info.vkCode != 0 {
                 let msg = wparam.0 as u32;
                 let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                 if let Some(slot) = watched_slot(info.vkCode) {
@@ -245,7 +252,8 @@ mod imp {
             let msg = wparam.0 as u32;
             if msg != WM_MOUSEMOVE && ACTIVE.load(Ordering::SeqCst) {
                 let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-                if info.flags & LLMHF_INJECTED == 0 {
+                // Same rule as the keyboard hook: skip our own injections only.
+                if info.dwExtraInfo != puca_input::PUCA_INJECT_TAG {
                     if let Some((vk, is_down)) = mouse_event_vk(msg, info) {
                         if let Some(slot) = watched_slot(vk) {
                             emit_transition(slot, vk, is_down);
