@@ -85,7 +85,7 @@ const bT = mint(bId, bName);
 console.log(`server=${srvId}  A(owner)=${aName}(${aId})  B=${bName}(${bId})\n`);
 
 const connect = (id, name) => new Promise((res, rej) => {
-    const ws = new WebSocket(`${API.replace(/^http/, 'ws')}/ws?token=${mint(id, name)}`);
+    const ws = new WebSocket(`${API.replace(/^http/, 'ws')}/ws`, ['bearer', mint(id, name)]);
     ws.on('open', () => res(ws));
     ws.on('error', rej);
 });

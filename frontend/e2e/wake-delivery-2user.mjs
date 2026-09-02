@@ -74,9 +74,10 @@ const [aId, aName, bId, bName] = [Number(row[0]), row[1], Number(row[2]), row[3]
 const aT = mint(aId, aName), bT = mint(bId, bName);
 console.log(`A=${aName}(${aId})  B=${bName}(${bId})\n`);
 
-const wsUrl = (token, extra = '') => `${API.replace(/^http/, 'ws')}/ws?token=${token}${extra}`;
+// The token rides the subprotocol (a query-string token is refused since 0.9.1); `extra` keeps its leading '&' from the old form.
+const wsUrl = (_token, extra = '') => `${API.replace(/^http/, 'ws')}/ws${extra ? '?' + extra.replace(/^&/, '') : ''}`;
 const connect = (token, extra) => new Promise((res, rej) => {
-    const ws = new WebSocket(wsUrl(token, extra));
+    const ws = new WebSocket(wsUrl(token, extra), ['bearer', token]);
     ws.on('open', () => res(ws));
     ws.on('error', rej);
 });
@@ -168,7 +169,7 @@ const send = (ws, type, payload) => ws.send(JSON.stringify({ type, payload }));
     // A real devices row, because the upgrade gate now fails CLOSED on a
     // claim it cannot verify — which is itself the first assertion.
     const unknown = await new Promise((res) => {
-        const ws = new WebSocket(wsUrl(bT, '&mode=delivery&device=dev-does-not-exist'));
+        const ws = new WebSocket(wsUrl(bT, '&mode=delivery&device=dev-does-not-exist'), ['bearer', bT]);
         ws.on('open', () => { ws.close(); res('open'); });
         ws.on('error', () => res('refused'));
     });
@@ -188,7 +189,7 @@ const send = (ws, type, payload) => ws.send(JSON.stringify({ type, payload }));
 
     // And the 5-second-reconnect hole is closed: the same claim is now refused.
     const again = await new Promise((res) => {
-        const ws = new WebSocket(wsUrl(bT, '&mode=delivery&device=dev-e2e-kill'));
+        const ws = new WebSocket(wsUrl(bT, '&mode=delivery&device=dev-e2e-kill'), ['bearer', bT]);
         ws.on('open', () => { ws.close(); res('open'); });
         ws.on('error', () => res('refused'));
     });

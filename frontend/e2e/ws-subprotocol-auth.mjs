@@ -82,9 +82,9 @@ ck(
     'the echo does NOT contain the token (that would put it in a response header)',
 );
 
-console.log('--- query path (clients older than this change) ---');
+console.log('--- query path (RETIRED in 0.9.1: a token in the URL lands in every access log) ---');
 const b = await handshake({ useSubprotocol: false, token: good });
-ck(/101/.test(b.status || ''), 'legacy query-string upgrade still accepted', b.status || b.error);
+ck(!/101/.test(b.status || ''), 'a VALID token in the query string is refused (nothing but the subprotocol is accepted)', b.status || b.error);
 
 console.log('--- negative control ---');
 const c = await handshake({ useSubprotocol: true, token: 'not.a.valid.jwt' });

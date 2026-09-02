@@ -28,7 +28,7 @@ const B = mkUser('b');
 psql1(`INSERT INTO dm_conversations (id, user1_id, user2_id) VALUES ('${randomUUID()}', ${A.id}, ${B.id})`);
 
 const open = (user) => new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:3000/ws?token=${user.t}`);
+    const ws = new WebSocket(`ws://127.0.0.1:3000/ws`, ['bearer', user.t]);
     ws.addEventListener('open', () => resolve(ws));
     ws.addEventListener('error', reject);
 });

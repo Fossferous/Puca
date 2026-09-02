@@ -211,13 +211,14 @@ console.log(`\n=== L8-DATA-2: a successful login stores NO session-key row ===`)
     // (BYTEA, never read, never pruned, surviving account deletion) on every
     // successful login. The write is gone; the login response must be exactly
     // what it was.
-    const before = psql1(`SELECT count(*) FROM sessions`);
+    // 0.9.1 (migration 058) dropped the table outright — the rows were live
+    // secrets — so the assertion is now that it does not exist at all.
     const u = await registerUser(`b10_sess_${RUN}`, 'CorrectHorse1!');
     const token = await loginUser(u.username, 'CorrectHorse1!');
     check('SRP login still succeeds and returns a token',
         typeof token === 'string' && token.split('.').length === 3, `token=${String(token).slice(0, 24)}`);
-    const after = psql1(`SELECT count(*) FROM sessions`);
-    check('no sessions row was written by the login', after === before, `before=${before} after=${after}`);
+    const tables = psql1(`SELECT count(*) FROM information_schema.tables WHERE table_name = 'sessions'`);
+    check('the sessions table no longer exists (migration 058), so no login can write to it', tables === '0', `tables=${tables}`);
 
     // Positive control: the token really authenticates, so "no row written"
     // cannot be passing because the login silently failed.

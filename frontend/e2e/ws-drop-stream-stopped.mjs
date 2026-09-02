@@ -47,7 +47,7 @@ console.log(`A=${aName}(${aId})  B=${bName}(${bId})  (server-mates)`);
 
 const ROOM = 'voice:wsdrop_' + Date.now().toString(36);
 const connect = (id, name) => new Promise((res, rej) => {
-    const ws = new WebSocket(`ws://localhost:3000/ws?token=${mint(id, name)}`);
+    const ws = new WebSocket(`ws://localhost:3000/ws`, ['bearer', mint(id, name)]);
     ws.on('open', () => res(ws));
     ws.on('error', rej);
 });

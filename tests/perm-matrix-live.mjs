@@ -87,7 +87,7 @@ const everyoneId = everyone?.id;
 
 // Member WS: capture ChannelPermsChanged + room-eviction signals.
 const wsEvents = [];
-const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/ws?token=${mintJwt(memberId, memberName)}`);
+const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/ws`, ['bearer', mintJwt(memberId, memberName)]);
 ws.onerror = () => { };
 await new Promise((res) => { ws.onopen = res; setTimeout(res, 3000); });
 // The timeout above resolves whether or not the socket opened. Every
