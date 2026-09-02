@@ -16,6 +16,7 @@ import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 
 const PSQL = 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
+const APP = process.env.APP || APP;
 const PASS = 'Password123!';
 const stamp = Date.now().toString(36);
 const AUSER = 'camowner_' + stamp;
@@ -23,7 +24,7 @@ const BUSER = 'campeer_' + stamp;
 
 let failures = 0;
 const check = (name, ok) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`); if (!ok) failures++; };
-const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-d', 'puca', '-t', '-A', '-c', sql],
+const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '-p', process.env.PGPORT || '5432', '-d', process.env.PGDB || 'puca', '-t', '-A', '-c', sql],
     { env: { ...process.env, PGPASSWORD: 'postgres' } }).toString().trim();
 
 const browser = await chromium.launch({
@@ -44,7 +45,7 @@ const browser = await chromium.launch({
 async function register(ctx, user) {
     const page = await ctx.newPage();
     page.on('console', m => { if (m.type() === 'error') console.log(`  [${user} err]`, m.text().slice(0, 140)); });
-    await page.goto('http://localhost:5173/login');
+    await page.goto(APP + '/login');
     await page.waitForURL('**/login');
     await page.waitForSelector('#username', { timeout: 10000 });
     await page.click('.toggle-mode', { timeout: 5000 });
