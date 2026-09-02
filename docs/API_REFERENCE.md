@@ -13,7 +13,11 @@ Quick reference for all REST API endpoints.
 |--------|----------|------|-------------|
 | POST | `/auth/register` | ❌ | Create account (SRP salt+verifier) |
 | POST | `/auth/login/step1` | ❌ | Start login (send A_pub, get B_pub) |
-| POST | `/auth/login/step2` | ❌ | Complete login (send proof, get JWT) |
+| POST | `/auth/login/step2` | ❌ | Complete login (send proof, get JWT). A successful exchange also records a **password proof** for the session the JWT belongs to; endpoints that rewrite credentials or key custody (`/keys/change-password`, `/keys/wrap`, `/keys/rewrap-pw`, `PATCH /keys/public`, `DELETE /account`) require one made within the last few minutes. To re-prove from a session you are already signed into, send the exchange **with your bearer token**: the proof then binds to that session and the response returns the same token (no second session is opened). |
+| POST | `/auth/logout-session` | ✅ | Sign out **this** session only: revokes the token's `sid` (every token carries one since 0.9.0; older tokens get one at their first sliding renewal) and closes its live sockets. Other devices keep working. |
+| POST | `/auth/logout` | ✅ | Sign out **everywhere**: bumps `token_version` and marks every session of the account revoked. |
+| DELETE | `/account` | ✅ | Tombstone the account. Body `{"confirm_username"}`; requires a recent password proof; refused while the caller still owns servers. |
+| PATCH | `/keys/public` | ✅ | Set the identity public key. Write-once for v3 accounts; requires a recent password proof. |
 
 ---
 
@@ -112,7 +116,7 @@ Quick reference for all REST API endpoints.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/upload` | ✅ | Upload file (multipart). With request header `X-Puca-Want-Cap: 1` the response also carries `cap`, a per-file capability returned exactly once (the server stores only its SHA-256). |
+| POST | `/upload` | ✅ | Upload file (multipart). With request header `X-Puca-Want-Cap: 1` the response also carries `cap`, a per-file capability returned exactly once (the server stores only its SHA-256). With request header `X-Puca-Channel: <channel id>` (sent by the official apps for chat and checklist attachments) the upload is refused with 403 unless the caller holds `ATTACH_FILES` in that channel — checked before any body byte is read. Uploads naming no channel are not gated. |
 | GET | `/files/:id` | ✅ | Get file. A file uploaded with a capability is checked against request header `X-Puca-File-Cap` when one is presented; a wrong one is a 404 (no existence oracle). With `FILES_ENFORCE_CAP=1` on the server the header is required for such files; files without a capability (older uploads, avatars, icons, sounds, emoji, clip parts) are never gated. |
 
 ---
@@ -158,22 +162,20 @@ Quick reference for all REST API endpoints.
 
 **URL:** `ws://localhost:3000/ws?token=<JWT>`
 
-### Message Types (Client → Server)
-```json
-{"type": "message", "channel_id": "...", "content": "..."}
-{"type": "typing", "channel_id": "..."}
-{"type": "join_voice", "channel_id": "..."}
-{"type": "leave_voice"}
-```
+Frames are `{"type": "<Variant>", "payload": {...}}`; the variants and their
+payloads are defined in `src/protocol.rs` (`ClientMessage` / `ServerMessage`),
+which is the source of truth — the list is long and changes with every release.
 
-### Message Types (Server → Client)
-```json
-{"type": "message", "message": {...}}
-{"type": "typing", "user_id": "...", "channel_id": "..."}
-{"type": "presence", "user_id": "...", "status": "online"}
-{"type": "voice_user_joined", ...}
-```
+**Media announcements are permission-gated and come first.** `CameraStart` and
+`ScreenShareStart` are refused with an `Error` frame when the caller lacks
+`VIDEO` / `STREAM` in the voice channel (`"You don't have permission to turn on
+your camera in this channel"`, `"…to share your screen in this channel"`) or is
+not in the room (`"Not in this room"`). An accepted announcement is broadcast to
+every member **including the sender** as `CameraStarted` / `ScreenShareStarted`;
+the official client publishes its tracks only after that echo, and mesh
+receivers render a peer's video only while the server has announced it — a
+track that arrives without an announcement is held, not shown.
 
 ---
 
-*Last Updated: 2025-12-12*
+*Last Updated: 2026-09-03 (0.9.0)*
