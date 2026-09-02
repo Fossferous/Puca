@@ -376,6 +376,25 @@ is a finding: read it, decide, then document it here or fix it.
 Live suites need a backend against a **throwaway** database — never the dev or
 production one. See the header of `frontend/e2e/e2ee-live-verify.mjs`.
 
+**Throwaway stack recipe (used for every 0.9.0 gate):** a second Postgres
+cluster on **5433** (`pg_ctl -D <scratch>/pgdata -o "-p 5433" start`), a
+fresh database per run, the debug backend on :3000 with `DATABASE_URL`
+pointing at it (migrations apply at startup), then the harness with its env:
+
+- `frontend/e2e/e2ee-live-verify.mjs` — `PGDB=<db> PGPORT=5433 API=http://127.0.0.1:3000`
+  (real SRP; covers E2EE, the password-proof/session binding and per-session
+  revocation stages).
+- `tests/batch7-permbits-live.mjs` — same env; it mints its own JWTs, so the
+  backend must run with `JWT_SECRET=puca_super_secret_key_change_in_production`.
+- the browser two-peer voice suites (`frontend/e2e/voice-camera-2peer.mjs`,
+  `perfect-negotiation-2peer.mjs`, `voice-rejoin-2peer.mjs`) — add
+  `APP=http://localhost:5174` with vite started via `.claude/launch.json`'s
+  `frontend-dev-alt`; the FIRST run against a cold dev server times out on
+  `page.goto` (vite compiling) — rerun, do not debug.
+- `cargo test` has one DB-backed test (`auth::session_tests`) that **silently
+  passes without a database**: run it with `TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/<migrated db>`
+  once per change to the session code, and confirm it did not print "skipping".
+
 ---
 
 ## Standing rules
@@ -412,6 +431,14 @@ map, reactions. Rules in `docs/ICON_LANGUAGE.md`; keep the wrapper span and
 swap only the glyph, because wrappers like `.menu-icon` set `width: 20px` and
 CSS beats the `<svg>`'s width attribute.
 
+**A password proof belongs to ONE session.** `/auth/login/step2` records the
+proof for the session whose token it returns; a signed-in client re-proving
+for a key-custody write (change password, recovery code, delete account)
+must send its bearer on the exchange so the proof binds to the session that
+will spend it. 0.8.136 minted a fresh session on every exchange and every
+in-app password change was refused — the unit tests were green because
+nothing exercised the two halves together. Live-verify now does.
+
 **Do not fix what you have not reproduced.** Two speculative timing fixes for
 one transfer bug were both wrong. Instrument, get evidence, then fix.
 
@@ -447,6 +474,11 @@ has never existed.
   pinned by a test — reconnects the socket through Doze. An earlier FCM design
   that carried sender names was removed on principle the day it shipped.
   Desktop notifications still require the app running (tray keeps it so).
+- **Authenticode code signing** of the Windows installer and binaries is NOT
+  done (the only launch item deliberately deferred by the owner): SmartScreen
+  warns on first run, and Defender false positives (see the 2026-08-17
+  incident) can only be cleared by MS WDSI submission. Everything else the
+  updater needs — the Tauri updater signature — is in place.
 - **Clips (replay buffer)** — built end to end (`docs/CLIPS.md`): desktop
   capture/seal/preview, the server presence log + approval protocol, and the
   client prompt/composer/attachment. Off per server until the owner enables
