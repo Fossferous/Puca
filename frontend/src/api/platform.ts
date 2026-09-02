@@ -107,16 +107,25 @@ function getPlatform(): Platform {
 export function getApiBaseUrl(): string {
     const platform = getPlatform();
 
-    // In development, you may want to use your local IP
-    // For production, use your deployed server URL
+    // The base is VITE_API_URL, baked in at BUILD time from
+    // frontend/.env.production — which is gitignored, so it is per-deployment
+    // and never a hardcoded domain in this repo.
+    //
+    // The localhost fallback is a development convenience and a shipping
+    // hazard, not a default: a release built without .env.production takes it
+    // silently. That happened on 2026-08-03 and stranded every updated client
+    // (login broke, and the update checks used the same broken base, so no
+    // client could reach the fixed release) — see api/updateCheckBases.ts, which
+    // exists because of it. Check the value the build printed before shipping.
+    //
+    // Both branches resolve the same way; they are kept apart because on a
+    // physical handset localhost is the HANDSET, so a mobile build that falls
+    // back here cannot reach a dev server at all — set VITE_API_URL to the
+    // machine's LAN address for on-device development.
     if (platform === 'ios' || platform === 'android') {
-        // TODO: Replace with your production server URL
-        // For local development, use your machine's IP address
-        // Example: return 'http://192.168.1.100:3000';
         return import.meta.env.VITE_API_URL || 'http://localhost:3000';
     }
 
-    // Tauri desktop and web can use localhost
     return import.meta.env.VITE_API_URL || 'http://localhost:3000';
 }
 

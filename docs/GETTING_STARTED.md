@@ -162,7 +162,7 @@ Your avatar now appears in:
 ## Troubleshooting
 
 ### "Failed to connect to server"
-- Check that the backend is running (`cargo run`)
+- Check that the backend is running (`cargo run --release`)
 - Try refreshing the page
 - Click "Logout" and login again
 
@@ -178,4 +178,8 @@ Your avatar now appears in:
 
 ## Need Help?
 
-Check `.agent/HANDOFF.md` for technical details and API documentation.
+- **Endpoints and wire formats:** [`docs/API_REFERENCE.md`](API_REFERENCE.md)
+- **Setting up a server (canonical):** [`deploy/README.md`](../deploy/README.md)
+- **What the encryption does and does not protect:**
+  [`docs/SECURITY_MODEL.md`](SECURITY_MODEL.md)
+- **Reporting a vulnerability:** [`SECURITY.md`](../SECURITY.md)

@@ -1,4 +1,3 @@
-// Force rebuild for migrations — bump on new migration (051_backfill_create_clips)
 use axum::body::Body;
 use axum::response::Response;
 use axum::{
@@ -1153,5 +1152,3 @@ async fn add_security_headers(
 
     response
 }
-
-// touched to force recompile
