@@ -93,7 +93,34 @@ pub struct Allocation {
     /// loss, it is a server that no longer has our allocation (NAT rebind,
     /// restart, expiry) and will never answer.
     refresh_unanswered_since: Option<Instant>,
+    /// Transaction ids of Refreshes still plausibly in flight, newest last.
+    ///
+    /// Half of the authenticity check in [`Allocation::may_act_on`]. A 438 or a
+    /// 437 is an ERROR response, and RFC 5389 §10.2.2 says a 438 "SHOULD NOT
+    /// include the USERNAME or MESSAGE-INTEGRITY attribute" — so demanding
+    /// integrity on the branch that matters MOST would mean a nonce-rotating
+    /// coturn stopped being believed and every relayed call died at the first
+    /// rotation. What an unauthenticated response must instead prove is that it
+    /// answers a request WE sent: 96 bits of OS randomness an off-path spoofer
+    /// cannot guess. `pending_perms` already records exactly that for
+    /// permission asks; this is the missing half for refreshes.
+    refresh_txids: Vec<([u8; 12], Instant)>,
 }
+
+/// The longest lifetime this client will believe.
+///
+/// The granted LIFETIME arrives in a server message and decides when the next
+/// Refresh goes out, so an attacker-chosen large value STOPS the client
+/// refreshing until the real allocation silently expires — a relayed call
+/// killed by one datagram. 600s is RFC 5766's recommended default allocation
+/// lifetime; refreshing more often than a generous server asked for costs one
+/// small packet every few minutes.
+const MAX_LIFETIME: Duration = Duration::from_secs(600);
+
+/// How long a Refresh transaction id stays acceptable as one we can be
+/// answering. Bounded so the list cannot grow for the life of a call, and so a
+/// txid seen on the wire cannot be replayed much later.
+const TXID_MEMORY: Duration = Duration::from_secs(40);
 
 /// STUN message builder. Attributes are written in order; MESSAGE-INTEGRITY
 /// must be last and is added by `finish_with_integrity`.
@@ -161,6 +188,78 @@ impl MsgBuilder {
         out.extend_from_slice(&digest);
         out
     }
+}
+
+/// Where MESSAGE-INTEGRITY sits in `msg`: (offset of the attribute header
+/// within the BODY, its 20-byte digest). `None` when the message carries none.
+///
+/// Walks the attribute run itself rather than reusing [`attrs`], because the
+/// HMAC is computed over everything BEFORE this attribute and that boundary is
+/// exactly what a `(type, value)` list throws away.
+fn integrity_at(msg: &[u8]) -> Option<(usize, &[u8])> {
+    if msg.len() < 20 {
+        return None;
+    }
+    let len = u16::from_be_bytes([msg[2], msg[3]]) as usize;
+    let body = msg.get(20..20 + len)?;
+    let mut i = 0usize;
+    while i + 4 <= body.len() {
+        let a = u16::from_be_bytes([body[i], body[i + 1]]);
+        let l = u16::from_be_bytes([body[i + 2], body[i + 3]]) as usize;
+        let v = body.get(i + 4..i + 4 + l)?;
+        if a == ATTR_MESSAGE_INTEGRITY {
+            // A 20-byte HMAC-SHA1 or it is not one.
+            return if l == 20 { Some((i, v)) } else { None };
+        }
+        i += 4 + l.div_ceil(4) * 4;
+    }
+    None
+}
+
+/// Does `msg` claim a MESSAGE-INTEGRITY at all?
+///
+/// ABSENT AND INVALID ARE DIFFERENT ANSWERS and the caller treats them
+/// differently: absent is "unproven, look for another proof", invalid is
+/// "forged, refuse". Collapsing the two either breaks nonce rotation (if
+/// absent is refused) or accepts a forgery (if invalid is treated as absent).
+fn has_integrity(msg: &[u8]) -> bool {
+    integrity_at(msg).is_some()
+}
+
+/// The verifying counterpart to [`MsgBuilder::finish_with_integrity`].
+///
+/// The arithmetic mirrors the builder exactly, and getting it wrong has one
+/// failure mode: EVERY legitimate server response is rejected and relayed media
+/// stops entirely, invisibly to a test suite that builds and verifies with the
+/// same buggy helper. So the length field is reconstructed as
+/// `offset_of_MI + 24` — the header length the server signed, which counts the
+/// MESSAGE-INTEGRITY attribute itself and nothing after it — rather than being
+/// read back out of the message.
+///
+/// Constant-time compare via `Mac::verify_slice`: a byte-at-a-time comparison
+/// of a MAC is a forgery oracle for an attacker who can retry.
+fn verify_integrity(msg: &[u8], key: &[u8; 16]) -> bool {
+    let Some((at, digest)) = integrity_at(msg) else {
+        return false;
+    };
+    let Some(body) = msg.get(20..20 + at) else {
+        return false;
+    };
+    let Ok(declared) = u16::try_from(at + 24) else {
+        return false;
+    };
+
+    let mut signed = Vec::with_capacity(20 + at);
+    signed.extend_from_slice(&msg[0..2]);
+    signed.extend_from_slice(&declared.to_be_bytes());
+    signed.extend_from_slice(&msg[4..20]);
+    signed.extend_from_slice(body);
+
+    let Ok(mut mac) = HmacSha1::new_from_slice(key) else {
+        return false;
+    };
+    mac.update(&signed);
+    mac.verify_slice(digest).is_ok()
 }
 
 fn encode_xor_address(addr: SocketAddr, txid: &[u8; 12]) -> Vec<u8> {
@@ -351,8 +450,12 @@ pub fn allocate(
         match a {
             ATTR_XOR_RELAYED_ADDRESS => relayed = decode_xor_address(v, &txid2),
             ATTR_XOR_MAPPED_ADDRESS => mapped = decode_xor_address(v, &txid2),
+            // Clamped for the same reason the refresh path clamps it: the
+            // lifetime is what decides when we next ask, and a number we
+            // believe uncritically is a way to stop us asking at all.
             ATTR_LIFETIME if v.len() >= 4 => {
-                lifetime = Duration::from_secs(u32::from_be_bytes([v[0], v[1], v[2], v[3]]) as u64);
+                lifetime = Duration::from_secs(u32::from_be_bytes([v[0], v[1], v[2], v[3]]) as u64)
+                    .min(MAX_LIFETIME);
             }
             _ => {}
         }
@@ -372,6 +475,7 @@ pub fn allocate(
         expires_at: Instant::now() + lifetime,
         last_refresh_sent: None,
         refresh_unanswered_since: None,
+        refresh_txids: Vec::new(),
         lifetime,
     })
 }
@@ -470,13 +574,71 @@ impl Allocation {
         self.pending_perms.push((txid, peer, Instant::now()));
     }
 
+    /// Is this response one we may CHANGE STATE on?
+    ///
+    /// Until this existed, the only gate was the caller's `source ==
+    /// alloc.server` check in `stream.rs` — a UDP source address, which an
+    /// off-path spoofer picks freely. Four state changes were reachable with
+    /// one forged datagram: a REFRESH_SUCCESS carrying a huge LIFETIME (stop
+    /// refreshing until the real allocation expires), a 438 (overwrite the
+    /// nonce, then clear every permission, so every later authenticated request
+    /// fails), a 437 (declare the relay dead within a round trip) and a
+    /// CREATE_PERM_SUCCESS. Net effect: relayed media killed for a call — which
+    /// is the path used when P2P fails, i.e. the restrictive-NAT users who have
+    /// no fallback.
+    ///
+    /// Two proofs, applied where each is actually available:
+    ///
+    /// - SUCCESS responses to authenticated requests always carry
+    ///   MESSAGE-INTEGRITY (RFC 5766 §7.3, §9.3), so nothing weaker is accepted
+    ///   for the branches that extend a lifetime or promote a peer.
+    /// - ERROR responses may legitimately carry none — RFC 5389 §10.2.2 says a
+    ///   438 Stale Nonce "SHOULD NOT include the USERNAME or MESSAGE-INTEGRITY
+    ///   attribute", and requiring it there would break nonce rotation and take
+    ///   relayed calls down at the first rotation, which is a worse outage than
+    ///   the bug. So an error must EITHER verify, or answer a transaction id we
+    ///   actually sent.
+    ///
+    /// PRESENT-AND-WRONG IS ALWAYS A REFUSAL. "Absent" means look for the other
+    /// proof; it never means "accept".
+    fn may_act_on(&self, msg: &[u8]) -> bool {
+        match msg_type(msg) {
+            REFRESH_SUCCESS | CREATE_PERM_SUCCESS => verify_integrity(msg, &self.key),
+            _ if has_integrity(msg) => verify_integrity(msg, &self.key),
+            _ => self.answers_our_request(msg),
+        }
+    }
+
+    /// Does `msg` carry the transaction id of a request still plausibly in
+    /// flight from this allocation?
+    fn answers_our_request(&self, msg: &[u8]) -> bool {
+        let Some(t) = txid_of(msg) else { return false };
+        self.pending_perms.iter().any(|(p, _, _)| *p == t)
+            || self
+                .refresh_txids
+                .iter()
+                .any(|(r, at)| *r == t && at.elapsed() < TXID_MEMORY)
+    }
+
     /// Consume a non-media message from the TURN server.
     ///
     /// Returns true when the packet was TURN bookkeeping and must NOT be handed
     /// to str0m — feeding it a CreatePermission response would be fed into the
     /// ICE state machine as a malformed STUN packet.
     pub fn handle_server_message(&mut self, msg: &[u8]) -> bool {
-        match msg_type(msg) {
+        let typ = msg_type(msg);
+        let is_turn_response = matches!(typ, REFRESH_SUCCESS | CREATE_PERM_SUCCESS)
+            || typ & 0x0110 == 0x0110;
+        if is_turn_response && !self.may_act_on(msg) {
+            // CONSUMED, not forwarded: it is shaped like TURN bookkeeping, so
+            // str0m has no use for it either. Nothing here reads it — an
+            // unauthenticated packet must not be able to move the nonce, the
+            // lifetime, the permissions or the liveness clock, which is the
+            // whole finding.
+            eprintln!("[turn] dropped an unauthenticated server message (type 0x{typ:04X})");
+            return true;
+        }
+        match typ {
             REFRESH_SUCCESS => {
                 // The allocation is confirmed alive. Nothing used to extend it
                 // here because the blocking refresh consumed its own reply;
@@ -489,10 +651,17 @@ impl Allocation {
                     .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
                     .map(|s| Duration::from_secs(s as u64))
                     .filter(|d| !d.is_zero())
+                    // CLAMPED. The lifetime decides when the next Refresh goes
+                    // out, so believing an enormous one is how a client stops
+                    // refreshing and lets the real allocation lapse under it.
+                    // Applies to an honest server too: nothing needs us to
+                    // trust a number this far past what the RFC recommends.
+                    .map(|d| d.min(MAX_LIFETIME))
                     .unwrap_or(self.lifetime);
                 self.lifetime = granted;
                 self.expires_at = Instant::now() + granted;
                 self.refresh_unanswered_since = None;
+                self.refresh_txids.clear();
                 true
             }
             CREATE_PERM_SUCCESS => {
@@ -595,7 +764,13 @@ impl Allocation {
         m.push(ATTR_USERNAME, self.username.as_bytes());
         m.push(ATTR_REALM, self.realm.as_bytes());
         m.push(ATTR_NONCE, self.nonce.as_bytes());
+        let txid = m.txid;
         let wire = m.finish_with_integrity(&self.key);
+        // Remembered so an ERROR answer to THIS request can be believed without
+        // a MESSAGE-INTEGRITY the RFC says a 438 will not carry. Pruned by age
+        // rather than count so the list cannot grow across a long call.
+        self.refresh_txids.retain(|(_, at)| at.elapsed() < TXID_MEMORY);
+        self.refresh_txids.push((txid, Instant::now()));
         self.last_refresh_sent = Some(Instant::now());
         // First send of this refresh episode starts the unanswered clock;
         // REFRESH_SUCCESS is the only thing that stops it.
@@ -683,7 +858,17 @@ mod tests {
             lifetime,
             last_refresh_sent: None,
             refresh_unanswered_since: None,
+            refresh_txids: Vec::new(),
         }
+    }
+
+    /// Mark `txid` as a Refresh this allocation sent, so an ERROR response
+    /// carrying it is one we may act on.
+    ///
+    /// The real path records this inside `maybe_refresh`; the tests below need
+    /// it without a socket and without the half-life gate.
+    fn sent_refresh(alloc: &mut Allocation, txid: [u8; 12]) {
+        alloc.refresh_txids.push((txid, Instant::now()));
     }
 
     fn peer() -> SocketAddr {
@@ -767,8 +952,13 @@ mod tests {
     #[test]
     fn a_stale_nonce_clears_pending_asks_too() {
         let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(599));
-        ask(&mut alloc);
+        let txid = ask(&mut alloc);
         let mut m = MsgBuilder::new(CREATE_PERM_REQUEST | 0x0110);
+        // ANSWERS OUR ASK. A 438 carries no MESSAGE-INTEGRITY (RFC 5389
+        // §10.2.2), so the transaction id is the only thing distinguishing the
+        // server's answer from a spoofed datagram — this test used to build one
+        // with a random txid and expect it to be believed, which is the bug.
+        m.txid = txid;
         m.push(ATTR_ERROR_CODE, &[0, 0, 4, 38]);
         m.push(ATTR_NONCE, b"fresh");
         assert!(alloc.handle_server_message(&m.finish()));
@@ -785,6 +975,7 @@ mod tests {
         let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(250));
         alloc.refresh_unanswered_since = Some(Instant::now() - Duration::from_secs(29));
         let mut m = MsgBuilder::new(REFRESH_REQUEST | 0x0110);
+        sent_refresh(&mut alloc, m.txid);
         m.push(ATTR_ERROR_CODE, &[0, 0, 4, 38]);
         m.push(ATTR_NONCE, b"rotated");
         assert!(alloc.handle_server_message(&m.finish()));
@@ -799,9 +990,196 @@ mod tests {
         let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(400));
         assert!(!alloc.looks_dead(), "positive control: healthy before the 437");
         let mut m = MsgBuilder::new(REFRESH_REQUEST | 0x0110);
+        sent_refresh(&mut alloc, m.txid);
         m.push(ATTR_ERROR_CODE, &[0, 0, 4, 37]);
         assert!(alloc.handle_server_message(&m.finish()));
         assert!(alloc.looks_dead(), "the server's own death certificate is final");
+    }
+
+    // ---- L8-NATIVE-3: an unauthenticated datagram changes nothing ----------
+    //
+    // The gate these pin: until it existed, the ONLY check on a message
+    // reaching `handle_server_message` was the caller's `source ==
+    // alloc.server` — a UDP source address, which an off-path spoofer picks
+    // freely. Each test below is one of the four state changes that were
+    // reachable with a single forged packet, and each has a positive control
+    // proving the same message IS applied when it is authentic (otherwise a
+    // handler that ignored everything would pass the lot).
+
+    #[test]
+    fn an_unauthenticated_refresh_success_cannot_move_the_clock() {
+        let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(10));
+        let before_expiry = alloc.expires_at;
+        alloc.refresh_unanswered_since = Some(Instant::now() - Duration::from_secs(29));
+
+        let mut m = MsgBuilder::new(REFRESH_SUCCESS);
+        // The attack: a LIFETIME so large the client stops refreshing and the
+        // real allocation lapses under it.
+        m.push(ATTR_LIFETIME, &86_400u32.to_be_bytes());
+        assert!(alloc.handle_server_message(&m.finish()), "consumed, not forwarded");
+        assert_eq!(alloc.lifetime, Duration::from_secs(600), "lifetime untouched");
+        assert_eq!(alloc.expires_at, before_expiry, "expiry untouched");
+        assert!(
+            alloc.refresh_unanswered_since.is_some(),
+            "the liveness clock must not be cleared by a packet nobody authenticated",
+        );
+
+        // POSITIVE CONTROL: signed, it applies — and is clamped.
+        let mut ok = MsgBuilder::new(REFRESH_SUCCESS);
+        ok.push(ATTR_LIFETIME, &86_400u32.to_be_bytes());
+        let key = alloc.key;
+        assert!(alloc.handle_server_message(&ok.finish_with_integrity(&key)));
+        assert_eq!(
+            alloc.lifetime, MAX_LIFETIME,
+            "even an authenticated server cannot push the refresh clock past the clamp",
+        );
+        assert!(alloc.expires_at > before_expiry);
+        assert!(alloc.refresh_unanswered_since.is_none());
+    }
+
+    #[test]
+    fn a_forged_message_integrity_is_refused_rather_than_ignored() {
+        // Present-and-wrong must never fall back to "well, treat it as
+        // absent" — that is how a forgery gets in through the door held open
+        // for the messages that legitimately carry no integrity.
+        let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(10));
+        let before = alloc.expires_at;
+        let mut m = MsgBuilder::new(REFRESH_SUCCESS);
+        m.push(ATTR_LIFETIME, &600u32.to_be_bytes());
+        let wire = m.finish_with_integrity(&[0xAAu8; 16]); // not our key
+        assert!(alloc.handle_server_message(&wire));
+        assert_eq!(alloc.expires_at, before, "a bad MAC changes nothing");
+        assert!(!verify_integrity(&wire, &alloc.key));
+    }
+
+    #[test]
+    fn an_unauthenticated_438_cannot_rewrite_the_nonce_or_wipe_permissions() {
+        let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(599));
+        let txid = ask(&mut alloc);
+        alloc.permitted.push((peer(), Instant::now()));
+
+        let mut m = MsgBuilder::new(CREATE_PERM_REQUEST | 0x0110); // random txid
+        m.push(ATTR_ERROR_CODE, &[0, 0, 4, 38]);
+        m.push(ATTR_NONCE, b"attacker");
+        assert!(alloc.handle_server_message(&m.finish()));
+        assert_eq!(alloc.nonce, "n", "the nonce must survive a spoofed 438");
+        assert_eq!(alloc.permitted.len(), 1, "permissions must survive it too");
+        assert_eq!(alloc.pending_perms.len(), 1, "and so must the ask in flight");
+
+        // POSITIVE CONTROL: the SAME message, carrying the txid of the request
+        // it answers, is believed.
+        let mut real = MsgBuilder::new(CREATE_PERM_REQUEST | 0x0110);
+        real.txid = txid;
+        real.push(ATTR_ERROR_CODE, &[0, 0, 4, 38]);
+        real.push(ATTR_NONCE, b"fresh");
+        assert!(alloc.handle_server_message(&real.finish()));
+        assert_eq!(alloc.nonce, "fresh");
+        assert!(alloc.permitted.is_empty());
+        assert!(alloc.pending_perms.is_empty());
+    }
+
+    #[test]
+    fn an_unauthenticated_437_cannot_declare_the_relay_dead() {
+        let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(400));
+        let mut m = MsgBuilder::new(REFRESH_REQUEST | 0x0110); // random txid
+        m.push(ATTR_ERROR_CODE, &[0, 0, 4, 37]);
+        assert!(alloc.handle_server_message(&m.finish()));
+        assert!(
+            !alloc.looks_dead(),
+            "one spoofed datagram must not kill relayed media for the call",
+        );
+
+        // POSITIVE CONTROL: answering a Refresh we actually sent, it is final.
+        let mut real = MsgBuilder::new(REFRESH_REQUEST | 0x0110);
+        sent_refresh(&mut alloc, real.txid);
+        real.push(ATTR_ERROR_CODE, &[0, 0, 4, 37]);
+        assert!(alloc.handle_server_message(&real.finish()));
+        assert!(alloc.looks_dead());
+    }
+
+    #[test]
+    fn an_unauthenticated_create_perm_success_promotes_nothing() {
+        let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(599));
+        let txid = ask(&mut alloc);
+
+        let mut m = MsgBuilder::new(CREATE_PERM_SUCCESS);
+        m.txid = txid; // right txid, no MESSAGE-INTEGRITY
+        assert!(alloc.handle_server_message(&m.finish()));
+        assert!(
+            alloc.permitted.is_empty(),
+            "a success response always carries integrity; an unsigned one is a forgery",
+        );
+        assert_eq!(alloc.pending_perms.len(), 1, "the ask stays pending");
+
+        // POSITIVE CONTROL: signed, it promotes.
+        let mut real = MsgBuilder::new(CREATE_PERM_SUCCESS);
+        real.txid = txid;
+        let key = alloc.key;
+        assert!(alloc.handle_server_message(&real.finish_with_integrity(&key)));
+        assert!(alloc.permitted.iter().any(|(p, _)| *p == peer()));
+    }
+
+    #[test]
+    fn verify_integrity_is_the_exact_counterpart_of_the_builder() {
+        // The failure mode of getting the length arithmetic wrong is that EVERY
+        // legitimate server response is rejected and relayed calls stop
+        // entirely — invisible if the same buggy helper both builds and
+        // verifies. So this pins the round trip AND that the MAC depends on
+        // every input it should.
+        let key = [7u8; 16];
+        let mut m = MsgBuilder::new(REFRESH_SUCCESS);
+        m.push(ATTR_LIFETIME, &600u32.to_be_bytes());
+        m.push(ATTR_NONCE, b"abc"); // 3 bytes: forces attribute padding
+        let wire = m.finish_with_integrity(&key);
+
+        assert!(verify_integrity(&wire, &key));
+        assert!(has_integrity(&wire));
+        assert!(!verify_integrity(&wire, &[8u8; 16]), "a different key must not verify");
+
+        // A flipped byte anywhere in the signed region must break it.
+        for i in [0usize, 3, 9, 21, wire.len() - 1] {
+            let mut tampered = wire.clone();
+            tampered[i] ^= 0x01;
+            assert!(
+                !verify_integrity(&tampered, &key),
+                "a message tampered at byte {i} must not verify",
+            );
+        }
+
+        // And a message with no MESSAGE-INTEGRITY is ABSENT, not invalid.
+        let mut bare = MsgBuilder::new(REFRESH_SUCCESS);
+        bare.push(ATTR_LIFETIME, &600u32.to_be_bytes());
+        let bare = bare.finish();
+        assert!(!has_integrity(&bare));
+        assert!(!verify_integrity(&bare, &key));
+    }
+
+    #[test]
+    fn a_refresh_records_its_transaction_id() {
+        // The mechanism the error-response proof rests on. Without it every
+        // unsigned 438/437 would be refused and nonce rotation would take
+        // relayed calls down — the outage that is worse than the bug.
+        let server = UdpSocket::bind("127.0.0.1:0").expect("bind server");
+        server.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").expect("bind client");
+        let mut alloc = expiring_allocation(Duration::from_secs(600), Duration::from_secs(10));
+        alloc.server = server.local_addr().unwrap();
+
+        alloc.maybe_refresh(&client);
+        let mut buf = [0u8; 2048];
+        let (n, _) = server.recv_from(&mut buf).expect("a refresh went out");
+        let txid = txid_of(&buf[..n]).expect("a transaction id");
+        assert!(
+            alloc.answers_our_request(&buf[..n]),
+            "the refresh we just sent must be recognised as ours",
+        );
+
+        // Positive control for the recogniser: a different txid is not ours.
+        let mut other = txid;
+        other[0] ^= 0xFF;
+        let mut m = MsgBuilder::new(REFRESH_REQUEST | 0x0110);
+        m.txid = other;
+        assert!(!alloc.answers_our_request(&m.finish()));
     }
 
     /// `looks_dead` is the honesty check the stream loop consults: a lifetime
