@@ -141,7 +141,7 @@ pub(crate) fn decode_public_key(encoded: &str) -> Option<[u8; 32]> {
 /// `PASSWORD_PROOF_TTL`. Fails CLOSED: the client's remedy is to re-run SRP
 /// with the password it already has in hand, which is exactly what
 /// `changePassword` does before calling here.
-fn require_password_proof(
+pub(crate) fn require_password_proof(
     state: &Arc<AppState>,
     user_id: i64,
     session_start: i64,
@@ -155,7 +155,7 @@ fn require_password_proof(
     );
     Err((
         StatusCode::UNAUTHORIZED,
-        "Confirm your password before changing key material",
+        "Confirm your password before making this change",
     )
         .into_response())
 }

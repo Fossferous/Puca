@@ -575,9 +575,11 @@ export async function changePassword(
 /**
  * Tombstone the account. The current password is proven CLIENT-SIDE by
  * unwrapping the E2EE seed with it — the identical proof changePassword uses —
- * so a stolen session token alone can't drive this flow. The server
- * additionally requires the username retyped and refuses while the user still
- * owns servers. On success every outstanding session is evicted.
+ * and then to the SERVER through an SRP exchange, because the server refuses
+ * the delete on a bare bearer token (a stolen token must not be able to
+ * destroy the account). It additionally requires the username retyped and
+ * refuses while the user still owns servers. On success every outstanding
+ * session is evicted.
  */
 /**
  * Sign out on EVERY device, by bumping the account's `token_version`.
@@ -612,6 +614,9 @@ export async function deleteAccount(username: string, currentPassword: string): 
         wrap.pw_kdf_iterations ?? undefined, wrap.pw_kdf ?? undefined,
     );
     if (!seed) throw new Error('Password is incorrect.');
+    // ...and to the SERVER, which refuses the delete on a bare bearer token.
+    // The exchange carries our token, so the proof binds to THIS session.
+    await proveCurrentPassword(username, currentPassword);
     await apiClient.delete('/account', { body: JSON.stringify({ confirm_username: username }) });
 }
 
@@ -758,6 +763,10 @@ export function logout(): void {
         }
         clearThisDeviceId();
     }
+    // Revoke THIS session server-side (per-session: other devices stay signed
+    // in). Fire-and-forget — the token is still valid on this line, and a
+    // failed revoke must not block the sign-out.
+    void apiClient.post('/auth/logout-session', {}).catch(() => { /* best effort */ });
     localStorage.removeItem('auth_token');
     // An explicit sign-out has to remove this, or it is not a sign-out. Login's
     // mount effect replays the blob unconditionally, so clearing only the token

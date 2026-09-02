@@ -839,6 +839,7 @@ async fn main() -> anyhow::Result<()> {
         )
         // Logout: bump token_version to revoke every outstanding JWT (M1).
         .route("/auth/logout", post(handlers::logout))
+        .route("/auth/logout-session", post(handlers::logout_session))
         // Unread count endpoints
         .route(
             "/channels/:channel_id/read",
