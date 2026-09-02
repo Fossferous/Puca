@@ -2,7 +2,6 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "//productName": "SEPARATE INSTALL SLOT. On Windows, NSIS derives the install directory, the Add/Remove Programs entry and the autostart Run value from productName. A distinct name is what lets this build's installer FIND an existing full install (by its own Add/Remove key) and remove it — see installer-hooks-lite.nsh. The two variants are mutually exclusive by design.",
   "productName": "Púca Lite",
-  "//mainBinaryName": "The installed executable, Task Manager entry, firewall prompt and AV alerts all show this filename. Without it Tauri names the binary after the Cargo package (app.exe). The two variants get DIFFERENT names on purpose: installer-migrate.nsh kills the OTHER variant by its own binary name when switching, so the names must not collide.",
   "mainBinaryName": "Puca-Lite",
   "//identifier": "DELIBERATELY NOT OVERRIDDEN — it must stay com.sovereign.chat, the same as the full build. identifier is what Tauri keys %APPDATA%/%LOCALAPPDATA% off, so sharing it is exactly what makes switching between the variants keep you signed in, with your keys, settings and history intact. The installer removes the other variant rather than running alongside it, so nothing is ever sharing that directory at the same time — which also avoids the WebView2 user-data lock that silently leaves a second process with no webview at all.",
   "build": {
