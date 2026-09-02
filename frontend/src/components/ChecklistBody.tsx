@@ -266,6 +266,7 @@ export function ChecklistBody({
                     myPerms={myPerms}
                     currentUserId={currentUserId}
                     resolveUserName={resolveUserName}
+                    channelId={channelId}
                 />
             )}
         </div>

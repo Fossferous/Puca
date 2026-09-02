@@ -99,7 +99,7 @@ export function parseEncAttachment(href: string): { id: string; key: string; mim
  * name, and the real mime. Building block for both the chat markdown form
  * (encryptAndUpload) and task attachment refs.
  */
-export async function encryptAndUploadRef(file: File): Promise<{ href: string; name: string; mime: string }> {
+export async function encryptAndUploadRef(file: File, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
     // Check BEFORE reading and encrypting: uploadFile checks too, but by then we
     // have already pulled the whole file into memory and encrypted it. Account
     // for what encryption adds, or a file of exactly the cap fails at the server.
@@ -110,7 +110,7 @@ export async function encryptAndUploadRef(file: File): Promise<{ href: string; n
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, raw as BufferSource));
     const blob = new Blob([nonce, ct], { type: 'application/octet-stream' });
-    const uploaded = await uploadFile(new File([blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true });
+    const uploaded = await uploadFile(new File([blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId });
 
     // The browser's guess first; when it has none (mkv famously reports ""),
     // infer video types from the extension so the ref records something the
@@ -130,8 +130,8 @@ export async function encryptAndUploadRef(file: File): Promise<{ href: string; n
  * Encrypt a file, upload the ciphertext, and return the markdown to insert into
  * the message composer (image syntax for images, link syntax otherwise).
  */
-export async function encryptAndUpload(file: File): Promise<string> {
-    const { href, name, mime } = await encryptAndUploadRef(file);
+export async function encryptAndUpload(file: File, opts?: { channelId?: number }): Promise<string> {
+    const { href, name, mime } = await encryptAndUploadRef(file, opts);
     return `${mime.startsWith('image/') ? '!' : ''}[${name}](${href})`;
 }
 

@@ -12,6 +12,7 @@
 //   VIDEO                (1<<10) WS CameraStart
 //   STREAM               (1<<11) WS ScreenShareStart   (NOT StartStream — that
 //                                is voice presence, see the ws.rs comment)
+//   ATTACH_FILES         (1<<4)  POST /upload naming a channel (X-Puca-Channel)
 //
 // Prereqs: backend on :3000 against a THROWAWAY db (PGDB + PGPORT must match).
 // Usage: PGDB=puca_sec_test PGPORT=5433 node tests/batch7-permbits-live.mjs
@@ -53,11 +54,11 @@ const api = async (method, path, body, token) => {
 };
 
 const P = {
-    VIEW_CHANNEL: 1 << 0, SEND_MESSAGES: 1 << 1, READ_MESSAGE_HISTORY: 1 << 2,
+    VIEW_CHANNEL: 1 << 0, SEND_MESSAGES: 1 << 1, READ_MESSAGE_HISTORY: 1 << 2, ATTACH_FILES: 1 << 4,
     ADD_REACTIONS: 1 << 6, CONNECT: 1 << 8, SPEAK: 1 << 9,
     VIDEO: 1 << 10, STREAM: 1 << 11,
 };
-const ALL_MEMBER = P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_MESSAGE_HISTORY
+const ALL_MEMBER = P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_MESSAGE_HISTORY | P.ATTACH_FILES
     | P.ADD_REACTIONS | P.CONNECT | P.SPEAK | P.VIDEO | P.STREAM;
 
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -188,6 +189,35 @@ console.log(`\n=== STREAM (1<<11) — ScreenShareStart ===`);
     clearDeny(voiceCh);
     const ok = await wsJoin(allowed, room, { type: 'ScreenShareStart', payload: { room_id: room, stream_id: null } });
     check('member WITH stream can screen share', ok.err === null, `err=${ok.err}`);
+}
+
+console.log(`\n=== ATTACH_FILES (1<<4) — POST /upload naming a channel ===`);
+{
+    // The stock client names the channel it is attaching to in a HEADER (a
+    // field would be taken as the file body by an older server). No header =
+    // not gated (avatars, emoji, sounds, DM attachments).
+    const upload = async (user, channelId) => {
+        const fd = new FormData();
+        fd.append('file', new Blob([`attach-${RUN}`], { type: 'text/plain' }), 'a.txt');
+        const res = await fetch(`${BASE}/upload`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${user.t}`, ...(channelId ? { 'X-Puca-Channel': String(channelId) } : {}) },
+            body: fd,
+        });
+        const text = await res.text(); let body; try { body = JSON.parse(text); } catch { body = text; }
+        return { status: res.status, body };
+    };
+    const ok = await upload(allowed, textCh);
+    check('member WITH attach-files can upload for the channel', ok.status < 300, `status=${ok.status} ${JSON.stringify(ok.body).slice(0, 80)}`);
+    denyBit(textCh, P.ATTACH_FILES);
+    const no = await upload(denied, textCh);
+    check('member DENIED attach-files is refused at the upload door', no.status === 403, `status=${no.status} ${JSON.stringify(no.body).slice(0, 80)}`);
+    check('the refusal stored nothing', psql1(`SELECT COUNT(*) FROM uploaded_files WHERE uploader_id = ${denied.id}`) === '0');
+    const bare = await upload(denied, null);
+    check('an upload naming no channel is not gated', bare.status < 300, `status=${bare.status}`);
+    const stranger = await upload(mkUser('stranger'), textCh);
+    check('a non-member naming the channel is refused', stranger.status === 403, `status=${stranger.status}`);
+    clearDeny(textCh);
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);

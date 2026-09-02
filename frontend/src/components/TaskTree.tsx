@@ -182,11 +182,14 @@ interface TaskTreeProps {
     /** Attribution: user id → display name. Provided for channel checklists;
      *  omitted for personal lists (every task is the owner's own). */
     resolveUserName?: (id: number) => string | undefined;
+    /** Channel checklists name their channel on attachment uploads so the
+     *  server can honour ATTACH_FILES at the upload door. Personal lists omit it. */
+    channelId?: number;
 }
 
 export function TaskTree({
     tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetAttachments,
-    myPerms, currentUserId, resolveUserName,
+    myPerms, currentUserId, resolveUserName, channelId,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
     const [subtaskFor, setSubtaskFor] = useState<number | null>(null);
@@ -349,7 +352,7 @@ export function TaskTree({
         // (over the 10 MB cap, network) are surfaced per file at the end.
         for (const file of files) {
             try {
-                const { href, name } = await encryptAndUploadRef(file);
+                const { href, name } = await encryptAndUploadRef(file, { channelId });
                 added.push({ href, name });
             } catch (err) {
                 console.error('Failed to attach file:', file.name, err);
