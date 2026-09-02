@@ -12,18 +12,6 @@ export interface ValidateTokenResponse {
     message?: string;
 }
 
-/**
- * Request a password reset email
- */
-export async function forgotPassword(email: string): Promise<MessageResponse> {
-    const response = await fetch(`${API_URL}/auth/forgot-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-    });
-
-    return response.json();
-}
 
 /**
  * Validate a password reset token

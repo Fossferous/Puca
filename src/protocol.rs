@@ -905,7 +905,7 @@ mod clip_frame_tests {
     #[test]
     fn the_android_and_web_clients_ring_the_same_doorbell_with_the_same_words() {
         const CLIP_TITLE: &str = "Approval needed";
-        const CONSENT_BODY: &str = "Open Puca to approve or decline";
+        const CONSENT_BODY: &str = "Open Púca to approve or decline";
 
         let java = include_str!(
             "../frontend/android/app/src/main/java/com/sovereign/app/PushFrames.java"

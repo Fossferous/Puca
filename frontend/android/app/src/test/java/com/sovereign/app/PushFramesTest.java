@@ -95,7 +95,7 @@ public class PushFramesTest {
             // read from the constant, so a "clearer wording" edit on either
             // side has to come through this test.
             assertEquals("Approval needed", d.get("title"));
-            assertEquals("Open Puca to approve or decline", d.get("body"));
+            assertEquals("Open Púca to approve or decline", d.get("body"));
             // Names nobody: the frame carries no proposer, and the gate's
             // author checks must see the author-less sentinel.
             assertEquals("-1", d.get("author_id"));
@@ -119,7 +119,7 @@ public class PushFramesTest {
                 "\"body\":\"from Late Night\"}}");
         assertNotNull(d);
         assertEquals("Approval needed", d.get("title"));
-        assertEquals("Open Puca to approve or decline", d.get("body"));
+        assertEquals("Open Púca to approve or decline", d.get("body"));
         assertEquals("clip:c-7", d.get("key"));
         assertEquals("clip:c-7", d.get("nav"));
         for (String leak : new String[] { "mallory", "Late Night", "Secret Guild" }) {
