@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use dashmap::mapref::one::Ref;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,18 @@ pub fn union_approvers(log_hits: &HashSet<UserId>, declared: &[UserId], viewers:
     let mut out: Vec<UserId> = set.into_iter().collect();
     out.sort_unstable();
     out
+}
+
+/// The voter records for a proposal: one per (id, username) row, carrying the
+/// media flags the log saw in the window and WHERE the id came from —
+/// `in_window` is true iff the server's own log had them in the window, false
+/// for a declared-only id the union added. Pure so the provenance is testable.
+pub fn build_voters(names: Vec<(i32, String)>, media: &HashMap<UserId, (bool, bool)>, log_hits: &HashSet<UserId>) -> Vec<ClipVoter> {
+    names.into_iter().map(|(id, username)| {
+        let uid = id as i64;
+        let (cam, share) = media.get(&uid).copied().unwrap_or((false, false));
+        ClipVoter { user_id: uid, username, vote: ClipVote::Pending, had_camera: cam, had_share: share, in_window: log_hits.contains(&uid) }
+    }).collect()
 }
 
 /// A proposal is live only while unexpired — enforced HERE, not just by the
@@ -134,6 +146,11 @@ pub struct ApproverView {
     pub id: UserId,
     pub username: String,
     pub online: bool,
+    /// Provenance: the SERVER's presence log saw them in the clip's window.
+    /// `false` = they are required only because the clipper's client declared
+    /// them (the union can only add). Shown to the proposer so a surprising
+    /// name is explainable; lives and dies with the in-memory proposal.
+    pub in_window: bool,
 }
 
 #[derive(Serialize)]
@@ -203,6 +220,8 @@ pub struct YouView {
     pub had_camera: bool,
     pub had_share: bool,
     pub still_in_call: bool,
+    /// The server's own log saw you in the window (see ApproverView::in_window).
+    pub in_window: bool,
 }
 
 fn vote_str(v: ClipVote) -> &'static str {
@@ -236,12 +255,12 @@ fn view_for(state: &AppState, p: &ClipProposal, viewer: UserId) -> ClipView {
         resolved: p.approved_at.is_some(),
         approved: p.approved_at.is_some(),
         approvers: if is_proposer {
-            Some(p.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: state.sessions.contains_key(&v.user_id) }).collect())
+            Some(p.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: state.sessions.contains_key(&v.user_id), in_window: v.in_window }).collect())
         } else {
             None
         },
         my_vote: mine.map(|v| vote_str(v.vote)),
-        you: mine.map(|v| YouView { had_camera: v.had_camera, had_share: v.had_share, still_in_call }),
+        you: mine.map(|v| YouView { had_camera: v.had_camera, had_share: v.had_share, still_in_call, in_window: v.in_window }),
     }
 }
 
@@ -425,14 +444,20 @@ pub async fn propose_clip(
         }
     };
     // Deleted accounts (no users row) are dropped — they can never consent.
-    let votes: Vec<ClipVoter> = names.into_iter().map(|(id, username)| {
-        let (cam, share) = media.get(&(id as i64)).copied().unwrap_or((false, false));
-        ClipVoter { user_id: id as i64, username, vote: ClipVote::Pending, had_camera: cam, had_share: share }
-    }).collect();
+    let votes = build_voters(names, &media, &log_hits);
     if state.clip_proposals.len() >= CLIP_MAX_LIVE_PROPOSALS { return plain(StatusCode::SERVICE_UNAVAILABLE, "Too many clips are waiting for approval right now"); }
     let now = Instant::now();
     let clip_id = uuid::Uuid::new_v4().to_string();
     let solo = votes.is_empty();
+    // Identity-free provenance for the operator's journal: enough to tell "the
+    // log saw them" from "only the client declared them" after the fact (the
+    // 2026-09-02 report could not be settled because nothing here logged),
+    // without naming anyone or recording who was in which call.
+    let declared_only = votes.iter().filter(|v| !v.in_window).count();
+    tracing::info!(
+        "propose_clip {}: approvers={} from_log={} declared_only={} declared_sent={} window_ms={} ended_ago_ms={} solo={}",
+        clip_id, votes.len(), votes.len() - declared_only, declared_only, req.declared_participants.len(), end_ms - start_ms, ended_ago_ms, solo
+    );
     let proposal = ClipProposal {
         clip_id: clip_id.clone(), proposer: user, proposer_username: claims.username.clone(), server_id,
         voice_channel_id, voice_channel_name: voice_name, target_channel_id: req.target_channel_id, target_channel_name: target_name,
@@ -443,7 +468,7 @@ pub async fn propose_clip(
     let resp = ProposeClipResponse {
         clip_id: clip_id.clone(),
         expires_in_ms: proposal.expires.saturating_duration_since(now).as_millis() as i64,
-        approvers: proposal.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: state.sessions.contains_key(&v.user_id) }).collect(),
+        approvers: proposal.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: state.sessions.contains_key(&v.user_id), in_window: v.in_window }).collect(),
         solo, resolved: solo, approved: solo,
     };
     notify_proposed(&state, &proposal);
@@ -583,6 +608,25 @@ mod tests {
     use super::*;
 
     fn set(v: &[i64]) -> HashSet<UserId> { v.iter().copied().collect() }
+
+    #[test]
+    fn voters_carry_provenance_and_media_flags() {
+        let names = vec![(2, "b".to_string()), (3, "c".to_string()), (4, "d".to_string())];
+        let mut media = HashMap::new();
+        media.insert(3i64, (true, false));
+        // the log saw 2 and 3; 4 is a declared-only add
+        let votes = build_voters(names, &media, &set(&[2, 3]));
+        let by = |id: i64| votes.iter().find(|v| v.user_id == id).unwrap();
+        assert!(by(2).in_window && by(3).in_window, "log hits are in_window");
+        assert!(!by(4).in_window, "a declared-only id is NOT in_window");
+        assert!(by(3).had_camera && !by(3).had_share);
+        // The fixture has no media entry for 4; at the call site media comes from
+        // overlapping_media over the same spans as log_hits, so a declared-only
+        // id never has one — build_voters itself just applies the (false, false) default.
+        assert!(!by(4).had_camera && !by(4).had_share, "no media entry → (false, false)");
+        assert!(votes.iter().all(|v| v.vote == ClipVote::Pending));
+        assert_eq!(votes.iter().filter(|v| !v.in_window).count(), 1);
+    }
 
     #[test]
     fn union_adds_declared_co_members_and_never_removes_log_hits() {

@@ -965,6 +965,12 @@ pub struct ClipVoter {
     /// (their picture may be in the footage, not just their voice).
     pub had_camera: bool,
     pub had_share: bool,
+    /// The server's own presence log placed them in the window. False means
+    /// the clipper's client declared them and the union added them — shown to
+    /// the proposer (and to the approver themselves) as provenance, never
+    /// used to drop anyone: the disconnect path never evicts a publisher from
+    /// the SFU, so a closed span is not proof that their voice is absent.
+    pub in_window: bool,
 }
 
 impl ClipProposal {
