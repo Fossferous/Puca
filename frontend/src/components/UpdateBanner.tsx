@@ -178,9 +178,15 @@ export function UpdateBanner() {
             {failure && (
                 <div className="update-failure" role="alert">
                     <span>
-                        {failure} This usually means the installer could not replace the
-                        running app — try closing Púca and running the installer
-                        yourself, as administrator if it asks.
+                        {/* Per-user installer (NSIS currentUser: %LOCALAPPDATA% +
+                            HKCU), so "run as administrator" is not the remedy —
+                            elevating into another admin account installs a
+                            second copy under that profile. The running process
+                            (kept alive by the tray) is what blocks the swap. */}
+                        {failure} This usually means Púca could not replace itself
+                        while it was still running. Close Púca completely — including
+                        the tray icon — and run the installer again; administrator
+                        rights are not needed.
                     </span>
                     <button
                         className="update-later-btn"

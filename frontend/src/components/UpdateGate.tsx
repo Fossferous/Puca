@@ -244,7 +244,14 @@ export function UpdateGate({ children }: UpdateGateProps) {
             setState(s => ({
                 ...s,
                 status: 'error',
-                error: 'This update could not be installed. On Windows this usually means the installer could not replace the running app — close Púca and run the installer yourself, as administrator if it asks. You can also continue on the current version.',
+                // The installer is per-user (NSIS currentUser mode: it writes
+                // under %LOCALAPPDATA% and HKCU), so administrator rights are
+                // NOT what it needs — and elevating into a DIFFERENT admin
+                // account would install a second, parallel copy under that
+                // profile. What actually stops it is the running process:
+                // NSIS aborts when Puca.exe cannot be closed, and the tray
+                // keeps the process alive after the window is gone.
+                error: 'This update could not be installed. On Windows this usually means Púca could not replace itself while it was still running. Close Púca completely — including the tray icon — and run the installer again; administrator rights are not needed. You can also continue on the current version.',
             }));
         } finally {
             clearInterval(stallWatchdog);
@@ -288,6 +295,9 @@ export function UpdateGate({ children }: UpdateGateProps) {
             variant?: string;
         };
         let currentVersion: string;
+        /** The update-check base that actually answered — the only base the
+         *  bundle URL may be trusted against. '' until one answers. */
+        let answeringBase = '';
         try {
             // Blessed at the entry point too (main.tsx — see the comment
             // there: the native appReadyTimeout rollback must not wait for
@@ -317,8 +327,28 @@ export function UpdateGate({ children }: UpdateGateProps) {
                     // since an older server ignores the parameter.
                     const checkUrl = `${base}/api/mobile-updates/check`
                         + (RC_ENABLED ? '' : '?variant=lite');
-                    checkResponse = await fetchWithTimeout(checkUrl, CHECK_FETCH_TIMEOUT_MS);
-                    break; // reached a server; its answer (incl. 404) is final
+                    const res = await fetchWithTimeout(checkUrl, CHECK_FETCH_TIMEOUT_MS);
+                    // A 404 (nothing published) or 204 is a real answer from a
+                    // server that serves this route, and it is final. Any OTHER
+                    // non-2xx means whatever answered is not serving manifests
+                    // — a proxy's 502, an origin lock's 403, or, in the exact
+                    // mis-build this loop exists for, whatever happens to be
+                    // listening on localhost:3000 — so it must not end the
+                    // search: treat it like an unreachable base and move on.
+                    if (!res.ok && res.status !== 404 && res.status !== 204) {
+                        console.warn(`[UpdateGate] check via ${base} answered ${res.status} — trying the next base`);
+                        continue;
+                    }
+                    checkResponse = res;
+                    // The base that ANSWERED is the one the bundle URL is held
+                    // against below. Holding it against the configured base
+                    // instead refused every manifest the fallback ever fetched:
+                    // the fallback only runs when the configured base is wrong
+                    // or absent, and an absent base fails the trust check
+                    // closed — so the recovery path could fetch a manifest and
+                    // then never apply it.
+                    answeringBase = base;
+                    break;
                 } catch (err) {
                     console.warn(`[UpdateGate] check via ${base} unreachable:`, err);
                 }
@@ -377,10 +407,16 @@ export function UpdateGate({ children }: UpdateGateProps) {
             return;
         }
 
-        // The bundle URL must be HTTPS and on the same site as our API — never
-        // follow a manifest that points the download at an arbitrary/plaintext host.
-        if (!isTrustedBundleUrl(updateInfo.url, import.meta.env.VITE_API_URL || '')) {
-            console.error('[UpdateGate] Refusing untrusted bundle URL:', updateInfo.url);
+        // The bundle URL must be HTTPS and on the same site as the base that
+        // answered the check — never follow a manifest that points the download
+        // at an arbitrary/plaintext host. The same-site rule still means
+        // something with the fallback: that base is operator-set build-time
+        // config, not something the manifest chose. Only the answering base
+        // is passed, never a default: an unknown base fails closed in
+        // isTrustedBundleUrl, and that branch is right for a base nobody
+        // configured.
+        if (!isTrustedBundleUrl(updateInfo.url, answeringBase)) {
+            console.error(`[UpdateGate] Refusing untrusted bundle URL ${updateInfo.url} (manifest came from ${answeringBase || 'an unknown base'})`);
             setState(s => ({ ...s, status: 'upToDate' }));
             return;
         }
@@ -480,7 +516,12 @@ export function UpdateGate({ children }: UpdateGateProps) {
             setState(s => ({
                 ...s,
                 status: 'error',
-                error: 'This update could not be verified or installed. If this keeps happening, reinstall the app from the download page to get the latest signed version.',
+                // Name the real cause. "Reinstall to get the latest signed
+                // version" was the previous advice, and it cannot help: the
+                // public key is baked into the APK, so reinstalling the SAME
+                // APK reinstalls the same key. Only an APK built for this
+                // server (whose key matches what it publishes) updates again.
+                error: 'This update could not be verified or installed. Púca only applies updates signed with the key built into this app, so this usually means the server is publishing bundles signed with a different key — or the download was corrupted. Retry once; if it keeps happening, an APK built for this server (from its download page) will update again, while reinstalling this same APK will not.',
             }));
         } finally {
             clearInterval(stallWatchdog);
