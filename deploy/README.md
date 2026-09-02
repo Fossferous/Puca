@@ -147,8 +147,8 @@ you must decide:
 | `DATABASE_URL` | `postgres://puca:<db-password>@127.0.0.1/puca` |
 | `CORS_ORIGINS` | `https://chat.example.com,https://app.example.com,tauri://localhost,http://tauri.localhost,https://localhost,capacitor://localhost` — the desktop and Android apps send their own origins; list them or every installed app is blocked while the web app keeps working |
 | `RUST_LOG` | `puca=info,tower_http=warn` |
-| `REGISTRATION_INVITE_CODE` | **set it before the server is reachable.** Unset means anyone who finds the origin can register, and every account carries a storage entitlement with no global cap. With it set, Register asks for the code (all clients); hand it to the people you invite. Changing it invalidates every invite link already given out |
-| `APP_URL` | `https://app.example.com` — the web app, used as the base of password-reset and verification links. **Required if you configure SMTP**: the default is `http://localhost:5173`, and every reset mail would point at the recipient's own machine |
+| `REGISTRATION_INVITE_CODE` | **set it before the server is reachable.** Unset means anyone who finds the origin can register, and every account carries a storage entitlement with no global cap. With it set, the sign-up form asks for the code on every client — `GET /config` tells clients only *that* one is required (`registration_invite_required`, a boolean; the code itself is never advertised). Hand it to the people you invite; changing it invalidates every invite link already given out |
+| `APP_URL` | `https://app.example.com` — the web app's public URL. `GET /config` advertises it and every client (desktop, Android, web) builds invite links as `<APP_URL>/invite/<code>`; unset, clients hand out the bare invite code instead. It is also the base of password-reset and verification links, so it is **required if you configure SMTP**: the mail default is `http://localhost:5173`, and every reset mail would point at the recipient's own machine |
 | `TURN_SERVER`, `TURN_SECRET` | section 8 — required for calls between people on different networks |
 | `DATABASE_MAX_CONNECTIONS` | leave unset (20). Keep below Postgres's `max_connections` (default 100) minus headroom for `pg_dump` and psql |
 | `SOURCE_URL` | **a fork must set this to its own repository.** `GET /source` answers with it plus the commit the binary was built from — the AGPL §13 offer of source to the people who use your server |
@@ -268,6 +268,10 @@ base URL is a build-time env var read by `frontend/src/api/platform.ts`:
 ```bash
 cd frontend && npm install
 echo 'VITE_API_URL=https://chat.example.com' > .env.production   # see .env.production.example
+# Every build below starts with scripts/check-api-url.mjs, which REFUSES a
+# missing or localhost VITE_API_URL — a build that baked in localhost could
+# never reach a server and never be offered a fix. PUCA_ALLOW_LOCAL_BUILD=1 is
+# the deliberate local-only override; hosted CI is exempt (test builds).
 npm run build                   # web assets (section 9) / desktop webview
 npm run tauri:build             # desktop installer + .sig  (NOT `npm run tauri build`: the colon
                                 # script builds the native agent and merges tauri.release.json)
