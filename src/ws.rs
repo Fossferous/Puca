@@ -24,24 +24,12 @@ use crate::state::{AppState, DeviceReattachOutcome, DeviceSession, DeviceSession
 /// Query parameters for WebSocket connection
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    /// DEPRECATED — kept only so clients older than the subprotocol change keep
-    /// connecting. A token here is written to every access log, proxy log and
-    /// history entry along the path: a live session credential landing on disk
-    /// in plaintext, by software that has no idea it is handling one. The
-    /// replacement is `Sec-WebSocket-Protocol` (see `bearer_from_subprotocol`),
-    /// which no proxy logs by default. Remove this once no shipped client sends
-    /// it — until then, dropping it would sign out every existing install.
-    ///
-    /// RETIREMENT PLAN (L8-XPORT-5). As of 0.9.0 every client in this tree sends
-    /// the subprotocol: the browser/desktop/mobile app (websocket.ts), the
-    /// Android delivery socket (NativeDelivery.java) and, new in this release,
-    /// both native background services (puca-service's link.rs and puca-waker's
-    /// net.rs). So this field now serves only installs that have not updated.
-    /// It can be deleted a full release cycle after 0.9.0 has gone out — NOT in
-    /// the same one. The waker is the reason for the caution: an un-updated
-    /// waker that silently stops reconnecting means missed wake doorbells, i.e.
-    /// messages that never arrive on a sleeping machine. "Update to fix" is
-    /// acceptable here; a flag day is not.
+    /// RETIRED (0.9.1). A token here used to be accepted for clients older
+    /// than the subprotocol change; it is now ignored and the connection is
+    /// refused, because a live session credential in a query string lands in
+    /// every access log, proxy log and history entry along the path. The
+    /// field survives only so the query still deserialises (serde ignores it)
+    /// and the refusal can be logged with a reason.
     #[serde(default)]
     pub token: Option<String>,
     /// `delivery` marks a background notification socket (the phone's native
@@ -101,12 +89,13 @@ pub async fn ws_handler(
     // keep. The query fallback exists only for installs that predate the
     // change, and refusing them here would sign out every one of them.
     let offered_protocol = bearer_from_subprotocol(&headers);
+    // RETIRED in 0.9.1: a token in the query string is written to every access
+    // log on the path. Every shipped client since 0.9.0 sends the subprotocol;
+    // an older native waker/service simply updates with the desktop app.
     if offered_protocol.is_none() && query.token.is_some() {
-        // Retirement gauge for the query-string token (see WsQuery::token):
-        // when this stops appearing for a full release cycle the field goes.
-        tracing::info!("ws: query-string token used (a client older than 0.9.0)");
+        tracing::info!("ws: refused a query-string token (client older than 0.9.0 — update the app)");
     }
-    let presented = match offered_protocol.as_deref().or(query.token.as_deref()) {
+    let presented = match offered_protocol.as_deref() {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "Missing token").into_response(),
     };
