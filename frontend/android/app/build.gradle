@@ -80,7 +80,7 @@ def isLite = System.getenv('PUCA_LITE') == '1'
 // how Android works: it refuses a strictly lower versionCode. Raising the
 // multiplier is a one-way ratchet — 801170 > any previous 8xxxx — so existing
 // installs upgrade normally.
-def baseVersionCode = 80133
+def baseVersionCode = 80134
 def variantVersionCode = baseVersionCode * 10 + (isLite ? 1 : 0)
 def variantName = isLite ? 'lite' : 'full'
 logger.lifecycle("PUCA variant=${variantName} versionCode=${variantVersionCode} " +
@@ -98,7 +98,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode variantVersionCode
-        versionName "0.8.133"
+        versionName "0.8.134"
         // The native layer's ONLY way to know which variant it is. The JS
         // bundle cannot answer this: an OTA bundle can be from either variant,
         // which is the whole problem above.
