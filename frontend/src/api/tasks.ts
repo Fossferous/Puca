@@ -22,6 +22,7 @@ import {
 } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
 import { currentUserIdFromToken } from './auth';
+import { MAX_READABLE_ENVELOPE_VERSION } from './e2ee';
 import { PERM, hasPerm } from './permissionBits';
 import * as MARKERS from './decryptMarkers';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -157,7 +158,7 @@ export async function updateChannelTask(
     const payload = updates.description === undefined
         ? updates
         : { ...updates, description: await sealChannel(channelId, updates.description, 'chan-task', createdBy) };
-    return apiClient.patch(`/tasks/${taskId}`, payload);
+    return apiClient.patch(`/tasks/${taskId}`, { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
 /** Replace a channel task's attachment refs, sealed under the channel key.
@@ -172,7 +173,7 @@ export async function updateChannelTaskAttachments(
     const attachments = refs.length === 0
         ? ''
         : await sealChannel(channelId, serializeTaskAttachments(refs), 'chan-taskatt', createdBy);
-    return apiClient.patch(`/tasks/${taskId}`, { attachments });
+    return apiClient.patch(`/tasks/${taskId}`, { attachments, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
 // --- Shared (either scope) ---
@@ -301,7 +302,7 @@ export async function createTaskList(title: string): Promise<TaskList> {
 }
 
 export async function renameTaskList(listId: number, title: string): Promise<void> {
-    return apiClient.patch(`/task-lists/${listId}`, { title: await sealSelf(title) });
+    return apiClient.patch(`/task-lists/${listId}`, { title: await sealSelf(title), reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
 export function deleteTaskList(listId: number): Promise<void> {
@@ -336,7 +337,7 @@ export async function updateListTask(taskId: number, updates: { is_completed?: b
     const payload = updates.description === undefined
         ? updates
         : { ...updates, description: await sealSelf(updates.description) };
-    return apiClient.patch(`/tasks/${taskId}`, payload);
+    return apiClient.patch(`/tasks/${taskId}`, { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
 /** Replace a personal-list task's attachment refs, sealed to self.
@@ -345,7 +346,7 @@ export async function updateListTaskAttachments(taskId: number, refs: TaskAttach
     const attachments = refs.length === 0
         ? ''
         : await sealSelf(serializeTaskAttachments(refs));
-    return apiClient.patch(`/tasks/${taskId}`, { attachments });
+    return apiClient.patch(`/tasks/${taskId}`, { attachments, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
 // --- Pure helpers (shared by ChecklistPanel + TasksView, unit-tested) ---

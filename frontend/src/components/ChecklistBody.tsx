@@ -18,6 +18,8 @@ import {
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { PERM, hasPerm } from '../api/permissionBits';
+import { ApiError } from '../api/client';
+import { pushMessageToast } from './messageToastBus';
 import { TaskTree } from './TaskTree';
 
 interface ChecklistBodyProps {
@@ -138,6 +140,8 @@ export function ChecklistBody({
             else await updateListTask(task.id, { description });
         } catch (err) {
             console.error('Failed to edit task:', err);
+            // The server's 409 explains itself (envelope-version refusal): surface it.
+            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
         }
     };

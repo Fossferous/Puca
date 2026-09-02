@@ -84,6 +84,10 @@ pub struct UpdateTaskRequest {
     /// Same three-state contract as attachments: None = keep, Some("") =
     /// clear, Some(rfc3339) = set.
     pub due_at: Option<String>,
+    /// The highest envelope version the editing client can OPEN — see
+    /// envelope_version.rs. Absent from clients that predate it.
+    #[serde(default)]
+    pub reads_up_to: Option<u64>,
 }
 
 /// Parse a request's due time. "" means "clear" and maps to None; anything
@@ -132,6 +136,9 @@ pub struct TaskListResponse {
 #[derive(Deserialize)]
 pub struct TaskListRequest {
     pub title: String,
+    /// See UpdateTaskRequest::reads_up_to.
+    #[serde(default)]
+    pub reads_up_to: Option<u64>,
 }
 
 type TaskRow = (
@@ -569,25 +576,43 @@ pub async fn update_task(
 
     // A stale client that rendered a newer envelope as text and re-sealed it
     // under its older format would destroy the item (there is no task edit
-    // history). Refuse the downgrade — see envelope_version.rs. Clearing the
-    // sidecar (empty string) is a deletion and stays allowed.
+    // history). Refuse the downgrade — see envelope_version.rs. The current
+    // row is read UNDER A ROW LOCK in the transaction the UPDATE runs in, so a
+    // concurrent upgrade cannot slip between the check and the write, and a
+    // read error fails CLOSED: this is a data-loss guard. Clearing the sidecar
+    // (empty string) is a deletion and stays allowed.
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to update task: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
+        }
+    };
     if payload.description.is_some() || new_attachments.is_some() {
-        let current: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT description, attachments FROM channel_tasks WHERE id = $1")
-                .bind(task_id)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or(None);
-        if let Some((cur_desc, cur_att)) = current {
-            if let Some(desc) = payload.description.as_deref().map(str::trim) {
-                if crate::envelope_version::edit_is_downgrade(&cur_desc, desc) {
-                    return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
-                }
+        let current: Option<(String, Option<String>)> = match sqlx::query_as(
+            "SELECT description, attachments FROM channel_tasks WHERE id = $1 FOR UPDATE",
+        )
+        .bind(task_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to read task before update: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
             }
-            if let (Some(cur), Some(new)) = (cur_att.as_deref(), new_attachments) {
-                if crate::envelope_version::edit_is_downgrade(cur, new) {
-                    return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
-                }
+        };
+        let Some((cur_desc, cur_att)) = current else {
+            return (StatusCode::NOT_FOUND, "Task not found").into_response();
+        };
+        if let Some(desc) = payload.description.as_deref().map(str::trim) {
+            if crate::envelope_version::edit_is_downgrade(&cur_desc, desc, payload.reads_up_to) {
+                return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+            }
+        }
+        if let (Some(cur), Some(new)) = (cur_att.as_deref(), new_attachments) {
+            if crate::envelope_version::edit_is_downgrade(cur, new, payload.reads_up_to) {
+                return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
             }
         }
     }
@@ -612,10 +637,14 @@ pub async fn update_task(
     .bind(set_due)
     .bind(new_due)
     .bind(task_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await;
 
     if let Err(e) = result {
+        tracing::error!("Failed to update task: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
+    }
+    if let Err(e) = tx.commit().await {
         tracing::error!("Failed to update task: {:?}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
     }
@@ -1308,6 +1337,24 @@ pub async fn rename_task_list(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Title too long").into_response();
     }
 
+    // Titles are sealed encrypt-to-self bodies with no history: the same
+    // downgrade rule as descriptions (envelope_version.rs), fail-closed.
+    let current: Option<(String,)> = match sqlx::query_as("SELECT title FROM task_lists WHERE id = $1")
+        .bind(list_id)
+        .fetch_optional(&state.pool)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to read task list before rename: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename task list").into_response();
+        }
+    };
+    if let Some((cur,)) = current {
+        if crate::envelope_version::edit_is_downgrade(&cur, title, payload.reads_up_to) {
+            return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+        }
+    }
     let result = sqlx::query("UPDATE task_lists SET title = $1 WHERE id = $2")
         .bind(title)
         .bind(list_id)

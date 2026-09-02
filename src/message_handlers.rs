@@ -91,6 +91,11 @@ pub struct MessageResponse {
 #[derive(Deserialize)]
 pub struct EditMessageRequest {
     pub content: String,
+    /// The highest envelope version the editing client can OPEN. Lets a
+    /// reader-first client re-seal at an older version without being taken
+    /// for a stale one — see envelope_version.rs. Absent from old clients.
+    #[serde(default)]
+    pub reads_up_to: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -532,7 +537,7 @@ pub async fn edit_message(
         Some((user_id, old_content)) if user_id == claims.sub as i32 => {
             // A stale client re-sealing the raw envelope JSON it could not read
             // must not replace the real ciphertext — see envelope_version.rs.
-            if crate::envelope_version::edit_is_downgrade(&old_content, &payload.content) {
+            if crate::envelope_version::edit_is_downgrade(&old_content, &payload.content, payload.reads_up_to) {
                 return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
             }
             // Save old content to edit history
@@ -543,14 +548,19 @@ pub async fn edit_message(
                     .execute(&state.pool)
                     .await;
 
-            // Update the message
-            let result = sqlx::query("UPDATE messages SET content = $1 WHERE id = $2")
+            // Update the message — only if it is still the body the guard
+            // checked. A concurrent edit between the read and this write
+            // (the author's other device) would otherwise be overwritten
+            // unchecked; zero rows means the body changed underneath us.
+            let result = sqlx::query("UPDATE messages SET content = $1 WHERE id = $2 AND content = $3")
                 .bind(&payload.content)
                 .bind(&message_id)
+                .bind(&old_content)
                 .execute(&state.pool)
                 .await;
 
             match result {
+                Ok(r) if r.rows_affected() == 0 => (StatusCode::CONFLICT, "The message changed while you were editing it — reload and try again").into_response(),
                 Ok(_) => StatusCode::OK.into_response(),
                 Err(e) => {
                     tracing::error!("Failed to edit message: {:?}", e);
