@@ -559,8 +559,7 @@ restore your old grants — an Admin role included — if the account ever rejoi
   anonymised rather than removed. Erasing them on request would let an account
   delete the record of what it did.
 
-**Your uploaded files are kept for 30 days, then purged.** Avatars, server
-icons, emoji, sounds, clip parts and every attachment you uploaded are stamped
+**Your uploaded files are kept for a grace period (30 days by default — `DELETED_ACCOUNT_FILE_GRACE_DAYS`), then purged.** Your avatar, sounds, clip parts and every attachment you uploaded are stamped
 `purge_after = now + 30 days` when the account is deleted, and the retention
 sweep removes the file and then the row once that passes. Until then they
 still open for anyone who could open them before. The grace period exists
@@ -569,6 +568,8 @@ messages: the server cannot see which channel a file was shared in, so it
 cannot warn anyone — the delay is the warning, and the deletion confirmation
 says so. An operator can clear `purge_after` within the window to undo a
 mistaken deletion's file loss; nothing else about the tombstone is reversible.
+Server icons and custom emoji you uploaded are NOT purged: they belong to the
+server now and its members still see them.
 
 If that changes, it needs to change as a product decision with three parts: the
 deletion confirmation must say what happens to files you shared, there should be

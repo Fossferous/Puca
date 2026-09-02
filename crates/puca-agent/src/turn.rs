@@ -1454,8 +1454,27 @@ mod tests {
         println!("live coturn: allocation granted, relayed address {:?}", alloc.relayed);
 
         // A refresh exercises the same signed path a long call takes, and the
-        // server's answer must again carry an integrity we accept.
+        // server's REPLY is what `may_act_on` verifies in production: read it
+        // back and feed it through `handle_server_message` — first tampered
+        // (the positive control: a flipped MAC byte must NOT move the
+        // lifetime), then genuine (must extend the allocation).
+        alloc.last_refresh_sent = None;
+        alloc.expires_at = Instant::now(); // force a refresh out now
         alloc.maybe_refresh(&socket);
+        socket.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+        let mut buf = [0u8; 1500];
+        let (n, _) = socket.recv_from(&mut buf).expect("coturn should answer the Refresh");
+        let reply = &buf[..n];
+        assert_eq!(msg_type(reply), REFRESH_SUCCESS, "expected a Refresh success, got 0x{:04X}", msg_type(reply));
+        let (mi_off, _) = integrity_at(reply).expect("a signed Refresh reply carries MESSAGE-INTEGRITY");
+        let mut tampered = reply.to_vec();
+        tampered[20 + mi_off + 4] ^= 0x01; // first byte of the digest
+        let before = alloc.expires_at;
+        assert!(alloc.handle_server_message(&tampered), "TURN bookkeeping is consumed either way");
+        assert_eq!(alloc.expires_at, before, "a reply with a forged MESSAGE-INTEGRITY must not touch the allocation");
+        assert!(alloc.handle_server_message(reply), "the genuine reply is TURN bookkeeping");
+        assert!(alloc.expires_at > before, "the genuine reply must extend the allocation — the verifier accepted coturn's MAC");
+        println!("live coturn: signed Refresh reply verified; a forged digest was ignored");
 
         // POSITIVE CONTROL: the same server refuses a credential whose password
         // does not match — proving the success above was not the rig accepting

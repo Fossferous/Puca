@@ -1453,15 +1453,30 @@ pub struct DeleteAccountRequest {
 /// uploaded files (the id lives inside E2EE content, so the server cannot tell
 /// which blobs other people can still read) — is documented in
 /// docs/SECURITY_MODEL.md §11.
+/// Uploaded blobs of the deleted account (attachments, avatar, sounds, clip
+/// parts) are stamped for purge `$2` days out, then removed by the retention
+/// sweep in main.rs. Their ids live inside other people's E2EE content, so the
+/// server cannot warn the channels they were shared in — the grace period IS
+/// the warning, and the confirmation copy says so. Stamped, not deleted, so a
+/// mistaken deletion is recoverable by an operator within the window.
+///
+/// Server assets are excluded: a server icon or a custom emoji the account
+/// uploaded belongs to the SERVER now (its members still see it), so it is
+/// not the account's to take away.
+const UPLOAD_GRACE_STAMP_SQL: &str = "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => $2)      WHERE uploader_id = $1 AND purge_after IS NULL        AND id NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL)        AND id NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL)        AND id NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL)";
+
+/// DELETED_ACCOUNT_FILE_GRACE_DAYS: how long a deleted account's uploads stay
+/// before the sweep removes them. Default 30; 0 purges at the next sweep.
+pub(crate) fn upload_grace_days() -> i32 {
+    std::env::var("DELETED_ACCOUNT_FILE_GRACE_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|d| (0..=3650).contains(d))
+        .unwrap_or(30) as i32
+}
+
 const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     "DELETE FROM device_tokens WHERE user_id = $1",
-    // Uploaded blobs (attachments, avatar, emoji, sounds, clip parts): kept
-    // for a 30-day grace, then purged by the retention sweep (main.rs). Their
-    // ids live inside other people's E2EE content, so the server cannot warn
-    // the channels they were shared in — the grace period IS the warning, and
-    // the confirmation copy says so. Stamped, not deleted, so a mistaken
-    // deletion is recoverable by an operator within the window.
-    "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => 30) WHERE uploader_id = $1 AND purge_after IS NULL",
     // Enrolled MACHINES, as distinct from the push tokens above. The tombstone
     // is an UPDATE so the devices FK cascade never fires, and /devices/token
     // re-reads token_version at mint time — so the bump in the anonymising
@@ -1635,6 +1650,15 @@ pub async fn delete_account(
             )
                 .into_response();
         }
+    }
+    if let Err(e) = sqlx::query(UPLOAD_GRACE_STAMP_SQL)
+        .bind(claims.sub as i32)
+        .bind(upload_grace_days())
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::error!("delete_account: could not stamp uploads for purge: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete account").into_response();
     }
 
     // Re-check inside the transaction, after the anonymising UPDATE has taken
@@ -1839,14 +1863,13 @@ mod account_deletion_residue_tests {
     /// The three additions in this release (L8-DATA-1) are the last three:
     /// cross-user device shares in both directions, the user's own wrapped
     /// channel keys, and the personal fields left on the revoked device rows.
-    /// 0.9.1 added the uploaded_files grace stamp (second entry): files are
-    /// purged 30 days after deletion by the retention sweep in main.rs.
+    /// 0.9.1: uploads are STAMPED for the grace purge by UPLOAD_GRACE_STAMP_SQL
+    /// (a separate statement, because it binds the operator's grace period),
+    /// and purged by the retention sweep in main.rs once it passes.
     #[test]
     fn the_cleanup_list_is_exactly_what_we_decided() {
         let expected: &[&str] = &[
             "DELETE FROM device_tokens WHERE user_id = $1",
-            // 0.9.1: uploads are stamped for the 30-day grace purge, not deleted.
-            "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => 30) WHERE uploader_id = $1 AND purge_after IS NULL",
             "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
             "DELETE FROM notification_preferences WHERE user_id = $1",
             "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",

@@ -150,10 +150,11 @@ pub async fn send_verification_email(
     let expires_at = Utc::now() + Duration::hours(24);
 
     if let Err(e) = sqlx::query(
+        // Digest at rest, like password_reset_tokens: the mail carries the token.
         "INSERT INTO email_verification_tokens (user_id, token, expires_at, pending_email) VALUES ($1, $2, $3, $4)"
     )
         .bind(claims.sub as i32)
-        .bind(&token)
+        .bind(reset_token_digest(&token))
         .bind(expires_at.naive_utc())
         .bind(email)
         .execute(&state.pool)
@@ -177,7 +178,7 @@ pub async fn send_verification_email(
         // The token is useless if its mail never went out; reap it so a failed
         // attempt leaves no live credential lying around.
         let _ = sqlx::query("DELETE FROM email_verification_tokens WHERE token = $1")
-            .bind(&token)
+            .bind(reset_token_digest(&token))
             .execute(&state.pool)
             .await;
         return (
@@ -205,7 +206,7 @@ pub async fn verify_email(
     let token_record = match sqlx::query(
         "SELECT user_id, expires_at, pending_email FROM email_verification_tokens WHERE token = $1",
     )
-    .bind(&query.token)
+    .bind(reset_token_digest(&query.token))
     .fetch_optional(&state.pool)
     .await
     {
@@ -288,7 +289,7 @@ pub async fn verify_email(
 
     // Delete used token
     let _ = sqlx::query("DELETE FROM email_verification_tokens WHERE token = $1")
-        .bind(&query.token)
+        .bind(reset_token_digest(&query.token))
         .execute(&state.pool)
         .await;
 
@@ -579,10 +580,10 @@ mod reset_token_digest_tests {
     #[test]
     fn the_row_never_holds_the_token_and_the_digest_is_what_a_lookup_needs() {
         let token = "3f9a1c7e5b2d8046a9e1f3c5d7b9a0e2";
-        let d = reset_token_digest(token);
+        let d = reset_token_digest(&token);
         assert_ne!(d, token);
         assert_eq!(d.len(), 64);
-        assert_eq!(d, reset_token_digest(token), "deterministic, so the lookup finds the row");
+        assert_eq!(d, reset_token_digest(&token), "deterministic, so the lookup finds the row");
         assert_ne!(d, reset_token_digest("3f9a1c7e5b2d8046a9e1f3c5d7b9a0e3"));
     }
 }
