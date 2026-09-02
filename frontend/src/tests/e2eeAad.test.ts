@@ -11,6 +11,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
     makeIdentity, sealChannelEnvelope, decryptChannelMessage, encryptChannelMessage, setActiveIdentity, clearActiveIdentity,
+    wrapChannelKeyForMembers, unwrapChannelKey, wrapAad, isWrapV3, EMIT_WRAP_V3,
     sealDmEnvelope, decryptDM, encryptDM, channelAad, dmAad, parseEnvelopeEx, isEncrypted,
     messageEncState, EMIT_ENVELOPE_V3, type Envelope,
 } from '../api/e2ee';
@@ -90,6 +91,35 @@ describe('v3 channel messages', () => {
         expect(await decryptChannelMessage(CK, task, ctx)).toBeNull();
         expect(await decryptChannelMessage(CK, task, { ...ctx, kind: 'chan-taskatt' })).toBeNull();
         expect(await decryptChannelMessage(CK, task, { ...ctx, kind: 'chan-task' })).toBe('buy milk');
+    });
+});
+
+describe('v3 channel key wraps (the highest-value binding: the wrong KEY, not just the wrong author)', () => {
+    const members = () => [{ userId: 41, publicKey: B().publicKeyEncoded }];
+    const ctx = { channelId: 7, epoch: 5 };
+
+    it('the grammar', () => {
+        expect(Buffer.from(wrapAad(ctx, 41)).toString()).toBe('puca/v3/wrap/7/5/41');
+    });
+    it('the default producer emits v3 (prefixed) and it opens under the row\'s own channel/epoch/recipient', async () => {
+        expect(EMIT_WRAP_V3).toBe(true);
+        const [w] = await wrapChannelKeyForMembers(A(), CK, members(), ctx);
+        expect(isWrapV3(w.wrappedKey)).toBe(true);
+        expect(await unwrapChannelKey(B(), w, { ...ctx, recipientId: 41 })).toEqual(CK);
+    });
+    it('a v3 wrap lifted to another channel, another epoch or another recipient is null — the substitution the KEK never prevented', async () => {
+        const [w] = await wrapChannelKeyForMembers(A(), CK, members(), ctx);
+        expect(await unwrapChannelKey(B(), w, { channelId: 8, epoch: 5, recipientId: 41 })).toBeNull();
+        expect(await unwrapChannelKey(B(), w, { channelId: 7, epoch: 2, recipientId: 41 })).toBeNull();
+        expect(await unwrapChannelKey(B(), w, { channelId: 7, epoch: 5, recipientId: 42 })).toBeNull();
+        expect(await unwrapChannelKey(B(), w)).toBeNull(); // a reader that predates v3
+    });
+    it('a v2 wrap (the frozen format, and what every pre-0.9.0 client wrote) still opens under any or no context', async () => {
+        const [w] = await wrapChannelKeyForMembers(A(), CK, members(), ctx, 2);
+        expect(isWrapV3(w.wrappedKey)).toBe(false);
+        expect(await unwrapChannelKey(B(), w)).toEqual(CK);
+        expect(await unwrapChannelKey(B(), w, { channelId: 999, epoch: 999, recipientId: 999 })).toEqual(CK);
+        expect(await unwrapChannelKey(B(), kat.wrappedChannelKey as never)).toEqual(CK);
     });
 });
 

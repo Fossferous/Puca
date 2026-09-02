@@ -23,6 +23,7 @@ import {
     type WrappedChannelKey,
 } from './e2ee';
 import { pinServedIdentityKey, hasIdentityPin, identityPinConflicts } from './keyVerification';
+import { currentUserIdFromToken } from './auth';
 
 interface ChannelKeyState {
     currentEpoch: number;
@@ -199,6 +200,9 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         }
     };
 
+    // Our own user id is the recipient a v3 wrap was bound to (recipient_id
+    // in the row); a signed-out rig has none, and then no v3 wrap can open.
+    const me = currentUserIdFromToken() ?? -1;
     for (const row of resp.keys) {
         // The conflict check runs at EVERY epoch, history included: it is free
         // (no network) and a substituted key for someone we already trust must
@@ -242,11 +246,13 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         // that conflicts with nothing, or an unverifiable current-epoch row we
         // have just flagged for rotation.
         const wrapped: WrappedChannelKey = {
-            recipientId: 0, // not needed for unwrap
+            recipientId: me,
             wrappedKey: row.wrapped_key,
             senderPublicKey: row.sender_public_key,
         };
-        const ck = await unwrapChannelKey(identity, wrapped);
+        // The row's OWN channel and epoch, and our own id: a v3 wrap opens under
+        // exactly that context and no other (a row lifted from elsewhere is null).
+        const ck = await unwrapChannelKey(identity, wrapped, { channelId, epoch: row.epoch, recipientId: me });
         if (ck) keys.set(row.epoch, ck);
     }
     // Epoch floor. `current_epoch` is whatever the untrusted server says it is,
@@ -324,7 +330,7 @@ async function mintEpoch(
     if (withKeys.length === 0) return null;
 
     const channelKey = generateChannelKey();
-    const wrapped = await wrapChannelKeyForMembers(identity, channelKey, withKeys);
+    const wrapped = await wrapChannelKeyForMembers(identity, channelKey, withKeys, { channelId, epoch });
     if (wrapped.length === 0) return null;
     console.debug(`[e2ee] mintEpoch(${channelId}) publishing ${wrapped.length} wrapped keys`);
 

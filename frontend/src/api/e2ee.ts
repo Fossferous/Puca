@@ -298,7 +298,7 @@ async function aesDecrypt(rawKey: Uint8Array, blobB64: string, aad?: Uint8Array)
 // neither can be bound; that needs a sender-chosen sequence in the plaintext,
 // which is separate work. Self envelopes, key wraps, seed wraps and control
 // frames stay v2 on purpose: self content has an unresolved notes/list
-// duality, a wrap flip locks un-updated clients out of a whole channel, the
+// duality (channel key wraps went v3 in 0.9.0 — see the wrap section), the
 // seed wrap's real weakness is KDF downgrade (an algorithm ratchet, not AAD),
 // and control frames have a native twin in puca-agent that would need a
 // lockstep two-language deploy.
@@ -515,22 +515,67 @@ export function generateChannelKey(): Uint8Array {
     return crypto.getRandomValues(new Uint8Array(32));
 }
 
+// --- Channel key wraps: context binding ---
+//
+// The wrap KEK is X25519(distributor, member) under a constant HKDF info: it
+// has NO channel and NO epoch input. So the same (distributor, member) pair
+// produced the same KEK for every channel and every epoch, and a wrap row
+// lifted from channel X epoch 5 and served as channel Y epoch 2 unwrapped
+// cleanly — a key-substitution primitive the server held, and the highest-
+// value binding in the whole v3 programme (a message binding only stops
+// re-attribution; this stops the wrong KEY being handed out). The database
+// UNIQUE(channel, epoch, recipient) is a constraint the AEAD never saw.
+//
+// v3 wraps carry the context as AES-GCM associated data and are marked by an
+// in-blob prefix (`wrapped_key` is opaque TEXT server-side, so no migration):
+//   wrapped_key = 'v3.' + base64(nonce || ct)
+//   AAD         = 'puca/v3/wrap/<channelId>/<epoch>/<recipientUserId>'
+// A reader that predates v3 hits fromBase64('v3.…'), throws inside its
+// try, returns null and skips the row: that client sees "key unavailable"
+// for the epoch until it updates. Nothing is lost — the row is intact and
+// opens once it does. Un-prefixed (v2) wraps keep opening forever.
+
+/** Emit v3 (context-bound) channel key wraps. ON since 0.9.0. */
+export const EMIT_WRAP_V3 = true;
+const WRAP_V3_PREFIX = 'v3.';
+
+export interface WrapContext {
+    channelId: number;
+    epoch: number;
+}
+
+export function wrapAad(ctx: WrapContext, recipientId: number): Uint8Array {
+    return utf8(`${AAD_PREFIX}wrap/${aadInt(ctx.channelId, 'channelId')}/${aadInt(ctx.epoch, 'epoch')}/${aadInt(recipientId, 'recipientId')}`);
+}
+
+/** Whether a stored wrap is context-bound (v3) or legacy (v2). */
+export function isWrapV3(wrappedKey: string): boolean {
+    return wrappedKey.startsWith(WRAP_V3_PREFIX);
+}
+
 /**
  * Wrap a channel key for a set of members. The distributor derives a
  * key-encryption key per member via X25519 and AES-GCM encrypts the CK.
+ * With `ctx` (and EMIT_WRAP_V3) the wrap binds channel, epoch and recipient
+ * into the tag; without it (tests of the frozen format) it is a v2 wrap.
  */
 export async function wrapChannelKeyForMembers(
     identity: Identity,
     channelKey: Uint8Array,
-    members: { userId: number; publicKey: string }[]
+    members: { userId: number; publicKey: string }[],
+    ctx?: WrapContext,
+    version: 2 | 3 = ctx && EMIT_WRAP_V3 ? 3 : 2,
 ): Promise<WrappedChannelKey[]> {
+    if (version === 3 && !ctx) throw new SecureSendError('E2EE: a v3 wrap needs its channel and epoch');
     const out: WrappedChannelKey[] = [];
     for (const m of members) {
         const memberPub = decodePublicKey(m.publicKey);
         if (!memberPub) continue; // member has no v2 key yet; skip
         const shared = x25519.getSharedSecret(identity.privateKey, memberPub);
         const kek = deriveSymmetricKey(shared, HKDF_WRAP_INFO);
-        const wrapped = await aesEncrypt(kek, toBase64(channelKey));
+        const wrapped = version === 3
+            ? WRAP_V3_PREFIX + await aesEncrypt(kek, toBase64(channelKey), wrapAad(ctx!, m.userId))
+            : await aesEncrypt(kek, toBase64(channelKey));
         out.push({
             recipientId: m.userId,
             wrappedKey: wrapped,
@@ -540,16 +585,24 @@ export async function wrapChannelKeyForMembers(
     return out;
 }
 
-/** Unwrap a channel key that was wrapped for us. */
+/** Unwrap a channel key that was wrapped for us. A v3 wrap needs the row's
+ *  own channel, epoch and OUR user id (`ctx`) — that is the binding; a v3
+ *  wrap without it, or under any other context, is null. v2 ignores ctx. */
 export async function unwrapChannelKey(
     identity: Identity,
-    wrapped: WrappedChannelKey
+    wrapped: WrappedChannelKey,
+    ctx?: WrapContext & { recipientId: number },
 ): Promise<Uint8Array | null> {
     const senderPub = decodePublicKey(wrapped.senderPublicKey);
     if (!senderPub) return null;
     try {
         const shared = x25519.getSharedSecret(identity.privateKey, senderPub);
         const kek = deriveSymmetricKey(shared, HKDF_WRAP_INFO);
+        if (isWrapV3(wrapped.wrappedKey)) {
+            if (!ctx) return null;
+            const ckB64 = await aesDecrypt(kek, wrapped.wrappedKey.slice(WRAP_V3_PREFIX.length), wrapAad(ctx, ctx.recipientId));
+            return fromBase64(ckB64);
+        }
         const ckB64 = await aesDecrypt(kek, wrapped.wrappedKey);
         return fromBase64(ckB64);
     } catch {
