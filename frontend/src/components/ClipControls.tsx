@@ -38,8 +38,9 @@ interface ClipButtonsProps {
     roomId: string;
     /** The VOICE server's clip policy + the voice channel's permission bits. */
     policy?: ClipPolicy;
-    /** Everyone this client saw in the room while the buffer was armed (D1). */
-    getDeclaredParticipants?: () => number[];
+    /** Everyone this client saw in the room whose presence overlaps the clip's
+     *  window [windowStartMs, windowEndMs] (D1; api/clips/clipParticipants.ts). */
+    getDeclaredParticipants?: (windowStartMs: number, windowEndMs: number) => number[];
 }
 
 const isArmedPhase = (p: ReplayState['phase']) => p === 'armed' || p === 'sealing' || p === 'sealed' || p === 'uploading';

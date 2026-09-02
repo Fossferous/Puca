@@ -28,6 +28,8 @@ import { isTauri } from '../api/platform';
 import { phonePanelQuery } from '../utils/phonePanel';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
+import { DeclaredParticipants } from '../api/clips/clipParticipants';
+import { getClipProposalState } from '../api/clips/clipProposals';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
 // A pending clip request is withdrawn on EVERY disarm by App.tsx (via
 // onArmedChange) — not here, so suspend/lock, "Stop sharing" and fatal
@@ -315,10 +317,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     /** Clip replay buffer armed on THIS machine (docs/CLIPS.md, roster badge). */
     const isBufferingRef = useRef(false);
     const [clipArmed, setClipArmed] = useState(false);
-    /** Everyone seen in this room while the buffer was armed — the client's
-     *  declared-participants list for a proposal (D1: the server unions it with
-     *  its own log; it can only ADD approvers, never remove). Reset on arm. */
-    const seenWhileArmedRef = useRef<Set<number>>(new Set());
+    /** Presence spans of everyone seen in this room while the buffer was armed
+     *  — the client's declared-participants input for a proposal, bounded to
+     *  the clip's WINDOW at proposal time (api/clips/clipParticipants.ts). The
+     *  server unions it with its own log and can only ADD approvers, never
+     *  remove — so a set that only ever grew from the arm made everyone who
+     *  had been in the call since you joined a required approver, offline or
+     *  not (2026-09-02). Reset on a fresh arm; merged on a re-assert. */
+    const declaredRef = useRef(new DeclaredParticipants());
     useEffect(() => {
         // Arming/disarming is the ONE event no existing broadcastStatus caller
         // fires on; without this the badge only appears at the next mute toggle.
@@ -326,22 +332,38 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             const wasArmed = isBufferingRef.current;
             isBufferingRef.current = armed;
             if (armed && !wasArmed) {
-                // A fresh arm: the declared-participants set starts from the
-                // room as it is right now.
-                seenWhileArmedRef.current = new Set(globalVoiceUsers.get(roomId)?.keys() ?? []);
+                // A fresh arm: the presence record starts from the room as it
+                // is right now.
+                declaredRef.current.reset(globalVoiceUsers.get(roomId)?.keys() ?? [], Date.now());
             } else if (armed) {
                 // A re-assert while ALREADY armed (armNative fires once when
                 // native capture starts and again when the worker confirms a
-                // codec) — MERGE, never rebuild: someone who left the call
+                // codec) — OBSERVE, never rebuild: someone who left the call
                 // between the two notifications is already in the ring and
-                // must stay declared, or the client under-declares a person
+                // must keep their span, or the client under-declares a person
                 // whose footage it holds (the server union can only ADD).
-                for (const id of globalVoiceUsers.get(roomId)?.keys() ?? []) seenWhileArmedRef.current.add(id);
+                declaredRef.current.observe(globalVoiceUsers.get(roomId)?.keys() ?? [], Date.now());
             }
             setClipArmed(armed);
             broadcastStatusRef.current(isMutedRef.current, isDeafenedRef.current);
         });
         return un;
+    }, [roomId]);
+    // `__pucaClipDiag()` in DevTools: the presence spans this client would
+    // declare from, and the live outgoing proposal with the server's
+    // per-approver `in_window` provenance. In-memory only — nothing here is
+    // ever written to disk (a record of who was in which call is exactly what
+    // this product does not keep). Mirrors `__pucaVoiceDiag` / `__pucaNotifyDiag`.
+    useEffect(() => {
+        const w = window as unknown as Record<string, unknown>;
+        w.__pucaClipDiag = () => ({
+            roomId,
+            armed: isBufferingRef.current,
+            replay: getReplayState().phase,
+            spans: declaredRef.current.snapshot(),
+            outgoing: getClipProposalState().outgoing,
+        });
+        return () => { delete w.__pucaClipDiag; };
     }, [roomId]);
     useEffect(() => { isScreenSharingRef.current = isScreenSharing; }, [isScreenSharing]);
     useEffect(() => { listenOnlyRef.current = listenOnly; }, [listenOnly]);
@@ -629,13 +651,18 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const refreshVoiceUsersList = useCallback(() => {
         const roomUsers = globalVoiceUsers.get(roomId);
         if (!roomUsers) {
+            // The room map is gone: everyone's span closes now.
+            if (isBufferingRef.current) declaredRef.current.observe([], Date.now());
             setVoiceUsers([]);
             return;
         }
+        // Every roster render while armed: opens spans for newcomers, closes
+        // the span of anyone who dropped out (StreamStopped / UserLeft / the
+        // REST rebuild all end up here).
+        if (isBufferingRef.current) declaredRef.current.observe(roomUsers.keys(), Date.now());
 
         const userList: VoiceUser[] = [];
         for (const [userId, status] of roomUsers) {
-            if (isBufferingRef.current) seenWhileArmedRef.current.add(userId);
             userList.push({
                 id: userId,
                 username: status.username,
@@ -3027,7 +3054,21 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             listenOnly={listenOnly}
                             roomId={roomId}
                             policy={clipPolicy}
-                            getDeclaredParticipants={() => Array.from(seenWhileArmedRef.current).filter(id => id !== currentUserId)}
+                            getDeclaredParticipants={(windowStartMs, windowEndMs) => {
+                                // Re-observe first: a roster change that never
+                                // reached refreshVoiceUsersList (Chat.tsx's
+                                // REST rebuild) is stamped now, which is LATER
+                                // than reality and so errs toward declaring.
+                                declaredRef.current.observe(globalVoiceUsers.get(roomId)?.keys() ?? [], Date.now());
+                                return declaredRef.current.declaredFor(windowStartMs, windowEndMs, {
+                                    self: currentUserId,
+                                    // Their LiveKit session outliving their roster row
+                                    // (a WS blip on their side) means their voice is
+                                    // still going into the ring — see the StreamStopped
+                                    // handler's identical guard.
+                                    stillAudible: (id) => sfuManager.hasParticipant(id),
+                                });
+                            }}
                         />
                         <button
                             className="voice-btn disconnect"

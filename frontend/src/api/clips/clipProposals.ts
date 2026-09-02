@@ -26,7 +26,10 @@ import { postMobileNotification } from '../mobileApp';
 export type ClipVote = 'pending' | 'approved' | 'declined';
 export type ClipOutcome = 'approved' | 'declined' | 'expired' | 'cancelled' | 'closed';
 
-export interface ClipApprover { id: number; username: string; online: boolean }
+/** Wire shape (snake_case). `in_window`: the server's OWN presence log saw
+ *  them in the clip's window; `false` means they are on the list only because
+ *  this client declared them. Absent from servers older than this field. */
+export interface ClipApprover { id: number; username: string; online: boolean; in_window?: boolean }
 
 /** A proposal I made. */
 export interface OutgoingProposal {
@@ -61,7 +64,9 @@ export interface IncomingProposal {
     approverCount: number;
     expiresAt: number;
     myVote: ClipVote;
-    you: { hadCamera: boolean; hadShare: boolean; stillInCall: boolean };
+    /** `inWindow` false = the server's log did not see you in the call during
+     *  the clip; the proposer's app listed you. Defaults to true for older servers. */
+    you: { hadCamera: boolean; hadShare: boolean; stillInCall: boolean; inWindow: boolean };
     /** Set when the proposal resolved while the prompt was open. `expired` is
      *  the LOCAL clock's verdict (confirmed by a re-fetch); the server never
      *  tells an approver "expired" — it just stops listing it. */
@@ -123,7 +128,7 @@ interface ServerClipView {
     approved: boolean;
     approvers?: ClipApprover[];
     my_vote?: ClipVote;
-    you?: { had_camera: boolean; had_share: boolean; still_in_call: boolean };
+    you?: { had_camera: boolean; had_share: boolean; still_in_call: boolean; in_window?: boolean };
 }
 interface ProposeResponse {
     clip_id: string;
@@ -149,7 +154,7 @@ function toIncoming(v: ServerClipView, prev?: IncomingProposal): IncomingProposa
         approverCount: v.approver_count,
         expiresAt: Date.now() + Math.max(0, v.expires_in_ms),
         myVote: v.my_vote ?? prev?.myVote ?? 'pending',
-        you: { hadCamera: !!v.you?.had_camera, hadShare: !!v.you?.had_share, stillInCall: !!v.you?.still_in_call },
+        you: { hadCamera: !!v.you?.had_camera, hadShare: !!v.you?.had_share, stillInCall: !!v.you?.still_in_call, inWindow: v.you?.in_window !== false },
         resolution: prev?.resolution ?? null,
     };
 }
@@ -223,6 +228,10 @@ export async function proposeClip(voiceChannelId: number, a: ProposeArgs): Promi
         total: r.approvers.length, solo: r.solo, expiresAt: Date.now() + Math.max(0, r.expires_in_ms),
         status: r.approved ? 'approved' : 'pending',
     };
+    // DevTools only (never persisted): what we declared and where each
+    // required approver came from, so a surprising name can be explained from
+    // evidence rather than theory.
+    console.log(`[clips] proposed ${r.clip_id}: window=${Math.round(a.durationMs / 1000)}s ended ${Math.round(a.endedAgoMs / 1000)}s ago, declared=[${a.declaredParticipants.join(',')}], approvers=[${r.approvers.map(x => `${x.id}${x.in_window === false ? ':declared-only' : ''}`).join(',')}]`);
     state.outgoing = out;
     emit();
     return out;
