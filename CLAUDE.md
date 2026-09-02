@@ -248,6 +248,17 @@ migration.
 
 ### Deploy traps that have cost real time
 
+- **`Get-Process puca | Stop-Process` kills the user's DESKTOP app.** Since
+  0.9.0 the desktop binary is `Puca.exe`, and PowerShell process names match
+  case-insensitively, so the throwaway-stack scripts' "stop the debug
+  backend" line closed the owner's running app on every harness run. Stop a
+  test backend by its PATH (`Where-Object { $_.Path -like '*target*puca.exe' }`)
+  or by the PID you started.
+- **The backend tarball must carry `SOURCE_COMMIT`.** `GET /source` (AGPL §13)
+  reports the commit `build.rs` embeds; a tarball has no `.git`, so write it
+  first: `git rev-parse HEAD > SOURCE_COMMIT` and include the file in
+  `src-<ver>.tar.gz` beside `Cargo.toml` (it is gitignored; delete it after).
+
 - `tar -xzf` on the server needs `--no-same-owner`, or it fails applying a
   Windows uid. It also needs `--touch` plus `find … -exec touch {} +`, or stale
   mtimes make `cargo build` "finish" in 0.2s and reuse the **old binary**. A
@@ -268,6 +279,7 @@ cargo test                                   # repo root
 cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
+node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
 ```
 
