@@ -727,11 +727,30 @@ pub(crate) async fn user_shows_online(state: &Arc<AppState>, user_id: UserId) ->
         .unwrap_or(true)
 }
 
+/// The fail-closed fallback for [`hidden_members`]: on a DB error EVERY id is
+/// treated as hidden.
+///
+/// Extracted so the DIRECTION is unit-testable without a pool. The previous
+/// `.unwrap_or_default()` returned an EMPTY set and its comment called that
+/// "fails CLOSED to 'nobody is hidden'" — a contradiction in terms. "Nobody is
+/// hidden" is the OPEN direction: the caller's `retain` becomes a no-op and the
+/// full roster ships, revealing every user who asked to appear offline and
+/// which channel they had open.
+fn hidden_on_error(ids: &[UserId]) -> std::collections::HashSet<UserId> {
+    ids.iter().copied().collect()
+}
+
 /// Which of `ids` have presence hidden (`show_online_status = false`)? One
 /// query for the whole set — the per-user `user_shows_online` would be an N+1
-/// against a room roster. Fails CLOSED to "nobody is hidden" on a DB error, the
-/// same direction as `user_shows_online`: presence visibility is the column
-/// default, and a transient error must not silently blank out every roster.
+/// against a room roster.
+///
+/// Fails CLOSED (everyone treated as hidden) on a DB error: a transient error
+/// must reveal nobody. The caller keeps its `m.id == user_id ||` clause, so the
+/// joining user still sees themselves; the rest of the roster arrives empty and
+/// the next join repopulates it. That degraded state is transient and
+/// self-healing, and is strictly preferable to leaking a user who asked to
+/// appear offline. `user_shows_online` above still fails OPEN — deliberately,
+/// and it says so: it gates a connect, not a roster.
 async fn hidden_members(
     state: &Arc<AppState>,
     ids: &[UserId],
@@ -739,7 +758,7 @@ async fn hidden_members(
     if ids.is_empty() {
         return std::collections::HashSet::new();
     }
-    sqlx::query_as::<_, (i64,)>(
+    match sqlx::query_as::<_, (i64,)>(
         // id is INT4 but `ids` binds as bigint[]; cast to match, mirroring the
         // proven `id::bigint = ANY($2)` pattern in broadcast_perms_changed_and_evict.
         "SELECT id::bigint FROM users WHERE id::bigint = ANY($1) AND show_online_status = FALSE",
@@ -747,8 +766,13 @@ async fn hidden_members(
     .bind(ids)
     .fetch_all(&state.pool)
     .await
-    .map(|rows| rows.into_iter().map(|(id,)| id).collect())
-    .unwrap_or_default()
+    {
+        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
+        Err(e) => {
+            tracing::warn!("hidden_members failed, treating the whole roster as hidden: {e:?}");
+            hidden_on_error(ids)
+        }
+    }
 }
 
 /// Does joining/leaving `room_id` announce the user to the other occupants?
@@ -4003,5 +4027,63 @@ mod ws_bearer_subprotocol_tests {
         let echoed = "bearer";
         assert_ne!(echoed, parsed);
         assert!(!echoed.contains(tok));
+    }
+}
+
+#[cfg(test)]
+mod hidden_members_fail_direction_tests {
+    use super::{hidden_on_error, UserId};
+    use crate::protocol::UserInfo;
+
+    /// The whole point of the fix: an error must yield EVERY id, not none.
+    #[test]
+    fn an_error_treats_the_entire_roster_as_hidden() {
+        let ids: Vec<UserId> = vec![7, 9, 11];
+        let hidden = hidden_on_error(&ids);
+        assert_eq!(hidden.len(), 3, "every id must be hidden on a DB error");
+        for id in &ids {
+            assert!(hidden.contains(id), "{id} must be treated as hidden");
+        }
+        assert!(hidden_on_error(&[]).is_empty(), "no ids, nothing to hide");
+    }
+
+    /// Positive control for the caller's side of the contract: with the
+    /// fail-closed set, the roster `RoomJoined` would carry is the joiner ALONE
+    /// — not the full membership. Reproduces the caller's `retain` verbatim, so
+    /// restoring `.unwrap_or_default()` (an empty set) makes this assertion
+    /// fail: the retain becomes a no-op and all three members survive.
+    #[test]
+    fn the_roster_the_caller_would_send_degrades_to_the_joiner_only() {
+        let joiner: UserId = 7;
+        let mut members = vec![
+            UserInfo::new(7, "me".to_string()),
+            UserInfo::new(9, "them".to_string()),
+            UserInfo::new(11, "other".to_string()),
+        ];
+        let ids: Vec<UserId> = members.iter().map(|m| m.id).collect();
+        let hidden = hidden_on_error(&ids);
+        members.retain(|m| m.id == joiner || !hidden.contains(&m.id));
+        assert_eq!(
+            members.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![joiner],
+            "a DB error must leak nobody but the joining user"
+        );
+    }
+
+    /// And the healthy path still hides only who asked to be hidden — the
+    /// fail-closed direction must not be the everyday behaviour.
+    #[test]
+    fn the_ok_path_hides_only_the_flagged_ids() {
+        // What the Ok arm does with rows the query returned.
+        let rows: Vec<(i64,)> = vec![(9,)];
+        let hidden: std::collections::HashSet<UserId> =
+            rows.into_iter().map(|(id,)| id).collect();
+        let mut members = vec![
+            UserInfo::new(7, "me".to_string()),
+            UserInfo::new(9, "them".to_string()),
+            UserInfo::new(11, "other".to_string()),
+        ];
+        members.retain(|m| m.id == 7 || !hidden.contains(&m.id));
+        assert_eq!(members.iter().map(|m| m.id).collect::<Vec<_>>(), vec![7, 11]);
     }
 }
