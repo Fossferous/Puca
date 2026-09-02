@@ -21,7 +21,9 @@ export const ENC_UNVERIFIED_SENDER = '[Encrypted — sender key unverified]';
 /** A v3 envelope opened with the right key but the wrong CONTEXT: the row's
  *  channel / sender / epoch (or DM direction) is not what the sender sealed
  *  it under. Distinct from ENC_KEY_UNAVAILABLE on purpose — "the server
- *  moved this" and "your key has not arrived yet" must not look alike. */
+ *  moved this" and "your key has not arrived yet" must not look alike. A
+ *  corrupted v3 ciphertext lands here too — a failed tag cannot say which —
+ *  so read it as "does not verify for this row", not as proof of tampering. */
 export const ENC_CONTEXT_MISMATCH = '[Encrypted — does not belong here]';
 /** An envelope whose version this build does not implement. Shown instead
  *  of the raw JSON a too-old parser used to render as plaintext. */

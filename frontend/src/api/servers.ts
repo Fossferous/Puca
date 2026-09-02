@@ -473,7 +473,11 @@ export async function editChannelMessageEncrypted(
 export async function decryptChannelContent(channelId: number, content: string, senderId: number): Promise<string> {
     const parsed = parseEnvelopeEx(content);
     if (parsed.kind === 'unsupported-version') return ENC_UNSUPPORTED_VERSION;
-    if (parsed.kind !== 'envelope' || parsed.env.t !== 'ch') return content;
+    if (parsed.kind !== 'envelope') return content;   // legacy plaintext row
+    // A DM or self envelope in a channel row is never legitimate content.
+    // Passing its JSON through as the body (and badging it secure, because it
+    // parses) is exactly the failure this reader exists to prevent.
+    if (parsed.env.t !== 'ch') return ENC_CANNOT_DECRYPT;
     const env = parsed.env;
     const epoch = env.epoch ?? 0;
     const key = await getChannelKeyForEpoch(channelId, epoch);

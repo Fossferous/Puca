@@ -9,12 +9,24 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
-    makeIdentity, sealChannelEnvelope, decryptChannelMessage, encryptChannelMessage,
+    makeIdentity, sealChannelEnvelope, decryptChannelMessage, encryptChannelMessage, setActiveIdentity, clearActiveIdentity,
     sealDmEnvelope, decryptDM, encryptDM, channelAad, dmAad, parseEnvelopeEx, isEncrypted,
     messageEncState, EMIT_ENVELOPE_V3, type Envelope,
 } from '../api/e2ee';
 import { ENC_UNSUPPORTED_VERSION, ENC_CONTEXT_MISMATCH, ENC_CANNOT_DECRYPT, isUndecryptable } from '../api/decryptMarkers';
 import kat from './fixtures/e2ee-wire-format-kat.json';
+
+// Wrap (not replace) the channel producer so the wrapper tests can see WHICH
+// context each send path seals under — with EMIT_ENVELOPE_V3 off the envelope
+// is v2 and a decrypt cannot observe the context, so the call is the evidence.
+vi.mock('../api/e2ee', async (orig) => {
+    const m = await orig<typeof import('../api/e2ee')>();
+    return { ...m, encryptChannelMessage: vi.fn(m.encryptChannelMessage) };
+});
+vi.mock('../api/keyVerification', () => ({
+    // The DM wrapper resolves the partner's key through the pin path; user 8 is A.
+    resolvePinnedIdentityKey: async (userId: number) => (userId === 8 ? A().publicKeyEncoded : null),
+}));
 
 const fromB64 = (s: string) => new Uint8Array(Buffer.from(s, 'base64'));
 const CK = fromB64(kat.channelKey_b64);
@@ -32,6 +44,7 @@ describe('the AAD grammar', () => {
         expect(() => channelAad({ ...ctx, senderId: 1.5 }, 3)).toThrow();
         expect(() => channelAad(ctx, Number.NaN)).toThrow();
         expect(() => dmAad({ senderId: 1, recipientId: undefined as unknown as number })).toThrow();
+        expect(() => channelAad({ ...ctx, kind: 'chan-x' as never }, 3)).toThrow();
     });
 });
 
@@ -121,9 +134,13 @@ describe('the channel message wrapper (servers.decryptChannelContent)', () => {
         expect(await decryptChannelContent(7, v3, 41)).toBe('hello');
         expect(await decryptChannelContent(7, v3, 42)).toBe(ENC_CONTEXT_MISMATCH);
         const v2 = await sealChannelEnvelope(CK, 3, 'hello', ctx, 2);
-        const tampered = JSON.stringify({ ...v2, ct: v2.ct.slice(0, -4) + 'AAAA' });
+        const tail = v2.ct.endsWith('AAAA') ? 'BBBB' : 'AAAA'; // never a no-op
+        const tampered = JSON.stringify({ ...v2, ct: v2.ct.slice(0, -4) + tail });
         expect(await decryptChannelContent(7, tampered, 41)).toBe(ENC_CANNOT_DECRYPT);
         expect(await decryptChannelContent(7, JSON.stringify({ v: 4, t: 'ch', ct: 'x' }), 41)).toBe(ENC_UNSUPPORTED_VERSION);
+        const dmInChannelRow = JSON.stringify(await sealDmEnvelope(A(), B().publicKeyEncoded, 'x', { senderId: 1, recipientId: 2 }, 2));
+        expect(await decryptChannelContent(7, dmInChannelRow, 41)).toBe(ENC_CANNOT_DECRYPT);
+        expect(await decryptChannelContent(7, 'plain legacy text', 41)).toBe('plain legacy text');
     });
 
     it('the send path seals under the current epoch and the signed-in user as author', async () => {
@@ -135,6 +152,64 @@ describe('the channel message wrapper (servers.decryptChannelContent)', () => {
         const env = JSON.parse(sent.wireContent) as Envelope;
         expect(env.v).toBe(2); // reader-only release
         expect(await decryptChannelMessage(CK, env, ctx)).toBe('hello');
+        // v2 cannot show the context, so check the call the producer received.
+        expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, 'hello', { kind: 'chan-msg', channelId: 7, senderId: 41 });
         post.mockRestore();
+    });
+});
+
+describe('the checklist wrappers (tasks.ts) seal under the CREATOR, never the editor', () => {
+    const row = (created_by: number, description: string) => ({
+        id: 1, channel_id: 7, list_id: null, parent_id: null, description, is_completed: false,
+        position: 0, created_at: '2026-09-02T00:00:00Z', created_by, attachments: null,
+    });
+
+    it('createTask seals under the signed-in user; the update paths under created_by', async () => {
+        const { createTask, updateChannelTask, updateChannelTaskAttachments } = await import('../api/tasks');
+        const { apiClient } = await import('../api/client');
+        const post = vi.spyOn(apiClient, 'post').mockImplementation(async (_url: string, body: unknown) => row(41, (body as { description: string }).description) as never);
+        const patch = vi.spyOn(apiClient, 'patch').mockResolvedValue(undefined as never);
+        await createTask(7, 'buy milk');
+        expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, 'buy milk', { kind: 'chan-task', channelId: 7, senderId: 41 });
+        await updateChannelTask(7, 1, { description: 'buy oat milk' }, 99); // a manager editing 99's item
+        expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, 'buy oat milk', { kind: 'chan-task', channelId: 7, senderId: 99 });
+        await updateChannelTaskAttachments(7, 1, [{ href: 'sovereign-enc:f1?k=K&m=image%2Fpng', name: 'pic.png' }], 99);
+        expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, expect.any(String), { kind: 'chan-taskatt', channelId: 7, senderId: 99 });
+        post.mockRestore(); patch.mockRestore();
+    });
+
+    it('listTasks opens each item under ITS created_by; a re-attributed v3 item shows the context marker', async () => {
+        const { listTasks } = await import('../api/tasks');
+        const { apiClient } = await import('../api/client');
+        const sealed = JSON.stringify(await sealChannelEnvelope(CK, 3, 'buy milk', { kind: 'chan-task', channelId: 7, senderId: 41 }, 3));
+        const get = vi.spyOn(apiClient, 'get').mockResolvedValue([row(41, sealed), { ...row(42, sealed), id: 2 }] as never);
+        const out = await listTasks(7);
+        expect(out[0].description).toBe('buy milk');
+        expect(out[1].description).toBe(ENC_CONTEXT_MISMATCH);
+        get.mockRestore();
+    });
+});
+
+describe('the DM wrapper (dms.decryptDMContent) with the real primitives', () => {
+    // me = 41 (B, per the auth mock); the partner A is user 8.
+    const seal = (v: 2 | 3) => sealDmEnvelope(A(), B().publicKeyEncoded, 'hi', { senderId: 8, recipientId: 41 }, v);
+
+    it('opens a v3 DM from the partner, refuses it re-attributed or flipped, and still opens v2 under any sender', async () => {
+        setActiveIdentity(B());
+        try {
+            const { decryptDMContent } = await import('../api/dms');
+            const v3 = JSON.stringify(await seal(3));
+            expect(await decryptDMContent(v3, 8, 8)).toBe('hi');
+            expect(await decryptDMContent(v3, 8, 9)).toBe(ENC_CONTEXT_MISMATCH);   // sender not in the pair
+            expect(await decryptDMContent(v3, 8, 41)).toBe(ENC_CONTEXT_MISMATCH);  // direction flipped
+            const v2 = JSON.stringify(await seal(2));
+            expect(await decryptDMContent(v2, 8, 999)).toBe('hi');
+            expect(await decryptDMContent(JSON.stringify({ v: 4, t: 'dm', ct: 'x' }), 8, 8)).toBe(ENC_UNSUPPORTED_VERSION);
+            const chInDmRow = JSON.stringify(await sealChannelEnvelope(CK, 3, 'x', ctx, 2));
+            expect(await decryptDMContent(chInDmRow, 8, 8)).toBe(ENC_CANNOT_DECRYPT);
+            expect(await decryptDMContent('plain legacy text', 8, 8)).toBe('plain legacy text');
+        } finally {
+            clearActiveIdentity();
+        }
     });
 });

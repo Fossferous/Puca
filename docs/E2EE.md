@@ -106,6 +106,41 @@ Group channels can't use pairwise ECDH, so each channel has a symmetric
 
 The server only stores opaque wrapped-key blobs and ciphertext.
 
+### Envelope versions and context binding (v3)
+
+`v` is the envelope version. **v2** is the format above: the AES-GCM tag covers
+the ciphertext only. **v3** (reader shipped in 0.8.135) keeps the same JSON
+shape and additionally binds the message's *context* into the tag as AES-GCM
+associated data, recomputed by the reader from the row's own metadata:
+
+```
+channel message        puca/v3/chan-msg/<channelId>/<epoch>/<user_id>
+channel checklist item puca/v3/chan-task/<channelId>/<epoch>/<created_by>
+task attachment sidecar puca/v3/chan-taskatt/<channelId>/<epoch>/<created_by>
+DM                     puca/v3/dm/<sender_id>/<recipient_id>      (directional)
+```
+
+Every field is a token from a closed set or a non-negative integer, so the
+grammar needs no escaping. What it buys: a v3 body re-attributed to another
+user, moved to another channel, relabelled to another epoch, moved between the
+message stream and a checklist, or (for a DM) flipped in direction fails the
+tag and shows `[Encrypted — does not belong here]`. There is no retry under
+another context (that would make the tag an oracle). v2 bodies keep opening
+forever. Self envelopes, channel key wraps, seed wraps and control frames stay
+v2 for now.
+
+An envelope-shaped body with any *other* `v` is `[Encrypted — unsupported
+version, update the app]`, never plaintext.
+
+**Rollout is two releases.** 0.8.135 ships the reader only
+(`EMIT_ENVELOPE_V3 = false` in `frontend/src/api/e2ee.ts`); a client that
+predates it would render a v3 body as raw JSON, so nothing writes v3 until the
+field has moved. Flip checklist, all in one commit: set the constant; change
+`frontend/e2e/puca.spec.ts`'s `{"v":2` pins; nothing in the codebase can
+*prove* every client updated (no client-version signal reaches the server), so
+confirm through the desktop/mobile update gates and the operator's own
+knowledge of the field first.
+
 ### Key rotation & membership
 
 Rotation is client-driven (the server never holds a channel key), coordinated by

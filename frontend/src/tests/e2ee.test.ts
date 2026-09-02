@@ -48,6 +48,11 @@ beforeAll(
 // >5s at 2x CPU oversubscription). The cost is inherent to what they test, so
 // they get headroom rather than a shortcut. 30s is ~30x the idle cost, so a
 // genuine hang still fails.
+// Every seal/open now takes its context. v2 ignores it, but the flip will not:
+// keep these in step so the suite still runs the day EMIT_ENVELOPE_V3 turns on.
+const DM = { senderId: 1, recipientId: 2 };
+const CH = { kind: 'chan-msg' as const, channelId: 1, senderId: 1 };
+
 describe('identity derivation', { timeout: 30_000 }, () => {
     it('is deterministic for the same password + salt', async () => {
         const i1 = await deriveIdentity('hunter2', SALT_A);
@@ -81,11 +86,11 @@ describe('DM encryption (pairwise)', () => {
         const alice = await testIdentity(...ALICE_DM);
         const bob = await testIdentity(...BOB_DM);
 
-        const env = (await encryptDM(alice, bob.publicKeyEncoded, 'hi bob'))!;
+        const env = (await encryptDM(alice, bob.publicKeyEncoded, 'hi bob', DM))!;
         expect(env.ct).not.toContain('hi bob');
 
         // Bob decrypts using Alice's public key.
-        const plain = await decryptDM(bob, alice.publicKeyEncoded, env);
+        const plain = await decryptDM(bob, alice.publicKeyEncoded, env, DM);
         expect(plain).toBe('hi bob');
     });
 
@@ -94,8 +99,8 @@ describe('DM encryption (pairwise)', () => {
         const bob = await testIdentity(...BOB_DM);
         const eve = await testIdentity(...EVE);
 
-        const env = (await encryptDM(alice, bob.publicKeyEncoded, 'secret'))!;
-        const asEve = await decryptDM(eve, alice.publicKeyEncoded, env);
+        const env = (await encryptDM(alice, bob.publicKeyEncoded, 'secret', DM))!;
+        const asEve = await decryptDM(eve, alice.publicKeyEncoded, env, DM);
         expect(asEve).toBeNull();
     });
 });
@@ -117,8 +122,8 @@ describe('channel (group) encryption', () => {
         const ckForM1 = (await unwrapChannelKey(m1, wrapped[0]))!;
         expect(Buffer.from(ckForM1)).toEqual(Buffer.from(ck));
 
-        const env = await encryptChannelMessage(ck, 1, 'gm everyone');
-        const plain = await decryptChannelMessage(ckForM1, env);
+        const env = await encryptChannelMessage(ck, 1, 'gm everyone', CH);
+        const plain = await decryptChannelMessage(ckForM1, env, CH);
         expect(plain).toBe('gm everyone');
     });
 
@@ -136,15 +141,15 @@ describe('channel (group) encryption', () => {
     it('a wrong channel key cannot decrypt', async () => {
         const ck = generateChannelKey();
         const wrong = generateChannelKey();
-        const env = await encryptChannelMessage(ck, 3, 'topsecret');
-        expect(await decryptChannelMessage(wrong, env)).toBeNull();
+        const env = await encryptChannelMessage(ck, 3, 'topsecret', CH);
+        expect(await decryptChannelMessage(wrong, env, CH)).toBeNull();
     });
 
     it('rejects tampered ciphertext (GCM auth)', async () => {
         const ck = generateChannelKey();
-        const env = await encryptChannelMessage(ck, 1, 'integrity');
+        const env = await encryptChannelMessage(ck, 1, 'integrity', CH);
         env.ct = env.ct.slice(0, -4) + (env.ct.endsWith('AAAA') ? 'BBBB' : 'AAAA');
-        expect(await decryptChannelMessage(ck, env)).toBeNull();
+        expect(await decryptChannelMessage(ck, env, CH)).toBeNull();
     });
 
     // This used to carry { timeout: 30000 } because its 4 deriveIdentity calls
@@ -173,23 +178,23 @@ describe('channel (group) encryption', () => {
             { userId: 1, publicKey: alice.publicKeyEncoded },
             { userId: 3, publicKey: carol.publicKeyEncoded },
         ]);
-        const msg = await encryptChannelMessage(ck2, 2, 'post-rotation secret');
+        const msg = await encryptChannelMessage(ck2, 2, 'post-rotation secret', CH);
 
         // Carol (new member) can read epoch 2.
         const carolWrap = wrapped2.find((w) => w.recipientId === 3)!;
         const carolCk2 = (await unwrapChannelKey(carol, carolWrap))!;
-        expect(await decryptChannelMessage(carolCk2, msg)).toBe('post-rotation secret');
+        expect(await decryptChannelMessage(carolCk2, msg, CH)).toBe('post-rotation secret');
 
         // Bob (removed) was not wrapped a key for epoch 2 and cannot read it.
         expect(wrapped2.some((w) => w.recipientId === 2)).toBe(false);
-        expect(await decryptChannelMessage(bobEpoch1, msg)).toBeNull();
+        expect(await decryptChannelMessage(bobEpoch1, msg, CH)).toBeNull();
     });
 });
 
 describe('envelope parsing', () => {
     it('round-trips and detects encryption', async () => {
         const ck = generateChannelKey();
-        const env = await encryptChannelMessage(ck, 5, 'x');
+        const env = await encryptChannelMessage(ck, 5, 'x', CH);
         const s = serializeEnvelope(env);
         expect(isEncrypted(s)).toBe(true);
         expect(parseEnvelope(s)).toMatchObject({ v: 2, t: 'ch', epoch: 5 });

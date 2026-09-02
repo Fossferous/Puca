@@ -60,6 +60,17 @@ describe('e2ee wire format (frozen)', () => {
         expect(plain).toBe(kat.ch.plaintext);
     });
 
+    it('the frozen channel envelope is plain AES-256-GCM with NO associated data (WebCrypto directly, not the module under test)', async () => {
+        // The fixture was minted by the pre-v3 encoder, but a reader of this file
+        // cannot verify that from the commit. This can: open the bytes with the
+        // platform primitive and no AAD, bypassing api/e2ee.ts entirely.
+        const raw = fromB64(kat.ch.envelope.ct);
+        const k = await crypto.subtle.importKey('raw', fromB64(kat.channelKey_b64), 'AES-GCM', false, ['decrypt']);
+        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, k, raw.slice(12));
+        expect(new TextDecoder().decode(pt)).toBe(kat.ch.plaintext);
+        expect(kat.ch.envelope.v).toBe(2);
+    });
+
     it('decrypts a self-stored envelope under the pinned format (HKDF_SELF_INFO)', async () => {
         const plain = await decryptSelf(identityA(), kat.self.envelope as never);
         expect(plain).toBe(kat.self.plaintext);

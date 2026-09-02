@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getChannelFeed, type Channel } from '../api/servers';
+import { getChannelFeed, decryptChannelContent, type Channel } from '../api/servers';
 import type { FeedMessage } from '../api/servers';
 import './ChannelDashboard.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -10,6 +10,19 @@ interface ChannelDashboardProps {
 }
 
 const FeedChild: React.FC<{ name: string; messages: FeedMessage[] }> = ({ name, messages }) => {
+    // The feed serves stored bodies verbatim, i.e. ciphertext envelopes. Open
+    // each under ITS row's channel and author — the same reader the channel
+    // view uses, so a failure shows the same marker instead of raw JSON.
+    const [texts, setTexts] = useState<Record<string, string>>({});
+    useEffect(() => {
+        let alive = true;
+        (async () => {
+            const out: Record<string, string> = {};
+            for (const m of messages) out[m.id] = await decryptChannelContent(m.channel_id, m.content, m.user_id);
+            if (alive) setTexts(out);
+        })();
+        return () => { alive = false; };
+    }, [messages]);
     return (
         <div className="feed-child-section">
             <h3 className="feed-child-header"># {name}</h3>
@@ -23,7 +36,7 @@ const FeedChild: React.FC<{ name: string; messages: FeedMessage[] }> = ({ name, 
                             <span className="feed-time">
                                 {new Date(parseServerTimestamp(msg.created_at)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
-                            <p className="feed-content">{msg.content}</p>
+                            <p className="feed-content">{texts[msg.id] ?? '…'}</p>
                         </div>
                     ))
                 )}

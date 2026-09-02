@@ -305,6 +305,38 @@ async function main() {
         const bDec = await decryptChannelMessage(bCk, bEnv);
         check('channel/member B unwraps key + decrypts message', bDec === PLAIN_CH, bDec === PLAIN_CH ? '' : `got: ${bDec}`);
 
+        // --- v3 context-bound envelope (reader shipped in 0.8.135) ---------
+        // Sealed here with the platform primitive + the documented AAD grammar,
+        // stored by the real server, opened under the ROW's own metadata.
+        {
+            const aad = (kind, ch, epoch, sender) => enc.encode(`puca/v3/${kind}/${ch}/${epoch}/${sender}`);
+            const sealV3 = async (ck, epoch, pt, ad) => {
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const k = await crypto.subtle.importKey('raw', ck, 'AES-GCM', false, ['encrypt']);
+                const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: ad }, k, enc.encode(pt)));
+                const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
+                return { v: 3, t: 'ch', epoch, ct: toB64(out) };
+            };
+            const openV3 = async (ck, env, ad) => {
+                try {
+                    const raw = fromB64(env.ct);
+                    const k = await crypto.subtle.importKey('raw', ck, 'AES-GCM', false, ['decrypt']);
+                    return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12), additionalData: ad }, k, raw.slice(12)));
+                } catch { return null; }
+            };
+            const PLAIN_V3 = 'v3 bound to channel/epoch/sender ' + Math.random().toString(36).slice(2);
+            const env3 = await sealV3(ckEpoch1, 1, PLAIN_V3, aad('chan-msg', channelId, 1, A.id));
+            await apiFetch('POST', `/channels/${channelId}/messages`, { content: serialize(env3), is_task: false, key_epoch: 1 }, A.token);
+            const rows = await apiFetch('GET', `/channels/${channelId}/messages`, null, B.token);
+            const row = rows.find(m => typeof m.content === 'string' && m.content.includes('"v":3'));
+            check('v3/server stores the v3 envelope verbatim under its author', !!row && row.user_id === A.id && !row.content.includes(PLAIN_V3));
+            const got = row ? JSON.parse(row.content) : null;
+            check('v3/member B opens it under the row\'s own channel/epoch/user_id', !!got && (await openV3(bCk, got, aad('chan-msg', channelId, got.epoch, row.user_id))) === PLAIN_V3);
+            check('v3/the same bytes FAIL under another sender (re-attribution)', !!got && (await openV3(bCk, got, aad('chan-msg', channelId, 1, B.id))) === null);
+            check('v3/the same bytes FAIL under another channel', !!got && (await openV3(bCk, got, aad('chan-msg', channelId + 1, 1, A.id))) === null);
+            check('v3/the same bytes FAIL under another epoch label', !!got && (await openV3(bCk, got, aad('chan-msg', channelId, 2, A.id))) === null);
+        }
+
         // --- Key PROVENANCE (migration 037) -------------------------------
         // The receive side used to unwrap with whatever `sender_public_key` the
         // server returned, with nothing tying that key to an identity. A server
