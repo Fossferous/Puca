@@ -54,7 +54,12 @@ pub struct BlockedUserResponse {
 pub struct AuditLogEntry {
     pub id: i64,
     pub action_type: String,
-    pub actor_id: i64,
+    /// NULL once the acting account is hard-deleted: `audit_log.actor_id` is
+    /// `ON DELETE SET NULL`, which migration 056 finally made reachable by
+    /// dropping the contradictory NOT NULL. Serialises as `null`, and
+    /// `actor_username` is filled with a placeholder in that case so an older
+    /// client's "username, else `user <id>`" fallback never renders "user null".
+    pub actor_id: Option<i64>,
     pub actor_username: Option<String>,
     pub target_id: Option<i64>,
     pub target_type: Option<String>,
@@ -87,7 +92,8 @@ pub struct ResolveReportRequest {
 #[derive(Serialize)]
 pub struct ReportResponse {
     pub id: i64,
-    pub reporter_id: i64,
+    /// NULL once the reporting account is hard-deleted — see AuditLogEntry.
+    pub reporter_id: Option<i64>,
     pub reporter_username: Option<String>,
     pub reported_user_id: Option<i64>,
     pub reported_username: Option<String>,
@@ -1051,10 +1057,15 @@ pub async fn list_audit_log(
     // ids are INT4 (decode as i32, cast to i64 in the response) and created_at is a
     // timestamp (cast ::text) — see [puca-sqlx-decode-gotcha]. Otherwise query_as
     // errors and .unwrap_or_default() silently yields an empty audit log.
+    // `a.actor_id` decodes as Option<i32>, not i32: migration 056 dropped the
+    // NOT NULL that made the column's own ON DELETE SET NULL unreachable, so a
+    // hard user delete now anonymises the actor instead of aborting. A reader
+    // that still demanded i32 would make query_as error, and the
+    // .unwrap_or_default() below would hide it as an EMPTY audit log.
     let entries: Vec<(
         i32,
         String,
-        i32,
+        Option<i32>,
         Option<String>,
         Option<i32>,
         Option<String>,
@@ -1107,8 +1118,14 @@ pub async fn list_audit_log(
                 AuditLogEntry {
                     id: id as i64,
                     action_type,
-                    actor_id: actor_id as i64,
-                    actor_username,
+                    actor_id: actor_id.map(|v| v as i64),
+                    // A null actor renders as a name, not as "user null": the
+                    // shipped clients fall back to `user <id>` when the username
+                    // is absent, and there is no id to show. The space makes it
+                    // unforgeable — validate_username allows only
+                    // [A-Za-z0-9_.-], so no real account can be called this.
+                    actor_username: actor_username
+                        .or_else(|| actor_id.is_none().then(|| "deleted user".to_string())),
                     target_id: target_id.map(|v| v as i64),
                     target_type,
                     details,
@@ -1242,9 +1259,11 @@ pub async fn list_reports(
     // INT4 ids decode as i32 (cast to i64 in the response) and the two timestamps
     // (created_at, resolved_at) are cast ::text — otherwise query_as errors and
     // .unwrap_or_default() silently returns an empty report list.
+    // `r.reporter_id` decodes as Option<i32> for the same reason as the audit
+    // log's actor_id — see list_audit_log and migration 056.
     let reports: Vec<(
         i32,
-        i32,
+        Option<i32>,
         Option<String>,
         Option<i32>,
         Option<String>,
@@ -1311,8 +1330,11 @@ pub async fn list_reports(
             )| {
                 ReportResponse {
                     id: id as i64,
-                    reporter_id: reporter_id as i64,
-                    reporter_username,
+                    reporter_id: reporter_id.map(|v| v as i64),
+                    // See list_audit_log: a null reporter renders as a name, not
+                    // as "user null".
+                    reporter_username: reporter_username
+                        .or_else(|| reporter_id.is_none().then(|| "deleted user".to_string())),
                     reported_user_id: reported_user_id.map(|v| v as i64),
                     reported_username,
                     reported_message_id,
@@ -1437,5 +1459,119 @@ mod crash_resistance_tests {
         assert_eq!(clamp(Some(1000)), 100);
         assert_eq!(clamp(None), 50);
         assert_eq!(clamp(Some(i32::MIN)), 1);
+    }
+}
+
+#[cfg(test)]
+mod nullable_actor_tests {
+    use super::{AuditLogEntry, ReportResponse};
+
+    /// The rendering rule the two list handlers apply, extracted verbatim so
+    /// this test runs the expression they run.
+    fn name_or_placeholder(username: Option<String>, id: Option<i32>) -> Option<String> {
+        username.or_else(|| id.is_none().then(|| "deleted user".to_string()))
+    }
+
+    /// INFO-11. `audit_log.actor_id` / `reports.reporter_id` were NOT NULL with
+    /// `ON DELETE SET NULL` — a contradiction that made a hard `DELETE FROM
+    /// users` abort rather than anonymise. Migration 056 drops the NOT NULL, so
+    /// the readers have to tolerate a null actor. They decode Option<i32>; a
+    /// reader still demanding i32 would make query_as error and the handlers'
+    /// `.unwrap_or_default()` would serve an EMPTY audit log, indistinguishable
+    /// from "nothing happened".
+    #[test]
+    fn a_null_actor_renders_as_a_name_not_as_user_null() {
+        assert_eq!(name_or_placeholder(None, None).as_deref(), Some("deleted user"));
+        // A live actor keeps their real username.
+        assert_eq!(
+            name_or_placeholder(Some("alice".into()), Some(7)).as_deref(),
+            Some("alice")
+        );
+        // An id with no username row (a state that should not arise, but the
+        // LEFT JOIN allows it) is left alone: the client's `user <id>` fallback
+        // can still say something true.
+        assert_eq!(name_or_placeholder(None, Some(7)), None);
+    }
+
+    /// The placeholder must be unforgeable. `validate_username` accepts only
+    /// ASCII alphanumerics and `_ - .`, so a space makes "deleted user"
+    /// impossible to register — nobody can impersonate a deleted actor.
+    #[test]
+    fn the_placeholder_cannot_be_a_real_username() {
+        assert!(crate::handlers::validate_username("deleted user").is_err());
+        // ...and the check is real, not passing because everything is invalid.
+        assert!(crate::handlers::validate_username("alice").is_ok());
+    }
+
+    /// The wire shape: `actor_id` / `reporter_id` serialise as JSON null rather
+    /// than disappearing, so a client can tell "no actor" from "field missing".
+    #[test]
+    fn a_null_actor_serialises_as_null() {
+        let e = AuditLogEntry {
+            id: 1,
+            action_type: "kick".into(),
+            actor_id: None,
+            actor_username: Some("deleted user".into()),
+            target_id: Some(9),
+            target_type: Some("user".into()),
+            details: None,
+            created_at: "2026-09-02T00:00:00Z".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert!(v["actor_id"].is_null(), "{v}");
+        assert_eq!(v["actor_username"], "deleted user");
+
+        let r = ReportResponse {
+            id: 1,
+            reporter_id: None,
+            reporter_username: Some("deleted user".into()),
+            reported_user_id: Some(9),
+            reported_username: Some("bob".into()),
+            reported_message_id: None,
+            report_type: "spam".into(),
+            reason: "x".into(),
+            status: "pending".into(),
+            resolved_by: None,
+            resolution_notes: None,
+            created_at: "2026-09-02T00:00:00Z".into(),
+            resolved_at: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert!(v["reporter_id"].is_null(), "{v}");
+        assert_eq!(v["reporter_username"], "deleted user");
+    }
+
+    /// The migration drops NOT NULL on BOTH columns and does NOT reach for
+    /// CASCADE, which would erase moderation history along with the account —
+    /// exactly what an account must not be able to do by deleting itself. Read
+    /// from the migration's own file, which is not the file this assertion
+    /// lives in.
+    #[test]
+    fn the_migration_drops_both_not_nulls_and_touches_no_foreign_key() {
+        let sql = include_str!("../migrations/056_nullable_audit_actors.sql");
+        let stmts: String = sql
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            stmts.contains("ALTER TABLE audit_log ALTER COLUMN actor_id DROP NOT NULL"),
+            "{stmts}"
+        );
+        assert!(
+            stmts.contains("ALTER TABLE reports ALTER COLUMN reporter_id DROP NOT NULL"),
+            "{stmts}"
+        );
+        assert!(
+            !stmts.to_uppercase().contains("CASCADE"),
+            "056 must not turn the FK into ON DELETE CASCADE: {stmts}"
+        );
+        // Catalogue-only: no table rewrite, no data statement.
+        for destructive in ["DROP TABLE", "DELETE FROM", "UPDATE "] {
+            assert!(
+                !stmts.to_uppercase().contains(destructive),
+                "056 must stay catalogue-only, found {destructive}: {stmts}"
+            );
+        }
     }
 }

@@ -319,3 +319,107 @@ fn nothing_reads_or_writes_the_sessions_table() {
         "the login path should still be touching login_attempts"
     );
 }
+
+/// INFO-11, against a real database. `audit_log.actor_id` and
+/// `reports.reporter_id` were declared NOT NULL while their foreign keys were
+/// `ON DELETE SET NULL`, so a hard `DELETE FROM users` ABORTED on the NOT NULL
+/// violation instead of anonymising the row — the declared semantics were
+/// unreachable. Migration 056 drops the NOT NULL.
+///
+/// The delete must now succeed AND both moderation rows must survive with a
+/// null actor: erasing them is what `ON DELETE CASCADE` would have done, and
+/// that would let an account delete the record of what it did.
+///
+/// Self-skips without a test database (the api_auth.rs / e2ee_keys.rs pattern);
+/// CI sets TEST_DATABASE_URL and boots the server first, which applies 056.
+/// Run BEFORE the migration, this fails with a NOT NULL violation on the delete
+/// — that is its positive control, and it is why the assertion is on the delete
+/// succeeding rather than only on the rows' contents.
+#[tokio::test]
+async fn a_hard_user_delete_anonymises_moderation_rows_instead_of_aborting() {
+    dotenv::dotenv().ok();
+    let pool = match create_test_pool().await {
+        Some(p) => p,
+        None => {
+            println!("Skipping test: no database connection");
+            return;
+        }
+    };
+
+    let tag = uuid::Uuid::new_v4().to_string();
+    let mk_user = |name: String| {
+        let pool = pool.clone();
+        async move {
+            let row: (i32,) = sqlx::query_as(
+                "INSERT INTO users (username, salt, verifier) VALUES ($1, '00', '00') RETURNING id",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .expect("insert user");
+            row.0
+        }
+    };
+    // The server OWNER is a different account: servers.owner_id is ON DELETE
+    // CASCADE, so deleting the owner would take the server — and its audit rows
+    // — with it, and the test would pass for the wrong reason.
+    let owner = mk_user(format!("info11_own_{}", &tag[..8])).await;
+    let actor = mk_user(format!("info11_act_{}", &tag[..8])).await;
+
+    let server_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'info11', $2)")
+        .bind(&server_id)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .expect("insert server");
+
+    let audit: (i32,) = sqlx::query_as(
+        "INSERT INTO audit_log (server_id, action_type, actor_id, target_id, target_type)          VALUES ($1, 'kick', $2, $2, 'user') RETURNING id",
+    )
+    .bind(&server_id)
+    .bind(actor)
+    .fetch_one(&pool)
+    .await
+    .expect("insert audit row");
+    let report: (i32,) = sqlx::query_as(
+        "INSERT INTO reports (server_id, reporter_id, report_type, reason)          VALUES ($1, $2, 'spam', 'because') RETURNING id",
+    )
+    .bind(&server_id)
+    .bind(actor)
+    .fetch_one(&pool)
+    .await
+    .expect("insert report row");
+
+    // THE ASSERTION. Not `let _ =`: every DELETE FROM users in this tree
+    // swallows its error, which is exactly how this stayed invisible.
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("a hard user delete must succeed — migration 056 not applied?");
+
+    let a: (Option<i32>,) = sqlx::query_as("SELECT actor_id FROM audit_log WHERE id = $1")
+        .bind(audit.0)
+        .fetch_one(&pool)
+        .await
+        .expect("the audit row must SURVIVE the delete, with a null actor");
+    assert_eq!(a.0, None, "the actor must be anonymised, not left dangling");
+
+    let r: (Option<i32>,) = sqlx::query_as("SELECT reporter_id FROM reports WHERE id = $1")
+        .bind(report.0)
+        .fetch_one(&pool)
+        .await
+        .expect("the report row must SURVIVE the delete, with a null reporter");
+    assert_eq!(r.0, None);
+
+    // Cleanup: the server cascades its audit/report rows, then the owner.
+    let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
+        .bind(&server_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(owner)
+        .execute(&pool)
+        .await;
+}
