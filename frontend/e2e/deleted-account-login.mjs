@@ -141,7 +141,9 @@ async function main() {
         check('residue/wrapped channel keys for the user are gone', psql(`SELECT count(*) FROM channel_keys WHERE recipient_id=${uid}`) === '0');
         check('residue/device share invites (either direction) are gone', psql(`SELECT count(*) FROM device_share_invites WHERE owner_user=${uid} OR grantee_user=${uid}`) === '0');
         check('residue/device row kept for integrity, name wiped', psql(`SELECT count(*) FROM devices WHERE user_id=${uid} AND name='removed' AND lan_info IS NULL`) === '1');
-        check("residue/uploaded blob KEPT (referenced from others' E2EE content, by decision)", psql(`SELECT count(*) FROM uploaded_files WHERE uploader_id=${uid}`) === '1');
+        check("residue/uploaded blob KEPT for the grace period (referenced from others' E2EE content)", psql(`SELECT count(*) FROM uploaded_files WHERE uploader_id=${uid}`) === '1');
+        check('residue/...and stamped for purge about 30 days out', psql(`SELECT count(*) FROM uploaded_files WHERE uploader_id=${uid} AND purge_after BETWEEN NOW() + INTERVAL '29 days' AND NOW() + INTERVAL '31 days'`) === '1');
+        check('residue/the sessions table is gone (migration 058)', psql(`SELECT count(*) FROM information_schema.tables WHERE table_name='sessions'`) === '0');
         check('residue/user row is a tombstone, not deleted', psql(`SELECT count(*) FROM users WHERE id=${uid} AND deleted_at IS NOT NULL`) === '1');
     } else if (!PGDB) {
         console.log('(PGDB not set: storage residue section skipped)');

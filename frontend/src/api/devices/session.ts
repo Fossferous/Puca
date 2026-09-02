@@ -4332,7 +4332,7 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             void (async () => {
                 const salt = Uint8Array.from(atob(chalSalt), c => c.charCodeAt(0));
                 const nonce = Uint8Array.from(atob(chalNonce), c => c.charCodeAt(0));
-                let seed = rememberedUaSeed(s.peerDevice, chalSalt);
+                let seed = await rememberedUaSeed(s.peerDevice, chalSalt);
                 if (!seed) {
                     // The user is about to be asked for a passphrase, which
                     // takes as long as typing takes. The host's own deadline

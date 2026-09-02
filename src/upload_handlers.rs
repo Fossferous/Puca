@@ -306,6 +306,40 @@ async fn clip_upload_gate(state: &AppState, claims: &Claims, clip_id: Option<&st
     None
 }
 
+/// The on-disk extension for an upload: the final path component's suffix,
+/// and only when it is short and alphanumeric. Anything else — a separator,
+/// a dot-only name, an over-long or exotic suffix — stores with none. The
+/// stored name is `<uuid><ext>` under `uploads/`, so this is what keeps the
+/// uploader's filename from steering the path or the served extension.
+pub(crate) fn storage_extension(original_name: &str) -> String {
+    let last = original_name.rsplit(['/', '\\']).next().unwrap_or("");
+    match last.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 16
+            && ext.bytes().all(|b| b.is_ascii_alphanumeric()) => format!(".{}", ext.to_ascii_lowercase()),
+        _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod storage_extension_tests {
+    use super::storage_extension;
+
+    #[test]
+    fn only_a_short_alphanumeric_suffix_survives() {
+        assert_eq!(storage_extension("photo.PNG"), ".png");
+        assert_eq!(storage_extension("dir/sub/clip.mp4"), ".mp4");
+        assert_eq!(storage_extension("C:\\Users\\x\\note.txt"), ".txt");
+        assert_eq!(storage_extension("archive.tar.gz"), ".gz");
+        assert_eq!(storage_extension("noext"), "");
+        assert_eq!(storage_extension(".bashrc"), "", "a dot-file has no extension");
+        assert_eq!(storage_extension("x."), "");
+        assert_eq!(storage_extension("x.ex e"), "");
+        assert_eq!(storage_extension("x.a/../../b"), "", "a separator inside the suffix is not a suffix");
+        assert_eq!(storage_extension("x.toolongextensionname"), "");
+        assert_eq!(storage_extension("x.ph*p"), "");
+    }
+}
+
 /// The ATTACH_FILES door.
 ///
 /// Message content is end-to-end encrypted, so the server never sees which
@@ -521,12 +555,7 @@ pub async fn upload_file(
     } else {
         (None, None)
     };
-    let extension = original_name
-        .rsplit('.')
-        .next()
-        .map(|e| format!(".{}", e))
-        .unwrap_or_default();
-    let stored_name = format!("{}{}", file_id, extension);
+    let stored_name = format!("{}{}", file_id, storage_extension(&original_name));
 
     // Save file to disk
     let file_path = format!("uploads/{}", stored_name);

@@ -1411,7 +1411,7 @@ mod tests {
     }
 
     /// LIVE, against the real relay. Run with:
-    ///   cargo test --release -- --ignored --nocapture live_coturn
+    ///   PUCA_TURN_SERVER=host:port cargo test --release -- --ignored --nocapture live_coturn
     ///
     /// Ignored by default because it needs the network, but it is the only
     /// thing here that proves the WIRE FORMAT: every other test in this module
@@ -1425,11 +1425,51 @@ mod tests {
     /// credential, which is minted server-side from TURN_SECRET. What the
     /// unauthenticated leg cannot tell you is pinned by
     /// `the_long_term_key_is_the_rfc_construction` instead.
+    /// LIVE, the authenticated leg — what `live_coturn_answers_our_allocate_with_a_challenge`
+    /// deliberately stops short of. Runs the real `allocate()` (401 challenge,
+    /// then the MESSAGE-INTEGRITY-signed retry) against a TURN server with a
+    /// REST credential, so the SUCCESS response must pass the same integrity
+    /// check `may_act_on` applies in production (L8-NATIVE-3). Bad HMAC
+    /// arithmetic on either side shows up here as a failed allocation, not as
+    /// a silent relay outage in the field. Mint the credential where
+    /// TURN_SECRET lives (username `<expiry>:<user id>`, password
+    /// base64(HMAC-SHA1(secret, username))) and run:
+    ///   PUCA_TURN_SERVER=host:port PUCA_TURN_USER=... PUCA_TURN_PASS=...     ///   cargo test --release -- --ignored --nocapture live_coturn_allocates
+    #[test]
+    #[ignore]
+    fn live_coturn_allocates_with_a_rest_credential() {
+        use std::net::ToSocketAddrs;
+        let server_spec = std::env::var("PUCA_TURN_SERVER").expect("PUCA_TURN_SERVER=host:port");
+        let user = std::env::var("PUCA_TURN_USER").expect("PUCA_TURN_USER");
+        let pass = std::env::var("PUCA_TURN_PASS").expect("PUCA_TURN_PASS");
+        let server = server_spec
+            .to_socket_addrs()
+            .expect("resolve")
+            .find(|a| a.is_ipv4())
+            .expect("an IPv4 address");
+        let socket = UdpSocket::bind("0.0.0.0:0").expect("bind");
+
+        let mut alloc = allocate(&socket, server, &user, &pass, Duration::from_secs(8))
+            .expect("the authenticated Allocate must succeed and its success response must pass the integrity check");
+        println!("live coturn: allocation granted, relayed address {:?}", alloc.relayed);
+
+        // A refresh exercises the same signed path a long call takes, and the
+        // server's answer must again carry an integrity we accept.
+        alloc.maybe_refresh(&socket);
+
+        // POSITIVE CONTROL: the same server refuses a credential whose password
+        // does not match — proving the success above was not the rig accepting
+        // anything that came back.
+        let bad = allocate(&socket, server, &user, "not-the-password", Duration::from_secs(8));
+        let refusal = match bad { Ok(_) => panic!("a wrong password must not allocate"), Err(e) => e };
+        println!("live coturn: wrong password refused ({refusal})");
+    }
+
     #[test]
     #[ignore]
     fn live_coturn_answers_our_allocate_with_a_challenge() {
         use std::net::ToSocketAddrs;
-        let server = "turn.example.com:3479"
+        let server = std::env::var("PUCA_TURN_SERVER").unwrap_or_else(|_| "turn.example.com:3479".to_string())
             .to_socket_addrs()
             .expect("resolve")
             .find(|a| a.is_ipv4())

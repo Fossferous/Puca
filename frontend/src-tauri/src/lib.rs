@@ -296,6 +296,41 @@ fn device_key_ensure() -> Result<device_key::DevicePublicIdentity, String> {
     device_key::ensure()
 }
 
+/// Seal a remembered unattended-control seed under the OS user's data
+/// protection (Windows DPAPI, user scope) so the WebView's storage never holds
+/// it in the clear. In: base64 seed; out: base64 sealed blob. On non-Windows
+/// the primitive is the identity and the file mode is the protection (see
+/// device_key.rs) — the JS side stores the result the same way either way.
+/// The blob only opens for the same Windows account on the same machine,
+/// which is exactly the boundary a "remember this device" seed should have.
+#[tauri::command]
+fn ua_seed_protect(seed_b64: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let plain = base64::engine::general_purpose::STANDARD
+        .decode(seed_b64.as_bytes())
+        .map_err(|e| format!("bad seed encoding: {e}"))?;
+    if plain.len() != 32 {
+        return Err("a seed is 32 bytes".to_string());
+    }
+    let sealed = device_key::protect(&plain)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(sealed))
+}
+
+/// The inverse of `ua_seed_protect`. A blob sealed by another account or
+/// machine, or tampered with, fails here and the caller asks for the passphrase.
+#[tauri::command]
+fn ua_seed_unprotect(blob_b64: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let sealed = base64::engine::general_purpose::STANDARD
+        .decode(blob_b64.as_bytes())
+        .map_err(|e| format!("bad blob encoding: {e}"))?;
+    let plain = device_key::unprotect(&sealed)?;
+    if plain.len() != 32 {
+        return Err("sealed data is not a seed".to_string());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(plain))
+}
+
 /// Sign a transcript with the device signing key (base64 signature).
 ///
 /// The CALLER supplies the whole message, so there is exactly one definition of
@@ -1351,6 +1386,8 @@ pub fn run() {
             inject_input,
             device_key_ensure,
             device_key_sign,
+            ua_seed_protect,
+            ua_seed_unprotect,
             #[cfg(feature = "remote-control")]
             device_key_dh,
             #[cfg(feature = "remote-control")]

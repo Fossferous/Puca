@@ -1032,6 +1032,33 @@ async fn main() -> anyhow::Result<()> {
                     .execute(&pool)
                     .await;
                 }
+                // Uploads of deleted accounts whose grace period has passed:
+                // the file first, then the row, so a crash between the two
+                // leaves a row the next pass retries rather than an orphan file.
+                let due: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT id::text, stored_name FROM uploaded_files WHERE purge_after IS NOT NULL AND purge_after < NOW() ORDER BY purge_after LIMIT 200",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+                let mut purged = 0usize;
+                for (id, stored_name) in due {
+                    match tokio::fs::remove_file(format!("uploads/{}", stored_name)).await {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            tracing::warn!("purge: could not remove {stored_name}: {e}");
+                            continue;
+                        }
+                    }
+                    match sqlx::query("DELETE FROM uploaded_files WHERE id = $1::uuid").bind(&id).execute(&pool).await {
+                        Ok(_) => purged += 1,
+                        Err(e) => tracing::warn!("purge: could not delete row {id}: {e:?}"),
+                    }
+                }
+                if purged > 0 {
+                    tracing::info!("purge: removed {purged} upload(s) of deleted accounts past their grace period");
+                }
             }
         });
     }

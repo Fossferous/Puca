@@ -1455,6 +1455,13 @@ pub struct DeleteAccountRequest {
 /// docs/SECURITY_MODEL.md §11.
 const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     "DELETE FROM device_tokens WHERE user_id = $1",
+    // Uploaded blobs (attachments, avatar, emoji, sounds, clip parts): kept
+    // for a 30-day grace, then purged by the retention sweep (main.rs). Their
+    // ids live inside other people's E2EE content, so the server cannot warn
+    // the channels they were shared in — the grace period IS the warning, and
+    // the confirmation copy says so. Stamped, not deleted, so a mistaken
+    // deletion is recoverable by an operator within the window.
+    "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => 30) WHERE uploader_id = $1 AND purge_after IS NULL",
     // Enrolled MACHINES, as distinct from the push tokens above. The tombstone
     // is an UPDATE so the devices FK cascade never fires, and /devices/token
     // re-reads token_version at mint time — so the bump in the anonymising
@@ -1832,10 +1839,14 @@ mod account_deletion_residue_tests {
     /// The three additions in this release (L8-DATA-1) are the last three:
     /// cross-user device shares in both directions, the user's own wrapped
     /// channel keys, and the personal fields left on the revoked device rows.
+    /// 0.9.1 added the uploaded_files grace stamp (second entry): files are
+    /// purged 30 days after deletion by the retention sweep in main.rs.
     #[test]
     fn the_cleanup_list_is_exactly_what_we_decided() {
         let expected: &[&str] = &[
             "DELETE FROM device_tokens WHERE user_id = $1",
+            // 0.9.1: uploads are stamped for the 30-day grace purge, not deleted.
+            "UPDATE uploaded_files SET purge_after = NOW() + make_interval(days => 30) WHERE uploader_id = $1 AND purge_after IS NULL",
             "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
             "DELETE FROM notification_preferences WHERE user_id = $1",
             "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",

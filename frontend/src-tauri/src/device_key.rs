@@ -67,7 +67,7 @@ fn key_path() -> Result<PathBuf, String> {
 // --- At-rest protection ------------------------------------------------------
 
 #[cfg(windows)]
-fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
@@ -86,7 +86,7 @@ fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(windows)]
-fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 
@@ -110,12 +110,12 @@ fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
 // keyring protection we do not have would be worse than stating the real
 // boundary.
 #[cfg(not(windows))]
-fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
     Ok(plain.to_vec())
 }
 
 #[cfg(not(windows))]
-fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
     Ok(sealed.to_vec())
 }
 

@@ -1347,7 +1347,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     <p className="settings-hint">
                                         Deleting your account is irreversible: your profile is erased,
                                         every session is signed out, and your encrypted message history
-                                        becomes permanently unreadable. Servers you own must be
+                                        becomes permanently unreadable. Files you uploaded — attachments,
+                                        your avatar, emoji, sounds — are removed 30 days later, so anything
+                                        you shared in a channel stops opening then. Servers you own must be
                                         disbanded or transferred first.
                                     </p>
                                     {!deleteArmed ? (

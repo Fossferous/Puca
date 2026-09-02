@@ -360,11 +360,13 @@ pub async fn forgot_password(
             let token = generate_token();
             let expires_at = Utc::now() + Duration::hours(1);
 
+            // Stored as a digest: a database dump must not be a password-reset
+            // kit. The email carries the token; the row can only recognise it.
             if let Ok(_) = sqlx::query(
                 "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
             )
             .bind(user_id)
-            .bind(&token)
+            .bind(reset_token_digest(&token))
             .bind(expires_at.naive_utc())
             .execute(&state.pool)
             .await
@@ -397,7 +399,7 @@ pub async fn reset_password(
     let token_record = match sqlx::query(
         "SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1",
     )
-    .bind(&payload.token)
+    .bind(reset_token_digest(&payload.token))
     .fetch_optional(&state.pool)
     .await
     {
@@ -544,7 +546,7 @@ pub async fn reset_password(
 
     // Mark token as used
     let _ = sqlx::query("UPDATE password_reset_tokens SET used = true WHERE token = $1")
-        .bind(&payload.token)
+        .bind(reset_token_digest(&payload.token))
         .execute(&state.pool)
         .await;
 
@@ -562,6 +564,29 @@ pub async fn reset_password(
     )
 }
 
+/// What the database keeps of a reset token: SHA-256, hex. Rows written
+/// before 0.9.1 held the token itself; they never match a digest lookup and
+/// expire within the hour on their own.
+pub(crate) fn reset_token_digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.trim().as_bytes()))
+}
+
+#[cfg(test)]
+mod reset_token_digest_tests {
+    use super::reset_token_digest;
+
+    #[test]
+    fn the_row_never_holds_the_token_and_the_digest_is_what_a_lookup_needs() {
+        let token = "3f9a1c7e5b2d8046a9e1f3c5d7b9a0e2";
+        let d = reset_token_digest(token);
+        assert_ne!(d, token);
+        assert_eq!(d.len(), 64);
+        assert_eq!(d, reset_token_digest(token), "deterministic, so the lookup finds the row");
+        assert_ne!(d, reset_token_digest("3f9a1c7e5b2d8046a9e1f3c5d7b9a0e3"));
+    }
+}
+
 /// Check if a reset token is valid (for frontend validation)
 pub async fn validate_reset_token(
     State(state): State<Arc<AppState>>,
@@ -573,7 +598,7 @@ pub async fn validate_reset_token(
            JOIN users u ON u.id = t.user_id
            WHERE t.token = $1"#,
     )
-    .bind(&query.token)
+    .bind(reset_token_digest(&query.token))
     .fetch_optional(&state.pool)
     .await
     {

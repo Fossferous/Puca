@@ -18,6 +18,21 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 // empty store rather than about what the store KEEPS. The refusal itself is
 // pinned in api/devices/unattended.test.ts.
 vi.mock('../api/platform', () => ({ isTauri: () => true, isMobile: () => false }));
+// A fake DPAPI: reversible, so the tests can see that what lands in storage is
+// NOT the seed, and that recall goes back through the OS primitive.
+vi.mock('../api/deviceIdentity/deviceKey', async (orig) => ({
+    ...(await orig<typeof import('../api/deviceIdentity/deviceKey')>()),
+    invokeTauri: async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'ua_seed_protect') return 'SEALED(' + String(args?.seedB64) + ')';
+        if (cmd === 'ua_seed_unprotect') {
+            const b = String(args?.blobB64);
+            if (!b.startsWith('SEALED(')) throw new Error('not a blob sealed here');
+            return b.slice(7, -1);
+        }
+        throw new Error('unexpected command ' + cmd);
+    },
+}));
+const flush = () => new Promise(r => setTimeout(r, 0));
 
 import {
     deriveUaSeed,
@@ -70,7 +85,7 @@ describe('seed signing is byte-identical to passphrase signing', { timeout: 30_0
      * the host rejects — which the auto-forget would then mask as an eternal
      * re-prompt rather than an error anyone can see. Pin the equivalence.
      */
-    it('signUaChallengeSeed(deriveUaSeed(p)) === signUaChallenge(p)', () => {
+    it('signUaChallengeSeed(deriveUaSeed(p)) === signUaChallenge(p)', async () => {
         const salt = Uint8Array.from(atob(SALT_B64), c => c.charCodeAt(0));
         const nonce = new Uint8Array(32).fill(3);
         const viaPassphrase = signUaChallenge('correct horse battery', salt, 'session-1', nonce);
@@ -84,62 +99,62 @@ describe('seed signing is byte-identical to passphrase signing', { timeout: 30_0
 });
 
 describe('the remembered-seed store', () => {
-    it('returns what was remembered, inside the window, under the same salt', () => {
-        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0);
-        const got = rememberedUaSeed('dev-a', SALT_B64, T0 + UA_REMEMBER_MS - 1);
+    it('returns what was remembered, inside the window, under the same salt', async () => {
+        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0); await flush();
+        const got = await rememberedUaSeed('dev-a', SALT_B64, T0 + UA_REMEMBER_MS - 1);
         expect(got).not.toBeNull();
         expect(Array.from(got!)).toEqual(Array.from(seed32(7)));
     });
 
-    it('is keyed per device', () => {
-        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0);
-        expect(rememberedUaSeed('dev-b', SALT_B64, T0)).toBeNull();
+    it('is keyed per device', async () => {
+        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0); await flush();
+        expect(await rememberedUaSeed('dev-b', SALT_B64, T0)).toBeNull();
     });
 
-    it('misses on a salt change AND drops the stale entry', () => {
-        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0);
+    it('misses on a salt change AND drops the stale entry', async () => {
+        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0); await flush();
         const otherSalt = btoa('salt-REARMED-...!');
-        expect(rememberedUaSeed('dev-a', otherSalt, T0), 'a re-armed host must miss').toBeNull();
+        expect(await rememberedUaSeed('dev-a', otherSalt, T0), 'a re-armed host must miss').toBeNull();
         // The drop is the half that keeps dead seeds out of storage: the
         // original salt must ALSO miss now.
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0), 'and the stale entry is gone').toBeNull();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0), 'and the stale entry is gone').toBeNull();
     });
 
-    it('expires without use, dropping the entry', () => {
-        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0);
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0 + UA_REMEMBER_MS)).toBeNull();
+    it('expires without use, dropping the entry', async () => {
+        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0); await flush();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0 + UA_REMEMBER_MS)).toBeNull();
         expect(localStorage.getItem(KEY), 'an emptied store removes its key').toBeNull();
     });
 
-    it('confirmUaSeed slides the expiry', () => {
-        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0);
+    it('confirmUaSeed slides the expiry', async () => {
+        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0); await flush();
         const halfway = T0 + UA_REMEMBER_MS / 2;
         confirmUaSeed('dev-a', halfway);
         // Past the ORIGINAL window, inside the slid one.
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0 + UA_REMEMBER_MS + 1)).not.toBeNull();
-        expect(rememberedUaSeed('dev-a', SALT_B64, halfway + UA_REMEMBER_MS)).toBeNull();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0 + UA_REMEMBER_MS + 1)).not.toBeNull();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, halfway + UA_REMEMBER_MS)).toBeNull();
     });
 
-    it('forgetUaSeed removes exactly one device', () => {
+    it('forgetUaSeed removes exactly one device', async () => {
         rememberUaSeed('dev-a', SALT_B64, seed32(1), T0);
         rememberUaSeed('dev-b', SALT_B64, seed32(2), T0);
         forgetUaSeed('dev-a');
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0)).toBeNull();
-        expect(rememberedUaSeed('dev-b', SALT_B64, T0)).not.toBeNull();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0)).toBeNull();
+        expect(await rememberedUaSeed('dev-b', SALT_B64, T0)).not.toBeNull();
     });
 
-    it('tolerates a corrupted store', () => {
+    it('tolerates a corrupted store', async () => {
         localStorage.setItem(KEY, '{not json');
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0)).toBeNull();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0)).toBeNull();
         // And recovers: remembering over the corruption works.
-        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0);
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0)).not.toBeNull();
+        rememberUaSeed('dev-a', SALT_B64, seed32(7), T0); await flush();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0)).not.toBeNull();
     });
 
-    it('refuses a stored seed of the wrong length', () => {
+    it('refuses a stored seed of the wrong length', async () => {
         localStorage.setItem(KEY, JSON.stringify({
             'dev-a': { salt: SALT_B64, seed: btoa('short'), expires: T0 + UA_REMEMBER_MS },
         }));
-        expect(rememberedUaSeed('dev-a', SALT_B64, T0), 'a truncated seed must not sign').toBeNull();
+        expect(await rememberedUaSeed('dev-a', SALT_B64, T0), 'a truncated seed must not sign').toBeNull();
     });
 });

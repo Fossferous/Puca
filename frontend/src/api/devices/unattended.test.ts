@@ -17,6 +17,21 @@ import {
 /** Which shell this rig plays. The remembered-seed store is written ONLY
  *  inside the native shells, so the web case has to be drivable too. */
 let nativeShell = true;
+// A fake DPAPI for the desktop path: reversible, so the tests can assert that
+// storage holds a sealed form and that recall goes back through the primitive.
+vi.mock('../deviceIdentity/deviceKey', async (orig) => ({
+    ...(await orig<typeof import('../deviceIdentity/deviceKey')>()),
+    invokeTauri: async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'ua_seed_protect') return 'SEALED(' + String(args?.seedB64) + ')';
+        if (cmd === 'ua_seed_unprotect') {
+            const b = String(args?.blobB64);
+            if (!b.startsWith('SEALED(')) throw new Error('not a blob sealed here');
+            return b.slice(7, -1);
+        }
+        throw new Error('unexpected command ' + cmd);
+    },
+}));
+const flush = () => new Promise(r => setTimeout(r, 0));
 vi.mock('../platform', () => ({
     isTauri: () => nativeShell,
     isMobile: () => false,
@@ -146,12 +161,12 @@ describe('remembering a proved unattended seed', () => {
         ls.removeItem.mockReset();
     });
 
-    it('is NOT written in a shared browser', () => {
+    it('is NOT written in a shared browser', async () => {
         // A later user of the same profile would otherwise hold unattended
         // control of someone else's machine.
         nativeShell = false;
         rememberUaSeed('dev-host', SALT, SEED);
-        expect(rememberedUaSeed('dev-host', SALT)).toBeNull();
+        expect(await rememberedUaSeed('dev-host', SALT)).toBeNull();
         expect(
             localStorage.getItem('sovereign-ua-remember'),
             'nothing at all may be written outside a native shell',
@@ -160,26 +175,29 @@ describe('remembering a proved unattended seed', () => {
         // POSITIVE CONTROL: the same call in a native shell DOES write, so the
         // assertion above is about the shell and not about a broken rig.
         nativeShell = true;
-        rememberUaSeed('dev-host', SALT, SEED);
-        expect(rememberedUaSeed('dev-host', SALT)).toEqual(SEED);
+        rememberUaSeed('dev-host', SALT, SEED); await flush();
+        expect(await rememberedUaSeed('dev-host', SALT)).toEqual(SEED);
+        // ...and what the desktop stores is the SEALED form, never the seed itself.
+        const stored = JSON.parse(String(localStorage.setItem.mock.calls.at(-1)?.[1] ?? '{}')) as Record<string, { seed?: string }>;
+        expect(stored['dev-host']?.seed?.startsWith('dpapi:')).toBe(true);
     });
 
-    it('lives for seven days, not thirty, and the expiry slides on use', () => {
+    it('lives for seven days, not thirty, and the expiry slides on use', async () => {
         // The TTL is client-side housekeeping rather than a security bound, but
         // a month is a long time for a cleartext signing key to sit unused. It
         // costs an active user nothing because confirmUaSeed renews it.
         expect(UA_REMEMBER_MS).toBe(7 * 24 * 60 * 60 * 1000);
 
         const t0 = 1_700_000_000_000;
-        rememberUaSeed('dev-host', SALT, SEED, t0);
-        expect(rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS - 1)).toEqual(SEED);
-        expect(rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS)).toBeNull();
+        rememberUaSeed('dev-host', SALT, SEED, t0); await flush();
+        expect(await rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS - 1)).toEqual(SEED);
+        expect(await rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS)).toBeNull();
 
         // Sliding: a host that accepted the signature renews the entry.
-        rememberUaSeed('dev-host', SALT, SEED, t0);
+        rememberUaSeed('dev-host', SALT, SEED, t0); await flush();
         confirmUaSeed('dev-host', t0 + UA_REMEMBER_MS - 1);
         expect(
-            rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS + 1),
+            await rememberedUaSeed('dev-host', SALT, t0 + UA_REMEMBER_MS + 1),
             'an actively used machine never notices the shorter window',
         ).toEqual(SEED);
     });
