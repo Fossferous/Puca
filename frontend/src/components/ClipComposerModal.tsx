@@ -37,7 +37,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { attachPreview, discardSeal, getReplayState, subscribeReplay, trimSeal, undoTrim, uploadAndBuild, type ReplayState } from '../api/clips/replayBuffer';
 import type { SealedInfo } from '../api/clips/clipTypes';
-import { CLIP_PAD_MS } from '../api/clips/clipParticipants';
+import { clipWindowFor } from '../api/clips/clipParticipants';
 import { formatClock, formatMB } from '../api/clips/clipPresets';
 import { CHIP_SECONDS, durationChips, outcomeCopy, resolveClipTarget } from '../api/clips/clipComposerLogic';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
@@ -322,8 +322,9 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                 // The same window the server computes from duration_ms +
                 // ended_ago_ms (start padded by 2 s, end not padded), on this
                 // client's clock — so the declared list covers the footage,
-                // not everyone seen since arming.
-                declaredParticipants: getDeclaredParticipants(sealedAt - sealed.durationMs - CLIP_PAD_MS, sealedAt),
+                // not everyone seen since arming. clipParticipants.test.ts
+                // pins this call shape: the window fix lived in the wiring.
+                declaredParticipants: (() => { const w = clipWindowFor(sealedAt, sealed.durationMs); return getDeclaredParticipants(w.start, w.end); })(),
             });
         } catch (e) {
             if (e instanceof ClipProposeError) {

@@ -9,15 +9,37 @@
  * were actually in the window.
  */
 import { describe, it, expect } from 'vitest';
-import { CLIP_PAD_MS, DeclaredParticipants, LEAVE_SLACK_MS, MAX_SPANS_PER_USER, RETENTION_MS } from '../api/clips/clipParticipants';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { CLIP_PAD_MS, clipWindowFor, DeclaredParticipants, LEAVE_SLACK_MS, MAX_SPANS_PER_USER, RETENTION_MS } from '../api/clips/clipParticipants';
 
 const SELF = 1;
 const MIN = 60_000;
 
-/** A 2-minute clip sealed at `sealedAt`, padded like the server pads it. */
+/** A 2-minute clip sealed at `sealedAt` — the PRODUCTION window arithmetic, not a re-implementation. */
 function window(sealedAt: number, durationMs = 120_000) {
-    return { start: sealedAt - durationMs - CLIP_PAD_MS, end: sealedAt };
+    return clipWindowFor(sealedAt, durationMs);
 }
+
+describe('clipWindowFor', () => {
+    it('pads the start by the server PAD and leaves the end at the seal', () => {
+        expect(clipWindowFor(1_000_000, 30_000)).toEqual({ start: 1_000_000 - 30_000 - CLIP_PAD_MS, end: 1_000_000 });
+    });
+
+    // The 2026-09-02 bug lived in the WIRING (an argument-free getter over a
+    // grow-only Set), not in any pure function — so the pure tests below could
+    // all stay green while the composer went back to declaring everyone. This
+    // pins the composer's single call site to the production window.
+    it('is what the composer passes to getDeclaredParticipants (call-site binding)', () => {
+        const src = readFileSync(join(__dirname, '..', 'components', 'ClipComposerModal.tsx'), 'utf8');
+        const calls = src.match(/getDeclaredParticipants\(/g) ?? [];
+        expect(calls).toHaveLength(1);
+        const bound = /const w = clipWindowFor\(sealedAt, sealed\.durationMs\); return getDeclaredParticipants\(w\.start, w\.end\)/;
+        expect(src).toMatch(bound);
+        // positive control for the regex itself: the regression shape does not match
+        expect('getDeclaredParticipants(0, Date.now())').not.toMatch(bound);
+    });
+});
 
 describe('DeclaredParticipants — the window bound', () => {
     it('declares everyone present throughout, minus the proposer', () => {
@@ -101,6 +123,41 @@ describe('DeclaredParticipants — the window bound', () => {
         expect(d.declaredFor(w.start, w.end, { self: SELF, stillAudible: id => id === 6 })).toEqual([6]);
         // positive control for the probe: when it says no, the stale span stays stale
         expect(d.declaredFor(w.start, w.end, { self: SELF, stillAudible: () => false })).toEqual([]);
+    });
+
+    it('stillAudible is keyed on the USER: a roster row that heals after the seal cannot cancel the rescue (review finding)', () => {
+        // B's socket blips at +0; the roster drops B (span closed) but B's SFU
+        // audio keeps flowing into the ring. The clip is sealed 5 min later
+        // with B audible throughout; B's socket then reconnects AFTER the seal
+        // and before the request, so observe() opens a second, post-window span.
+        const d = new DeclaredParticipants();
+        const t0 = 1_000_000;
+        d.reset([SELF, 8], t0);
+        d.observe([SELF], t0);                          // roster row gone at t0
+        const sealedAt = t0 + 5 * MIN;
+        d.observe([SELF, 8], sealedAt + 10_000);        // row heals after the seal
+        const w = window(sealedAt, 30_000);
+        expect(d.declaredFor(w.start, w.end, { self: SELF, stillAudible: id => id === 8 })).toEqual([8]);
+        // and without the probe the same spans are (correctly) out of the window
+        expect(d.declaredFor(w.start, w.end, { self: SELF })).toEqual([]);
+    });
+
+    it('an SFU-present peer fed through observe() keeps an OPEN span while the roster has dropped them', () => {
+        // The callers union the roster with the SFU's live participants, so a
+        // blipped peer never gets a closed span while they are still audible.
+        const d = new DeclaredParticipants();
+        const t0 = 1_000_000;
+        d.reset([SELF, 8], t0);
+        d.observe([SELF, 8], t0 + 1 * MIN);             // roster dropped 8, SFU still has them
+        d.observe([SELF, 8], t0 + 6 * MIN);
+        expect(d.snapshot()[8]).toHaveLength(1);
+        expect(d.snapshot()[8][0].leftAt).toBeNull();
+        const w = window(t0 + 7 * MIN, 30_000);
+        expect(d.declaredFor(w.start, w.end, { self: SELF })).toEqual([8]);
+        // positive control: once BOTH signals drop them, the span closes and ages out
+        d.observe([SELF], t0 + 8 * MIN);
+        const w2 = window(t0 + 20 * MIN, 30_000);
+        expect(d.declaredFor(w2.start, w2.end, { self: SELF })).toEqual([]);
     });
 
     it('stillAudible cannot conjure someone who only ever joined after the seal', () => {

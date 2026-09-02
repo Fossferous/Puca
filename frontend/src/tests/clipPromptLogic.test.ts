@@ -7,7 +7,7 @@ function inc(over: Partial<IncomingProposal>): IncomingProposal {
     return {
         clipId: 'c', proposer: { id: 1, username: 'ann' }, serverId: 's', voiceChannelId: 1, voiceChannelName: 'v',
         targetChannelId: 2, targetChannelName: 't', durationMs: 5000, endedAgoMs: 0, receivedAt: 0, approverCount: 1,
-        expiresAt: 10_000, myVote: 'pending', you: { hadCamera: false, hadShare: false, stillInCall: true }, resolution: null,
+        expiresAt: 10_000, myVote: 'pending', you: { hadCamera: false, hadShare: false, stillInCall: true, inWindow: true }, resolution: null,
         ...over,
     };
 }
@@ -36,10 +36,10 @@ describe('endedAgoText keeps ticking from the received ended_ago', () => {
 
 describe('includesClause renders per the SERVER flags', () => {
     it('voice only / +camera / +share / all three', () => {
-        expect(includesClause({ hadCamera: false, hadShare: false, stillInCall: true })).toBe('your voice');
-        expect(includesClause({ hadCamera: true, hadShare: false, stillInCall: true })).toBe('your voice and your camera');
-        expect(includesClause({ hadCamera: false, hadShare: true, stillInCall: true })).toBe('your voice and the screen you were sharing');
-        expect(includesClause({ hadCamera: true, hadShare: true, stillInCall: true })).toBe('your voice, your camera, and the screen you were sharing');
+        expect(includesClause({ hadCamera: false, hadShare: false, stillInCall: true, inWindow: true })).toBe('your voice');
+        expect(includesClause({ hadCamera: true, hadShare: false, stillInCall: true, inWindow: true })).toBe('your voice and your camera');
+        expect(includesClause({ hadCamera: false, hadShare: true, stillInCall: true, inWindow: true })).toBe('your voice and the screen you were sharing');
+        expect(includesClause({ hadCamera: true, hadShare: true, stillInCall: true, inWindow: true })).toBe('your voice, your camera, and the screen you were sharing');
     });
 });
 

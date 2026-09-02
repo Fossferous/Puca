@@ -2,7 +2,7 @@
 
 **Status (2026-08-20): Phases 1 + 2 built — desktop capture and seal (behind
 Settings › Advanced › "Clips (replay buffer)"), the server presence log +
-approval protocol (live-tested, 126 checks), and the client half: the approval
+approval protocol (live-tested, 131 checks), and the client half: the approval
 prompt on every device, the request → pending → upload → post composer flow,
 the posted-clip player with its consent badge, the owner's per-server switch.
 The native no-picker auto-arm SHIPPED in 0.8.108/0.8.109 (see "Arm
@@ -409,7 +409,7 @@ default 3600), `CLIP_PROPOSAL_TTL_SECS` (default 1800; the e2e runs at 6).
 Check free disk on both hosts before enabling clips in a server: 2 GiB/user is
 real.
 
-**Live proof:** `frontend/e2e/clip-consent-live.mjs` — 126 checks against a
+**Live proof:** `frontend/e2e/clip-consent-live.mjs` — 131 checks against a
 throwaway Postgres (header of the file has the exact recipe). It found what
 the 30 Rust unit tests could not: two queries naming the `channels` column
 `channel_type` (the schema says `type`), which made EVERY proposal a 404 and
