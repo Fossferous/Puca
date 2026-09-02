@@ -87,6 +87,28 @@
       MessageBox MB_ICONEXCLAMATION|MB_OK "Puca could not remove its background service, because that needs administrator rights.$\r$\n$\r$\nThe service 'SovereignRemote' is still installed and still starts with Windows. To remove it, open Command Prompt as administrator and run:$\r$\n$\r$\n    sc stop SovereignRemote$\r$\n    sc delete SovereignRemote$\r$\n$\r$\nThen delete this folder:$\r$\n    $PROGRAMFILES64\Sovereign\service"
       ${EndIf}
     ${EndIf}
+  ${Else}
+    ; NO service registered, but the folder may still be there: enrolment
+    ; copies the binaries and writes the machine's secrets BEFORE it registers
+    ; the service, so a provision that failed part-way (seen in a clean-Windows
+    ; sandbox run: the copy succeeded, the service install did not) leaves a
+    ; keyed folder under Program Files with nothing pointing at it. The branch
+    ; above only ever ran when the service existed, so that folder survived
+    ; every uninstall. Removing it needs the same rights as removing the
+    ; service; when we lack them, say so rather than pretend.
+    ${If} ${FileExists} "$PROGRAMFILES64\Sovereign\service\*.*"
+      DetailPrint "Removing a leftover service folder (no service was registered)..."
+      RMDir /r "$PROGRAMFILES64\Sovereign\service"
+      RMDir "$PROGRAMFILES64\Sovereign"
+      ${If} ${FileExists} "$PROGRAMFILES64\Sovereign\service\*.*"
+        DetailPrint "Could not remove $PROGRAMFILES64\Sovereign\service (needs administrator rights)."
+        ${IfNot} ${Silent}
+        MessageBox MB_ICONEXCLAMATION|MB_OK "Puca could not remove a leftover folder from an earlier enrolment, because that needs administrator rights.$\r$\n$\r$\nIt holds this machine's sign-in-screen secrets. Please delete it yourself:$\r$\n    $PROGRAMFILES64\Sovereign\service"
+        ${EndIf}
+      ${Else}
+        DetailPrint "Leftover service folder removed."
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
 !macroend
 
