@@ -96,6 +96,10 @@ export function isAttachmentsLocked(opened: string | null): boolean {
  *  recomputes with — not the editor: a manager may edit another member's
  *  item, and sealing under the editor would brick it for everyone. */
 async function sealChannel(channelId: number, plaintext: string, kind: ChannelAadKind, ownerId: number): Promise<string> {
+    // An item that failed to decrypt shows a marker as its text; an editor
+    // that prefilled from it would otherwise seal the MARKER over the real
+    // ciphertext and lose the original for everyone. Refuse at the seal.
+    if (MARKERS.isUndecryptable(plaintext)) throw new Error('Refusing to store a decrypt-failure marker as content: the original ciphertext would be replaced by the words of the error');
     const ck = await ensureChannelKey(channelId);
     if (!ck) throw new Error('Channel encryption key unavailable; cannot store checklist item');
     return serializeEnvelope(await encryptChannelMessage(ck.key, ck.epoch, plaintext, { kind, channelId, senderId: ownerId }));
@@ -254,6 +258,7 @@ export function putTaskTabPrefs(prefs: TaskTabPref[]): Promise<void> {
 /** Encrypt owner-only text into a serialized envelope. Throws without keys —
  *  personal tasks must never be stored in plaintext. */
 async function sealSelf(plaintext: string): Promise<string> {
+    if (MARKERS.isUndecryptable(plaintext)) throw new Error('Refusing to store a decrypt-failure marker as content: the original ciphertext would be replaced by the words of the error'); // see sealChannel
     const identity = getActiveIdentity();
     if (!identity) throw new Error('E2EE identity not available; cannot store personal tasks');
     return serializeEnvelope(await encryptSelf(identity, plaintext));
@@ -268,6 +273,9 @@ async function openSelf(stored: string): Promise<string> {
     if (parsed.kind === 'unsupported-version') return MARKERS.ENC_UNSUPPORTED_VERSION;
     if (parsed.kind !== 'envelope') return stored;   // legacy plaintext row
     if (parsed.env.t !== 'self') return DECRYPT_FAILED;   // a channel/DM envelope has no business here
+    // Self envelopes are defined at v2 only; a v3 self would decrypt with no
+    // context bound, so it is 'unsupported' until a self grammar exists.
+    if (parsed.env.v !== 2) return MARKERS.ENC_UNSUPPORTED_VERSION;
     const identity = getActiveIdentity();
     if (!identity) return IDENTITY_LOCKED;
     return (await decryptSelf(identity, parsed.env)) ?? DECRYPT_FAILED;

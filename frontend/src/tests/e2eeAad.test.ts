@@ -13,7 +13,7 @@ import {
     sealDmEnvelope, decryptDM, encryptDM, channelAad, dmAad, parseEnvelopeEx, isEncrypted,
     messageEncState, EMIT_ENVELOPE_V3, type Envelope,
 } from '../api/e2ee';
-import { ENC_UNSUPPORTED_VERSION, ENC_CONTEXT_MISMATCH, ENC_CANNOT_DECRYPT, isUndecryptable } from '../api/decryptMarkers';
+import { ENC_UNSUPPORTED_VERSION, ENC_CONTEXT_MISMATCH, ENC_CANNOT_DECRYPT, ENC_KEY_UNAVAILABLE, isUndecryptable } from '../api/decryptMarkers';
 import kat from './fixtures/e2ee-wire-format-kat.json';
 
 // Wrap (not replace) the channel producer so the wrapper tests can see WHICH
@@ -156,6 +156,12 @@ describe('the channel message wrapper (servers.decryptChannelContent)', () => {
         expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, 'hello', { kind: 'chan-msg', channelId: 7, senderId: 41 });
         post.mockRestore();
     });
+
+    it('an edit whose text is a decrypt-failure marker is refused before any key work (it would seal the marker over the original)', async () => {
+        const { editChannelMessageEncrypted } = await import('../api/servers');
+        await expect(editChannelMessageEncrypted(7, 'm1', ENC_CONTEXT_MISMATCH)).rejects.toThrow(/can't be edited/);
+        await expect(editChannelMessageEncrypted(7, 'm1', ENC_KEY_UNAVAILABLE)).rejects.toThrow(/can't be edited/);
+    });
 });
 
 describe('the checklist wrappers (tasks.ts) seal under the CREATOR, never the editor', () => {
@@ -175,7 +181,22 @@ describe('the checklist wrappers (tasks.ts) seal under the CREATOR, never the ed
         expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, 'buy oat milk', { kind: 'chan-task', channelId: 7, senderId: 99 });
         await updateChannelTaskAttachments(7, 1, [{ href: 'sovereign-enc:f1?k=K&m=image%2Fpng', name: 'pic.png' }], 99);
         expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, expect.any(String), { kind: 'chan-taskatt', channelId: 7, senderId: 99 });
+        await expect(updateChannelTask(7, 1, { description: ENC_KEY_UNAVAILABLE }, 99)).rejects.toThrow(/decrypt-failure marker/);
+        expect(patch).not.toHaveBeenCalledWith('/tasks/1', expect.objectContaining({ description: expect.stringContaining('[Encrypted') }));
         post.mockRestore(); patch.mockRestore();
+    });
+
+    it('a personal list opens plaintext and v2 self items, and calls a v3 self item unsupported (no self grammar exists)', async () => {
+        const { listListTasks } = await import('../api/tasks');
+        const { apiClient } = await import('../api/client');
+        const get = vi.spyOn(apiClient, 'get').mockResolvedValue([
+            { ...row(41, 'plain legacy note'), list_id: 5, channel_id: null },
+            { ...row(41, JSON.stringify({ v: 3, t: 'self', ct: 'AAAA' })), id: 2, list_id: 5, channel_id: null },
+        ] as never);
+        const out = await listListTasks(5);
+        expect(out[0].description).toBe('plain legacy note');
+        expect(out[1].description).toBe(ENC_UNSUPPORTED_VERSION);
+        get.mockRestore();
     });
 
     it('listTasks opens each item under ITS created_by; a re-attributed v3 item shows the context marker', async () => {
@@ -208,6 +229,9 @@ describe('the DM wrapper (dms.decryptDMContent) with the real primitives', () =>
             const chInDmRow = JSON.stringify(await sealChannelEnvelope(CK, 3, 'x', ctx, 2));
             expect(await decryptDMContent(chInDmRow, 8, 8)).toBe(ENC_CANNOT_DECRYPT);
             expect(await decryptDMContent('plain legacy text', 8, 8)).toBe('plain legacy text');
+            expect(await decryptDMContent(JSON.stringify({ v: 3, t: 'self', ct: 'AAAA' }), 41, 41)).toBe(ENC_UNSUPPORTED_VERSION);
+            const { encryptDMContent } = await import('../api/dms');
+            await expect(encryptDMContent(ENC_CONTEXT_MISMATCH, 8)).rejects.toThrow(/can't be edited or re-sent/);
         } finally {
             clearActiveIdentity();
         }

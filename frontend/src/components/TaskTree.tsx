@@ -8,6 +8,7 @@
  * the owner via callbacks so each panel keeps its own optimistic state.
  */
 
+import { isUndecryptable } from '../api/decryptMarkers';
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import {
     type Task, type TaskNode, type TaskAttachmentRef,
@@ -276,6 +277,10 @@ export function TaskTree({
         resolveUserName ? (resolveUserName(task.created_by) ?? `user #${task.created_by}`) : null;
 
     const startEdit = (task: Task) => {
+        // A failure marker is not text to edit: the editor would prefill with it
+        // and a save would replace the real (still encrypted) item. The seal
+        // layer refuses too; this just keeps the editor from opening on it.
+        if (isUndecryptable(task.description)) return;
         setEditingId(task.id);
         setEditText(task.description);
     };
