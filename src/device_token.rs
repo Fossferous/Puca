@@ -202,7 +202,13 @@ pub async fn device_token(
     .bind(&payload.device_id)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("database error: {e}")))?;
+    .map_err(|e| {
+        // Unauthenticated route: the driver's error text (host, table, column
+        // names) stays in the log, and the wire answer is the same wording as
+        // every other failure here so the modes stay indistinguishable.
+        tracing::error!("device_token db error: {e:?}");
+        bad("that device could not be verified")
+    })?;
 
     // Same answer as a bad signature: whether a device id exists is not
     // something an unauthenticated caller should be able to measure.
