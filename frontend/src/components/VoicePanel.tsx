@@ -488,7 +488,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         const apply = () => {
             const required = loadSettings().requireMediaE2ee || serverRequireMediaE2ee;
             webrtcManager.setRequireMediaE2ee(required);
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- mirrors an external store (settings + server policy) into render state; the same effect owns the subscription
             setRequireE2ee(required);
         };
         apply();
