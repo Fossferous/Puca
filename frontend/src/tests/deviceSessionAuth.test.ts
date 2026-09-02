@@ -19,6 +19,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // --- observes exactly what would have hit the machine.
 const injectEvent = vi.fn(async () => {});
 const setMonitor = vi.fn(async (..._a: unknown[]) => {});
+/** The encoder knobs the CAPTURE PIPELINE exposes. Mocked here because they
+ *  are what L8-NATIVE-6's three ungated handlers reached — an armed host that
+ *  had not yet been shown the passphrase would still change which screen it
+ *  captured, change the encoder's fps/bitrate, and read the current quality
+ *  back out. */
+const updateStream = vi.fn(async (..._a: unknown[]) => {});
+const getStreamQuality = vi.fn(async (..._a: unknown[]) => ({ fps: 30, bitrate_kbps: 4000 }));
 const powerAction = vi.fn(async (..._a: unknown[]) => {});
 const displayTopologyChanged = vi.fn(async () => {});
 /** What listMonitors answers — the topology tests shrink it to one screen. */
@@ -64,6 +71,8 @@ vi.mock('../api/devices/hostBackend', () => ({
         stopSession: async () => {},
         listMonitors: async () => monitorsList,
         setMonitor: (...a: unknown[]) => setMonitor(...a),
+        updateStream: (...a: unknown[]) => updateStream(...a),
+        getStreamQuality: (...a: unknown[]) => getStreamQuality(...a),
         displayTopologyChanged: () => displayTopologyChanged(),
         setFileAccess: (...a: unknown[]) => setFileAccess(...a),
         // Optional on the interface; a phone host has none. `hasPowerAction`
@@ -95,6 +104,18 @@ vi.mock('../api/devices/clipboard', () => ({
     MAX_CLIPBOARD_BYTES: 6000,
     isClipboardEvent: (e: unknown) => (e as { t?: string })?.t === 'clip',
     buildClipboardEvent: (data: string) => ({ t: 'clip', data }),
+}));
+/** The host's physical kill switch / inactivity revoke. Mocked so the tests
+ *  can see WHETHER the device-session path arms it — the whole of
+ *  L8-NATIVE-7 was that it never did. */
+const armControlGuard = vi.fn((..._a: unknown[]) => {});
+const releaseControlGuard = vi.fn((..._a: unknown[]) => {});
+const noteControlActivity = vi.fn((..._a: unknown[]) => {});
+vi.mock('../api/devices/controlGuard', () => ({
+    armControlGuard: (...a: unknown[]) => armControlGuard(...a),
+    releaseControlGuard: (...a: unknown[]) => releaseControlGuard(...a),
+    noteControlActivity: (...a: unknown[]) => noteControlActivity(...a),
+    DEVICE_CONTROL_IDLE_MS: 1_800_000,
 }));
 vi.mock('../api/iceConfig', () => ({ withRelayOnlyIfRequested: (c: unknown) => c, fetchIceConfig: async () => ({ iceServers: [] }) }));
 vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTunnels: () => {} }));
@@ -246,6 +267,11 @@ beforeEach(() => {
     agentAnswerOffer.mockClear();
     verifyUaResponse.mockClear();
     verifyUaResponse.mockImplementation(async () => false);
+    updateStream.mockClear();
+    getStreamQuality.mockClear();
+    armControlGuard.mockClear();
+    releaseControlGuard.mockClear();
+    noteControlActivity.mockClear();
 });
 
 /** The peer's signalling counter. Signalling frames carry a strictly increasing
@@ -1251,5 +1277,161 @@ describe('display power actions', () => {
         const frames = await sentFrames(key, before);
         expect(frames.find(f => f.kind === 'monitors'),
             'a single-screen announce is topology-only').toBeUndefined();
+    });
+});
+
+/**
+ * L8-NATIVE-6 — THE CAPTURE PIPELINE IS NOT A STRANGER'S TO DRIVE.
+ *
+ * `set-monitor`, `update-stream` and `query_stream_quality` were the three
+ * host-side handlers missing the gate every comparable one carries. Media
+ * itself was still withheld (the offer is held pending proof), so this was not
+ * a picture leak — it was pre-proof CONTROL of the capture pipeline: change
+ * which screen the machine captures, change the encoder's fps and bitrate, and
+ * read the current quality back. The replies leak state too
+ * (`monitor-active`/`monitor-failed`, `stream-quality-ack`), which is why the
+ * test asserts on what goes back on the wire as well as on what the backend
+ * was asked to do.
+ */
+describe('an armed host ignores capture control until the passphrase is proved', () => {
+    it('does not switch screens, change quality, or answer a quality query', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+        updateStream.mockClear();
+        getStreamQuality.mockClear();
+        const before = sent.length;
+
+        await signal(key, { kind: 'set-monitor', monitor: 2 });
+        await signal(key, { kind: 'update-stream', fps: 60, bitrate: 12000 });
+        await signal(key, { kind: 'query_stream_quality' });
+
+        expect(setMonitor, 'an unproven peer must not choose what is captured')
+            .not.toHaveBeenCalled();
+        expect(updateStream, 'nor drive the encoder').not.toHaveBeenCalled();
+        expect(getStreamQuality, 'nor read its settings back').not.toHaveBeenCalled();
+
+        // Silence, not a refusal: the replies are themselves state, and an
+        // honest controller does not send these before proving anyway.
+        const kinds = await sentKinds(key, before);
+        for (const leak of ['monitor-active', 'monitor-failed', 'stream-quality-ack', 'stream-quality-error']) {
+            expect(kinds, `${leak} must not go back to an unproven peer`).not.toContain(leak);
+        }
+    });
+
+    it('POSITIVE CONTROL: does all three once the passphrase IS proved', async () => {
+        // Without this the test above asserts "nothing happened" in a rig where
+        // nothing could ever happen — the failure this codebase keeps producing.
+        armed = true;
+        const { key } = await activeHostSession();
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+
+        setMonitor.mockClear();
+        updateStream.mockClear();
+        getStreamQuality.mockClear();
+        const before = sent.length;
+
+        await signal(key, { kind: 'set-monitor', monitor: 2 });
+        await signal(key, { kind: 'update-stream', fps: 60, bitrate: 12000 });
+        await signal(key, { kind: 'query_stream_quality' });
+
+        expect(setMonitor).toHaveBeenCalledWith('ds-test', 2);
+        expect(updateStream).toHaveBeenCalledWith('ds-test', 60, 12000);
+        expect(getStreamQuality).toHaveBeenCalledWith('ds-test');
+        const kinds = await sentKinds(key, before);
+        expect(kinds, 'and the proved peer is answered').toContain('monitor-active');
+        expect(kinds).toContain('stream-quality-ack');
+    });
+
+    it('NEGATIVE CONTROL: an UNARMED host answers all three, gate or no gate', async () => {
+        // The gate reads `uaRequired && !uaVerified`, which is FALSE on an
+        // unarmed host — so this proves the three handlers were not simply
+        // switched off for everyone.
+        armed = false;
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+        updateStream.mockClear();
+        getStreamQuality.mockClear();
+
+        await signal(key, { kind: 'set-monitor', monitor: 1 });
+        await signal(key, { kind: 'update-stream', fps: 30, bitrate: 4000 });
+        await signal(key, { kind: 'query_stream_quality' });
+
+        expect(setMonitor).toHaveBeenCalled();
+        expect(updateStream).toHaveBeenCalled();
+        expect(getStreamQuality).toHaveBeenCalled();
+    });
+});
+
+/**
+ * L8-NATIVE-7 — THE HOST'S WAY OUT HAS TO BE ARMED ON THIS PATH TOO.
+ *
+ * The kill switch is built, configurable, and was armed by the legacy in-call
+ * path only. On a device session — which is what My Devices, device shares and
+ * unattended access all use — nothing ever called it, so the two settings the
+ * user is shown did nothing and the only exit was the on-screen Stop button
+ * that a controller driving the pointer can keep you away from.
+ *
+ * The guard's own behaviour is tested in api/devices/controlGuard.test.ts;
+ * what these pin is the WIRING, which is the part that was missing.
+ */
+describe('a host session arms the physical kill switch', () => {
+    it('arms it once the screen offer is answered, and releases it at teardown', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        armControlGuard.mockClear();
+
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        expect(armControlGuard, 'a controllable session must arm the host’s escape hatch')
+            .toHaveBeenCalledWith('ds-test', expect.any(Function), null);
+
+        const { endAllSessions } = await import('../api/devices/session');
+        endAllSessions('test end');
+        await settle();
+        expect(releaseControlGuard, 'a low-level input hook must not outlive its session')
+            .toHaveBeenCalledWith('ds-test');
+    });
+
+    it('gives an UNATTENDED session an idle budget, and an attended one none', async () => {
+        // Nobody is at an armed machine to press Stop, so "armed and forgotten"
+        // needs a bound. An attended session had a human consent at the
+        // keyboard, and cutting that off would drop a friend who is watching
+        // rather than typing.
+        armed = true;
+        const { key } = await activeHostSession();
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+        armControlGuard.mockClear();
+
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        expect(armControlGuard).toHaveBeenCalledWith('ds-test', expect.any(Function), 1_800_000);
+    });
+
+    it('does not arm it for a FILES-ONLY session, which drives nothing', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        armControlGuard.mockClear();
+
+        await signal(key, {
+            kind: 'offer',
+            sdp: 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n',
+            filesOnly: true,
+        });
+        expect(armControlGuard, 'a file browse cannot trap the person at the keyboard')
+            .not.toHaveBeenCalled();
+    });
+
+    it('resets the inactivity clock on AUTHORISED input only', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        noteControlActivity.mockClear();
+
+        const sealed = await sealControl(key, JSON.stringify({ s: 1, e: { t: 'mouse', x: 5, y: 5 } }));
+        handlers.get('DeviceInputted')!({ payload: { session_id: 'ds-test', event: sealed } });
+        await settle();
+
+        expect(injectEvent, 'positive control: the rig really did inject').toHaveBeenCalled();
+        expect(noteControlActivity).toHaveBeenCalledWith('ds-test');
     });
 });
