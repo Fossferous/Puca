@@ -29,8 +29,8 @@ in this file is not registered there, so what IS listed is real.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| GET | `/config` | ❌ | What a client needs before signing in: `app_url` (the web app, so invite links are `<app_url>/invite/<code>`) and whether registration requires an invite code. |
-| GET | `/source` | ❌ | Where the source of this build can be obtained (`SOURCE_URL`) and the commit it was built from — the AGPL §13 offer. A fork must set `SOURCE_URL` to its own repository. |
+| GET | `/config` | ❌ | What a client needs before signing in: `app_url` (the web app, so invite links are `<app_url>/invite/<code>`; null when the operator has not set `APP_URL`) and `registration_invite_required` (boolean — whether the sign-up form must ask for an invite code; the code itself is never exposed). |
+| GET | `/source` | ❌ | `repository` (the operator's `SOURCE_URL`), `commit` (what the binary was built from) and `license` — the AGPL §13 offer of source to the people using this server. A fork must set `SOURCE_URL` to its own repository. |
 | GET | `/ice-config` | ❌ (TURN credentials only with a bearer token) | STUN servers, and for a signed-in caller 4-hour credentials for the operator's TURN relay. |
 
 ---
@@ -98,7 +98,7 @@ in this file is not registered there, so what IS listed is real.
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/servers/:id/invites` | ✅ | List invites |
-| POST | `/servers/:id/invites` | ✅ | Create invite |
+| POST | `/servers/:id/invites` | ✅ | Create invite. Needs the Create Invites permission; otherwise 403 with `You don't have permission to create invites on this server`. |
 | DELETE | `/servers/:id/invites/:code` | ✅ | Delete invite |
 | GET | `/invites/:code` | ❌ | Get invite info (preview) |
 | POST | `/invites/:code/join` | ✅ | Join via invite |
@@ -115,6 +115,8 @@ in this file is not registered there, so what IS listed is real.
 | POST | `/servers/:id/bans/:user_id` | ✅ | Ban member |
 | DELETE | `/servers/:id/bans/:user_id` | ✅ | Unban member |
 | GET | `/servers/:id/bans` | ✅ | List bans |
+| POST | `/servers/:id/reports` | ✅ | Report a message or a member to the server's moderators (any member) |
+| GET | `/servers/:id/reports` | ✅ | List reports (moderators) |
 
 ---
 

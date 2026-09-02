@@ -128,6 +128,13 @@ server has email set up) gets you back in but does not recover old messages.
 - **Mute**: Others can hear you, but you're silent
 - **Deafen**: You hear nothing AND are muted
 
+### Calls in the background (Android)
+Switching to another app does not drop your microphone: while a call is live
+(and the microphone permission is granted) the app's keep-alive service holds
+the microphone foreground type for the duration of the call, and releases it
+when you leave. Android 14+ only allows that type to be taken while the app
+is in the foreground, which is why it is set up the moment you join.
+
 ---
 
 ## Screen Sharing
