@@ -367,9 +367,14 @@ replaced the ENTIRE app with the crash screen — every user, every platform,
 recoverable only by reloading (which drops any live call). Only the review
 caught it.
 
-`npm run lint` is four checks chained, not just eslint: eslint, then
+`npm run lint` is six checks chained, not just eslint: eslint, then
 `scripts/check-no-ui-emoji.mjs` (no emoji in chrome — docs/ICON_LANGUAGE.md),
-then `scripts/check-source-hygiene.mjs`, then `../scripts/check-docs-links.mjs`.
+then `scripts/check-source-hygiene.mjs`, then `../scripts/check-docs-links.mjs`,
+then `../scripts/check-docs-consistency.mjs` (the operator/user docs against
+the code: retired claims, the TURN credential TTL, the password KDF, every
+env var src/ reads present in .env.example, the pool default, the ops
+script listing, frozen migration attrs) and `../scripts/check-api-docs.mjs`
+(every route docs/API_REFERENCE.md tabulates is registered in src/main.rs).
 The last two were added 2026-09-02 and each exists because of something that
 shipped: a user-facing diagnostic told people to install the APK from
 `download.example.com`, a `TODO: Replace with your production server URL` sat
