@@ -213,6 +213,44 @@ async function runTests() {
     }
 
     // ─────────────────────────────────────────
+    // Error strings must not leak the schema (L8-ERR-1)
+    // ─────────────────────────────────────────
+    // /devices/token is UNAUTHENTICATED and used to return
+    // `database error: <raw sqlx text>` on a DB fault — table and constraint
+    // names to an anonymous caller, and an answer distinguishable from a bad
+    // signature, which turns the endpoint into a device-id oracle. Every
+    // failure must now read the same, with no SQL vocabulary.
+    const SQL_WORDS = ['sqlx', 'relation', 'column', 'constraint', 'postgres',
+                       'syntax error', 'pg_', 'duplicate key'];
+    for (const [name, path, body] of [
+        ['/devices/token with an unknown device', '/devices/token',
+            { device_id: 'nope-nope-nope-nope-no', nonce: 'x', sig: 'x' }],
+        ['/devices/token with a malformed body', '/devices/token', { device_id: 1 }],
+        ['/devices/token/challenge with an unknown device', '/devices/token/challenge',
+            { device_id: 'nope-nope-nope-nope-no' }],
+    ]) {
+        try {
+            const res = await fetch(`${API_BASE}${path}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const text = (await res.text()).toLowerCase();
+            const leak = SQL_WORDS.find(w => text.includes(w));
+            if (leak) {
+                fail(`Error leakage: ${name}`, `body names "${leak}": ${text.slice(0, 120)}`);
+                failed++;
+            } else {
+                pass(`No schema vocabulary in the refusal: ${name}`);
+                passed++;
+            }
+        } catch (e) {
+            fail(`Error leakage: ${name}`, `Request failed: ${e.message}`);
+            failed++;
+        }
+    }
+
+    // ─────────────────────────────────────────
     // Summary
     // ─────────────────────────────────────────
     console.log('\n═══════════════════════════════════════════');

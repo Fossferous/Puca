@@ -94,6 +94,35 @@ if sudo -u postgres createdb "$DRILL_DB" 2>/dev/null; then
 				*)           ok  "rows in $t: $c" ;;
 			esac
 		done
+		# --- 3b. Would this dump BOOT? ---
+		#
+		# The drill proves the dump restores. It did not prove the backend would
+		# come up on it, and migrations run at startup — so a dump that restores
+		# perfectly can still crash-loop the server. Two assertions, both cheap:
+		#
+		# (i) The dump must carry its own _sqlx_migrations. Without it every
+		#     migration REPLAYS over the restored rows, and 008 then runs
+		#     `UPDATE users SET username = LOWER(username)` unguarded against
+		#     real data (see migrations/README.md). With it, 008 is recorded and
+		#     never re-runs, which is what keeps that landmine dormant.
+		mig=$(sudo -u postgres psql -tAc "SELECT count(*) FROM _sqlx_migrations" "$DRILL_DB" 2>/dev/null || echo "ERR")
+		case "$mig" in
+			''|*[!0-9]*) bad "_sqlx_migrations missing from the dump ($mig) — every migration would REPLAY over restored data at boot" ;;
+			0)           bad "_sqlx_migrations restored EMPTY — every migration would replay at boot" ;;
+			*)           ok  "migration ledger restored ($mig applied)" ;;
+		esac
+		# (ii) And if they DID replay, would 008 survive it? Two usernames that
+		#      differ only by case violate 001's case-sensitive UNIQUE the moment
+		#      008 lowercases them. Asserted even when (i) passed, because this
+		#      is also the state 053 warns about and it is worth knowing about
+		#      before a restore, not after.
+		dup=$(sudo -u postgres psql -tAc "SELECT count(*) FROM (SELECT LOWER(username) FROM users GROUP BY 1 HAVING count(*) > 1) d" "$DRILL_DB" 2>/dev/null || echo "ERR")
+		case "$dup" in
+			''|*[!0-9]*) bad "case-collision check failed to run ($dup)" ;;
+			0)           ok  "no case-colliding usernames (008 is safe to replay)" ;;
+			*)           bad "$dup username(s) collide case-insensitively — migration 008 would abort boot on this dump" ;;
+		esac
+
 		mc=$(sudo -u postgres psql -tAc "SELECT count(*) FROM messages" "$DRILL_DB" 2>/dev/null || echo "ERR")
 		case "$mc" in
 			''|*[!0-9]*) bad "rows in messages: could not be counted ($mc)" ;;

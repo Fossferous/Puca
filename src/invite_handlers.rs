@@ -58,6 +58,17 @@ fn generate_invite_code() -> String {
         .collect()
 }
 
+/// Invite lifetime bounds, in hours: at least 1, at most a year.
+///
+/// Named and separate so the bound is testable without a database. See the call
+/// site for why an unclamped value is not merely odd but broken.
+pub(crate) const MIN_EXPIRY_HOURS: i32 = 1;
+pub(crate) const MAX_EXPIRY_HOURS: i32 = 8760;
+
+pub(crate) fn clamp_expiry_hours(hours: i32) -> i32 {
+    hours.clamp(MIN_EXPIRY_HOURS, MAX_EXPIRY_HOURS)
+}
+
 // --- Handlers ---
 
 /// Create an invite for a server
@@ -67,16 +78,22 @@ pub async fn create_invite(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateInviteRequest>,
 ) -> impl IntoResponse {
-    // Verify user is a member of the server
-    let is_member: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2")
-            .bind(&server_id)
-            .bind(claims.sub as i32)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-
-    if is_member.is_none() {
+    // CREATE_INVITE, not bare membership (L8-AUTHZ-1). Membership alone meant
+    // the lowest-privilege member of a private server — including one denied
+    // VIEW_CHANNEL on every channel in it — could mint an unlimited,
+    // non-expiring code for that server, and no setting could stop them.
+    // `user_has_permission` resolves SERVER permissions and answers false for a
+    // non-member (get_user_server_permissions returns empty for one), so this
+    // subsumes the membership check rather than replacing it; the body is
+    // deliberately the same string a non-member used to get.
+    if !user_has_permission(
+        &state.pool,
+        &server_id,
+        claims.sub,
+        Permissions::CREATE_INVITE,
+    )
+    .await
+    {
         return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
     }
 
@@ -87,8 +104,14 @@ pub async fn create_invite(
     // evaluates `0 < 0` = false and the invite is born unusable.
     let max_uses = payload.max_uses.filter(|&n| n > 0);
 
+    // Clamp the lifetime. `Duration::hours(i32::MAX as i64)` is ~245,000 years:
+    // the timestamp it produces overflows the column's range on the way in, and
+    // a negative value produces an invite born expired while the response tells
+    // the creator it expires in the past. 1 hour .. 1 year (8760 h) covers every
+    // real use; an ABSENT field still means "never expires", unchanged.
     let expires_at = payload
         .expires_in_hours
+        .map(clamp_expiry_hours)
         .map(|hours| chrono::Utc::now() + chrono::Duration::hours(hours as i64));
 
     let created_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();

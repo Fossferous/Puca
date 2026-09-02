@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -609,7 +608,9 @@ pub async fn login_step_2(
     }
 
     let hamk = verifier_instance.proof();
-    let session_key = verifier_instance.key();
+    // The SRP session key is deliberately NOT bound to anything: it used to be
+    // INSERTed into `sessions` and read by nothing (see step 6 below).
+    let _session_key = verifier_instance.key();
 
     // Successful auth — clear this username's failure streak (M3).
     state.clear_login_failures(&payload.username);
@@ -655,23 +656,30 @@ pub async fn login_step_2(
             tracing::warn!("login: could not record session for user {}: {:?}", user_id, e);
         }
 
-        // 6. Also store session in DB for reference
-        let session_id = Uuid::new_v4().to_string();
-        let expires_at = Utc::now() + Duration::hours(24);
-
-        sqlx::query(
-            "INSERT INTO sessions (id, user_id, session_key, expires_at) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&session_id)
-        .bind(user_id)
-        .bind(session_key.as_ref())
-        .bind(expires_at.naive_utc())
-        .execute(&state.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create session: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        // 6. NOTHING is written to the `sessions` table (L8-DATA-2).
+        //
+        // This used to INSERT the raw SRP session key — `session_key.as_ref()` into
+        // a `BYTEA NOT NULL` column — on every successful login, justified by a
+        // comment reading "Also store session in DB for reference". Nothing ever
+        // read it: a grep for `FROM sessions`, `DELETE FROM sessions` and
+        // `UPDATE sessions` across src/ returns nothing, the `session_id` local
+        // never left this function (LoginStep2Response is `{hamk_hex, token}`), and
+        // `expires_at` was written but never consulted. Authentication is JWT-based,
+        // right above. So the table was a monotonically growing store of one live
+        // cryptographic secret per successful login, for the life of the
+        // deployment, with no consumer — and it survived account deletion, since
+        // the tombstone is an UPDATE and the table's ON DELETE CASCADE never fires.
+        //
+        // Removing the write also removes a failure mode: the `?` on that query was
+        // the only way a healthy login could 500 on a database hiccup.
+        //
+        // DROPPING THE TABLE IS A SEPARATE, LATER RELEASE. It must land only after
+        // a release in which nothing writes it, or a rollback to the previous
+        // binary hits a missing relation on every login. The existing rows are
+        // historical secrets, and that migration is the point at which they stop
+        // existing — which is the entire benefit. A login audit trail, if wanted, is
+        // a different table with a different shape (user_id, timestamp, IP hash) and
+        // explicitly no key material; do not repurpose this one.
         token
     };
 
@@ -1416,6 +1424,81 @@ pub struct DeleteAccountRequest {
     pub confirm_username: String,
 }
 
+/// Every row an account deletion removes outright, in the order the transaction
+/// runs them. `$1` is the user id in every statement.
+///
+/// A NAMED ARRAY, ITERATED BY `delete_account`, so the tombstone's residue is a
+/// reviewable list rather than a shape you have to read a loop to discover —
+/// and so a test can hold it, which is what turns "we decided" into something
+/// that stays decided.
+///
+/// member_roles is in this list because leaving it behind survives the
+/// membership deletion: get_user_channel_permissions ORs every member_roles row
+/// for the server, so re-joining later (a public server, or any shared invite)
+/// would silently restore the old grants — an Admin role included. Both other
+/// paths that end a membership, kick_member and leave_server, already delete it
+/// first.
+///
+/// What is deliberately NOT here — messages and tasks (other people's
+/// conversations, and the server cannot read them to decide otherwise), the
+/// device ROWS themselves (revoked rather than deleted, because device_shares
+/// reference them and "a REVOKED device stays revoked" is enrol_device's
+/// invariant), moderation records (anonymised, not erased — INFO-11) and
+/// uploaded files (the id lives inside E2EE content, so the server cannot tell
+/// which blobs other people can still read) — is documented in
+/// docs/SECURITY_MODEL.md §11.
+const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
+    "DELETE FROM device_tokens WHERE user_id = $1",
+    // Enrolled MACHINES, as distinct from the push tokens above. The tombstone
+    // is an UPDATE so the devices FK cascade never fires, and /devices/token
+    // re-reads token_version at mint time — so the bump in the anonymising
+    // UPDATE is absorbed and a device holding its Ed25519 key could keep
+    // minting full account JWTs indefinitely after the account was deleted.
+    // Revoked rather than deleted: device_shares reference these rows.
+    "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+    "DELETE FROM notification_preferences WHERE user_id = $1",
+    "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",
+    "DELETE FROM friend_requests WHERE sender_id = $1 OR receiver_id = $1",
+    "DELETE FROM blocked_users WHERE blocker_id = $1 OR blocked_id = $1",
+    "DELETE FROM member_roles WHERE user_id = $1",
+    "DELETE FROM server_members WHERE user_id = $1",
+    "DELETE FROM server_nicknames WHERE user_id = $1",
+    // The tombstone is an UPDATE, so the ON DELETE CASCADE on these token
+    // tables never fires. A surviving change-email token would let verify_email
+    // re-install a live, verified address on the anonymised row for up to 24h
+    // after deletion (and password_reset_tokens is the same shape, purged for
+    // the same reason).
+    "DELETE FROM email_verification_tokens WHERE user_id = $1",
+    "DELETE FROM password_reset_tokens WHERE user_id = $1",
+    // Cross-user device shares, BOTH directions: shares this account granted on
+    // its own machines and shares other people granted to it. Their
+    // owner_user/grantee_user FKs are ON DELETE CASCADE (migration 049) and the
+    // tombstone is an UPDATE, so the cascade never fires and an accepted share
+    // row — naming the deleted account as a party, with its capability list —
+    // outlives the account indefinitely.
+    "DELETE FROM device_share_invites WHERE owner_user = $1 OR grantee_user = $1",
+    // Wrapped channel keys addressed to a user who can never unwrap them again:
+    // the identity key is nulled and both wrapped seeds are gone, so these are
+    // permanently opaque ciphertext.
+    //
+    // Mostly already handled, which the finding did not say: migration 015's
+    // trg_server_members_generation deletes the departed member's channel_keys
+    // on every server_members DELETE, which the statement above performs. This
+    // is the sweep for rows whose channel is not in a server this account was a
+    // member of. Deliberately the SAME unconditional shape as that trigger
+    // rather than a cleverer guarded one — a second, different rule for the
+    // same table is how a pair drifts. Only this user's own wrapped copies go;
+    // every other member's row for the same epoch is untouched, so nobody
+    // else's history becomes unreadable.
+    "DELETE FROM channel_keys WHERE recipient_id = $1",
+    // Devices are revoked, not deleted, so the rows survive — along with a
+    // user-chosen machine NAME, which is personal data with no purpose once the
+    // account is gone, and lan_info, a client-encrypted map of the machine's
+    // MAC and internal IPs that nothing can ever decrypt again. `name` is NOT
+    // NULL, so it is replaced rather than nulled.
+    "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
+];
+
 /// DELETE /account — tombstone the account.
 ///
 /// Tombstone, not hard-delete: the users row is anonymised (username becomes
@@ -1527,40 +1610,11 @@ pub async fn delete_account(
     }
 
     // Relationship + device rows go outright; content rows (messages, tasks)
-    // stay attributed to the tombstone for FK integrity.
-    //
-    // member_roles is in this list because leaving it behind survives the
-    // membership deletion: get_user_channel_permissions ORs every member_roles
-    // row for the server, so re-joining later (a public server, or any shared
-    // invite) silently restores the old grants — an Admin role included. Both
-    // other paths that end a membership, kick_member and leave_server, already
-    // delete it first.
-    for q in [
-        "DELETE FROM device_tokens WHERE user_id = $1",
-        // Enrolled MACHINES, as distinct from the push tokens above. The
-        // tombstone is an UPDATE so the devices FK cascade never fires, and
-        // /devices/token re-reads token_version at mint time — so the bump above
-        // is absorbed and a device holding its Ed25519 key could keep minting
-        // full account JWTs indefinitely after the account was deleted. Revoked
-        // rather than deleted: device_shares reference these rows, and
-        // "a REVOKED device stays revoked" is the invariant enrol_device relies on.
-        "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
-        "DELETE FROM notification_preferences WHERE user_id = $1",
-        "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",
-        "DELETE FROM friend_requests WHERE sender_id = $1 OR receiver_id = $1",
-        "DELETE FROM blocked_users WHERE blocker_id = $1 OR blocked_id = $1",
-        "DELETE FROM member_roles WHERE user_id = $1",
-        "DELETE FROM server_members WHERE user_id = $1",
-        "DELETE FROM server_nicknames WHERE user_id = $1",
-        // The tombstone is an UPDATE, so the ON DELETE CASCADE on these token
-        // tables never fires. A surviving change-email token would let
-        // verify_email re-install a live, verified address on the anonymised
-        // row for up to 24h after deletion (and password_reset_tokens is the
-        // same shape, purged for the same reason).
-        "DELETE FROM email_verification_tokens WHERE user_id = $1",
-        "DELETE FROM password_reset_tokens WHERE user_id = $1",
-    ] {
-        if let Err(e) = sqlx::query(q).bind(uid).execute(&mut *tx).await {
+    // stay attributed to the tombstone for FK integrity. The list itself, and
+    // the reasoning for every entry AND every deliberate omission, is on
+    // ACCOUNT_DELETE_CLEANUP above.
+    for q in ACCOUNT_DELETE_CLEANUP {
+        if let Err(e) = sqlx::query(*q).bind(uid).execute(&mut *tx).await {
             tracing::error!("delete_account: cleanup `{}` failed: {:?}", q, e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1757,5 +1811,86 @@ mod tests {
         assert!(!ct_eq(b"code", b"code-longer"));
         assert!(!ct_eq(b"code", b"cod"));
         assert!(!ct_eq(b"", b"x"));
+    }
+}
+
+#[cfg(test)]
+mod account_deletion_residue_tests {
+    use super::ACCOUNT_DELETE_CLEANUP;
+
+    /// THIS TEST IS THE SPECIFICATION for what a deletion removes. It holds the
+    /// array the handler iterates — not a copy of it — so removing a statement,
+    /// or widening one, goes red here and has to be argued for rather than
+    /// happening quietly.
+    ///
+    /// The three additions in this release (L8-DATA-1) are the last three:
+    /// cross-user device shares in both directions, the user's own wrapped
+    /// channel keys, and the personal fields left on the revoked device rows.
+    #[test]
+    fn the_cleanup_list_is_exactly_what_we_decided() {
+        let expected: &[&str] = &[
+            "DELETE FROM device_tokens WHERE user_id = $1",
+            "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+            "DELETE FROM notification_preferences WHERE user_id = $1",
+            "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",
+            "DELETE FROM friend_requests WHERE sender_id = $1 OR receiver_id = $1",
+            "DELETE FROM blocked_users WHERE blocker_id = $1 OR blocked_id = $1",
+            "DELETE FROM member_roles WHERE user_id = $1",
+            "DELETE FROM server_members WHERE user_id = $1",
+            "DELETE FROM server_nicknames WHERE user_id = $1",
+            "DELETE FROM email_verification_tokens WHERE user_id = $1",
+            "DELETE FROM password_reset_tokens WHERE user_id = $1",
+            "DELETE FROM device_share_invites WHERE owner_user = $1 OR grantee_user = $1",
+            "DELETE FROM channel_keys WHERE recipient_id = $1",
+            "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
+        ];
+        assert_eq!(
+            ACCOUNT_DELETE_CLEANUP, expected,
+            "the account-deletion residue changed — update docs/SECURITY_MODEL.md §11 in the same commit"
+        );
+    }
+
+    /// The tables that must NOT appear, each for a stated reason. A future edit
+    /// that "tidies up" by adding one of these destroys other people's data,
+    /// not just this account's.
+    #[test]
+    fn deletion_does_not_touch_other_peoples_content() {
+        for forbidden in [
+            // Other people's conversations; the server cannot read them to
+            // decide which parts are only yours.
+            "FROM messages",
+            "FROM dm_messages",
+            "FROM tasks",
+            // The id lives inside E2EE ciphertext, so the server cannot tell
+            // which blobs other people can still read — SECURITY_MODEL.md §11.
+            "FROM uploaded_files",
+            // Erasing these would let an account delete the record of what it
+            // did; the actor is anonymised instead (INFO-11).
+            "FROM audit_log",
+            "FROM reports",
+            // The device ROWS stay, revoked: device_shares reference them, and
+            // a deleted row would let the same machine simply re-enrol.
+            "DELETE FROM devices",
+            // A hard user delete is the thing the tombstone exists to avoid.
+            "DELETE FROM users",
+        ] {
+            assert!(
+                !ACCOUNT_DELETE_CLEANUP.iter().any(|q| q.contains(forbidden)),
+                "account deletion must not run `{forbidden}` — see docs/SECURITY_MODEL.md §11"
+            );
+        }
+    }
+
+    /// Every statement is scoped to ONE user. An unscoped statement in this list
+    /// would empty the table for everybody on the first deletion.
+    #[test]
+    fn every_statement_is_scoped_to_the_deleted_user() {
+        for q in ACCOUNT_DELETE_CLEANUP {
+            assert!(q.contains("$1"), "unscoped statement in the cleanup list: {q}");
+            assert!(
+                q.contains("WHERE"),
+                "a statement with no WHERE clause would hit every row: {q}"
+            );
+        }
     }
 }

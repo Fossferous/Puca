@@ -211,5 +211,25 @@ console.log(`\n=== M-b: StreamStarted must reach channel VIEWERS only, not every
     check('a VIEW-denied member does NOT receive StreamStarted', !wsO.__got, 'outsider received the leak');
 }
 
+console.log(`\n=== L8-AUTHZ-6 — the default-server auto-join endpoint is GONE ===`);
+{
+    // `GET /servers/default` took any valid JWT and inserted a server_members
+    // row for a hardcoded well-known server id, with no invite and NO BAN
+    // CHECK — while both real join paths check bans. A user banned from that
+    // server rejoined by calling this. The route is deleted, so it must 404,
+    // and calling it must not create a membership row.
+    const banned = mkUser('defban');
+    const before = psql1(`SELECT count(*) FROM server_members WHERE user_id = ${banned.id}`);
+    const res = await api('GET', '/servers/default', null, banned.t);
+    check('GET /servers/default is 404', res.status === 404, `status=${res.status}`);
+    const after = psql1(`SELECT count(*) FROM server_members WHERE user_id = ${banned.id}`);
+    check('and it joined the caller to nothing', after === before, `before=${before} after=${after}`);
+
+    // Positive control for the harness: the token really does authenticate, so
+    // the 404 above is the ROUTE being absent and not a rejected credential.
+    const alive = await api('GET', '/servers', null, banned.t);
+    check('the same token is accepted on a route that exists', alive.status === 200,
+        `status=${alive.status}`);
+}
 console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);

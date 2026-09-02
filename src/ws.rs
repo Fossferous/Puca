@@ -31,6 +31,17 @@ pub struct WsQuery {
     /// replacement is `Sec-WebSocket-Protocol` (see `bearer_from_subprotocol`),
     /// which no proxy logs by default. Remove this once no shipped client sends
     /// it — until then, dropping it would sign out every existing install.
+    ///
+    /// RETIREMENT PLAN (L8-XPORT-5). As of 0.9.0 every client in this tree sends
+    /// the subprotocol: the browser/desktop/mobile app (websocket.ts), the
+    /// Android delivery socket (NativeDelivery.java) and, new in this release,
+    /// both native background services (puca-service's link.rs and puca-waker's
+    /// net.rs). So this field now serves only installs that have not updated.
+    /// It can be deleted a full release cycle after 0.9.0 has gone out — NOT in
+    /// the same one. The waker is the reason for the caution: an un-updated
+    /// waker that silently stops reconnecting means missed wake doorbells, i.e.
+    /// messages that never arrive on a sleeping machine. "Update to fix" is
+    /// acceptable here; a flag day is not.
     #[serde(default)]
     pub token: Option<String>,
     /// `delivery` marks a background notification socket (the phone's native
@@ -723,11 +734,30 @@ pub(crate) async fn user_shows_online(state: &Arc<AppState>, user_id: UserId) ->
         .unwrap_or(true)
 }
 
+/// The fail-closed fallback for [`hidden_members`]: on a DB error EVERY id is
+/// treated as hidden.
+///
+/// Extracted so the DIRECTION is unit-testable without a pool. The previous
+/// `.unwrap_or_default()` returned an EMPTY set and its comment called that
+/// "fails CLOSED to 'nobody is hidden'" — a contradiction in terms. "Nobody is
+/// hidden" is the OPEN direction: the caller's `retain` becomes a no-op and the
+/// full roster ships, revealing every user who asked to appear offline and
+/// which channel they had open.
+fn hidden_on_error(ids: &[UserId]) -> std::collections::HashSet<UserId> {
+    ids.iter().copied().collect()
+}
+
 /// Which of `ids` have presence hidden (`show_online_status = false`)? One
 /// query for the whole set — the per-user `user_shows_online` would be an N+1
-/// against a room roster. Fails CLOSED to "nobody is hidden" on a DB error, the
-/// same direction as `user_shows_online`: presence visibility is the column
-/// default, and a transient error must not silently blank out every roster.
+/// against a room roster.
+///
+/// Fails CLOSED (everyone treated as hidden) on a DB error: a transient error
+/// must reveal nobody. The caller keeps its `m.id == user_id ||` clause, so the
+/// joining user still sees themselves; the rest of the roster arrives empty and
+/// the next join repopulates it. That degraded state is transient and
+/// self-healing, and is strictly preferable to leaking a user who asked to
+/// appear offline. `user_shows_online` above still fails OPEN — deliberately,
+/// and it says so: it gates a connect, not a roster.
 async fn hidden_members(
     state: &Arc<AppState>,
     ids: &[UserId],
@@ -735,7 +765,7 @@ async fn hidden_members(
     if ids.is_empty() {
         return std::collections::HashSet::new();
     }
-    sqlx::query_as::<_, (i64,)>(
+    match sqlx::query_as::<_, (i64,)>(
         // id is INT4 but `ids` binds as bigint[]; cast to match, mirroring the
         // proven `id::bigint = ANY($2)` pattern in broadcast_perms_changed_and_evict.
         "SELECT id::bigint FROM users WHERE id::bigint = ANY($1) AND show_online_status = FALSE",
@@ -743,8 +773,13 @@ async fn hidden_members(
     .bind(ids)
     .fetch_all(&state.pool)
     .await
-    .map(|rows| rows.into_iter().map(|(id,)| id).collect())
-    .unwrap_or_default()
+    {
+        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
+        Err(e) => {
+            tracing::warn!("hidden_members failed, treating the whole roster as hidden: {e:?}");
+            hidden_on_error(ids)
+        }
+    }
 }
 
 /// Does joining/leaving `room_id` announce the user to the other occupants?
@@ -1070,6 +1105,48 @@ fn parse_voice_room(room_id: &str) -> Option<i64> {
     room_id
         .strip_prefix("voice_")
         .and_then(|s| s.parse::<i64>().ok())
+}
+
+/// The channel behind a room id, whichever of the two legal shapes it is —
+/// `channel_<id>` (text) or `voice_<id>` (voice/stream). `None` means the id is
+/// not a room this server recognises AT ALL, which is now a refusal at JoinRoom
+/// rather than a fall-through that mints an arbitrary room (L8-AUTHZ-5).
+///
+/// Named so the join gate and the mutate gate resolve through the SAME function:
+/// they disagreed before (join covered both shapes, mutate covered voice only),
+/// and a gate pair that can drift is a gate pair that will.
+fn room_channel_id(room_id: &str) -> Option<i64> {
+    parse_channel_room(room_id).or_else(|| parse_voice_room(room_id))
+}
+
+/// What a WS handler returns when a database call fails.
+///
+/// `handle_message` returns `Result<(), String>` and the socket loop sends that
+/// string straight back as `ServerMessage::Error { message }`. Two sites folded
+/// raw sqlx errors in via `.map_err(|e| e.to_string())?`, which puts table and
+/// constraint names — schema reconnaissance — on the wire. Every OTHER `Err` in
+/// `handle_message` is a fixed literal (enumerated when this was written), so
+/// fixing the producers makes the boundary safe without classifying errors
+/// there; a `WsError { Client, Internal }` enum would be the fuller answer and
+/// is not worth the churn while the producer set stays this small.
+///
+/// `ctx` names the call site for the log and is NEVER sent.
+fn ws_db_error(ctx: &str, e: sqlx::Error) -> String {
+    tracing::error!("ws db error [{ctx}]: {e}");
+    "internal error".to_string()
+}
+
+/// The refusal message a JoinRoom for an unrecognised room id gets. Identical
+/// for every bad shape — it tells a prober nothing.
+const UNKNOWN_ROOM: &str = "unknown room";
+
+/// The room a JoinRoom may target, or the refusal. THIS is the L8-AUTHZ-5 gate:
+/// `Err` for anything that is not `channel_<id>` / `voice_<id>`, so the handler
+/// cannot fall through to `state.join_room` with an arbitrary string. Written as
+/// a `Result`-returning function rather than an `if let` in the arm so the
+/// refusal is the function's own contract and a unit test can hold it.
+fn join_target(room_id: &str) -> Result<i64, &'static str> {
+    room_channel_id(room_id).ok_or(UNKNOWN_ROOM)
 }
 
 /// True if `a` and `b` are both currently joined to the same in-memory VOICE
@@ -1424,6 +1501,34 @@ async fn can_mutate_room(state: &Arc<AppState>, room_id: &str, user_id: UserId) 
 pub const SHARE_DENIED: &str = "You don't have permission to share your screen in this channel";
 pub const CAMERA_DENIED: &str = "You don't have permission to turn on your camera in this channel";
 
+/// The channel `can_mutate_room_with` must resolve permissions against, and the
+/// EXTRA media bit that applies there — or `None` for a room with no channel
+/// behind it.
+///
+/// L8-AUTHZ-4: this used to be `parse_voice_room` alone, so every NON-voice room
+/// fell through to membership only. The one non-voice caller is `Typing`, and
+/// the residual was a stale typing indicator surviving the window between a
+/// permission change and `broadcast_perms_changed_and_evict`'s sweep — or a kick
+/// that never runs one. Resolving BOTH shapes makes the mutate gate agree with
+/// the join gate, at the cost of one indexed lookup per typing frame (already
+/// metered by the per-connection token bucket).
+///
+/// `extra` (STREAM / VIDEO) is voice semantics and is dropped for a text room:
+/// a text channel has no media to gate. Every caller that passes one passes a
+/// voice room, but that is dropped explicitly rather than relied upon.
+fn mutate_gate_target(
+    room_id: &str,
+    extra: Option<Permissions>,
+) -> Option<(i64, Option<Permissions>)> {
+    let cid = room_channel_id(room_id)?;
+    let extra = if parse_voice_room(room_id).is_some() {
+        extra
+    } else {
+        None
+    };
+    Some((cid, extra))
+}
+
 /// As [`can_mutate_room`], plus an optional EXTRA permission bit the caller must
 /// hold on the voice room's channel — used to gate the specific media a member
 /// is starting (STREAM for a screen share, VIDEO for a camera), which are
@@ -1447,7 +1552,7 @@ async fn can_mutate_room_with(
     if !is_member {
         return false;
     }
-    if let Some(cid) = parse_voice_room(room_id) {
+    if let Some((cid, extra)) = mutate_gate_target(room_id, extra) {
         return matches!(
             get_user_channel_permissions(&state.pool, cid, user_id).await,
             ChannelPermAccess::Allowed { perms, .. }
@@ -1455,6 +1560,8 @@ async fn can_mutate_room_with(
                     && extra.is_none_or(|bit| perms.has(bit))
         );
     }
+    // Unreachable for any room a client can join (JoinRoom refuses every id that
+    // is not `channel_`/`voice_`); kept as the defensive floor.
     true
 }
 
@@ -1632,30 +1739,50 @@ async fn handle_message(
             // rejected as before. DM rooms are governed elsewhere. The error is
             // deliberately identical for not-found / non-member / VIEW-denied
             // so the channel's existence is not leaked.
-            if let Some(cid) = parse_channel_room(&room_id).or_else(|| parse_voice_room(&room_id)) {
-                // A VOICE room additionally requires CONNECT: it is an editable
-                // role bit ("Join voice channels") that nothing enforced, so a
-                // member explicitly denied CONNECT could still join the call.
-                // Text rooms need VIEW only — CONNECT is a voice permission.
-                let need_connect = parse_voice_room(&room_id).is_some();
-                let allowed = matches!(
-                    get_user_channel_permissions(&state.pool, cid, user_id).await,
-                    ChannelPermAccess::Allowed { perms, .. }
-                        if perms.has(Permissions::VIEW_CHANNEL)
-                            && (!need_connect || perms.has(Permissions::CONNECT))
+            //
+            // The gate is EXHAUSTIVE, not an allowlist-by-omission (L8-AUTHZ-5).
+            // Anything that was neither shape used to fall through and create a
+            // room in the global map, which handed two authenticated clients who
+            // agreed on a made-up id a server-mediated presence channel: joining
+            // one returns a `RoomJoined` roster, so a joiner learned the
+            // usernames of everyone else who guessed the same string. Verified
+            // before flipping this that no shipped client sends another shape —
+            // the only senders are `channel_${id}` (Chat.tsx, ChecklistBody.tsx),
+            // `voice_${id}` (Chat.tsx → VoicePanel), and websocket.ts's onopen
+            // replay, which re-sends only ids it was given; the two native crates
+            // send no JoinRoom at all. `state.join_room` has exactly one caller,
+            // this arm, so nothing server-side conjures another namespace either.
+            let cid = join_target(&room_id).map_err(|refusal| {
+                tracing::warn!(
+                    "JoinRoom refused for user {} ({}): unknown room shape {:?}",
+                    user_id,
+                    username,
+                    room_id
                 );
-                if !allowed {
-                    // Warn-level: a legitimate client rejoining after reconnect
-                    // that lands here is silently cut off from live channel
-                    // traffic — this must be visible in prod logs.
-                    tracing::warn!(
-                        "JoinRoom rejected for user {} ({}): no VIEW/CONNECT access for room {}",
-                        user_id,
-                        username,
-                        room_id
-                    );
-                    return Err("Not a member of this channel's server".to_string());
-                }
+                refusal.to_string()
+            })?;
+            // A VOICE room additionally requires CONNECT: it is an editable
+            // role bit ("Join voice channels") that nothing enforced, so a
+            // member explicitly denied CONNECT could still join the call.
+            // Text rooms need VIEW only — CONNECT is a voice permission.
+            let need_connect = parse_voice_room(&room_id).is_some();
+            let allowed = matches!(
+                get_user_channel_permissions(&state.pool, cid, user_id).await,
+                ChannelPermAccess::Allowed { perms, .. }
+                    if perms.has(Permissions::VIEW_CHANNEL)
+                        && (!need_connect || perms.has(Permissions::CONNECT))
+            );
+            if !allowed {
+                // Warn-level: a legitimate client rejoining after reconnect
+                // that lands here is silently cut off from live channel
+                // traffic — this must be visible in prod logs.
+                tracing::warn!(
+                    "JoinRoom rejected for user {} ({}): no VIEW/CONNECT access for room {}",
+                    user_id,
+                    username,
+                    room_id
+                );
+                return Err("Not a member of this channel's server".to_string());
             }
 
             // VOICE EXCLUSIVITY: one voice room per USER across all devices.
@@ -2326,7 +2453,7 @@ async fn handle_message(
             .bind(user_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ws_db_error("device_attest lookup", e))?;
 
             let Some((sign_pub,)) = row else {
                 tracing::debug!("device attest: unknown/revoked device {}", device_id);
@@ -2457,7 +2584,7 @@ async fn handle_message(
             .bind(user_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ws_db_error("device_session host lookup", e))?;
             // One refusal for "no such device", "someone else's device" and
             // "no grant": a probing client must not learn which it was.
             let Some((host_owner, share_caps)) = host_row else {
@@ -4009,5 +4136,212 @@ mod ws_bearer_subprotocol_tests {
         let echoed = "bearer";
         assert_ne!(echoed, parsed);
         assert!(!echoed.contains(tok));
+    }
+}
+
+#[cfg(test)]
+mod hidden_members_fail_direction_tests {
+    use super::{hidden_on_error, UserId};
+    use crate::protocol::UserInfo;
+
+    /// The whole point of the fix: an error must yield EVERY id, not none.
+    #[test]
+    fn an_error_treats_the_entire_roster_as_hidden() {
+        let ids: Vec<UserId> = vec![7, 9, 11];
+        let hidden = hidden_on_error(&ids);
+        assert_eq!(hidden.len(), 3, "every id must be hidden on a DB error");
+        for id in &ids {
+            assert!(hidden.contains(id), "{id} must be treated as hidden");
+        }
+        assert!(hidden_on_error(&[]).is_empty(), "no ids, nothing to hide");
+    }
+
+    /// Positive control for the caller's side of the contract: with the
+    /// fail-closed set, the roster `RoomJoined` would carry is the joiner ALONE
+    /// — not the full membership. Reproduces the caller's `retain` verbatim, so
+    /// restoring `.unwrap_or_default()` (an empty set) makes this assertion
+    /// fail: the retain becomes a no-op and all three members survive.
+    #[test]
+    fn the_roster_the_caller_would_send_degrades_to_the_joiner_only() {
+        let joiner: UserId = 7;
+        let mut members = vec![
+            UserInfo::new(7, "me".to_string()),
+            UserInfo::new(9, "them".to_string()),
+            UserInfo::new(11, "other".to_string()),
+        ];
+        let ids: Vec<UserId> = members.iter().map(|m| m.id).collect();
+        let hidden = hidden_on_error(&ids);
+        members.retain(|m| m.id == joiner || !hidden.contains(&m.id));
+        assert_eq!(
+            members.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![joiner],
+            "a DB error must leak nobody but the joining user"
+        );
+    }
+
+    /// And the healthy path still hides only who asked to be hidden — the
+    /// fail-closed direction must not be the everyday behaviour.
+    #[test]
+    fn the_ok_path_hides_only_the_flagged_ids() {
+        // What the Ok arm does with rows the query returned.
+        let rows: Vec<(i64,)> = vec![(9,)];
+        let hidden: std::collections::HashSet<UserId> =
+            rows.into_iter().map(|(id,)| id).collect();
+        let mut members = vec![
+            UserInfo::new(7, "me".to_string()),
+            UserInfo::new(9, "them".to_string()),
+            UserInfo::new(11, "other".to_string()),
+        ];
+        members.retain(|m| m.id == 7 || !hidden.contains(&m.id));
+        assert_eq!(members.iter().map(|m| m.id).collect::<Vec<_>>(), vec![7, 11]);
+    }
+}
+
+#[cfg(test)]
+mod ws_error_leak_tests {
+    use super::ws_db_error;
+
+    /// L8-ERR-1. `handle_message` returns `Result<(), String>` and the socket
+    /// loop sends that string verbatim as `ServerMessage::Error`. Two sites
+    /// folded raw sqlx errors in with `.map_err(|e| e.to_string())?`, putting
+    /// table and constraint names on the wire. The replacement must return a
+    /// FIXED token for every error shape.
+    #[test]
+    fn a_db_error_never_reaches_the_wire() {
+        let cases = [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::ColumnNotFound("sign_pub".into()),
+            sqlx::Error::Protocol("relation \"devices\" does not exist".into()),
+        ];
+        for e in cases {
+            // Capture what the raw string WOULD have been, so this test also
+            // proves the leak was real rather than only that the new string is
+            // tidy.
+            let raw = e.to_string();
+            let sent = ws_db_error("test", e);
+            assert_eq!(sent, "internal error", "the wire message must be fixed");
+            assert!(
+                !sent.contains(&raw) || raw == sent,
+                "the raw error text must not survive: {raw}"
+            );
+            let lowered = sent.to_lowercase();
+            for word in ["sqlx", "relation", "column", "constraint", "devices", "postgres"] {
+                assert!(!lowered.contains(word), "leaked {word:?}: {sent}");
+            }
+        }
+    }
+
+    /// Positive control for the assertion above: the RAW text of at least one of
+    /// those errors really does carry SQL vocabulary, so "contains no SQL words"
+    /// is a property of the mapping and not of sqlx being coy.
+    #[test]
+    fn the_raw_error_really_would_have_leaked() {
+        let raw = sqlx::Error::ColumnNotFound("sign_pub".into()).to_string();
+        assert!(
+            raw.to_lowercase().contains("column") || raw.contains("sign_pub"),
+            "expected the raw error to name the column: {raw}"
+        );
+        let raw = sqlx::Error::Protocol("relation \"devices\" does not exist".into()).to_string();
+        assert!(raw.contains("relation"), "expected the raw error to leak: {raw}");
+    }
+}
+
+#[cfg(test)]
+mod room_id_gate_tests {
+    use super::{
+        join_target, mutate_gate_target, parse_channel_room, parse_voice_room, room_channel_id,
+        Permissions,
+    };
+
+    /// L8-AUTHZ-5. `room_channel_id` is the whole gate: `None` is a REFUSAL at
+    /// JoinRoom now, so anything that is not one of the two canonical shapes
+    /// must resolve to None. Before the fix these strings fell through the
+    /// `if let` and minted a room in the global map.
+    #[test]
+    fn only_the_two_canonical_shapes_resolve() {
+        for bad in [
+            "dm_1",             // a shape the server never broadcasts to
+            "",                 // empty
+            "channel_",         // prefix with no id
+            "voice_",           // ditto
+            "CHANNEL_1",        // case matters
+            "Voice_1",
+            "channel_1x",       // trailing junk
+            "channel_ 1",
+            "room1",            // the signaling test's ad-hoc name
+            "channel_1/2",
+            "lobby",
+        ] {
+            assert!(
+                room_channel_id(bad).is_none(),
+                "{bad:?} must not resolve to a channel — JoinRoom refuses it"
+            );
+        }
+
+        assert_eq!(room_channel_id("channel_1"), Some(1));
+        assert_eq!(room_channel_id("voice_1"), Some(1));
+        assert_eq!(room_channel_id("channel_987654321"), Some(987654321));
+        // Negative ids parse as i64 but no channel has one; they reach the
+        // permission resolver, which answers NotFound. That is the intended
+        // path — refusal by authorization, not by string shape.
+        assert_eq!(room_channel_id("voice_-3"), Some(-3));
+    }
+
+    /// The two shapes stay DISTINCT: `same_voice_room` and the presence carve-out
+    /// both key off `parse_voice_room` alone, so a text room must never answer it.
+    /// The gate itself, as the handler calls it: `join_target` REFUSES every id
+    /// that is not one of the two shapes, and the two shapes reach the
+    /// permission resolver with a channel id. Reverting the gate — making this
+    /// function hand back a channel (or the handler fall through) — turns this
+    /// test red, which is what makes it worth having.
+    #[test]
+    fn join_target_refuses_every_shape_the_server_does_not_own() {
+        for bad in ["dm_1", "", "channel_", "voice_", "CHANNEL_1", "room1", "lobby"] {
+            assert_eq!(
+                join_target(bad),
+                Err("unknown room"),
+                "JoinRoom must refuse {bad:?}"
+            );
+        }
+        assert_eq!(join_target("channel_1"), Ok(1));
+        assert_eq!(join_target("voice_1"), Ok(1));
+    }
+
+    /// L8-AUTHZ-4. A TEXT room must now resolve a channel, so the mutate gate
+    /// re-checks VIEW on it exactly as the join gate does. Reverting
+    /// `mutate_gate_target` to `parse_voice_room` alone makes the first
+    /// assertion red — which is the point of asserting it here rather than on
+    /// `room_channel_id`, which was always both-shapes.
+    #[test]
+    fn the_mutate_gate_resolves_text_rooms_too_and_scopes_extra_to_voice() {
+        assert_eq!(
+            mutate_gate_target("channel_5", None),
+            Some((5, None)),
+            "a text room must reach the permission resolver"
+        );
+        // STREAM/VIDEO are voice semantics: dropped for a text room, kept for voice.
+        assert_eq!(
+            mutate_gate_target("channel_5", Some(Permissions::STREAM)),
+            Some((5, None)),
+            "a text channel has no media bit to enforce"
+        );
+        assert_eq!(
+            mutate_gate_target("voice_5", Some(Permissions::STREAM)),
+            Some((5, Some(Permissions::STREAM))),
+        );
+        assert_eq!(mutate_gate_target("voice_5", None), Some((5, None)));
+        // No channel behind it → the defensive membership-only floor.
+        assert_eq!(mutate_gate_target("dm_1", None), None);
+        assert_eq!(mutate_gate_target("", Some(Permissions::VIDEO)), None);
+    }
+
+    #[test]
+    fn a_text_room_is_not_a_voice_room() {
+        assert!(parse_voice_room("channel_5").is_none());
+        assert!(parse_channel_room("voice_5").is_none());
+        assert_eq!(parse_channel_room("channel_5"), Some(5));
+        assert_eq!(parse_voice_room("voice_5"), Some(5));
     }
 }
