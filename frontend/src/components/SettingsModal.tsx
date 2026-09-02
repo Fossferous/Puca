@@ -4,7 +4,8 @@ import { unblockUser, type BlockedUser } from '../api/blocking';
 import { autostartSupported, isAutostartEnabled, setAutostart } from '../api/autostart';
 import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
-import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout } from '../api/auth';
+import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout, regenerateRecoveryCode } from '../api/auth';
+import { showRecoveryCode } from '../api/recoveryPrompt';
 import { currentAppVersion } from '../api/appVersion';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -143,8 +144,8 @@ function AndroidNotificationHealth({ wantsNotifications, backgroundDelivery }: {
                         <span className="option-hint">
                             {canPrompt
                                 ? 'Android has not been asked for permission yet, or the ask was dismissed.'
-                                : 'Notifications are turned off for Puca at the system level, so nothing it posts is shown. Android stops asking after two refusals — it can only be re-enabled from the system settings screen.'}
-                            {linkFailed && ' Open Android Settings → Apps → Puca → Notifications and allow them.'}
+                                : 'Notifications are turned off for Púca at the system level, so nothing it posts is shown. Android stops asking after two refusals — it can only be re-enabled from the system settings screen.'}
+                            {linkFailed && ' Open Android Settings → Apps → Púca → Notifications and allow them.'}
                         </span>
                     </>
                 ) : (
@@ -153,9 +154,9 @@ function AndroidNotificationHealth({ wantsNotifications, backgroundDelivery }: {
                         <span className="option-hint">
                             With the screen off, Android pauses this app's network to
                             save battery — the connection that delivers notifications
-                            starves exactly when you'd need it. Exempting Puca is
+                            starves exactly when you'd need it. Exempting Púca is
                             what makes screen-off delivery reliable.
-                            {batteryAskFailed && ' This phone hides that dialog: open Android Settings → Apps → Puca → Battery and choose Unrestricted.'}
+                            {batteryAskFailed && ' This phone hides that dialog: open Android Settings → Apps → Púca → Battery and choose Unrestricted.'}
                         </span>
                     </>
                 )}
@@ -325,6 +326,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const [pwConfirm, setPwConfirm] = useState('');
     const [pwStatus, setPwStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [pwError, setPwError] = useState('');
+    // Regenerate recovery code: armed ⇒ the password field + warning show.
+    const [rcArmed, setRcArmed] = useState(false);
+    const [rcPassword, setRcPassword] = useState('');
+    const [rcStatus, setRcStatus] = useState<'idle' | 'working' | 'error'>('idle');
+    const [rcError, setRcError] = useState('');
 
     // Change-email state
     const [emailEditing, setEmailEditing] = useState(false);
@@ -382,6 +388,25 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         } catch (err) {
             setDeleteError(err instanceof Error ? err.message : 'Failed to delete account.');
             setDeleteStatus('error');
+        }
+    };
+
+    const handleRegenerateRecoveryCode = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!rcPassword || rcStatus === 'working') return;
+        setRcStatus('working');
+        setRcError('');
+        try {
+            const code = await regenerateRecoveryCode(username, rcPassword);
+            // Shown by RecoveryCodeModal (mounted in the authed layout, above
+            // this modal), acknowledge-gated like the first one.
+            showRecoveryCode(code);
+            setRcArmed(false);
+            setRcPassword('');
+            setRcStatus('idle');
+        } catch (err) {
+            setRcError(err instanceof Error ? err.message : 'Could not generate a new recovery code.');
+            setRcStatus('error');
         }
     };
 
@@ -1244,7 +1269,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             value={email}
                                             disabled={!emailEditing}
                                             onChange={(e) => setEmail(e.target.value)}
-                                            placeholder="Add an email for account recovery"
+                                            placeholder="Add an email for verification and notifications"
                                         />
                                         <button
                                             className="secondary-btn"
@@ -1313,6 +1338,52 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <div className="password-change-error">{pwError}</div>
                                         )}
                                     </form>
+                                </div>
+
+                                <h3>Recovery code</h3>
+                                <div className="settings-card">
+                                    <p className="settings-hint">
+                                        Your 12-word recovery code is the only way to reset a forgotten
+                                        password without losing your encrypted messages — an e-mail reset
+                                        cannot do that. If you never saved it, or think someone else has
+                                        seen it, generate a new one. <strong>The old code stops working the
+                                        moment the new one is created.</strong>
+                                    </p>
+                                    {!rcArmed ? (
+                                        <button className="secondary-btn" onClick={() => setRcArmed(true)}>
+                                            Regenerate recovery code
+                                        </button>
+                                    ) : (
+                                        <form className="password-change-form" onSubmit={handleRegenerateRecoveryCode} autoComplete="off">
+                                            <input
+                                                type="password"
+                                                placeholder="Current password"
+                                                value={rcPassword}
+                                                onChange={e => setRcPassword(e.target.value)}
+                                                autoComplete="current-password"
+                                                required
+                                            />
+                                            {rcStatus === 'error' && rcError && (
+                                                <div className="password-change-error">{rcError}</div>
+                                            )}
+                                            <div className="settings-actions">
+                                                <button
+                                                    type="button"
+                                                    className="secondary-btn"
+                                                    onClick={() => { setRcArmed(false); setRcPassword(''); setRcStatus('idle'); }}
+                                                >
+                                                    Cancel
+                                                </button>
+                                                <button
+                                                    type="submit"
+                                                    className="danger-btn"
+                                                    disabled={rcStatus === 'working' || !rcPassword}
+                                                >
+                                                    {rcStatus === 'working' ? 'Generating…' : 'Retire the old code and show a new one'}
+                                                </button>
+                                            </div>
+                                        </form>
+                                    )}
                                 </div>
 
                                 <h3>Sessions</h3>
@@ -1554,7 +1625,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <span className="option-hint">
                                                 Press this anytime to take back control — it works even while a
                                                 controlled game has focus{isTauri() ? '' : ' (desktop app only)'}. Esc also
-                                                works whenever the Puca window is focused.
+                                                works whenever the Púca window is focused.
                                             </span>
                                         </div>
                                         {bindControl('remoteControlKillKey', 'Click, then press the key combo you want')}
@@ -1618,7 +1689,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                             <div className="settings-section">
                                 <h3>Appearance</h3>
                                 <p className="settings-description">
-                                    Customize how Puca looks.
+                                    Customize how Púca looks.
                                 </p>
                                 <div className="settings-card">
                                     <div className="settings-option theme-picker-option">
@@ -1684,7 +1755,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                             <div className="settings-section">
                                 <h3>Accessibility</h3>
                                 <p className="settings-description">
-                                    Make Puca easier to see, read and use.
+                                    Make Púca easier to see, read and use.
                                 </p>
                                 <div className="settings-card">
                                     <div className="settings-option">
@@ -1737,7 +1808,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Enable Animations</label>
                                             <span className="option-hint">
                                                 Turn off to stop all animated effects and transitions.
-                                                Puca also honours your system's reduced-motion setting.
+                                                Púca also honours your system's reduced-motion setting.
                                             </span>
                                         </div>
                                         <input
@@ -1813,7 +1884,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="option-info">
                                             <label>Notifications</label>
                                             <span className="option-hint">
-                                                Notify for messages arriving while Puca is open in
+                                                Notify for messages arriving while Púca is open in
                                                 the background. Fired by this phone's own connection —
                                                 nothing arrives once the app is closed.
                                             </span>
@@ -1877,7 +1948,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="option-info">
                                             <label>Updates on this phone</label>
                                             <span className="option-hint">
-                                                Puca updates itself here automatically: each time it
+                                                Púca updates itself here automatically: each time it
                                                 starts, it fetches the current version from your
                                                 server and applies it before the app opens.
                                                 <strong> There is no switch for this</strong>, and it
@@ -1897,7 +1968,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="option-info">
                                             <label>Deliver in the background</label>
                                             <span className="option-hint">
-                                                Keep Puca's own connection alive after you leave
+                                                Keep Púca's own connection alive after you leave
                                                 the app, so messages still come through. Shows a
                                                 "Connected" notification and uses some battery. Needs
                                                 the current APK. Everything you receive travels over
@@ -1931,7 +2002,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 "Allow all the time" and location on; a quiet "Location
                                                 reminders active" notification shows while this phone
                                                 watches, and Android will periodically note that
-                                                Puca used location in the background. Needs the
+                                                Púca used location in the background. Needs the
                                                 current APK.
                                             </span>
                                         </div>
@@ -2000,7 +2071,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="option-info">
                                             <label>Recent chats on the app icon</label>
                                             <span className="option-hint">
-                                                Long-pressing Puca's icon lists your most recent
+                                                Long-pressing Púca's icon lists your most recent
                                                 conversations. Their names are visible on the launcher
                                                 without opening the app — turn this off to show only
                                                 the fixed shortcuts. Needs the current APK.
@@ -2034,7 +2105,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 <span className="option-hint">
                                                     Fires one now, so you can check notifications work
                                                     without needing someone to message you. Notifications
-                                                    only arrive while Puca is running{isTauri()
+                                                    only arrive while Púca is running{isTauri()
                                                         ? ' — see Advanced → Desktop App for tray behaviour.'
                                                         : '.'}
                                                 </span>
@@ -2421,7 +2492,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 inverse — you transmit until you hold the key. The mute
                                                 button always wins. On the desktop app the keys work
                                                 system-wide during a call — even while a game has focus;
-                                                in the browser they work while Puca is focused.
+                                                in the browser they work while Púca is focused.
                                             </span>
                                         </div>
                                         <select
@@ -2610,7 +2681,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 <div className="option-info">
                                                     <label>Keep running in the tray when closed</label>
                                                     <span className="option-hint">
-                                                        Notifications only reach you while Puca is running.
+                                                        Notifications only reach you while Púca is running.
                                                         Turn this off and closing the window quits completely.
                                                         Quit is always available from the tray icon.
                                                     </span>
@@ -2625,7 +2696,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 <div className="option-info">
                                                     <label>Install updates automatically</label>
                                                     <span className="option-hint">
-                                                        When a new version is out, Puca installs it while it
+                                                        When a new version is out, Púca installs it while it
                                                         starts up — before you sign in — then opens on the new
                                                         version. Off by default: with this off you get a banner
                                                         instead, and an update never interrupts a call or a
@@ -2641,9 +2712,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             {autostartSupported() && (
                                                 <div className="settings-option">
                                                     <div className="option-info">
-                                                        <label>Start Puca when I sign in</label>
+                                                        <label>Start Púca when I sign in</label>
                                                         <span className="option-hint">
-                                                            Launches Puca in the tray at sign-in, so notifications
+                                                            Launches Púca in the tray at sign-in, so notifications
                                                             reach you without opening it first. Off by default.
                                                             {autostartError && (
                                                                 <span style={{ color: 'var(--danger, #f38ba8)', display: 'block' }}>
@@ -2768,7 +2839,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 <label>Ask where to save files</label>
                                                 <span className="option-hint">
                                                     Choose a location each time a received file or an
-                                                    attachment is saved. Off, everything goes to the Puca
+                                                    attachment is saved. Off, everything goes to the Púca
                                                     folder in Downloads.
                                                 </span>
                                             </div>
@@ -2823,7 +2894,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <span className="app-version">{appVersion || 'Loading...'}</span>
                                     </div>
                                     <p className="settings-hint" style={{ marginTop: '8px' }}>
-                                        © 2025 Puca • Built with <HeartIcon title="love" />
+                                        © 2025 Púca • Built with <HeartIcon title="love" />
                                     </p>
                                 </div>
                             </div>

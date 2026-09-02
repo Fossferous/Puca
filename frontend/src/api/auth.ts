@@ -1,5 +1,5 @@
 /**
- * SRP Authentication Module for Puca
+ * SRP Authentication Module for Púca
  * 
  * Custom SRP-6a implementation compatible with the Rust srp crate (v0.6.0).
  * 
@@ -227,7 +227,7 @@ import {
     computeRecoveryProof,
     type PwKdf,
 } from './e2ee';
-import { setPendingRecoveryCode } from './recoveryPrompt';
+import { setPendingRecoveryCode, markRecoveryCodeUnacknowledged } from './recoveryPrompt';
 import { clearChannelKeyCache } from './channelKeys';
 import { resetIceConfigCache } from './iceConfig';
 import { clearBlobCache } from './attachments';
@@ -270,8 +270,10 @@ export async function register(username: string, password: string, inviteCode?: 
     });
 
     setActiveIdentity(identity);
-    // Surfaced by RecoveryCodeModal after the user logs in.
+    // Surfaced by RecoveryCodeModal after the user logs in. The marker
+    // outlives a reload; the code itself deliberately does not.
     setPendingRecoveryCode(recoveryCode);
+    markRecoveryCodeUnacknowledged();
 }
 
 /**
@@ -350,7 +352,16 @@ async function srpExchange(username: string, password: string): Promise<string> 
  * session, and `change_password` invalidates every token immediately after.
  */
 async function proveCurrentPassword(username: string, password: string): Promise<void> {
-    await srpExchange(username, password);
+    await proofImpl(username, password);
+}
+
+/** The SRP round-trip proveCurrentPassword runs. Swappable ONLY by tests:
+ *  a unit test cannot answer step2 with a valid server proof (that needs the
+ *  server's half of SRP), and the flows that prove-then-write must still be
+ *  exercised end to end — see tests/recoveryRegenerate.test.ts. */
+let proofImpl: (username: string, password: string) => Promise<unknown> = srpExchange;
+export function __setProofImplForTest(fn: ((u: string, p: string) => Promise<unknown>) | null): void {
+    proofImpl = fn ?? srpExchange;
 }
 
 /** login() refuses a key_version < 3 account. Its own error type so the
@@ -414,11 +425,23 @@ export async function login(username: string, password: string): Promise<string>
     }
 
     localStorage.setItem('auth_token', token);
+    await restoreIdentityAfterLogin(username, password);
+    return token;
+}
 
-    // Restore the E2EE identity. v3: unwrap the random seed with the password.
-    // v2 (legacy): derive the old password-based seed, then transparently
-    // migrate to v3 — freeze that SAME seed under password + a new recovery
-    // code, so no history is lost and future resets become recoverable.
+/**
+ * Restore the E2EE identity for a session whose token is already stored:
+ * v3 unwraps the random seed with the password.
+ *
+ * Every failure except a retired key format is SWALLOWED — the session
+ * stays — because dropping a sign-in over a flaky GET /keys/wrap would be
+ * worse. But a swallowed failure used to be silent: the user was fully
+ * "logged in" with no identity and found out when a send was refused. It is
+ * now recorded (persisted, so a reload does not forget it) and the authed
+ * layout shows IdentityBanner with a retry that re-runs this with the
+ * password. Exported so that path can be tested without the SRP half.
+ */
+export async function restoreIdentityAfterLogin(username: string, password: string): Promise<void> {
     try {
         const wrap: {
             key_version: number;
@@ -457,6 +480,7 @@ export async function login(username: string, password: string): Promise<string>
             );
             if (!seed) throw new Error('seed unwrap failed (password/key mismatch)');
             setActiveIdentity(makeIdentity(seed));
+            clearIdentityRestoreFailure();
             // Transparently upgrade the password wrap to the current KDF
             // (Argon2id) if it isn't already. Best-effort — login already
             // succeeded; a failed upgrade just retries next login.
@@ -490,9 +514,74 @@ export async function login(username: string, password: string): Promise<string>
             throw e;
         }
         console.warn('E2EE identity setup failed; messaging may be unavailable until next login', e);
+        markIdentityRestoreFailed(username);
     }
+}
 
-    return token;
+// --- "signed in, but the keys never came back" -----------------------------
+
+const IDENTITY_MISSING_KEY = 'e2ee_identity_missing_v1';
+const IDENTITY_EVENT = 'identity-restore-changed';
+
+function markIdentityRestoreFailed(username: string): void {
+    try { localStorage.setItem(IDENTITY_MISSING_KEY, username); } catch { /* private mode */ }
+    try { window.dispatchEvent(new CustomEvent(IDENTITY_EVENT)); } catch { /* non-DOM */ }
+}
+
+function clearIdentityRestoreFailure(): void {
+    let had = false;
+    try {
+        had = localStorage.getItem(IDENTITY_MISSING_KEY) !== null;
+        localStorage.removeItem(IDENTITY_MISSING_KEY);
+    } catch { /* private mode */ }
+    if (had) {
+        try { window.dispatchEvent(new CustomEvent(IDENTITY_EVENT)); } catch { /* non-DOM */ }
+    }
+}
+
+/** True while this device is signed in without a restored E2EE identity. */
+export function identityRestoreFailed(): boolean {
+    try { return localStorage.getItem(IDENTITY_MISSING_KEY) !== null; } catch { return false; }
+}
+
+/** Subscribe to the flag changing; returns the unsubscribe. */
+export function onIdentityRestoreChange(cb: () => void): () => void {
+    window.addEventListener(IDENTITY_EVENT, cb);
+    return () => window.removeEventListener(IDENTITY_EVENT, cb);
+}
+
+/**
+ * Try the restore again with the password (the seed unwrap needs it). No
+ * SRP here — a wrong password fails the unwrap locally and never reaches a
+ * 401 that the session-expiry handler would act on. Throws with a message
+ * the banner can show.
+ */
+export async function retryIdentityRestore(password: string): Promise<void> {
+    let username: string | null = null;
+    try { username = localStorage.getItem(IDENTITY_MISSING_KEY); } catch { /* private mode */ }
+    if (!username) {
+        const t = getToken();
+        const claims = t ? decodeJwtPayload(t) : null;
+        username = typeof claims?.username === 'string' ? claims.username : null;
+    }
+    if (!username) throw new Error('Sign in again to restore your keys.');
+    const wrap: {
+        key_version: number;
+        wrap_salt: string | null;
+        seed_wrapped_pw: string | null;
+        pw_kdf_iterations: number | null;
+        pw_kdf: PwKdf | null;
+    } = await apiClient.get('/keys/wrap');
+    if (wrap.key_version < 3 || !wrap.wrap_salt || !wrap.seed_wrapped_pw) {
+        throw new RetiredKeyFormatError();
+    }
+    const seed = await unwrapSeedWithPassword(
+        password, wrap.wrap_salt, wrap.seed_wrapped_pw,
+        wrap.pw_kdf_iterations ?? undefined, wrap.pw_kdf ?? undefined,
+    );
+    if (!seed) throw new Error('That password did not unlock the keys. Check it and try again.');
+    setActiveIdentity(makeIdentity(seed));
+    clearIdentityRestoreFailure();
 }
 
 /**
@@ -584,6 +673,59 @@ export async function changePassword(
         new_pw_kdf_iterations: pwKdfIterations,
         new_pw_kdf: pwKdf,
     });
+}
+
+/**
+ * Mint a NEW 12-word recovery code for this account, retiring the old one.
+ *
+ * Until 0.9.2 the code existed exactly once: shown after registration, held
+ * in a JS variable, gone on the first reload. A user who lost it had no
+ * second chance, and the e-mail reset is refused for every E2EE account —
+ * so forgetting the password meant losing the history. This is the second
+ * chance. The identity seed is unchanged (history stays readable); only the
+ * recovery-wrapped blob is replaced, alongside a fresh password wrap of the
+ * same seed under the same password, because /keys/rewrap replaces the
+ * whole custody row at once.
+ *
+ * Order matters and is the same as changePassword's: prove the password to
+ * OURSELVES first by unwrapping the seed with it (a wrong password fails
+ * here, locally, and never reaches the SRP exchange — whose 401 would trip
+ * the session-expiry handler), then prove it to the SERVER, which refuses a
+ * key-custody write on a bare bearer token. Only then is anything written.
+ *
+ * Resolves with the new phrase; the caller shows it through RecoveryCodeModal.
+ * The OLD phrase stops working the instant the server accepts the write —
+ * the UI says so before the user confirms.
+ */
+export async function regenerateRecoveryCode(username: string, currentPassword: string): Promise<string> {
+    const wrap: {
+        key_version: number;
+        wrap_salt: string | null;
+        seed_wrapped_pw: string | null;
+        pw_kdf_iterations: number | null;
+        pw_kdf: PwKdf | null;
+    } = await apiClient.get('/keys/wrap');
+    if (wrap.key_version < 3 || !wrap.wrap_salt || !wrap.seed_wrapped_pw) {
+        throw new Error('This account is not set up for recovery codes. Ask your server operator.');
+    }
+    const seed = await unwrapSeedWithPassword(
+        currentPassword, wrap.wrap_salt, wrap.seed_wrapped_pw,
+        wrap.pw_kdf_iterations ?? undefined, wrap.pw_kdf ?? undefined,
+    );
+    if (!seed) throw new Error('Current password is incorrect.');
+
+    await proveCurrentPassword(username, currentPassword);
+
+    const { material, recoveryCode } = await buildWrapMaterial(seed, currentPassword);
+    await apiClient.post('/keys/rewrap', {
+        wrap_salt: material.wrapSalt,
+        recovery_salt: material.recoverySalt,
+        seed_wrapped_pw: material.seedWrappedPw,
+        seed_wrapped_rc: material.seedWrappedRc,
+        pw_kdf_iterations: material.pwKdfIterations,
+        pw_kdf: material.pwKdf,
+    });
+    return recoveryCode;
 }
 
 /**
@@ -789,6 +931,7 @@ export function logout(): void {
     // again with the box unticked, which requires being signed out.
     localStorage.removeItem(REMEMBER_ME_KEY);
     clearActiveIdentity(); // Clear E2EE identity on logout
+    clearIdentityRestoreFailure(); // a missing identity is not missing once signed out
     clearChannelKeyCache();
     // Secrets and personal data that outlived a sign-out. Everything below is
     // either a private key or a real-world location, and none of it belongs to
