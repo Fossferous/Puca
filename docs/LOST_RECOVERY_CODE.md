@@ -11,19 +11,17 @@ There are three situations.
 
 ## 1. You lost the code but still know your password
 
-You are fine day to day: sign in as usual, and change your password from
-Settings whenever you like — a password change keeps your keys and history
-and does not touch the recovery code.
+Make a new one now: **Settings › My Account › Recovery code**. You prove
+your current password, the app mints a fresh 12-word code, re-wraps the same
+keys under it and shows it to you once — nothing about your history changes.
+The old code stops working the instant the new one is created, so if you
+suspect the old one leaked this is also the fix. Save the new code the way
+you should have saved the first.
 
-What you have lost is the safety net. **In the current build there is no way
-to mint a new recovery code for an existing account.** The server-side
-endpoint for it exists, but no screen in the app calls it yet, so until that
-ships the mitigation is simple: do not lose your password. Put it in a
-password manager now.
-
-If a future release adds "Generate a new recovery code" under Settings, use it
-the day it appears; this paragraph will then be out of date, and the release
-notes will say so.
+Until you do that you are fine day to day (signing in and changing your
+password both keep your keys), but you have no spare key: a forgotten
+password would put you in situation 2. Put the password in a password
+manager, then make the new code.
 
 ## 2. You lost the code and forgot your password
 

@@ -25,6 +25,16 @@ in this file is not registered there, so what IS listed is real.
 
 ---
 
+## Public information
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/config` | ❌ | What a client needs before signing in: `app_url` (the web app, so invite links are `<app_url>/invite/<code>`) and whether registration requires an invite code. |
+| GET | `/source` | ❌ | Where the source of this build can be obtained (`SOURCE_URL`) and the commit it was built from — the AGPL §13 offer. A fork must set `SOURCE_URL` to its own repository. |
+| GET | `/ice-config` | ❌ (TURN credentials only with a bearer token) | STUN servers, and for a signed-in caller 4-hour credentials for the operator's TURN relay. |
+
+---
+
 ## Servers
 
 | Method | Endpoint | Auth | Description |
