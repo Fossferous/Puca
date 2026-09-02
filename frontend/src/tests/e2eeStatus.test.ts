@@ -24,14 +24,14 @@ describe('localMediaBlockNotice', () => {
         expect(s).toMatch(/blocked/i);
         expect(s).toMatch(/nobody’s voice or video plays/i);
         expect(s).toContain('Require encryption for calls');
-        expect(s).toContain('Settings → Voice & Video');
+        expect(s).toContain('Settings → Privacy & Safety');
         expect(s).toMatch(/Firefox|Safari|iOS/);
     });
 
     it('under a SERVER policy, offers only the native apps', () => {
         const s = localMediaBlockNotice({ ...base, serverRequired: true })!;
-        expect(s).not.toContain('Settings → Voice & Video');
-        expect(s).toMatch(/desktop or Android app/i);
+        expect(s).not.toContain('Settings → Privacy & Safety');
+        expect(s).toMatch(/Windows or Android app/i);
     });
 
     it('on an SFU channel, warns regardless of the setting because the join itself refuses', () => {
@@ -72,7 +72,7 @@ describe('mediaE2eeExplanation', () => {
         expect(s).toMatch(/blocked both ways/i);
         expect(s).toMatch(/microphone/i);
         expect(s).toContain('Require encryption for calls');
-        expect(s).toContain('Settings → Voice & Video');
+        expect(s).toContain('Settings → Privacy & Safety');
         // The cost of turning it off is stated in the same breath.
         expect(s).toMatch(/server in a form it can access/i);
         expect(s).toMatch(/Firefox|Safari|iOS/);
@@ -82,8 +82,8 @@ describe('mediaE2eeExplanation', () => {
         const s = mediaE2eeExplanation('local-unsupported', '', true, /* serverRequired */ true)!;
         expect(s).toMatch(/blocked both ways/i);
         expect(s).toMatch(/server requires encrypted calls/i);
-        expect(s).not.toContain('Settings → Voice & Video');
-        expect(s).toMatch(/desktop or Android app/i);
+        expect(s).not.toContain('Settings → Privacy & Safety');
+        expect(s).toMatch(/Windows or Android app/i);
     });
 
     it('flags a verification failure as a possible tamper/out-of-date case', () => {

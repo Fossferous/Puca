@@ -15,11 +15,19 @@ const NO_ENCODED_TRANSFORM = 'it has no WebRTC Encoded Transform API — Firefox
  * requiring encryption: a server policy leaves only the native apps, while the
  * user's own setting can be turned off — at the cost the sentence names, so
  * nobody flips it believing it merely "relaxes a check".
+ *
+ * TWO THINGS THIS SENTENCE MUST GET RIGHT, because it is the only instruction
+ * the user gets. The toggle lives in Settings → Privacy & Safety (its "Call
+ * Encryption" block), NOT Voice & Video — sending someone to the wrong tab to
+ * find a switch that is not there reads as the switch being gone. And the
+ * remedy names WINDOWS, not "desktop": the macOS and Linux shells embed
+ * WebKit, which lacks exactly the API this message is about, so telling a
+ * Linux user to use the desktop app sends them to the same failure.
  */
 function localUnsupportedRemedy(serverRequired: boolean): string {
     return serverRequired
-        ? 'This server requires encrypted calls, so the way to join from here is the desktop or Android app.'
-        : 'Use the desktop or Android app — or, to call from this browser anyway, turn off “Require encryption for calls” in Settings → Voice & Video; your voice and video then pass through the server in a form it can access.';
+        ? 'This server requires encrypted calls, so the way to join from here is the Windows or Android app.'
+        : 'Use the Windows or Android app — or, to call from this browser anyway, turn off “Require encryption for calls” in Settings → Privacy & Safety; your voice and video then pass through the server in a form it can access.';
 }
 
 /**
@@ -89,7 +97,7 @@ export interface LocalMediaBlockInputs {
 export function localMediaBlockNotice(i: LocalMediaBlockInputs): string | null {
     if (i.supported) return null;
     if (i.sfuMode) {
-        return 'Calls in this channel are encrypted-only, and this browser can’t encrypt live media (no WebRTC Encoded Transform API). Joining will fail here — use the desktop or Android app.';
+        return 'Calls in this channel are encrypted-only, and this browser can’t encrypt live media (no WebRTC Encoded Transform API). Joining will fail here — use the Windows or Android app.';
     }
     if (!i.required) return null;
     return `Voice is blocked in this browser: it can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}), and encryption is required for calls. If you join, your microphone and camera are not sent and nobody’s voice or video plays. ${localUnsupportedRemedy(i.serverRequired)}`;

@@ -262,6 +262,10 @@ mod imp {
     /// happening where the hook cannot see them.
     static POLL_PRESSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static POLL_RELEASES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// Presses the poll refused because the remote-control injector was
+    /// holding something. Non-zero is not a fault: it is the self-trigger
+    /// guard doing its job.
+    static POLL_PRESSES_SUPPRESSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// Set by the blocker thread: the foreground window belongs to a process
     /// above our integrity level, so every capture method reads "nothing
@@ -318,11 +322,29 @@ mod imp {
         Emit(bool),
         /// The injection ended; the poll owns the slot again.
         ClearMask,
+        /// A press the poll would have supplied, refused because the
+        /// remote-control injector is holding something down.
+        SuppressedPress,
     }
 
+    /// `masked` comes from the HOOKS (they saw a tagged edge for this slot).
+    /// `injector_holding` comes from the injector itself
+    /// (`puca_input::injected_inputs_held`), and is the backstop for every
+    /// case where the mask cannot be right: the hooks were evicted before the
+    /// tagged edge arrived, or the watch list was rewritten mid-hold and the
+    /// slot-indexed mask went with it. Without it, a controller holding the
+    /// host's push-to-talk key opens the host's microphone — precisely what
+    /// the hooks' `PUCA_INJECT_TAG` filter refuses, arrived at through the
+    /// poll instead.
+    ///
+    /// Only PRESSES are refused. A release the poll wants to supply is always
+    /// safe: closing a microphone that should already be closed costs
+    /// nothing, and leaving one open is the failure this whole poll exists
+    /// to prevent.
     fn poll_slot_action(
         disagree: &mut u8,
         masked: bool,
+        injector_holding: bool,
         ours_down: bool,
         phys_down: bool,
     ) -> PollAction {
@@ -331,6 +353,7 @@ mod imp {
             return if phys_down { PollAction::Nothing } else { PollAction::ClearMask };
         }
         match poll_verdict(disagree, ours_down, phys_down) {
+            Some(true) if injector_holding => PollAction::SuppressedPress,
             Some(is_down) => PollAction::Emit(is_down),
             None => PollAction::Nothing,
         }
@@ -350,6 +373,9 @@ mod imp {
         let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
         let down = DOWN.load(Ordering::SeqCst);
         let masked_bits = SELF_INJECTED.load(Ordering::SeqCst);
+        // Asked ONCE per tick, not per slot: it is a relaxed atomic read in
+        // another crate, and every slot gets the same answer anyway.
+        let injector_holding = puca_input::injected_inputs_held() > 0;
         let mut supplied_press = false;
         for (slot, w) in WATCH.iter().enumerate() {
             let vk = w.load(Ordering::SeqCst);
@@ -360,8 +386,11 @@ mod imp {
             let bit = 1u32 << slot;
             let phys = (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0;
             let ours = down & bit != 0;
-            match poll_slot_action(&mut disagree[slot], masked_bits & bit != 0, ours, phys) {
+            match poll_slot_action(&mut disagree[slot], masked_bits & bit != 0, injector_holding, ours, phys) {
                 PollAction::Nothing => {}
+                PollAction::SuppressedPress => {
+                    POLL_PRESSES_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+                }
                 PollAction::ClearMask => {
                     SELF_INJECTED.fetch_and(!bit, Ordering::SeqCst);
                 }
@@ -414,8 +443,16 @@ mod imp {
     }
 
     /// Integrity level of the token behind `process` (SECURITY_MANDATORY_*_RID),
-    /// or None when it cannot be read — which for a foreground process means
-    /// "higher than us": OpenProcess is refused across a UIPI boundary.
+    /// or None when it cannot be read.
+    ///
+    /// None means UNKNOWN, and callers must treat it as such. It used to be
+    /// folded into "higher than us", on the theory that a refusal implies a
+    /// UIPI boundary. It does not: UIPI governs window messages, while handle
+    /// access is decided by the process DACL and the mandatory policy, whose
+    /// default (no-write-up) allows query reads upward. A protected or
+    /// anti-cheat-shielded game, or an app started as a different user, is
+    /// refused while its keys reach us perfectly — and the user was being
+    /// told to restart it as administrator for no reason.
     unsafe fn integrity_level_of(process: HANDLE) -> Option<u32> {
         let mut token = HANDLE::default();
         OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
@@ -461,9 +498,12 @@ mod imp {
             }
             let ours = integrity_level_of(GetCurrentProcess()).unwrap_or(0x2000);
             let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-                // Refused even for limited query: a protected or higher-IL
-                // process. Either way its input is not ours to see.
-                return (Some(format!("pid {pid}")), pid);
+                // Cannot open it at all: unknown, not "elevated". Recorded so
+                // a diagnosis can see the difference; never shown to the user
+                // as a process name (a banner reading "pid 4312 runs as
+                // administrator" is a guess wearing a fact's clothes).
+                FOREGROUND_UNREADABLE.store(true, Ordering::SeqCst);
+                return (None, 0);
             };
             let theirs = integrity_level_of(process);
             let name = {
@@ -479,11 +519,27 @@ mod imp {
             };
             let _ = CloseHandle(process);
             match theirs {
-                Some(level) if level <= ours => (None, 0),
-                _ => (Some(name), pid),
+                // The only case we claim: a level was READ and it is higher.
+                Some(level) if level > ours => {
+                    FOREGROUND_UNREADABLE.store(false, Ordering::SeqCst);
+                    (Some(name), pid)
+                }
+                Some(_) => {
+                    FOREGROUND_UNREADABLE.store(false, Ordering::SeqCst);
+                    (None, 0)
+                }
+                None => {
+                    FOREGROUND_UNREADABLE.store(true, Ordering::SeqCst);
+                    (None, 0)
+                }
             }
         }
     }
+
+    /// The last probe could not read the foreground process's integrity
+    /// level. Not a blocker — an unknown. In `diag` so "hotkeys are dead and
+    /// nothing is reported" can be told apart from "nothing is wrong".
+    static FOREGROUND_UNREADABLE: AtomicBool = AtomicBool::new(false);
 
     /// Whether the foreground window belongs to THIS process — the truth the
     /// frontend needs where `document.hasFocus()` in the WebView has been seen
@@ -658,6 +714,10 @@ mod imp {
             "poll_every_ms": POLL_EVERY_MS,
             "poll_presses": POLL_PRESSES.load(Ordering::Relaxed),
             "poll_releases": POLL_RELEASES.load(Ordering::Relaxed),
+            // Presses refused because our own remote-control injector was
+            // holding a key. Expected during a device session, zero otherwise.
+            "poll_presses_suppressed": POLL_PRESSES_SUPPRESSED.load(Ordering::Relaxed),
+            "injected_inputs_held": puca_input::injected_inputs_held(),
             // Of `rearms`, how many the poll's evidence triggered (the rest
             // are the 60 s clock). Each one is a hook Windows had removed.
             "rearms_on_evidence": REARMS_ON_EVIDENCE.load(Ordering::Relaxed),
@@ -673,6 +733,9 @@ mod imp {
             // empty by definition.
             "foreground_blocker": BLOCKER.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "foreground_is_us": foreground_is_us(),
+            // True = the foreground process could not be inspected at all
+            // (protected, or another user). NOT the same as blocked.
+            "foreground_unreadable": FOREGROUND_UNREADABLE.load(Ordering::SeqCst),
         })
     }
 
@@ -1048,7 +1111,7 @@ mod imp {
             let mut d = 0;
             for _ in 0..10 {
                 assert_eq!(
-                    poll_slot_action(&mut d, true, false, true),
+                    poll_slot_action(&mut d, true, false, false, true),
                     PollAction::Nothing,
                     "the poll must never open the mic for our own injection",
                 );
@@ -1063,7 +1126,7 @@ mod imp {
             let mut d = 0;
             let mut got = PollAction::Nothing;
             for _ in 0..POLL_CONFIRM {
-                got = poll_slot_action(&mut d, false, false, true);
+                got = poll_slot_action(&mut d, false, false, false, true);
             }
             assert_eq!(got, PollAction::Emit(true));
         }
@@ -1072,7 +1135,7 @@ mod imp {
         fn the_mask_lifts_when_the_injected_key_goes_up() {
             use super::{poll_slot_action, PollAction};
             let mut d = 0;
-            assert_eq!(poll_slot_action(&mut d, true, false, false), PollAction::ClearMask);
+            assert_eq!(poll_slot_action(&mut d, true, false, false, false), PollAction::ClearMask);
         }
 
         #[test]
@@ -1082,9 +1145,47 @@ mod imp {
             // immediately, on a count built up while we were blind.
             let mut d = 0;
             for _ in 0..10 {
-                let _ = poll_slot_action(&mut d, true, false, true);
+                let _ = poll_slot_action(&mut d, true, false, false, true);
             }
             assert_eq!(d, 0);
+        }
+
+        #[test]
+        fn a_press_is_refused_while_our_own_injector_holds_a_key() {
+            use super::{poll_slot_action, PollAction};
+            // The mask is the hooks' answer and can be missing: they may have
+            // been evicted before the tagged edge, or the watch list may have
+            // been rewritten mid-hold. The injector's own count is not.
+            let mut d = 0;
+            let mut got = PollAction::Nothing;
+            for _ in 0..POLL_CONFIRM {
+                got = poll_slot_action(&mut d, false, true, false, true);
+            }
+            assert_eq!(got, PollAction::SuppressedPress);
+        }
+
+        #[test]
+        fn positive_control_the_same_press_lands_when_the_injector_is_idle() {
+            use super::{poll_slot_action, PollAction};
+            let mut d = 0;
+            let mut got = PollAction::Nothing;
+            for _ in 0..POLL_CONFIRM {
+                got = poll_slot_action(&mut d, false, false, false, true);
+            }
+            assert_eq!(got, PollAction::Emit(true));
+        }
+
+        #[test]
+        fn a_release_is_never_refused_for_the_injector() {
+            use super::{poll_slot_action, PollAction};
+            // A microphone closing a moment early costs nothing; one that
+            // stays open is the failure the poll exists for.
+            let mut d = 0;
+            let mut got = PollAction::Nothing;
+            for _ in 0..POLL_CONFIRM {
+                got = poll_slot_action(&mut d, false, true, true, false);
+            }
+            assert_eq!(got, PollAction::Emit(false));
         }
 
         #[test]

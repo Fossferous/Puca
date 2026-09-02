@@ -170,6 +170,16 @@ impl FileScope {
         if denied_roots().iter().any(|d| is_within(&c, d)) {
             return Err("that folder is a system location (Windows, Program Files or ProgramData), so it cannot be shared".into());
         }
+        // A ROOT THE JAIL CANNOT EXPRESS IS NOT A GRANT. `keys` is None for a
+        // UNC or device-namespace prefix (comp_key refuses them: browsing one
+        // would make this an SMB client authenticating as whoever the agent
+        // runs as), and `is_within` compares keys — so such a root accepted
+        // here produces a grant whose every browse fails the containment test
+        // with the generic refusal. That reads as file sharing being broken.
+        // Say it once, here, where the folder was chosen.
+        if keys(&c).is_none() {
+            return Err("that folder is on a network location (a mapped drive or \\\\server\\share), which cannot be shared — pick a folder on a local disk".into());
+        }
         Ok(FileScope::Jailed(c))
     }
 }
@@ -257,6 +267,15 @@ fn comp_key(c: Component<'_>) -> Option<String> {
         // Normalised away before this is called.
         Component::CurDir | Component::ParentDir => None,
     }
+}
+
+/// A path the jail can express at all: `keys` is what containment compares,
+/// so a root it cannot key is a root nothing can be checked against. Used by
+/// `FileScope::jailed` to refuse such a folder at grant time rather than at
+/// every browse.
+#[cfg(test)]
+fn jail_can_express(p: &Path) -> bool {
+    keys(p).is_some()
 }
 
 /// Is `child` at or underneath `parent`? Component-wise and case-folded.
@@ -1861,6 +1880,80 @@ mod tests {
         assert!(
             got.is_err(),
             "PROGRA~1 expands into Program Files, which is denied; got {got:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod network_root_tests {
+    use super::{jail_can_express, FileScope};
+    use std::path::Path;
+
+    /// A UNC or device-namespace root has no component key, so `is_within`
+    /// can decide nothing about it. `FileScope::jailed` refuses it for that
+    /// reason — before the refusal existed, granting a mapped network folder
+    /// "succeeded" and then failed every single browse with the generic
+    /// message, which reads as file sharing being broken rather than as a
+    /// rule about network drives.
+    #[test]
+    #[cfg(windows)]
+    fn a_network_root_cannot_be_expressed_as_a_jail() {
+        assert!(!jail_can_express(Path::new(r"\\server\share\folder")));
+        assert!(!jail_can_express(Path::new(r"\\?\UNC\server\share")));
+        assert!(!jail_can_express(Path::new(r"\\.\PhysicalDrive0")));
+    }
+
+    /// The positive control: an ordinary local root IS expressible, so the
+    /// refusal above is about network paths and not about everything.
+    #[test]
+    #[cfg(windows)]
+    fn an_ordinary_local_root_is_expressible() {
+        assert!(jail_can_express(Path::new(r"C:\Users\someone\Shared")));
+        assert!(jail_can_express(Path::new(r"\\?\C:\Users\someone\Shared")));
+    }
+
+    /// And the refusal is wired into the grant path, with a sentence that
+    /// names the cause. (A real UNC root cannot be canonicalized in a unit
+    /// test, so this pins the code that runs when one is.)
+    #[test]
+    fn the_grant_path_refuses_an_inexpressible_root_by_name() {
+        let src = include_str!("file_transfer.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source above the tests");
+        let start = src.find("pub fn jailed(root: &str)").expect("jailed moved");
+        let body = &src[start..start + 2200];
+        assert!(
+            body.contains("keys(&c).is_none()"),
+            "jailed no longer refuses a root the jail cannot express: {body}"
+        );
+        assert!(
+            body.contains("network location"),
+            "the refusal no longer names the cause: {body}"
+        );
+        // The refusal must come BEFORE the scope is handed back.
+        let refusal = body.find("keys(&c).is_none()").unwrap();
+        let ok = body.find("Ok(FileScope::Jailed(c))").expect("the accept moved");
+        assert!(refusal < ok, "the network-root refusal must precede the accept");
+    }
+
+    /// FileScope is still constructible for a normal folder — the refusal did
+    /// not turn every grant into an error.
+    #[test]
+    fn a_real_local_folder_still_grants() {
+        // NOT the temp dir: on Windows it lives under AppData, which
+        // `denied_by_shape` refuses on purpose — this control would then pass
+        // for the wrong reason on Linux and fail for the right one here. The
+        // crate's own build directory is a plain local folder either way.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("puca-jail-grant-test");
+        std::fs::create_dir_all(&dir).expect("create the test folder");
+        let granted = FileScope::jailed(dir.to_str().unwrap());
+        let _ = std::fs::remove_dir(&dir);
+        assert!(
+            matches!(granted, Ok(FileScope::Jailed(_))),
+            "an ordinary local folder must still be grantable: {granted:?}"
         );
     }
 }

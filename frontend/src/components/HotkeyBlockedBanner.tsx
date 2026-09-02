@@ -8,13 +8,14 @@
  * fixes.
  *
  * Driven by the native feed's `global-hotkey-blocked` event (src-tauri's
- * hotkeys.rs probes the foreground process once a second while the feed is
- * live), so it only ever appears in a call with system-wide hotkeys armed —
+ * hotkeys.rs runs a probe thread that checks the foreground process once a
+ * second while the feed is live), so it only ever appears in a call with
+ * system-wide hotkeys armed —
  * and the user sees it the moment they come back to Púca wondering why the
  * mic stayed shut.
  *
- * Dismissal is per process: "I know about this game" must not silence the
- * warning for a different one.
+ * Dismissal is per process and CUMULATIVE: dismissing a second game must not
+ * bring the first one's banner back the next time it is in front.
  */
 import { useEffect, useState } from 'react';
 import { captureBlocker, onCaptureBlockerChange } from '../api/hotkeys';
@@ -23,11 +24,11 @@ import './HotkeyBlockedBanner.css';
 
 export function HotkeyBlockedBanner() {
     const [process, setProcess] = useState(captureBlocker);
-    const [dismissedFor, setDismissedFor] = useState('');
+    const [dismissed, setDismissed] = useState<string[]>([]);
 
     useEffect(() => onCaptureBlockerChange(setProcess), []);
 
-    if (!process || process === dismissedFor) return null;
+    if (!process || dismissed.includes(process)) return null;
 
     return (
         <div className="hotkey-blocked-banner" role="status">
@@ -39,7 +40,7 @@ export function HotkeyBlockedBanner() {
             <button
                 className="hotkey-blocked-dismiss"
                 aria-label="Dismiss"
-                onClick={() => setDismissedFor(process)}
+                onClick={() => setDismissed(d => (d.includes(process) ? d : [...d, process]))}
             >
                 <CloseIcon size={16} />
             </button>
