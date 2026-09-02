@@ -58,9 +58,17 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Who talks to whom, and when
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events
-- IP addresses, device tokens, and — because the WebSocket token rides in the query string
-  ([`websocket.ts:94`](../frontend/src/api/websocket.ts#L94)) — the session token is written
-  into any proxy or access log along the path
+- IP addresses and device tokens
+
+  This used to say the session token lands in every proxy access log too, because
+  the WebSocket carried it in the query string. It no longer does: every client —
+  browser, desktop, mobile, and both background services — now sends it in
+  `Sec-WebSocket-Protocol` as `bearer, <jwt>`, which no proxy on this path logs
+  by default (`bearer_from_subprotocol`, [`src/ws.rs`](../src/ws.rs)). The server
+  still ACCEPTS `?token=` so installs older than the change keep connecting; that
+  fallback is due for removal a release after every shipped client has updated,
+  and until then a very old install still writes its token into the log. Existing
+  log files, of course, still contain what they already captured.
 
 ### Can do
 

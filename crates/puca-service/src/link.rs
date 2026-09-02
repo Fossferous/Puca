@@ -253,11 +253,43 @@ pub const DEVICE_PRIV_FILE: &str = "device.key";
 pub const SIGN_SEED_FILE: &str = "sign.key";
 
 impl LinkConfig {
-    /// `wss://host/ws?token=…`, derived from `api_base` so there is one place
-    /// the host is configured and no chance of the two disagreeing.
-    pub fn ws_url(&self, token: &str) -> String {
+    /// `wss://host/ws` — derived from `api_base` so there is one place the host
+    /// is configured and no chance of the two disagreeing.
+    ///
+    /// NO CREDENTIAL IN THE URL. This was `?token={token}`, and this service
+    /// re-dials on every boot and on every socket expiry, so each connection
+    /// deposited a live device-scoped JWT into the reverse proxy's access log —
+    /// which is rotated, shipped and backed up. Query strings are written
+    /// verbatim by essentially every proxy; the subprotocol header is not
+    /// logged by default anywhere in that path. See `ws_request`.
+    pub fn ws_url(&self) -> String {
         let host = self.api_base.trim_start_matches("https://").trim_start_matches("http://");
-        format!("wss://{host}/ws?token={token}")
+        format!("wss://{host}/ws")
+    }
+
+    /// The handshake request, carrying the token in `Sec-WebSocket-Protocol` as
+    /// `bearer, <jwt>` — the same shape the browser client sends and the server
+    /// has accepted since `bearer_from_subprotocol` landed (it is checked BEFORE
+    /// the query fallback, so this needs no server change).
+    ///
+    /// A browser has no choice about this — `new WebSocket(url, protocols)` is
+    /// the only place it can put a credential. This is a tokio-tungstenite
+    /// client and could set any header it likes; it used the query string only
+    /// because the browser did.
+    pub fn ws_request(
+        &self,
+        token: &str,
+    ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderValue};
+        let mut req = self
+            .ws_url()
+            .into_client_request()
+            .map_err(|e| format!("bad websocket url: {e}"))?;
+        let value = HeaderValue::from_str(&format!("bearer, {token}"))
+            .map_err(|_| "the link token is not a valid header value".to_string())?;
+        req.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
+        Ok(req)
     }
 
     pub fn load() -> Result<Self, String> {
@@ -609,7 +641,7 @@ pub async fn run_socket(
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(cfg.ws_url(token))
+    let (mut ws, _) = tokio_tungstenite::connect_async(cfg.ws_request(token)?)
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
     crate::log::line("[link] connected; waiting for the attestation challenge");
@@ -1388,12 +1420,60 @@ mod tests {
             sign_pub: "ed25519:AAAA".into(),
             account_sign_pub: "ed25519:BBBB".into(),
         };
-        assert_eq!(cfg.ws_url("T"), "wss://chat.example.com/ws?token=T");
+        assert_eq!(cfg.ws_url(), "wss://chat.example.com/ws");
         // http in the config must still produce wss: this connection carries an
         // attestation signature and a bearer token, and downgrading it because
         // someone typed the wrong scheme is not a failure mode worth having.
         cfg.api_base = "http://chat.example.com".into();
-        assert_eq!(cfg.ws_url("T"), "wss://chat.example.com/ws?token=T");
+        assert_eq!(cfg.ws_url(), "wss://chat.example.com/ws");
+    }
+
+    /// The token rides a HEADER, never the URL. A query string is written
+    /// verbatim into every proxy access log along the path, and this service
+    /// re-dials on every boot — so the old form deposited a live device-scoped
+    /// JWT into a rotated, shipped, backed-up log file on each connection.
+    #[test]
+    fn the_handshake_carries_the_token_in_a_header_and_never_in_the_uri() {
+        let cfg = LinkConfig {
+            api_base: "https://chat.example.com".into(),
+            user_id: 1,
+            device_id: "d".into(),
+            device_pub: "x25519:AAAA".into(),
+            sign_pub: "ed25519:AAAA".into(),
+            account_sign_pub: "ed25519:BBBB".into(),
+        };
+        let jwt = "header.payload.signature";
+        let req = cfg.ws_request(jwt).expect("builds");
+
+        let uri = req.uri().to_string();
+        assert_eq!(uri, "wss://chat.example.com/ws");
+        assert!(!uri.contains("token="), "the URI must carry no credential: {uri}");
+        assert!(!uri.contains(jwt), "the URI must not contain the token: {uri}");
+
+        let sent = req
+            .headers()
+            .get("sec-websocket-protocol")
+            .expect("the bearer subprotocol must be offered")
+            .to_str()
+            .expect("ascii");
+        assert_eq!(sent, format!("bearer, {jwt}"));
+    }
+
+    /// A token that cannot be a header value must FAIL the dial rather than
+    /// silently connecting without one — an unauthenticated upgrade would be
+    /// refused by the server anyway, but as a confusing 401 loop.
+    #[test]
+    fn a_token_that_is_not_header_safe_is_refused_up_front() {
+        let cfg = LinkConfig {
+            api_base: "https://chat.example.com".into(),
+            user_id: 1,
+            device_id: "d".into(),
+            device_pub: "x25519:AAAA".into(),
+            sign_pub: "ed25519:AAAA".into(),
+            account_sign_pub: "ed25519:BBBB".into(),
+        };
+        assert!(cfg.ws_request("bad
+value").is_err());
     }
 
     #[test]
