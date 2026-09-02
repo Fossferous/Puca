@@ -72,6 +72,11 @@
 ; Path-scoped killing is not available: `wmic` is gone from current Windows 11,
 ; and `taskkill /FI "IMAGENAME eq ..."` filters by the same machine-wide image
 ; name it already matches on.
+; This file's own folder, captured at definition time: ${__FILEDIR__} inside a
+; macro BODY expands where the macro is inserted (the generated .nsi, which
+; lives under target/), not where the macro was written.
+!define PUCA_HOOKS_DIR "${__FILEDIR__}"
+
 !macro MigrateRenamedInstall OLD_NAME OLD_BINARY
   ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${OLD_NAME}" "UninstallString"
   ${If} $R0 == ""
@@ -128,3 +133,23 @@
 ; install AND the lite build, and the lite build removes the full one. NSIS
 ; refuses a duplicate !macro definition, so it is defined once here and
 ; included by both.
+
+; --- Shortcuts and taskbar pins that still point at a binary we renamed ------
+;
+; NSIS rewrites the Start Menu and desktop shortcuts IT created. A taskbar pin
+; is a shortcut the user made, in a folder the installer never touches, and the
+; 0.9.0 rename (app.exe -> Puca.exe / Puca-Lite.exe) left every such pin dead:
+; "the item has been moved". Switching Full <-> Lite leaves the same wound. So
+; after the files are in place, retarget every shortcut of ours whose target no
+; longer exists (installer-repair-shortcuts.ps1 — it touches nothing that still
+; resolves, and nothing outside our own install folders). PowerShell 5.1 ships
+; with every supported Windows; the script is unpacked beside the app for the
+; duration of the call and removed again. Never fails the install.
+!macro RepairShortcutsToRenamedBinary
+  SetOutPath "$INSTDIR"
+  File "${PUCA_HOOKS_DIR}\installer-repair-shortcuts.ps1"
+  DetailPrint "Repairing shortcuts and taskbar pins that pointed at the old executable..."
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\installer-repair-shortcuts.ps1" -InstallDir "$INSTDIR" -Binary "${MAINBINARYNAME}.exe"'
+  Pop $R0
+  Delete "$INSTDIR\installer-repair-shortcuts.ps1"
+!macroend

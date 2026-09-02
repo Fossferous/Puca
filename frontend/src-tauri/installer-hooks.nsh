@@ -38,6 +38,7 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  !insertmacro RepairShortcutsToRenamedBinary
 !macroend
 
 ; Remove the LocalSystem service the FULL build can install, before the app's
