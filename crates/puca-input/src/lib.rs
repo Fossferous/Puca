@@ -189,6 +189,28 @@ pub struct MonitorList {
 // a flood of down-events can't amplify. Scancodes for keys, DOM codes for buttons.
 static PRESSED_KEYS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static PRESSED_BUTTONS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// How many injected keys and buttons this process is holding down right now:
+/// the same two lists above, as one number that can be read WITHOUT a lock.
+///
+/// WHO READS IT AND WHY IT CANNOT BE A LOCK. The global-hotkey listener
+/// (frontend/src-tauri/src/hotkeys.rs) reads the physical key state every
+/// 20 ms as a second source, because a Windows low-level hook is removed
+/// without notice and loses key-ups. `GetAsyncKeyState` cannot tell SendInput
+/// from a finger, so that poll would otherwise let a remote controller's
+/// keystroke trigger the host's own push-to-talk — the exact self-trigger the
+/// `PUCA_INJECT_TAG` filter refuses in the hooks. It consults this instead.
+///
+/// It runs on the thread that services the low-level hook callbacks, and that
+/// thread must never block: Windows measures its latency and silently unhooks
+/// it. Taking `PRESSED_KEYS` there would block behind an injection in
+/// progress. An atomic cannot.
+static INJECT_HELD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Keys and buttons currently held down by OUR injection. See [`INJECT_HELD`].
+pub fn injected_inputs_held() -> usize {
+    INJECT_HELD.load(std::sync::atomic::Ordering::SeqCst)
+}
 static TARGET: Mutex<Option<TargetMonitor>> = Mutex::new(None);
 
 /// Set (or clear, with None) the monitor the injected absolute moves map onto.
@@ -800,6 +822,7 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
                     return Ok(());
                 }
                 b.push(button);
+                INJECT_HELD.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             if let Some(i) = win::button(button, true) {
                 return sent_following(|| win::send(i), "button press");
@@ -814,6 +837,7 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
             if let Ok(mut b) = PRESSED_BUTTONS.lock() {
                 if let Some(pos) = b.iter().position(|x| *x == button) {
                     b.swap_remove(pos);
+                    INJECT_HELD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 } else {
                     return Ok(());
                 }
@@ -836,8 +860,10 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
                         return Ok(()); // dedupe key repeat
                     }
                     keys.push(held_key);
+                    INJECT_HELD.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 } else if let Some(pos) = keys.iter().position(|k| *k == held_key) {
                     keys.swap_remove(pos);
+                    INJECT_HELD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 } else {
                     return Ok(()); // release for a key we never saw down
                 }
@@ -880,6 +906,10 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
 /// so a session never leaves input stuck down.
 #[cfg(windows)]
 pub fn release_all() {
+    // Zeroed FIRST, not decremented per item: a teardown that failed halfway
+    // must not leave the count claiming inputs are held forever, which would
+    // mute the hotkey poll's press path for the rest of the process.
+    INJECT_HELD.store(0, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut b) = PRESSED_BUTTONS.lock() {
         for button in b.drain(..) {
             if let Some(i) = win::button(button, false) {
@@ -1603,12 +1633,55 @@ mod tests {
     /// which presses keys into whatever window has focus. Scoped to the non-test
     /// half of the file: a scan that also read this module would find this
     /// assertion's own text and pass whatever the real code does.
+    /// The held count is what the hotkey poll trusts to refuse a press it
+    /// did not see a hook for, so it has to move at every site that touches
+    /// the two pressed lists, and `release_all` has to zero it.
+    ///
+    /// Read from the source ABOVE the test module (the same trick the test
+    /// below uses), so this cannot pass by matching its own assertion text.
+    /// It is a source check because the only behavioural alternative is
+    /// calling `inject`, which on Windows is a real `SendInput` — a test that
+    /// types into whatever window happens to be focused.
+    #[cfg(windows)]
+    #[test]
+    fn the_held_count_moves_with_every_pressed_list_mutation() {
+        let src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap().replace('\r', "");
+        let arm_start = src.find("ControlInput::Key { code, down } =>").expect("the Key arm");
+        let arm = &src[arm_start..arm_start + 1500];
+        let push = arm.find("keys.push(held_key);").expect("the press no longer records the key");
+        let add = arm.find("INJECT_HELD.fetch_add").expect("a tracked key press no longer raises the held count");
+        let remove = arm.find("keys.swap_remove(pos);").expect("the release no longer forgets the key");
+        let sub = arm.find("INJECT_HELD.fetch_sub").expect("a tracked key release no longer lowers the held count");
+        assert!(push < add && add < remove && remove < sub, "the count moved to the wrong arm: {arm}");
+
+        let rel = src.find("pub fn release_all() {").expect("release_all");
+        assert!(
+            src[rel..rel + 400].contains("INJECT_HELD.store(0"),
+            "release_all no longer zeroes the held count, so a half-failed teardown mutes the hotkey poll forever"
+        );
+
+        let btn = src.find("// Dedupe: ignore a press for an already-held button.").expect("the button arm");
+        assert_eq!(
+            src[btn..btn + 900].matches("INJECT_HELD.fetch_").count(),
+            2,
+            "a button press or release stopped moving the held count"
+        );
+    }
+
+    #[test]
+    fn the_held_count_starts_at_zero() {
+        // Not a tautology: it is read by another crate as "is a remote
+        // controller holding anything right now", and a non-zero start would
+        // mute that crate's fallback until the first release_all.
+        assert_eq!(super::injected_inputs_held(), 0);
+    }
+
     #[cfg(windows)]
     #[test]
     fn the_key_arm_tracks_held_keys_by_the_packed_identity() {
         let src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
         let arm_start = src.find("ControlInput::Key { code, down } =>").expect("the Key arm");
-        let arm = &src[arm_start..arm_start + 1200];
+        let arm = &src[arm_start..arm_start + 1500];
         assert!(
             arm.contains("pack_key(scan, extended)"),
             "the held-key set must be keyed on scan code AND prefix: {arm}"
@@ -1628,7 +1701,7 @@ mod tests {
         );
         // And `release_all` must undo it symmetrically, or the pair is stuck.
         let rel = src.find("pub fn release_all()").expect("release_all");
-        let body = &src[rel..rel + 900];
+        let body = &src[rel..rel + 1100];
         assert!(body.contains("unpack_key(packed)"), "release_all lost the prefix: {body}");
         assert!(
             body.contains("win::key(scan, extended, false)"),

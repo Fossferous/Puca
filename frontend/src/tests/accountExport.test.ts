@@ -16,7 +16,8 @@ vi.mock('../api/servers', () => ({ decryptChannelContent: vi.fn() }));
 vi.mock('../api/dms', () => ({ decryptDMContent: vi.fn() }));
 vi.mock('../api/tasks', () => ({ openChannelTaskText: vi.fn(), openSelfTaskText: vi.fn() }));
 vi.mock('../api/saveAttachment', () => ({ saveAttachment: vi.fn() }));
-vi.mock('../api/platform', () => ({ isMobile: () => false, isTauri: () => false }));
+let mobile = false;
+vi.mock('../api/platform', () => ({ isMobile: () => mobile, isTauri: () => false }));
 
 import { openExport, exportFileName, envelopeMeta, type AccountExportRaw, type ExportReaders } from '../api/accountExport';
 import { ENC_KEY_UNAVAILABLE, ENC_CONTEXT_MISMATCH } from '../api/decryptMarkers';
@@ -169,5 +170,31 @@ describe('exportFileName', () => {
         expect(exportFileName('alice', new Date('2026-09-02T23:59:00Z'))).toBe('puca-export-alice-2026-09-02.json');
         expect(exportFileName('../evil name/', new Date('2026-09-02T00:00:00Z'))).toBe('puca-export-.._evil_name_-2026-09-02.json');
         expect(exportFileName('', new Date('2026-09-02T00:00:00Z'))).toBe('puca-export-account-2026-09-02.json');
+    });
+});
+
+describe('saving on a phone', () => {
+    afterEach(() => { mobile = false; });
+
+    it('reports a real failure instead of "Downloaded as" when nothing was written', async () => {
+        // A blob-URL anchor click downloads NOTHING in a WebView. Falling
+        // through to it on a native platform produced a success message for a
+        // file that does not exist, and the user then had to wait out the
+        // server's cooldown to find out.
+        mobile = true;
+        const { saveExportFile } = await import('../api/accountExport');
+        await expect(saveExportFile({ any: 'doc' }, 'alice')).rejects.toThrow(/Could not save the export/i);
+        const { saveAttachment } = await import('../api/saveAttachment');
+        expect(saveAttachment, 'the dead anchor must not be reached on a phone').not.toHaveBeenCalled();
+    });
+
+    it('positive control: on the desktop the same call still goes through the save path', async () => {
+        const { saveAttachment } = await import('../api/saveAttachment');
+        (saveAttachment as unknown as { mockResolvedValue: (v: unknown) => void })
+            .mockResolvedValue({ where: 'Downloads/Puca/x.json', onDisk: true });
+        const { saveExportFile } = await import('../api/accountExport');
+        await expect(saveExportFile({ any: 'doc' }, 'alice')).resolves.toEqual({
+            where: 'Downloads/Puca/x.json', onDisk: true,
+        });
     });
 });

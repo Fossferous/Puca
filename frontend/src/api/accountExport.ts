@@ -162,12 +162,28 @@ export async function openExport(
     // the reason per channel and apply it to the rest without asking again.
     // Marker RETURNS (key unavailable for one epoch) are not memoised: they
     // come from cached state and differ per epoch.
+    //
+    // ONLY A SETTLED ANSWER IS REMEMBERED. One dropped connection used to
+    // seal a whole channel for the rest of the export, so a moment of bad
+    // Wi-Fi turned a year of readable messages into ciphertext with no
+    // warning beyond a count. A transport failure is retried on the next row
+    // instead; a refusal (this account cannot have that key) still costs one
+    // round trip and no more.
     const deadChannels = new Map<number, string>();
+    const settledRefusal = (e: unknown): boolean => {
+        const status = (e as { status?: number } | null)?.status;
+        if (typeof status === 'number') return status >= 400 && status < 500;
+        const m = (e instanceof Error ? e.message : String(e)).toLowerCase();
+        return m.includes('locked') || m.includes('no key') || m.includes('not a member')
+            || m.includes('forbidden') || m.includes('unauthor');
+    };
     const viaChannel = (channelId: number, read: () => Promise<string>): (() => Promise<string>) => {
         const known = deadChannels.get(channelId);
         if (known !== undefined) return () => Promise.reject(new Error(known));
         return () => read().catch((e: unknown) => {
-            deadChannels.set(channelId, e instanceof Error ? e.message : String(e));
+            if (settledRefusal(e)) {
+                deadChannels.set(channelId, e instanceof Error ? e.message : String(e));
+            }
             throw e;
         });
     };
@@ -247,9 +263,16 @@ export async function saveExportFile(doc: Record<string, unknown>, username: str
     const json = JSON.stringify(doc, null, 2);
 
     if (isMobile()) {
+        // A phone has no download tray and a blob-URL anchor click writes
+        // NOTHING in a WebView, so the anchor below is not a fallback here —
+        // it is a silent failure that then reports "Downloaded as …". Either
+        // the real write happens or the caller is told it did not.
         try {
             const { Capacitor } = await import('@capacitor/core');
-            if (Capacitor.getPlatform() === 'android' && Capacitor.isPluginAvailable('Filesystem')) {
+            if (Capacitor.getPlatform() !== 'android' || !Capacitor.isPluginAvailable('Filesystem')) {
+                throw new Error('this app cannot write files on this platform');
+            }
+            {
                 const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
                 await Filesystem.writeFile({
                     path: `Puca/${name}`,
@@ -261,8 +284,8 @@ export async function saveExportFile(doc: Record<string, unknown>, username: str
                 return { where: `Documents/Puca/${name}`, onDisk: true };
             }
         } catch (e) {
-            // Fall through to the anchor: worse, but not nothing.
-            console.warn('[export] Documents write failed, falling back to a download:', e);
+            console.warn('[export] could not write the export to this device:', e);
+            throw new Error('Could not save the export to this device. Free some space and try again, or run the export from the desktop app.');
         }
     }
 

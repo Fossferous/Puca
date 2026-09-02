@@ -121,9 +121,14 @@ push-to-talk to, dead in every game profile.
 
 A process running **above ours in integrity** (a game launched "as
 administrator") gets its input routed by Windows to no lower process: not to
-hooks, not to raw input, not to the key-state table (UIPI). No capture
-method works, and no re-arm helps. The hook thread probes the foreground
-process once a second, compares integrity levels, and emits
+hooks, not to raw input, not to the key-state table (UIPI). Only a level that
+was actually READ and is higher counts: a process we cannot inspect at all is
+reported as unknown, never as elevated, because telling someone to relaunch a
+game as administrator when their hotkeys work is worse than saying nothing.
+No capture
+method works, and no re-arm helps. A dedicated probe thread — never the hook
+thread, whose latency Windows measures — checks the foreground process once a
+second, compares integrity levels, and emits
 `global-hotkey-blocked { process }` on change; the banner names the game and
 the two real fixes (run it normally, or run Púca elevated too). Dismissal is
 per process.
@@ -156,6 +161,8 @@ await __pucaHotkeysDebug.snapshot()
 | `native.down_bits` non-zero at rest | a slot believes its key is held — the poll will clear it within 40 ms |
 | `native.foreground_blocker` non-empty | the app in front runs elevated; nothing here can see its keys |
 | `native.self_injected_bits` non-zero | those slots are held by our OWN remote-control injection; the poll is deliberately blind to them |
+| `native.poll_presses_suppressed` rising | presses the poll refused because the remote-control injector was holding a key. Expected during a device session, and zero otherwise |
+| `native.foreground_unreadable` true | the foreground process could not be inspected at all (protected, anti-cheat, another user). NOT a blocker: nothing is claimed about it |
 | `feed.ownershipDeferrals` climbing while `feed.nativeDispatches` does not | the in-app feed is standing down for a native feed that has gone quiet — the one failure mode the single-owner rule can have |
 | `feed.blocker` | the same, as the frontend last heard it (drives the banner) |
 | `native.rearms` | re-installs so far (60 s clock plus evidence) |

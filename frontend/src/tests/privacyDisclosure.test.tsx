@@ -58,8 +58,20 @@ describe('PrivacyDisclosure', () => {
         expect(text).toMatch(/\/api\/mobile-updates\/check/);
         // The one third-party STUN case is stated, not hidden.
         expect(text).toMatch(/Google’s public STUN servers as a last resort/);
-        // Browser voice honesty (CMP-01) is consistent with Voice & Video.
-        expect(text).toMatch(/Firefox, Safari and iOS, media is blocked by default/);
+        // Browser voice honesty (CMP-01). The claim must match what the code
+        // actually does on an engine with no Encoded Transform: media is
+        // blocked only when "Require encryption for calls" is on, and
+        // settingsStore's migrateRequireMediaE2ee deliberately does NOT turn
+        // it on for an existing profile on such an engine (it would have
+        // killed working calls). Saying "blocked by default" there was a
+        // promise the app does not keep.
+        expect(text).toMatch(/Firefox, Safari and iOS cannot encrypt live media/);
+        expect(text).toMatch(/readable by the server, unless “Require encryption for calls” is on/);
+        expect(text).toMatch(/New installs have that on; an existing one keeps whatever it had/);
+        expect(text, 'the retracted claim must not come back').not.toMatch(/media is blocked by default/);
+        // And the platform list must not promise the macOS/Linux shells,
+        // whose WebKit lacks the same API.
+        expect(text).toMatch(/every call from the Windows and Android apps/);
     });
 
     it('links the long-form statement in the repository GET /source names', async () => {

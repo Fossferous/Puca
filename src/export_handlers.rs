@@ -244,6 +244,11 @@ pub(crate) async fn build_export(pool: &PgPool, claims: &Claims) -> Result<Value
     // Pins how row_to_json renders every timestamptz in this transaction,
     // whatever the server's default zone is. LOCAL: gone at commit.
     sqlx::query("SET LOCAL TIME ZONE 'UTC'").execute(&mut *tx).await?;
+    // The sections are unpaged by design (an export IS the whole account), so
+    // the bound is a time one: a section still running after this is a bug or
+    // an account far outside what the format is useful for, and either way it
+    // must not hold a pool connection indefinitely. LOCAL: gone at commit.
+    sqlx::query("SET LOCAL statement_timeout = '30000ms'").execute(&mut *tx).await?;
 
     let profile = section(&mut tx, PROFILE_SQL, uid).await?;
     let servers = section(&mut tx, SERVERS_SQL, uid).await?;

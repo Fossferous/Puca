@@ -8,26 +8,39 @@ one-line summary; this file is the full story. Versions follow
 
 Everything the launch-readiness pass found, in one update.
 
+### Added
+- **Download your data.** Settings → Privacy & Safety will produce a single
+  JSON file holding your account's own rows — profile, memberships, friends,
+  the messages you wrote, tasks, uploads, devices and preferences — decrypted
+  on your own machine by your own keys, with anything this device cannot open
+  left as ciphertext and counted in the summary. It asks for your password,
+  and allows one export a minute. Other people's messages are not included:
+  they are theirs.
+- **A plain statement of what leaves your device and what your server can
+  see**, in Settings → Privacy & Safety, next to the export. It names the
+  metadata a server operator can read, what it cannot read, and the two
+  places anything is fetched from a third party.
+
 ### Fixed
 - **Voice hotkeys that worked about half the time.** Push-to-talk, mute and
-  deafen from inside a game now come from two independent sources: the
-  system hook, and a 20 ms check of the physical key state that catches a
-  press or release the hook missed (Windows silently removes a hook under
-  load; a key released on a UAC prompt was never seen). A lost release used
-  to leave push-to-talk open AND swallow the next press. Hotkeys pressed
-  while Púca itself was in front were also being dropped by a focus test the
-  WebView answers unreliably; the OS's answer is used now. Keys delivered
-  by a gaming mouse's own software (G HUB, Synapse) or AutoHotkey used to be
-  ignored as "injected"; only Púca's own remote-control input is now.
-  A game going fullscreen mid-call (which arms the clip buffer) used to
-  restart the whole hotkey feed, closing a held push-to-talk. A Ctrl or Shift
-  pressed in the same instant as its key could go unseen by a toggle A
-  hotkey bound to a mouse button no longer stops working while the message
-  box has focus, and a rapid settings change can no longer leave the same
-  keypress being handled twice.
-  If a game runs as administrator, Windows hides its keys from every
-  program that does not, and Púca now says so in a banner instead of
-  failing silently.
+  deafen from inside a game now come from two independent sources: the system
+  hook, and a 20 ms check of the physical key state that catches a press or
+  release the hook missed. Windows removes a hook without warning when the
+  machine is loaded, and a key released on a security prompt was never seen
+  at all; one lost release used to leave push-to-talk open and swallow the
+  next press too, which is why it felt like every other press worked.
+  Hotkeys could also vanish whenever the app wrongly believed it still had
+  focus while a game was in front, and for a mouse button pressed with the
+  pointer outside the window; the answer now comes from Windows itself. Keys
+  sent by a gaming mouse's own software (G HUB, Synapse) or by AutoHotkey
+  were being ignored as "injected"; only Púca's own remote-control input is
+  now. A game going fullscreen mid-call used to restart the whole hotkey
+  system, closing a held push-to-talk. A Ctrl or Shift pressed in the same
+  instant as its key could go unseen by a toggle. A hotkey on a mouse button
+  no longer stops working while the message box you type in has focus, and a
+  quick settings change can no longer leave one keypress handled twice. If a
+  game runs as administrator, Windows hides its keys from every program that
+  does not, and Púca now says so in a banner instead of failing silently.
 - **Taskbar pins and shortcuts left dead by the 0.9.0 rename.** 0.9.0 renamed
   the program file from `app.exe` to `Puca.exe` (`Puca-Lite.exe` for Lite), and
   a taskbar pin you made yourself kept pointing at the old name. This update's
@@ -38,6 +51,17 @@ Everything the launch-readiness pass found, in one update.
   server; a database dump no longer contains a usable reset link.
 - The obsolete `sessions` table (raw login session keys, written by nothing
   since 0.9.0) is dropped.
+- **Updates could stop looking after one wrong answer.** The desktop and
+  mobile update checks try more than one address; a reply from something that
+  was not Púca used to end the search instead of moving on to the next one,
+  leaving the app on an old version with no sign anything was wrong. The
+  failure message now names what would help.
+- Joining a call from Firefox, Safari or iOS now says up front that the
+  browser cannot encrypt live media, and what your options are, instead of
+  the call simply being silent in one direction.
+- Sharing a folder that sits on a network drive is refused when you pick it,
+  naming the reason, rather than being accepted and then failing on every
+  browse.
 
 ### Security
 - Keystrokes sent by someone controlling this machine through My Devices
