@@ -6,6 +6,8 @@
  * compares that against its own version and shows the UpdateBanner when newer.
  *
  * Install: clicking the banner runs the Tauri updater plugin — it fetches
+ * hygiene-lint:allow-placeholder-domain — illustrative prose; the real endpoint
+ * is baked in from the untracked src-tauri/tauri.release.json at build time.
  * https://download.example.com/latest.json, verifies the installer's minisign
  * signature against the pubkey baked into the app, downloads it with progress,
  * runs it (passive mode), and the app relaunches updated. If any of that fails
@@ -29,6 +31,8 @@ const CHECK_FETCH_TIMEOUT_MS = 8_000;
 export interface AppVersionInfo {
     version: string;
     /** Where "Download" opens in the system browser. Point this at a landing
+     *  hygiene-lint:allow-placeholder-domain — illustrative prose; the value
+     *  comes from the operator's /app-version file, never from this repo.
      *  PAGE (e.g. https://download.example.com/), NOT a direct .exe URL — a raw
      *  installer link often just opens a blank browser tab and never downloads. */
     download_url: string;

@@ -53,11 +53,11 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   This boundary does NOT apply to the separate SYSTEM-service transport
   (`crates/puca-service`, `crates/puca-agent`), which exists
   specifically to reach the lock and sign-in screens — see
-  `docs/DEVICES_HANDOFF.md` and `crates/puca-input/src/desktop.rs`. That
-  path runs as LocalSystem and attaches the calling thread to the input
-  desktop with `DESKTOP_JOURNALPLAYBACK`, which is the access right
-  `SendInput` requires there and which a lower-integrity process could never
-  be granted regardless.
+  `crates/puca-input/src/desktop.rs`, whose header documents the whole
+  mechanism. That path runs as LocalSystem and attaches the calling thread
+  to the input desktop with `DESKTOP_JOURNALPLAYBACK`, which is the access
+  right `SendInput` requires there and which a lower-integrity process could
+  never be granted regardless.
 
   **What to do about a UAC prompt mid-session.** A prompt that appears while you
   are signed in and using the machine freezes the picture and swallows input: the

@@ -191,7 +191,8 @@ function PhoneFileSharingCard() {
                                 : diag && !diag.pluginVisible
                                     ? `Diagnostic: platform "${diag.platform}", but the native file plugin is `
                                       + 'not registered. This build of the APK does not carry it — install the '
-                                      + 'latest APK from download.example.com (an over-the-air update cannot add it).'
+                                      + "latest APK from your server's download page (an over-the-air "
+                                      + 'update cannot add it).'
                                     : diag?.error
                                         ? `Diagnostic: the plugin is present but returned an error — ${diag.error}`
                                         : 'Diagnostic: unavailable for an unknown reason.'}

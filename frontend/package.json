@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "npm run build:agent && tsc -b && vite build",
     "typecheck": "tsc -b",
-    "lint": "eslint . && node scripts/check-no-ui-emoji.mjs",
+    "lint": "eslint . && node scripts/check-no-ui-emoji.mjs && node scripts/check-source-hygiene.mjs && node ../scripts/check-docs-links.mjs",
     "lint:icons": "node scripts/check-no-ui-emoji.mjs",
     "preview": "vite preview",
     "test": "vitest run",
@@ -32,7 +32,9 @@
     "e2e:ui": "playwright test --ui",
     "e2e:headed": "playwright test --headed",
     "verify:e2ee": "node e2e/e2ee-live-verify.mjs",
-    "build:agent": "node scripts/build-agent.mjs"
+    "build:agent": "node scripts/build-agent.mjs",
+    "lint:hygiene": "node scripts/check-source-hygiene.mjs",
+    "lint:docs": "node ../scripts/check-docs-links.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.0.0",
