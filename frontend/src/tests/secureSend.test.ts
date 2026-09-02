@@ -26,6 +26,9 @@ const fake = {
     },
 };
 
+// The send paths seal under the signed-in user as author (v3 context) and
+// refuse to seal without knowing who that is; the rig has no token.
+vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), currentUserIdFromToken: () => 1 }));
 vi.mock('../api/client', () => ({
     apiClient: {
         get: vi.fn(async (url: string) => {

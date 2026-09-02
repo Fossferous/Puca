@@ -387,16 +387,17 @@ export function listPinnedMessages(channelId: number): Promise<PinnedMessage[]> 
 // --- E2EE Channel Message Support (group keys) ---
 
 import {
-    parseEnvelope,
     serializeEnvelope,
     encryptChannelMessage,
     decryptChannelMessage as decryptWithChannelKey,
+    parseEnvelopeEx,
     SecureSendError,
     messageEncState,
     type MessageEncState,
 } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
-import { ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT } from './decryptMarkers';
+import { ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
+import { currentUserIdFromToken } from './auth';
 
 /**
  * Encrypt and send a channel message under the channel's group key.
@@ -424,7 +425,12 @@ export async function sendChannelMessageEncrypted(
         throw new SecureSendError("Can't send securely — this channel's encryption key isn't available yet. Try again in a moment.");
     }
     console.debug(`[e2ee] send(${channelId}): encrypting under epoch ${keyInfo.epoch}`);
-    const env = await encryptChannelMessage(keyInfo.key, keyInfo.epoch, content);
+    // The context the reader will recompute: this channel, the CURRENT epoch
+    // (the same value that goes into the envelope — never the row's stale
+    // key_epoch on an edit), and me as the author.
+    const me = currentUserIdFromToken();
+    if (me === null) throw new SecureSendError("Can't send securely — you appear to be signed out. Sign in again.");
+    const env = await encryptChannelMessage(keyInfo.key, keyInfo.epoch, content, { kind: 'chan-msg', channelId, senderId: me });
     const wireContent = serializeEnvelope(env);
     const res = await sendMessage(channelId, wireContent, replyToId, isTask, keyInfo.epoch, clipId);
     return { id: res.id, wireContent, keyEpoch: keyInfo.epoch, clipConsent: res.clip_consent };
@@ -449,7 +455,12 @@ export async function editChannelMessageEncrypted(
     if (!keyInfo) {
         throw new SecureSendError("Can't save the edit securely — this channel's encryption key isn't available. Try again in a moment.");
     }
-    const env = await encryptChannelMessage(keyInfo.key, keyInfo.epoch, content);
+    // The context the reader will recompute: this channel, the CURRENT epoch
+    // (the same value that goes into the envelope — never the row's stale
+    // key_epoch on an edit), and me as the author.
+    const me = currentUserIdFromToken();
+    if (me === null) throw new SecureSendError("Can't send securely — you appear to be signed out. Sign in again.");
+    const env = await encryptChannelMessage(keyInfo.key, keyInfo.epoch, content, { kind: 'chan-msg', channelId, senderId: me });
     const wireContent = serializeEnvelope(env);
     await editMessage(channelId, messageId, wireContent);
     return { wireContent, keyEpoch: keyInfo.epoch };
@@ -459,14 +470,20 @@ export async function editChannelMessageEncrypted(
  * Decrypt a single channel message's content. Plaintext (non-envelope) content
  * is returned unchanged so legacy messages still render.
  */
-export async function decryptChannelContent(channelId: number, content: string): Promise<string> {
-    const env = parseEnvelope(content);
-    if (!env || env.t !== 'ch') return content;
+export async function decryptChannelContent(channelId: number, content: string, senderId: number): Promise<string> {
+    const parsed = parseEnvelopeEx(content);
+    if (parsed.kind === 'unsupported-version') return ENC_UNSUPPORTED_VERSION;
+    if (parsed.kind !== 'envelope' || parsed.env.t !== 'ch') return content;
+    const env = parsed.env;
     const epoch = env.epoch ?? 0;
     const key = await getChannelKeyForEpoch(channelId, epoch);
     if (!key) return ENC_KEY_UNAVAILABLE;
-    const plain = await decryptWithChannelKey(key, env);
-    return plain ?? ENC_CANNOT_DECRYPT;
+    const plain = await decryptWithChannelKey(key, env, { kind: 'chan-msg', channelId, senderId });
+    if (plain !== null) return plain;
+    // Right key, tag fails. For v3 that is the binding doing its job: the
+    // row's channel / sender / epoch is not what the author sealed under. No
+    // retry under other context — that would make the tag an oracle.
+    return env.v === 3 ? ENC_CONTEXT_MISMATCH : ENC_CANNOT_DECRYPT;
 }
 
 /** Decrypt an array of channel messages in place, tagging each with its E2EE
@@ -475,7 +492,7 @@ export async function decryptChannelMessages(channelId: number, messages: Messag
     return Promise.all(
         messages.map(async (msg) => {
             const wire = msg.content;
-            const text = await decryptChannelContent(channelId, wire);
+            const text = await decryptChannelContent(channelId, wire, msg.user_id);
             return { ...msg, content: text, encState: messageEncState(wire, text) };
         })
     );

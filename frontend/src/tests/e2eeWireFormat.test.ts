@@ -30,6 +30,7 @@ import {
     decryptSelf,
     unwrapChannelKey,
     encryptDM,
+    decryptChannelMessage,
 } from '../api/e2ee';
 import kat from './fixtures/e2ee-wire-format-kat.json';
 
@@ -48,8 +49,15 @@ describe('e2ee wire format (frozen)', () => {
     });
 
     it('decrypts a DM encrypted under the pinned format (HKDF_DM_INFO)', async () => {
-        const plain = await decryptDM(identityB(), kat.pubA, kat.dm.envelope as never);
+        const plain = await decryptDM(identityB(), kat.pubA, kat.dm.envelope as never, { senderId: 1, recipientId: 2 });
         expect(plain).toBe(kat.dm.plaintext);
+    });
+
+    it('decrypts a v2 CHANNEL message minted before the v3 context binding', async () => {
+        // The context is IGNORED for v2 — that is the whole compatibility
+        // contract, and any value here must open the frozen ciphertext.
+        const plain = await decryptChannelMessage(fromB64(kat.channelKey_b64), kat.ch.envelope as never, { kind: 'chan-msg', channelId: 999, senderId: 999 });
+        expect(plain).toBe(kat.ch.plaintext);
     });
 
     it('decrypts a self-stored envelope under the pinned format (HKDF_SELF_INFO)', async () => {
@@ -72,7 +80,7 @@ describe('e2ee wire format (frozen)', () => {
      */
     it('fails to decrypt when the derivation inputs are wrong', async () => {
         const wrongPeer = makeIdentity(new Uint8Array(32).fill(9)).publicKeyEncoded;
-        const plain = await decryptDM(identityB(), wrongPeer, kat.dm.envelope as never);
+        const plain = await decryptDM(identityB(), wrongPeer, kat.dm.envelope as never, { senderId: 1, recipientId: 2 });
         expect(plain).toBeNull();
     });
 
@@ -83,9 +91,9 @@ describe('e2ee wire format (frozen)', () => {
     it('still round-trips a fresh DM', async () => {
         const a = identityA();
         const b = identityB();
-        const env = await encryptDM(a, b.publicKeyEncoded, 'round trip');
+        const env = await encryptDM(a, b.publicKeyEncoded, 'round trip', { senderId: 1, recipientId: 2 });
         expect(env).not.toBeNull();
-        expect(await decryptDM(b, a.publicKeyEncoded, env as never)).toBe('round trip');
+        expect(await decryptDM(b, a.publicKeyEncoded, env as never, { senderId: 1, recipientId: 2 })).toBe('round trip');
     });
 });
 

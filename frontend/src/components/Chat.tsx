@@ -1871,7 +1871,7 @@ export function Chat({ onLogout }: ChatProps) {
                     // the content-free channel notification.
                     if (appIsForeground() && loadSettings().messageToasts) {
                         const from = payload.sender.display_name || payload.sender.username;
-                        decryptDMContent(payload.content, payload.sender.id)
+                        decryptDMContent(payload.content, payload.sender.id, payload.sender.id)
                             .then(body => pushMessageToast({
                                 title: from,
                                 body: body.length > 120 ? `${body.slice(0, 120)}…` : body,
@@ -1885,7 +1885,7 @@ export function Chat({ onLogout }: ChatProps) {
             if (currentDM && payload.conversation_id === currentDM.id) {
                 // Decrypt with the conversation partner's key (works for both
                 // incoming messages and the server's echo of our own).
-                const displayContent = await decryptDMContent(payload.content, currentDM.other_user_id);
+                const displayContent = await decryptDMContent(payload.content, currentDM.other_user_id, payload.sender.id);
                 const newDMMessage = {
                     id: payload.message_id,
                     conversation_id: payload.conversation_id,
@@ -2182,7 +2182,7 @@ export function Chat({ onLogout }: ChatProps) {
             const ownEcho = payload.sender.id === currentUserId;
 
             if (payload.room_id === roomId && currentChannel) {
-                const displayContent = await decryptChannelContent(currentChannel.id, payload.content);
+                const displayContent = await decryptChannelContent(currentChannel.id, payload.content, payload.sender.id);
                 // @mention ping. This can only exist HERE: messages are E2EE, so
                 // the cross-channel MessageNotification carries no content — the
                 // open channel is the one place decrypted text is in hand. (When
@@ -2711,7 +2711,7 @@ export function Chat({ onLogout }: ChatProps) {
         try {
             const pins = await listPinnedMessages(currentChannel.id);
             const decrypted = await Promise.all(
-                pins.map(async (p) => ({ ...p, content: await decryptChannelContent(currentChannel.id, p.content) }))
+                pins.map(async (p) => ({ ...p, content: await decryptChannelContent(currentChannel.id, p.content, p.user_id) }))
             );
             setPinnedMessages(decrypted);
             setShowPins(true);
