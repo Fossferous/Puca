@@ -69,7 +69,18 @@ export async function checkForNewVersion(): Promise<AppVersionInfo | null> {
         try {
             // no-store: never let a cached body hide a release published seconds ago.
             const res = await fetch(`${base}/app-version`, { cache: 'no-store', signal: ctrl.signal });
-            if (!res.ok) return null; // reached a server; 404 = nothing published
+            // 404 (nothing published) and 204 are real answers from a server
+            // that serves this route, and they are final. Any OTHER non-2xx
+            // means whatever answered is not serving /app-version — a proxy's
+            // 502, an origin lock's 403, or, in the mis-build this loop exists
+            // for, whatever happens to be listening on localhost:3000 — and
+            // must not end the search: advance to the next base as a throw
+            // would.
+            if (res.status === 404 || res.status === 204) return null;
+            if (!res.ok) {
+                console.warn(`[AppVersion] ${base}/app-version answered ${res.status} — trying the next base`);
+                continue;
+            }
             const info: AppVersionInfo = await res.json();
             if (!info?.version || !info?.download_url?.startsWith('https://')) return null;
 

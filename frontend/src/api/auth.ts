@@ -776,6 +776,37 @@ export async function deleteAccount(username: string, currentPassword: string): 
     await apiClient.delete('/account', { body: JSON.stringify({ confirm_username: username }) });
 }
 
+/**
+ * Fetch the account's own rows from the server (GET /account/export) — the
+ * raw document, ciphertext included. `api/accountExport.ts` opens what the
+ * identity can and saves the result; this only does the credential half.
+ *
+ * Same shape as deleteAccount: the password is checked LOCALLY first (the
+ * seed unwrap), which gives a clean "incorrect" without spending a login
+ * attempt, then proven to the server, which refuses the export on a bare
+ * bearer token — the whole account in one response is exactly what a stolen
+ * token must not be able to fetch.
+ */
+export async function requestAccountExport(username: string, currentPassword: string): Promise<unknown> {
+    const wrap: {
+        key_version: number;
+        wrap_salt: string | null;
+        seed_wrapped_pw: string | null;
+        pw_kdf_iterations: number | null;
+        pw_kdf: PwKdf | null;
+    } = await apiClient.get('/keys/wrap');
+    if (wrap.key_version < 3 || !wrap.wrap_salt || !wrap.seed_wrapped_pw) {
+        throw new Error('This account is not set up for in-app export. Ask your server operator.');
+    }
+    const seed = await unwrapSeedWithPassword(
+        currentPassword, wrap.wrap_salt, wrap.seed_wrapped_pw,
+        wrap.pw_kdf_iterations ?? undefined, wrap.pw_kdf ?? undefined,
+    );
+    if (!seed) throw new Error('Password is incorrect.');
+    await proveCurrentPassword(username, currentPassword);
+    return apiClient.get('/account/export');
+}
+
 /** Set (or change) the account email: sends a verification link to the new
  *  address; the address only becomes verified when that link is opened. */
 export async function requestEmailChange(email: string): Promise<string> {

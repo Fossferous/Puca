@@ -6,6 +6,8 @@ import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
 import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout, regenerateRecoveryCode } from '../api/auth';
 import { showRecoveryCode } from '../api/recoveryPrompt';
+import { PrivacyDisclosure } from './PrivacyDisclosure';
+import { AccountExportCard } from './AccountExportCard';
 import { currentAppVersion } from '../api/appVersion';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -1413,6 +1415,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     )}
                                 </div>
 
+                                <AccountExportCard username={username} />
+
                                 <h3>Account Removal</h3>
                                 <div className="settings-card danger">
                                     <p className="settings-hint">
@@ -1534,6 +1538,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         </button>
                                     </div>
                                 </div>
+
+                                <PrivacyDisclosure />
 
                                 <h3>Call Encryption</h3>
                                 <div className="settings-card">

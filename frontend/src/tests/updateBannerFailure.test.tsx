@@ -166,6 +166,33 @@ describe('a failed update says so', () => {
     });
 
     /**
+     * The advice must name what actually helps. The installer is per-user
+     * (NSIS currentUser: %LOCALAPPDATA% + HKCU), so "as administrator" was
+     * wrong twice over — elevation is not needed, and elevating into a
+     * different admin account installs a second copy under that profile.
+     * What blocks the swap is the running process, which the tray keeps
+     * alive after the window closes.
+     */
+    it('the failure advice says to close the app INCLUDING the tray, and never mentions administrator', async () => {
+        installUpdateInPlace.mockImplementation(async (onProgress: (p: unknown) => void) => {
+            onProgress({ phase: 'installing' });
+            throw new Error('installer exited with code 1');
+        });
+        await mount();
+        const btn = host!.querySelector<HTMLButtonElement>('.update-now-btn');
+        await act(async () => { btn!.click(); });
+        await act(async () => { await Promise.resolve(); });
+
+        const failure = host!.querySelector('.update-failure')?.textContent ?? '';
+        // Positive control: the block rendered at all, so the assertions
+        // below are not passing against an empty node.
+        expect(failure).toContain('installer exited with code 1');
+        expect(failure).toMatch(/close Púca completely/i);
+        expect(failure).toMatch(/tray/i);
+        expect(failure).not.toMatch(/as administrator/i);
+    });
+
+    /**
      * The existing behaviour for an early failure must survive: opening the
      * download page is right when the update never reached the install step.
      */
