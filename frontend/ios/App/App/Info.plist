@@ -47,5 +47,20 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<!-- WKWebView getUserMedia HARD-CRASHES the app if these strings are
+	     missing when the page asks for the device — without them joining
+	     voice or turning on the camera kills Púca on the spot. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Púca uses the microphone for end-to-end encrypted voice calls.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Púca uses the camera for end-to-end encrypted video calls.</string>
+	<!-- Keep a live voice call's audio (both directions) running when the app
+	     is backgrounded — the WebRTC session stays up instead of iOS
+	     suspending it, the companion of the JS-side keep-alive in
+	     voiceAudioKeepAlive.ts. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 </dict>
 </plist>

@@ -453,4 +453,30 @@ describe('the Pop out control', () => {
         act(() => { root.render(<StreamPip onExpand={() => {}} onClose={() => {}} />); });
         expect(popOutButtons()).toHaveLength(0);
     });
+
+    // Review finding on the mobile stream revamp: the DOCKED strip is in-flow,
+    // so hiding it with an inline visibility kept its whole ~32dvh row as a
+    // blank band above the messages while the stream was popped out. Hidden
+    // is a class there, and StreamPip.css collapses the row under it.
+    it('hides the DOCKED strip with a row-collapsing class, never an inline visibility', () => {
+        act(() => {
+            root.render(<StreamPip docked hidden onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={vi.fn()} />);
+        });
+        const pip = container.querySelector<HTMLElement>('.stream-pip')!;
+        expect(pip.classList.contains('docked')).toBe(true);
+        expect(pip.classList.contains('is-hidden')).toBe(true);
+        expect(pip.style.visibility).toBe('');
+        expect(pip.getAttribute('style')).toBeNull(); // no inline geometry either
+
+        act(() => {
+            root.render(<StreamPip docked onExpand={() => {}} onClose={() => {}} poppedStreams={[]} onTogglePopout={vi.fn()} />);
+        });
+        expect(container.querySelector('.stream-pip')!.classList.contains('is-hidden')).toBe(false);
+
+        // The floating desktop box keeps its inline hide: it has drag state to preserve.
+        act(() => {
+            root.render(<StreamPip hidden onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={vi.fn()} />);
+        });
+        expect(container.querySelector<HTMLElement>('.stream-pip')!.style.visibility).toBe('hidden');
+    });
 });

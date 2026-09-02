@@ -76,12 +76,14 @@ const version = (() => {
 // applied and reached nothing. The first attempt at this fix shipped unchanged
 // binaries behind a green import check that was case-sensitive against an
 // upper-case import name. Append, never replace, so an existing -L survives.
-const CRT_STATIC = '-C target-feature=+crt-static';
-const withCrtStatic = (flags) =>
-    (flags && flags.includes('crt-static')) ? flags : [flags, CRT_STATIC].filter(Boolean).join(' ');
+//
+// WINDOWS ONLY, decided in crtStatic.mjs: on Linux the same flag makes rustc
+// drop proc-macro crates, so serde's derive cannot build and this very
+// script fails — the Linux build it must keep green. The flag exists solely
+// so app.exe starts on a fresh Windows.
+import { envWithCrtStatic } from './crtStatic.mjs';
 const cargoEnv = {
-    ...process.env,
-    RUSTFLAGS: withCrtStatic(process.env.RUSTFLAGS),
+    ...envWithCrtStatic(process.platform, process.env),
     ...(version ? { PUCA_VERSION: version } : {}),
 };
 if (version) console.log(`[build-agent] stamping sidecars as ${version}`);
@@ -240,5 +242,13 @@ const bytes = statSync(staged).size;
 const floor = process.platform === 'win32' ? 500_000 : 100_000;
 if (bytes < floor) throw new Error(`staged agent looks wrong: ${bytes} bytes (floor ${floor} for ${process.platform})`);
 assertStamped(staged, 'puca-agent');
-assertCarriesFrozenLabel(staged, 'puca-agent');
+// Windows only, like the size floor above and for the same reason: the label
+// lives in the sealed-control path, which only the Windows build links —
+// main() off Windows is the cross-compile guard stub that exits 2, so the
+// constant is dead code there and LLVM strips the string from the binary.
+// Only the artefact that ships (the Windows sidecar) can — or needs to —
+// carry it.
+if (process.platform === 'win32') {
+    assertCarriesFrozenLabel(staged, 'puca-agent');
+}
 console.log(`[build-agent] staged ${staged} (${bytes} bytes)`);

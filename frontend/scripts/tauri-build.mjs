@@ -20,11 +20,9 @@
  * update server to point at. It just says so, loudly, rather than pretending.
  */
 import { spawnSync } from 'node:child_process';
-// Static CRT for app.exe. Same reason, same environment-override trap, as
-// the identical helper in build-agent.mjs; see the comment there.
-const CRT_STATIC = '-C target-feature=+crt-static';
-const withCrtStatic = (flags) =>
-    (flags && flags.includes('crt-static')) ? flags : [flags, CRT_STATIC].filter(Boolean).join(' ');
+// Static CRT for app.exe — Windows only, decided in crtStatic.mjs (same
+// reason and the same environment-override trap as build-agent.mjs).
+import { envWithCrtStatic } from './crtStatic.mjs';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +30,14 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tauriDir = join(here, '..', 'src-tauri');
+// tauri.windows.conf.json (beside the base config) is a PLATFORM overlay that
+// Tauri loads and merges BY ITSELF, unsanitised: it names puca-service as a
+// sidecar only on Windows, because build-agent.mjs only builds and stages the
+// Windows service on win32 and a Linux/macOS bundle must not demand a binary
+// that never exists there. Two consequences: it must not carry "//" comment
+// keys (the schema rejects unknown fields and the whole Windows build fails),
+// and JSON merge REPLACES arrays, so it lists every Windows sidecar, agent
+// included. The lite config passed via --config overrides it with [].
 const overlay = join(tauriDir, 'tauri.release.json');
 const baseConf = join(tauriDir, 'tauri.conf.json');
 
@@ -306,7 +312,7 @@ console.log(`[tauri-build] tauri build ${args.join(' ')}`);
 const r = spawnSync('npx', ['tauri', 'build', ...args], {
     stdio: 'inherit',
     shell: true,
-    env: { ...process.env, RUSTFLAGS: withCrtStatic(process.env.RUSTFLAGS) },
+    env: envWithCrtStatic(process.platform, process.env),
 });
 if (mergedDir) {
     try { rmSync(mergedDir, { recursive: true, force: true }); } catch { /* best effort */ }

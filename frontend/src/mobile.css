@@ -259,9 +259,17 @@
        position isn't trapped by .sidebar's transform, but that also means
        it no longer shares a flex column with .chat-main — nothing reserves
        its height, so it sits directly over the message form. Push the
-       message form up to clear it. */
+       message form up to clear it.
+
+       --mobile-voice-panel-h is the panel's MEASURED height, published onto
+       <html> by a ResizeObserver in VoicePanel.tsx, so the reservation is
+       exact in every state (collapsed bar, expanded controls, join button,
+       clip status rows). The previous hardcoded 172px had drifted from the
+       panel's real size as controls were added, leaving the composer covered
+       by the panel's top rows — the "chatbox under everything" report. The
+       fallback only matters if the measurement effect somehow never ran. */
     body:has(.voice-panel-compact) .chat-main {
-        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 172px);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--mobile-voice-panel-h, 172px));
     }
 
     /* Same reservation for the rail, channel sidebar, and checklist drawer —
@@ -272,7 +280,7 @@
     body:has(.voice-panel-compact) [class*="server-list"],
     body:has(.voice-panel-compact) .sidebar,
     body:has(.voice-panel-compact) .checklist-panel {
-        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 172px);
+        bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--mobile-voice-panel-h, 172px));
     }
 
     /* ==========================================================================

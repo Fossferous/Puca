@@ -119,6 +119,63 @@ const overlapInfo = await page.evaluate(() => {
     return { vpRect: { top: vr.top, bottom: vr.bottom }, mfRect: { top: mr.top, bottom: mr.bottom }, overlap };
 });
 console.log('>>> [overlap-check]', JSON.stringify(overlapInfo));
+// Logs were the file's convention, but a check that cannot fail is not a
+// check: the three new ones below set a non-zero exit code on a miss.
+if (!overlapInfo || overlapInfo.overlap !== false) {
+    console.log('FAIL overlap-check: the voice bar overlaps the composer (or one of them is missing)');
+    process.exitCode = 1;
+}
+
+// The compact panel is a slim COLLAPSED bar by default on phones — the full
+// two-row panel stood ~230px tall, which with the soft keyboard up left no
+// room for the message list ("everything stacked on top of each other while
+// typing"). Verify the collapsed class, the expand chevron, and the measured
+// --mobile-voice-panel-h variable mobile.css uses to reserve EXACTLY the
+// panel's height (the old hardcoded 172px drifted from the real size and
+// left the composer covered).
+const barInfo = await page.evaluate(() => {
+    const vp = document.querySelector('.voice-panel-compact');
+    if (!vp) return null;
+    return {
+        collapsed: vp.classList.contains('vp-collapsed'),
+        height: vp.getBoundingClientRect().height,
+        reservedVar: document.documentElement.style.getPropertyValue('--mobile-voice-panel-h'),
+        expandBtn: !!vp.querySelector('.vp-expand'),
+    };
+});
+console.log('>>> [collapsed-bar]', JSON.stringify(barInfo));
+if (!barInfo || !barInfo.collapsed || !barInfo.expandBtn || barInfo.height > 90
+    || parseInt(barInfo.reservedVar, 10) !== Math.ceil(barInfo.height)) {
+    console.log('FAIL collapsed-bar: expected a collapsed bar under 90px, an expand chevron, and an exact height reservation');
+    process.exitCode = 1;
+}
+
+// The chevron reveals the full control set (noise mode, camera, …) and the
+// reservation variable must follow the taller panel.
+await tryStep('expand-voice-controls', async () => {
+    await page.locator('.vp-expand').tap({ timeout: 3000 });
+    await page.waitForTimeout(500);
+});
+await shot('voice-bar-expanded');
+const expandedInfo = await page.evaluate(() => {
+    const vp = document.querySelector('.voice-panel-compact');
+    if (!vp) return null;
+    return {
+        collapsed: vp.classList.contains('vp-collapsed'),
+        height: vp.getBoundingClientRect().height,
+        reservedVar: document.documentElement.style.getPropertyValue('--mobile-voice-panel-h'),
+    };
+});
+console.log('>>> [expanded-bar]', JSON.stringify(expandedInfo));
+if (!expandedInfo || expandedInfo.collapsed || expandedInfo.height <= 90
+    || parseInt(expandedInfo.reservedVar, 10) !== Math.ceil(expandedInfo.height)) {
+    console.log('FAIL expanded-bar: expanding must drop vp-collapsed, grow the bar, and move the reservation with it');
+    process.exitCode = 1;
+}
+await tryStep('collapse-voice-controls', async () => {
+    await page.locator('.vp-expand').tap({ timeout: 3000 });
+    await page.waitForTimeout(400);
+});
 
 // Also check the checklist-drawer-closes-on-nav fix
 await tryStep('open-channel-checklist', async () => {

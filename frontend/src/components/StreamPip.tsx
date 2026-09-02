@@ -29,6 +29,19 @@ import { docPipSupported } from './streamDocPip';
 interface StreamPipProps {
     onExpand: () => void;
     onClose: () => void;
+    /** Mobile: render as a DOCKED strip (an in-flow flex child of .chat-main,
+     *  pinned under the chat header) instead of a floating draggable box. The
+     *  floating box is a desktop paradigm — its drag/resize are mouse-only and
+     *  its spawn position assumes a desktop-sized window — so on a phone it
+     *  sat immovably on top of the composer and voice bar. Docked, the video
+     *  reserves its own row and messages + composer lay out BELOW it. */
+    docked?: boolean;
+    /** Docked close = stop watching (deselect every stream). The floating
+     *  close's setShowPip(false) is wrong there: with streams still selected
+     *  the auto-switch effect in Chat.tsx immediately reopens the FULL stage —
+     *  on a phone that's "the close button fullscreens the thing I tried to
+     *  dismiss". */
+    onStopWatching?: () => void;
     /** Which streams are popped out (Doc-PiP grid: several; legacy engines:
      *  at most one), and the toggle. Optional: absent → no control. */
     poppedStreams?: number[];
@@ -39,7 +52,7 @@ interface StreamPipProps {
     hidden?: boolean;
 }
 
-export function StreamPip({ onExpand, onClose, poppedStreams = [], onTogglePopout, hidden = false }: StreamPipProps) {
+export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, poppedStreams = [], onTogglePopout, hidden = false }: StreamPipProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
     const [position, setPosition] = useState({ x: window.innerWidth - 420, y: window.innerHeight - 280 });
     const [size, setSize] = useState({ width: 400, height: 250 });
@@ -154,15 +167,25 @@ export function StreamPip({ onExpand, onClose, poppedStreams = [], onTogglePopou
     return (
         <div
             ref={pipRef}
-            className="stream-pip"
-            style={{
-                left: position.x,
-                top: position.y,
-                width: size.width,
-                height: size.height,
-                ...(hidden ? { visibility: 'hidden' as const } : {}),
-            }}
-            onMouseDown={handleMouseDown}
+            className={`stream-pip${docked ? ' docked' : ''}${docked && hidden ? ' is-hidden' : ''}`}
+            // Docked: no inline geometry at all — StreamPip.css's .docked rules
+            // size it (in-flow, aspect-ratio). Inline left/top/width/height
+            // would win over any stylesheet and drag the desktop float's stale
+            // coordinates onto the phone layout. Hidden is a CLASS here too: the
+            // strip is in-flow, so an inline visibility:hidden kept its whole
+            // ~32dvh row as a blank band above the messages while a stream was
+            // popped out; .is-hidden collapses the row and keeps the element
+            // laid out (a display:none <video> can pause — see the prop doc).
+            style={docked
+                ? undefined
+                : {
+                    left: position.x,
+                    top: position.y,
+                    width: size.width,
+                    height: size.height,
+                    ...(hidden ? { visibility: 'hidden' as const } : {}),
+                }}
+            onMouseDown={docked ? undefined : handleMouseDown}
         >
             {/* Header with controls */}
             <div className="pip-header">
@@ -218,29 +241,38 @@ export function StreamPip({ onExpand, onClose, poppedStreams = [], onTogglePopou
                             <PopOutIcon />
                         </button>
                     )}
-                    <button className="pip-btn" onClick={onExpand} title="Expand">
+                    <button className="pip-btn" onClick={onExpand} title="Expand" aria-label="Expand to full view">
                         <FullscreenIcon />
                     </button>
-                    <button className="pip-btn close" onClick={onClose} title="Close">
+                    <button
+                        className="pip-btn close"
+                        onClick={docked ? (onStopWatching ?? onClose) : onClose}
+                        title={docked ? 'Stop watching' : 'Close'}
+                        aria-label={docked ? 'Stop watching' : 'Close'}
+                    >
                         <CloseIcon />
                     </button>
                 </div>
             </div>
 
             {/* Video — NOT hard-muted: PiP is the only audio path while the full
-                stream view is closed (muted/volume driven by the effect above). */}
+                stream view is closed (muted/volume driven by the effect above).
+                Docked, the video itself is the big tap target for "expand". */}
             <video
                 ref={videoRef}
                 autoPlay
                 playsInline
                 className="pip-video"
+                onClick={docked ? onExpand : undefined}
             />
 
-            {/* Resize handle */}
-            <div
-                className="pip-resize-handle"
-                onMouseDown={handleResizeMouseDown}
-            />
+            {/* Resize handle — floating mode only (mouse-driven) */}
+            {!docked && (
+                <div
+                    className="pip-resize-handle"
+                    onMouseDown={handleResizeMouseDown}
+                />
+            )}
 
             {/* Stream count badge */}
             {selectedStreams.length > 1 && (
