@@ -90,6 +90,7 @@ const PERMISSION_CATEGORIES = [
             { key: 'MANAGE_SERVER', label: 'Manage Server', desc: 'Change server name and settings' },
             { key: 'KICK_MEMBERS', label: 'Kick Members', desc: 'Remove members from the server' },
             { key: 'BAN_MEMBERS', label: 'Ban Members', desc: 'Permanently ban members' },
+            { key: 'CREATE_INVITE', label: 'Create Invites', desc: 'Create invite links for this server' },
             { key: 'ADMINISTRATOR', label: 'Administrator', desc: 'Full access to all permissions' },
         ],
     },

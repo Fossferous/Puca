@@ -71,6 +71,12 @@ pub(crate) fn clamp_expiry_hours(hours: i32) -> i32 {
 
 // --- Handlers ---
 
+/// `expires_at` is TEXT holding an RFC-3339 UTC instant (`...Z`). It is compared
+/// as `::timestamptz`, never `::timestamp`: the naive cast DROPS the `Z`, so the
+/// value was read as a wall-clock time in the database session's zone and
+/// compared with NOW() — on a Postgres running in Europe/London a one-hour
+/// invite was born expired, and every invite expired early by the zone's
+/// offset. Caught by tests/batch7-permbits-live.mjs against a London database.
 /// Create an invite for a server
 pub async fn create_invite(
     State(state): State<Arc<AppState>>,
@@ -159,7 +165,7 @@ pub async fn get_invite_info(
     let invite: Option<(String, String)> = sqlx::query_as(
         "SELECT i.server_id, s.name FROM server_invites i 
          JOIN servers s ON i.server_id = s.id 
-         WHERE i.code = $1 AND (i.expires_at IS NULL OR i.expires_at::timestamp > NOW())
+         WHERE i.code = $1 AND (i.expires_at IS NULL OR i.expires_at::timestamptz > NOW())
          AND (i.max_uses IS NULL OR i.max_uses <= 0 OR i.uses < i.max_uses)",
     )
     .bind(&code)
@@ -242,7 +248,7 @@ pub async fn join_via_invite(
     // `uses` and overshot max_uses.
     let consumed: Option<(String,)> = sqlx::query_as(
         "UPDATE server_invites SET uses = uses + 1 \
-         WHERE code = $1 AND (expires_at IS NULL OR expires_at::timestamp > NOW()) \
+         WHERE code = $1 AND (expires_at IS NULL OR expires_at::timestamptz > NOW()) \
          AND (max_uses IS NULL OR max_uses <= 0 OR uses < max_uses) \
          RETURNING server_id",
     )
