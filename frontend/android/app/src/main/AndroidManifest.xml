@@ -115,13 +115,17 @@
             android:exported="false" />
 
         <!-- Keeps the process (and the WebView's WebSocket/WebRTC) alive while
-             a remote-control session is active or the user opted into
-             background notification delivery. specialUse, NOT dataSync: both
-             reasons are open-ended, and dataSync's cumulative six-hour budget
-             on Android 15 is already spent by TransferService. -->
+             a remote-control session is active, a voice call is live, or the
+             user opted into background notification delivery. specialUse, NOT
+             dataSync: the reasons are open-ended, and dataSync's cumulative
+             six-hour budget on Android 15 is already spent by TransferService.
+             `microphone` is what keeps a backgrounded call's capture running
+             on 14+; the service only REQUESTS that type while a call is live
+             (KeepAliveReasons.fgsType), so the shade never claims a mic that
+             is not in use. -->
         <service
             android:name=".KeepAliveService"
-            android:foregroundServiceType="specialUse|location"
+            android:foregroundServiceType="specialUse|location|microphone"
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
@@ -186,6 +190,10 @@
     <!-- KeepAliveService (control sessions + opted-in notification delivery);
          see the service declaration and its subtype property above. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Voice calls in the background (Android 14+): pairs with the service's
+         `microphone` type. Requested only while a call is live, and only
+         when RECORD_AUDIO has been granted. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Background delivery is NativeDelivery's socket to the user's OWN

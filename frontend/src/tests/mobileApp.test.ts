@@ -127,9 +127,9 @@ describe('keep-alive reason merging', () => {
         m.setControlKeepAlive(false); // repeat: no extra call
         await settle();
         expect(h.calls).toEqual([
-            { setKeepAlive: { control: true, notify: false, geofence: false } },
-            { setKeepAlive: { control: true, notify: true, geofence: false } },
-            { setKeepAlive: { control: false, notify: true, geofence: false } },
+            { setKeepAlive: { control: true, notify: false, geofence: false, voice: false } },
+            { setKeepAlive: { control: true, notify: true, geofence: false, voice: false } },
+            { setKeepAlive: { control: false, notify: true, geofence: false, voice: false } },
         ]);
     });
 
@@ -139,7 +139,7 @@ describe('keep-alive reason merging', () => {
         m.setControlKeepAlive(false);   // flips while the first push is out
         await settle();
         expect(h.calls[h.calls.length - 1]).toEqual(
-            { setKeepAlive: { control: false, notify: false, geofence: false } },
+            { setKeepAlive: { control: false, notify: false, geofence: false, voice: false } },
         );
     });
 
@@ -165,9 +165,26 @@ describe('keep-alive reason merging', () => {
         m.setNotifyKeepAlive(false);
         await settle();
         expect(h.calls).toEqual([
-            { setKeepAlive: { control: false, notify: true, geofence: false } },
-            { setKeepAlive: { control: false, notify: true, geofence: true } },
-            { setKeepAlive: { control: false, notify: false, geofence: true } },
+            { setKeepAlive: { control: false, notify: true, geofence: false, voice: false } },
+            { setKeepAlive: { control: false, notify: true, geofence: true, voice: false } },
+            { setKeepAlive: { control: false, notify: false, geofence: true, voice: false } },
+        ]);
+    });
+
+    it('voice merges as a fourth reason and is declared at join time (the mic FGS type)', async () => {
+        const m = await freshModule();
+        m.setNotifyKeepAlive(true);
+        await settle();
+        m.setVoiceKeepAlive(true);
+        await settle();
+        m.setVoiceKeepAlive(true); // repeat: deduped
+        await settle();
+        m.setVoiceKeepAlive(false);
+        await settle();
+        expect(h.calls).toEqual([
+            { setKeepAlive: { control: false, notify: true, geofence: false, voice: false } },
+            { setKeepAlive: { control: false, notify: true, geofence: false, voice: true } },
+            { setKeepAlive: { control: false, notify: true, geofence: false, voice: false } },
         ]);
     });
 
@@ -198,7 +215,7 @@ describe('keep-alive reason merging', () => {
         document.dispatchEvent(new Event('visibilitychange'));
         await settle();
         expect(h.calls).toEqual([
-            { setKeepAlive: { control: true, notify: true, geofence: false } },
+            { setKeepAlive: { control: true, notify: true, geofence: false, voice: false } },
         ]);
     });
 
@@ -226,7 +243,7 @@ describe('keep-alive reason merging', () => {
         document.dispatchEvent(new Event('visibilitychange'));
         await settle();
         const mine = h.calls.filter(c => JSON.stringify(c.setKeepAlive)
-            === JSON.stringify({ control: false, notify: false, geofence: true }));
+            === JSON.stringify({ control: false, notify: false, geofence: true, voice: false }));
         // Exactly one: clearing `pushed` is precisely what used to make the
         // convergence re-push in `finally` unbounded, so the count matters as
         // much as the presence.
@@ -244,7 +261,7 @@ describe('keep-alive reason merging', () => {
         document.dispatchEvent(new Event('visibilitychange'));
         await settle();
         const allFalse = h.calls.filter(c => JSON.stringify(c.setKeepAlive)
-            === JSON.stringify({ control: false, notify: false, geofence: false }));
+            === JSON.stringify({ control: false, notify: false, geofence: false, voice: false }));
         expect(allFalse).toEqual([]);
     });
 

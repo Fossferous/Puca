@@ -3,12 +3,13 @@
  * background, posting message notifications, and receiving navigation intents
  * from the home-screen widget and notification taps.
  *
- * KEEP-ALIVE. Two independent reasons keep the process running — an active
- * remote-control session, and the user's opt-in to background notification
- * delivery. They are declared by different modules at different times, so this
- * module owns the merge: each setter records its reason and the COMPLETE
- * desired state is pushed to the native side, latest-state-wins under a
- * single in-flight call so a burst of changes cannot interleave.
+ * KEEP-ALIVE. Four independent reasons keep the process running — an active
+ * remote-control session, the user's opt-in to background notification
+ * delivery, location-reminder fences, and a live voice call. They are declared
+ * by different modules at different times, so this module owns the merge: each
+ * setter records its reason and the COMPLETE desired state is pushed to the
+ * native side, latest-state-wins under a single in-flight call so a burst of
+ * changes cannot interleave.
  *
  * DEGRADES SILENTLY AND ON PURPOSE, exactly like mobileTransferService: the
  * native half only exists in APKs from 0.8.33; this code reaches older APKs
@@ -23,9 +24,11 @@ interface SovereignAppPlugin {
      *  cannot see, and re-requesting cannot fix. Absent on older APKs. */
     notificationStatus(): Promise<{ granted: boolean; needsRequest: boolean; blocked?: boolean }>;
     requestNotificationPermission(): Promise<{ granted: boolean }>;
-    /** `geofence` (APKs with location reminders): unknown extras are ignored
-     *  by older APKs, so sending it is always safe. */
-    setKeepAlive(opts: { control: boolean; notify: boolean; geofence: boolean }): Promise<void>;
+    /** `geofence` (APKs with location reminders) and `voice` (APKs from
+     *  0.9.2, the `microphone` foreground type for a backgrounded call):
+     *  unknown extras are ignored by older APKs, so sending them is always
+     *  safe — an old APK simply keeps its old behaviour. */
+    setKeepAlive(opts: { control: boolean; notify: boolean; geofence: boolean; voice: boolean }): Promise<void>;
     notify(opts: { key: string; title: string; body: string; nav?: string }): Promise<void>;
     clearNotifications(opts: { key?: string }): Promise<void>;
     consumeLaunchNav(): Promise<{ target: string | null }>;
@@ -34,6 +37,10 @@ interface SovereignAppPlugin {
     batteryStatus(): Promise<{ ignoring: boolean }>;
     requestIgnoreBatteryOptimizations(): Promise<void>;
     openNotificationSettings(): Promise<void>;
+    /** This app's own page in Android Settings — Permissions lives under it
+     *  (APKs from 0.9.2). The only way back once a runtime permission has
+     *  been refused with "Don't allow", after which Android never asks again. */
+    openAppSettings(): Promise<void>;
     /** Native delivery (APKs from 0.8.66): hand the background socket its
      *  connection credentials — OUR server's WS URL + the session JWT. Null
      *  token clears them. No third party in this path, by design. `deviceId`
@@ -117,13 +124,14 @@ export function mobileAppAvailable(): boolean {
 let controlReason = false;
 let notifyReason = false;
 let geofenceReason = false;
+let voiceReason = false;
 let pushed: string | null = null;      // last state the native side ACCEPTED
 let refusedKey: string | null = null;  // last state the native side REFUSED
 let inFlight = false;
 
 function pushKeepAlive(): void {
     if (!android() || usable === false) return;
-    const key = `${controlReason}|${notifyReason}|${geofenceReason}`;
+    const key = `${controlReason}|${notifyReason}|${geofenceReason}|${voiceReason}`;
     // A key the native side just refused is NOT retried until something
     // changes. Without the refusedKey guard, a rejection (Android refusing a
     // foreground-service start from the background, the expected case on
@@ -136,7 +144,7 @@ function pushKeepAlive(): void {
     if (key === pushed || key === refusedKey || inFlight) return;
     inFlight = true;
     const sent = key;
-    void App.setKeepAlive({ control: controlReason, notify: notifyReason, geofence: geofenceReason })
+    void App.setKeepAlive({ control: controlReason, notify: notifyReason, geofence: geofenceReason, voice: voiceReason })
         .then(() => { usable = true; pushed = sent; refusedKey = null; })
         .catch(() => {
             // Old APK (no plugin — permanent), or a background-start refusal
@@ -173,6 +181,20 @@ export function setNotifyKeepAlive(on: boolean): void {
 export function setGeofenceKeepAlive(on: boolean): void {
     if (geofenceReason === on) return;
     geofenceReason = on;
+    pushKeepAlive();
+}
+
+/**
+ * Declared by VoicePanel: is a voice call live right now? The service then
+ * takes the `microphone` foreground-service type (RECORD_AUDIO allowing), which
+ * is what keeps capture running after the app is backgrounded on Android 14+ —
+ * without it peers stop hearing the user the moment the screen locks. Declared
+ * at JOIN time on purpose: the type can only be taken while the app is still
+ * eligible, i.e. before the user switches away.
+ */
+export function setVoiceKeepAlive(on: boolean): void {
+    if (voiceReason === on) return;
+    voiceReason = on;
     pushKeepAlive();
 }
 
@@ -308,6 +330,28 @@ export async function openMobileNotificationSettings(): Promise<boolean> {
         return true;
     } catch {
         notifSettingsSupported = false;
+        return false;
+    }
+}
+
+/** Whether openAppSettings exists natively (APKs from 0.9.2). Its own latch,
+ *  like the others: a rejection here must not blind anything else. */
+let appSettingsSupported: boolean | null = null;
+
+/**
+ * Deep-link to this app's page in Android Settings (Permissions lives there).
+ * false = not Android, or an APK without the method — the caller then shows
+ * the manual path instead of a button that does nothing.
+ */
+export async function openMobileAppSettings(): Promise<boolean> {
+    if (!android() || usable === false || appSettingsSupported === false) return false;
+    try {
+        await App.openAppSettings();
+        usable = true;
+        appSettingsSupported = true;
+        return true;
+    } catch {
+        appSettingsSupported = false;
         return false;
     }
 }
@@ -724,7 +768,7 @@ export function installMobileNav(): void {
         // Foreground return is the repair point: the one moment a
         // foreground-service start is always legal, and the only moment the
         // user could notice. Forget what we believe and re-assert the truth.
-        const anyReason = controlReason || notifyReason || geofenceReason;
+        const anyReason = controlReason || notifyReason || geofenceReason || voiceReason;
         if (anyReason) pushed = null;
         // Both beliefs are dropped above before either is acted on — a refusal
         // and a stale `pushed` are independent, and clearing only whichever

@@ -31,20 +31,26 @@ import androidx.core.content.ContextCompat;
  *  - CONTROL: a My Devices remote-control session is active. Backgrounding
  *    the app used to end it: the process froze, ICE consent lapsed, and the
  *    server reaped the session before the phone thawed.
- *  - NOTIFY: the user opted into background notification delivery. Puca
+ *  - NOTIFY: the user opted into background notification delivery. Púca
  *    is self-hosted and data rides no relay (the FCM wake signal carries a
  *    constant only), so like the desktop tray the
  *    only way to hear about a message is to still be connected.
+ *  - VOICE: the user is in a voice call. On Android 14+ the microphone of a
+ *    backgrounded app is silenced unless a foreground service holding the
+ *    `microphone` type is running — and that type can only be taken while
+ *    the app is still eligible, so JS declares it at JOIN time, not when the
+ *    user switches away. Without it, peers stopped hearing the user the
+ *    moment the screen locked.
  *
- * Both are open-ended, so the type is specialUse, not dataSync — dataSync
+ * All are open-ended, so the base type is specialUse, not dataSync — dataSync
  * carries a cumulative six-hour budget on Android 15 which the transfers
  * service already spends, and a control session must not die because a file
  * transfer ran earlier that day.
  *
- * The wake lock is held only while CONTROL is among the reasons: an active
- * session must survive the screen turning off mid-use, but notification
- * delivery must not pin the CPU around the clock — for that, the process
- * being alive is enough for the socket to wake it.
+ * The wake lock is held only while CONTROL or VOICE is among the reasons: an
+ * active session or call must survive the screen turning off mid-use, but
+ * notification delivery must not pin the CPU around the clock — for that,
+ * the process being alive is enough for the socket to wake it.
  */
 public class KeepAliveService extends Service {
 
@@ -52,10 +58,15 @@ public class KeepAliveService extends Service {
     public static final int NOTIFICATION_ID = 4712;
 
     /** Desired state, sent complete on every start. A start carrying these
-     *  extras is a DECLARATION: it replaces all three reasons, because JS is
+     *  extras is a DECLARATION: it replaces all four reasons, because JS is
      *  the authority on what is wanted. See {@link KeepAliveReasons}. */
     public static final String EXTRA_CONTROL = "control";
     public static final String EXTRA_NOTIFY = "notify";
+    /** A voice call is live in the WebView: the service takes the
+     *  `microphone` foreground type (permission allowing) so capture keeps
+     *  running while the app is backgrounded. Absent from older JS bundles,
+     *  which simply never get background mic on this APK either. */
+    public static final String EXTRA_VOICE = "voice";
     /** Location reminders: task fences exist and the setting is on. The
      *  service watches location and fires content-free arrival notifications
      *  entirely natively — the WebView is not in this loop at all. */
@@ -172,7 +183,7 @@ public class KeepAliveService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         // A wake is an EVENT — it says delivery must run and nothing else. A
         // start carrying reason extras is a DECLARATION from JS and replaces
-        // all three. Reading the doorbell as a declaration is what silently
+        // all four. Reading the doorbell as a declaration is what silently
         // released a live session's wake lock (and stopped a geofence-only
         // watch) every time a message arrived at a backgrounded phone.
         if (intent != null && ACTION_WAKE.equals(intent.getAction())) {
@@ -181,7 +192,8 @@ public class KeepAliveService extends Service {
             reasons = KeepAliveReasons.declared(
                     intent != null && intent.getBooleanExtra(EXTRA_CONTROL, false),
                     intent != null && intent.getBooleanExtra(EXTRA_NOTIFY, false),
-                    intent != null && intent.getBooleanExtra(EXTRA_GEOFENCE, false));
+                    intent != null && intent.getBooleanExtra(EXTRA_GEOFENCE, false),
+                    intent != null && intent.getBooleanExtra(EXTRA_VOICE, false));
         }
 
         if (!reasons.any()) {
@@ -198,8 +210,10 @@ public class KeepAliveService extends Service {
         Notification n = buildNotification(reasons.title(), reasons.text());
         boolean promoted = enterForeground(n, reasons.fgsType(
                 hasLocationPermission(),
+                hasMicPermission(),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION));
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE));
         if (!promoted && !inForeground) {
             // A FRESH start the OS refused to promote. Stop immediately and
             // deliberately: stopping cancels the system's "must call
@@ -366,18 +380,22 @@ public class KeepAliveService extends Service {
             // delivery and geofencing carry on. That is a genuine change of
             // desired state, so it is recorded as one rather than left for
             // the next start to discover.
-            reasons = KeepAliveReasons.declared(false, true, reasons.geofence);
+            // VOICE dies with the task for the same reason CONTROL does: the
+            // call lives in the WebView's WebRTC, which is gone.
+            reasons = KeepAliveReasons.declared(false, true, reasons.geofence, false);
             // The app is no longer visible — make sure the visibility gate
             // reflects that, or a stale "visible" flag from a killed Activity
             // would suppress every notification the survivor exists to
             // deliver.
             PushPrefs.setAppVisible(this, false);
-            setWakeLock(false); // control cannot outlive its WebView
+            setWakeLock(false); // neither control nor a call can outlive its WebView
             Notification n = buildNotification(reasons.title(), reasons.text());
             enterForeground(n, reasons.fgsType(
                     hasLocationPermission(),
+                    false, // no call survives the WebView, so never the mic type
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION));
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE));
             super.onTaskRemoved(rootIntent);
             return;
         }
@@ -394,12 +412,14 @@ public class KeepAliveService extends Service {
             // delivery has no usable credentials. Record it, so the paused
             // notice is not owed a second time and the notification text
             // matches what is actually running.
-            reasons = KeepAliveReasons.declared(false, false, true);
+            reasons = KeepAliveReasons.declared(false, false, true, false);
             Notification n = buildNotification(reasons.title(), reasons.text());
             enterForeground(n, reasons.fgsType(
                     true, // gated by wantsLocationWatch above
+                    false,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION));
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE));
             setWakeLock(false); // a control session cannot outlive its WebView
             super.onTaskRemoved(rootIntent);
             return;
@@ -447,7 +467,7 @@ public class KeepAliveService extends Service {
                 // next time the shade is opened.
                 nm.notify(NOTIFICATION_ID + 1, new NotificationCompat.Builder(this, CHANNEL_ID)
                         .setContentTitle("Notifications are paused")
-                        .setContentText("Puca was closed. Open it again to reconnect.")
+                        .setContentText("Púca was closed. Open it again to reconnect.")
                         .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                         .setContentIntent(pi)
                         .setAutoCancel(true)
@@ -478,6 +498,13 @@ public class KeepAliveService extends Service {
                     == PackageManager.PERMISSION_GRANTED
                 || ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION)
                     == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** RECORD_AUDIO is a runtime permission; the microphone foreground type
+     *  is a SecurityException without it, exactly like location above. */
+    private boolean hasMicPermission() {
+        return ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
     }
 
     /** Provider preference: the platform fused provider (AOSP has one from
@@ -592,7 +619,7 @@ public class KeepAliveService extends Service {
         String body = count == 1 ? "A task is waiting here" : count + " tasks are waiting here";
         nm.notify(SovereignAppPlugin.MSG_TAG, id,
                 new NotificationCompat.Builder(this, SovereignAppPlugin.MSG_CHANNEL_ID)
-                        .setContentTitle("Puca Tasks")
+                        .setContentTitle("Púca Tasks")
                         .setContentText(body)
                         .setSmallIcon(android.R.drawable.stat_notify_chat)
                         .setContentIntent(pi)
@@ -628,7 +655,7 @@ public class KeepAliveService extends Service {
         if (nm == null || nm.getNotificationChannel(CHANNEL_ID) != null) return;
         NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID, "Background connection", NotificationManager.IMPORTANCE_LOW);
-        ch.setDescription("Shown while Puca stays connected in the background.");
+        ch.setDescription("Shown while Púca stays connected in the background.");
         ch.setShowBadge(false);
         ch.setSound(null, null);
         nm.createNotificationChannel(ch);
