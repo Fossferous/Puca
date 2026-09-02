@@ -28,6 +28,12 @@ interface RoleSettingsModalProps {
 //                         announced as an opaque status ping); nothing can
 //                         force-deafen another user.
 //   PRIORITY_SPEAKER    — no priority/ducking-by-role feature exists.
+//   EMBED_LINKS         — link previews are generated LOCALLY by each viewer
+//                         (api/linkPreview.ts) from the message text; the
+//                         sender's bit cannot govern what a viewer renders.
+//   USE_VOICE_ACTIVITY  — push-to-talk vs voice activity is a local capture
+//                         decision the server never observes (audited
+//                         2026-09-02; both bits stay defined, see below).
 //
 // The bits stay DEFINED in src/permissions.rs (removing them would let the
 // numbers be reused and silently re-interpret stored role rows) — they are just
@@ -43,7 +49,6 @@ const PERMISSION_CATEGORIES = [
         permissions: [
             { key: 'VIEW_CHANNEL', label: 'View Channels', desc: 'See channels and read messages' },
             { key: 'ATTACH_FILES', label: 'Attach Files', desc: 'Upload images and files' },
-            { key: 'EMBED_LINKS', label: 'Embed Links', desc: 'Links show previews' },
             { key: 'ADD_REACTIONS', label: 'Add Reactions', desc: 'React to messages with emoji' },
         ],
     },
@@ -70,7 +75,6 @@ const PERMISSION_CATEGORIES = [
             { key: 'SPEAK', label: 'Speak', desc: 'Talk in voice channels' },
             { key: 'VIDEO', label: 'Video', desc: 'Share video in voice channels' },
             { key: 'STREAM', label: 'Stream', desc: 'Screen share and stream' },
-            { key: 'USE_VOICE_ACTIVITY', label: 'Use Voice Activity', desc: 'Speak without push-to-talk' },
             { key: 'MUTE_MEMBERS', label: 'Mute Members', desc: 'Silence a member’s custom join/leave sounds' },
             { key: 'MOVE_MEMBERS', label: 'Move Members', desc: 'Drag members between voice channels and disconnect them from voice' },
             { key: 'CREATE_CLIPS', label: 'Create Clips', desc: 'Record a replay clip of a voice call — every participant must approve before it posts' },

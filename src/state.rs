@@ -858,7 +858,11 @@ pub struct AppState {
     /// overwrite the wrapped seed. In-memory and single-node, which is the
     /// correct direction to fail: a restart (or a request landing on the other
     /// host) simply forces the client to re-prove, never the reverse.
-    pub password_proofs: DashMap<UserId, std::time::Instant>,
+    /// Keyed by user, valued by (the session start `sst` the proving login
+    /// minted, when). A proof is honoured only by a token carrying THAT `sst`:
+    /// a stolen token from an older session cannot ride on a fresh login's
+    /// proof to rewrite credentials.
+    pub password_proofs: DashMap<UserId, (i64, std::time::Instant)>,
 
     /// Per-real-IP count of in-flight /files downloads. Bounds one IP's
     /// concurrent (possibly slow-drip) streams so it can't saturate the uplink
@@ -1276,19 +1280,19 @@ impl AppState {
     /// Called from `login_step_2` ONLY — the one place the server actually
     /// verifies knowledge of the password. Anything else recording a proof
     /// would defeat the point.
-    pub fn record_password_proof(&self, user_id: UserId) {
+    pub fn record_password_proof(&self, user_id: UserId, session_start: i64) {
         self.password_proofs
-            .insert(user_id, std::time::Instant::now());
+            .insert(user_id, (session_start, std::time::Instant::now()));
     }
 
     /// Has `user_id` proved their password within [`PASSWORD_PROOF_TTL`]?
     ///
     /// Fails CLOSED: no entry (server restarted, proof expired, request landed
     /// on another host) means "not proven", and the client re-proves.
-    pub fn password_recently_proven(&self, user_id: UserId) -> bool {
+    pub fn password_recently_proven(&self, user_id: UserId, session_start: i64) -> bool {
         self.password_proofs
             .get(&user_id)
-            .is_some_and(|t| t.elapsed() < PASSWORD_PROOF_TTL)
+            .is_some_and(|e| e.0 == session_start && e.1.elapsed() < PASSWORD_PROOF_TTL)
     }
 
     /// Drop a user's password proof — used after a credential rewrite so one

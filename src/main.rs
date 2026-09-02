@@ -36,6 +36,7 @@ mod protocol;
 mod push_handlers;
 mod reaction_handlers;
 mod recovery_handlers;
+mod retention;
 mod role_handlers;
 mod server_handlers;
 mod sfu;
@@ -966,6 +967,35 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .execute(&pool)
                 .await;
+            }
+        });
+    }
+
+    // Moderation-table retention (src/retention.rs): resolved reports and
+    // audit rows older than their window are pruned; pending reports never.
+    // 0 in either env var keeps that table forever.
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                tick.tick().await;
+                if let Some(days) = retention::retention_days("REPORTS_RETENTION_DAYS", retention::REPORTS_RETENTION_DAYS_DEFAULT) {
+                    let _ = sqlx::query(
+                        "DELETE FROM reports WHERE status <> 'pending' AND resolved_at IS NOT NULL AND resolved_at < NOW() - make_interval(days => $1::int)",
+                    )
+                    .bind(days as i32)
+                    .execute(&pool)
+                    .await;
+                }
+                if let Some(days) = retention::retention_days("AUDIT_RETENTION_DAYS", retention::AUDIT_RETENTION_DAYS_DEFAULT) {
+                    let _ = sqlx::query(
+                        "DELETE FROM audit_log WHERE created_at < NOW() - make_interval(days => $1::int)",
+                    )
+                    .bind(days as i32)
+                    .execute(&pool)
+                    .await;
+                }
             }
         });
     }

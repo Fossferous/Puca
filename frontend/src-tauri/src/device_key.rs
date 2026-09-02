@@ -207,6 +207,12 @@ const MAX_SIGNABLE_LEN: usize = 4096;
 const ATTEST_PREFIX: &str = "sovereign-device-attest-v1|";
 /// `typ` value of the device-grant record (`grants.ts` `DEVICE_GRANT_TYPE`).
 const GRANT_TYPE: &str = "sovereign-device-grant-v1";
+/// `typ` value of the device-share record (`shares.ts` `DEVICE_SHARE_TYPE`) —
+/// the host device signs it when the owner activates a share. It was missing
+/// from this list once, and "Confirm & activate" silently did nothing on the
+/// platform that is always the host. deviceKeySignable.test.ts (TS) mirrors
+/// this list against every caller of signWithDeviceKey.
+const SHARE_TYPE: &str = "sovereign-device-share-v1";
 
 /// Whether the device key may sign `message`.
 ///
@@ -218,7 +224,8 @@ const GRANT_TYPE: &str = "sovereign-device-grant-v1";
 /// actually defines are signable:
 ///
 ///  1. the connection attestation, a `|`-separated string with a fixed prefix;
-///  2. the device-grant record, canonical JSON carrying `typ` = GRANT_TYPE.
+///  2. the device-grant record, canonical JSON carrying `typ` = GRANT_TYPE;
+///  3. the device-share record, canonical JSON carrying `typ` = SHARE_TYPE.
 ///
 /// NOTE the grant is matched by PARSING, not by a prefix: `canonicalJson`
 /// sorts keys, so the record serialises as `{"ctl":…,"typ":…}` — a `{"typ"`
@@ -236,7 +243,7 @@ pub fn is_signable(message: &str) -> bool {
     }
     serde_json::from_str::<serde_json::Value>(message)
         .ok()
-        .and_then(|v| v.get("typ")?.as_str().map(|t| t == GRANT_TYPE))
+        .and_then(|v| v.get("typ")?.as_str().map(|t| t == GRANT_TYPE || t == SHARE_TYPE))
         .unwrap_or(false)
 }
 
@@ -250,7 +257,7 @@ pub fn sign(message: &str) -> Result<String, String> {
     use ed25519_dalek::{Signer, SigningKey};
 
     if !is_signable(message) {
-        return Err("refusing to sign: not a device attestation or grant record".to_string());
+        return Err("refusing to sign: not a device attestation, grant or share record".to_string());
     }
 
     let blob = ensure_blob()?;
@@ -324,6 +331,9 @@ mod signable_tests {
     /// Byte-for-byte what `canonicalJson(buildGrantRecord(...))` produces —
     /// note the SORTED keys, which is why `typ` is not first.
     const REAL_GRANT: &str = r#"{"ctl":"ctl-dev","exp":null,"host":"host-dev","ts":1786000000,"typ":"sovereign-device-grant-v1","v":1}"#;
+    /// Byte-for-byte what `buildShareRecord(...).canonical` produces
+    /// (shares.ts; pinned by deviceKeySignable.test.ts on the TS side).
+    const REAL_SHARE: &str = r#"{"caps":[],"grantee":7,"host":"host-dev","owner":42,"ts":1786000000,"typ":"sovereign-device-share-v1","v":1}"#;
 
     #[test]
     fn the_two_real_transcripts_are_signable() {
@@ -331,6 +341,7 @@ mod signable_tests {
         // are BROKEN — the guard must accept exactly what the client sends.
         assert!(is_signable(REAL_ATTEST));
         assert!(is_signable(REAL_GRANT));
+        assert!(is_signable(REAL_SHARE));
     }
 
     #[test]
@@ -353,6 +364,7 @@ mod signable_tests {
         assert!(!is_signable("sovereign-device-attest-v2|n|1"));
         assert!(!is_signable("xsovereign-device-attest-v1|n|1"));
         assert!(!is_signable(r#"{"typ":"sovereign-device-grant-v2"}"#));
+        assert!(!is_signable(r#"{"typ":"sovereign-device-share-v2"}"#));
     }
 
     #[test]
