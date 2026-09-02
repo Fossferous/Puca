@@ -1,0 +1,27 @@
+-- audit_log.actor_id and reports.reporter_id are declared NOT NULL while their
+-- foreign keys are ON DELETE SET NULL (migrations/001_init.sql). Those two
+-- statements contradict each other: a hard `DELETE FROM users` aborts on the
+-- NOT NULL violation instead of anonymising the row, so the declared semantics
+-- were unreachable.
+--
+-- Blast radius is small today -- the product has no hard-delete path, account
+-- deletion is a tombstone UPDATE -- but the only `DELETE FROM users` statements
+-- in the tree are test cleanup, and every one swallows the error with `let _ =`,
+-- so they have been silently leaving rows behind.
+--
+-- Dropping NOT NULL makes the declared ON DELETE SET NULL actually reachable
+-- and preserves the moderation record with an anonymised actor, which is the
+-- intended reading. The FK is deliberately NOT changed to ON DELETE CASCADE:
+-- that would erase moderation history along with the account, which is exactly
+-- what an account should not be able to do by deleting itself.
+--
+-- The readers ship in the SAME release and tolerate NULL: list_audit_log and
+-- list_reports decode Option<i32> and render a null actor as "deleted user"
+-- (src/moderation_handlers.rs).
+--
+-- Catalogue-only: ALTER COLUMN ... DROP NOT NULL rewrites no table rows and
+-- takes a brief ACCESS EXCLUSIVE lock. Idempotent -- DROP NOT NULL on a column
+-- that is already nullable is a no-op, not an error -- which matters because
+-- migrations run automatically at startup and a failing one aborts boot.
+ALTER TABLE audit_log ALTER COLUMN actor_id DROP NOT NULL;
+ALTER TABLE reports ALTER COLUMN reporter_id DROP NOT NULL;
