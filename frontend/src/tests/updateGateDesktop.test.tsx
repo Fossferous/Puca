@@ -177,6 +177,10 @@ describe('desktop auto-install is opt-in and pre-load', () => {
         await advance(100);
 
         expect(container.textContent).toContain('could not be installed');
+        // The remedy must be the real one: the per-user installer needs the
+        // running process (tray included) gone, never administrator rights.
+        expect(container.textContent).toMatch(/tray/i);
+        expect(container.textContent).not.toMatch(/as administrator/i);
         const labels = [...container.querySelectorAll('button')].map(b => b.textContent);
         expect(labels).toEqual(expect.arrayContaining(['Retry', 'Continue Anyway']));
         expect(appRendered()).toBe(false);
