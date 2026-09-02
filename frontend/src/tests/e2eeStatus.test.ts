@@ -1,5 +1,45 @@
 import { describe, it, expect } from 'vitest';
-import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
+import { mediaE2eeExplanation, localMediaBlockNotice } from '../api/rtc/e2eeStatus';
+
+/**
+ * The PRE-JOIN notice. The badge tooltip only exists once a peer is present
+ * and only on hover; this is the visible line that stops a Firefox/Safari
+ * user from pressing Join into a call where nobody can hear them.
+ */
+describe('localMediaBlockNotice', () => {
+    const base = { supported: false, required: true, serverRequired: false, sfuMode: false };
+
+    it('is silent on a supported engine, whatever is required (positive control for the rig)', () => {
+        expect(localMediaBlockNotice({ ...base, supported: true })).toBeNull();
+        expect(localMediaBlockNotice({ ...base, supported: true, sfuMode: true })).toBeNull();
+        expect(localMediaBlockNotice({ ...base, supported: true, serverRequired: true })).toBeNull();
+    });
+
+    it('is silent when nothing requires encryption on a mesh call (transport-only is then allowed)', () => {
+        expect(localMediaBlockNotice({ ...base, required: false })).toBeNull();
+    });
+
+    it('warns BEFORE join on an unsupported engine under the default enforcement, and says how to change it', () => {
+        const s = localMediaBlockNotice(base)!;
+        expect(s).toMatch(/blocked/i);
+        expect(s).toMatch(/nobody’s voice or video plays/i);
+        expect(s).toContain('Require encryption for calls');
+        expect(s).toContain('Settings → Voice & Video');
+        expect(s).toMatch(/Firefox|Safari|iOS/);
+    });
+
+    it('under a SERVER policy, offers only the native apps', () => {
+        const s = localMediaBlockNotice({ ...base, serverRequired: true })!;
+        expect(s).not.toContain('Settings → Voice & Video');
+        expect(s).toMatch(/desktop or Android app/i);
+    });
+
+    it('on an SFU channel, warns regardless of the setting because the join itself refuses', () => {
+        const s = localMediaBlockNotice({ ...base, required: false, sfuMode: true })!;
+        expect(s).toMatch(/encrypted-only/i);
+        expect(s).toMatch(/joining will fail/i);
+    });
+});
 
 describe('mediaE2eeExplanation', () => {
     it('returns null when encrypted (nothing to explain)', () => {
@@ -19,6 +59,31 @@ describe('mediaE2eeExplanation', () => {
         expect(s).toMatch(/Safari|iOS|Firefox/);
         // Reassures that transit encryption still applies.
         expect(s).toContain('DTLS-SRTP');
+    });
+
+    /**
+     * requireMediaE2ee defaults to ON, so a first-time Firefox/Safari web user
+     * has media blocked BOTH ways with no setting ever touched. The enforced
+     * wording must say exactly that, and exactly what changes it — including
+     * the cost of the change, so nobody flips it believing it is harmless.
+     */
+    it('under enforcement, the local-unsupported wording says media is blocked both ways and names the setting that changes it', () => {
+        const s = mediaE2eeExplanation('local-unsupported', '', true)!;
+        expect(s).toMatch(/blocked both ways/i);
+        expect(s).toMatch(/microphone/i);
+        expect(s).toContain('Require encryption for calls');
+        expect(s).toContain('Settings → Voice & Video');
+        // The cost of turning it off is stated in the same breath.
+        expect(s).toMatch(/server in a form it can access/i);
+        expect(s).toMatch(/Firefox|Safari|iOS/);
+    });
+
+    it('when the SERVER requires encryption, the remedy does not offer a setting the user cannot change', () => {
+        const s = mediaE2eeExplanation('local-unsupported', '', true, /* serverRequired */ true)!;
+        expect(s).toMatch(/blocked both ways/i);
+        expect(s).toMatch(/server requires encrypted calls/i);
+        expect(s).not.toContain('Settings → Voice & Video');
+        expect(s).toMatch(/desktop or Android app/i);
     });
 
     it('flags a verification failure as a possible tamper/out-of-date case', () => {

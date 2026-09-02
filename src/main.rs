@@ -22,6 +22,7 @@ mod dm_handlers;
 mod email;
 mod email_handlers;
 mod envelope_version;
+mod export_handlers;
 mod friend_handlers;
 mod handlers;
 mod invite_handlers;
@@ -733,6 +734,10 @@ async fn main() -> anyhow::Result<()> {
         // Account deletion (tombstone; username re-typed, password proven
         // client-side via the seed unwrap, same as change-password)
         .route("/account", delete(handlers::delete_account))
+        // Data export: the account's own rows as one JSON document. Password
+        // proof required (a bearer token alone is the stolen-token threat);
+        // one per user per minute (export_handlers.rs).
+        .route("/account/export", get(export_handlers::export_account))
         // Blocked users endpoints
         .route("/blocked", get(moderation_handlers::list_blocked_users))
         .route(

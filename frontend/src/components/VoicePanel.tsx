@@ -4,7 +4,7 @@ import { webrtcManager } from '../api/webrtc';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { setSfuControlSender } from '../api/rtc/controlDc';
 import type { MediaE2eeReason } from '../api/rtc/types';
-import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
+import { mediaE2eeExplanation, localMediaBlockNotice } from '../api/rtc/e2eeStatus';
 import { loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
@@ -59,7 +59,7 @@ import { decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon } from './Icons';
 import { Toast } from './Toast';
 import './VoicePanel.css';
 
@@ -481,8 +481,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // manager: either the per-user setting OR the server-admin policy turns it
     // on (fail-closed OR). Re-applies on the settingsChanged event and whenever
     // the server policy changes.
+    // Mirrored into state so the pre-join notice below re-renders when the
+    // user flips the setting while looking at this panel.
+    const [requireE2ee, setRequireE2ee] = useState(() => loadSettings().requireMediaE2ee || serverRequireMediaE2ee);
     useEffect(() => {
-        const apply = () => webrtcManager.setRequireMediaE2ee(loadSettings().requireMediaE2ee || serverRequireMediaE2ee);
+        const apply = () => {
+            const required = loadSettings().requireMediaE2ee || serverRequireMediaE2ee;
+            webrtcManager.setRequireMediaE2ee(required);
+            setRequireE2ee(required);
+        };
         apply();
         const onChange = () => apply();
         window.addEventListener('settingsChanged', onChange);
@@ -2768,7 +2775,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Deduplicate: if OUR device can't do it, that's the single cause for all peers.
     const localUnsupported = e2eeDetail.some(d => d.reason === 'local-unsupported') || mediaSecure.supported === false;
     const downgradeLines: string[] = localUnsupported
-        ? [mediaE2eeExplanation('local-unsupported', '', enforced)!]
+        ? [mediaE2eeExplanation('local-unsupported', '', enforced, serverRequireMediaE2ee)!]
         : e2eeDetail.filter(d => !d.encrypted)
             .map(d => mediaE2eeExplanation(d.reason, nameFor(d.userId), enforced))
             .filter((s): s is string => !!s);
@@ -2932,6 +2939,28 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     }}
                 />
             )}
+
+            {/* This engine cannot do what the call requires: say so in plain
+                sight, before Join and for as long as it holds. The E2EE badge's
+                tooltip explains the same thing, but it only mounts once a peer
+                is present and only on hover — a Firefox/Safari user under the
+                default enforcement otherwise joined a call where nobody could
+                hear them and nothing on screen said why. `mediaSecure.supported`
+                is the probe for the transport in use (mesh vs SFU), polled. */}
+            {(() => {
+                const notice = localMediaBlockNotice({
+                    supported: mediaSecure.supported,
+                    required: requireE2ee,
+                    serverRequired: serverRequireMediaE2ee,
+                    sfuMode,
+                });
+                return notice ? (
+                    <div className="voice-e2ee-blocked" role="status">
+                        <span className="voice-e2ee-blocked-icon" aria-hidden="true"><WarningIcon /></span>
+                        <span>{notice}</span>
+                    </div>
+                ) : null;
+            })()}
 
             {/* Connection Status */}
             {!isInVoice ? (
