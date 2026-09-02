@@ -15,11 +15,14 @@ import {
     encryptChannelMessage,
     decryptChannelMessage,
     parseEnvelope,
+    parseEnvelopeEx,
     serializeEnvelope,
+    type ChannelAadKind,
     messageEncState,
     type MessageEncState,
 } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
+import { currentUserIdFromToken } from './auth';
 import { PERM, hasPerm } from './permissionBits';
 import * as MARKERS from './decryptMarkers';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -90,40 +93,49 @@ export function isAttachmentsLocked(opened: string | null): boolean {
 
 /** Encrypt shared checklist text under the channel key for the current epoch.
  *  Throws if no key can be obtained — never store a checklist item in plaintext. */
-async function sealChannel(channelId: number, plaintext: string): Promise<string> {
+/** `ownerId` is the task's CREATOR (`created_by`), which is what the reader
+ *  recomputes with — not the editor: a manager may edit another member's
+ *  item, and sealing under the editor would brick it for everyone. */
+async function sealChannel(channelId: number, plaintext: string, kind: ChannelAadKind, ownerId: number): Promise<string> {
     const ck = await ensureChannelKey(channelId);
     if (!ck) throw new Error('Channel encryption key unavailable; cannot store checklist item');
-    return serializeEnvelope(await encryptChannelMessage(ck.key, ck.epoch, plaintext));
+    return serializeEnvelope(await encryptChannelMessage(ck.key, ck.epoch, plaintext, { kind, channelId, senderId: ownerId }));
 }
 
 /** Decrypt a stored checklist item. Legacy plaintext passes through; an
  *  undecryptable envelope becomes a visible marker rather than an error. */
-async function openChannel(channelId: number, stored: string): Promise<string> {
-    const env = parseEnvelope(stored);
-    if (!env) return stored;                       // legacy plaintext row
+async function openChannel(channelId: number, stored: string, kind: ChannelAadKind, ownerId: number): Promise<string> {
+    const parsed = parseEnvelopeEx(stored);
+    if (parsed.kind === 'unsupported-version') return MARKERS.ENC_UNSUPPORTED_VERSION;
+    if (parsed.kind !== 'envelope') return stored;   // legacy plaintext row
+    const env = parsed.env;
     if (env.t !== 'ch') return DECRYPT_FAILED;
     const key = await getChannelKeyForEpoch(channelId, env.epoch ?? 0);
     if (!key) return ENC_KEY_UNAVAILABLE;
-    return (await decryptChannelMessage(key, env)) ?? DECRYPT_FAILED;
+    const plain = await decryptChannelMessage(key, env, { kind, channelId, senderId: ownerId });
+    if (plain !== null) return plain;
+    return env.v === 3 ? MARKERS.ENC_CONTEXT_MISMATCH : DECRYPT_FAILED;
 }
 
 export async function listTasks(channelId: number): Promise<Task[]> {
     const tasks: Task[] = await apiClient.get(`/channels/${channelId}/tasks`);
     return Promise.all(tasks.map(async (t) => {
         const wire = t.description;
-        const description = await openChannel(channelId, wire);
+        const description = await openChannel(channelId, wire, 'chan-task', t.created_by);
         return {
             ...t,
             description,
-            attachments: t.attachments ? await openChannel(channelId, t.attachments) : null,
+            attachments: t.attachments ? await openChannel(channelId, t.attachments, 'chan-taskatt', t.created_by) : null,
             descEncState: messageEncState(wire, description),
         };
     }));
 }
 
 export async function createTask(channelId: number, description: string, parentId?: number): Promise<Task> {
+    const me = currentUserIdFromToken();
+    if (me === null) throw new Error('Signed out; cannot store checklist item');
     const created: Task = await apiClient.post(`/channels/${channelId}/tasks`, {
-        description: await sealChannel(channelId, description),
+        description: await sealChannel(channelId, description, 'chan-task', me),
         parent_id: parentId ?? null,
     });
     return { ...created, description }; // show the plaintext locally
@@ -136,10 +148,12 @@ export async function updateChannelTask(
     channelId: number,
     taskId: number,
     updates: { is_completed?: boolean; description?: string; due_at?: string },
+    /** The task's `created_by` — see sealChannel. */
+    createdBy: number,
 ): Promise<void> {
     const payload = updates.description === undefined
         ? updates
-        : { ...updates, description: await sealChannel(channelId, updates.description) };
+        : { ...updates, description: await sealChannel(channelId, updates.description, 'chan-task', createdBy) };
     return apiClient.patch(`/tasks/${taskId}`, payload);
 }
 
@@ -149,10 +163,12 @@ export async function updateChannelTaskAttachments(
     channelId: number,
     taskId: number,
     refs: TaskAttachmentRef[],
+    /** The task's `created_by` — see sealChannel. */
+    createdBy: number,
 ): Promise<void> {
     const attachments = refs.length === 0
         ? ''
-        : await sealChannel(channelId, serializeTaskAttachments(refs));
+        : await sealChannel(channelId, serializeTaskAttachments(refs), 'chan-taskatt', createdBy);
     return apiClient.patch(`/tasks/${taskId}`, { attachments });
 }
 

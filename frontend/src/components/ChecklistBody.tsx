@@ -134,7 +134,7 @@ export function ChecklistBody({
         const original = tasks;
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, description } : t));
         try {
-            if (isChannel) await updateChannelTask(channelId!, task.id, { description });
+            if (isChannel) await updateChannelTask(channelId!, task.id, { description }, task.created_by);
             else await updateListTask(task.id, { description });
         } catch (err) {
             console.error('Failed to edit task:', err);
@@ -203,7 +203,7 @@ export function ChecklistBody({
             // fns seal it for the wire. Serialize can throw (cap) → rollback.
             const plain = refs.length === 0 ? null : serializeTaskAttachments(refs);
             setTasks(prev => prev.map(t => t.id === task.id ? { ...t, attachments: plain } : t));
-            if (isChannel) await updateChannelTaskAttachments(channelId!, task.id, refs);
+            if (isChannel) await updateChannelTaskAttachments(channelId!, task.id, refs, task.created_by);
             else await updateListTaskAttachments(task.id, refs);
         } catch (err) {
             console.error('Failed to update attachments:', err);

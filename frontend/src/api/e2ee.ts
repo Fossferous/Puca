@@ -134,7 +134,11 @@ export interface WrappedChannelKey {
 
 /** Envelope stored in a message's `content` field. */
 export interface Envelope {
-    v: 2;
+    /** 2 = the original format (no associated data). 3 = context-bound:
+     *  the AES-GCM tag also covers an AAD string naming the channel, epoch
+     *  and sender (or DM sender and recipient), recomputed by the reader
+     *  from the row's own metadata. Same JSON shape; only `v` changes. */
+    v: 2 | 3;
     /** "dm" for pairwise, "ch" for channel/group, "self" for encrypt-to-self. */
     t: 'dm' | 'ch' | 'self';
     /** Channel key epoch (channel messages only). */
@@ -249,21 +253,105 @@ function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
     return p;
 }
 
-/** Encrypt with a raw 32-byte key. Output: base64( nonce(12) || ciphertext ). */
-async function aesEncrypt(rawKey: Uint8Array, plaintext: string): Promise<string> {
+/** Encrypt with a raw 32-byte key. Output: base64( nonce(12) || ciphertext ).
+ *  `aad`, when given, is bound into the GCM tag and must be presented again
+ *  to decrypt; absent, this is byte-for-byte the v2 primitive. */
+async function aesEncrypt(rawKey: Uint8Array, plaintext: string, aad?: Uint8Array): Promise<string> {
     const key = await importAesKey(rawKey);
     const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, utf8(plaintext) as BufferSource);
+    const params: AesGcmParams = { name: 'AES-GCM', iv: nonce as BufferSource };
+    if (aad) params.additionalData = aad as BufferSource;
+    const ct = await crypto.subtle.encrypt(params, key, utf8(plaintext) as BufferSource);
     return toBase64(concat(nonce, new Uint8Array(ct)));
 }
 
-async function aesDecrypt(rawKey: Uint8Array, blobB64: string): Promise<string> {
+async function aesDecrypt(rawKey: Uint8Array, blobB64: string, aad?: Uint8Array): Promise<string> {
     const key = await importAesKey(rawKey);
     const blob = fromBase64(blobB64);
     const nonce = blob.slice(0, 12);
     const ct = blob.slice(12);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ct as BufferSource);
+    const params: AesGcmParams = { name: 'AES-GCM', iv: nonce as BufferSource };
+    if (aad) params.additionalData = aad as BufferSource;
+    const pt = await crypto.subtle.decrypt(params, key, ct as BufferSource);
     return new TextDecoder().decode(pt);
+}
+
+// --- v3 context binding (associated data) ---
+//
+// v2 envelopes authenticate the bytes but not WHERE they belong: a channel
+// message is sealed under a key every member holds, so `messages.user_id` is a
+// pure server assertion (rewrite it and the message decrypts under someone
+// else's name); the pairwise DM key is the same in both directions, so
+// flipping `dm_messages.sender_id` re-attributes a DM with no cryptographic
+// consequence; a channel checklist item and a channel message share a key and
+// an envelope type, so one can be moved into the other; and the epoch in the
+// envelope is a plaintext label the reader trusts to pick a key.
+//
+// v3 puts that context into the AES-GCM associated data. The reader RECOMPUTES
+// it from the row's own metadata (channel id, sender id, epoch; DM sender and
+// recipient), so any of those edits makes the tag fail — with a distinct
+// marker, and with no retry under other context, which would turn the tag
+// into an oracle. The JSON shape is unchanged; only `v` moves.
+//
+// What v3 does NOT buy: replay and reorder. A message id does not exist at
+// encrypt time (the server mints it) and timestamps are server-assigned, so
+// neither can be bound; that needs a sender-chosen sequence in the plaintext,
+// which is separate work. Self envelopes, key wraps, seed wraps and control
+// frames stay v2 on purpose: self content has an unresolved notes/list
+// duality, a wrap flip locks un-updated clients out of a whole channel, the
+// seed wrap's real weakness is KDF downgrade (an algorithm ratchet, not AAD),
+// and control frames have a native twin in puca-agent that would need a
+// lockstep two-language deploy.
+//
+// Byte layout: UTF-8 of an ASCII string, fixed field order, '/'-separated,
+// every field either a token from a closed set or a non-negative integer
+// rendered by String(n) — checked, so the grammar needs no escaping.
+
+/** Emit v3 (context-bound) envelopes for channel messages and DMs.
+ *
+ *  OFF for the reader-only release: a client that predates v3 shows a v3
+ *  message as ENC_UNSUPPORTED_VERSION, so every client must be able to READ
+ *  v3 before any client WRITES it. Flip to true in a later release, once the
+ *  reader has shipped on every surface. The reader accepts both, forever. */
+export const EMIT_ENVELOPE_V3 = false;
+
+const AAD_PREFIX = 'puca/v3/';
+
+function aadInt(n: number, what: string): string {
+    if (!Number.isSafeInteger(n) || n < 0) {
+        // SecureSendError so the composer shows "can't send securely" rather than an
+        // unhandled rejection; on the read side every caller catches into a marker.
+        throw new SecureSendError(`E2EE context: ${what} must be a non-negative integer, got ${String(n)}`);
+    }
+    return String(n);
+}
+
+/** Which channel-keyed thing this is. A checklist item must not open as a
+ *  message, nor an attachment sidecar as a description. */
+export type ChannelAadKind = 'chan-msg' | 'chan-task' | 'chan-taskatt';
+
+export interface ChannelContext {
+    kind: ChannelAadKind;
+    channelId: number;
+    /** The message's author, or the task's CREATOR (`created_by`) — never the
+     *  editor: a manager may edit another member's item, and the reader only
+     *  has `created_by` to recompute with. */
+    senderId: number;
+}
+
+export interface DmContext {
+    senderId: number;
+    recipientId: number;
+}
+
+export function channelAad(ctx: ChannelContext, epoch: number): Uint8Array {
+    return utf8(`${AAD_PREFIX}${ctx.kind}/${aadInt(ctx.channelId, 'channelId')}/${aadInt(epoch, 'epoch')}/${aadInt(ctx.senderId, 'senderId')}`);
+}
+
+/** Directional: `dm/<sender>/<recipient>`. The pairwise key is symmetric, so
+ *  the direction is exactly what the key itself does not authenticate. */
+export function dmAad(ctx: DmContext): Uint8Array {
+    return utf8(`${AAD_PREFIX}dm/${aadInt(ctx.senderId, 'senderId')}/${aadInt(ctx.recipientId, 'recipientId')}`);
 }
 
 // --- Key agreement ---
@@ -282,26 +370,42 @@ function deriveSymmetricKey(sharedSecret: Uint8Array, info: Uint8Array): Uint8Ar
 export async function encryptDM(
     identity: Identity,
     recipientPublicKeyEncoded: string,
-    plaintext: string
+    plaintext: string,
+    ctx: DmContext,
+): Promise<Envelope | null> {
+    return sealDmEnvelope(identity, recipientPublicKeyEncoded, plaintext, ctx, EMIT_ENVELOPE_V3 ? 3 : 2);
+}
+
+/** The DM seal with an explicit version — tests reach v3 through this while
+ *  EMIT_ENVELOPE_V3 is off. `ctx` is required even for v2 so every send
+ *  site is already threaded when the flip comes. */
+export async function sealDmEnvelope(
+    identity: Identity,
+    recipientPublicKeyEncoded: string,
+    plaintext: string,
+    ctx: DmContext,
+    version: 2 | 3,
 ): Promise<Envelope | null> {
     const recipientPub = decodePublicKey(recipientPublicKeyEncoded);
     if (!recipientPub) return null;
     const shared = x25519.getSharedSecret(identity.privateKey, recipientPub);
     const key = deriveSymmetricKey(shared, HKDF_DM_INFO);
+    if (version === 3) return { v: 3, t: 'dm', ct: await aesEncrypt(key, plaintext, dmAad(ctx)) };
     return { v: 2, t: 'dm', ct: await aesEncrypt(key, plaintext) };
 }
 
 export async function decryptDM(
     identity: Identity,
     senderPublicKeyEncoded: string,
-    envelope: Envelope
+    envelope: Envelope,
+    ctx: DmContext,
 ): Promise<string | null> {
     const senderPub = decodePublicKey(senderPublicKeyEncoded);
     if (!senderPub) return null;
     try {
         const shared = x25519.getSharedSecret(identity.privateKey, senderPub);
         const key = deriveSymmetricKey(shared, HKDF_DM_INFO);
-        return await aesDecrypt(key, envelope.ct);
+        return await aesDecrypt(key, envelope.ct, envelope.v === 3 ? dmAad(ctx) : undefined);
     } catch {
         return null;
     }
@@ -440,17 +544,34 @@ export async function unwrapChannelKey(
 export async function encryptChannelMessage(
     channelKey: Uint8Array,
     epoch: number,
-    plaintext: string
+    plaintext: string,
+    ctx: ChannelContext,
 ): Promise<Envelope> {
+    return sealChannelEnvelope(channelKey, epoch, plaintext, ctx, EMIT_ENVELOPE_V3 ? 3 : 2);
+}
+
+/** The channel seal with an explicit version (see sealDmEnvelope). */
+export async function sealChannelEnvelope(
+    channelKey: Uint8Array,
+    epoch: number,
+    plaintext: string,
+    ctx: ChannelContext,
+    version: 2 | 3,
+): Promise<Envelope> {
+    if (version === 3) return { v: 3, t: 'ch', epoch, ct: await aesEncrypt(channelKey, plaintext, channelAad(ctx, epoch)) };
     return { v: 2, t: 'ch', epoch, ct: await aesEncrypt(channelKey, plaintext) };
 }
 
 export async function decryptChannelMessage(
     channelKey: Uint8Array,
-    envelope: Envelope
+    envelope: Envelope,
+    ctx: ChannelContext,
 ): Promise<string | null> {
     try {
-        return await aesDecrypt(channelKey, envelope.ct);
+        // v3 binds the epoch the ENVELOPE carries — the value the reader
+        // used to pick this key — so a relabelled epoch fails the tag
+        // instead of silently redirecting key selection.
+        return await aesDecrypt(channelKey, envelope.ct, envelope.v === 3 ? channelAad(ctx, envelope.epoch ?? 0) : undefined);
     } catch {
         return null;
     }
@@ -967,22 +1088,42 @@ export function serializeEnvelope(env: Envelope): string {
     return JSON.stringify(env);
 }
 
-/** Parse a stored content string into an envelope, or null if it is plaintext. */
-export function parseEnvelope(content: string): Envelope | null {
-    if (!content || content[0] !== '{') return null;
+export type ParsedEnvelope =
+    | { kind: 'envelope'; env: Envelope }
+    /** Shaped like an envelope, but a version this build does not
+     *  implement. MUST be treated as encrypted-and-unreadable, never as
+     *  plaintext: the old parser returned null here, and the raw JSON then
+     *  rendered as content with a "not encrypted" badge. */
+    | { kind: 'unsupported-version'; v: number }
+    | { kind: 'plaintext' };
+
+export function parseEnvelopeEx(content: string): ParsedEnvelope {
+    if (!content || content[0] !== '{') return { kind: 'plaintext' };
+    let parsed: unknown;
     try {
-        const parsed = JSON.parse(content);
-        if (parsed && parsed.v === 2 && (parsed.t === 'dm' || parsed.t === 'ch' || parsed.t === 'self') && typeof parsed.ct === 'string') {
-            return parsed as Envelope;
-        }
+        parsed = JSON.parse(content);
     } catch {
-        // not JSON / not an envelope
+        return { kind: 'plaintext' }; // not JSON
     }
-    return null;
+    const p = parsed as { v?: unknown; t?: unknown; ct?: unknown } | null;
+    const shaped = !!p && typeof p.v === 'number' && (p.t === 'dm' || p.t === 'ch' || p.t === 'self') && typeof p.ct === 'string';
+    if (!shaped) return { kind: 'plaintext' };
+    if (p.v === 2 || p.v === 3) return { kind: 'envelope', env: parsed as Envelope };
+    return { kind: 'unsupported-version', v: p.v as number };
 }
 
+/** Parse a stored content string into an envelope this build can open, or
+ *  null. Prefer parseEnvelopeEx wherever "unsupported version" must be
+ *  told apart from "plaintext" — every message renderer must. */
+export function parseEnvelope(content: string): Envelope | null {
+    const p = parseEnvelopeEx(content);
+    return p.kind === 'envelope' ? p.env : null;
+}
+
+/** Envelope-shaped — INCLUDING versions this build cannot open — so a newer
+ *  format is never classified as legacy plaintext by messageEncState. */
 export function isEncrypted(content: string): boolean {
-    return parseEnvelope(content) !== null;
+    return parseEnvelopeEx(content).kind !== 'plaintext';
 }
 
 /**

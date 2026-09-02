@@ -25,5 +25,15 @@
     "recipientId": 42,
     "wrappedKey": "2BJ/9gaEToshdqPQjxHap34WZVKeAkURrTMqMu59ii4JadxJ3DXdKV0tGWldlXk6QBzSbldqO81WYwXVWQvTFe1N5uNAzAzl",
     "senderPublicKey": "x25519:yP7Kgb4ZbN8sreq/E8SQPXYy3OSVWqaLbl2a3vVOJhY="
+  },
+  "ch": {
+    "plaintext": "frozen channel message — minted before the v3 AAD change",
+    "epoch": 3,
+    "envelope": {
+      "v": 2,
+      "t": "ch",
+      "epoch": 3,
+      "ct": "XsQ1cyYJzJmqGDJsD3dHYlJPudM0Ee3b3fd19SzNxPPumSNmgKt0/+uONIc5p9X4zhSWD3Q+pOKgKC7EEjNQHb1TVhKlztDHjINA6SIdziAOANmSQOo="
+    }
   }
 }
