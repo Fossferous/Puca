@@ -36,9 +36,10 @@ not continue until you confirm you have saved it. Take that seriously:
 - Write it down somewhere that is not the device you are signing up on, or put
   it in a password manager next to your password.
 
-If you skipped past it: as long as you still know your password you are fine
-day to day, but you have no spare key — [`LOST_RECOVERY_CODE.md`](LOST_RECOVERY_CODE.md)
-explains exactly what that means and what to do.
+If you skipped past it: as long as you still know your password you can make
+a new one under **Settings › My Account › Recovery code** (the old one stops
+working at that moment). [`LOST_RECOVERY_CODE.md`](LOST_RECOVERY_CODE.md)
+explains the other cases.
 
 ### 3. Explore the Interface
 

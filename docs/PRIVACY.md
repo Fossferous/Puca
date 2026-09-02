@@ -55,9 +55,9 @@ that limit — but cannot read content.
   calling. When the operator runs their own TURN relay it is used for STUN
   too and nothing leaves their infrastructure. Only on a deployment with
   **no** relay configured does the server hand out Google's public STUN
-  servers as a last resort (`.env.example`, `STUN_SERVERS`), and the app
-  keeps the same public list built in for the case where the server's ICE
-  configuration cannot be fetched at all (`frontend/src/api/rtc/config.ts`).
+  servers as a last resort (`.env.example`, `STUN_SERVERS`). The app itself
+  has no built-in STUN list: if the server's ICE configuration cannot be
+  fetched it contacts nobody (`frontend/src/api/rtc/config.ts`).
 - **Google (Firebase Cloud Messaging), only if your operator enabled wake
   signals for Android.** The message that crosses Google is the constant
   `{"w":"1"}` plus your device's push token — its entire body is pinned by

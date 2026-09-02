@@ -151,6 +151,8 @@ you must decide:
 | `APP_URL` | `https://app.example.com` — the web app, used as the base of password-reset and verification links. **Required if you configure SMTP**: the default is `http://localhost:5173`, and every reset mail would point at the recipient's own machine |
 | `TURN_SERVER`, `TURN_SECRET` | section 8 — required for calls between people on different networks |
 | `DATABASE_MAX_CONNECTIONS` | leave unset (20). Keep below Postgres's `max_connections` (default 100) minus headroom for `pg_dump` and psql |
+| `SOURCE_URL` | **a fork must set this to its own repository.** `GET /source` answers with it plus the commit the binary was built from — the AGPL §13 offer of source to the people who use your server |
+| `UPLOAD_MAX_USER_BYTES` | per-user attachment quota, default 512 MiB; clips have their own (`CLIP_MAX_USER_BYTES`) |
 
 Retention is configurable and documented in `.env.example`:
 `REPORTS_RETENTION_DAYS`, `AUDIT_RETENTION_DAYS`, `CLIP_RETENTION_DAYS`, and
@@ -371,7 +373,8 @@ deploy/ops/dual-ship.sh installer <Puca-Setup.exe> <.sig> <version> "<one-line n
 deploy/ops/dual-ship.sh apk       <Puca-<version>.apk> <version>
 deploy/ops/dual-ship.sh mobile    <bundle.enc.zip> <version> <sessionKey> <checksum>   # mobile/README.md
 deploy/ops/dual-ship.sh webapp    <dist.tar.gz>
-deploy/ops/dual-ship.sh backend   <src.tar.gz>           # builds ON the first host, copies the binary to the rest
+git rev-parse HEAD > SOURCE_COMMIT                       # the tarball has no .git; build.rs embeds this for GET /source
+deploy/ops/dual-ship.sh backend   <src.tar.gz>           # builds ON the first host, copies the binary to the rest (tarball incl. SOURCE_COMMIT)
 deploy/ops/check-versions.sh                             # every surface, every host, one version
 ```
 
