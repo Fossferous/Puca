@@ -312,9 +312,23 @@ pub fn cursor_clip_conflict_for(_t: TargetMonitor) -> bool {
     false
 }
 
+/// Stamped into `dwExtraInfo` of every INPUT this crate injects, so a
+/// low-level hook in the same product (the desktop shell's global-hotkey
+/// listener) can tell OUR synthetic input from everyone else's. The hook used
+/// to skip ALL injected input (LLKHF_INJECTED) to keep the remote-control
+/// agent's SendInput from triggering a binding on the host — which also
+/// skipped every key a gaming mouse's driver software injects for a remapped
+/// side button (Logitech G HUB, Razer Synapse, AutoHotkey…), i.e. exactly the
+/// button people bind push-to-talk to. Now only input carrying this tag is
+/// ignored; the flag alone is not a reason.
+///
+/// `dwExtraInfo` is ULONG_PTR; the value is ASCII "PUCA" and survives a
+/// 32-bit truncation unchanged.
+pub const PUCA_INJECT_TAG: usize = 0x5055_4341;
+
 #[cfg(windows)]
 mod win {
-    use super::TargetMonitor;
+    use super::{TargetMonitor, PUCA_INJECT_TAG};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
         KEYEVENTF_KEYUP,
@@ -338,7 +352,7 @@ mod win {
                     mouseData: data as u32,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: PUCA_INJECT_TAG,
                 },
             },
         }
@@ -412,7 +426,7 @@ mod win {
                     wScan: unit,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: PUCA_INJECT_TAG,
                 },
             },
         }
@@ -473,7 +487,7 @@ mod win {
                     wScan: scan,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: PUCA_INJECT_TAG,
                 },
             },
         }
@@ -1805,5 +1819,20 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod inject_tag_tests {
+    use super::PUCA_INJECT_TAG;
+
+    /// The desktop shell's hook (frontend/src-tauri/src/hotkeys.rs) compares
+    /// `KBDLLHOOKSTRUCT::dwExtraInfo` against this exact value; a change here
+    /// without one there would make our own injections trigger bindings again.
+    #[test]
+    fn the_tag_is_the_ascii_word_puca_and_fits_32_bits() {
+        assert_eq!(PUCA_INJECT_TAG, 0x5055_4341);
+        assert_eq!(&PUCA_INJECT_TAG.to_be_bytes()[std::mem::size_of::<usize>() - 4..], b"PUCA");
+        assert!(PUCA_INJECT_TAG <= u32::MAX as usize);
     }
 }
