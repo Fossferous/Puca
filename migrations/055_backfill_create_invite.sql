@@ -1,0 +1,25 @@
+-- CREATE_INVITE (1<<27 = 134217728) onto every @everyone role.
+--
+-- BEHAVIOUR-PRESERVING, in the sense migration 046 established: `create_invite`
+-- checked bare `server_members` membership, so every member of every server can
+-- mint an invite code TODAY. Introducing the bit without this backfill would
+-- take that away from every non-admin on every existing server at the moment
+-- the new binary starts -- a visible regression, and one nobody asked for.
+-- So: grant first (here), enforce second (src/invite_handlers.rs). Newly
+-- created servers get the bit through Permissions::DEFAULT_MEMBER, which
+-- create_server derives @everyone from.
+--
+-- What the bit BUYS, since it changes nothing on day one: an owner can now
+-- clear it from @everyone and grant it to a role instead. Before, the
+-- lowest-privilege member of a private server -- including one denied
+-- VIEW_CHANNEL on every channel in it -- could mint an unlimited, non-expiring
+-- code for that server, and no setting existed that said no.
+--
+-- Scoped to is_default roles ONLY, like 046 and 051: a non-default role is a
+-- deliberate grant an admin authored, and OR-ing bits into it would be a
+-- privilege change nobody asked for. Idempotent -- OR-ing a set bit is a no-op,
+-- so a re-run changes nothing.
+--
+-- Reversible: UPDATE server_roles SET permissions = permissions & ~134217728
+-- WHERE is_default = true; nobody held this bit before today.
+UPDATE server_roles SET permissions = permissions | 134217728 WHERE is_default = true;

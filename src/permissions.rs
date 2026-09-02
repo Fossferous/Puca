@@ -45,6 +45,19 @@ bitflags! {
         // grants nothing. Overwritable per channel like every non-admin bit.
         const CREATE_CLIPS       = 1 << 26;
 
+        // Minting an invite code for the server. SERVER-scoped, not channel-
+        // scoped (see OVERWRITABLE below): an invite is to the server, so a
+        // per-channel overwrite for it would mean nothing.
+        //
+        // In DEFAULT_MEMBER because that is today's behaviour — `create_invite`
+        // checked membership alone — and migration 055 ORs the bit onto every
+        // existing @everyone role so nobody loses invite creation at deploy
+        // time. What it buys is the ability to TAKE it away: before this,
+        // the lowest-privilege member of a private server, including one with
+        // VIEW_CHANNEL denied on every channel, could mint an unlimited
+        // non-expiring code for it and there was no setting that said no.
+        const CREATE_INVITE      = 1 << 27;
+
         // Default member permissions
         const DEFAULT_MEMBER = Self::VIEW_CHANNEL.bits()
                              | Self::SEND_MESSAGES.bits()
@@ -57,7 +70,8 @@ bitflags! {
                              | Self::USE_VOICE_ACTIVITY.bits()
                              | Self::CREATE_TASKS.bits()
                              | Self::COMPLETE_TASKS.bits()
-                             | Self::CREATE_CLIPS.bits();
+                             | Self::CREATE_CLIPS.bits()
+                             | Self::CREATE_INVITE.bits();
     }
 }
 
@@ -510,7 +524,11 @@ impl Permissions {
                 | Self::MANAGE_ROLES.bits()
                 | Self::MANAGE_SERVER.bits()
                 | Self::KICK_MEMBERS.bits()
-                | Self::BAN_MEMBERS.bits()),
+                | Self::BAN_MEMBERS.bits()
+                // Server-scoped, like the admin bits above: create_invite
+                // resolves SERVER permissions, so a channel overwrite for it
+                // would be a control that silently does nothing.
+                | Self::CREATE_INVITE.bits()),
     );
 }
 
@@ -1053,5 +1071,96 @@ mod create_clips_bit_tests {
         let stmt: String = sql.lines().filter(|l| !l.trim_start().starts_with("--")).collect::<Vec<_>>().join("\n");
         assert!(stmt.contains(&format!("permissions | {}", Permissions::CREATE_CLIPS.bits())), "051 must OR in {}: {stmt}", Permissions::CREATE_CLIPS.bits());
         assert!(stmt.contains("WHERE is_default = true"), "051 must be scoped to @everyone: {stmt}");
+    }
+}
+
+#[cfg(test)]
+mod create_invite_bit_tests {
+    use super::Permissions;
+
+    /// The bit must be 27 and must not collide with CREATE_CLIPS (26) — the two
+    /// were added a fortnight apart and a mis-typed shift would silently make
+    /// "can create invites" mean "can create clips".
+    #[test]
+    fn create_invite_is_bit_27_and_collides_with_nothing() {
+        assert_eq!(Permissions::CREATE_INVITE.bits(), 1 << 27);
+        assert_eq!(Permissions::CREATE_CLIPS.bits(), 1 << 26);
+        assert!(
+            (Permissions::CREATE_INVITE & Permissions::CREATE_CLIPS).is_empty(),
+            "CREATE_INVITE must not overlap CREATE_CLIPS"
+        );
+        // Every OTHER named flag is disjoint from it too.
+        let others = Permissions::all() & !Permissions::CREATE_INVITE;
+        assert!((others & Permissions::CREATE_INVITE).is_empty());
+    }
+
+    /// Behaviour-preserving by default: every member could invite before, so the
+    /// bit ships in DEFAULT_MEMBER (and migration 055 backfills it onto every
+    /// existing @everyone role). It is NOT overwritable per channel — invites
+    /// are server-scoped and `create_invite` resolves SERVER permissions, so a
+    /// channel overwrite for it would be a control that does nothing.
+    #[test]
+    fn create_invite_is_a_default_member_bit_and_is_not_channel_overwritable() {
+        assert!(Permissions::DEFAULT_MEMBER.contains(Permissions::CREATE_INVITE));
+        assert!(!Permissions::OVERWRITABLE.contains(Permissions::CREATE_INVITE));
+        // The clips bit stays overwritable — this test must not be passing
+        // because OVERWRITABLE is empty or the check is inverted.
+        assert!(Permissions::OVERWRITABLE.contains(Permissions::CREATE_CLIPS));
+    }
+
+    /// The backfill hard-codes the bit's decimal value. Read the migration's own
+    /// SQL (a DIFFERENT file from this test) so moving the bit without following
+    /// through in SQL goes red — the same guard 051 carries.
+    #[test]
+    fn the_backfill_migration_grants_exactly_this_bit() {
+        let sql = include_str!("../migrations/055_backfill_create_invite.sql");
+        let stmt: String = sql
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(
+            stmt.contains(&format!("permissions | {}", Permissions::CREATE_INVITE.bits())),
+            "055 must OR in {}: {stmt}",
+            Permissions::CREATE_INVITE.bits()
+        );
+        assert!(
+            stmt.contains("WHERE is_default = true"),
+            "055 must be scoped to @everyone: {stmt}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod invite_expiry_clamp_tests {
+    use crate::invite_handlers::{clamp_expiry_hours, MAX_EXPIRY_HOURS, MIN_EXPIRY_HOURS};
+
+    /// `chrono::Duration::hours(i32::MAX as i64)` is roughly 245,000 years: the
+    /// timestamp overflows the column on the way in. A negative value is worse
+    /// in a quieter way — the invite is born expired while the response tells
+    /// the creator it expires in the past.
+    #[test]
+    fn the_clamp_bounds_both_ends() {
+        assert_eq!(clamp_expiry_hours(i32::MAX), MAX_EXPIRY_HOURS);
+        assert_eq!(clamp_expiry_hours(i32::MIN), MIN_EXPIRY_HOURS);
+        assert_eq!(clamp_expiry_hours(0), MIN_EXPIRY_HOURS);
+        assert_eq!(clamp_expiry_hours(-1), MIN_EXPIRY_HOURS);
+        assert_eq!(clamp_expiry_hours(MAX_EXPIRY_HOURS + 1), MAX_EXPIRY_HOURS);
+        // ... and leaves every ordinary value alone.
+        for h in [1, 24, 168, 720, MAX_EXPIRY_HOURS] {
+            assert_eq!(clamp_expiry_hours(h), h, "{h} is in range");
+        }
+    }
+
+    /// The clamped maximum must survive the arithmetic the handler then does.
+    #[test]
+    fn the_clamped_maximum_produces_a_real_timestamp() {
+        let hours = clamp_expiry_hours(i32::MAX);
+        let when = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::hours(hours as i64))
+            .expect("a clamped lifetime must not overflow");
+        assert!(when > chrono::Utc::now());
+        assert!(when < chrono::Utc::now() + chrono::Duration::days(366));
     }
 }
