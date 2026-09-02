@@ -260,10 +260,15 @@ echo "--- dual-ship.sh: the download page is RENDERED and must not name a placeh
 # The check-versions cases above swapped in a non-logging ssh stub; restore the
 # recording one, and make scp also keep a copy of every existing file it is
 # handed, so the page that would have reached the host can be inspected.
-mkdir -p "$TMP/uploaded"
+mkdir -p "$TMP/uploaded" "$TMP/docs"
+printf '# Changelog\n' > "$TMP/CHANGELOG.md"
+printf '# Privacy\n' > "$TMP/docs/PRIVACY.md"
+# ...and answers a fetch of SHA256SUMS.txt with whatever $TMP/served-sums holds,
+# so the "the served file lists the shipped hash" check is under test control.
 cat > "$TMP/bin/ssh" <<STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
+case "\$*" in *SHA256SUMS.txt*curl*|*curl*SHA256SUMS.txt*) cat "$TMP/served-sums" 2>/dev/null ;; esac
 exit 0
 STUB
 chmod +x "$TMP/bin/ssh"
@@ -318,6 +323,25 @@ check "for \$INSTALL_DIR/downloads/mobile"                  "$(has "$first" '/tm
 check "and it precedes the first scp"                       "$([ "$(grep -n 'mkdir -p' "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^scp' "$LOG" | head -1 | cut -d: -f1)" ] && echo 1 || echo 0)" "$(cat "$LOG")"
 out="$(ship apk "$TMP/app.apk" 9.9.9)"
 check "the APK path preflights too"                         "$(has "$(head -1 "$LOG")" 'mkdir -p')" "$(head -1 "$LOG")"
+
+echo
+echo "--- dual-ship.sh: every artifact's SHA-256 is published and verified through the download host ---"
+exe_sha="$(sha256sum "$TMP/setup.exe" | cut -d' ' -f1)"
+printf '%s  Puca-Setup-9.9.9.exe\n%s  Puca-Setup.exe\n' "$exe_sha" "$exe_sha" > "$TMP/served-sums"
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "the installer's hash is written to SHA256SUMS.txt on the host" "$(grep -q "SHA256SUMS.txt" "$LOG" && grep -q "$exe_sha  Puca-Setup.exe" "$LOG" && echo 1 || echo 0)" "$(grep SHA256 "$LOG")"
+check "and the versioned name too"                                   "$(grep -q "$exe_sha  Puca-Setup-9.9.9.exe" "$LOG" && echo 1 || echo 0)"
+check "and the SERVED file is checked for both"                      "$([ "$(has "$out" 'PASS  sandbox SHA256SUMS.txt lists Puca-Setup.exe')" = 1 ] && [ "$(has "$out" 'PASS  sandbox SHA256SUMS.txt lists Puca-Setup-9.9.9.exe')" = 1 ] && echo 1 || echo 0)" "$out"
+check "the release notes and privacy statement ship beside it"       "$(grep -q 'CHANGELOG.md' "$LOG" && grep -q 'PRIVACY.md' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
+# NEGATIVE CONTROL: a served file that does not carry the shipped hash is a FAIL.
+printf '%s  Puca-Setup.exe\n' "0000000000000000000000000000000000000000000000000000000000000000" > "$TMP/served-sums"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "a served SHA256SUMS.txt with the wrong hash FAILS the ship"   "$(has "$out" 'FAIL  sandbox SHA256SUMS.txt does not list Puca-Setup.exe')" "$out"
+apk_sha="$(sha256sum "$TMP/app.apk" | cut -d' ' -f1)"
+printf '%s  mobile/Puca-9.9.9.apk\n' "$apk_sha" > "$TMP/served-sums"
+out="$(ship apk "$TMP/app.apk" 9.9.9)"
+check "the APK is listed under mobile/"                              "$(has "$out" 'PASS  sandbox SHA256SUMS.txt lists mobile/Puca-9.9.9.apk')" "$out"
 
 echo
 echo "--- a clone with no hosts.conf gets a sentence, not a bash error ---"

@@ -215,6 +215,47 @@ ship_download_page() {
 	fi
 }
 
+# Publish an artifact's SHA-256 beside it. The Windows installers are not
+# code-signed (a certificate is deferred — the download page says so), so a
+# checksum the user can compare is the compensating control: SHA256SUMS.txt at
+# the download root, one `<sha>  <path>` line per artifact in sha256sum
+# format, upserted so a re-ship replaces its line. Then verified through the
+# download host like everything else here — the file the user fetches, not
+# the one that was written.
+#   record_sha256 <entry> <label> <sha> <path-relative-to-downloads>
+record_sha256() {
+	local entry="$1" label="$2" sha="$3" rel="$4"
+	ssh_to "$entry" "set -e
+		cd $INSTALL_DIR/downloads
+		{ [ -f SHA256SUMS.txt ] && awk -v r='$rel' '\$2 != r' SHA256SUMS.txt || true; echo '$sha  $rel'; } | sort -k2 > SHA256SUMS.txt.new
+		mv SHA256SUMS.txt.new SHA256SUMS.txt
+		chmod 644 SHA256SUMS.txt"
+	local served
+	served="$(remote_body "$entry" "$DOWNLOAD_HOST" /SHA256SUMS.txt || true)"
+	if printf '%s\n' "$served" | grep -qF "$sha  $rel"; then
+		echo "PASS  $label SHA256SUMS.txt lists $rel"
+	else
+		echo "FAIL  $label SHA256SUMS.txt does not list $rel with the shipped hash"
+		FAILED+=("$label:sha256sums")
+	fi
+}
+
+# The release notes and the privacy statement ship beside the installers, so
+# the download page links files this deployment serves rather than a
+# repository the operator may not own — a fork's users should read the fork's
+# changelog. Served as plain text by deploy/download-site/Caddyfile.snippet.
+ship_release_docs() {
+	local entry="$1" f
+	for f in CHANGELOG.md docs/PRIVACY.md; do
+		if [ ! -f "$HERE/../../$f" ]; then
+			echo "WARN  $f not found in this checkout; the download page's link to it will 404"
+			continue
+		fi
+		scp_to "$entry" "$HERE/../../$f" "${entry#*:}:$INSTALL_DIR/downloads/$(basename "$f")"
+		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/$(basename "$f")"
+	done
+}
+
 # Run curl ON the target host against ITS OWN loopback, not from wherever
 # this script happens to execute.
 #
@@ -334,10 +375,12 @@ cmd_mobile() {
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
 	ensure_download_dirs
+	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== mobile OTA $version -> $label ==="
 		scp_to "$entry" "$bundle" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip"
+		record_sha256 "$entry" "$label" "$bundle_sha" "mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip"
 		ssh_to "$entry" "set -e
 			cd $INSTALL_DIR
 			[ -f mobile-update.json ] && cp -a mobile-update.json mobile-update.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
@@ -384,6 +427,7 @@ cmd_mobile_lite() {
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
 	ensure_download_dirs
+	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
 		local label; label="$(label_of "$entry")"
 		echo "=== mobile OTA (lite) $version -> $label ==="
@@ -395,6 +439,7 @@ cmd_mobile_lite() {
 		local full_before full_after
 		full_before="$(remote_code "$entry" "$API_HOST" /api/mobile-updates/check):$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)"
 		scp_to "$entry" "$bundle" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip"
+		record_sha256 "$entry" "$label" "$bundle_sha" "mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip"
 		ssh_to "$entry" "set -e
 			cd $INSTALL_DIR
 			[ -f mobile-update-lite.json ] && cp -a mobile-update-lite.json mobile-update-lite.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
@@ -601,6 +646,9 @@ cmd_installer() {
 			echo "FAIL  $label installer hash mismatch"
 			FAILED+=("$label:installer")
 		fi
+		record_sha256 "$entry" "$label" "$local_sha" "$INSTALLER_NAME"
+		record_sha256 "$entry" "$label" "$local_sha" "$versioned"
+		ship_release_docs "$entry"
 	done
 	rm -f "$tmp_latest" "$tmp_appver"
 	verify_cdn_exe "$versioned" "$local_sha" "installer" "$INSTALLER_NAME"
@@ -695,6 +743,9 @@ cmd_installer_lite() {
 			echo "FAIL  $label lite installer hash mismatch"
 			FAILED+=("$label:installer-lite")
 		fi
+		record_sha256 "$entry" "$label" "$local_sha" "$INSTALLER_NAME_LITE"
+		record_sha256 "$entry" "$label" "$local_sha" "$versioned"
+		ship_release_docs "$entry"
 	done
 	rm -f "$tmp_latest"
 	verify_cdn_exe "$versioned" "$local_sha" "installer-lite" "$INSTALLER_NAME_LITE"
@@ -828,6 +879,7 @@ cmd_apk() {
 			echo "FAIL  $label apk hash mismatch"
 			FAILED+=("$label:apk")
 		fi
+		record_sha256 "$entry" "$label" "$local_sha" "mobile/$APK_PREFIX-$version.apk"
 		local page_links
 		page_links="$(remote_body "$entry" "$DOWNLOAD_HOST" / | grep -c "$APK_PREFIX-$version.apk" || true)"
 		if [ "${page_links:-0}" -gt 0 ]; then
@@ -873,6 +925,7 @@ cmd_apk_lite() {
 			echo "FAIL  $label lite apk hash mismatch"
 			FAILED+=("$label:apk-lite")
 		fi
+		record_sha256 "$entry" "$label" "$local_sha" "mobile/$APK_PREFIX_LITE-$version.apk"
 		local page_links
 		page_links="$(remote_body "$entry" "$DOWNLOAD_HOST" / | grep -c "$APK_PREFIX_LITE-$version.apk" || true)"
 		if [ "${page_links:-0}" -gt 0 ]; then
