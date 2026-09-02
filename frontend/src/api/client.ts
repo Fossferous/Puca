@@ -20,6 +20,37 @@ export class ApiError extends Error {
     }
 }
 
+/**
+ * The HTTP status a thrown error carries, or undefined for anything that is
+ * not a server refusal. THE one way to branch on a status: two call sites
+ * (channelKeys' 409 epoch-race adoption, FriendsPanel's "already friends")
+ * read `err.response.status` — the axios shape — from errors this client
+ * never throws, so both branches were dead and every 409 fell through to a
+ * generic failure.
+ */
+export function statusOf(err: unknown): number | undefined {
+    return err instanceof ApiError ? err.status : undefined;
+}
+
+/**
+ * The message a server error body carries. Handlers answer with either a
+ * plain-text body or `{"message": "..."}` / `{"error": "..."}`; callers that
+ * print `err.message` verbatim (SettingsModal's e-mail hint, Login) were
+ * showing the braces to users. Falls back to the raw text, then to a status
+ * line, so no caller sees an empty string.
+ */
+export function errorMessageFromBody(text: string, status: number): string {
+    const raw = text.trim();
+    if (raw.startsWith('{')) {
+        try {
+            const j = JSON.parse(raw) as { message?: unknown; error?: unknown };
+            if (typeof j.message === 'string' && j.message.trim()) return j.message;
+            if (typeof j.error === 'string' && j.error.trim()) return j.error;
+        } catch { /* not JSON after all — show it as text */ }
+    }
+    return raw || `Request failed with status ${status}`;
+}
+
 /** True when the request never got a response at all (offline, DNS, refused). */
 export function isNetworkError(err: unknown): boolean {
     if (err instanceof ApiError) return false;
@@ -147,10 +178,7 @@ class ApiClient {
                     signalAuthExpired();
                 }
                 const errorText = await response.text();
-                throw new ApiError(
-                    errorText || `Request failed with status ${response.status}`,
-                    response.status,
-                );
+                throw new ApiError(errorMessageFromBody(errorText, response.status), response.status);
             }
 
             // For DELETE or empty responses, return generic success or null

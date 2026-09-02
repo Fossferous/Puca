@@ -23,7 +23,7 @@
  *  - the NATIVE feed (desktop only): a Rust WH_KEYBOARD_LL hook that reports
  *    watched-key transitions system-wide, so push-to-talk keeps working while
  *    a fullscreen game has focus. startNativeFeed()/stopNativeFeed() manage
- *    it; events are dropped while Puca has focus (the in-app listener
+ *    it; events are dropped while Púca has focus (the in-app listener
  *    already saw the same physical keys — processing both would double-fire).
  */
 import type { KeyBinding } from '../components/settingsStore';
@@ -471,7 +471,7 @@ export async function startNativeFeed(actionIds: string[], watchedKeys: number[]
                 const suppressed = document.hasFocus();
                 console.log('[hotkeys] native', e.payload.down ? 'down' : 'up', e.payload.keyCode,
                     suppressed ? '(suppressed: app focused)' : '');
-                // Focus dedupe: while Puca has focus the in-app listener
+                // Focus dedupe: while Púca has focus the in-app listener
                 // saw the same physical key — process each press exactly once.
                 if (suppressed) return;
                 nativeKeyEvent(e.payload.down ? 'down' : 'up', e.payload, nativeAllow ?? undefined);

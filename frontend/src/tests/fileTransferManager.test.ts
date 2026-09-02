@@ -230,7 +230,7 @@ describe('offering a file', () => {
             type: 'FileParked',
             payload: {
                 from_user: 7, transfer_id: id,
-                reason: 'your other device isn’t connected — the offer will reach it when Puca opens there',
+                reason: 'your other device isn’t connected — the offer will reach it when Púca opens there',
             },
         });
         let t = fileTransferManager.list().find(x => x.id === id)!;

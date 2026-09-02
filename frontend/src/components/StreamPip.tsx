@@ -229,14 +229,14 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
                         );
                     })()}
                     {/* OS-level picture-in-picture: stays on top when
-                        Puca is tabbed out. Only where the API exists. */}
+                        Púca is tabbed out. Only where the API exists. */}
                     {onTogglePopout && (pipSupported() || docPipSupported()) && (
                         <button
                             className={`pip-btn ${poppedStreams.includes(primaryUserId) ? 'active' : ''}`}
                             onClick={() => onTogglePopout(primaryUserId)}
                             title={poppedStreams.includes(primaryUserId)
                                 ? 'Bring back from picture-in-picture'
-                                : 'Pop out (stays on top when Puca is tabbed out)'}
+                                : 'Pop out (stays on top when Púca is tabbed out)'}
                         >
                             <PopOutIcon />
                         </button>

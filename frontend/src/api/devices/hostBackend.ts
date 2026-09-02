@@ -18,7 +18,7 @@
  * place.
  *
  * Note what is deliberately NOT here: the agent never speaks WebSocket to the
- * Puca server. It speaks local IPC to this app, which keeps ownership of
+ * Púca server. It speaks local IPC to this app, which keeps ownership of
  * the socket, the device key, and every authorization decision.
  */
 import { isTauri } from '../platform';

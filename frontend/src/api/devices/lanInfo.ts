@@ -68,7 +68,7 @@ let republishWanted = false;
  *  `lan_info` NULL forever, on the same unchanged hardware: re-enrolling this
  *  machine (Devices → reset identity mints a NEW device id), and signing in as
  *  a different account (a different row again). Both are un-wakeable until the
- *  app restarts, and `planWake` then advises opening Puca on that
+ *  app restarts, and `planWake` then advises opening Púca on that
  *  machine — which is exactly what just happened and changed nothing. */
 function fingerprint(deviceId: string, companionId: string | null, info: CollectedLan): string {
     return [
@@ -98,7 +98,7 @@ function fingerprint(deviceId: string, companionId: string | null, info: Collect
  * this module published to `thisDeviceId()` and nothing else. The consequence
  * was precise and bad: the row you can actually REACH while the screen is
  * locked was the one that could never be WOKEN, and its refusal told you to
- * "open Puca on that device once", which publishes to the other row and
+ * "open Púca on that device once", which publishes to the other row and
  * can never help. The two halves of one machine each lacked what the other had.
  *
  * Same machine, same adapter, same MAC — so the same sealed blob is correct for
@@ -187,7 +187,7 @@ async function publish(): Promise<void> {
  * `deviceAttested`, i.e. on socket (re)connects — which may be days away on a
  * desktop that stays up. A freshly-enrolled sign-in-screen row would sit with
  * `lan_info = NULL` that whole time: un-wakeable, un-grouped, and telling the
- * user to "open Puca on that device once" when Puca is already open.
+ * user to "open Púca on that device once" when Púca is already open.
  * `enrolLockScreenAccess` calls this the moment enrolment lands.
  */
 export async function publishNow(): Promise<void> {

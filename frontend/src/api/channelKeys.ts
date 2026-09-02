@@ -13,7 +13,7 @@
  * identity key, and when bootstrapping we wrap it for each member's public key.
  */
 
-import { apiClient } from './client';
+import { apiClient, statusOf } from './client';
 import {
     getActiveIdentity,
     generateChannelKey,
@@ -367,8 +367,7 @@ async function mintEpoch(
         // converges on one key for the epoch instead of a split. If they didn't
         // wrap it for us (they hadn't seen us as a member yet), we can't send this
         // round — return null; the next ensureChannelKey retries.
-        const status = (e as { response?: { status?: number } })?.response?.status;
-        if (status === 409) {
+        if (statusOf(e) === 409) {
             console.debug(`[e2ee] mintEpoch(${channelId}) epoch=${epoch}: lost the race, adopting winner's key`);
             const fresh = await getState(channelId, true);
             return fresh.keys.get(epoch) ?? null;

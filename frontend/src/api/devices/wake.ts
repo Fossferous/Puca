@@ -143,8 +143,8 @@ export async function planWake(
     if (!targetLan?.mac) {
         return {
             waker: null, mac: null,
-            reason: `Puca has not recorded ${target.name}'s network details yet. ` +
-                'Open Puca on that device once while it is on your home network.',
+            reason: `Púca has not recorded ${target.name}'s network details yet. ` +
+                'Open Púca on that device once while it is on your home network.',
         };
     }
     const targetSubnet = targetLan.subnet ?? subnetOf(targetLan.ip);

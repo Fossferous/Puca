@@ -17,7 +17,7 @@ export function WelcomePopup({ onCreateServer, onJoinServer, onDismiss }: Welcom
                 <button className="welcome-popup-close" onClick={onDismiss} aria-label="Close"><CloseIcon size={18} /></button>
 
                 <div className="welcome-popup-header">
-                    <h2>Welcome to Puca!</h2>
+                    <h2>Welcome to Púca!</h2>
                     <p>Get started by creating or joining a server</p>
                 </div>
 

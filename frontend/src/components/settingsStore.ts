@@ -74,7 +74,7 @@ export const defaultSettings = {
      *  saved on it for a task (taskPlaces.ts). OFF by default and opt-in per
      *  device, deliberately: it needs "Allow all the time" location — the
      *  most sensitive permission this app can hold — and the OS will
-     *  periodically tell the user Puca used location in the background.
+     *  periodically tell the user Púca used location in the background.
      *  Places and coordinates are DEVICE-LOCAL (localStorage + the APK's own
      *  storage); nothing is uploaded, and the notification is content-free.
      *  Gated behind mobileNotifications like everything that posts. */
@@ -208,7 +208,7 @@ export const defaultSettings = {
      * meant to claim the key. That inference is sound but invisible: a user who
      * is happy with Ctrl+Shift+M has no way to reach the global behaviour, and
      * nothing tells them why their hotkey dies the moment they tab into a game.
-     * Reported twice as "hotkeys don't work when Puca isn't focused" — which is
+     * Reported twice as "hotkeys don't work when Púca isn't focused" — which is
      * exactly what it looks like from outside.
      *
      * So: record the intent instead of inferring it. A user who changes the
