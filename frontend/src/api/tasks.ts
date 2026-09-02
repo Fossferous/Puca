@@ -121,6 +121,13 @@ async function openChannel(channelId: number, stored: string, kind: ChannelAadKi
     return env.v === 3 ? MARKERS.ENC_CONTEXT_MISMATCH : DECRYPT_FAILED;
 }
 
+/** The two task readers, for the account export (api/accountExport.ts): a
+ *  checklist item is sealed under a task-specific AAD kind, so the message
+ *  reader cannot open it, and a personal-list item is encrypt-to-self. Same
+ *  functions the Tasks view uses, so the export can never disagree with it. */
+export const openChannelTaskText = openChannel;
+export const openSelfTaskText = (stored: string): Promise<string> => openSelf(stored);
+
 export async function listTasks(channelId: number): Promise<Task[]> {
     const tasks: Task[] = await apiClient.get(`/channels/${channelId}/tasks`);
     return Promise.all(tasks.map(async (t) => {
