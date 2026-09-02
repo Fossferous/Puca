@@ -51,8 +51,12 @@ or a documented trade-off:
   suite CI never runs.
 - [`docs/E2EE.md`](docs/E2EE.md) and
   [`docs/E2EE_RECOVERY.md`](docs/E2EE_RECOVERY.md) — the design and its limits.
-- The `docs/AUDIT_*.md` files — prior audits with their findings, and the ones
-  that were refuted.
+- Prior audit write-ups are not published in this repository (they were
+  written against the maintainer's own deployment and cite it); their
+  conclusions, including the refuted findings, are folded into the security
+  model above.
+- [`docs/PRIVACY.md`](docs/PRIVACY.md) — what is collected (nothing beyond
+  the server you join) and which third parties the apps contact.
 
 Several properties are **known limits, deliberately accepted**, and are
 documented rather than hidden: trust-on-first-use for identity keys (so first

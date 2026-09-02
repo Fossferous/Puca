@@ -64,11 +64,10 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   the WebSocket carried it in the query string. It no longer does: every client —
   browser, desktop, mobile, and both background services — now sends it in
   `Sec-WebSocket-Protocol` as `bearer, <jwt>`, which no proxy on this path logs
-  by default (`bearer_from_subprotocol`, [`src/ws.rs`](../src/ws.rs)). The server
-  still ACCEPTS `?token=` so installs older than the change keep connecting; that
-  fallback is due for removal a release after every shipped client has updated,
-  and until then a very old install still writes its token into the log. Existing
-  log files, of course, still contain what they already captured.
+  by default (`bearer_from_subprotocol`, [`src/ws.rs`](../src/ws.rs)). Since
+  0.9.1 the server REFUSES a token in the query string outright (an install
+  older than 0.9.0 must update), so nothing new can land in a log this way.
+  Existing log files, of course, still contain what they already captured.
 
 ### Can do
 

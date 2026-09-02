@@ -6,81 +6,89 @@ Tauri's updater allows your users to automatically receive updates without manua
 
 ## Setup Steps
 
-### 1. Generate Signing Keys (One-time)
+The deployment guide covers this end to end — [`deploy/README.md`](../deploy/README.md)
+section 6.1 — and is the version to follow. In short:
 
-Run this command in `frontend/` folder:
+### 1. Generate a signing keypair (once, on your machine)
 
 ```bash
-npx tauri signer generate -w .tauri/puca.key
+cd frontend
+npx tauri signer generate -w ~/.puca/tauri-updater.key
 ```
 
-You'll be prompted for a password. **Remember this password!** You'll need it when building releases.
+You'll be prompted for a password. **Remember this password**, and back the
+key up with `deploy/ops/backup-keys.sh` the same day: the public half is
+compiled into every installer, and an app accepts an update only if it was
+signed by the matching private key. Lose the key and no update can ever be
+signed again — every installed client stays on its version until its user
+reinstalls by hand.
 
-This creates:
-- `.tauri/puca.key` - Your **PRIVATE key** (keep secret!)
-- Outputs a **PUBLIC key** - Put this in `tauri.conf.json`
+### 2. Put the public key and your download host in the overlay
 
-### 2. Update tauri.conf.json
-
-Replace `REPLACE_WITH_YOUR_PUBLIC_KEY` with the public key from step 1:
+Do **not** edit the tracked `src-tauri/tauri.conf.json` (it carries this
+project's key and a placeholder endpoint). Copy
+`src-tauri/tauri.release.example.json` to the gitignored
+`src-tauri/tauri.release.json` and set both:
 
 ```json
 "plugins": {
   "updater": {
-    "endpoints": [
-      "https://YOUR_SERVER/api/updates/{{target}}/{{arch}}/{{current_version}}"
-    ],
-    "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu..."
+    "endpoints": ["https://download.example.com/latest.json"],
+    "pubkey": "<the public key `tauri signer generate` printed>"
   }
 }
 ```
 
-### 3. Build a Signed Release
+`npm run tauri:build` merges it and prints the endpoint and the key id it
+baked in, every time. The endpoint is a **static file**: `latest.json` at the
+download host's root, written by `deploy/ops/dual-ship.sh installer` (the
+Lite build reads `latest-lite.json` beside it, derived automatically).
 
-Set environment variables before building:
+### 3. Build a signed release
+
+Set the two environment variables before building — the build fails without
+them, because `createUpdaterArtifacts` is on:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content ".tauri/puca.key" -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "~/.puca/tauri-updater.key" -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "your-password-here"
 
 npm run tauri:build
 ```
 
-This creates signed update artifacts in:
-- `src-tauri/target/release/bundle/`
+This creates the installer and its `.sig` in `src-tauri/target/release/bundle/nsis/`.
 
-### 4. Host Updates
+### 4. Publish
 
-You need a server endpoint that returns JSON like this:
+`deploy/ops/dual-ship.sh installer <Puca-Setup.exe> <.sig> <version> "<notes>"`
+uploads the installer under a versioned name, writes `latest.json` with the
+signature from the `.sig` file, writes the `/app-version` file that drives the
+in-app prompt, and verifies each through the download host. `latest.json`
+has the shape Tauri expects:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.9.0",
   "notes": "Bug fixes and improvements",
-  "pub_date": "2024-12-12T12:00:00Z",
+  "pub_date": "2026-09-02T12:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNv...",
-      "url": "https://yourserver.com/releases/Púca_0.2.0_x64-setup.exe"
+      "url": "https://download.example.com/Puca-Setup-0.9.0.exe"
     }
   }
 }
 ```
 
-You can use:
-- **GitHub Releases** (Tauri has built-in support)
-- **Your own backend** (add an endpoint in the Rust server)
-- **Static JSON file** on any CDN
+### 5. Version bump workflow
 
-### 5. Version Bump Workflow
-
-When releasing a new version:
-
-1. Update version in `frontend/src-tauri/tauri.conf.json`
-2. Update version in `frontend/package.json`
-3. Build with signing keys (step 3)
-4. Upload artifacts to your server
-5. Update the JSON endpoint with new version info
+1. Bump `version` in `frontend/src-tauri/tauri.conf.json` — the only place
+   the version lives (`frontend/package.json` and the root `Cargo.toml` carry
+   frozen values nothing reads).
+2. Write the release notes entry in `CHANGELOG.md`.
+3. Build with the signing keys (step 3).
+4. Ship with `dual-ship.sh` (step 4); `deploy/ops/check-versions.sh` confirms
+   every surface agrees.
 
 ---
 
