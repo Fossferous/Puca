@@ -93,11 +93,35 @@ impl Config {
         raw.try_into().map_err(|_| "sign_seed must be 32 bytes".to_string())
     }
 
-    /// `wss://host/ws?token=…`, derived from `api_base` so the two can never
-    /// point at different deployments.
-    pub fn ws_url(&self, token: &str) -> String {
+    /// `wss://host/ws` — derived from `api_base` so the two can never point at
+    /// different deployments.
+    ///
+    /// NO CREDENTIAL IN THE URL. This was `?token={token}`, and the waker
+    /// re-dials on every boot and every socket expiry, so each connection
+    /// deposited a live device-scoped JWT into the reverse proxy's access log —
+    /// rotated, shipped and backed up. See `ws_request`.
+    pub fn ws_url(&self) -> String {
         let host = self.api_base.trim_start_matches("https://");
-        format!("wss://{host}/ws?token={token}")
+        format!("wss://{host}/ws")
+    }
+
+    /// The handshake request, carrying the token in `Sec-WebSocket-Protocol` as
+    /// `bearer, <jwt>` — the same shape the browser client sends, which the
+    /// server checks BEFORE the query fallback, so this needs no server change.
+    pub fn ws_request(
+        &self,
+        token: &str,
+    ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderValue};
+        let mut req = self
+            .ws_url()
+            .into_client_request()
+            .map_err(|e| format!("bad websocket url: {e}"))?;
+        let value = HeaderValue::from_str(&format!("bearer, {token}"))
+            .map_err(|_| "the waker token is not a valid header value".to_string())?;
+        req.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
+        Ok(req)
     }
 }
 
@@ -278,10 +302,41 @@ mod tests {
         // Derived rather than configured separately, so the two cannot end up
         // pointing at different deployments — which would present as "enrolled
         // fine, never comes online".
-        assert_eq!(
-            sample().ws_url("tok"),
-            "wss://chat.example.com/ws?token=tok"
-        );
+        assert_eq!(sample().ws_url(), "wss://chat.example.com/ws");
+    }
+
+    /// The token rides a HEADER, never the URL. A query string is written
+    /// verbatim into every proxy access log along the path, and the waker
+    /// re-dials on every boot — so the old form deposited a live device-scoped
+    /// JWT into a rotated, shipped, backed-up log file on each connection. On
+    /// the waker specifically, a socket that stops reconnecting means missed
+    /// wake doorbells, i.e. messages that never arrive on a sleeping machine —
+    /// which is why the server keeps accepting the query form for now.
+    #[test]
+    fn the_handshake_carries_the_token_in_a_header_and_never_in_the_uri() {
+        let jwt = "header.payload.signature";
+        let req = sample().ws_request(jwt).expect("builds");
+
+        let uri = req.uri().to_string();
+        assert_eq!(uri, "wss://chat.example.com/ws");
+        assert!(!uri.contains("token="), "the URI must carry no credential: {uri}");
+        assert!(!uri.contains(jwt), "the URI must not contain the token: {uri}");
+
+        let sent = req
+            .headers()
+            .get("sec-websocket-protocol")
+            .expect("the bearer subprotocol must be offered")
+            .to_str()
+            .expect("ascii");
+        assert_eq!(sent, format!("bearer, {jwt}"));
+    }
+
+    /// A token that cannot be a header value fails the dial up front rather
+    /// than connecting without one.
+    #[test]
+    fn a_token_that_is_not_header_safe_is_refused_up_front() {
+        assert!(sample().ws_request("bad
+value").is_err());
     }
 
     /// The renewal write must survive inside the service's seccomp sandbox.

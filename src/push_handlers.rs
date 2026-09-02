@@ -457,9 +457,15 @@ pub async fn send_test_notification(
                  socket reconnects within a few seconds."
             ),
         })),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            format!("Wake transport rejected the signal: {e}"),
-        )),
+        Err(e) => {
+            // The transport error is an FCM/APNs response body, which can carry
+            // the project id and other deployment detail. Log it; tell the
+            // caller only that it failed.
+            tracing::error!("wake_probe: transport rejected the signal: {e}");
+            Err((
+                StatusCode::BAD_GATEWAY,
+                "the wake transport rejected the signal".to_string(),
+            ))
+        }
     }
 }

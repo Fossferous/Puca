@@ -245,7 +245,15 @@ async fn main() -> anyhow::Result<()> {
     // Run database migrations on startup.
     // NOTE: sqlx::migrate! embeds the migrations dir at COMPILE time — when you
     // add a migration, this file must be recompiled for the macro to re-expand
-    // (an incremental build that skips main.rs won't pick it up). Latest: 042.
+    // (an incremental build that skips main.rs won't pick it up). Latest: 057.
+    //
+    // Read migrations/README.md before adding or editing anything in there: an
+    // APPLIED migration is frozen bytes (sqlx checksums the file and compares it
+    // against _sqlx_migrations, so editing one — comments and line endings
+    // included — crash-loops this call), and two already-applied files carry
+    // dormant landmines that are documented there rather than patched.
+    // Non-.sql files in that directory are ignored by the resolver, which is
+    // what makes the README safe to keep next to them.
     tracing::info!("Running database migrations...");
     sqlx::migrate!("./migrations")
         .run(&pool)
@@ -366,10 +374,6 @@ async fn main() -> anyhow::Result<()> {
         // Server endpoints
         .route("/servers", post(server_handlers::create_server))
         .route("/servers", get(server_handlers::list_servers))
-        .route(
-            "/servers/default",
-            get(server_handlers::get_or_create_default_server),
-        )
         // Per-user server-rail drag-and-drop order (static segment beats :server_id)
         .route("/servers/reorder", patch(server_handlers::reorder_servers))
         .route(
@@ -1088,7 +1092,7 @@ async fn main() -> anyhow::Result<()> {
         "listening on http://{} (local bind — expected behind a TLS-terminating reverse proxy)",
         addr
     );
-    tracing::info!("WebSocket path: /ws?token=YOUR_JWT — reachable locally as ws://{addr}/ws, or wss://<public-host>/ws through the reverse proxy in production");
+    tracing::info!("WebSocket path: /ws, authenticating with the Sec-WebSocket-Protocol header `bearer, YOUR_JWT` (?token= is still accepted for pre-0.9.0 installs, but lands in access logs) — reachable locally as ws://{addr}/ws, or wss://<public-host>/ws through the reverse proxy in production");
     tracing::info!("💡 Production deployments MUST sit behind a reverse proxy (nginx/Caddy) terminating TLS — this process itself never speaks TLS/WSS");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -229,122 +229,25 @@ pub async fn create_server(
     .into_response()
 }
 
-// Well-known UUID for the default server (same for all users)
-const DEFAULT_SERVER_ID: &str = "00000000-0000-0000-0000-000000000001";
-const DEFAULT_SERVER_NAME: &str = "Main Server";
-
-/// Get or create the global default server and auto-join the user
-pub async fn get_or_create_default_server(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-) -> impl IntoResponse {
-    tracing::info!(
-        ">>> get_or_create_default_server called for user_id: {}",
-        claims.sub
-    );
-
-    // Check if default server exists
-    let server_result = sqlx::query_as::<_, (String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32)>(
-        "SELECT id, name, owner_id, (replace(created_at::text, ' ', 'T') || 'Z') AS created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, COALESCE(is_public, false), afk_timeout_minutes FROM servers WHERE id = $1"
-    )
-    .bind(DEFAULT_SERVER_ID)
-    .fetch_optional(&state.pool)
-    .await;
-
-    let server = match server_result {
-        Ok(s) => {
-            tracing::info!("  Server lookup result: {:?}", s.is_some());
-            s
-        }
-        Err(e) => {
-            tracing::error!("  Failed to query server: {:?}", e);
-            None
-        }
-    };
-
-    let server_response = if let Some((
-        id,
-        name,
-        owner_id,
-        created_at,
-        icon_file_id,
-        description,
-        require_media_e2ee,
-        clips_enabled,
-        clip_max_seconds,
-        clip_channel_id,
-        is_public,
-        afk_timeout_minutes,
-    )) = server
-    {
-        // Server exists, make sure user is a member
-        let _ = sqlx::query(
-            "INSERT INTO server_members (server_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
-        )
-        .bind(DEFAULT_SERVER_ID)
-        .bind(claims.sub as i32)
-        .execute(&state.pool)
-        .await;
-
-        ServerResponse {
-            id,
-            name,
-            owner_id: owner_id as i64,
-            created_at,
-            icon_file_id,
-            description,
-            require_media_e2ee,
-            clips_enabled,
-            clip_max_seconds,
-            clip_channel_id: clip_channel_id.map(|c| c as i64),
-            is_public,
-            afk_timeout_minutes,
-        }
-    } else {
-        // Create the default server (first user becomes owner)
-        let _ = sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
-            .bind(DEFAULT_SERVER_ID)
-            .bind(DEFAULT_SERVER_NAME)
-            .bind(claims.sub as i32)
-            .execute(&state.pool)
-            .await;
-
-        // Add user as member
-        let _ = sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
-            .bind(DEFAULT_SERVER_ID)
-            .bind(claims.sub as i32)
-            .execute(&state.pool)
-            .await;
-
-        // Default channel set: text + voice (both "default") + an AFK voice channel.
-        let _ = sqlx::query(
-            "INSERT INTO channels (name, type, position, is_afk, server_id) VALUES \
-                ('default', 0, 0, false, $1), \
-                ('default', 1, 1, false, $1), \
-                ('AFK', 1, 2, true, $1)",
-        )
-        .bind(DEFAULT_SERVER_ID)
-        .execute(&state.pool)
-        .await;
-
-        ServerResponse {
-            id: DEFAULT_SERVER_ID.to_string(),
-            name: DEFAULT_SERVER_NAME.to_string(),
-            owner_id: claims.sub,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            icon_file_id: None,
-            description: None,
-            require_media_e2ee: false,
-            clips_enabled: false,
-            clip_max_seconds: 120,
-            clip_channel_id: None,
-            is_public: false,
-            afk_timeout_minutes: 15,
-        }
-    };
-
-    Json(server_response)
-}
+// There is deliberately NO "default server" here.
+//
+// `GET /servers/default` used to take any valid JWT and INSERT a
+// `server_members` row for a hardcoded well-known server id, with no invite
+// and — decisively — no BAN check, while both legitimate join paths
+// (invite_handlers::join_via_invite and server_handlers::join_public_server)
+// check bans. So a user banned from that server rejoined it by calling this
+// endpoint. Its create branch was broken in its own right: it inserted the
+// server, the member row and three channels but NO roles, so with no
+// `is_default` @everyone role `get_user_channel_permissions` resolved an empty
+// base and every non-owner member held no VIEW_CHANNEL at all.
+//
+// Deleted rather than fixed: no shipped client calls it (frontend/src/
+// components/Chat.tsx already carries "getOrCreateDefaultServer removed - no
+// auto-join default server", and neither native crate has ever referenced it).
+// If a seeded default server is ever wanted, it belongs in a migration that
+// creates @everyone and Owner alongside it, joined through the normal
+// ban-checked path — not minted lazily by whoever hits an endpoint first.
+// Existing server_members rows for that id are untouched by the removal.
 
 /// List servers user is a member of
 pub async fn list_servers(

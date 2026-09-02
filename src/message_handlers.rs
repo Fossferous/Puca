@@ -21,6 +21,27 @@ use crate::state::AppState;
 /// Maximum allowed length of a single message's content, in bytes.
 const MAX_MESSAGE_LEN: usize = 8000;
 
+/// How many previous bodies to keep per message (L8-DOS-2).
+///
+/// The history was unbounded: every successful edit wrote a full copy of the
+/// previous body — up to MAX_MESSAGE_LEN — with no cap and no pruning anywhere,
+/// so an author looping edits on one message wrote permanent, unreclaimable
+/// storage at whatever rate the API limiter allows, and `get_message_edits`
+/// returned all of it in one response. Ten bounds it at ~80 KB per message and
+/// is generous enough that nobody legitimately reading an edit trail notices;
+/// the cap does DELETE older rows, which is real (if unlikely to be missed)
+/// data loss for anyone who relied on a long trail, and belongs in release
+/// notes.
+const MAX_EDIT_HISTORY: i64 = 10;
+
+/// Delete every edit-history row for `$1` beyond the newest `$2`.
+///
+/// A named constant, USED BY THE HANDLER, so a test runs the string the server
+/// runs rather than its own copy of it. Ordered by `edited_at DESC, id DESC`:
+/// `edited_at` defaults to the TRANSACTION timestamp, so two edits inside one
+/// transaction tie on it and `id` (a SERIAL primary key) makes the order total.
+pub(crate) const PRUNE_EDIT_HISTORY_SQL: &str = "DELETE FROM message_edits      WHERE message_id = $1 AND id NOT IN (          SELECT id FROM message_edits WHERE message_id = $1          ORDER BY edited_at DESC, id DESC LIMIT $2)";
+
 /// Resolve channel access and require VIEW_CHANNEL, converting the result into
 /// an early HTTP response on failure. A member who is VIEW-denied gets the same
 /// 404 as a missing channel (hide its existence); non-members keep 403. Returns
@@ -81,6 +102,14 @@ pub struct MessageResponse {
     pub is_completed: bool,
     pub parent_message_id: Option<String>, // For sub-tasks
     pub key_epoch: Option<i32>,            // E2EE epoch (None = plaintext)
+    /// When the body was last edited, or absent if it never was. `messages.
+    /// edited_at` has existed since migrations/001 and was NEVER written — dead
+    /// schema — until edit_message started stamping it (L8-DOS-2). Additive:
+    /// `skip_serializing_if` keeps an UNEDITED message serialising
+    /// byte-identically to before, and an old client ignores the key on the
+    /// rest, so the backend can ship ahead of any "(edited)" marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
     /// Server-stamped clip consent record, or absent. `skip_serializing_if` so a
     /// non-clip message serialises BYTE-IDENTICALLY to today's — the inertness
     /// the backend-first deploy of Clips rests on (pinned by a test).
@@ -432,10 +461,11 @@ pub async fn get_messages(
         },
         None => None,
     };
-    let messages: Vec<(String, i32, i32, String, Option<String>, String, String, Option<String>, bool, bool, Option<String>, Option<i32>, Option<serde_json::Value>)> = sqlx::query_as(
+    let messages: Vec<(String, i32, i32, String, Option<String>, String, String, Option<String>, bool, bool, Option<String>, Option<i32>, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
         r#"
         SELECT m.id, m.channel_id, m.user_id, u.username, u.display_name, m.content, (replace(m.created_at::text, ' ', 'T') || 'Z') AS created_at, m.reply_to_id,
-               COALESCE(m.is_task, false) as is_task, COALESCE(m.is_completed, false) as is_completed, m.parent_message_id, m.key_epoch, m.clip_consent
+               COALESCE(m.is_task, false) as is_task, COALESCE(m.is_completed, false) as is_completed, m.parent_message_id, m.key_epoch,
+               (replace(m.edited_at::text, ' ', 'T') || 'Z') AS edited_at, m.clip_consent
         FROM messages m
         JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = $1
@@ -468,6 +498,7 @@ pub async fn get_messages(
                 is_completed,
                 parent_message_id,
                 key_epoch,
+                edited_at,
                 clip_consent,
             )| {
                 MessageResponse {
@@ -483,6 +514,7 @@ pub async fn get_messages(
                     is_completed,
                     parent_message_id,
                     key_epoch,
+                    edited_at,
                     clip_consent,
                 }
             },
@@ -540,30 +572,93 @@ pub async fn edit_message(
             if crate::envelope_version::edit_is_downgrade(&old_content, &payload.content, payload.reads_up_to) {
                 return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
             }
-            // Save old content to edit history
-            let _ =
-                sqlx::query("INSERT INTO message_edits (message_id, old_content) VALUES ($1, $2)")
-                    .bind(&message_id)
-                    .bind(&old_content)
-                    .execute(&state.pool)
-                    .await;
+            // ONE transaction for the whole edit (L8-DOS-2). These were two
+            // independent statements — history INSERT, then message UPDATE — so
+            // a crash or a lost-race between them left a history row for an edit
+            // that never happened, and the history was written even when the
+            // UPDATE went on to affect zero rows.
+            let mut tx = match state.pool.begin().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!("edit_message: begin failed: {:?}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to edit message")
+                        .into_response();
+                }
+            };
 
             // Update the message — only if it is still the body the guard
             // checked. A concurrent edit between the read and this write
             // (the author's other device) would otherwise be overwritten
             // unchecked; zero rows means the body changed underneath us.
-            let result = sqlx::query("UPDATE messages SET content = $1 WHERE id = $2 AND content = $3")
-                .bind(&payload.content)
-                .bind(&message_id)
-                .bind(&old_content)
-                .execute(&state.pool)
-                .await;
+            //
+            // `edited_at` is now WRITTEN. The column has existed since
+            // migrations/001 and nothing ever set it, so it was dead schema; an
+            // additive write breaks nothing (an old client ignores the field)
+            // and it is what an "(edited)" marker needs to exist at all.
+            let result = sqlx::query(
+                "UPDATE messages SET content = $1, edited_at = NOW() WHERE id = $2 AND content = $3",
+            )
+            .bind(&payload.content)
+            .bind(&message_id)
+            .bind(&old_content)
+            .execute(&mut *tx)
+            .await;
 
             match result {
-                Ok(r) if r.rows_affected() == 0 => (StatusCode::CONFLICT, "The message changed while you were editing it — reload and try again").into_response(),
-                Ok(_) => StatusCode::OK.into_response(),
+                Ok(r) if r.rows_affected() == 0 => {
+                    let _ = tx.rollback().await;
+                    (StatusCode::CONFLICT, "The message changed while you were editing it — reload and try again").into_response()
+                }
+                Ok(_) => {
+                    // Save the old content to edit history, then prune to the
+                    // last MAX_EDIT_HISTORY. Unbounded before: every successful
+                    // edit wrote a full copy of the previous body (up to
+                    // MAX_MESSAGE_LEN) with no cap and no pruning anywhere, so
+                    // an author looping edits on ONE message wrote permanent,
+                    // unreclaimable rows at whatever rate the API limiter allows
+                    // — and `get_message_edits` then returned all of them in a
+                    // single response.
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO message_edits (message_id, old_content) VALUES ($1, $2)",
+                    )
+                    .bind(&message_id)
+                    .bind(&old_content)
+                    .execute(&mut *tx)
+                    .await
+                    {
+                        tracing::error!("edit_message: history insert failed: {:?}", e);
+                        let _ = tx.rollback().await;
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to edit message")
+                            .into_response();
+                    }
+                    // Keep the newest N by id. `edited_at` defaults to the
+                    // TRANSACTION timestamp, so two edits inside one transaction
+                    // tie on it — the `id DESC` tiebreak (message_edits.id is a
+                    // SERIAL primary key) makes the order total. Prunes by
+                    // primary key rather than ctid so it is index-driven.
+                    if let Err(e) = sqlx::query(PRUNE_EDIT_HISTORY_SQL)
+                        .bind(&message_id)
+                        .bind(MAX_EDIT_HISTORY)
+                        .execute(&mut *tx)
+                        .await
+                    {
+                        tracing::error!("edit_message: history prune failed: {:?}", e);
+                        let _ = tx.rollback().await;
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to edit message")
+                            .into_response();
+                    }
+                    match tx.commit().await {
+                        Ok(()) => StatusCode::OK.into_response(),
+                        Err(e) => {
+                            tracing::error!("edit_message: commit failed: {:?}", e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to edit message")
+                                .into_response()
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::error!("Failed to edit message: {:?}", e);
+                    let _ = tx.rollback().await;
                     (StatusCode::INTERNAL_SERVER_ERROR, "Failed to edit message").into_response()
                 }
             }
@@ -695,7 +790,7 @@ pub async fn get_message_edits(
     let edits: Vec<(String, String)> = sqlx::query_as(
         "SELECT e.old_content, (replace(e.edited_at::text, ' ', 'T') || 'Z') AS edited_at FROM message_edits e \
          JOIN messages m ON m.id = e.message_id \
-         WHERE e.message_id = $1 AND m.channel_id = $2 ORDER BY e.edited_at DESC"
+         WHERE e.message_id = $1 AND m.channel_id = $2 ORDER BY e.edited_at DESC, e.id DESC"
     )
     .bind(&message_id)
     // messages.channel_id is INT4 — bind i32 so the comparison decodes cleanly.
@@ -907,7 +1002,7 @@ mod clip_consent_shape_tests {
         let m = MessageResponse {
             id: "m1".into(), channel_id: 1, user_id: 2, username: "u".into(), display_name: None,
             content: "hi".into(), created_at: "2026-08-18T00:00:00Z".into(), reply_to_id: None,
-            is_task: false, is_completed: false, parent_message_id: None, key_epoch: Some(3), clip_consent: None,
+            is_task: false, is_completed: false, parent_message_id: None, key_epoch: Some(3), edited_at: None, clip_consent: None,
         };
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert!(v.get("clip_consent").is_none(), "no clip_consent key on an ordinary message: {v}");
@@ -916,5 +1011,178 @@ mod clip_consent_shape_tests {
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
         assert_eq!(v["clip_consent"]["approver_count"], 2);
         assert!(v["clip_consent"].get("approvers").is_none(), "the stamp carries a COUNT, never identities");
+    }
+}
+
+#[cfg(test)]
+mod edit_history_bound_tests {
+    use super::{MessageResponse, MAX_EDIT_HISTORY, PRUNE_EDIT_HISTORY_SQL};
+
+    /// Shape of the prune, asserted against the CONSTANT the handler binds, not
+    /// a copy pasted into the test — a test with its own copy of a query proves
+    /// the copy is right and nothing about the code path.
+    #[test]
+    fn the_prune_is_scoped_ordered_and_limited() {
+        let sql = PRUNE_EDIT_HISTORY_SQL;
+        assert!(sql.starts_with("DELETE FROM message_edits"), "{sql}");
+        // Scoped to ONE message, in both the delete and the keep-set — an
+        // unscoped subselect would keep the ten newest rows in the whole TABLE
+        // and delete every other message's history.
+        assert_eq!(
+            sql.matches("message_id = $1").count(),
+            2,
+            "both the DELETE and its keep-subselect must be scoped to $1: {sql}"
+        );
+        // The keep-set is the NEWEST rows, with a total order. `edited_at`
+        // defaults to the transaction timestamp, so two edits in one
+        // transaction tie on it; `id DESC` breaks the tie deterministically.
+        assert!(sql.contains("ORDER BY edited_at DESC, id DESC"), "{sql}");
+        assert!(sql.contains("LIMIT $2"), "the cap must be a bound parameter: {sql}");
+        assert!(sql.contains("id NOT IN"), "{sql}");
+        // A cap of zero or one would be a data-destroying typo.
+        assert!(MAX_EDIT_HISTORY >= 10, "the cap must stay generous: {MAX_EDIT_HISTORY}");
+    }
+
+    /// `edited_at` is ADDITIVE: an unedited message must serialise exactly as it
+    /// did before the field existed, so the backend can ship ahead of any
+    /// "(edited)" marker. Same inertness contract `clip_consent` carries.
+    #[test]
+    fn edited_at_is_absent_until_a_message_is_edited() {
+        let m = MessageResponse {
+            id: "m1".into(),
+            channel_id: 1,
+            user_id: 2,
+            username: "u".into(),
+            display_name: None,
+            content: "hi".into(),
+            created_at: "2026-09-02T00:00:00Z".into(),
+            reply_to_id: None,
+            is_task: false,
+            is_completed: false,
+            parent_message_id: None,
+            key_epoch: Some(3),
+            edited_at: None,
+            clip_consent: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert!(
+            v.get("edited_at").is_none(),
+            "an unedited message must carry no edited_at key: {v}"
+        );
+
+        let edited = MessageResponse {
+            edited_at: Some("2026-09-02T01:02:03Z".into()),
+            ..m
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&edited).unwrap()).unwrap();
+        assert_eq!(v["edited_at"], "2026-09-02T01:02:03Z");
+    }
+
+    /// The cap, against a REAL database, running the handler's own prune string.
+    /// Self-skips when no test database is configured (the `e2ee_keys.rs`
+    /// pattern); CI sets TEST_DATABASE_URL, so this runs there.
+    #[tokio::test]
+    async fn twenty_five_edits_leave_exactly_ten_history_rows() {
+        dotenv::dotenv().ok();
+        let Ok(url) = std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
+        else {
+            println!("Skipping: no database connection");
+            return;
+        };
+        let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        else {
+            println!("Skipping: could not connect");
+            return;
+        };
+
+        let tag = uuid::Uuid::new_v4().to_string();
+        let user: (i32,) = sqlx::query_as(
+            "INSERT INTO users (username, salt, verifier) VALUES ($1, '00', '00') RETURNING id",
+        )
+        .bind(format!("edithist_{}", &tag[..8]))
+        .fetch_one(&pool)
+        .await
+        .expect("insert user");
+        let server_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'edithist', $2)")
+            .bind(&server_id)
+            .bind(user.0)
+            .execute(&pool)
+            .await
+            .expect("insert server");
+        let channel: (i32,) = sqlx::query_as(
+            "INSERT INTO channels (name, type, server_id) VALUES ('general', 0, $1) RETURNING id",
+        )
+        .bind(&server_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert channel");
+        let message_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO messages (id, channel_id, user_id, content) VALUES ($1, $2, $3, 'v0')")
+            .bind(&message_id)
+            .bind(channel.0)
+            .bind(user.0)
+            .execute(&pool)
+            .await
+            .expect("insert message");
+
+        // 25 edits, each doing exactly what the handler does: record the old
+        // body, then prune.
+        for i in 0..25 {
+            sqlx::query("INSERT INTO message_edits (message_id, old_content) VALUES ($1, $2)")
+                .bind(&message_id)
+                .bind(format!("v{i}"))
+                .execute(&pool)
+                .await
+                .expect("insert history");
+            sqlx::query(PRUNE_EDIT_HISTORY_SQL)
+                .bind(&message_id)
+                .bind(MAX_EDIT_HISTORY)
+                .execute(&pool)
+                .await
+                .expect("prune");
+        }
+
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM message_edits WHERE message_id = $1")
+                .bind(&message_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(
+            count.0, MAX_EDIT_HISTORY,
+            "25 edits must leave exactly {MAX_EDIT_HISTORY} history rows"
+        );
+
+        // ...and the ten kept are the ten most RECENT, newest first — the same
+        // order get_message_edits serves.
+        let kept: Vec<(String,)> = sqlx::query_as(
+            "SELECT old_content FROM message_edits WHERE message_id = $1              ORDER BY edited_at DESC, id DESC",
+        )
+        .bind(&message_id)
+        .fetch_all(&pool)
+        .await
+        .expect("select kept");
+        let kept: Vec<&str> = kept.iter().map(|(c,)| c.as_str()).collect();
+        assert_eq!(
+            kept,
+            vec!["v24", "v23", "v22", "v21", "v20", "v19", "v18", "v17", "v16", "v15"],
+            "the OLDEST rows must be the ones pruned"
+        );
+
+        // Cleanup. message_edits/messages/channels cascade off the server and
+        // the user; delete both so a repeated CI run does not accumulate.
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
+            .bind(&server_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user.0)
+            .execute(&pool)
+            .await;
     }
 }

@@ -57,6 +57,9 @@ const P = {
     VIEW_CHANNEL: 1 << 0, SEND_MESSAGES: 1 << 1, READ_MESSAGE_HISTORY: 1 << 2, ATTACH_FILES: 1 << 4,
     ADD_REACTIONS: 1 << 6, CONNECT: 1 << 8, SPEAK: 1 << 9,
     VIDEO: 1 << 10, STREAM: 1 << 11,
+    // Server-scoped (not channel-overwritable): create_invite resolves SERVER
+    // permissions, so it is denied by NOT granting it, never by an overwrite.
+    CREATE_INVITE: 1 << 27,
 };
 const ALL_MEMBER = P.VIEW_CHANNEL | P.SEND_MESSAGES | P.READ_MESSAGE_HISTORY | P.ATTACH_FILES
     | P.ADD_REACTIONS | P.CONNECT | P.SPEAK | P.VIDEO | P.STREAM;
@@ -220,5 +223,61 @@ console.log(`\n=== ATTACH_FILES (1<<4) — POST /upload naming a channel ===`);
     clearDeny(textCh);
 }
 
+console.log(`\n=== CREATE_INVITE (1<<27) — POST /servers/:id/invites ===`);
+{
+    // Server-scoped, so the deny is "absent from every role you hold", not an
+    // overwrite. ALL_MEMBER (the @everyone grant above) deliberately omits the
+    // bit, so `denied` holds it nowhere; `allowed` gets a role that carries it.
+    const inviterRole = parseInt(psql1(`INSERT INTO server_roles (server_id, name, color, permissions, position, is_default)
+        VALUES ('${srvId}', 'inviter-${RUN}', '#22aa22', ${P.CREATE_INVITE}, 2, false) RETURNING id`), 10);
+    psql(`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ('${srvId}', ${allowed.id}, ${inviterRole})`);
+
+    const no = await api('POST', `/servers/${srvId}/invites`, { max_uses: 0 }, denied.t);
+    check('member WITHOUT create-invite is refused', no.status === 403, `status=${no.status}`);
+    const leaked = psql1(`SELECT count(*) FROM server_invites WHERE server_id='${srvId}' AND creator_id=${denied.id}`);
+    check('no invite row written for the refused member', leaked === '0', `rows=${leaked}`);
+
+    const ok = await api('POST', `/servers/${srvId}/invites`, { max_uses: 0 }, allowed.t);
+    check('member WITH create-invite still succeeds', ok.status < 300 && typeof ok.body?.code === 'string',
+        `status=${ok.status} body=${JSON.stringify(ok.body).slice(0, 80)}`);
+
+    // Expiry clamp: i32::MAX hours is ~245,000 years and used to overflow the
+    // column on the way in. Clamped to a year, so the row must both EXIST and
+    // carry a timestamp inside that year.
+    const huge = await api('POST', `/servers/${srvId}/invites`, { max_uses: 0, expires_in_hours: 2147483647 }, allowed.t);
+    check('an absurd expires_in_hours is accepted, not 500', huge.status < 300, `status=${huge.status}`);
+    if (huge.status < 300 && huge.body?.code) {
+        const within = psql1(`SELECT count(*) FROM server_invites
+            WHERE code='${huge.body.code}' AND expires_at::timestamp <= NOW() + INTERVAL '367 days'
+              AND expires_at::timestamp > NOW()`);
+        check('the clamped expiry lands inside a year', within === '1', `rows=${within}`);
+    }
+
+    // ...and a negative one must not produce an invite that is born expired.
+    const neg = await api('POST', `/servers/${srvId}/invites`, { max_uses: 0, expires_in_hours: -5 }, allowed.t);
+    if (neg.status < 300 && neg.body?.code) {
+        const live = psql1(`SELECT count(*) FROM server_invites
+            WHERE code='${neg.body.code}' AND expires_at::timestamp > NOW()`);
+        check('a negative expires_in_hours is clamped forward, not born expired', live === '1', `rows=${live}`);
+    } else {
+        check('a negative expires_in_hours is handled', false, `status=${neg.status}`);
+    }
+}
+
+console.log(`\n=== JoinRoom room-id namespace (L8-AUTHZ-5) ===`);
+{
+    // A room id that is neither channel_<id> nor voice_<id> used to fall
+    // through and MINT a room, handing two clients who agreed on a made-up
+    // string a server-mediated presence channel with a username roster.
+    for (const bogus of [`made_up_${RUN}`, 'dm_1', 'CHANNEL_1', 'channel_']) {
+        const r = await wsJoin(allowed, bogus);
+        check(`JoinRoom refuses ${JSON.stringify(bogus)}`, !r.joined && r.err !== null,
+            `joined=${r.joined} err=${r.err}`);
+    }
+    // Positive control for the harness itself: a REAL room still joins, so a
+    // socket that simply never connected cannot make the four above pass.
+    const real = await wsJoin(allowed, `channel_${textCh}`);
+    check('a canonical channel room still joins', real.joined && !real.err, `err=${real.err}`);
+}
 console.log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
