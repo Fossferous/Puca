@@ -46,7 +46,7 @@ public final class PushFrames {
     // byte-for-byte across PushFrames.java, clipProposals.ts and its own test,
     // so the two delivery paths share one notification body. Rename all three
     // together or not at all.
-    static final String CONSENT_BODY = "Open Puca to approve or decline";
+    static final String CONSENT_BODY = "Open Púca to approve or decline";
 
     /** Author id for a frame that names nobody — the same "-1" the author-ful
      *  frames fall back to when an id is missing (optLong's default). PushGate

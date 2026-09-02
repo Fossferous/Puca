@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { Login } from './components/Login';
 import { Chat } from './components/Chat';
-import ForgotPassword from './components/ForgotPassword';
 import ResetPassword from './components/ResetPassword';
 import VerifyEmail from './components/VerifyEmail';
 import { isAuthenticated, logout, getToken, softExpireSession, isTokenExpired } from './api/auth';
@@ -339,12 +338,6 @@ function App() {
       <Route path="/login" element={
         <PublicOnly>
           <Login onLoginSuccess={handleLoginSuccess} />
-        </PublicOnly>
-      } />
-
-      <Route path="/forgot-password" element={
-        <PublicOnly>
-          <ForgotPassword onBack={handleBackToLogin} />
         </PublicOnly>
       } />
 

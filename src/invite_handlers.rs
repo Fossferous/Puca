@@ -90,8 +90,9 @@ pub async fn create_invite(
     // non-expiring code for that server, and no setting could stop them.
     // `user_has_permission` resolves SERVER permissions and answers false for a
     // non-member (get_user_server_permissions returns empty for one), so this
-    // subsumes the membership check rather than replacing it; the body is
-    // deliberately the same string a non-member used to get.
+    // subsumes the membership check rather than replacing it; ONE body for
+    // both cases (non-member, member without the bit), so the answer never
+    // says which — and the client can show it as it is.
     if !user_has_permission(
         &state.pool,
         &server_id,
@@ -100,7 +101,7 @@ pub async fn create_invite(
     )
     .await
     {
-        return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
+        return (StatusCode::FORBIDDEN, "You don't have permission to create invites on this server").into_response();
     }
 
     let code = generate_invite_code();

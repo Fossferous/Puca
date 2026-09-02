@@ -350,8 +350,7 @@ async function hydrateAndPrompt(clipId: string): Promise<void> {
         void import('@tauri-apps/api/core').then(({ invoke }) => invoke('attention_main_window', { mode: 'flash' })).catch(() => { /* older build */ });
     }
     if (isAndroidApp() && !appIsForeground()) {
-        // hygiene-lint:allow-product-spelling — pinned byte-for-byte with PushFrames.java by src/protocol.rs's doorbell test
-        void postMobileNotification('clip:' + clipId, 'Approval needed', 'Open Puca to approve or decline', 'clip:' + clipId);
+        void postMobileNotification('clip:' + clipId, 'Approval needed', 'Open Púca to approve or decline', 'clip:' + clipId);
     }
 }
 
