@@ -3369,13 +3369,29 @@ mod tests {
         ));
     }
 
+    /// A directory a `FileScope::Jailed` grant can actually be made over.
+    ///
+    /// NOT `std::env::temp_dir()`: on Windows that lives under
+    /// `%LOCALAPPDATA%\Temp`, and AppData is on the file-transfer denylist —
+    /// which since L8-NATIVE-2 applies to a JAIL as well as to Policy. A
+    /// worker test rooted there is refused for WHERE IT STARTS, which makes an
+    /// "it works" test fail and, far worse, would make a "it refuses" test pass
+    /// without exercising anything.
+    fn fs_scope_dir(tag: &str) -> std::path::PathBuf {
+        let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .expect("a home directory to test under");
+        let dir = std::path::PathBuf::from(home)
+            .join(format!("puca-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
     #[test]
     fn the_fs_worker_answers_in_request_order_with_ids_echoed() {
         // Order IS the protocol for id-less clients, so the worker being a
         // single thread is load-bearing — this pins that N requests come back
         // as N completions, in order, with each carried id echoed.
-        let dir = std::env::temp_dir().join(format!("puca-fsworker-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fs_scope_dir("fsworker");
         std::fs::write(dir.join("a.txt"), b"hello").unwrap();
 
         let scope = Arc::new(Mutex::new(Some(crate::file_transfer::FileScope::Jailed(
@@ -3416,8 +3432,7 @@ mod tests {
 
     #[test]
     fn the_fs_worker_reads_the_scope_per_request_so_revocation_is_instant() {
-        let dir = std::env::temp_dir().join(format!("puca-fsworker-rev-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fs_scope_dir("fsworker-rev");
         let scope = Arc::new(Mutex::new(Some(crate::file_transfer::FileScope::Jailed(
             dir.clone(),
         ))));

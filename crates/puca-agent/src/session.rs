@@ -1820,12 +1820,28 @@ impl Agent {
                         "ambiguous file scope: a folder and the unattended policy were both requested",
                     );
                 }
+                // CANONICALISED AT THE GRANT, which is what `FileScope::Jailed`
+                // has always claimed and this call site did not do. It was not
+                // only a doc/code mismatch: `resolve` canonicalises the TARGET
+                // and compares it against the root, so a folder reached through
+                // a junction, a directory symlink, a `subst` drive or an 8.3
+                // short name — all ordinary on Windows, e.g. a redirected
+                // profile folder — resolved out from under a raw root and every
+                // operation inside the folder the user had just picked was
+                // refused with "path leaves the granted folder through a link".
+                //
+                // A root that cannot be resolved now fails the GRANT, loudly,
+                // rather than becoming a jail that cannot be enforced.
                 let scope = if policy {
                     Some(crate::file_transfer::FileScope::Policy)
                 } else {
-                    root.as_deref().map(|r| {
-                        crate::file_transfer::FileScope::Jailed(std::path::PathBuf::from(r))
-                    })
+                    match root.as_deref() {
+                        None => None,
+                        Some(r) => match crate::file_transfer::FileScope::jailed(r) {
+                            Ok(s) => Some(s),
+                            Err(e) => return Response::error(e),
+                        },
+                    }
                 };
                 let described = match &scope {
                     None => "REVOKED".to_string(),

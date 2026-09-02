@@ -21,6 +21,7 @@
  */
 import { argon2id } from '@noble/hashes/argon2.js';
 import { ed25519 } from '@noble/curves/ed25519';
+import { isTauri, isMobile } from '../platform';
 
 /** Domain-separation tag. MUST equal `puca_ua::DOMAIN`. */
 const DOMAIN = 'sovereign-unattended-v1';
@@ -172,10 +173,12 @@ export function signUaChallengeSeed(
 // re-arming: a new passphrase means a new salt and verifying key, and every
 // remembered seed everywhere misses from that moment.
 //
-// Because of that exposure, the session layer only WRITES this store inside
-// the native shells (Tauri / Capacitor), where storage belongs to the app —
-// never in a shared browser, where a later user of the same profile could
-// lift it. Signing out clears it either way (see auth.ts logout).
+// Because of that exposure, this store is only WRITTEN inside the native
+// shells (Tauri / Capacitor), where storage belongs to the app — never in a
+// shared browser, where a later user of the same profile could lift it. That
+// refusal lives in `rememberUaSeed` itself as well as at the session-layer
+// call site, so it holds for whatever calls it next. Signing out clears it
+// either way (see auth.ts logout).
 //
 // The entry is keyed by host device id and pinned to the host's SALT: re-arm
 // the host with a new passphrase and the salt changes, so the stale seed
@@ -186,8 +189,20 @@ export function signUaChallengeSeed(
 // bounds are the native-shell gate, the logout clear, and re-arming.
 // ---------------------------------------------------------------------------
 
-/** How long a remembered seed lives without a successful use: 30 days. */
-export const UA_REMEMBER_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * How long a remembered seed lives without a successful use: 7 days.
+ *
+ * It was 30. The expiry is not a security bound — the bounds are the
+ * native-shell gate below, the logout clear, and re-arming — but a month is a
+ * long time for a cleartext SIGNING KEY to sit in a WebView profile doing
+ * nothing. Shortening it costs an actively-used machine nothing at all, because
+ * the expiry SLIDES: every session the host accepts renews it (`confirmUaSeed`).
+ * What it does change is the abandoned case — a device nobody has connected
+ * from in a week stops holding an unattended capability for that machine.
+ *
+ * The worst case for a user is one extra passphrase prompt.
+ */
+export const UA_REMEMBER_MS = 7 * 24 * 60 * 60 * 1000;
 
 const REMEMBER_KEY = 'sovereign-ua-remember';
 
@@ -228,13 +243,27 @@ function b64(bytes: Uint8Array): string {
     return btoa(s);
 }
 
-/** Remember a derived seed for `deviceId` under the host's current salt. */
+/**
+ * Remember a derived seed for `deviceId` under the host's current salt.
+ *
+ * REFUSES OUTSIDE A NATIVE SHELL, here rather than only at the call site. The
+ * session layer already checks `isTauri() || isMobile()` before calling this,
+ * and that check is the one a reader finds; this one is the one that holds when
+ * a second caller appears. What is written is the Argon2id-stretched Ed25519
+ * SEED — the signing key for that host — so in a shared browser profile a later
+ * user of the same machine could lift an unattended capability for someone
+ * else's computer. In the native shells the store belongs to the app.
+ *
+ * Silent, not thrown: remembering is an optimisation, and the caller's
+ * fallback is the thing that always works — ask for the passphrase.
+ */
 export function rememberUaSeed(
     deviceId: string,
     saltB64: string,
     seed: Uint8Array,
     now: number = Date.now(),
 ): void {
+    if (!isTauri() && !isMobile()) return;
     const map = loadRemembered();
     map[deviceId] = { salt: saltB64, seed: b64(seed), expires: now + UA_REMEMBER_MS };
     storeRemembered(map);

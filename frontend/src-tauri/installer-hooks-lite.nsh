@@ -27,8 +27,12 @@
 !include "${__FILEDIR__}\installer-migrate.nsh"
 
 !macro NSIS_HOOK_PREINSTALL
-  !insertmacro MigrateRenamedInstall "Púca"
-  !insertmacro MigrateRenamedInstall "Sovereign"
+  ; The FULL variant's own mainBinaryName, not this build's — see
+  ; installer-migrate.nsh: the binary that has to stop is the one the install
+  ; being replaced actually runs.
+  !insertmacro MigrateRenamedInstall "Púca" "Puca"
+  ; The legacy pre-rename install, which ran the generic "app.exe".
+  !insertmacro MigrateRenamedInstall "Sovereign" "app"
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

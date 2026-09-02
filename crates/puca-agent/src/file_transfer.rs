@@ -43,11 +43,42 @@
 //! Gate 2 is skipped only when nothing on the path exists at all, in which case
 //! there is nothing on disk to escape to and the open would fail anyway.
 //!
-//! KNOWN RESIDUAL: this is resolve-then-open, so a component swapped for a
-//! junction in the window between the two would not be caught. Closing that
-//! needs handle-based checks (`FILE_FLAG_OPEN_REPARSE_POINT` and re-validating
-//! by handle), which is a bigger change than this one. Using the canonical path
-//! for the open narrows the window but does not remove it.
+//! 3. THE HANDLE CHECK, which closes the resolve-then-open race gates 1 and 2
+//!    could not. Both of them reason about a PATH, and a path is only a
+//!    description of where an object was a moment ago: a component swapped for
+//!    a junction between the check and the open was not caught. So every arm
+//!    now opens through [`open_verified`], which re-derives the path from the
+//!    OPEN HANDLE (`GetFinalPathNameByHandleW` on Windows, `/proc/self/fd` on
+//!    Linux) and runs the scope check again against THAT. The object that was
+//!    checked and the object that is operated on are the same object by
+//!    construction.
+//!
+//! DENIALS APPLY TO BOTH SCOPES. They used to apply only under `Policy`, so an
+//! attended grant of the user's home folder — the obvious thing to pick in a
+//! folder picker — exposed `%LOCALAPPDATA%\com.sovereign.chat` (the armed
+//! record, the device key, and the WebView profile holding the remembered
+//! unattended signing seed) and `~/.ssh`. A scope-shaped hole in a denylist is
+//! a hole; there is now ONE denial block and every scope goes through it.
+//!
+//! WHAT THE PEER IS TOLD THE ROOT IS CALLED. Under `Jailed`, `ListRoots` used
+//! to answer with the granted folder's absolute path — which discloses the
+//! host's OS account name (commonly a real one) and their folder layout to a
+//! peer who was granted FILE ACCESS, not identity. It now answers with the
+//! opaque token [`JAILED_ROOT`], and `normalize_lexical` re-bases any path that
+//! starts at a root but names no drive onto the granted folder. The jail
+//! therefore looks like a small filesystem of its own to the controller, which
+//! is both less to leak and easier to reason about.
+//!
+//! RESIDUAL, stated honestly. The handle check makes the checked object and the
+//! opened object identical. It does NOT freeze the path an ancestor is reached
+//! through: for `List` the directory handle is held open across the enumeration
+//! (and without `FILE_SHARE_DELETE`, so that directory cannot be renamed or
+//! deleted under it), but a rename of a GRANDPARENT between the verify and the
+//! enumerate is still possible. For `Write`, the open is `create(true)`, so a
+//! swap losing the race can still leave a zero-byte file at the attacker's
+//! location — nothing is ever written to it, because the verify runs before the
+//! first `write_all`. All of this needs code already running on the host that
+//! can win a race against the agent.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -88,11 +119,44 @@ pub const MAX_WRITE_LEN: usize = 64 * 1024;
 /// same `Option` it always was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileScope {
-    /// One folder, already canonicalised by the caller at grant time.
+    /// One folder, canonicalised. Build it with [`FileScope::jailed`] — the
+    /// doc comment used to say "already canonicalised by the caller" and the
+    /// one caller did not, which is a live functional failure, not a comment
+    /// bug: `resolve` canonicalises the TARGET and compares it against the
+    /// root, so a root reached through a junction, a directory symlink, a
+    /// `subst` drive or an 8.3 short name — all ordinary on Windows — made
+    /// every operation inside the folder the user had just granted fail with
+    /// "path leaves the granted folder through a link".
     Jailed(PathBuf),
     /// Fixed drives minus [`denied_roots`]. Only ever set for an armed host
     /// whose controller proved the unattended passphrase.
     Policy,
+}
+
+/// The opaque root token a jailed peer is handed by `ListRoots`.
+///
+/// NOT the granted folder's absolute path, which is what this used to answer
+/// with: that path names the host's OS account (`C:\Users\<real name>\…`) and
+/// their folder layout, to a peer who was granted file access and nothing
+/// else. `normalize_lexical` re-bases any rootless path onto the granted
+/// folder, so the controller keeps sending exactly what it always sent — it
+/// simply no longer LEARNS the absolute prefix. The audit log still records
+/// the real path; that is host-side and should stay precise.
+pub const JAILED_ROOT: &str = "/";
+
+impl FileScope {
+    /// The only way a grant should build a `Jailed` scope: canonicalise now,
+    /// and refuse the grant if that is impossible.
+    ///
+    /// FAILING CLOSED IS THE POINT. A root we cannot resolve is a jail we
+    /// cannot enforce, so an unresolvable folder must not become a grant that
+    /// silently checks against a path the filesystem disagrees with.
+    pub fn jailed(root: &str) -> Result<Self, String> {
+        match fs::canonicalize(root) {
+            Ok(c) => Ok(FileScope::Jailed(c)),
+            Err(e) => Err(format!("that folder could not be resolved: {e}")),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -201,11 +265,48 @@ fn keys(p: &Path) -> Option<Vec<String>> {
 /// there is no single base, so a relative path is refused rather than guessed at.
 fn normalize_lexical(base: Option<&Path>, requested: &str) -> Result<PathBuf, String> {
     let raw = Path::new(requested);
-    let joined = if raw.is_absolute() {
+    // Does the path NAME A VOLUME? That, not `is_absolute`, is the question
+    // that separates "somewhere else on this machine" from "somewhere in the
+    // jail" — and the two spell themselves differently per platform, which is
+    // exactly the sort of difference that makes a security check mean one
+    // thing on the developer's machine and another on the user's.
+    let names_a_volume = matches!(raw.components().next(), Some(Component::Prefix(_)));
+    let joined = if names_a_volume {
         raw.to_path_buf()
     } else {
         match base {
-            Some(b) => b.join(raw),
+            // THE JAIL IS THE PEER'S WHOLE FILESYSTEM. A path that starts at a
+            // root but names no drive — `/`, the [`JAILED_ROOT`] token, and
+            // anything the controller builds by joining onto it — is taken
+            // against the granted folder rather than against the real root.
+            // Chroot semantics: under a jail there is no spelling of an
+            // absolute path that leaves it, which is strictly narrower than
+            // what this did before (`\Windows\System32` used to become
+            // `C:\Windows\System32` and be refused; it is now a location
+            // inside the jail that almost certainly does not exist).
+            //
+            // THE EXCEPTION, and it is not a hole: a rootless path that ALREADY
+            // names a location inside the granted folder is left alone. On
+            // Windows that cannot happen — a real in-jail path carries a drive
+            // letter, so this arm never fires there — but on unix `/granted/x`
+            // and `/x` are spelled the same way and a peer may legitimately
+            // have been handed either. BOTH readings land inside the jail, so
+            // the choice is about which file you get, never about whether you
+            // are allowed it.
+            Some(b) if raw.has_root() && is_within(raw, b) => raw.to_path_buf(),
+            Some(b) => {
+                let mut p = b.to_path_buf();
+                for comp in raw.components() {
+                    if matches!(comp, Component::RootDir) {
+                        continue;
+                    }
+                    p.push(comp.as_os_str());
+                }
+                p
+            }
+            // Under Policy there is no base to re-base onto, so an absolute
+            // path is the only thing that can be resolved at all.
+            None if raw.is_absolute() => raw.to_path_buf(),
             None => {
                 return Err("a relative path needs a folder to resolve against".into());
             }
@@ -443,9 +544,32 @@ fn resolve(scope: &FileScope, requested: &str) -> Result<PathBuf, String> {
         None => lexical,
     };
 
+    check_effective(scope, &effective)?;
+    Ok(effective)
+}
+
+/// Is `effective` — a path that has already been through gates 1 and 2, or one
+/// re-derived from an OPEN HANDLE — inside `scope` and not denied?
+///
+/// Split out of `resolve` for two reasons, and the second is the important one:
+///
+/// - [`open_verified`] runs it a second time against the handle's own path, so
+///   the check and the open cannot disagree about which object they mean.
+/// - The denials used to live inside the `Policy` arm, where `Jailed` could not
+///   reach them. An attended grant of a home folder therefore exposed
+///   `%LOCALAPPDATA%\com.sovereign.chat` — the armed record, the device key and
+///   the WebView profile holding the remembered unattended seed — and `~/.ssh`.
+///   Containment is per-scope; DENIAL IS NOT. Keeping them in one block below
+///   the match is what stops a third scope quietly inheriting the hole.
+///
+/// The deliberate consequence: a user who grants a folder inside `%APPDATA%`
+/// finds it unbrowsable, and the refusal message says why. That is the right
+/// answer — if some workflow genuinely needs it, the override belongs at grant
+/// time, never in here.
+fn check_effective(scope: &FileScope, effective: &Path) -> Result<(), String> {
     match scope {
         FileScope::Jailed(root) => {
-            if !is_within(&effective, root) {
+            if !is_within(effective, root) {
                 // This is the junction case: lexically inside, actually outside.
                 return Err("path leaves the granted folder through a link".into());
             }
@@ -457,22 +581,181 @@ fn resolve(scope: &FileScope, requested: &str) -> Result<PathBuf, String> {
             if drives.is_empty() {
                 return Err("could not determine this machine's drives".into());
             }
-            if !drives.iter().any(|d| is_within(&effective, Path::new(d))) {
+            if !drives.iter().any(|d| is_within(effective, Path::new(d))) {
                 return Err("only local fixed drives can be browsed".into());
-            }
-            // Shape first: it needs no filesystem access and cannot go stale.
-            if denied_by_shape(&effective).is_some() {
-                return Err("that path is a system or protected location".into());
-            }
-            for denied in denied_roots() {
-                if is_within(&effective, denied) {
-                    return Err("that path is a system or protected location".into());
-                }
             }
         }
     }
 
-    Ok(effective)
+    // EVERY SCOPE, no exceptions. Shape first: it needs no filesystem access
+    // and cannot go stale.
+    if denied_by_shape(effective).is_some() {
+        return Err("that path is a system or protected location".into());
+    }
+    for denied in denied_roots() {
+        if is_within(effective, denied) {
+            return Err("that path is a system or protected location".into());
+        }
+    }
+
+    Ok(())
+}
+
+/// What an arm wants the handle for. Only the open flags differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenAs {
+    Read,
+    Write,
+    Dir,
+}
+
+/// Why an open did not happen.
+///
+/// The two are kept apart because the AUDIT LOG distinguishes them and a reader
+/// of that log needs to: "the jail refused this" and "the file is not there"
+/// are different events, and collapsing them into one string would make a
+/// refused traversal indistinguishable from a typo in a filename.
+#[derive(Debug)]
+enum OpenError {
+    /// A scope check said no — gate 1, 2 or the handle check.
+    Denied(String),
+    /// The scope was satisfied and the filesystem still said no.
+    Io(String),
+}
+
+impl OpenError {
+    fn tag(&self) -> &'static str {
+        match self {
+            OpenError::Denied(_) => "denied",
+            OpenError::Io(_) => "error",
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            OpenError::Denied(m) | OpenError::Io(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Denied(m) | OpenError::Io(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Where an OPEN HANDLE actually points, asked of the OS rather than of the
+/// path we happened to open with.
+///
+/// `None` means "this platform cannot answer", which is deliberately distinct
+/// from an error: on a platform with no way to interrogate a handle there is
+/// nothing to compare, and refusing every open would disable the feature rather
+/// than harden it. Windows (the only platform the grant path is even compiled
+/// for — `Request::SetFileAccess` is `#[cfg(windows)]`) and Linux both answer.
+#[cfg(windows)]
+fn handle_real_path(f: &fs::File) -> Option<PathBuf> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED};
+
+    let handle = HANDLE(f.as_raw_handle());
+    let mut buf = vec![0u16; 512];
+    loop {
+        let n = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) };
+        if n == 0 {
+            return None;
+        }
+        // Success returns the length WITHOUT the NUL; "too small" returns the
+        // length WITH it. Treating the second as the first would silently
+        // compare a truncated path, which is the failure mode that turns a
+        // security check into a coin flip.
+        if (n as usize) < buf.len() {
+            return Some(PathBuf::from(String::from_utf16_lossy(&buf[..n as usize])));
+        }
+        buf = vec![0u16; n as usize + 1];
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_real_path(f: &fs::File) -> Option<PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd())).ok()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn handle_real_path(_f: &fs::File) -> Option<PathBuf> {
+    None
+}
+
+/// Open `resolved` and prove the OPENED OBJECT is inside `scope`.
+///
+/// GATE 3, and the reason it exists: gates 1 and 2 check a path, and between
+/// checking a path and opening it another process can swap a component for a
+/// junction. Re-deriving the path from the handle and re-running
+/// [`check_effective`] against it makes the checked object and the opened
+/// object the same object — the check no longer depends on nothing having
+/// moved. A disagreement is a refusal, not a warning.
+///
+/// Separate from [`open_checked`] so a test can drive the handle gate on its
+/// own, by handing it a path `resolve` would have refused: that is precisely
+/// the state a lost race leaves behind, and there is no other way to reach it
+/// deterministically.
+fn open_verified(
+    scope: &FileScope,
+    resolved: &Path,
+    mode: OpenAs,
+) -> Result<(fs::File, PathBuf), OpenError> {
+    let mut opts = fs::OpenOptions::new();
+    match mode {
+        OpenAs::Read | OpenAs::Dir => {
+            opts.read(true);
+        }
+        OpenAs::Write => {
+            opts.write(true).create(true);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_FLAG_BACKUP_SEMANTICS` — without it CreateFile refuses to open
+        /// a DIRECTORY at all, and there would be no handle to validate.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        /// FILE_SHARE_READ | FILE_SHARE_WRITE. Note the ABSENCE of
+        /// FILE_SHARE_DELETE: while this handle is held, the directory it names
+        /// cannot be renamed or deleted, which is the swap the enumeration
+        /// below would otherwise still be racing.
+        const SHARE_NO_DELETE: u32 = 0x0000_0003;
+        if mode == OpenAs::Dir {
+            opts.custom_flags(FILE_FLAG_BACKUP_SEMANTICS).share_mode(SHARE_NO_DELETE);
+        }
+    }
+    let file = opts
+        .open(resolved)
+        .map_err(|e| OpenError::Io(format!("could not open path: {e}")))?;
+
+    match handle_real_path(&file) {
+        Some(real) => {
+            check_effective(scope, &real).map_err(OpenError::Denied)?;
+            Ok((file, real))
+        }
+        // Nothing to compare against. Fall back to what gates 1 and 2 already
+        // established rather than refusing every open on a platform that cannot
+        // interrogate a handle.
+        None => Ok((file, resolved.to_path_buf())),
+    }
+}
+
+/// Resolve then open, with the handle check in between. The one entry point
+/// every arm uses.
+fn open_checked(
+    scope: &FileScope,
+    requested: &str,
+    mode: OpenAs,
+) -> Result<(fs::File, PathBuf), OpenError> {
+    let resolved = resolve(scope, requested).map_err(OpenError::Denied)?;
+    open_verified(scope, &resolved, mode)
 }
 
 pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudit>) -> FsResponse {
@@ -490,7 +773,10 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
         // at paths it is allowed to have.
         FsRequest::ListRoots => {
             let roots = match scope {
-                FileScope::Jailed(root) => vec![root.to_string_lossy().to_string()],
+                // The OPAQUE token, not the folder's absolute path: that path
+                // names the host's OS account and folder layout to a peer who
+                // was granted file access and nothing else. See JAILED_ROOT.
+                FileScope::Jailed(_) => vec![JAILED_ROOT.to_string()],
                 FileScope::Policy => fixed_drive_roots(),
             };
             log("list_roots", "", roots.len() as u64, "ok");
@@ -498,11 +784,15 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
         }
 
         FsRequest::List { path } => {
-            let dir = match resolve(scope, &path) {
+            // The handle is bound to `_dir` and HELD for the whole enumeration
+            // on purpose: it was opened without FILE_SHARE_DELETE, so this
+            // directory cannot be renamed or deleted out from under the read
+            // below. Dropping it early would put the swap back on the table.
+            let (_dir, dir) = match open_checked(scope, &path, OpenAs::Dir) {
                 Ok(p) => p,
                 Err(e) => {
-                    log("list", &path, 0, &format!("denied: {e}"));
-                    return FsResponse::error(e);
+                    log("list", &path, 0, &format!("{}: {}", e.tag(), e));
+                    return FsResponse::error(e.into_message());
                 }
             };
             match fs::read_dir(&dir) {
@@ -541,24 +831,20 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
 
         FsRequest::Read { path, offset, len } => {
             use std::io::{Read, Seek, SeekFrom};
-            let file_path = match resolve(scope, &path) {
-                Ok(p) => p,
-                Err(e) => {
-                    log("read", &path, 0, &format!("denied: {e}"));
-                    return FsResponse::error(e);
-                }
-            };
+            // BEFORE the open: an over-limit read is refused without touching
+            // the disk at all, which is what stopped `{"len": 9999999999}`
+            // being an out-of-memory kill on the host.
             if len > MAX_READ_LEN {
-                log("read", &file_path.to_string_lossy(), len, "denied: over limit");
+                log("read", &path, len, "denied: over limit");
                 return FsResponse::error(format!(
                     "read of {len} bytes is over the {MAX_READ_LEN}-byte limit; request it in chunks"
                 ));
             }
-            let mut file = match fs::File::open(&file_path) {
-                Ok(f) => f,
+            let (mut file, file_path) = match open_checked(scope, &path, OpenAs::Read) {
+                Ok(p) => p,
                 Err(e) => {
-                    log("read", &file_path.to_string_lossy(), 0, &format!("error: {e}"));
-                    return FsResponse::error(format!("could not open file: {e}"));
+                    log("read", &path, 0, &format!("{}: {}", e.tag(), e));
+                    return FsResponse::error(e.into_message());
                 }
             };
             if let Err(e) = file.seek(SeekFrom::Start(offset)) {
@@ -589,34 +875,24 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
         } => {
             use base64::prelude::*;
             use std::io::{Seek, SeekFrom, Write};
-            let file_path = match resolve(scope, &path) {
-                Ok(p) => p,
-                Err(e) => {
-                    log("write", &path, 0, &format!("denied: {e}"));
-                    return FsResponse::error(e);
-                }
-            };
+            // Decode and size-check BEFORE the open, so an over-limit chunk
+            // never even creates a file.
             let decoded = match BASE64_STANDARD.decode(&data) {
                 Ok(d) => d,
                 Err(e) => return FsResponse::error(format!("could not decode base64: {e}")),
             };
             if decoded.len() > MAX_WRITE_LEN {
-                log(
-                    "write",
-                    &file_path.to_string_lossy(),
-                    decoded.len() as u64,
-                    "denied: over limit",
-                );
+                log("write", &path, decoded.len() as u64, "denied: over limit");
                 return FsResponse::error(format!(
                     "write of {} bytes is over the {MAX_WRITE_LEN}-byte limit; send it in chunks",
                     decoded.len()
                 ));
             }
-            let mut file = match fs::OpenOptions::new().write(true).create(true).open(&file_path) {
-                Ok(f) => f,
+            let (mut file, file_path) = match open_checked(scope, &path, OpenAs::Write) {
+                Ok(p) => p,
                 Err(e) => {
-                    log("write", &file_path.to_string_lossy(), 0, &format!("error: {e}"));
-                    return FsResponse::error(format!("could not open file: {e}"));
+                    log("write", &path, 0, &format!("{}: {}", e.tag(), e));
+                    return FsResponse::error(e.into_message());
                 }
             };
             // NO HOLES. `offset` comes from the peer and was never checked against
@@ -697,35 +973,34 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// A real directory that exists, for the tests that need gate 2 to engage.
+    /// A real directory that exists AND that both scopes allow.
     ///
-    /// Fine for `Jailed` tests, where the denylist does not apply.
+    /// NOT `std::env::temp_dir()`, which this used to be: on Windows that is
+    /// `%USERPROFILE%\AppData\Local\Temp`, and AppData is on the denylist —
+    /// which since L8-NATIVE-2 applies to `Jailed` as well as `Policy`. A test
+    /// rooted there is refused because of WHERE IT STARTS, which would make an
+    /// "allowed" test fail and — far worse — make a "denied" test pass without
+    /// ever exercising the thing it claims to check. The junction tests below
+    /// are exactly that trap: built under temp_dir they would be refused for
+    /// their base rather than for the junction, and would have looked green.
     fn tempdir(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("sov-ft-{tag}-{}", stamp()));
-        fs::create_dir_all(&p).unwrap();
-        p.canonicalize().unwrap()
-    }
-
-    /// A real directory that `Policy` ALLOWS.
-    ///
-    /// Not `std::env::temp_dir()`: on Windows that is
-    /// `%USERPROFILE%\AppData\Local\Temp`, and AppData is on the denylist. A
-    /// Policy test rooted there is refused because of WHERE IT STARTS, which
-    /// would make an "allowed" test fail and — far worse — make a "denied" test
-    /// pass without ever exercising the thing it claims to check. The junction
-    /// test below is exactly that trap: built under temp_dir it would be refused
-    /// for its base rather than for the junction, and would have looked green.
-    fn policy_tempdir(tag: &str) -> PathBuf {
         let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .expect("a home directory to test under");
-        let p = PathBuf::from(home).join(format!("sov-ft-{tag}-{}", stamp()));
+        let p = PathBuf::from(home).join(format!("puca-ft-{tag}-{}", stamp()));
         fs::create_dir_all(&p).unwrap();
         let c = p.canonicalize().unwrap();
-        // Guard the guard: if this location is itself denied, every test using
-        // it is meaningless, so say so instead of reporting a pass.
+        // Guard the guard, for BOTH scopes: if this location is itself denied,
+        // every test using it is meaningless, so say so instead of reporting a
+        // pass.
         assert!(
             resolve(&FileScope::Policy, &c.to_string_lossy()).is_ok(),
             "the test fixture directory {} must itself be allowed by Policy, \
+             or the tests built on it prove nothing",
+            c.display()
+        );
+        assert!(
+            resolve(&FileScope::Jailed(c.clone()), &c.to_string_lossy()).is_ok(),
+            "the test fixture directory {} must itself be allowed as a jail root, \
              or the tests built on it prove nothing",
             c.display()
         );
@@ -778,14 +1053,13 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_path_outside_the_root_is_refused() {
+    fn a_path_naming_another_volume_is_refused() {
         let r = root();
-        let outside = if cfg!(windows) {
-            "C:\\Windows\\System32\\config\\SAM"
-        } else {
-            "/etc/shadow"
-        };
-        assert!(resolve(&jailed(), outside).is_err());
+        if cfg!(windows) {
+            // A path that NAMES A VOLUME is a claim about somewhere else on
+            // this machine, and there is no jail it could be inside.
+            assert!(resolve(&jailed(), "C:\\Windows\\System32\\config\\SAM").is_err());
+        }
 
         // Positive control: an absolute path INSIDE the root is fine, so the
         // rejection above is about location and not about absoluteness.
@@ -794,16 +1068,77 @@ mod tests {
     }
 
     #[test]
+    fn a_rootless_path_is_taken_against_the_jail_not_the_real_root() {
+        // THE OPAQUE-ROOT CONTRACT (INFO-2). The controller is handed
+        // JAILED_ROOT and joins onto it, so `/etc/shadow` and
+        // `\Windows\System32\config\SAM` name locations INSIDE the granted
+        // folder — they can no longer denote the real ones at all.
+        //
+        // Asserted as containment rather than as a refusal, because a refusal
+        // is what the pre-INFO-2 code did and this is deliberately the safer
+        // of the two: under a jail there is now NO spelling of an absolute
+        // path that leaves it.
+        let r = root();
+        assert_resolves_to(&jailed(), JAILED_ROOT, &r);
+        assert_resolves_to(&jailed(), "/notes.txt", &r.join("notes.txt"));
+        assert_resolves_to(&jailed(), "/sub/notes.txt", &r.join("sub").join("notes.txt"));
+        let escape = if cfg!(windows) {
+            "\\Windows\\System32\\config\\SAM"
+        } else {
+            "/etc/shadow"
+        };
+        let got = resolve(&jailed(), escape).expect("a rootless path re-bases into the jail");
+        assert!(
+            is_within(&got, &r),
+            "{escape} must land inside the jail, got {}",
+            got.display()
+        );
+
+        // And `..` still cannot climb out of the re-based path, or the
+        // re-basing would be a way round gate 1.
+        assert!(resolve(&jailed(), "/../secrets.txt").is_err());
+    }
+
+    #[test]
+    fn a_rootless_path_is_still_refused_under_policy() {
+        // Positive control for the re-basing: it is the JAIL that supplies the
+        // base. Under Policy there is none, so a path that names no volume has
+        // nothing to resolve against and must stay refused rather than being
+        // quietly taken against some default.
+        if !cfg!(windows) {
+            return; // on unix a leading "/" IS an absolute path; nothing to test
+        }
+        let err = resolve(&FileScope::Policy, "\\Windows\\System32\\config\\SAM").unwrap_err();
+        assert!(err.contains("relative"), "{err}");
+    }
+
+    #[test]
     fn a_sibling_directory_sharing_the_root_prefix_is_refused() {
         // "C:\granted-evil" starts with "C:\granted" as a STRING but is not
         // under it. The comparison is component-wise, which is why this passes
         // -- pin it so nobody "optimises" it into a string compare.
+        let r = root();
+        if cfg!(windows) {
+            assert!(resolve(&jailed(), "C:\\granted-evil\\loot.txt").is_err());
+        }
+        // Asserted as containment rather than as a refusal on unix, where a
+        // rootless path is re-based into the jail: `/granted-evil/loot.txt`
+        // names a folder INSIDE the granted one. Either way the property is
+        // the same and it is the one that matters — the real sibling directory
+        // is not reachable.
         let sibling = if cfg!(windows) {
             "C:\\granted-evil\\loot.txt"
         } else {
             "/granted-evil/loot.txt"
         };
-        assert!(resolve(&jailed(), sibling).is_err());
+        match resolve(&jailed(), sibling) {
+            Err(_) => {}
+            Ok(got) => assert!(
+                is_within(&got, &r),
+                "{sibling} must never resolve to the real sibling, got {}",
+                got.display()
+            ),
+        }
     }
 
     #[test]
@@ -870,7 +1205,7 @@ mod tests {
         // Positive control for the denylist: if Policy refused everything, the
         // test above would pass while the feature was useless. This proves the
         // refusals are about WHICH path, not about Policy itself.
-        let dir = policy_tempdir("policy-allow");
+        let dir = tempdir("policy-allow");
         let f = dir.join("notes.txt");
         fs::write(&f, b"hello").unwrap();
 
@@ -927,7 +1262,7 @@ mod tests {
         // called "Recovery" deeper in the tree is ordinary and must stay
         // browsable. Without this, denying the name everywhere would look
         // identical to denying it at the root.
-        let dir = policy_tempdir("shape-control");
+        let dir = tempdir("shape-control");
         let ordinary = dir.join("Recovery").join("notes.txt");
         assert!(
             resolve(&FileScope::Policy, &ordinary.to_string_lossy()).is_ok(),
@@ -956,7 +1291,7 @@ mod tests {
     fn a_write_target_that_does_not_exist_yet_is_still_allowed() {
         // The whole reason gate 1 stayed lexical. If gate 2 demanded that the
         // target exist, every upload would be refused.
-        let dir = policy_tempdir("policy-newfile");
+        let dir = tempdir("policy-newfile");
         let target = dir.join("does-not-exist-yet.txt");
         assert!(resolve(&FileScope::Policy, &target.to_string_lossy()).is_ok());
         let _ = fs::remove_dir_all(&dir);
@@ -980,14 +1315,102 @@ mod tests {
     }
 
     #[test]
-    fn listing_roots_reports_only_the_granted_folder_when_jailed() {
-        let r = root();
-        match handle_request(FsRequest::ListRoots, &jailed(), None) {
+    fn listing_roots_does_not_disclose_the_granted_folders_absolute_path() {
+        // INFO-2. The absolute path names the host's OS account
+        // (`C:\Users\<real name>\…`) and their folder layout, to a peer who was
+        // granted FILE ACCESS and nothing else. The peer gets an opaque token.
+        let dir = tempdir("roots-opaque");
+        let scope = FileScope::Jailed(dir.clone());
+        match handle_request(FsRequest::ListRoots, &scope, None) {
             FsResponse::Roots { roots } => {
-                assert_eq!(roots, vec![r.to_string_lossy().to_string()])
+                assert_eq!(roots, vec![JAILED_ROOT.to_string()]);
+                // Said the other way round too, so a future "helpful" label
+                // that happens to embed the path fails this rather than
+                // passing it: NO root may contain the granted prefix. The
+                // last component alone would still leak a folder name, and the
+                // parent chain is the part that carries the account name.
+                for r in &roots {
+                    assert!(
+                        !r.contains(&*dir.to_string_lossy()),
+                        "a root must not carry the granted folder's absolute path: {r}"
+                    );
+                }
             }
             other => panic!("expected roots, got {other:?}"),
         }
+
+        // POSITIVE CONTROL: the token the peer is handed must actually WORK —
+        // a redaction that made the root unusable would pass the assertions
+        // above while breaking every browse.
+        fs::write(dir.join("notes.txt"), b"hi").unwrap();
+        match handle_request(FsRequest::List { path: JAILED_ROOT.into() }, &scope, None) {
+            FsResponse::List { entries, .. } => {
+                assert!(
+                    entries.iter().any(|e| e.name == "notes.txt"),
+                    "listing the opaque root must show the granted folder's contents"
+                );
+            }
+            other => panic!("expected a list, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- L8-NATIVE-2: the denials apply to a JAIL too ----------------------
+
+    #[test]
+    fn a_jail_refuses_the_agents_own_state_and_ssh_keys() {
+        // The composition this closes: an attended grant of the user's HOME
+        // folder — the obvious thing to pick in a folder picker — used to
+        // expose %LOCALAPPDATA%\com.sovereign.chat (the armed record, the
+        // device key, and the WebView profile holding the remembered
+        // unattended signing seed) and ~/.ssh, because the denylist lived
+        // inside resolve()'s Policy arm where Jailed could not reach it.
+        let home = tempdir("jail-denied");
+        let scope = FileScope::Jailed(home.clone());
+        for attempt in [
+            home.join("AppData").join("Local").join("com.sovereign.chat")
+                .join("device").join("unattended.json"),
+            home.join(".ssh").join("id_ed25519"),
+            home.join(".aws").join("credentials"),
+        ] {
+            let got = resolve(&scope, &attempt.to_string_lossy());
+            assert!(
+                got.is_err(),
+                "{} must be refused under a jail, got {got:?}",
+                attempt.display()
+            );
+        }
+
+        // POSITIVE CONTROL, and it is the assertion that matters: a resolve
+        // that refused EVERYTHING would satisfy the loop above while making
+        // the whole feature useless.
+        let ordinary = home.join("Documents").join("notes.txt");
+        assert!(
+            resolve(&scope, &ordinary.to_string_lossy()).is_ok(),
+            "an ordinary file under the same grant must still resolve"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_jail_refuses_a_denied_root_it_was_granted_through() {
+        // The other half: the denial is by LOCATION as well as by shape, and
+        // the entry that matters most is the agent's own data directory.
+        if !cfg!(windows) {
+            return;
+        }
+        let Ok(lad) = std::env::var("LOCALAPPDATA") else { return };
+        let state = PathBuf::from(&lad).join("com.sovereign.chat");
+        // The jail root itself is inside a denied root, so nothing under it
+        // resolves — including the grant's own folder.
+        let scope = FileScope::Jailed(state.clone());
+        let got = resolve(&scope, JAILED_ROOT);
+        assert!(
+            got.is_err(),
+            "a jail rooted at the agent's own state must resolve nothing, got {got:?}"
+        );
     }
 
     #[test]
@@ -1216,7 +1639,7 @@ mod tests {
         // `policy_tempdir`, not `tempdir`: under the system temp directory the
         // base is inside AppData and already denied, so the refusal would prove
         // nothing about junctions and this test would be green and worthless.
-        let base = policy_tempdir("junction-policy");
+        let base = tempdir("junction-policy");
         let link = base.join("winlink");
         let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
 
@@ -1231,6 +1654,146 @@ mod tests {
         assert!(
             got.is_err(),
             "a junction into the system root must be refused, got {got:?}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // ---- INFO-4: the grant canonicalises, or it is not a grant -------------
+
+    #[test]
+    #[cfg(windows)]
+    fn a_grant_reached_through_a_junction_is_usable() {
+        // THE LIVE FAILURE. `resolve` canonicalises the TARGET and compares it
+        // against the root, so a root that was never canonicalised — reached
+        // through a junction, a directory symlink, a `subst` drive or an 8.3
+        // short name, all ordinary on Windows — resolved out from under itself
+        // and EVERY operation inside the folder the user had just picked was
+        // refused with "path leaves the granted folder through a link".
+        let base = tempdir("grant-canon");
+        let real = base.join("real");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("notes.txt"), b"fine").unwrap();
+
+        let link = base.join("link");
+        assert!(
+            make_junction(&link, &real),
+            "could not create a test junction; INFO-4 is UNVERIFIED on this machine"
+        );
+
+        // POSITIVE CONTROL, and it is the bug itself: granted RAW, the folder
+        // refuses its own contents — gate 2 canonicalises `link\notes.txt` to
+        // `real\notes.txt`, which is not under the raw root `link`. The peer's
+        // request is the ordinary one (a path relative to the granted folder,
+        // which is all the opaque root ever gives it). If this ever starts
+        // passing, the constructor below has stopped being what fixes it.
+        let raw = FileScope::Jailed(link.clone());
+        let refused = resolve(&raw, "notes.txt").unwrap_err();
+        assert!(
+            refused.contains("link"),
+            "the un-canonicalised grant must still fail exactly this way, got: {refused}"
+        );
+
+        // And the fix: canonicalised at the grant, the folder works — both
+        // relative and through the opaque root the peer is actually handed.
+        let scope = FileScope::jailed(&link.to_string_lossy()).expect("the folder resolves");
+        assert!(
+            resolve(&scope, "notes.txt").is_ok(),
+            "a grant made through FileScope::jailed must be usable"
+        );
+        assert!(resolve(&scope, "/notes.txt").is_ok());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_grant_of_a_folder_that_does_not_exist_fails_at_grant_time() {
+        // Failing CLOSED: a root we cannot resolve is a jail we cannot enforce,
+        // so it must not become a grant that silently checks against a path the
+        // filesystem disagrees with.
+        let missing = tempdir("grant-missing").join("no-such-folder");
+        let got = FileScope::jailed(&missing.to_string_lossy());
+        assert!(got.is_err(), "an unresolvable root must not be granted");
+
+        // Positive control: the constructor is not simply always-Err.
+        let real = tempdir("grant-real");
+        assert!(FileScope::jailed(&real.to_string_lossy()).is_ok());
+        let _ = fs::remove_dir_all(&real);
+    }
+
+    // ---- L8-NATIVE-1 / gate 3: the handle, not the path --------------------
+
+    #[cfg(windows)]
+    fn make_dir_link(link: &Path, target: &Path) -> bool {
+        make_junction(link, target)
+    }
+
+    #[cfg(unix)]
+    fn make_dir_link(link: &Path, target: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[test]
+    fn this_platform_can_derive_a_path_from_an_open_handle() {
+        // Gate 3 degrades to nothing on a platform that cannot answer "where
+        // does this handle actually point". Without this assertion the test
+        // below would pass for that reason and look like a working defence.
+        let dir = tempdir("handle-avail");
+        let f = dir.join("x.txt");
+        fs::write(&f, b"x").unwrap();
+        let file = fs::File::open(&f).unwrap();
+        let real = handle_real_path(&file)
+            .expect("gate 3 needs a handle-to-path syscall on this platform");
+        assert!(
+            is_within(&real, &dir),
+            "{} should be inside {}",
+            real.display(),
+            dir.display()
+        );
+        drop(file);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_open_is_validated_by_the_handle_not_by_the_path() {
+        // THE RESOLVE-THEN-OPEN RACE. `open_verified` is driven directly with a
+        // path `resolve` would have refused, because that is exactly the state
+        // a lost race leaves behind — the check passed, and then the object
+        // moved — and there is no deterministic way to lose a race on purpose.
+        let base = tempdir("handle-gate");
+        let inside = base.join("granted");
+        let outside = base.join("secrets");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("loot.txt"), b"top secret").unwrap();
+        fs::write(inside.join("notes.txt"), b"fine").unwrap();
+
+        let link = inside.join("escape");
+        assert!(
+            make_dir_link(&link, &outside),
+            "could not create a test link; gate 3 is UNVERIFIED on this machine"
+        );
+
+        let scope = FileScope::Jailed(inside.clone());
+
+        // POSITIVE CONTROL FIRST: a file genuinely inside the jail must open,
+        // or "everything is refused" would look like a working gate.
+        let ok = open_verified(&scope, &inside.join("notes.txt"), OpenAs::Read);
+        assert!(ok.is_ok(), "a file inside the jail must open: {:?}", ok.err());
+        let dir_ok = open_verified(&scope, &inside, OpenAs::Dir);
+        assert!(dir_ok.is_ok(), "the jail root must open as a directory: {:?}", dir_ok.err());
+
+        // The gate: lexically inside, actually outside.
+        let attempt = link.join("loot.txt");
+        assert!(
+            is_within(&attempt, &inside),
+            "the fixture must be LEXICALLY inside, or this proves nothing about gate 3"
+        );
+        let got = open_verified(&scope, &attempt, OpenAs::Read);
+        assert!(
+            got.is_err(),
+            "the handle's real path is outside the jail and must be refused, got {:?}",
+            got.map(|(_, p)| p)
         );
 
         let _ = fs::remove_dir_all(&base);

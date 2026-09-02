@@ -55,9 +55,34 @@ mod power;
 #[cfg(windows)]
 mod display_wake;
 
+/// The environment variable the launcher puts this agent's token in.
+///
+/// A COPY of `puca_service::AGENT_TOKEN_ENV`, because this crate does not
+/// depend on `puca-service` and there is nowhere else both can see. The other
+/// spellings live in `crates/puca-service/src/lib.rs` (the constant, and the
+/// service's own launch) and `frontend/src-tauri/src/agent_ipc.rs` (which uses
+/// the constant directly). A mismatch is loud — this process exits 2 saying a
+/// token is required, and the launcher logs the give-up — but it is still a
+/// mismatch, so change every copy.
+const TOKEN_ENV: &str = "PUCA_AGENT_TOKEN";
+
 fn arg(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+}
+
+#[cfg(test)]
+mod launch_token_tests {
+    /// The handoff name, pinned on the agent's side.
+    ///
+    /// `puca_service`'s `the_launch_token_env_name_is_unchanged` pins the same
+    /// literal on the other side. Neither test can see the other's copy — what
+    /// the pair buys is that a rename sweep has to change two things it was
+    /// told about rather than one it was not.
+    #[test]
+    fn the_launch_token_env_name_is_unchanged() {
+        assert_eq!(super::TOKEN_ENV, "PUCA_AGENT_TOKEN");
+    }
 }
 
 /// Send everything this process writes to stderr into `path` instead.
@@ -178,13 +203,28 @@ fn main() {
     privacy::init();
     // The token is REQUIRED. Defaulting to something would mean any local
     // process that knows the pipe name could drive OS input on this machine.
-    let Some(token) = arg("--token") else {
-        eprintln!("puca-agent: --token is required");
+    //
+    // IT ARRIVES IN THE ENVIRONMENT, not on the command line. Full command
+    // lines are captured by Sysmon/EDR process-create events and by Windows
+    // 4688 auditing where that is enabled, and those records travel off the
+    // box — so the secret that authorises driving this machine's screen and
+    // input was being copied into a log its owner does not control.
+    //
+    // `--token` is still accepted, and deliberately so for one release: a
+    // partially-applied update (a new agent binary beside an older launcher)
+    // would otherwise start no agent at all, and the failure would look like
+    // "unattended access stopped working" rather than "the update half-landed".
+    let Some(token) = std::env::var(TOKEN_ENV)
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| arg("--token"))
+    else {
+        eprintln!("puca-agent: a launch token is required ({TOKEN_ENV} or --token)");
         eprintln!("This is launched by the Puca desktop app, not run by hand.");
         std::process::exit(2);
     };
     if token.len() < 16 {
-        eprintln!("puca-agent: --token is too short to be a real launch token");
+        eprintln!("puca-agent: the launch token is too short to be a real one");
         std::process::exit(2);
     }
 
