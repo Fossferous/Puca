@@ -1715,7 +1715,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 // remote-control frames take the room's data path instead of
                 // the WS relay. Same frames and same sealed-hello gate as the
                 // mesh lanes — remoteControl never learns which pipe it is.
-                setSfuControlSender((userId, frame) => sfuManager.publishControlFrame(userId, frame));
+                if (__RC_ENABLED__) setSfuControlSender((userId, frame) => sfuManager.publishControlFrame(userId, frame));
                 const channelId = parseInt(roomId.replace(/^voice_/, ''), 10);
                 const micTrack = localStream.getAudioTracks()[0] ?? null;
                 await sfuManager.connect(channelId, micTrack);
@@ -2085,7 +2085,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         sfuManager.setOnDisconnected(null);
         // The publisher dies with the room: a frame sent into a disconnected
         // room is silently lost, and the relay must take over instead.
-        setSfuControlSender(null);
+        if (__RC_ENABLED__) setSfuControlSender(null);
         void sfuManager.disconnect();
         // Every media stop MUST precede leaveRoom: once we're out of the room
         // the server's membership gate refuses them, so the event is never

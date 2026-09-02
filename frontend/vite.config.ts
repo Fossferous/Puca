@@ -50,6 +50,9 @@ const src = (p: string) => fileURLToPath(new URL('./src/' + p, import.meta.url))
 const RC_MODULE_PATTERNS: RegExp[] = [
   /[\\/]src[\\/]api[\\/]devices[\\/]/,
   /[\\/]src[\\/]api[\\/]remoteControl\.ts$/,
+  // The P2P input lanes (remote-control frames over the call's own data
+  // channels). Inert without remote control, but inert is not excluded.
+  /[\\/]src[\\/]api[\\/]rtc[\\/]controlDc\.ts$/,
   /[\\/]src[\\/]components[\\/]RcGlobals\.tsx$/,
   // Device* components. DELIBERATELY a prefix match on DeviceStage rather than
   // an enumeration: the first version listed `Stage|StageMobile\w*|…` and so
@@ -136,6 +139,11 @@ export default defineConfig({
       // undefined and React throws at render.
       { find: /^\.\/components\/RcGlobals$/, replacement: src('components/RcGlobals.lite.tsx') },
       { find: /^(\.\.?\/)+api\/remoteControl$/, replacement: src('api/remoteControl.lite.ts') },
+      // The voice managers import the control-lane registry statically; its
+      // callers are gated behind __RC_ENABLED__, and this keeps the real
+      // module out of the graph regardless of what Rollup decides about its
+      // module-level state.
+      { find: /^(\.\/controlDc|(\.\.\/)+api\/rtc\/controlDc)$/, replacement: src('api/rtc/controlDc.lite.ts') },
     ],
   },
   plugins: [react(), ...(RC_ENABLED ? [] : [rcExclusionGuard()])],

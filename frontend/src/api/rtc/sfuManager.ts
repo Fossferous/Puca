@@ -734,6 +734,7 @@ export class SfuManager {
      * indistinguishable from the click that follows it going missing.
      */
     publishControlFrame(userId: number, frame: Uint8Array): boolean {
+        if (!__RC_ENABLED__) return false; // lite: no remote control, so no control lane
         const room = this.room;
         if (!room || room.state !== ConnectionState.Connected) return false;
         const identities = [...room.remoteParticipants.values()]
@@ -797,7 +798,7 @@ export class SfuManager {
                 // hop, NOT removing a trust boundary. The frames stay sealed
                 // under the session key, so the SFU learns no more than the
                 // WS relay already does.
-                if (topic !== CTL_SFU_TOPIC || !participant) return;
+                if (!__RC_ENABLED__ || topic !== CTL_SFU_TOPIC || !participant) return;
                 const uid = userIdFromIdentity(participant.identity);
                 if (uid === null || uid === this.localUserId) return;
                 // Copy into a plain ArrayBuffer-backed view: LiveKit types

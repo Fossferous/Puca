@@ -197,7 +197,7 @@ describe('envelope parsing', () => {
         const env = await encryptChannelMessage(ck, 5, 'x', CH);
         const s = serializeEnvelope(env);
         expect(isEncrypted(s)).toBe(true);
-        expect(parseEnvelope(s)).toMatchObject({ v: 2, t: 'ch', epoch: 5 });
+        expect(parseEnvelope(s)).toMatchObject({ v: 3, t: 'ch', epoch: 5 });
     });
 
     it('treats plaintext as not encrypted', () => {
