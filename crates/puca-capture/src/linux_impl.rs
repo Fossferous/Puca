@@ -244,6 +244,12 @@ impl ScreenCapture {
     pub fn using_shm(&self) -> bool {
         self.shm.is_some()
     }
+
+    /// Mirrors the Windows setter so cross-platform callers (composite.rs)
+    /// compile everywhere. Nothing to toggle yet: XGetImage never includes
+    /// the pointer, so this capture simply has no cursor to draw — blending
+    /// one in via XFixesGetCursorImage is where `on == true` would land.
+    pub fn set_draw_cursor(&mut self, _on: bool) {}
 }
 
 /// Capturable outputs with their geometry, in capture-index order.

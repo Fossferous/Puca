@@ -25,6 +25,7 @@ import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
 import { isTauri } from '../api/platform';
+import { phonePanelQuery } from '../utils/phonePanel';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
@@ -53,7 +54,8 @@ import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon } from './Icons';
+import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, LockIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import { Toast } from './Toast';
 import './VoicePanel.css';
 
@@ -154,6 +156,58 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Detect mobile for hiding screen share option
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
+    // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: it IS mobile.css's media
+    // query (utils/phonePanel.ts), and nothing else. This decides whether the
+    // compact panel is the fixed bottom bar (collapsible, height-reserved).
+    // It used to add `|| isNativeMobile()`, which made the JS gate wider than
+    // the CSS one: the native shell above 1024 CSS px (an iPad in landscape)
+    // rendered an expand chevron that toggled nothing, because every collapse
+    // rule lives inside the media query. Live-subscribed so rotating across
+    // the boundary re-renders; the UA-sniff `isMobile` answers a different
+    // question ("no screen-share picker on this device") and must not gate
+    // layout.
+    const [isPhonePanel, setIsPhonePanel] = useState(() => phonePanelQuery()?.matches ?? false);
+    useEffect(() => {
+        const mq = phonePanelQuery();
+        if (!mq) return;
+        const onChange = () => setIsPhonePanel(mq.matches);
+        mq.addEventListener('change', onChange);
+        return () => mq.removeEventListener('change', onChange);
+    }, []);
+
+    // Mobile: the full control set is behind an expand chevron. Collapsed is
+    // the DEFAULT — the full panel is ~230px tall, which with the soft
+    // keyboard up left no room for messages at all (the "everything stacked
+    // on top of each other while typing" report).
+    const [controlsExpanded, setControlsExpanded] = useState(false);
+    const panelRef = useRef<HTMLDivElement>(null);
+
+    // Mobile: publish the panel's REAL height so mobile.css can reserve
+    // exactly that much room above the bottom nav for .chat-main and the
+    // side panels. The old hardcoded 172px drifted from the panel's actual
+    // size as controls were added, leaving the composer covered by the
+    // panel's top rows. documentElement, not the panel: the panel is
+    // portaled to <body> while the readers are elsewhere in the tree.
+    useEffect(() => {
+        if (!isPhonePanel) return;
+        const el = panelRef.current;
+        if (!el) return;
+        const apply = () => document.documentElement.style.setProperty(
+            '--mobile-voice-panel-h', `${Math.ceil(el.getBoundingClientRect().height)}px`);
+        apply();
+        const ro = new ResizeObserver(apply);
+        ro.observe(el);
+        return () => {
+            ro.disconnect();
+            document.documentElement.style.removeProperty('--mobile-voice-panel-h');
+        };
+    }, [isPhonePanel]);
+
+    // Coming back to the foreground: resume any remote-voice element the
+    // platform paused AND our background nudge could not restart (iOS Safari
+    // refuses play() while hidden). Companion to keepVoiceAudioAlive above.
+    useEffect(() => installVoiceAudioResume(), []);
+
     // Camera PiP (Picture-in-Picture) state for mobile
     const [pipPosition, setPipPosition] = useState({ x: 20, y: 100 });
     const [isDragging, setIsDragging] = useState(false);
@@ -217,6 +271,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // the only input signal a web build can see). A ref write per event; no
     // state, no re-renders, no throttling needed.
     const lastAppInputRef = useRef<number | null>(null);
+    /** Watching someone else's stream — presence on the no-OS-probe AFK path
+     *  only (utils/afkIdle.ts). Fed from the stream-state subscription below. */
+    const watchingStreamRef = useRef(false);
     useEffect(() => {
         const mark = () => { lastAppInputRef.current = Date.now(); };
         const opts = { capture: true, passive: true } as AddEventListenerOptions;
@@ -361,6 +418,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 const d = decideAfk({
                     timeoutMs,
                     broadcasting: isScreenSharingRef.current || isCameraOnRef.current,
+                    // A phone viewer in the docked mini-player touches nothing;
+                    // without this the mini-player moved its own viewer to AFK.
+                    // Ignored wherever an OS probe answered (desktop).
+                    watching: watchingStreamRef.current,
                     osIdleSecs,
                     lastAppInputMs: lastAppInputRef.current,
                     nowMs: Date.now(),
@@ -501,8 +562,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // stream-state bus because every selection path notifies it. Own id is
     // excluded: we never subscribe to our own publications.
     useEffect(() => {
-        const sync = () =>
-            sfuManager.setWatchedVideo([...globalSelectedStreams].filter(id => id !== currentUserId));
+        const sync = () => {
+            const others = [...globalSelectedStreams].filter(id => id !== currentUserId);
+            watchingStreamRef.current = others.length > 0;
+            sfuManager.setWatchedVideo(others);
+        };
         sync();
         return subscribeToStreamState(sync);
     }, [currentUserId]);
@@ -1218,6 +1282,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // Play through the output device chosen in Settings, not
                     // just the system default.
                     applyOutputDevice(audio);
+                    // Android pauses playing media elements when the app
+                    // backgrounds while the MIC keeps transmitting — peers
+                    // heard the user, the user heard silence. Fight the
+                    // platform pause for the life of the element (removal
+                    // disarms it; see voiceAudioKeepAlive.ts).
+                    keepVoiceAudioAlive(audio);
                     document.body.appendChild(audio);
                     console.log(`[VoicePanel] Created new audio element for ${userId}`);
                 }
@@ -2717,7 +2787,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             </span>,
             document.body
         )}
-        <div className="voice-panel-compact">
+        <div
+            ref={panelRef}
+            className={`voice-panel-compact${isPhonePanel && isInVoice && !controlsExpanded ? ' vp-collapsed' : ''}`}
+        >
             {/* Permission Help Modal */}
             {showPermissionHelp && (
                 <div className="permission-help-overlay">
@@ -2891,7 +2964,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             )}
                         </select>
                         <button
-                            className={`voice-btn ${isCameraOn ? 'active' : ''}`}
+                            className={`voice-btn vp-camera ${isCameraOn ? 'active' : ''}`}
                             onClick={async () => {
                                 try {
                                     await setCameraEnabled(!isCameraOn);
@@ -2904,10 +2977,25 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         >
                             {isCameraOn ? <CameraIcon size={18} /> : <CameraOffIcon size={18} />}
                         </button>
+                        {/* Mobile only: collapsed, the bar shows just mic /
+                            deafen / hang-up; everything else (noise mode,
+                            camera, any future control) is behind this
+                            chevron. CSS keys the hiding on .vp-collapsed. */}
+                        {isPhonePanel && (
+                            <button
+                                className="voice-btn vp-expand"
+                                onClick={() => setControlsExpanded(e => !e)}
+                                title={controlsExpanded ? 'Fewer voice controls' : 'More voice controls'}
+                                aria-label={controlsExpanded ? 'Fewer voice controls' : 'More voice controls'}
+                                aria-expanded={controlsExpanded}
+                            >
+                                {controlsExpanded ? <ChevronDownIcon size={18} /> : <ChevronUpIcon size={18} />}
+                            </button>
+                        )}
                         {/* Hide screen share on mobile - not supported */}
                         {!isMobile && (
                             <button
-                                className={`voice-btn ${isScreenSharing ? 'active screen-share' : ''}`}
+                                className={`voice-btn vp-screenshare ${isScreenSharing ? 'active screen-share' : ''}`}
                                 onClick={async () => {
                                     if (isScreenSharing) {
                                         void sfuManager.stopScreenShare(); // no-op on mesh calls

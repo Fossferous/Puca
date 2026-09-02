@@ -18,8 +18,13 @@
  * playing gamer as present, same as Discord) never even ran for muted users,
  * because the mute exemption returned first.
  *
- * This function is deliberately pure and takes NO mute/deafen/watching
- * inputs — that absence IS the Discord copy, and the tests pin it.
+ * This function is deliberately pure and takes NO mute/deafen inputs — that
+ * absence IS the Discord copy, and the tests pin it. `watching` is the one
+ * later addition (2026-09-02), honoured ONLY where no OS input probe exists:
+ * on a phone the only presence signal is a touch, and watching a friend's
+ * stream in the docked mini-player produces none, so the mini-player was
+ * moving its own viewer to AFK mid-stream. On desktop the OS probe still
+ * decides first, so a silent desktop viewer is moved at Discord's line.
  *
  * The caller (VoicePanel) arms a timer for the timeout; the timer only fires
  * at all if nothing reset it — and speech (VAD) resets it, so "the timer
@@ -33,7 +38,8 @@
  *  - Desktop: the OS input probe (GetLastInputInfo) is the authority. A gamer
  *    deep in a match generates constant input → present. A muted user who
  *    walked away generates none → moved, exactly at Discord's line.
- *  - Web/mobile (no OS probe): input anywhere in the app stands in for it.
+ *  - Web/mobile (no OS probe): watching a stream, or input anywhere in the
+ *    app, stands in for it.
  *  - No probe and no recorded input → moved: every presence signal we can
  *    observe has been silent for the whole window.
  */
@@ -63,14 +69,21 @@ export function decideAfk(input: {
     /** Epoch ms of the last input inside the app, or null if none recorded. */
     lastAppInputMs: number | null;
     nowMs: number;
+    /** Watching someone ELSE's stream. Presence only where no OS probe
+     *  exists — see the header. Optional so the desktop callers and the
+     *  older tests read unchanged. */
+    watching?: boolean;
 }): AfkDecision {
-    const { timeoutMs, broadcasting, osIdleSecs, lastAppInputMs, nowMs } = input;
+    const { timeoutMs, broadcasting, osIdleSecs, lastAppInputMs, nowMs, watching = false } = input;
     if (broadcasting) return { action: 'wait', recheckInMs: timeoutMs };
     if (osIdleSecs !== null) {
         const idleMs = osIdleSecs * 1000;
         if (idleMs >= timeoutMs) return { action: 'move' };
         return { action: 'wait', recheckInMs: Math.max(1000, timeoutMs - idleMs) };
     }
+    // No OS probe from here on. A phone viewer in the docked mini-player
+    // touches nothing for as long as the stream holds them.
+    if (watching) return { action: 'wait', recheckInMs: timeoutMs };
     if (lastAppInputMs !== null) {
         const idleMs = nowMs - lastAppInputMs;
         if (idleMs >= timeoutMs) return { action: 'move' };
