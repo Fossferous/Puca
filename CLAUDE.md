@@ -441,8 +441,6 @@ has never existed.
   Desktop notifications still require the app running (tray keeps it so).
 - **"Save as" for received files**: downloads go to `<Downloads>/Púca/`
   unconditionally. Needs `tauri-plugin-dialog`, which is not registered.
-- **Mic slow to work after joining voice**: reported, unexplained. Diagnose with
-  `__pucaVoiceDiag()` in DevTools *while it is happening*.
 - **Clips (replay buffer)** — built end to end (`docs/CLIPS.md`): desktop
   capture/seal/preview, the server presence log + approval protocol, and the
   client prompt/composer/attachment. Still behind `experimentalClips` and
