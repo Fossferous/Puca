@@ -4223,7 +4223,13 @@ async function serveFileAccessRequest(s: Internal): Promise<void> {
         await sendSignal(s, { kind: 'file-access-granted', root: consent.root });
     } catch (e) {
         console.warn('[device-session] file access refused', e);
-        await sendSignal(s, { kind: 'file-access-denied' }).catch(() => undefined);
+        // Say WHY. The agent now refuses a folder AT THE GRANT — AppData, a
+        // system location, a path it cannot resolve — with a sentence written
+        // for a person and naming no path. Without it the controller saw the
+        // same bare gate as a denial by silence and asked again forever, while
+        // the host, who picked the folder, was never told either.
+        const reason = e instanceof Error && e.message ? e.message : undefined;
+        await sendSignal(s, { kind: 'file-access-denied', ...(reason ? { reason } : {}) }).catch(() => undefined);
     }
 }
 

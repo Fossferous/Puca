@@ -152,10 +152,25 @@ impl FileScope {
     /// cannot enforce, so an unresolvable folder must not become a grant that
     /// silently checks against a path the filesystem disagrees with.
     pub fn jailed(root: &str) -> Result<Self, String> {
-        match fs::canonicalize(root) {
-            Ok(c) => Ok(FileScope::Jailed(c)),
-            Err(e) => Err(format!("that folder could not be resolved: {e}")),
+        let c = fs::canonicalize(root).map_err(|e| format!("that folder could not be resolved: {e}"))?;
+        // REFUSE AT THE GRANT what `check_effective` refuses at every browse.
+        // Until this ran here, a grant of a folder under %APPDATA% "succeeded"
+        // and the peer's first listing came back with the generic browse-time
+        // refusal — which reads as file transfer being broken, not as a rule,
+        // and named neither the folder nor the reason. The browse-time check
+        // STAYS: it is what covers a denied subtree reached from an allowed
+        // root, and the Policy scope, which never passes through here.
+        match denied_by_shape(&c) {
+            Some("a per-user secret directory") => {
+                return Err("that folder is inside AppData or another per-user secret directory (.ssh, .gnupg, .aws…) — those hold credentials and this app's own keys, so it cannot be shared; pick a folder outside it".into());
+            }
+            Some(other) => return Err(format!("that folder is {other}, so it cannot be shared")),
+            None => {}
         }
+        if denied_roots().iter().any(|d| is_within(&c, d)) {
+            return Err("that folder is a system location (Windows, Program Files or ProgramData), so it cannot be shared".into());
+        }
+        Ok(FileScope::Jailed(c))
     }
 }
 
@@ -1267,6 +1282,31 @@ mod tests {
         assert!(
             resolve(&FileScope::Policy, &ordinary.to_string_lossy()).is_ok(),
             "a Recovery folder that is not at a drive root must be browsable"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_grant_inside_appdata_is_refused_at_grant_time_and_says_why() {
+        if !cfg!(windows) {
+            return;
+        }
+        // The system temp directory lives under %LOCALAPPDATA%\Temp — the
+        // exact kind of folder a user pastes from a shell. Before the check
+        // moved forward, this grant SUCCEEDED and only the peer's first
+        // listing was refused, with a message that named neither.
+        let temp = std::env::temp_dir();
+        let err = FileScope::jailed(&temp.to_string_lossy())
+            .err()
+            .expect("a folder under AppData must not become a grant");
+        assert!(err.contains("AppData"), "the refusal must name the rule, got: {err}");
+
+        // POSITIVE CONTROL: an ordinary folder under the profile is granted —
+        // without this, a jailed() that refused everything would pass above.
+        let dir = tempdir("jail-grant");
+        assert!(
+            matches!(FileScope::jailed(&dir.to_string_lossy()), Ok(FileScope::Jailed(_))),
+            "an ordinary folder must still be grantable"
         );
         let _ = fs::remove_dir_all(&dir);
     }
