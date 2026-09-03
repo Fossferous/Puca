@@ -276,6 +276,21 @@ npm run build                   # web assets (section 9) / desktop webview
 npm run tauri:build             # desktop installer + .sig  (NOT `npm run tauri build`: the colon
                                 # script builds the native agent and merges tauri.release.json)
 npm run cap:build:android && (cd android && ./gradlew assembleRelease)   # Puca-<ver>.apk
+
+# THE LITE APK NEEDS PUCA_LITE=1 ON THE GRADLE CALL, not just the npm script.
+# build.gradle reads `System.getenv('PUCA_LITE')` — nothing else tells it which
+# variant it is — so a plain `./gradlew assembleRelease` after the lite npm
+# script produces a FULL apk (versionCode base*10+0, label "Púca") carrying the
+# lite JS bundle. It builds and signs perfectly; only the versionCode reveals it.
+npm run cap:build:android:lite && (cd android && PUCA_LITE=1 ./gradlew assembleRelease)
+
+# And COPY EACH APK OUT BEFORE BUILDING THE OTHER. Both variants write to the
+# same app/build/outputs/apk/release/app-release.apk, and the second build wipes
+# that directory — including anything you copied alongside it. Stage outside the
+# build tree.
+#
+# Verify what you actually built before shipping it:
+#   aapt2 dump badging <apk> | head -1     # full = ...0, lite = ...1
 ```
 
 The WebSocket URL is derived automatically (`wss://chat.example.com/ws`).
