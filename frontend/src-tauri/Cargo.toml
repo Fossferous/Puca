@@ -71,12 +71,12 @@ tauri-plugin-autostart = "2"
 # empty title, nothing in any log. It cost most of a debugging session.
 tauri-plugin-single-instance = "2"
 # Opens the release download page in the system browser (open_external command)
-opener = "0.7"
+opener = "0.8"
 
 # Verifies a RESUMED transfer: the receiver never saw the bytes written by the
 # earlier attempt, so the only way to know the finished file is the file that was
 # offered is to hash it at rest.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Input injection, shared with the native host agent (crates/puca-input).
 # A plain PATH dependency. This crate is deliberately kept OUT of the root
@@ -104,14 +104,14 @@ puca-ua = { path = "../../crates/puca-ua", optional = true }
 # produces. public_identity() needs BOTH curves — the x25519 half is this
 # device's public key, not just the input to the remote-control key agreement.
 # Only device_key_dh and device_key_forget are gated, inside the module.
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-rand = "0.8"
-image = { version = "0.24", features = ["png"], default-features = false }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+rand = "0.9"
+image = { version = "0.25", features = ["png"], default-features = false }
 
 [dependencies.base64]
 # audio_capture.rs encodes PCM chunks for the 'audio-data' event
-version = "0.22"
+version = "0.23"
 
 # Reused for its install/status logic, so the app and the elevated helper cannot
 # end up disagreeing about what "installed" means. A COMMON dependency, not a
@@ -133,8 +133,8 @@ optional = true
 # focus and a permission grant, so it cannot serve a background HOST — which is
 # exactly when a device session needs it. RC-only — optional.
 clipboard-win = { version = "5", optional = true }
-wasapi = "0.22"
-sysinfo = "0.32"
+wasapi = "0.24"
+sysinfo = "0.39"
 # Win32_UI_Shell is for SHGetFileInfoW in audio_capture.rs (app icons for the
 # share picker). Without it the crate does not compile at all — and NO gate
 # catches that: this crate is not in the root workspace, so `cargo test` at the
@@ -145,6 +145,6 @@ sysinfo = "0.32"
 # proves the deadline fires. Win32_System_Services = the read-only SCM query in
 # rc_leftovers.rs, which detects a SovereignRemote service a previous FULL
 # install left behind (needed in the LITE build especially).
-windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
+windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
 
 
