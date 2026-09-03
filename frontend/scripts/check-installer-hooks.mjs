@@ -145,4 +145,32 @@ for (const f of ['installer-hooks.nsh', 'installer-hooks-lite.nsh']) {
     }
 }
 console.log('  ok  every MigrateRenamedInstall call names the old install\'s binary');
+// The 0.9.2 fix, pinned so it cannot quietly fall back out. The in-place rename
+// keeps the install directory, so the pre-rename binary was left there
+// LAUNCHABLE -- and a taskbar pin aimed at it starts a pre-0.9.0 client that
+// this server now refuses, behind an error screen on which nothing helps.
+// Repairing shortcuts is not enough while the binary they pointed at still runs.
+for (const f of ['installer-hooks.nsh', 'installer-hooks-lite.nsh']) {
+    const body = readFileSync(join(tauriDir, f), 'utf8');
+    if (!/!insertmacro\s+StopOrphanedHelpers\b/.test(body)) {
+        console.error('FAIL: ' + f + ': does not insert StopOrphanedHelpers. The NSIS updater kills '
+            + 'the app rather than exiting it, so agent_stop() never runs, an orphaned helper holds '
+            + 'its own file open, and the install cannot replace it.');
+        process.exit(1);
+    }
+    const calls = [...body.matchAll(/^\s*!insertmacro\s+RemoveSupersededBinary\s+"([^"]*)"/gm)].map(m => m[1]);
+    if (!calls.includes('app')) {
+        console.error('FAIL: ' + f + ': does not insert RemoveSupersededBinary "app". That is '
+            + 'the pre-rename executable of this product, which the in-place rename leaves behind, launchable.');
+        process.exit(1);
+    }
+    for (const c of calls) {
+        if (c === 'Puca' || c === 'Puca-Lite') {
+            console.error('FAIL: ' + f + ': RemoveSupersededBinary "' + c + '" names a CURRENT binary. '
+                + 'On the build whose mainBinaryName that is, it would delete the app it just installed.');
+            process.exit(1);
+        }
+    }
+}
+console.log('  ok  both hooks stop orphaned helpers and remove the superseded binary');
 console.log('check-installer-hooks: PASS');

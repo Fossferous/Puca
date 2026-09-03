@@ -184,7 +184,13 @@ Confirm which box actually answered a request with
 Remove a host's line from `hosts.conf` once that box is genuinely
 decommissioned, so the ship scripts stop expecting it.
 
-**Version** lives in `frontend/src-tauri/tauri.conf.json` only. The `version`
+**Version** is authored in `frontend/src-tauri/tauri.conf.json` — but it is
+not the only file that has to change, and believing otherwise cost a build.
+`frontend/android/app/build.gradle` carries `versionName` and
+`baseVersionCode` (which must be minor*10000+patch), and
+`node scripts/check-lite-identity.mjs` FAILS the lite build until both match
+the tauri version. That gate is the only thing standing between you and an APK
+that lies about its version, so bump all three together. The `version`
 fields in `frontend/package.json` and the root `Cargo.toml` are frozen fossils
 (0.8.21) that nothing reads — do not bump them, and never read them as current.
 
