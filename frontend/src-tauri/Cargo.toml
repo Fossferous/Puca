@@ -79,8 +79,12 @@ opener = "0.7"
 sha2 = "0.10"
 
 # Input injection, shared with the native host agent (crates/puca-input).
-# A plain PATH dependency, deliberately NOT a Cargo workspace: a workspace moves
-# target/ and would break the container build path documented in CLAUDE.md.
+# A plain PATH dependency. This crate is deliberately kept OUT of the root
+# workspace (it is named in `workspace.exclude`), because a member's build
+# output moves to the workspace target/ and tauri-cli, the NSIS hooks, the
+# updater artifact paths and the macOS bundle steps all read
+# frontend/src-tauri/target/. Its tests are still gated: CI runs them by
+# manifest path on the Windows job.
 puca-input = { path = "../../crates/puca-input" }
 
 # Clips auto-arm (clip_capture.rs): the SAME DXGI-duplication capture and MFT

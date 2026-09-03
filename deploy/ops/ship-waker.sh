@@ -109,7 +109,19 @@ assert_same_platform
 echo "=== building on $BUILD_LABEL ==="
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 TAR=$(mktemp -u /tmp/waker-src-XXXX.tar.gz)
-tar -czf "$TAR" -C "$REPO_ROOT/crates" puca-waker
+# THE LOCK TRAVELS WITH THE CRATE. This builds puca-waker standalone on the
+# remote box, outside the workspace it belongs to, so without a Cargo.lock
+# beside it cargo re-resolves every dependency fresh on the server — the
+# always-on LAN waker would then be built from versions nothing here has ever
+# tested. The workspace lock is a superset; cargo prunes what this package
+# does not use. (Before the workspace, crates/puca-waker/Cargo.lock served
+# this purpose; a workspace member's own lock is never updated again, so
+# keeping one would have meant shipping a pin that silently rots.)
+WAKER_SRC=$(mktemp -d /tmp/waker-src-XXXX)
+cp -r "$REPO_ROOT/crates/puca-waker" "$WAKER_SRC/"
+cp "$REPO_ROOT/Cargo.lock" "$WAKER_SRC/puca-waker/Cargo.lock"
+tar -czf "$TAR" -C "$WAKER_SRC" puca-waker
+rm -rf "$WAKER_SRC"
 scp "${SSH_OPTS[@]}" "$TAR" "$BUILD_HOST:/tmp/waker-src.tar.gz"
 rm -f "$TAR"
 

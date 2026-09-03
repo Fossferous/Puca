@@ -73,6 +73,50 @@ jobs:
       - name: dual-ship.sh / check-versions.sh refusal gates
         run: bash deploy/ops/ship-gates.test.sh
 
+  # EVERYTHING UNDER crates/ — the capture, encode, injection, agent and
+  # service layer, `unsafe` included. None of it ran in CI until 2026-09-03:
+  # the root Cargo.toml had no [workspace], so `cargo test` at the root built
+  # the backend package and nothing else. Measured that day: 529 tests down
+  # there, zero of them gated.
+  #
+  # TWO RUNNERS, ON PURPOSE. Roughly half those tests are #[cfg(windows)] —
+  # this is a Windows product, and the half that matters most (the path jail
+  # that decides which folders a remote controller may read, the injection
+  # tag, the service's pipe) compiles nowhere else. A Linux-only job would go
+  # green having never built them, which is worse than no job at all because
+  # it looks like coverage. Linux is the fast one that catches ordinary
+  # regressions; Windows is the one that can fail for a real reason.
+  #
+  # `--exclude puca` keeps the backend package out: it needs a database and is
+  # already covered by the `backend` job below, with postgres attached.
+  # `--locked` makes a stale Cargo.lock a failure rather than a silent
+  # re-resolve — the lock is shared now, so drift would move every crate.
+  # Tests needing real hardware carry #[ignore] with a reason and are skipped
+  # here, which is why this runs headless.
+  crates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Crate tests (Linux — the platform-independent half)
+        run: cargo test --workspace --exclude puca --locked
+
+  crates-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Crate tests (Windows — capture, injection, the service, the agent's path jail)
+        run: cargo test --workspace --exclude puca --locked
+      # The desktop shell is EXCLUDED from the workspace (tauri-cli owns its
+      # layout), so --workspace does not reach it. It holds the global-hotkey
+      # engine, the DPAPI seal and the tray, and it is Windows-only code — so
+      # it is tested here, by name, or not at all.
+      - name: Desktop shell tests (frontend/src-tauri)
+        run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
+
   backend:
     runs-on: ubuntu-latest
     services:

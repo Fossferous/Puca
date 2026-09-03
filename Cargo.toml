@@ -1,3 +1,41 @@
+# ONE WORKSPACE, so `cargo test --workspace` reaches the crates.
+#
+# WHAT THIS FIXES. Without it, the root package is the only thing `cargo test`
+# builds: every crate under crates/ — the whole capture, encode, input, agent
+# and service layer, `unsafe` included — was invisible to the gate and to CI.
+# Measured on 2026-09-03: 529 tests live down there and CI ran none of them.
+#
+# The root package stays the workspace ROOT, so a bare `cargo test` still means
+# "the backend" exactly as before and nothing that runs it has to change. The
+# crates come along only when you ask for them by name or with `--workspace`.
+#
+# TWO CONSEQUENCES WORTH KNOWING, both real and both accepted:
+#  - Build output MOVES to this directory's target/. A member built with
+#    `--manifest-path crates/X/Cargo.toml` no longer writes to
+#    crates/X/target/. frontend/scripts/build-agent.mjs reads the built agent
+#    and service binaries and was updated with it; a stale copy under the old
+#    path would otherwise have been staged into the installer forever.
+#  - ONE Cargo.lock, here. The crates' own lock files stop being consulted, so
+#    resolution is shared. resolver = "2" is set explicitly rather than
+#    inherited, because feature unification is the one thing that could change
+#    a crate's behaviour without changing a line of its code.
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+# frontend/src-tauri sits inside this directory tree, so cargo would consider
+# it a member by location and REFUSE to build it ("believes it's in a
+# workspace when it's not") — which is the installer, i.e. everything. It is
+# excluded rather than added: tauri-cli drives that crate with its own layout
+# and its own target directory, and moving those a day after a release is a
+# risk with no upside. Its tests are not lost — CI runs them directly, on
+# Windows, where its code actually compiles (see the crates-windows job).
+# frontend/df-wasm is excluded for a second reason on top of that one: it
+# carries its own `[profile.release]` (opt-level = "s", lto = true) and a
+# member's profile section is IGNORED inside a workspace. Making it a member
+# would quietly drop both and ship a fatter noise-suppression blob to every
+# browser, with no error anywhere.
+exclude = ["frontend/src-tauri", "frontend/df-wasm"]
+
 [package]
 name = "puca"
 version = "0.8.21"
@@ -66,6 +104,12 @@ tokio-test = "0.4"
 aes-gcm = "0.10"
 
 # Workaround for Windows PDB linker errors (LNK1318)
+# WORKSPACE-WIDE since the [workspace] above: a root profile governs every
+# member, and a member's own profile section is ignored. These two were a
+# Windows PDB/LNK1318 workaround for the backend; the cost of them applying to
+# the crates as well is that `cargo test -p puca-agent` builds without debug
+# info, so a panic in the unsafe capture/injection layer gives no line numbers.
+# Raise `debug` here when you need to step through one of those.
 [profile.dev]
 incremental = false
 debug = 0

@@ -27,7 +27,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -62,22 +62,64 @@ const npmTree = JSON.parse(run('npm', ['ls', '--prod', '--all', '--json', '--lon
 walkNpm({ dependencies: npmTree.dependencies }, null);
 
 // ---------------------------------------------------------------- cargo
+//
+// THE "used by" COLUMN IS AN ATTRIBUTION CLAIM, so it walks the resolve graph
+// per artifact rather than listing everything cargo mentions.
+//
+// This used to take every package out of a `cargo metadata` run per crate.
+// That was accidentally right while each crate was a standalone package, and
+// became wrong the moment they joined a workspace: metadata run anywhere in a
+// workspace returns the WHOLE workspace graph, so every crate inherited every
+// other crate's dependencies. The generated file then claimed aes-gcm ships
+// inside puca-waker and the spike binaries, which is false, and false in the
+// direction that matters — this document is what tells someone auditing a
+// binary which third-party code is in it.
 const cargoPkgs = new Map(); // name@version -> {license, repository, from}
-function addCargo(manifestDir, label) {
-    const meta = JSON.parse(run('cargo', ['metadata', '--format-version', '1'], manifestDir));
-    const own = new Set((meta.workspace_members || []).map(id => id));
-    for (const p of meta.packages) {
-        if (own.has(p.id)) continue;               // our own crates carry the project licence
+
+/** Package ids reachable from `rootId` in this metadata's resolve graph. */
+function reachable(meta, rootId) {
+    const edges = new Map((meta.resolve?.nodes || []).map(n => [n.id, (n.deps || []).map(d => d.pkg)]));
+    const seen = new Set();
+    const queue = [rootId];
+    while (queue.length) {
+        const id = queue.pop();
+        if (seen.has(id)) continue;
+        seen.add(id);
+        for (const dep of edges.get(id) || []) queue.push(dep);
+    }
+    return seen;
+}
+
+/**
+ * Record every third-party package the artifact rooted at `manifestDir`
+ * actually depends on. `meta` is a metadata document that CONTAINS that
+ * package — one workspace run covers the backend and every member.
+ */
+function addCargoFrom(meta, manifestDir, label) {
+    const byId = new Map(meta.packages.map(p => [p.id, p]));
+    const members = new Set(meta.workspace_members || []);
+    const wanted = resolve(manifestDir, 'Cargo.toml');
+    const root = meta.packages.find(p => resolve(p.manifest_path) === wanted);
+    if (!root) throw new Error(`no package for ${manifestDir} in this cargo metadata`);
+    for (const id of reachable(meta, root.id)) {
+        if (members.has(id)) continue;             // our own crates carry the project licence
+        const p = byId.get(id);
+        if (!p) continue;
         const key = `${p.name}@${p.version}`;
         if (!cargoPkgs.has(key)) cargoPkgs.set(key, { license: p.license || (p.license_file ? `see ${p.license_file}` : 'UNKNOWN'), repository: p.repository || '', from: new Set() });
         cargoPkgs.get(key).from.add(label);
     }
 }
-addCargo(ROOT, 'backend');
-addCargo(join(ROOT, 'frontend', 'src-tauri'), 'desktop');
+
+// One run for the workspace (backend + every crate under crates/), one for the
+// desktop shell, which is deliberately excluded from that workspace.
+const wsMeta = JSON.parse(run('cargo', ['metadata', '--format-version', '1'], ROOT));
+addCargoFrom(wsMeta, ROOT, 'backend');
 for (const d of readdirSync(join(ROOT, 'crates'))) {
-    if (existsSync(join(ROOT, 'crates', d, 'Cargo.toml'))) addCargo(join(ROOT, 'crates', d), d);
+    if (existsSync(join(ROOT, 'crates', d, 'Cargo.toml'))) addCargoFrom(wsMeta, join(ROOT, 'crates', d), d);
 }
+const shellDir = join(ROOT, 'frontend', 'src-tauri');
+addCargoFrom(JSON.parse(run('cargo', ['metadata', '--format-version', '1'], shellDir)), shellDir, 'desktop');
 
 // ---------------------------------------------------------------- render
 const sortKeys = (m) => [...m.keys()].sort((a, b) => a.localeCompare(b));
