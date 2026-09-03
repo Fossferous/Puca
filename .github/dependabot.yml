@@ -11,6 +11,13 @@
 # and a bot nobody reads is worse than no bot, because it trains you to ignore
 # exactly the PR that matters. Security updates are NOT grouped: Dependabot
 # always raises those separately, so they arrive on their own and stand out.
+#
+# MAJORS ARE GROUPED TOO, not split out. The first run of this file proved why:
+# with only minor+patch grouped, eleven PRs landed at once because every major
+# arrived on its own — among them okhttp 4->5, which is the Android
+# push-delivery transport, and actions/setup-node 4->7. One grouped PR per
+# ecosystem is still reviewable; eleven is a wall you stop reading, which is the
+# failure this file was meant to avoid.
 version: 2
 updates:
   # --- Rust: the backend plus every crate under crates/ (one workspace) ------
@@ -20,9 +27,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      cargo-minor-and-patch:
+      cargo:
         applies-to: version-updates
-        update-types: ["minor", "patch"]
+        update-types: ["major", "minor", "patch"]
 
   # The desktop shell is EXCLUDED from the root workspace (see Cargo.toml
   # `exclude`), so the entry above does not reach it and it needs its own.
@@ -32,9 +39,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 3
     groups:
-      tauri-minor-and-patch:
+      tauri:
         applies-to: version-updates
-        update-types: ["minor", "patch"]
+        update-types: ["major", "minor", "patch"]
 
   # So is the DeepFilterNet wasm crate — which produces a binary committed to
   # the tree and shipped to every web and desktop client.
@@ -43,6 +50,10 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 2
+    groups:
+      df-wasm:
+        applies-to: version-updates
+        update-types: ["major", "minor", "patch"]
 
   # --- The web / desktop / mobile client ------------------------------------
   - package-ecosystem: npm
@@ -51,9 +62,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      npm-minor-and-patch:
+      npm:
         applies-to: version-updates
-        update-types: ["minor", "patch"]
+        update-types: ["major", "minor", "patch"]
 
   # --- The Android app ------------------------------------------------------
   - package-ecosystem: gradle
@@ -61,6 +72,10 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      android:
+        applies-to: version-updates
+        update-types: ["major", "minor", "patch"]
 
   # --- The workflows themselves ---------------------------------------------
   # Every action in .github/workflows is pinned to a commit SHA, which is the
@@ -71,3 +86,7 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      actions:
+        applies-to: version-updates
+        update-types: ["major", "minor", "patch"]
