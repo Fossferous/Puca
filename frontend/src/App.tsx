@@ -6,6 +6,8 @@ import ResetPassword from './components/ResetPassword';
 import VerifyEmail from './components/VerifyEmail';
 import { isAuthenticated, logout, getToken, softExpireSession, isTokenExpired } from './api/auth';
 import { resetAuthExpiredFlag, probeSession } from './api/client';
+import { checkForNewVersion, openDownloadPage, type AppVersionInfo } from './api/appVersion';
+import { RETRY_DELAYS_MS, failureFor, type ConnectionFailure } from './appConnection.utils';
 import { wsClient } from './api/websocket';
 import { clearBlockedUsers } from './components/blockStore';
 import { clearFileCache } from './api/authedMedia';
@@ -33,15 +35,8 @@ import { API_BASE_URL } from './api/config';
 import { ClipApprovalPrompt } from './components/ClipApprovalPrompt';
 import './App.css';
 
-const MAX_AUTO_RETRIES = 3;
-const RETRY_DELAY_MS = 1000;
+const MAX_AUTO_RETRIES = RETRY_DELAYS_MS.length;
 
-/** What actually went wrong, so the screen can say so (and offer the action
- *  that helps). A dead SESSION is deliberately not in here: that never reaches
- *  the error screen — it re-authenticates instead. */
-type ConnectionFailure =
-    | 'unreachable' // no answer from the server at all: offline, DNS, or it's down
-    | 'socket';     // server up + token accepted over HTTP, but the socket won't open
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const location = useLocation();
@@ -64,6 +59,9 @@ function App() {
   const [loggedIn, setLoggedIn] = useState(isAuthenticated());
   const [wsConnected, setWsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<ConnectionFailure | null>(null);
+  // Set alongside a 'stale-client' failure so the screen can offer the
+  // download rather than just naming the problem.
+  const [staleUpdate, setStaleUpdate] = useState<AppVersionInfo | null>(null);
   const retryCount = useRef(0);
 
   // Helper to get token from URL for reset/verify
@@ -253,8 +251,9 @@ function App() {
         retryCount.current++;
 
         if (retryCount.current < MAX_AUTO_RETRIES) {
-          console.log(`Retrying in ${RETRY_DELAY_MS}ms...`);
-          retryTimer = setTimeout(attemptConnection, RETRY_DELAY_MS);
+          const wait = RETRY_DELAYS_MS[retryCount.current - 1] ?? 1000;
+          console.log(`Retrying in ${wait}ms...`);
+          retryTimer = setTimeout(attemptConnection, wait);
           return;
         }
 
@@ -269,8 +268,36 @@ function App() {
           expireSession();
           return;
         }
-        console.error(`Max retries reached (${probe}), showing error dialog`);
-        setConnectionError(probe === 'ok' ? 'socket' : 'unreachable');
+        if (probe !== 'ok') {
+          console.error(`Max retries reached (${probe}), showing error dialog`);
+          setConnectionError('unreachable');
+          return;
+        }
+
+        // The server is up and our token is good, so the socket is the only
+        // thing that failed — and by far the most useful question left is
+        // whether THIS BUILD is too old to open one. Since 0.9.1 the server
+        // refuses the query-string token that every client before 0.9.0 sends,
+        // while REST keeps working, so a stale install lands exactly here: the
+        // probe says "healthy", and the old copy shows a dialog blaming the
+        // user's firewall. Neither of its buttons can fix that; only replacing
+        // the binary can. The server's log recorded 669 such refusals in three
+        // days, still arriving once a minute, from someone who cannot be told
+        // what is wrong.
+        //
+        // A newer published release is not proof of that fault, but it is the
+        // one actionable answer available, and it is never wrong ADVICE: if a
+        // socket will not open and the app is out of date, updating is the
+        // right next step regardless.
+        let update = null;
+        try {
+          update = await checkForNewVersion();
+        } catch { /* no update info — fall through to the generic message */ }
+        if (cancelled) return;
+        setStaleUpdate(update);
+        const failure = failureFor(probe, update !== null);
+        console.error(`Max retries reached (ok), showing ${failure} dialog`);
+        setConnectionError(failure);
       }
     };
 
@@ -293,6 +320,7 @@ function App() {
   const handleRetry = () => {
     retryCount.current = 0;
     setConnectionError(null);
+    setStaleUpdate(null);
     setWsConnected(false);
   };
 
@@ -302,22 +330,41 @@ function App() {
 
   if (connectionError) {
     const unreachable = connectionError === 'unreachable';
+    const stale = connectionError === 'stale-client';
+    // "This usually clears by itself" was false. The effect that reconnects
+    // bails on `connectionError` (see its guard), so once this screen is up
+    // NOTHING retries until the button is pressed — the app was describing a
+    // recovery it had just disabled.
+    const heading = stale
+      ? 'This app is out of date'
+      : unreachable
+        ? "Can't reach the server"
+        : 'Live connection failed';
+    const body = stale
+      ? `This copy of Púca is too old for this server, so it can sign in but cannot open a live connection. Version ${staleUpdate?.version ?? 'a newer release'} is available; updating fixes this. Retrying will not.`
+      : unreachable
+        ? "Púca couldn't reach the server. Check your internet connection — if that's fine, the server may be restarting."
+        : 'Your session is valid and the server is responding, but the live connection could not be opened. Nothing will retry until you choose Try again.';
+    const hint = stale
+      ? 'Your messages and encryption keys stay on this device and survive the update.'
+      : unreachable
+        ? 'Your messages and encryption keys are safe on this device.'
+        : 'If it keeps happening, a firewall or proxy may be blocking WebSocket connections — but a server that has just restarted looks the same, so try again first.';
     return (
       <div className="app loading">
         <div className="connection-error">
-          <h2>{unreachable ? "Can't reach the server" : 'Live connection failed'}</h2>
-          <p>
-            {unreachable
-              ? "Púca couldn't reach the server. Check your internet connection — if that's fine, the server may be restarting."
-              : 'Your session is valid and the server is responding, but the live connection could not be opened. This usually clears by itself.'}
-          </p>
-          <p className="connection-error-hint">
-            {unreachable
-              ? 'Your messages and encryption keys are safe on this device.'
-              : 'If it keeps happening, a firewall or proxy may be blocking WebSocket connections.'}
-          </p>
+          <h2>{heading}</h2>
+          <p>{body}</p>
+          <p className="connection-error-hint">{hint}</p>
           <div className="error-buttons">
-            <button className="primary" onClick={handleRetry}>Try again</button>
+            {stale && staleUpdate ? (
+              <button className="primary" onClick={() => { void openDownloadPage(staleUpdate.download_url); }}>
+                Get the update
+              </button>
+            ) : (
+              <button className="primary" onClick={handleRetry}>Try again</button>
+            )}
+            {stale && <button onClick={handleRetry}>Try again anyway</button>}
             <button onClick={handleLogout}>Sign out</button>
           </div>
         </div>
