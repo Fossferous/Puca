@@ -159,7 +159,7 @@ dependencies {
     testImplementation "junit:junit:$junitVersion"
     // Real org.json on the unit-test classpath: the android.jar stubs throw,
     // and PushFrames/PushPrefs parse JSON. Overrides the stub for tests only.
-    testImplementation 'org.json:json:20240303'
+    testImplementation 'org.json:json:20260814'
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')
