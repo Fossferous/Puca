@@ -323,11 +323,36 @@ which had gone three migrations stale before anyone noticed. Do not delete
 `build.rs`, and do not add a `rerun-if-changed` for a path you have not tested —
 naming any path opts out of Cargo's "rerun on any change" default.
 
-**`cargo test` at the repo root covers ONLY the root package.** The root
-`Cargo.toml` declares no `[workspace]`, so nothing under `crates/` (the whole
-capture/input/encode/agent layer, `unsafe` included) and none of the
-`src-tauri` tests compile under this gate — measured once at 92 of 418 tests.
-When you touch a crate, run `cargo test` inside that crate's directory as well.
+**`cargo test` at the repo root still covers ONLY the root package — use
+`--workspace` for the rest.** The root `Cargo.toml` gained a `[workspace]`
+over `crates/*` on 2026-09-03, so the whole capture/input/encode/agent/service
+layer is reachable at last; before that it was unreachable from any root
+command and CI ran none of it (529 tests, measured that day). A bare
+`cargo test` deliberately still means "the backend", so nothing that ran it
+had to change:
+
+```bash
+cargo test                                   # the backend package only
+cargo test --workspace --exclude puca        # everything under crates/
+```
+
+CI runs that second command TWICE, on Linux and on Windows, and both are
+needed: about half those tests are `#[cfg(windows)]`, including the agent's
+path jail and the injection tag, so a Linux-only run goes green having never
+compiled them. Tests that need real hardware carry `#[ignore]` with a reason.
+
+`frontend/src-tauri` is NOT a workspace member — it is built by tauri-cli
+with its own layout — so its ~145 tests still need `cargo test` run inside
+`frontend/src-tauri`.
+
+**Build output moved with the workspace.** A member built by
+`--manifest-path` now writes to the ROOT `target/`, not `crates/<name>/target/`.
+The old directories still exist on any machine that built before the move and
+still hold the last binary produced there, so a hard-coded path would find a
+real, stale file and ship it. `frontend/scripts/build-agent.mjs` asks
+`cargo metadata` for the directory and refuses a binary older than the build
+that just ran; `frontend/src/tests/buildAgentTargetDir.test.ts` keeps it that
+way.
 
 **NEVER use `npx tsc --noEmit` here — it checks NOTHING and always exits 0.**
 The root `tsconfig.json` is solution-style (`"files": []` plus two

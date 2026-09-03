@@ -8,6 +8,10 @@ node_modules/
 
 # Build outputs
 target/
+# The crates are workspace members, so cargo reads the ROOT Cargo.lock and
+# ignores theirs. A per-crate lock left lying about looks authoritative and
+# is not: it can pin versions nothing will ever build with.
+crates/*/Cargo.lock
 dist/
 # scripts/check-no-rc.mjs stages a full and a lite build side by side here to
 # diff them; pure build output, regenerated on every run.

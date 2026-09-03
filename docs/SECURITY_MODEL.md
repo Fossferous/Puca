@@ -382,7 +382,7 @@ Reproduce them:
 ```bash
 rg -t rust --no-filename -o '#\[(tokio::)?test\]' | wc -l          # 794
 rg --files -g '*.test.ts' -g '*.test.tsx' frontend/src/ | wc -l    # 182
-grep -c '\[workspace\]' Cargo.toml                                 # 0  <-- the important one
+grep -c 'run: cargo test --workspace' .github/workflows/tests.yml   # 2  <-- the important one
 rg -t rust --no-filename -o '\bunsafe\b' src/ tests/ | wc -l       # 0   (backend)
 rg -t rust --no-filename -o '\bunsafe\b' crates/ frontend/src-tauri/src/ | wc -l   # 260
 git log --format='%an' | sort | uniq -c                            # 1 author (see the note at the top)
@@ -399,15 +399,22 @@ git log --format='%an' | sort | uniq -c                            # 1 author (s
 
 ### Read that table adversarially, because it deserves it
 
-**"782 tests" is only honest if you immediately say "of which CI runs 163."** The root
-`Cargo.toml` has no `[workspace]` section, and every crate carries its own `Cargo.lock`, so
-`cargo test` from the root compiles only the root package. **619 Rust tests are never built
-in CI.** They could have been broken for months and nothing would notice.
+**This used to be the worst line in the document, and it is worth reading what it said.**
+Until 2026-09-03: *"782 tests is only honest if you immediately say 'of which CI runs 163.'
+The root `Cargo.toml` has no `[workspace]` section... 619 Rust tests are never built in CI.
+And those 619 uncompiled tests and the 252 `unsafe` blocks are largely the same code — the
+screen-capture and input-injection layer, which is precisely the part you care about."*
 
-And those 619 uncompiled tests and the 252 `unsafe` blocks are **largely the same code** —
-the screen-capture and input-injection layer. Which is precisely the part you care about.
-"It's written in Rust" is not an answer to "what if the capture code has a bug", because
-that code is the `unsafe` part, and it's the part CI cannot reach.
+That is fixed. The root `Cargo.toml` is a workspace over `crates/*`, and CI runs
+`cargo test --workspace --exclude puca` on **two** runners — Linux and Windows — plus the
+desktop shell's own suite by manifest path. Two runners because roughly half of that code
+is `#[cfg(windows)]`: a Linux-only job would have gone green having never compiled the
+capture and injection layer, which is a worse lie than no job at all.
+
+Verify it rather than believing it — the commands below print the counts, and check 7 in
+the audit section shows CI passing `--workspace`. What has NOT changed: tests needing real
+hardware still carry `#[ignore]`, so a headless runner skips them, and no CI runner has a
+GPU or a physical display. Read `#[ignore]` as "a human has to run this".
 
 Note the direction of travel: at v0.8.41 this said 418 tests / 92 in CI / 112 `unsafe`.
 Every one of those numbers has roughly doubled, and **the untested-and-`unsafe` gap grew
@@ -510,8 +517,11 @@ rg -n -B2 -A6 'enrolment record verified under the account signing key' \n  fron
 # 6. Is media E2EE enforced? (expect: false — then go turn it on)
 rg -n 'requireMediaE2ee' frontend/src/api/rtc/manager.ts frontend/src/components/settingsStore.ts
 
-# 7. How many tests does CI actually run? (expect 0 → crates are excluded)
-grep -c '\[workspace\]' Cargo.toml
+# 7. Does CI actually run the crates' tests, or only the backend's?
+#    (expect 2 → a Linux job and a Windows job both pass --workspace)
+grep -c 'run: cargo test --workspace' .github/workflows/tests.yml
+#    ...and the desktop shell, which is excluded from the workspace on purpose:
+grep -c 'frontend/src-tauri/Cargo.toml' .github/workflows/tests.yml
 
 # 8. Who wrote this?
 git log --format='%an' | sort | uniq -c | sort -rn

@@ -35,6 +35,51 @@ const manifest = join(repo, 'crates', 'puca-agent', 'Cargo.toml');
 // rather than absent.
 const serviceManifest = join(repo, 'crates', 'puca-service', 'Cargo.toml');
 
+/**
+ * Build one crate and return the binary CARGO SAYS it produced.
+ *
+ * THE BUG THIS PREVENTS. These crates used to be standalone packages, each
+ * with its own `crates/<name>/target/`. They are workspace members now, so the
+ * output moved to the workspace root's `target/`. The old directories still
+ * EXIST on any machine that built before the move, holding the last binary
+ * produced there — so a hard-coded path would have found a real file, passed
+ * every existsSync and size check below, and staged a stale agent into the
+ * installer on every release from here on, silently and forever.
+ *
+ * So the path is not computed at all. `--message-format=json-render-diagnostics`
+ * makes cargo emit one `compiler-artifact` record per target, carrying the
+ * absolute path of the executable it linked; diagnostics still render to
+ * stderr, so the build reads exactly as before.
+ *
+ * A TIMESTAMP CHECK WOULD BE WRONG HERE, and was tried first: cargo does not
+ * rewrite a binary that is already up to date, so "older than this build" is
+ * the normal state of an incremental rebuild, not evidence of staleness. It
+ * failed the very next build.
+ */
+function cargoBuildExecutable(manifestPath, crateName, env) {
+    const out = execFileSync('cargo', [
+        'build', '--release', '--manifest-path', manifestPath,
+        '--message-format=json-render-diagnostics',
+    ], { stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 });
+
+    let exe = null;
+    for (const line of out.split('\n')) {
+        if (!line.startsWith('{')) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.reason === 'compiler-artifact' && msg.executable && msg.target?.name === crateName) {
+            exe = msg.executable;   // last one wins: the final link of this target
+        }
+    }
+    if (!exe) {
+        throw new Error(
+            `cargo reported no executable for ${crateName}. Either the target was renamed, ` +
+            `or the build produced nothing — do not fall back to a guessed path.`
+        );
+    }
+    return exe;
+}
+
 const triple = execFileSync('rustc', ['-vV'], { encoding: 'utf8' })
     .split('\n').find(l => l.startsWith('host:')).slice(5).trim();
 const ext = process.platform === 'win32' ? '.exe' : '';
@@ -191,12 +236,7 @@ function readFileVersion(file) {
 }
 
 console.log(`[build-agent] building puca-agent for ${triple}`);
-execFileSync('cargo', ['build', '--release', '--manifest-path', manifest], {
-    stdio: 'inherit',
-    env: cargoEnv,
-});
-
-const built = join(repo, 'crates', 'puca-agent', 'target', 'release', `puca-agent${ext}`);
+const built = cargoBuildExecutable(manifest, 'puca-agent', cargoEnv);
 if (!existsSync(built)) throw new Error(`agent binary missing after build: ${built}`);
 
 const outDir = join(here, '..', 'src-tauri', 'binaries');
@@ -206,11 +246,7 @@ copyFileSync(built, staged);
 
 if (process.platform === 'win32') {
     console.log(`[build-agent] building puca-service for ${triple}`);
-    execFileSync('cargo', ['build', '--release', '--manifest-path', serviceManifest], {
-        stdio: 'inherit',
-        env: cargoEnv,
-    });
-    const svc = join(repo, 'crates', 'puca-service', 'target', 'release', `puca-service${ext}`);
+    const svc = cargoBuildExecutable(serviceManifest, 'puca-service', cargoEnv);
     if (!existsSync(svc)) throw new Error(`service binary missing after build: ${svc}`);
     // Staged under the TRIPLE-SUFFIXED name, which is what `externalBin` in
     // tauri.conf.json resolves; a missing one fails the whole bundle step. Tauri

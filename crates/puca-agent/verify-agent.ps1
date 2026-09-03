@@ -10,7 +10,12 @@
 #   powershell -ExecutionPolicy Bypass -File crates/puca-agent/verify-agent.ps1
 $ErrorActionPreference = 'Stop'
 
-$agent = Join-Path $PSScriptRoot 'target\debug\puca-agent.exe'
+# The crate is a workspace member, so cargo writes to the WORKSPACE target
+# dir, not this folder's. Asked, not assumed: a leftover binary under the old
+# path would run all of the checks below against an older commit and report
+# every one of them passing.
+$wsRoot = Split-Path (cargo locate-project --workspace --message-format plain)
+$agent = Join-Path $wsRoot 'target\debug\puca-agent.exe'
 if (-not (Test-Path $agent)) { throw "build it first: cargo build -p puca-agent" }
 
 $pipeName = "puca-agent-verify-$PID"

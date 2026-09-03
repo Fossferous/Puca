@@ -22,8 +22,13 @@
 $ErrorActionPreference = 'Stop'
 
 # Prefer a release build if present; fall back to debug.
-$release = Join-Path $PSScriptRoot 'target\release\spike-s5.exe'
-$debug   = Join-Path $PSScriptRoot 'target\debug\spike-s5.exe'
+# Workspace member: cargo writes to the WORKSPACE target dir, not this
+# folder's. This script registers a SYSTEM scheduled task pointing at whatever
+# it finds, so a leftover binary under the old per-crate path would be run with
+# full privileges, from an unknown commit.
+$wsRoot  = Split-Path (cargo locate-project --workspace --message-format plain)
+$release = Join-Path $wsRoot 'target\release\spike-s5.exe'
+$debug   = Join-Path $wsRoot 'target\debug\spike-s5.exe'
 $exe = if (Test-Path $release) { $release } elseif (Test-Path $debug) { $debug } else {
     throw "build it first: cargo build -p puca-spike-s5  (looked for release then debug)"
 }

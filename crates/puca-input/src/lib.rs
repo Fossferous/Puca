@@ -9,9 +9,10 @@
 //! `AppHandle`. The physical-input kill switch stays in the app precisely
 //! because it emits Tauri events; everything here is plain OS calls.
 //!
-//! Consumed as a plain PATH dependency rather than via a Cargo workspace — a
-//! workspace would change the build layout the container deploy in CLAUDE.md
-//! depends on.
+//! Consumed as a plain PATH dependency by the desktop shell, which is itself
+//! excluded from the root workspace. This crate IS a workspace member, so its
+//! output lands in the repo-root target/ and `cargo test --workspace` reaches
+//! its tests — CI runs that on Linux and on Windows.
 
 pub mod desktop;
 
