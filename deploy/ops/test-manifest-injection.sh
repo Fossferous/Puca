@@ -15,7 +15,13 @@
 # execute the command, this harness proves nothing and says so.
 set -u
 
-SCRIPT="/c/Users/USER/Testing/puca-release/deploy/ops/dual-ship.sh"
+# Locate dual-ship.sh beside this harness, the way every other test in
+# this directory does. This was an absolute path into one developer's
+# home directory, which meant the harness ran nowhere else -- and it put
+# a real Windows username into a repository that is about to be made
+# public.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT="$HERE/dual-ship.sh"
 
 # Extract the interpreter picker, the path translator and both builders from
 # the REAL script (it exits early without hosts.conf, so it cannot be sourced
