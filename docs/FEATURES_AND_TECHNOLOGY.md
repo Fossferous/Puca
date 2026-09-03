@@ -79,7 +79,7 @@ A small module (`frontend/src/api/platform.ts`) detects which shell it's in and 
 
 **How it works.**
 - **Sending** (`message_handlers.rs → send_message`). The server checks you're a member of the channel, validates the content (non‑empty, ≤ 8000 bytes, no null bytes), enforces any **timeout** or **slowmode**, stores the (already‑encrypted) message, and **broadcasts** it over WebSocket to everyone else in that channel's "room". The realtime fan‑out primitive is `AppState::broadcast_to_room` (`state.rs`), which pushes to each connected member's private channel.
-- **History & search.** `get_messages` is paginated with a "load older" timestamp cursor; `search_messages` does a safe wildcard `LIKE`.
+- **History & search.** `get_messages` is paginated with a "load older" timestamp cursor. Search is **client-side**: the app fetches, decrypts and filters the conversation you have open, so results stop at that conversation. There is no server-side search and there cannot be one — message bodies are ciphertext to the server. A `LIKE` endpoint did exist and was deleted: because the stored envelope is JSON, substrings of the *wrapper* matched every row, so searching for `v` or `epoch` returned the whole channel as confident false positives.
 - **Edit / delete / pin.** Edits snapshot the previous text into an edit‑history table; deletes are allowed for the author or anyone with *Manage Messages*; pins require *Manage Messages*.
 - **Encryption is transparent to the server.** What's stored in a message's `content` is an **encrypted envelope** (see §15). The server relays those bytes verbatim; only the members' devices can read them.
 

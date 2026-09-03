@@ -9,6 +9,8 @@ import { showRecoveryCode } from '../api/recoveryPrompt';
 import { PrivacyDisclosure } from './PrivacyDisclosure';
 import { AccountExportCard } from './AccountExportCard';
 import { currentAppVersion } from '../api/appVersion';
+import { apiClient } from '../api/client';
+import { safeRepositoryUrl } from './privacyDisclosure.utils';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { type Settings, type KeyBinding, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
@@ -281,6 +283,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const [email, setEmail] = useState('');
     const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [appVersion, setAppVersion] = useState<string>('');
+    // The AGPL section 13 offer. GET /source is what the licence obliges this
+    // deployment to publish, and it already carried both fields — but nothing
+    // in the UI ever showed them, so the offer existed only as a JSON route a
+    // user had no way to discover. Defaults are the truthful answer for an
+    // unmodified build, so the row renders even if the fetch fails.
+    const [source, setSource] = useState<{ repository?: string; license?: string }>({});
     // Server-side privacy flags (PATCH /profile) — unlike the rest of this
     // modal these are NOT localStorage: a privacy control the server never
     // hears about protects nothing. null = not loaded yet.
@@ -512,6 +520,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
 
             // Fetch app version from Tauri
             currentAppVersion().then(setAppVersion).catch(() => setAppVersion('Unknown'));
+            apiClient.get<{ repository?: string; license?: string }>('/source')
+                .then(r => setSource(r || {}))
+                .catch(() => { /* the defaults below are still true */ });
         }
     }, [isOpen]);
 
@@ -2912,8 +2923,23 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <span>Version</span>
                                         <span className="app-version">{appVersion || 'Loading...'}</span>
                                     </div>
+                                    <div className="app-info-row">
+                                        <span>Licence</span>
+                                        <span className="app-version">{source.license || 'AGPL-3.0-or-later'}</span>
+                                    </div>
                                     <p className="settings-hint" style={{ marginTop: '8px' }}>
-                                        © 2025 Púca • Built with <HeartIcon title="love" />
+                                        Púca is free software. You are entitled to the complete source
+                                        of the version this server runs:{' '}
+                                        <a
+                                            href={safeRepositoryUrl(source.repository)}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                        >
+                                            get the source
+                                        </a>.
+                                    </p>
+                                    <p className="settings-hint" style={{ marginTop: '8px' }}>
+                                        © 2025–2026 Púca • Built with <HeartIcon title="love" />
                                     </p>
                                 </div>
                             </div>

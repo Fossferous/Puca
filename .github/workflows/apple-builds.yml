@@ -1,6 +1,6 @@
 # Apple builds — macOS desktop (Tauri) + iOS (Capacitor), on macOS runners.
 #
-# Trigger MANUALLY only: the repo is private and macOS runners bill minutes
+# Trigger MANUALLY only: macOS runners bill minutes at a premium
 # at 10x, so this never runs on ordinary pushes. Fire it either from the
 # Actions tab (workflow_dispatch) or by pushing a tag starting with "apple-":
 #
@@ -26,6 +26,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # PLACEHOLDER. Anything built here talks to a host that does not exist, so
+  # these artifacts are build-verification only and must never be handed to a
+  # user. Set a real host before any Apple build is actually distributed.
   VITE_API_URL: https://chat.example.com
 
 jobs:
@@ -65,7 +68,11 @@ jobs:
         working-directory: frontend
 
       - name: Package .app (tar preserves exec bits + symlinks)
-        run: tar -czf Puca-macos-universal.app.tar.gz Sovereign.app
+        # Glob, not a literal: the bundle is named from tauri.conf.json's
+        # productName, which stopped being "Sovereign" at the 0.9.0 rename.
+        # This step tar'd a name nothing produced any more, so the job failed
+        # at packaging after a full ~45-minute universal build.
+        run: tar -czf Puca-macos-universal.app.tar.gz *.app
         working-directory: frontend/src-tauri/target/universal-apple-darwin/release/bundle/macos
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
