@@ -114,6 +114,22 @@ jobs:
       # layout), so --workspace does not reach it. It holds the global-hotkey
       # engine, the DPAPI seal and the tray, and it is Windows-only code — so
       # it is tested here, by name, or not at all.
+      #
+      # ITS BUILD SCRIPT NEEDS THE SIDECARS FIRST. tauri-build resolves
+      # `externalBin` at build time and fails with "resource path
+      # binaries\puca-agent-...exe doesn't exist" on a clean checkout, because
+      # those are produced by build-agent.mjs and are gitignored. Building them
+      # here is not just a prerequisite: it runs build-agent.mjs on a machine
+      # that has never built this repo, which is exactly the case that would
+      # have caught it reading a stale binary from the pre-workspace path.
+      # The script imports only node builtins and its own crtStatic helper, so
+      # no npm install is needed.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Build the agent + service sidecars (build-agent.mjs, clean machine)
+        working-directory: frontend
+        run: node scripts/build-agent.mjs
       - name: Desktop shell tests (frontend/src-tauri)
         run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
 
