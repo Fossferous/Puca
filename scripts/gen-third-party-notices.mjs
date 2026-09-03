@@ -20,6 +20,13 @@
  *   - the DeepFilterNet wasm, which is a redistributed binary with its own
  *     notice file beside it (frontend/src/wasm/df/NOTICE.md).
  *
+ * This describes a DEFAULT-feature build. Optional features pull extra crates
+ * that are NOT listed here — env-libvpx-sys behind puca-encode's `vp8`, for
+ * example — so a distributor who enables one must regenerate. Switching the
+ * generator to --all-features is the tempting fix and the wrong one: it
+ * resolves every optional feature across the whole workspace and lists crates
+ * that no shipped artifact contains, which is a different kind of untrue.
+ *
  * Licences it cannot determine are listed as UNKNOWN and the script exits 1,
  * so a new dependency without licence metadata is noticed before release.
  *
@@ -27,7 +34,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -103,6 +110,18 @@ function addCargoFrom(meta, manifestDir, label) {
     if (!root) throw new Error(`no package for ${manifestDir} in this cargo metadata`);
     for (const id of reachable(meta, root.id)) {
         if (members.has(id)) continue;             // our own crates carry the project licence
+        // ...and `members` alone is not enough. It is scoped to the metadata
+        // being read, so when this runs for frontend/src-tauri (its own
+        // workspace) the crates/puca-* path dependencies are NOT members of
+        // THAT graph and were being listed as third-party dependencies of the
+        // desktop artifact, under AGPL-3.0-or-later. A notices file that lists
+        // the project's own code as somebody else's is wrong in the direction
+        // that makes every other row less trustworthy. Anything whose manifest
+        // lives inside this repository is first-party, whichever graph we are
+        // reading: third-party crates resolve into the cargo registry or git
+        // cache, always outside ROOT.
+        const pkg = byId.get(id);
+        if (pkg && !relative(ROOT, resolve(pkg.manifest_path)).startsWith('..')) continue;
         const p = byId.get(id);
         if (!p) continue;
         const key = `${p.name}@${p.version}`;
@@ -120,6 +139,15 @@ for (const d of readdirSync(join(ROOT, 'crates'))) {
 }
 const shellDir = join(ROOT, 'frontend', 'src-tauri');
 addCargoFrom(JSON.parse(run('cargo', ['metadata', '--format-version', '1'], shellDir)), shellDir, 'desktop');
+
+// ...and one for the DeepFilterNet wasm crate, which is excluded from the
+// workspace too. This was missing entirely, and it is the worst omission to
+// have: frontend/src/wasm/df/df_wasm_bg.wasm is a 13.8 MB binary committed to
+// this tree and shipped to EVERY web, desktop and mobile client, and it
+// statically links 149 crates none of which appeared here. Its own NOTICE.md
+// named only DeepFilterNet, which is the one dependency it links directly.
+const wasmDir = join(ROOT, 'frontend', 'df-wasm');
+addCargoFrom(JSON.parse(run('cargo', ['metadata', '--format-version', '1'], wasmDir)), wasmDir, 'wasm');
 
 // ---------------------------------------------------------------- render
 const sortKeys = (m) => [...m.keys()].sort((a, b) => a.localeCompare(b));
@@ -147,7 +175,7 @@ for (const k of sortKeys(npmPkgs)) {
     lines.push(`| ${k} | ${v.license} | ${v.repository.replace(/^git\+/, '').replace(/\.git$/, '')} |`);
 }
 lines.push('');
-lines.push(`## Rust crates in the server, desktop shell and native helpers (${cargoPkgs.size})`);
+lines.push(`## Rust crates in the server, desktop shell, native helpers and the wasm (${cargoPkgs.size})`);
 lines.push('');
 lines.push('| crate | licence | used by | origin |');
 lines.push('|---|---|---|---|');

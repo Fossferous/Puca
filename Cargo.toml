@@ -42,7 +42,7 @@ version = "0.8.21"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "Self-hosted, end-to-end-encrypted chat, voice, and screen-share server"
-repository = "https://github.com/Fossferous/puca"
+repository = "https://github.com/Fossferous/Puca"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws", "multipart"] }

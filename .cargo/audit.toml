@@ -11,4 +11,27 @@ ignore = [
     # reached. No fixed `rsa` release exists upstream. Re-evaluate immediately if we
     # ever adopt RS256/RS384/RS512 tokens.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0258 - "h2 unbounded empty DATA frames" (DoS), h2 0.3.27,
+    # fixed in >= 0.4.16. Present in BOTH lockfiles.
+    #
+    # Reachability, checked rather than assumed: `cargo tree -i h2` shows h2
+    # entering ONLY through reqwest 0.11 -> hyper 0.14. It is not in the server
+    # path at all - axum serves HTTP/1.1 behind the reverse proxy and no second
+    # h2 appears in the graph - so this is a CLIENT-side advisory, and the
+    # hostile party would have to be a server we deliberately connect TO.
+    #
+    # There are exactly two such peers, both fixed endpoints and neither
+    # user-supplied: Google (src/wake/fcm.rs - oauth2.googleapis.com and
+    # fcm.googleapis.com) and the operator's own LiveKit SFU (src/sfu.rs).
+    # Púca has no link-preview fetcher and no route that fetches an
+    # attacker-chosen URL, so no third party can position itself as the peer;
+    # doing so would mean breaking TLS to those two hosts.
+    #
+    # THE REAL FIX is reqwest 0.12, which uses hyper 1 + h2 0.4 and would also
+    # align with the hyper axum already pulls, shrinking the tree. That is a
+    # dependency upgrade with its own risk and belongs in its own change, not
+    # bundled into a documentation pass. Re-evaluate the moment the backend
+    # gains any outbound request to a host a user can influence.
+    "RUSTSEC-2026-0258",
 ]

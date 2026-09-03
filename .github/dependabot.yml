@@ -1,0 +1,73 @@
+# Dependency updates.
+#
+# WHY THIS EXISTS. Púca ships end-to-end encryption and a remote-desktop agent,
+# so a vulnerable transitive dependency is not cosmetic. Nothing in this
+# repository watched for one: no scanner ran in CI and no bot opened a PR, so an
+# advisory against a crate in Cargo.lock or a package in package-lock.json could
+# sit unnoticed indefinitely.
+#
+# GROUPED DELIBERATELY. Ungrouped, four ecosystems across five manifests produce
+# a stream of single-dependency PRs that a one-person project stops reading —
+# and a bot nobody reads is worse than no bot, because it trains you to ignore
+# exactly the PR that matters. Security updates are NOT grouped: Dependabot
+# always raises those separately, so they arrive on their own and stand out.
+version: 2
+updates:
+  # --- Rust: the backend plus every crate under crates/ (one workspace) ------
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # The desktop shell is EXCLUDED from the root workspace (see Cargo.toml
+  # `exclude`), so the entry above does not reach it and it needs its own.
+  - package-ecosystem: cargo
+    directory: "/frontend/src-tauri"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      tauri-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # So is the DeepFilterNet wasm crate — which produces a binary committed to
+  # the tree and shipped to every web and desktop client.
+  - package-ecosystem: cargo
+    directory: "/frontend/df-wasm"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+
+  # --- The web / desktop / mobile client ------------------------------------
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # --- The Android app ------------------------------------------------------
+  - package-ecosystem: gradle
+    directory: "/frontend/android"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+
+  # --- The workflows themselves ---------------------------------------------
+  # Every action in .github/workflows is pinned to a commit SHA, which is the
+  # right call and also means a pinned action never updates on its own. This is
+  # what stops those pins from silently rotting.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

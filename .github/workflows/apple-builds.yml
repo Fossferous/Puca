@@ -1,10 +1,10 @@
 # Apple builds — macOS desktop (Tauri) + iOS (Capacitor), on macOS runners.
 #
-# Trigger MANUALLY only: macOS runners bill minutes at a premium
+# Trigger MANUALLY only: macOS runners bill minutes
 # at 10x, so this never runs on ordinary pushes. Fire it either from the
 # Actions tab (workflow_dispatch) or by pushing a tag starting with "apple-":
 #
-#   git tag apple-v0.5.49 && git push origin apple-v0.5.49
+#   git tag apple-v0.9.1 && git push origin apple-v0.9.1
 #
 # Outputs (Actions run page → Artifacts):
 #   - Puca-macOS-dmg    : universal (Intel+Apple Silicon) .dmg, ad-hoc
@@ -14,6 +14,9 @@
 #                              a device until re-signed with an Apple Developer
 #                              certificate (TestFlight/sideload comes later).
 name: Apple builds
+
+permissions:
+  contents: read
 
 on:
   workflow_dispatch:

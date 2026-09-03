@@ -1,0 +1,55 @@
+Púca
+Copyright (C) 2025-2026 Fossferous and contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+The complete licence text is in LICENSE.
+
+
+WHY THIS FILE EXISTS
+--------------------
+
+No source file in this repository carries a per-file copyright header. That is
+a deliberate choice for a single-author codebase with a contributor agreement
+(CLA.md) — headers on several hundred files add noise to every diff and drift
+out of date — but it left the repository with the copyright stated nowhere at
+all, which is a different problem. This file is the statement.
+
+
+SECTION 13, AND WHAT YOU ARE OWED
+---------------------------------
+
+The AGPL differs from the GPL in one way that matters to anyone using a Púca
+server they do not run: if you interact with this software over a network, you
+are entitled to the complete corresponding source of the version that server is
+running.
+
+Every Púca server answers `GET /source` with the repository and licence of its
+own build, and the app surfaces both under Settings > App Info. If you operate a
+modified Púca, set SOURCE_URL to point at YOUR source, not at this repository —
+otherwise you are pointing your users at code you did not run and the offer is
+not satisfied.
+
+
+THIRD-PARTY SOFTWARE
+--------------------
+
+Púca links and redistributes third-party components under their own licences.
+THIRD_PARTY_NOTICES.md lists them with those licences.
+
+
+TRADEMARK
+---------
+
+The licence above covers the code. It does not grant rights in the name "Púca"
+or the project's logo; see TRADEMARK.md.

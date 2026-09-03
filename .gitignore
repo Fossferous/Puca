@@ -265,6 +265,11 @@ docs/DEVICES_HANDOFF.md
 docs/TESTING_AND_LAUNCH.md
 docs/VPS_MIGRATION.md
 docs/SCREENSHARE_REDESIGN_PLAN.md
+# A task prompt ("Level 3: Playwright E2E Testing Setup") telling a reader to
+# run `npm init playwright` and paste in a config — an instruction to one agent
+# at one moment, not documentation of anything that now exists. Nothing links
+# to it and the harnesses it describes were never built this way.
+docs/E2E_TESTING_GUIDE.md
 
 # screenshots and evidence from on-demand e2e harnesses (csp-smoke-desktop etc.)
 frontend/e2e-artifacts/

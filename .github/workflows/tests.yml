@@ -4,6 +4,13 @@ name: tests
 # - frontend: typecheck + build + vitest (offline, always runs)
 # - backend:  cargo build + start server (which applies migrations) + cargo test
 #             + the feature-flows API regression, all against a Postgres service
+# Least privilege: these jobs only ever read the tree. Without this block the
+# workflow inherits the repository default, which can be read/write on every
+# scope — an unnecessary token to hand to any step, and to every dependency
+# those steps install.
+permissions:
+  contents: read
+
 on:
   push:
     # main is the trunk. It was [feature/e2ee-security-and-chat, main] while all
@@ -72,6 +79,35 @@ jobs:
         run: bash deploy/ops/backup-keys.test.sh
       - name: dual-ship.sh / check-versions.sh refusal gates
         run: bash deploy/ops/ship-gates.test.sh
+
+  # Known-vulnerable Rust dependencies. Nothing watched for these: `npm audit`
+  # covered the JS side, but an advisory against a crate in either Cargo.lock
+  # could sit unnoticed indefinitely — in a product that ships E2EE and a
+  # remote-desktop agent.
+  #
+  # THIS ONE BLOCKS, unlike the npm step above, and the asymmetry is deliberate.
+  # npm's advisory stream is noisy enough that a blocking gate would be routinely
+  # overridden, which teaches you to ignore it. RustSec is quiet, and this repo
+  # already has the right escape hatch: .cargo/audit.toml, where an advisory that
+  # has been read and judged not to apply is listed WITH ITS REASONING (see the
+  # RUSTSEC-2023-0071 entry). So a red run here has exactly two honest answers —
+  # update the dependency, or write down why it does not apply.
+  #
+  # cwd MUST stay the repo root: cargo-audit only reads .cargo/audit.toml
+  # relative to the working directory, so cd-ing into a sub-crate would silently
+  # drop the allowlist and red-light an already-accepted advisory. Hence -f.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Backend + crates/* (the shared workspace lock)
+        run: cargo audit -f Cargo.lock
+      - name: Desktop shell (excluded from the workspace, so its own lock)
+        run: cargo audit -f frontend/src-tauri/Cargo.lock
 
   # EVERYTHING UNDER crates/ — the capture, encode, injection, agent and
   # service layer, `unsafe` included. None of it ran in CI until 2026-09-03:
