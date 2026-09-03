@@ -1,8 +1,12 @@
 # Local development database.
 #
-# NOT a production deployment. It exists so `cargo run` has a Postgres to talk
-# to on a developer's machine; production runs Postgres on the host, configured
-# by deploy/ (see docs/PRODUCTION_DEPLOYMENT.md).
+# NOT a production deployment, and not the way to self-host. It exists so
+# `cargo run` has a Postgres to talk to on a developer's machine.
+#
+# To RUN a server, see deploy/README.md — production runs Postgres, Caddy and
+# coturn on the host, because coturn needs a wide UDP range and the SFU needs
+# host networking, neither of which a compose file makes simpler. (This comment
+# used to point at docs/PRODUCTION_DEPLOYMENT.md, which no longer exists.)
 services:
   postgres:
     image: postgres:16-alpine

@@ -1600,6 +1600,17 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         />
                                     </div>
 
+                                    {/* WINDOWS DESKTOP ONLY. This toggles a bar that
+                                        Windows itself draws, so on a phone or in a
+                                        browser it is a control over something that
+                                        does not exist — and it sat in Privacy &
+                                        Safety, where a phone user is most likely to
+                                        be reading carefully. The "Screen control"
+                                        group below takes the other approach and says
+                                        "(desktop app only)" inline, which suits a
+                                        setting that still MEANS something off the
+                                        desktop; this one does not. */}
+                                    {isTauri() && (
                                     <div className="settings-option">
                                         <div className="option-info">
                                             <label>Hide Windows' "sharing your screen" bar</label>
@@ -1617,6 +1628,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             onChange={(e) => updateSetting('hideOsCaptureBar', e.target.checked)}
                                         />
                                     </div>
+                                    )}
                                 </div>
 
                                 <h3>Screen control</h3>

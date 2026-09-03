@@ -146,9 +146,15 @@ call, never a plaintext one ([`sfuManager.ts:192`](../frontend/src/api/rtc/sfuMa
 
 ### The gap
 
-**Enforcement is off by default** — `requireMediaE2ee = false`
-([`manager.ts:204`](../frontend/src/api/rtc/manager.ts#L204),
-[`settingsStore.ts:107`](../frontend/src/components/settingsStore.ts#L107)).
+**Enforcement is ON by default** since 0.8.130 — `requireMediaE2ee = true`
+([`settingsStore.ts:120`](../frontend/src/components/settingsStore.ts#L120)), and a
+one-time migration armed it for existing installs
+([`settingsStore.ts` `migrateRequireMediaE2ee`](../frontend/src/components/settingsStore.ts)).
+Read that migration before quoting the default at anyone: it deliberately does NOT arm
+the setting on an engine that cannot satisfy it (Firefox, Safari, iOS, the WebKit desktop
+shells), because doing so would have taken working calls away from those users for a
+setting they never touched. So on those engines an upgraded profile keeps whatever it
+had, while a fresh install gets the fail-closed default and is told before it joins.
 
 The capability is advertised as a line in the SDP, which the server relays. If someone who
 can terminate TLS *substitutes* that line, the tag check catches it and the call stays

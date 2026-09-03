@@ -13,8 +13,14 @@
 # or you build the backend and start the unit (a fresh install) — see
 # deploy/README.md for what comes after this script.
 #
-#   ./provision.sh --public-ip 203.0.113.10 --uplink-mbps 1000
-#   ./provision.sh --public-ip 203.0.113.10 --uplink-mbps 1000 --dry-run
+#   ./provision.sh --public-ip 203.0.113.10 --realm chat.example.net --uplink-mbps 1000
+#   ./provision.sh --public-ip 203.0.113.10 --realm chat.example.net --dry-run
+#
+# --realm IS YOUR DOMAIN, and it is required. It is not decoration: it becomes
+# the coturn realm, APP_URL, CORS_ORIGINS and the TURN_SERVER URLs — the whole
+# deployment's identity. It used to default to `example.com`, which produced a
+# host that provisioned cleanly, booted, passed its health check and was
+# unreachable from every client, with nothing in any log saying why.
 #
 # Safe to re-run: every generated file is backed up to <file>.bak-<timestamp>
 # before it is replaced.
@@ -30,7 +36,7 @@ set -euo pipefail
 
 PUBLIC_IP=""
 UPLINK_MBPS=1000
-REALM="example.com"
+REALM=""
 DRY_RUN=0
 
 while [ $# -gt 0 ]; do
@@ -43,7 +49,20 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-[ -n "$PUBLIC_IP" ] || { echo "usage: provision.sh --public-ip <ip> [--uplink-mbps N] [--dry-run]" >&2; exit 2; }
+usage() { echo "usage: provision.sh --public-ip <ip> --realm <your domain> [--uplink-mbps N] [--dry-run]" >&2; exit 2; }
+[ -n "$PUBLIC_IP" ] || usage
+[ -n "$REALM" ] || { echo "REFUSING: --realm is required — it is your domain, and it becomes the coturn realm, APP_URL, CORS_ORIGINS and the TURN URLs." >&2; usage; }
+# A placeholder here is the quietest way to get a dead deployment: everything
+# provisions, the service starts, the health check passes, and no client can
+# reach it. Refuse the documentation's own examples by name.
+case "$REALM" in
+	example.com|example.org|example.net|*.example.com|*.example.org|*.example.net|localhost|*.local|"<"*)
+		echo "REFUSING: --realm '$REALM' is a placeholder, not a domain you own." >&2
+		echo "  It would be written into coturn's realm, APP_URL, CORS_ORIGINS and the TURN URLs," >&2
+		echo "  and the result provisions and boots perfectly while being unreachable from every client." >&2
+		echo "  Pass the domain your DNS actually points at this host, e.g. --realm chat.yourdomain.net" >&2
+		exit 2 ;;
+esac
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 
 # --- Guard: never run this against the existing production box. -------------

@@ -356,6 +356,26 @@ check "check-versions.sh does the same"                      "$([ $rc -ne 0 ] &&
 mv "$TMP/deploy/ops/hosts.conf.away" "$TMP/deploy/ops/hosts.conf"
 
 echo
+echo "--- a token nobody substituted must not reach a visitor either ---"
+# The other way this page lies: an unsubstituted __TOKEN__ renders literally,
+# so a button points at https://__APP_HOST__ and simply fails. Added when the
+# page gained an "Open in your browser" link for iPhone/Mac visitors, whose
+# href is exactly such a token.
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+echo '<a href="https://__SOME_UNKNOWN_HOST__">Open in your browser</a>' >> "$TMP/deploy/download-site/index.html"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "REFUSES a page with an unsubstituted token"          "$([ $rc -ne 0 ] && [ "$(has "$out" 'unsubstituted token')" = 1 ] && echo 1 || echo 0)" "$out"
+check "naming the token it found"                           "$(has "$out" '__SOME_UNKNOWN_HOST__')" "$out"
+check "and refuses BEFORE touching any host"                "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+
+# POSITIVE CONTROL: the known tokens ARE substituted, so a normal page ships.
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+rm -f "$TMP/uploaded/index.html"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "a page whose tokens are all known is NOT refused"    "$([ "$(has "$out" 'unsubstituted token')" = 0 ] && echo 1 || echo 0)" "$out"
+check "and nothing __LIKE_THIS__ survives into it"          "$([ -f "$TMP/uploaded/index.html" ] && ! grep -qE '__[A-Z_]+__' "$TMP/uploaded/index.html" && echo 1 || echo 0)" "$(cat "$TMP/uploaded/index.html" 2>/dev/null | head -5)"
+
+echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

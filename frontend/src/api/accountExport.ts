@@ -285,7 +285,18 @@ export async function saveExportFile(doc: Record<string, unknown>, username: str
             }
         } catch (e) {
             console.warn('[export] could not write the export to this device:', e);
-            throw new Error('Could not save the export to this device. Free some space and try again, or run the export from the desktop app.');
+            // DO NOT blame disk space alone. Writing into the public Documents
+            // folder needs no grant on Android 11+ (scoped storage), but on
+            // Android 10 and older it needs storage permission — and that is
+            // the likeliest cause of a failure here, on exactly the devices
+            // least likely to be short of space. Naming the wrong cause sends
+            // someone to delete photos over a permission dialog.
+            throw new Error(
+                'Could not save the export to this device. On Android 10 and older, Púca needs '
+                + 'permission to write to Documents — allow storage access in Android Settings → '
+                + 'Apps → Púca → Permissions, then try again. Otherwise check you have free space, '
+                + 'or run the export from the desktop app or a browser.'
+            );
         }
     }
 

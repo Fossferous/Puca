@@ -73,8 +73,8 @@ pointed at a live box by accident, and it is re-runnable.
 ```bash
 git clone <this repository> && cd puca
 bash deploy/migrate/render-turn-conf.test.sh                        # first, anywhere
-sudo deploy/migrate/provision.sh --public-ip <this host's public IP> --uplink-mbps <your uplink> --realm example.com --dry-run
-sudo deploy/migrate/provision.sh --public-ip <this host's public IP> --uplink-mbps <your uplink> --realm example.com
+sudo deploy/migrate/provision.sh --public-ip <this host's public IP> --uplink-mbps <your uplink> --realm <your domain> --dry-run
+sudo deploy/migrate/provision.sh --public-ip <this host's public IP> --uplink-mbps <your uplink> --realm <your domain>
 sudo deploy/migrate/verify.sh                                        # the silent-failure checks
 ```
 

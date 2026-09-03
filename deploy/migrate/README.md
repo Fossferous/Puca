@@ -73,8 +73,8 @@ If it says INVALID, suspect your own uplink before the VPS.
 
 ```bash
 bash deploy/migrate/render-turn-conf.test.sh          # first, on any machine
-sudo ./provision.sh --public-ip <ip> --uplink-mbps 1000 --dry-run
-sudo ./provision.sh --public-ip <ip> --uplink-mbps 1000
+sudo ./provision.sh --public-ip <ip> --realm <your domain> --uplink-mbps 1000 --dry-run
+sudo ./provision.sh --public-ip <ip> --realm <your domain> --uplink-mbps 1000
 sudo ./verify.sh
 ```
 

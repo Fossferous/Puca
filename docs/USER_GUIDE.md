@@ -40,19 +40,19 @@ server has email set up) gets you back in but does not recover old messages.
 ## Servers
 
 ### Create a Server
-1. Click **➕** at bottom of server list
+1. Click **Create a Server** at the bottom of the server rail (the strip of round icons on the left)
 2. Choose "Create Server"
 3. Enter server name
 4. Click **Create**
 
 ### Join a Server
-1. Click **➕** at bottom of server list
-2. Choose "Join Server"
+1. Click **Create a Server** at the bottom of the server rail (the strip of round icons on the left)
+2. Choose **Join a Server**
 3. Enter invite code
 4. Click **Join**
 
 ### Server Settings
-1. Click **⚙️** in server header
+1. Open the server menu from the server name at the top of the channel list, then **Server Settings**
 2. Change name, upload icon
 3. Click **Save**
 
@@ -82,7 +82,7 @@ server has email set up) gets you back in but does not recover old messages.
 - Click ✏️ to edit, 🗑️ to delete
 
 ### Attach Files
-1. Click **📎** next to input
+1. Click **Attach file** beside the message box
 2. Select file
 3. Send message
 
@@ -97,7 +97,7 @@ server has email set up) gets you back in but does not recover old messages.
 
 ### Add a Reaction
 1. Hover over any message
-2. Click **➕** button
+2. Click **Create Text Channel** (or **Create Voice Channel**)
 3. Select emoji from picker
 
 ### React with Custom Emojis
@@ -141,7 +141,7 @@ is in the foreground, which is why it is set up the moment you join.
 
 ### Start Sharing
 1. Join a voice channel
-2. Click **🖥️** button
+2. Use the **screen-share** control in the voice panel
 3. Select screen/window/tab
 4. Check **"Share audio"** for game/app sound
 
@@ -167,7 +167,7 @@ When others share:
 2. See their role badges in popup
 
 ### Manage Roles (Owner/Admin)
-1. Click **🛡️** in server header
+1. Open the server menu from the server name, then the moderation section
 2. Click **"+ Create Role"**
 3. Set name, color, permissions
 4. Click **Save**
@@ -202,7 +202,7 @@ When others share:
 ## Friends
 
 ### Open Friends Panel
-- Click **👥** in server header
+- Open **Direct Messages** from the server rail, where friends live
 
 ### Add Friend
 1. Click on user in member list
@@ -219,7 +219,7 @@ When others share:
 ## Profile & Settings
 
 ### Upload Avatar
-1. Click **👤** in server header
+1. Open **Settings → Profile**
 2. Click **Choose file**
 3. Select image
 4. Click **Upload Avatar**
@@ -234,7 +234,7 @@ Your avatar appears in:
 ## Custom Emojis
 
 ### Upload Emoji (Owner)
-1. Click **😎** in server header
+1. Open **Server Settings → Emoji** (server owner only)
 2. Click **Choose file**
 3. Enter emoji name (e.g., `pepehype`)
 4. Click **Upload**
@@ -248,7 +248,7 @@ Your avatar appears in:
 ## Invites
 
 ### Create Invite
-1. Click **📩** in server header
+1. Click **Invite people to this server** in the server header
 2. Set expiry (optional)
 3. Set max uses (optional)
 4. Click **Create**
