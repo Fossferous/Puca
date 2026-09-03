@@ -129,6 +129,40 @@ out="$(run "$TMP/dump.sql.gz")"
 check "names http://127.0.0.1:8080/ rather than :3000" "$(has "$out" 'http://127.0.0.1:8080/')" "$out"
 
 echo
+echo "--- a CORRUPT archive is refused before anything is destroyed ---"
+# Decrypting proves the container opened; it does not prove the bytes survived.
+# A truncated dump used to get all the way past the role pre-flight and fail
+# AFTER dropdb — the one moment the host has neither the old data nor the new.
+reset; echo sandbox > "$STATE/roles"
+dump_with_owner sandbox
+# Truncate mid-stream: still gzip-shaped, CRC now wrong.
+head -c 20 "$TMP/dump.sql.gz" > "$TMP/truncated.sql.gz"
+out="$(run "$TMP/truncated.sql.gz")"; rc=$?
+check "refuses a truncated dump"                     "$([ $rc -ne 0 ] && echo 1 || echo 0)" "$out"
+check "says it is corrupt, and names the file"       "$(has "$out" 'corrupt or truncated')" "$out"
+check "promises nothing was changed"                 "$(has "$out" 'Nothing has been changed on this host')" "$out"
+check "and indeed ran NO dropdb"                     "$([ "$(has "$(calls)" 'dropdb')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+check "and did NOT stop the service"                 "$([ "$(has "$(calls)" 'systemctl stop')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+
+echo
+echo "--- a corrupt UPLOADS archive is refused the same way ---"
+reset; echo sandbox > "$STATE/roles"; dump_with_owner sandbox
+head -c 20 "$TMP/uploads.tar.gz" > "$TMP/truncated.tar.gz"
+out="$(run "$TMP/dump.sql.gz" "$TMP/truncated.tar.gz")"; rc=$?
+check "refuses a truncated uploads archive"          "$([ $rc -ne 0 ] && echo 1 || echo 0)" "$out"
+check "offers restoring the database alone"          "$(has "$out" 'without the uploads argument')" "$out"
+check "ran NO dropdb for that either"                "$([ "$(has "$(calls)" 'dropdb')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+
+# POSITIVE CONTROL: intact archives still go all the way through, or a script
+# that refused everything would pass every assertion above.
+echo
+echo "--- POSITIVE CONTROL: intact archives still restore ---"
+reset; echo sandbox > "$STATE/roles"; dump_with_owner sandbox
+out="$(run "$TMP/dump.sql.gz" "$TMP/uploads.tar.gz")"; rc=$?
+check "intact archives are accepted"                 "$([ $rc -eq 0 ] && echo 1 || echo 0)" "$out"
+check "and the drop/recreate did happen"             "$([ "$(has "$(calls)" 'dropdb --if-exists sandbox')" = 1 ] && echo 1 || echo 0)" "$(calls)"
+
+echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

@@ -91,7 +91,7 @@ DB_FILE="$DIR/$DB_NAME-db-$TS.sql.gz"
 if sudo -u postgres pg_dump "$DB_NAME" | gzip > "$DB_FILE"; then
 	log "db ok -> $(basename "$DB_FILE") ($(du -h "$DB_FILE" | cut -f1))"
 else
-	log "ERROR db dump failed"; rm -f "$DB_FILE"; DB_FILE=""
+	log "ERROR db dump failed"; rm -f "$DB_FILE"; DB_FILE=""; DB_DUMP_FAILED=1
 fi
 
 # --- 2. Uploaded attachment ciphertext ---
@@ -218,6 +218,21 @@ else
 fi
 
 # --- 5. Rotation (every artifact type; also sweeps legacy puca-*.sql.gz) ---
+#
+# NOT WHEN TONIGHT'S DUMP FAILED. Rotation deletes by age, so a run that
+# produced no new database backup and rotated anyway spends one day of the
+# retention window for nothing. Repeat that for KEEP_DAYS nights — a full disk,
+# a Postgres that will not start, a permissions change — and the last good
+# backup is deleted by this script, on the night you most need it, having
+# reported success every time.
+#
+# So: a failed dump skips rotation entirely (the uploads and config archives
+# keep their own copies too — they are worth more than the disk they cost when
+# the database side is already broken) and makes the whole run exit non-zero.
+# Cron mails a non-zero exit; it does not read logs.
+if [ "${DB_DUMP_FAILED:-0}" = "1" ]; then
+	log "ERROR skipping rotation: tonight produced no database backup, and rotating would spend a day of the $KEEP_DAYS-day window for nothing"
+else
 find "$DIR" -name "$DB_NAME-*.sql.gz"         -mtime +"$KEEP_DAYS" -delete
 find "$DIR" -name "$DB_NAME-uploads-*.tar.gz" -mtime +"$KEEP_DAYS" -delete
 find "$DIR" -name "$DB_NAME-config-*.tar.gz"  -mtime +"$KEEP_DAYS" -delete
@@ -229,5 +244,19 @@ if [ "$MAX_LOCAL_UPLOAD_ARCHIVES" -gt 0 ] 2>/dev/null; then
 	done
 fi
 
+fi
+
 # --- 6. The trend line: how much the backups hold, how much room is left ---
 log "backups dir $(du -sh "$DIR" 2>/dev/null | cut -f1), free on that filesystem $(human "$(df -B1 --output=avail "$DIR" 2>/dev/null | tail -1 | tr -d ' ')")"
+
+# --- 7. Tell the scheduler ------------------------------------------------
+# The database dump is the artifact a restore cannot do without. Everything
+# else here is recoverable or re-derivable; that one is not. Exit non-zero so
+# `cron` mails the operator, `systemd` marks the unit failed, and any external
+# monitor sees it. Logging an ERROR and exiting 0 is how a backup stops
+# existing without anybody finding out.
+if [ "${DB_DUMP_FAILED:-0}" = "1" ]; then
+	log "FAILED no database backup was produced tonight"
+	exit 1
+fi
+log "ok"

@@ -97,6 +97,21 @@ if [ -n "$missing_roles" ]; then
   Create them (CREATE ROLE <name> LOGIN ...) before restoring, or the restore aborts part-way with the database already dropped."
 fi
 
+# --- 1b. The archives must be READABLE before anything is destroyed ----------
+# Decrypting proved we could open the container; it did not prove the contents
+# survived the trip. A truncated or corrupt gzip gets that far and then fails
+# AFTER the drop, which is the one moment this host has neither the old data
+# nor the new. `gzip -t` and `tar -tzf` read the whole stream and check the
+# CRC, which is exactly the pre-flight restore-drill.sh already runs.
+if ! gzip -t "$DB_GZ" 2>/dev/null; then
+	fatal "the database dump is corrupt or truncated (gzip -t failed on $(basename "$DB_GZ_IN")).
+  Nothing has been changed on this host. Fetch the artifact again, or restore from an older one."
+fi
+if [ -n "$UP_TGZ" ] && ! tar -tzf "$UP_TGZ" >/dev/null 2>&1; then
+	fatal "the uploads archive is corrupt or truncated (tar -tzf failed on $(basename "$UP_TGZ_IN")).
+  Nothing has been changed on this host. Re-fetch it, or re-run without the uploads argument to restore the database alone."
+fi
+
 echo "About to REPLACE the live '$DB_NAME' database on this host (owner: $DB_OWNER)"
 [ -n "$UP_TGZ" ] && echo "  and overwrite $UPLOADS from $(basename "$UP_TGZ_IN")"
 read -r -p "Type 'yes' to continue: " ok

@@ -70,6 +70,7 @@ import {
     type MemberWithRoles,
     type ChannelUnreadCount,
 } from '../api/servers';
+import { rewrapForMembershipChange } from '../api/channelKeys';
 import {
     getDMMessages,
     listDMConversations,
@@ -2565,6 +2566,39 @@ export function Chat({ onLogout }: ChatProps) {
         wsClient.on('MemberJoined', handleMemberJoined);
         return () => wsClient.off('MemberJoined', handleMemberJoined);
     }, [currentUserId, servers]);
+
+    // Give the new member a key they can write under.
+    //
+    // Channel keys are wrapped per member, so whoever just joined holds
+    // nothing and their first message would be refused until an existing
+    // member happened to write something. Every member who already holds the
+    // key runs this; api/channelKeys.ts's rewrapForMembershipChange staggers
+    // them and collapses to a single rotation.
+    //
+    // Separate from the notification effect above ON PURPOSE: that one is
+    // muted for quiet servers and skips blocked users, and neither of those
+    // should decide whether somebody can speak.
+    useEffect(() => {
+        const rewrapForJoiner = async (msg: ServerMessage) => {
+            const p = msg.payload as { server_id: string; user: { id: number } };
+            if (p.user.id === currentUserId) return;          // we are the joiner
+            if (!servers.some(s => s.id === p.server_id)) return;  // not our server
+            try {
+                // The loaded list covers the server being VIEWED; any other
+                // needs a fetch, which is one request on a rare event.
+                const list = currentServer?.id === p.server_id
+                    ? channels
+                    : await listChannels(p.server_id);
+                await rewrapForMembershipChange(
+                    list.filter(c => c.channel_type === 0).map(c => c.id)
+                );
+            } catch (e) {
+                console.debug('[e2ee] could not re-wrap keys for the new member:', e);
+            }
+        };
+        wsClient.on('MemberJoined', rewrapForJoiner);
+        return () => wsClient.off('MemberJoined', rewrapForJoiner);
+    }, [currentUserId, servers, currentServer?.id, channels]);
 
     // Clear the taskbar/tray unread badge the moment the user comes back —
     // matching the "focused messages don't notify" philosophy, the badge is a

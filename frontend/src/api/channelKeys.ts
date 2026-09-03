@@ -516,6 +516,55 @@ export async function ensureChannelKey(
 }
 
 /**
+ * Someone joined: give them a key they can write under.
+ *
+ * THE BUG THIS FIXES. A group key is wrapped per member, so a member who
+ * joined after the current epoch was minted holds nothing. `ensureChannelKey`
+ * returns null for them and the composer refuses with "this channel's
+ * encryption key isn't available yet — try again in a moment". But nothing
+ * made that moment arrive: the rotate-and-rewrap path only runs inside a
+ * SEND, an EDIT, a task write or a voice join, so the newcomer stayed mute
+ * until some existing member happened to write something. Invite a friend
+ * while you are asleep and their first message fails, with copy promising a
+ * recovery that nothing was going to deliver.
+ *
+ * So an existing holder does it for them, on the `MemberJoined` event. This
+ * calls the ordinary path: `ensureChannelKey` sees the member generation has
+ * moved, mints the next epoch and wraps it for every current member —
+ * including whoever just arrived. History stays readable because only a
+ * holder of the current key can rotate, which is unchanged.
+ *
+ * EVERY member runs this, so it is written to collapse to one rotation:
+ *  - a short random delay staggers the clients, and
+ *  - `ensureChannelKey` re-reads state first, so once the first client has
+ *    rotated the rest see `epochGeneration === currentGeneration`, return the
+ *    key they now hold, and publish nothing.
+ * The 409 path in `mintEpoch` is the backstop for a genuine tie.
+ *
+ * Best-effort by construction: a channel this member cannot rotate (no key,
+ * no permission, offline) is skipped silently — the send path still refuses
+ * safely, exactly as before. Returns how many channels were rotated.
+ */
+export async function rewrapForMembershipChange(channelIds: number[]): Promise<number> {
+    if (!getActiveIdentity() || channelIds.length === 0) return 0;
+    // 0-1500ms. Cheap dispersion: with N members the expected number that get
+    // as far as minting is ~1, and the rest cost one cached state read each.
+    await new Promise(r => setTimeout(r, Math.floor(Math.random() * 1500)));
+    let rotated = 0;
+    for (const channelId of channelIds) {
+        try {
+            const before = cache.get(channelId)?.currentEpoch ?? 0;
+            const got = await ensureChannelKey(channelId);
+            if (got && got.epoch > before) rotated++;
+        } catch (e) {
+            console.debug(`[e2ee] rewrapForMembershipChange(${channelId}) skipped:`, e);
+        }
+    }
+    if (rotated > 0) console.log(`[e2ee] re-wrapped ${rotated} channel key(s) for the new member`);
+    return rotated;
+}
+
+/**
  * Get the channel key for a specific epoch (to decrypt a historical message).
  * Reloads once from the server if the epoch isn't cached.
  */
