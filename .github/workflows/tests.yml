@@ -109,6 +109,44 @@ jobs:
       - name: Desktop shell (excluded from the workspace, so its own lock)
         run: cargo audit -f frontend/src-tauri/Cargo.lock
 
+  # THE LINUX DESKTOP BUILD, which nothing compiled until now.
+  #
+  # The shell is written to build off Windows -- every Windows-needing Tauri
+  # command is registered behind #[cfg(all(windows, feature = "remote-control"))]
+  # individually rather than the whole handler being gated, lib.rs carries
+  # explicit #[cfg(not(windows))] branches, and wasapi/clipboard-win sit under
+  # [target.'cfg(windows)'.dependencies]. That care was being maintained BY HAND:
+  # the only desktop-shell build in CI ran on windows-latest, and the
+  # ubuntu-latest job that names src-tauri only reads its lockfile for
+  # cargo-audit. Nothing would have told you the day the Linux path stopped
+  # compiling.
+  #
+  # `check`, not `test`: this exists to prove the non-Windows path still
+  # compiles. The tests themselves are overwhelmingly #[cfg(windows)] and run in
+  # crates-windows, so running them here would mostly assert nothing.
+  #
+  # build-agent.mjs first because tauri-build validates externalBin before it
+  # compiles anything, and on Linux it wants binaries/puca-agent-<linux triple>.
+  # The script derives that triple from `rustc -vV`, so it needs no arguments.
+  desktop-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: Tauri v2 Linux system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev             libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Build the Linux agent sidecar (tauri-build requires it to exist)
+        working-directory: frontend
+        run: node scripts/build-agent.mjs
+      - name: Desktop shell compiles for Linux
+        run: cargo check --manifest-path frontend/src-tauri/Cargo.toml --locked
+
   # EVERYTHING UNDER crates/ — the capture, encode, injection, agent and
   # service layer, `unsafe` included. None of it ran in CI until 2026-09-03:
   # the root Cargo.toml had no [workspace], so `cargo test` at the root built
