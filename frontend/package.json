@@ -48,7 +48,7 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^2.0.1",
     "@sapphi-red/web-noise-suppressor": "^0.3.5",
-    "@scure/bip39": "^1.6.0",
+    "@scure/bip39": "^2.4.0",
     "@tanstack/react-query": "^5.90.12",
     "@tauri-apps/api": "^2.9.1",
     "@tauri-apps/cli": "^2.9.5",
