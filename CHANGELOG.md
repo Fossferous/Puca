@@ -4,7 +4,7 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## 0.9.1 — unreleased (the launch release)
+## 0.9.1 — 2026-09-03 (the launch release)
 
 Everything the launch-readiness pass found, in one update.
 
