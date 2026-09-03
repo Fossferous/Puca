@@ -76,7 +76,7 @@ sha1 = "0.10"
 base64 = "0.22"
 # E2EE account recovery: X25519 DH proof-of-possession + HKDF (must match the
 # frontend's @noble x25519/hkdf byte-for-byte).
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 # Device attestation: verifies the Ed25519 signature a client produces to prove
 # WHICH of the account's devices a connection is (see ws.rs). Already present
 # transitively via jsonwebtoken; promoted to a direct dependency because we now

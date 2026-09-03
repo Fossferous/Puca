@@ -18,7 +18,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # else the waker presents (device id, auth record, auth signature) is static
 # text produced once at provisioning and read from a file.
 ed25519-dalek = "2"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"

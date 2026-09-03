@@ -44,7 +44,7 @@ hkdf = "0.12"
 sha2 = "0.10"
 aes-gcm = "0.10"
 getrandom = "0.2"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 sha1 = "0.10"
 md-5 = "0.10"
 # The agent owns the socket and the clock, so it drives str0m directly rather
