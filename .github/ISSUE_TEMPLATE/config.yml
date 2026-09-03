@@ -1,0 +1,23 @@
+# A security bug must never arrive as a public issue, so the first thing the
+# "New issue" page offers is the private route — before either template.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability (do not open an issue)
+    url: https://github.com/Fossferous/Puca/security/advisories/new
+    about: >-
+      Anything exploitable goes through GitHub's private reporting, which opens
+      an advisory only you and the maintainer can read. SECURITY.md explains the
+      scope and what makes a report useful. If that link 404s, private reporting
+      is not enabled yet — open an ordinary issue saying ONLY that you have a
+      security report and nothing about the bug itself.
+  - name: Question, or not sure it's a bug
+    url: https://github.com/Fossferous/Puca/discussions
+    about: >-
+      Setup trouble, "is this supposed to happen", design arguments. If
+      Discussions is not enabled, an ordinary issue is fine.
+  - name: Read the security model first
+    url: https://github.com/Fossferous/Puca/blob/main/docs/SECURITY_MODEL.md
+    about: >-
+      Several properties are known limits, deliberately accepted and documented
+      — trust-on-first-use, no forward secrecy, server-visible metadata. Worth
+      checking before reporting one as a finding.

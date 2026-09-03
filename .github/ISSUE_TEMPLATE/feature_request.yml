@@ -1,0 +1,56 @@
+name: Feature request
+description: Something Púca should do that it does not.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things worth knowing before you write this, because they decide
+        most requests here:
+
+        - **Messages, attachments and call media are end-to-end encrypted.**
+          The server holds ciphertext, so anything that needs the *server* to
+          read message content — server-side search, keyword notifications,
+          content moderation, previews generated centrally — cannot be built
+          without breaking the property the project exists for. Say if your
+          idea has a client-side shape; that version is often buildable.
+        - **This is a one-person project.** Scope is the scarcest resource, and
+          a clear problem statement is far more persuasive than a specified
+          solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: >-
+        The situation you were in when you wanted it, not the feature itself.
+        This is the part that decides whether it gets built.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Optional. A rough shape is fine; so is "no idea, you decide".
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered instead
+      description: >-
+        Including whether an existing setting nearly does it. If something
+        nearly works, saying how it falls short is often the more useful bug.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: >-
+            I checked that this does not require the server to read message
+            content, or I have said how it would work without that.
+          required: true
+        - label: >-
+            I searched existing issues.
+          required: false

@@ -14,7 +14,7 @@
 //! taught to be suspicious of, and they would be right to be.
 //!
 //! This does NOT make the binary trusted — only a code-signing certificate does
-//! that, and that was deliberately declined (see docs/DEVICES_HANDOFF.md). It
+//! that, and that was deliberately declined (see docs/SECURITY_MODEL.md). It
 //! removes one gratuitous reason to distrust it, and it costs nothing at runtime:
 //! VERSIONINFO is inert data in the PE resource section that is never executed.
 //!

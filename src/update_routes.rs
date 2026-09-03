@@ -5,8 +5,8 @@
 //!
 //! ```json
 //! {
-//!   "version": "0.5.40",
-//!   "download_url": "https://download.example.com/Sovereign-Setup.exe",
+//!   "version": "0.9.1",
+//!   "download_url": "https://download.example.com/Puca-Setup.exe",
 //!   "notes": "Game-only stream audio, DM reactions, …"
 //! }
 //! ```

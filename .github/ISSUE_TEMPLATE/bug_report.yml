@@ -1,0 +1,92 @@
+name: Bug report
+description: Something behaves differently from how it is documented or intended.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security bugs.** Anything exploitable goes through
+        [private reporting](https://github.com/Fossferous/Puca/security/advisories/new)
+        instead — see [SECURITY.md](https://github.com/Fossferous/Puca/blob/main/SECURITY.md).
+
+        **Please redact before you paste.** Púca is self-hosted, so logs and
+        screenshots routinely contain your server's address, other people's
+        names and message content. None of that helps a bug report and you
+        cannot un-publish it once it is here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected instead
+      description: Say what you observed separately from what you concluded from it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it happen again if you retry?
+      description: >-
+        "Only once" is still worth filing — say so rather than leaving it out.
+      options:
+        - Every time
+        - Sometimes
+        - Happened once, could not repeat it
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: "Settings → App Info → Version."
+      placeholder: "0.9.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Which client
+      options:
+        - Windows desktop (Full)
+        - Windows desktop (Lite)
+        - Android app
+        - Browser
+        - Other / built it myself
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS and, for a browser, which browser and version
+      placeholder: "Windows 11 26100 / Firefox 142"
+
+  - type: textarea
+    id: server
+    attributes:
+      label: Server side
+      description: >-
+        Whether you run the server yourself, and if so its version and anything
+        relevant from `journalctl -u puca` around the time it happened. Do NOT
+        paste the server's hostname or IP.
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console or log output
+      description: >-
+        Desktop and browser: Ctrl+Shift+I → Console. Redact first.
+      render: text

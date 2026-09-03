@@ -12,6 +12,11 @@ that a line of code is.
 vulnerability*. That opens a private advisory only you and the maintainer can
 read, which is the right venue for anything exploitable.
 
+If the *Security* tab offers no such option, private reporting is not enabled
+on this repository yet. In that case open an ordinary issue saying **only** that
+you have a security report and nothing whatsoever about the bug — that is enough
+to get the setting turned on and a private advisory opened for you.
+
 Please do **not** open a public issue for an exploitable bug until there is a
 fix available.
 

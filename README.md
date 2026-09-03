@@ -9,6 +9,29 @@ calls, or files.
 ![Backend](https://img.shields.io/badge/backend-Rust%20%2F%20Axum-orange.svg)
 ![Frontend](https://img.shields.io/badge/frontend-React%20%2F%20TypeScript-blue.svg)
 
+**Status:** 0.9.x, in daily use by its author and a handful of friends, and
+not yet used at any scale beyond that. The protocol and storage format are
+stable enough that releases upgrade in place, and migrations run automatically
+at startup. Expect the rough edges of a young project rather than of an
+abandoned one; `CHANGELOG.md` shows the pace.
+
+**What it costs to run:** one small VPS. Two vCPUs and 2 GB of RAM is enough
+for a group of friends, and the only recurring costs are that box and a domain.
+There is no hosted version to buy and nothing phones home — voice beyond a
+couple of people needs a TURN relay, which the deployment guide sets up on the
+same machine.
+
+### Where to read next
+
+| If you want to | Read |
+|---|---|
+| Know what it actually does, feature by feature | [`docs/FEATURES_AND_TECHNOLOGY.md`](docs/FEATURES_AND_TECHNOLOGY.md) |
+| Decide whether to trust it | [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — written for a reader who does not |
+| Understand the encryption | [`docs/E2EE.md`](docs/E2EE.md), [`docs/E2EE_RECOVERY.md`](docs/E2EE_RECOVERY.md) |
+| Know what the server can see | [`docs/PRIVACY.md`](docs/PRIVACY.md) |
+| Run your own server | [`deploy/README.md`](deploy/README.md) |
+| Use the app | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) |
+
 ---
 
 ## Getting the app — Full or Lite
@@ -409,3 +432,11 @@ Contributions are accepted under the terms in [`CLA.md`](CLA.md), which
 grants the maintainer the right to relicense the project — including under
 the commercial terms above — without affecting your own rights to your own
 contribution. Read it before your first PR — it's short.
+
+The AGPL covers the code and deliberately grants no rights in the project's
+name or logo; [`TRADEMARK.md`](TRADEMARK.md) says what you may do without
+asking, which is nearly everything except shipping a modified build called
+Púca. [`NOTICE`](NOTICE) carries the copyright statement and what the AGPL's
+section 13 entitles a user of somebody else's server to.
+
+By taking part you agree to the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
