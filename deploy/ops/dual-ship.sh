@@ -120,13 +120,28 @@ render_download_page() {
 		PAGE_SOURCE="$HERE/../download-site/index.html"
 	fi
 	PAGE="$PAGE_DIR/index.html"
-	sed "s|__API_HOST__|$API_HOST|g" "$PAGE_SOURCE" > "$PAGE"
+	sed -e "s|__API_HOST__|$API_HOST|g" -e "s|__APP_HOST__|$APP_HOST|g" "$PAGE_SOURCE" > "$PAGE"
 }
 
 # Refuse to publish a page that still names a placeholder domain. The same
 # shape as deploy/migrate/render-turn-conf.sh's placeholder guard: a page
 # that reads "connects to chat.example.com" looks finished and points every
 # user at a domain that is not yours.
+# A token nobody substituted is the other way this page lies to a visitor: it
+# renders literally, so the "Open in your browser" button points at
+# https://__APP_HOST__ and simply fails. Same class as the placeholder domain
+# below, caught the same way — before it goes anywhere.
+require_no_unsubstituted_token() {
+	local page="$1" found
+	found="$(grep -oE '__[A-Z_]+__' "$page" | sort -u | tr '\n' ' ' || true)"
+	if [ -n "$found" ]; then
+		echo "REFUSING: $PAGE_SOURCE still contains unsubstituted token(s): $found"
+		echo "Every __TOKEN__ on the download page must be filled from deploy/ops/hosts.conf"
+		echo "by render_download_page. Add the missing sed expression there, or remove the token."
+		exit 1
+	fi
+}
+
 require_no_placeholder_domain() {
 	local page="$1" found
 	found="$(grep -oiE '([a-z0-9-]+\.)*example\.(com|org|net)' "$page" | sort -u | head -3 | tr '\n' ' ' || true)"
@@ -172,6 +187,7 @@ ensure_download_dirs() {
 # stop exactly that. version_on_page pins both ends.
 require_page_advertises() {
 	local page="$1" version="$2" artifact="$3" what="$4"
+	require_no_unsubstituted_token "$page"
 	require_no_placeholder_domain "$page"
 	if ! grep -qF "$artifact" "$page"; then
 		echo "REFUSING: $PAGE_SOURCE does not link $artifact."
@@ -857,6 +873,7 @@ cmd_backend() {
 cmd_apk() {
 	local apk="${1:?usage: dual-ship.sh apk <APK> <version>}" version="${2:?version}"
 	render_download_page; local page="$PAGE"
+	require_no_unsubstituted_token "$page"
 	require_no_placeholder_domain "$page"
 	if ! grep -qF "$APK_PREFIX-$version.apk" "$page"; then
 		echo "REFUSING: $PAGE_SOURCE does not link $APK_PREFIX-$version.apk."
@@ -903,6 +920,7 @@ cmd_apk() {
 cmd_apk_lite() {
 	local apk="${1:?usage: dual-ship.sh apk-lite <APK> <version>}" version="${2:?version}"
 	render_download_page; local page="$PAGE"
+	require_no_unsubstituted_token "$page"
 	require_no_placeholder_domain "$page"
 	if ! grep -qF "$APK_PREFIX_LITE-$version.apk" "$page"; then
 		echo "REFUSING: $PAGE_SOURCE does not link $APK_PREFIX_LITE-$version.apk."

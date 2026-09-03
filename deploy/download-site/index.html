@@ -94,8 +94,20 @@
              that label is the only thing a human reads to tell them apart. -->
         <a class="btn" href="/Puca-Setup.exe" download>Download for Windows</a>
         <a class="btn secondary" href="/mobile/Puca-0.9.1.apk" download>Download for Android (.apk)</a>
+        <!-- __APP_HOST__ is filled in from APP_HOST in deploy/ops/hosts.conf by
+             dual-ship.sh, the same way __API_HOST__ below is. Without this row
+             the page offered an iPhone or Mac visitor two files neither of
+             which runs, and never mentioned that the same deployment already
+             serves a browser app they can use right now. -->
+        <a class="btn secondary" href="https://__APP_HOST__">Open in your browser</a>
       </div>
-      <div class="meta">v0.9.1 &middot; Windows 10/11 (64-bit) &middot; Android 7+</div>
+      <div class="meta">v0.9.1 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; or any modern browser</div>
+      <p class="apk-note">
+        <b>On iPhone, iPad or Mac, use the browser app</b> &mdash; there is no Apple
+        build yet. Everything works there except screen control of another machine,
+        which is Windows-only. Calls in Safari cannot be encrypted frame by frame:
+        Púca tells you before you join rather than quietly downgrading you.
+      </p>
       <p class="apk-note">
         The Android app keeps itself up to date: each time it starts it fetches the
         current version from this server and applies it before opening. There is no

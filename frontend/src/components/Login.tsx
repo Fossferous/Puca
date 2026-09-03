@@ -164,7 +164,21 @@ export function Login({ onLoginSuccess }: LoginProps) {
                 // Check for status property (set by auth.ts for fetch errors)
                 const fetchError = err as Error & { status?: number };
 
-                if (fetchError.status === 403) {
+                if (fetchError.status === 403 && isRegistering) {
+                    // REGISTERING, not signing in. A 403 here is the invite
+                    // gate refusing the code (public_config.rs: the gate
+                    // answers 403 to a missing or wrong one) — it has nothing
+                    // to do with the password migration below, and this branch
+                    // used to be shared, so a mistyped invite code threw a
+                    // brand-new visitor into a "Security Update Required"
+                    // password-reset screen for an account they do not have,
+                    // whose submit endpoint is disabled by default. The first
+                    // thing a stranger did wrong produced the most alarming
+                    // and least true message in the product.
+                    setError(inviteCode
+                        ? "That invite code wasn't accepted. Check it for typos, or ask whoever invited you for a fresh one — invites can expire or be used up."
+                        : 'This server needs an invite code to create an account. Ask whoever runs it for one.');
+                } else if (fetchError.status === 403) {
                     // Password reset required (case-insensitive login migration)
                     setShowResetForm(true);
                     setError('Security Update: Please set a new password for your account.');
@@ -388,8 +402,16 @@ export function Login({ onLoginSuccess }: LoginProps) {
                             type="password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            placeholder="Enter password"
+                            placeholder={isRegistering ? 'Choose a password (min 8 characters)' : 'Enter password'}
                             required
+                            // Only when CREATING the account. Every other
+                            // password field in the app demands 8; this one
+                            // demanded nothing, so the one place a weak
+                            // password can still be chosen was the place it
+                            // gets chosen. Not applied when signing in: an
+                            // existing shorter password must still be able to
+                            // log in and be changed.
+                            minLength={isRegistering ? 8 : undefined}
                             disabled={loading}
                         />
                     </div>

@@ -120,6 +120,28 @@ echo "--- argument handling ---"
 out="$(bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
 check "refuses without --public-ip" "$([ $rc -ne 0 ] && echo 1 || echo 0)" "$out"
 
+# --realm becomes the coturn realm, APP_URL, CORS_ORIGINS and the TURN URLs.
+# It used to default to example.com, so a host could provision cleanly, boot,
+# pass its health check and be unreachable from every client with nothing in
+# any log to say why. Both refusals below are that failure, made loud.
+out="$(bash "$SCRIPT" --public-ip 203.0.113.10 --dry-run 2>&1)"; rc=$?
+check "refuses without --realm"                  "$([ $rc -ne 0 ] && echo 1 || echo 0)" "$out"
+check "and says what --realm is for"             "$(printf '%s' "$out" | grep -qF 'it is your domain' && echo 1 || echo 0)" "$out"
+
+for bad in example.com chat.example.com localhost; do
+	out="$(bash "$SCRIPT" --public-ip 203.0.113.10 --realm "$bad" --dry-run 2>&1)"; rc=$?
+	check "refuses the placeholder realm '$bad'"  "$([ $rc -ne 0 ] && echo 1 || echo 0)" "$out"
+done
+out="$(bash "$SCRIPT" --public-ip 203.0.113.10 --realm example.com --dry-run 2>&1)"
+check "explains what a placeholder realm would break" "$(printf '%s' "$out" | grep -qF 'unreachable from every client' && echo 1 || echo 0)" "$out"
+
+# POSITIVE CONTROL: a real domain gets PAST argument handling. It still stops
+# at the fresh-box guard or the first privileged step — this asserts only that
+# the refusals above are about the realm, not about everything.
+out="$(bash "$SCRIPT" --public-ip 203.0.113.10 --realm chat.somebodys-real-domain.net --dry-run 2>&1)"
+check "a real domain is not refused as a placeholder" "$(printf '%s' "$out" | grep -qF 'is a placeholder' && echo 0 || echo 1)" "$out"
+check "and it is not refused for a missing realm"     "$(printf '%s' "$out" | grep -qF -- '--realm is required' && echo 0 || echo 1)" "$out"
+
 echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"

@@ -36,8 +36,10 @@ your device before they are sent, under keys derived from a seed only your
 devices hold (`docs/E2EE.md`, `docs/SECURITY_MODEL.md` §3). Voice, video and
 screen-share frames are encrypted end to end as well, on the peer-to-peer
 path and through the optional SFU, which forwards ciphertext (§4 of the
-security model, including the browsers where that falls back to transport
-encryption only and the app says so). Remote-control input between your own
+security model). Firefox, Safari and iOS cannot encrypt call media frame by
+frame. The app does not silently downgrade them: it says so before you join
+and blocks the call's media, unless you choose to allow transport-only calls
+in Settings → Privacy & Safety. Remote-control input between your own
 devices is encrypted the same way. The operator can deny you service, delete
 things, or impersonate you *to the server* — the security model spells out
 that limit — but cannot read content.
