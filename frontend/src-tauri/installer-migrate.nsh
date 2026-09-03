@@ -163,6 +163,48 @@
 ; resolves, and nothing outside our own install folders). PowerShell 5.1 ships
 ; with every supported Windows; the script is unpacked beside the app for the
 ; duration of the call and removed again. Never fails the install.
+; --- Leftovers an in-place rename cannot clear on its own --------------------
+
+!macro StopOrphanedHelpers
+  ; The NSIS updater KILLS the running app rather than exiting it, so the app's
+  ; own agent_stop() never runs (agent_ipc.rs says so, and says why). Before
+  ; --parent-pid existed, that left an orphaned puca-agent.exe holding its own
+  ; file open, the install could not replace it, and the installer carried on
+  ; without saying anything that mattered -- so the app went on driving a binary
+  ; several releases old. --parent-pid prevents NEW orphans; it cannot free a
+  ; machine that already has one, which is why this has to run here.
+  ;
+  ; Measured on a real machine, 2026-09-03: Puca.exe 0.9.1 sitting beside
+  ; puca-agent.exe and puca-service.exe both still 0.8.117 from 25 August, with
+  ; freshly extracted 0.9.1 copies of both abandoned in %TEMP% from the same
+  ; install run.
+  DetailPrint "Releasing any helper still holding its own file open..."
+  nsExec::ExecToLog 'taskkill /F /T /IM puca-agent.exe'
+  Pop $R0
+  nsExec::ExecToLog 'taskkill /F /T /IM puca-service.exe'
+  Pop $R0
+!macroend
+
+!macro RemoveSupersededBinary OLD_BINARY
+  ; A taskbar pin or hand-made shortcut pointing at the pre-rename binary does
+  ; not error -- it LAUNCHES it. RepairShortcutsToRenamedBinary repoints the
+  ; shortcuts it can find, but it cannot see every one, and it never removed the
+  ; binary they point at.
+  ;
+  ; Leaving that binary launchable is worse than a broken shortcut. Since 0.9.1
+  ; the server refuses the query-string token that every client older than 0.9.0
+  ; sends, so the stale binary starts, signs in over REST, and then shows "Live
+  ; connection failed" indefinitely with a hint blaming the user's firewall.
+  ; Neither button on that dialog can fix it. Confirmed from the server's own
+  ; log, which recorded 669 such refusals in three days.
+  ;
+  ; Compile-time guard: never delete the binary this build just installed.
+  !if "${OLD_BINARY}" != "${MAINBINARYNAME}"
+    DetailPrint "Removing superseded ${OLD_BINARY}.exe, if present..."
+    Delete "$INSTDIR\${OLD_BINARY}.exe"
+  !endif
+!macroend
+
 !macro RepairShortcutsToRenamedBinary
   SetOutPath "$INSTDIR"
   File "${PUCA_HOOKS_DIR}\installer-repair-shortcuts.ps1"

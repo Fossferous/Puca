@@ -27,6 +27,7 @@
 !include "${__FILEDIR__}\installer-migrate.nsh"
 
 !macro NSIS_HOOK_PREINSTALL
+  !insertmacro StopOrphanedHelpers
   ; The FULL variant's own mainBinaryName, not this build's — see
   ; installer-migrate.nsh: the binary that has to stop is the one the install
   ; being replaced actually runs.
@@ -37,6 +38,9 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro RepairShortcutsToRenamedBinary
+  ; "app" is this product's pre-rename binary. The in-place rename kept the
+  ; install directory, so it was left sitting there, launchable.
+  !insertmacro RemoveSupersededBinary "app"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

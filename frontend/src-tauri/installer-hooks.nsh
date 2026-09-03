@@ -17,6 +17,7 @@
 !include "${__FILEDIR__}\installer-migrate.nsh"
 
 !macro NSIS_HOOK_PREINSTALL
+  !insertmacro StopOrphanedHelpers
   ; SELF-GUARDING against the pinned-name build. A deployment may pin
   ; productName "Sovereign" in tauri.release.json (keeping the old install
   ; identity instead of renaming). In that build, OLD_NAME equals the CURRENT
@@ -39,6 +40,9 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro RepairShortcutsToRenamedBinary
+  ; "app" is this product's pre-rename binary. The in-place rename kept the
+  ; install directory, so it was left sitting there, launchable.
+  !insertmacro RemoveSupersededBinary "app"
 !macroend
 
 ; Remove the LocalSystem service the FULL build can install, before the app's
