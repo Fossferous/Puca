@@ -71,7 +71,7 @@ tauri-plugin-autostart = "2"
 # empty title, nothing in any log. It cost most of a debugging session.
 tauri-plugin-single-instance = "2"
 # Opens the release download page in the system browser (open_external command)
-opener = "0.7"
+opener = "0.8"
 
 # Verifies a RESUMED transfer: the receiver never saw the bytes written by the
 # earlier attempt, so the only way to know the finished file is the file that was
