@@ -17,7 +17,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # The whole runtime crypto surface: sign the attestation transcript. Everything
 # else the waker presents (device id, auth record, auth signature) is static
 # text produced once at provisioning and read from a file.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 sha2 = "0.10"
 base64 = "0.22"

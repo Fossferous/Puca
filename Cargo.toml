@@ -81,7 +81,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # WHICH of the account's devices a connection is (see ws.rs). Already present
 # transitively via jsonwebtoken; promoted to a direct dependency because we now
 # call it ourselves.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 # The wake transport is a trait object (src/wake) so the FCM doorbell, the
 # no-credentials no-op and test recorders are interchangeable — what makes the
 # layer testable without a Firebase project. Already present transitively;
