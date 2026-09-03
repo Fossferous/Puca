@@ -109,6 +109,39 @@ jobs:
       - name: Desktop shell (excluded from the workspace, so its own lock)
         run: cargo audit -f frontend/src-tauri/Cargo.lock
 
+  # THE LINUX REMOTE-CONTROL BACKENDS, which nothing has ever RUN.
+  #
+  # crates/puca-capture/src/linux_impl.rs (282 lines, X11 via x11rb + SHM) and
+  # crates/puca-input/src/linux_impl.rs (705 lines, XTEST) already exist, and so
+  # do 673 lines of live tests for them. Every one of those tests is #[ignore]d
+  # "needs a real X server", so the crates job compiles this code and runs none
+  # of it. Until this job existed, the entire Linux host path rested on the
+  # author's own machine.
+  #
+  # Xvfb is a real X server with the XTEST extension, which is exactly what both
+  # suites ask for. `xvfb-run -a` picks a free display number so parallel jobs
+  # cannot collide on :99.
+  #
+  # These tests are STRONGER than their Windows counterparts, which is why they
+  # are worth running rather than merely compiling: the Windows live capture test
+  # asserts "the frame has varied pixels", which passes on any real desktop. A
+  # bare X root is uniformly black, so live_capture_x11 draws a known colour and
+  # asserts the exact pixel value came back.
+  linux-rc-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, pinned 2026-07-23
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: An X server with XTEST
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils
+      - name: X11 capture, against a real display
+        run: xvfb-run -a cargo test -p puca-capture --test live_capture_x11 --locked -- --ignored --nocapture
+      - name: XTEST injection, against a real display
+        run: xvfb-run -a cargo test -p puca-input --test live_inject_x11 --locked -- --ignored --nocapture
+
   # THE LINUX DESKTOP BUILD, which nothing compiled until now.
   #
   # The shell is written to build off Windows -- every Windows-needing Tauri
