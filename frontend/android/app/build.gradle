@@ -155,7 +155,7 @@ dependencies {
     // pins the entire wake wire surface in a test asserting the full body.
     implementation platform('com.google.firebase:firebase-bom:34.4.0')
     implementation 'com.google.firebase:firebase-messaging'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.okhttp3:okhttp:5.5.0'
     testImplementation "junit:junit:$junitVersion"
     // Real org.json on the unit-test classpath: the android.jar stubs throw,
     // and PushFrames/PushPrefs parse JSON. Overrides the stub for tests only.
