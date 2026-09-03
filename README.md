@@ -30,6 +30,17 @@ because antivirus heuristics sometimes flag exactly that machinery in the
 full build. The two installs are mutually exclusive on one machine but share
 their data: switching between them keeps your session, keys, and history.
 
+**Neither installer is code-signed.** There is no Authenticode certificate
+yet, so Windows SmartScreen shows "Windows protected your PC" the first time
+you run either build, and you have to choose **More info → Run anyway**.
+Antivirus heuristics sometimes go further than a warning: Defender
+quarantined v0.8.82 on a user's machine as a false positive. That is the
+other reason Lite exists — it compiles the screen-capture and input-injection
+code out of the binary entirely, which is the machinery those heuristics
+react to — but Lite is unsigned too and gets the same SmartScreen prompt.
+[docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) has the detail, including
+how to verify a download against the published hash.
+
 **Because Púca is self-hosted, the app you install is built for the server it
 talks to.** If someone runs a Púca server for you, get the installer or APK
 from *their* download page — it offers both variants side by side. If you're
@@ -181,11 +192,17 @@ document is actually trying to make.
   [docs/LOST_RECOVERY_CODE.md](docs/LOST_RECOVERY_CODE.md) is the honest
   account of what happens without it. See
   [docs/E2EE_RECOVERY.md](docs/E2EE_RECOVERY.md).
-- 💬 **Real-time messaging** — WebSocket-based delivery, threads, reactions,
-  edits, search.
+- 💬 **Real-time messaging** — WebSocket-based delivery, replies, reactions,
+  edits, search. Search runs on your own device over messages it has already
+  decrypted, so it covers the conversation you have open; the server cannot
+  search ciphertext on your behalf.
 - 🎙️ **Voice & video** — WebRTC voice channels with native noise
   suppression; frames encrypted end-to-end over Insertable Streams on both
-  the mesh and the opt-in SFU (LiveKit) path.
+  the mesh and the opt-in SFU (LiveKit) path. Insertable Streams is
+  Chromium-only, so Firefox, Safari and iOS cannot encrypt call media
+  frame-by-frame. They are not quietly downgraded: "Require encryption for
+  calls" defaults on, so the app says so before you join and blocks the
+  media instead.
 - 📺 **Screen sharing** — including giving a trusted friend control of your
   shared screen, with an explicit per-request consent prompt.
 - 🖥️ **My Devices** — remote-desktop access to machines you own, gated by a
@@ -197,8 +214,9 @@ document is actually trying to make.
   control with a permission-overwrite system per channel.
 - 📱 **Desktop, mobile and browser** — a Windows desktop app (Tauri; Full
   and Lite builds), an Android app (Capacitor), and the same app in a
-  browser, from one codebase. macOS, Linux and iOS builds exist in the tree
-  but are not released or tested. The interface is English-only for now.
+  browser, from one codebase — with one exception, encrypted call media,
+  noted under Voice & video above. macOS, Linux and iOS builds exist in the
+  tree but are not released or tested. The interface is English-only for now.
 - 🔍 **No telemetry** — nothing reports to anyone but the server you joined;
   [docs/PRIVACY.md](docs/PRIVACY.md) lists what that server can see and the
   few third parties the apps ever contact.

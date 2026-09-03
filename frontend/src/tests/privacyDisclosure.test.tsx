@@ -17,7 +17,7 @@ const h = vi.hoisted(() => ({ get: vi.fn<(path: string) => Promise<unknown>>() }
 vi.mock('../api/client', () => ({ apiClient: { get: (p: string) => h.get(p) } }));
 
 import { PrivacyDisclosure } from '../components/PrivacyDisclosure';
-import { privacyDocUrl } from '../components/privacyDisclosure.utils';
+import { privacyDocUrl, safeRepositoryUrl } from '../components/privacyDisclosure.utils';
 import { AccountExportCard } from '../components/AccountExportCard';
 import { resultSummary } from '../api/accountExport';
 
@@ -97,6 +97,30 @@ describe('privacyDocUrl', () => {
         expect(privacyDocUrl('https://github.com/x/y.git')).toBe('https://github.com/x/y/blob/main/docs/PRIVACY.md');
         expect(privacyDocUrl('https://code.example.org/puca')).toBe('https://code.example.org/puca');
         expect(privacyDocUrl(null)).toBe('https://github.com/Fossferous/Puca/blob/main/docs/PRIVACY.md');
+    });
+});
+
+describe('safeRepositoryUrl', () => {
+    const UPSTREAM = 'https://github.com/Fossferous/Puca';
+
+    it('refuses a scheme that would execute, and falls back to the published tree', () => {
+        // SOURCE_URL is set by whoever runs the server. React renders a
+        // `javascript:` href with only a console warning, so this is the one
+        // case that must never reach an anchor.
+        expect(safeRepositoryUrl('javascript:alert(1)')).toBe(UPSTREAM);
+        expect(safeRepositoryUrl('data:text/html,<script>1</script>')).toBe(UPSTREAM);
+        expect(safeRepositoryUrl('')).toBe(UPSTREAM);
+        expect(safeRepositoryUrl(null)).toBe(UPSTREAM);
+    });
+
+    it('POSITIVE CONTROL: a self-hosted forge is passed through unchanged', () => {
+        // Without this the test above passes just as well for a function that
+        // always returns UPSTREAM — which would be a real AGPL bug, since a
+        // modified build must point at ITS OWN source, not at ours.
+        expect(safeRepositoryUrl('https://code.example.org/puca')).toBe('https://code.example.org/puca');
+        expect(safeRepositoryUrl('http://gitea.lan/me/puca')).toBe('http://gitea.lan/me/puca');
+        expect(safeRepositoryUrl('https://github.com/x/y.git')).toBe('https://github.com/x/y');
+        expect(safeRepositoryUrl('https://github.com/x/y/')).toBe('https://github.com/x/y');
     });
 });
 
