@@ -162,6 +162,41 @@ out="$(run env)"
 check "JWT_SECRET value never appears in backup.log or stdout" "$([ "$(has "$(logtxt)$out" 'hunter2')" = 0 ] && echo 1 || echo 0)"
 
 echo
+echo "--- a failed dump is LOUD, and does not spend a day of the retention window ---"
+# The failure this pins: pg_dump fails, the script logs ERROR, rotates anyway
+# and exits 0. cron mails nothing (it reads the exit code, not the log), so
+# after KEEP_DAYS such nights this script has deleted the last good backup
+# itself, having reported success every time.
+reset
+# Old artifacts, well past the window, that rotation would normally delete.
+mkdir -p "$INSTALL/backups"
+for f in sandbox-db-old.sql.gz sandbox-uploads-old.tar.gz sandbox-config-old.tar.gz; do
+	printf 'x' > "$INSTALL/backups/$f"
+	touch -d '30 days ago' "$INSTALL/backups/$f" 2>/dev/null || touch -t 202001010000 "$INSTALL/backups/$f"
+done
+# pg_dump now fails; everything else still works.
+printf '#!/usr/bin/env bash\necho "pg_dump $*" >> "$CALLS"\nexit 1\n' > "$TMP/bin/pg_dump"
+out="$(run env KEEP_DAYS=7)"; rc=$?
+check "exits NON-ZERO so cron mails somebody"          "$([ "$rc" != 0 ] && echo 1 || echo 0)" "exit=$rc"
+check "says so in the log"                             "$(has "$(logtxt)$out" 'no database backup was produced')"
+check "the old db backup SURVIVES (no rotation)"       "$([ -f "$INSTALL/backups/sandbox-db-old.sql.gz" ] && echo 1 || echo 0)" "$(artifacts)"
+check "the old uploads archive survives too"           "$([ -f "$INSTALL/backups/sandbox-uploads-old.tar.gz" ] && echo 1 || echo 0)" "$(artifacts)"
+check "and it names rotation as the thing it skipped"  "$(has "$(logtxt)$out" 'skipping rotation')"
+
+echo
+echo "--- POSITIVE CONTROL: a healthy run still rotates and still exits 0 ---"
+# Without this, a script that simply never rotated would pass everything above.
+reset
+printf '#!/usr/bin/env bash\necho "pg_dump $*" >> "$CALLS"\nprintf "CREATE TABLE users (id int);\\n"\n' > "$TMP/bin/pg_dump"
+mkdir -p "$INSTALL/backups"
+printf 'x' > "$INSTALL/backups/sandbox-db-old.sql.gz"
+touch -d '30 days ago' "$INSTALL/backups/sandbox-db-old.sql.gz" 2>/dev/null || touch -t 202001010000 "$INSTALL/backups/sandbox-db-old.sql.gz"
+out="$(run env KEEP_DAYS=7)"; rc=$?
+check "healthy run exits 0"                            "$([ "$rc" = 0 ] && echo 1 || echo 0)" "exit=$rc"
+check "healthy run DOES rotate the stale artifact"     "$([ ! -f "$INSTALL/backups/sandbox-db-old.sql.gz" ] && echo 1 || echo 0)" "$(artifacts)"
+check "and still produced tonight's dump"              "$([ -n "$(ls "$INSTALL"/backups/sandbox-db-2*.sql.gz 2>/dev/null)" ] && echo 1 || echo 0)" "$(artifacts)"
+
+echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1
