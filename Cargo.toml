@@ -67,7 +67,7 @@ dashmap = "6.1.0"
 jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 futures = "0.3.31"
 tower-http = { version = "0.6.7", features = ["cors", "fs"] }
-tower_governor = "0.4.2"
+tower_governor = "0.8.0"
 governor = "0.6.3"
 tokio-util = { version = "0.7", features = ["io"] }
 # For TURN credential generation
