@@ -4,6 +4,40 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.2 — 2026-09-03
+
+A follow-up to 0.9.1 for one problem that could not fix itself, plus the
+groundwork for publishing the source.
+
+### Fixed
+- **"Live connection failed" that never cleared.** If you updated from an older
+  release, the pre-rename `app.exe` was left in your install folder, still
+  launchable — and a taskbar pin aimed at it started a months-old client rather
+  than failing. That client cannot open a live connection to a 0.9.1 or newer
+  server: it signs in, then shows a connection error blaming your firewall,
+  which nothing on that screen can fix. The installer now removes the
+  superseded binary and stops the background helpers that were holding their
+  own files open and preventing replacement. **If you have a pin that still
+  misbehaves, unpin it and pin again from the Start Menu.**
+- **That error screen told you two untrue things.** It said the problem
+  "usually clears by itself" while nothing was retrying, and it blamed a
+  firewall — the least likely cause. It now says what actually happened, and
+  when your copy is out of date it says so and offers the update.
+- **A backend restart no longer throws an error at everyone connected.** The
+  app gave up reconnecting after about three seconds, which is shorter than a
+  restart takes, so every server update produced an error dialog for a
+  condition that resolves on its own. It now waits about fifteen.
+- **The source link the licence requires is reachable.** Settings → App Info
+  shows the licence and links the source of the version your server runs, which
+  the AGPL entitles you to and which previously existed only as an endpoint
+  nobody could find.
+
+### Changed
+- Documentation now states what the software does rather than what was once
+  planned: that the installers are unsigned and warn on first run, that
+  encrypted call media needs a Chromium-based browser, and that search runs on
+  your own device over the conversation you have open.
+
 ## 0.9.1 — 2026-09-03 (the launch release)
 
 Everything the launch-readiness pass found, in one update.
