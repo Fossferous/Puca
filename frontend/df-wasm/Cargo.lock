@@ -153,7 +153,7 @@ dependencies = [
  "itertools 0.10.5",
  "lewton",
  "log",
- "ndarray",
+ "ndarray 0.15.6",
  "num-complex",
  "ogg",
  "realfft",
@@ -191,7 +191,7 @@ version = "0.1.0"
 dependencies = [
  "deep_filter",
  "getrandom",
- "ndarray",
+ "ndarray 0.17.2",
  "wasm-bindgen",
 ]
 
@@ -543,6 +543,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndarray"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -681,6 +696,21 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "powerfmt"
@@ -1114,7 +1144,7 @@ dependencies = [
  "lazy_static",
  "log",
  "maplit",
- "ndarray",
+ "ndarray 0.15.6",
  "num-integer",
  "num-traits",
  "rustfft",
@@ -1135,7 +1165,7 @@ dependencies = [
  "itertools 0.10.5",
  "lazy_static",
  "maplit",
- "ndarray",
+ "ndarray 0.15.6",
  "nom",
  "num-complex",
  "num-integer",
