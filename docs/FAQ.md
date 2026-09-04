@@ -148,10 +148,13 @@ What is done about it:
   name, company, description — so they say what they are in Task Manager. A
   nameless process doing those things is exactly what someone hunting malware is
   taught to distrust, and they would be right.
-- **Púca Lite** exists partly for this. It compiles the screen-capture and
-  input-injection machinery out of the binary *entirely* — not disabled, absent.
-  If you do not want that machinery on your machine, that is the build to take.
-  It is unsigned too, so SmartScreen still prompts.
+- **Púca Lite** exists partly for this: it does not ship the agent or service
+  binaries at all, so the executable that gets flagged is simply not on your
+  disk. Be clear on what that does *not* mean, though — Lite still shares your
+  screen and records clips, so screen-capture code is still inside the Lite app
+  itself, and always will be. What is gone is the unattended host: nothing in a
+  Lite install can capture your desktop without you starting it, or synthesise
+  input at all. Lite is unsigned too, so SmartScreen still prompts.
 - Every release publishes `SHA256SUMS.txt`. Check your download against it —
   that tells you the file is the one that was built, which is a different and
   more useful guarantee than an antivirus verdict.
@@ -163,10 +166,16 @@ classifications are per-file-hash and each release is a new file.
 
 ## Full or Lite — which do I want?
 
-Both do chat, voice, video, screen-share *viewing* and file transfer. **Full**
-adds My Devices: remote desktop, remote input and Wake-on-LAN. **Lite** has that
-code compiled out, not merely switched off, for people who would rather not have
-capture machinery on their machine at all.
+Both do chat, voice, video, screen sharing *and* clips, and file transfer.
+**Full** adds My Devices: remote desktop, remote input, Wake-on-LAN and the
+remote file browser. **Lite** has that code compiled out rather than switched
+off, and does not bundle the agent or service helper binaries.
+
+Take Lite if you do not want your machine to be remotely controllable. Note the
+distinction, because it is easy to overstate: Lite is not a build with no
+screen-capture code in it — sharing your screen and clipping both need that
+code, so it is present. Lite removes the ability to *be a host*, not the ability
+to capture.
 
 They are mutually exclusive on one machine but share their data, so switching
 keeps your session, keys and history.

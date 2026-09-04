@@ -28,7 +28,7 @@
     "//externalBin": "No sidecars. binaries/puca-agent is the native remote-desktop host agent and binaries/puca-service is the elevated helper that installs it as a SYSTEM service; neither exists in a build without remote control.",
     "externalBin": [],
     "shortDescription": "Self-hosted end-to-end encrypted chat and voice",
-    "longDescription": "Puca Lite is a self-hosted communication app: end-to-end encrypted messages, DMs, attachments and voice. It contains no remote-control features. It talks only to the server you run.",
+    "longDescription": "Puca Lite is a self-hosted communication app: end-to-end encrypted messages, DMs, attachments, voice, video and screen sharing. It cannot be remotely controlled: no host agent is installed. It talks only to the server you run.",
     "windows": {
       "nsis": {
         "//installerHooks": "Removes an existing full 'Púca' install (and a legacy 'Sovereign' one) before installing, so the two variants are never installed at once. App DATA survives — it lives under `identifier`, which both share. See installer-hooks-lite.nsh.",

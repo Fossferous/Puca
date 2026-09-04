@@ -65,17 +65,28 @@ Púca ships every release as **two distinct builds**:
 | | **Púca (Full)** | **Púca Lite** |
 |---|---|---|
 | Chat, voice, video, screen-share viewing, file transfer, E2EE | ✓ | ✓ |
-| My Devices (remote desktop), remote input, Wake-on-LAN | ✓ | **absent** |
-| Screen capture / input injection / system service code in the binary | present (opt-in) | **compiled out entirely** |
+| Screen sharing, and Clips (the replay buffer) | ✓ | ✓ |
+| My Devices: remote desktop, remote input, Wake-on-LAN, remote file browser | ✓ | **absent** |
+| `puca-agent` / `puca-service` helper binaries — the processes that capture a whole desktop and synthesise input | bundled | **not shipped** |
 
 Lite is not Full with features switched off — the remote-control code is
 **excluded at compile time** and is not in the artifact, which you can verify
 yourself (`frontend/scripts/check-no-rc.mjs` builds both and proves the
-difference, with a positive control). It exists for people who don't want
-screen-capture/input-injection machinery on their machine at all — and
-because antivirus heuristics sometimes flag exactly that machinery in the
-full build. The two installs are mutually exclusive on one machine but share
-their data: switching between them keeps your session, keys, and history.
+difference, with a positive control). The two installs are mutually exclusive
+on one machine but share their data: switching between them keeps your
+session, keys, and history.
+
+**Be precise about what Lite does and does not remove**, because the tempting
+summary is wrong. Lite still shares your screen and still records clips, so the
+screen-capture library is necessarily *in* the Lite binary — it cannot be
+otherwise. What Lite does not have is the part that makes a machine
+**controllable**: the `puca-agent` sidecar, which is what captures an entire
+desktop unattended and injects keyboard and mouse events, is not bundled at all,
+and the code paths that would drive it are removed at compile time. That sidecar
+is also the binary antivirus heuristics react to. If your objection is "I don't
+want a remote-access host on this machine", Lite answers it exactly. If your
+objection is "I don't want any screen-capture code on this machine", Lite does
+not answer it, and no build that can share a screen could.
 
 **Neither installer is code-signed.** There is no Authenticode certificate
 yet, so Windows SmartScreen shows "Windows protected your PC" the first time
