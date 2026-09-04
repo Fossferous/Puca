@@ -123,13 +123,43 @@ alerts.
 
 Because the installers are **not code-signed**. There is no Authenticode
 certificate, so SmartScreen shows "Windows protected your PC" on first run and
-you have to choose **More info → Run anyway**. Antivirus heuristics sometimes go
-further: Defender quarantined v0.8.82 as a false positive.
+you have to choose **More info → Run anyway**. A certificate costs money
+annually and ties a legal identity to the binary; there isn't one yet.
 
-That is also why **Púca Lite** exists — it compiles the screen-capture and
-input-injection machinery out of the binary entirely, which is what those
-heuristics react to. Lite is unsigned too and gets the same prompt. Verify any
-download against the published `SHA256SUMS.txt`.
+## My antivirus called it a trojan. Is it?
+
+No — but the warning is not stupid either, and you should understand why before
+you dismiss it.
+
+Microsoft Defender flagged the v0.8.82 build as **`Trojan:Win32/Bearfoos.B!ml`**
+on a real user's machine. The `!ml` suffix means a machine-learning classifier,
+not a signature match for known malware — nothing had been found *in* the file.
+
+Look at what the remote-control agent legitimately does: it captures the screen
+with no on-screen indicator, synthesises keyboard and mouse input, and opens
+outbound network connections on its own. That is a precise description of Púca's
+My Devices feature. It is also a precise description of a remote-access trojan.
+A behavioural classifier cannot tell the difference from the binary alone, and an
+**unsigned** binary that does those things scores worse still.
+
+What is done about it:
+
+- The agent and service binaries carry a full Windows version resource — product
+  name, company, description — so they say what they are in Task Manager. A
+  nameless process doing those things is exactly what someone hunting malware is
+  taught to distrust, and they would be right.
+- **Púca Lite** exists partly for this. It compiles the screen-capture and
+  input-injection machinery out of the binary *entirely* — not disabled, absent.
+  If you do not want that machinery on your machine, that is the build to take.
+  It is unsigned too, so SmartScreen still prompts.
+- Every release publishes `SHA256SUMS.txt`. Check your download against it —
+  that tells you the file is the one that was built, which is a different and
+  more useful guarantee than an antivirus verdict.
+
+Since the source is public, you can also read exactly what the agent does, or
+build it yourself and trust your own binary. If Defender quarantines a build,
+submitting it to Microsoft as a false positive genuinely helps, because these
+classifications are per-file-hash and each release is a new file.
 
 ## Full or Lite — which do I want?
 

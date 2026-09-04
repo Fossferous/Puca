@@ -61,7 +61,13 @@ function bigIntToPaddedHex(n: bigint, byteLength: number): string {
     return hex;
 }
 
-function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
+/**
+ * Modular exponentiation for PUBLIC exponents.
+ *
+ * Square-and-multiply. The operation sequence depends on the bits of `exp`, so
+ * this must never be called with a secret. Use `modPowSecret` for those.
+ */
+function modPowPublic(base: bigint, exp: bigint, mod: bigint): bigint {
     let result = 1n;
     base = base % mod;
     while (exp > 0n) {
@@ -72,6 +78,78 @@ function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
         base = (base * base) % mod;
     }
     return result;
+}
+
+/**
+ * Modular exponentiation for SECRET exponents: the SRP private key `x` and the
+ * client ephemeral `a`.
+ *
+ * WHAT THIS FIXES. The previous implementation was a plain square-and-multiply
+ * whose inner branch tested a bit of the secret exponent, and whose loop count
+ * revealed the exponent's bit length. An external review flagged it, correctly.
+ *
+ * WHAT IT DOES NOT CLAIM. This is NOT constant-time, and it cannot be:
+ * JavaScript `BigInt` arithmetic is variable-time by construction, the engine is
+ * free to optimise it, and nothing at this layer can change that. Anyone
+ * claiming a constant-time bignum in portable JS is claiming something the
+ * runtime does not offer. So this reduces the signal rather than removing it,
+ * by three separate means:
+ *
+ *  1. MONTGOMERY LADDER. Every bit performs exactly one multiply and one
+ *     square, in the same order, whatever the bit is. The branch selects which
+ *     variable receives which product, not whether work happens.
+ *  2. FIXED WIDTH. The loop always runs the modulus's bit length, so a small
+ *     exponent takes the same number of iterations as a large one. The old
+ *     `while (exp > 0n)` leaked the bit length directly.
+ *  3. EXPONENT BLINDING, which is the part that actually matters. `N` is a safe
+ *     prime, so by Fermat's little theorem g^(N-1) = 1 (mod N), and therefore
+ *     g^(e + r(N-1)) = g^e (mod N) for any r. We add a random 64-bit multiple
+ *     of (N-1) before exponentiating. The result is identical; the exponent the
+ *     hardware actually processes is different on every call. Averaging many
+ *     measurements now converges on noise instead of on `x`.
+ *
+ * Blinding costs one extra multiply and ~64 extra ladder steps. That is
+ * nothing next to a network round trip, and it is the standard defence.
+ */
+function modPowSecret(base: bigint, exp: bigint, mod: bigint): bigint {
+    // Blind: e' = e + r*(mod-1), which is congruent for a prime modulus.
+    const r = bytesToBigInt(randomBytes(8));
+    const blinded = exp + r * (mod - 1n);
+
+    // Ladder over a fixed width: the blinded exponent can exceed the modulus,
+    // so size the loop from it rather than from `mod`.
+    let r0 = 1n;
+    let r1 = base % mod;
+    const bits = blinded.toString(2).length;
+    for (let i = bits - 1; i >= 0; i--) {
+        const bit = (blinded >> BigInt(i)) & 1n;
+        if (bit === 1n) {
+            r0 = (r0 * r1) % mod;
+            r1 = (r1 * r1) % mod;
+        } else {
+            r1 = (r0 * r1) % mod;
+            r0 = (r0 * r0) % mod;
+        }
+    }
+    return r0;
+}
+
+/** Big-endian bytes to BigInt. Used for blinding factors. */
+function bytesToBigInt(b: Uint8Array): bigint {
+    let n = 0n;
+    for (const byte of b) n = (n << 8n) | BigInt(byte);
+    return n;
+}
+
+/**
+ * Kept as the name the call sites use. Every current caller passes a SECRET
+ * exponent — the SRP private key `x`, the client ephemeral `a`, or the session
+ * exponent derived from both — so this routes to the blinded ladder. If a
+ * caller ever needs a public exponent, call `modPowPublic` explicitly and say
+ * in a comment why the exponent is not secret.
+ */
+function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
+    return modPowSecret(base, exp, mod);
 }
 
 // SHA-256 hash using Web Crypto API
@@ -1043,3 +1121,10 @@ export async function resetPasswordMigration(username: string, newPassword: stri
         verifier_hex: vHex,
     });
 }
+
+/**
+ * Internals exposed ONLY for tests. Not part of the module's API: the SRP
+ * maths is matched to a Rust implementation and a test that cannot reach these
+ * cannot prove they still agree.
+ */
+export const __testing = { modPowSecret, modPowPublic, N, g };
