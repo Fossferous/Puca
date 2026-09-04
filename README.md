@@ -25,6 +25,7 @@ same machine.
 
 | If you want to | Read |
 |---|---|
+| Get a straight answer to an obvious question | [`docs/FAQ.md`](docs/FAQ.md) — including what works on Linux, macOS and iOS |
 | Know what it actually does, feature by feature | [`docs/FEATURES_AND_TECHNOLOGY.md`](docs/FEATURES_AND_TECHNOLOGY.md) |
 | Decide whether to trust it | [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — written for a reader who does not |
 | Understand the encryption | [`docs/E2EE.md`](docs/E2EE.md), [`docs/E2EE_RECOVERY.md`](docs/E2EE_RECOVERY.md) |
