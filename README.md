@@ -9,6 +9,15 @@ calls, or files.
 ![Backend](https://img.shields.io/badge/backend-Rust%20%2F%20Axum-orange.svg)
 ![Frontend](https://img.shields.io/badge/frontend-React%20%2F%20TypeScript-blue.svg)
 
+<p align="center">
+  <img src="docs/screenshots/02-chat.png" alt="A Púca server: text and voice channels, an end-to-end encrypted conversation, and the member list" width="900">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/04-settings.png" alt="Server settings showing the require-encryption-for-calls control, which mutes participants who cannot be encrypted rather than relaying them in the clear" width="900">
+  <br><em>Encryption is enforced, not advertised: anyone whose browser cannot encrypt live media is muted rather than quietly relayed through the server.</em>
+</p>
+
 **Status:** 0.9.x, in daily use by its author and a handful of friends, and
 not yet used at any scale beyond that. The protocol and storage format are
 stable enough that releases upgrade in place, and migrations run automatically
