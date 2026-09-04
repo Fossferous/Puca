@@ -21,6 +21,20 @@ There is no hosted version to buy and nothing phones home — voice beyond a
 couple of people needs a TURN relay, which the deployment guide sets up on the
 same machine.
 
+### What to expect from the maintainer
+
+This is built and run by one person, for their own use and their friends'. It is
+in daily use, and it is not a product.
+
+Issues and pull requests are welcome and will be read. Responses are
+best-effort, and there is no support commitment, no roadmap you can hold anyone
+to, and no promise that a given feature will ever exist. Security reports are the
+exception and are taken seriously: see [`SECURITY.md`](SECURITY.md) for the
+private route.
+
+Said plainly so nobody has to guess, and so the absence of a reply is never a
+mystery.
+
 ### Where to read next
 
 | If you want to | Read |

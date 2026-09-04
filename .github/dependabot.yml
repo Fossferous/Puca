@@ -1,3 +1,21 @@
+# Dependency updates — SECURITY ONLY.
+#
+# `open-pull-requests-limit: 0` switches OFF routine version updates while
+# leaving SECURITY updates untouched: Dependabot still opens a PR the day an
+# advisory lands against something in a lockfile, which is the part worth having.
+#
+# MEASURED, which is why this setting changed within a day of the file being
+# added. Turning version updates on produced ELEVEN pull requests at once and
+# then, on inspection, NINE of them failed CI for real reasons — steps ran, jobs
+# broke. #21 (27 crates) broke four jobs; #22 (15 tauri crates) broke
+# crates-windows. Only str0m passed clean.
+#
+# For a solo maintainer that is not a safety net, it is a queue of broken
+# branches that makes the repository look abandoned to anyone who visits, and
+# trains you to ignore the one PR that matters. Routine bumps can be done
+# deliberately, in a batch, when there is appetite to fix what they break.
+# Advisories cannot wait, so those still arrive.
+
 # Dependency updates.
 #
 # WHY THIS EXISTS. Púca ships end-to-end encryption and a remote-desktop agent,
@@ -25,7 +43,7 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       cargo:
         applies-to: version-updates
@@ -37,7 +55,7 @@ updates:
     directory: "/frontend/src-tauri"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
     groups:
       tauri:
         applies-to: version-updates
@@ -49,7 +67,7 @@ updates:
     directory: "/frontend/df-wasm"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 0
     groups:
       df-wasm:
         applies-to: version-updates
@@ -60,7 +78,7 @@ updates:
     directory: "/frontend"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     groups:
       npm:
         applies-to: version-updates
@@ -71,7 +89,7 @@ updates:
     directory: "/frontend/android"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
     groups:
       android:
         applies-to: version-updates
@@ -85,7 +103,7 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
     groups:
       actions:
         applies-to: version-updates
