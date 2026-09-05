@@ -138,9 +138,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils
       - name: X11 capture, against a real display
-        run: xvfb-run -a cargo test -p puca-capture --test live_capture_x11 --locked -- --ignored --nocapture
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p puca-capture --test live_capture_x11 --locked -- --ignored --nocapture
       - name: XTEST injection, against a real display
-        run: xvfb-run -a cargo test -p puca-input --test live_inject_x11 --locked -- --ignored --test-threads=1 --nocapture
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p puca-input --test live_inject_x11 --locked -- --ignored --test-threads=1 --nocapture
 
   # THE LINUX DESKTOP BUILD, which nothing compiled until now.
   #

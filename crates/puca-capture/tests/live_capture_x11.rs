@@ -57,6 +57,27 @@ impl Drop for Marked {
 fn draw_marker(w: u16, h: u16) -> Marked {
     let (conn, screen_num) = x11rb::connect(None).expect("no X server on $DISPLAY");
     let screen = &conn.setup().roots[screen_num];
+    // The marker is a packed 0xRRGGBB pixel, which only means what it says on
+    // a TrueColor visual of depth 24 or more. Xvfb's DEFAULT screen is
+    // 640x480x8, PseudoColor: the fill lands on a palette entry, the read-back
+    // is an index, and every colour assertion in this file then fails with a
+    // misleading "never drawn" (which is what CI showed for weeks). State the
+    // precondition, with the fix, instead of leaving it to be rediscovered.
+    let depth = screen.root_depth;
+    let class = screen
+        .allowed_depths
+        .iter()
+        .flat_map(|d| d.visuals.iter())
+        .find(|v| v.visual_id == screen.root_visual)
+        .map(|v| v.class);
+    println!(
+        "display: {}x{}, depth {depth}, root visual {class:?}",
+        screen.width_in_pixels, screen.height_in_pixels
+    );
+    assert!(
+        depth >= 24 && class == Some(x11rb::protocol::xproto::VisualClass::TRUE_COLOR),
+        "this test needs a TrueColor display of depth 24+ (got depth {depth}, {class:?});          Xvfb defaults to 640x480x8 -- start it with `-screen 0 1280x1024x24`"
+    );
     let (root, root_visual, black) = (screen.root, screen.root_visual, screen.black_pixel);
 
     let win = conn.generate_id().expect("window id");
