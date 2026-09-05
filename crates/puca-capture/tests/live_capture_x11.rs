@@ -23,6 +23,17 @@
 //! than of the code. The window path is correct on BOTH, so that is where the
 //! must-pass assertion lives; the root is measured and reported, and its result
 //! is asserted against what the server has already told us it is.
+//!
+//! RUN THIS SUITE WITH `--test-threads=1`. Every test here draws its marker
+//! window at (0,0) of the one shared display. On a non-compositing server —
+//! Xvfb, a bare X root — a window has no pixmap of its own: GetImage on it
+//! returns the screen framebuffer inside its bounds, and when a sibling test's
+//! window has been stacked over that area and then destroyed, the region
+//! underneath is left undefined (black) until an Expose repaints it, which
+//! these one-shot tests never do. Run in parallel, the per-window colour test
+//! therefore read #000000 on every frame in CI while the same capture read the
+//! marker perfectly on WSLg, whose Xwayland keeps a pixmap per window. The
+//! injection suite (live_inject_x11.rs) is single-threaded for the same reason.
 
 #![cfg(target_os = "linux")]
 
@@ -139,7 +150,7 @@ fn compositor_running(conn: &x11rb::rust_connection::RustConnection, screen: usi
 /// Uses the window path, which is correct on every X server — composited or
 /// not. A stub, a zeroed buffer or a capture of the wrong drawable all fail.
 #[test]
-#[ignore = "needs a real X server; run with --ignored"]
+#[ignore = "needs a real X server; run with --ignored --test-threads=1"]
 fn captures_the_exact_colour_drawn_on_the_display() {
     let (w, h) = (400u16, 300u16);
     let marked = draw_marker(w, h);
@@ -187,7 +198,7 @@ fn captures_the_exact_colour_drawn_on_the_display() {
 /// and if none is running the root MUST contain it. Either surprise means an
 /// assumption in `linux_impl.rs` is wrong and the fullscreen path needs work.
 #[test]
-#[ignore = "needs a real X server; run with --ignored"]
+#[ignore = "needs a real X server; run with --ignored --test-threads=1"]
 fn root_capture_matches_what_the_server_says_about_compositing() {
     let (w, h) = (400u16, 300u16);
     let marked = draw_marker(w, h);
@@ -252,7 +263,7 @@ fn root_capture_matches_what_the_server_says_about_compositing() {
 }
 
 #[test]
-#[ignore = "needs a real X server; run with --ignored"]
+#[ignore = "needs a real X server; run with --ignored --test-threads=1"]
 fn repeated_capture_stays_stable() {
     // X11 has no per-frame resource to release the way DXGI does, but a leaked
     // SHM segment or reply buffer would show up as a failure partway through
@@ -278,7 +289,7 @@ fn repeated_capture_stays_stable() {
 /// Returning zeroed frames would present to the controller as "the screen went
 /// black" with nothing in any log.
 #[test]
-#[ignore = "needs a real X server; run with --ignored"]
+#[ignore = "needs a real X server; run with --ignored --test-threads=1"]
 fn capturing_a_destroyed_window_reports_an_error() {
     let win = {
         let marked = draw_marker(100, 100);
@@ -302,7 +313,7 @@ fn capturing_a_destroyed_window_reports_an_error() {
 }
 
 #[test]
-#[ignore = "needs a real X server; run with --ignored"]
+#[ignore = "needs a real X server; run with --ignored --test-threads=1"]
 fn root_content_probe_agrees_with_a_real_capture() {
     // root_has_content() is what the agent uses to REFUSE a fullscreen session
     // with a real reason instead of streaming black. If it disagreed with an
