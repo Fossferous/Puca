@@ -27,6 +27,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { signingConfig } from './sign-windows.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tauriDir = join(here, '..', 'src-tauri');
@@ -361,6 +362,24 @@ if (liteEndpointOverride) {
         plugins: { updater: { endpoints: liteEndpointOverride } },
     }, null, 2));
     args.push('--config', epFile);
+}
+
+// Authenticode (scripts/sign-windows.mjs) is declared to the bundler ONLY when
+// a signer is configured. Declaring bundle.windows.signCommand in the tracked
+// config looked right — the script exits 0 with nothing configured — but Tauri
+// asks signtool whether each file is ALREADY signed before it runs any sign
+// command at all, so on a machine without the Windows SDK every unsigned
+// bundle died with "SignTool not found" (caught building 0.9.3). With a signer
+// configured, signtool is present by definition, and the hook then runs on the
+// app binary and the installer BEFORE the updater's minisign signature.
+if (signingConfig(process.env)) {
+    mergedDir = mergedDir ?? mkdtempSync(join(tmpdir(), 'tauri-overlay-'));
+    const signCfg = join(mergedDir, 'tauri.sign.json');
+    writeFileSync(signCfg, JSON.stringify({ bundle: { windows: { signCommand: 'node scripts/sign-windows.mjs %1' } } }, null, 2));
+    args.push('--config', signCfg);
+    console.log('[tauri-build] Authenticode signer configured: bundle.windows.signCommand -> scripts/sign-windows.mjs');
+} else {
+    console.log('[tauri-build] no Authenticode signer configured: bundles stay unsigned (docs/CODE_SIGNING.md)');
 }
 
 // npx, not a bare `tauri`: the binary lives in node_modules/.bin, which is on

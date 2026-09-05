@@ -7,9 +7,12 @@ build is ready to sign the moment one exists; nothing in the tree changes.
 ## What gets signed, and where
 
 - **The app binary and the installer** — by Tauri, through
-  `bundle.windows.signCommand` in `frontend/src-tauri/tauri.conf.json`, which
-  runs `frontend/scripts/sign-windows.mjs` on each file **before** Tauri
-  produces the updater's minisign `.sig`. That ordering is the whole point:
+  `bundle.windows.signCommand`, which `frontend/scripts/tauri-build.mjs`
+  declares at build time **only when a signer is configured** (Tauri asks
+  signtool whether a file is already signed before it runs any sign command,
+  so declaring the hook on a machine without the Windows SDK fails every
+  unsigned build). The hook runs `frontend/scripts/sign-windows.mjs` on each
+  file **before** Tauri produces the updater's minisign `.sig`. That ordering is the whole point:
   signing the installer after the updater signature exists changes the bytes
   the `.sig` covers, and every auto-update then fails verification.
 - **The helper binaries** (`puca-agent`, `puca-service`) — Tauri's hook does

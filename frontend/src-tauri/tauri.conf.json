@@ -46,7 +46,6 @@
         "type": "embedBootstrapper",
         "silent": true
       },
-      "signCommand": "node scripts/sign-windows.mjs %1",
       "nsis": {
         "installerHooks": "installer-hooks.nsh"
       }
