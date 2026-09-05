@@ -45,9 +45,9 @@ description = "Self-hosted, end-to-end-encrypted chat, voice, and screen-share s
 repository = "https://github.com/Fossferous/Puca"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws", "multipart"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-native-tls", "chrono"] }
+sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "tls-native-tls", "chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # mediasoup = "0.20"
@@ -58,51 +58,51 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 anyhow = "1.0"
 hex = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
-rand = "0.8"
+rand = "0.10"
 dotenv = "0.15"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 dashmap = "6.1.0"
-jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11.0.0", features = ["rust_crypto"] }
 futures = "0.3.31"
-tower-http = { version = "0.6.7", features = ["cors", "fs"] }
-tower_governor = "0.4.2"
-governor = "0.6.3"
+tower-http = { version = "0.7.1", features = ["cors", "fs"] }
+tower_governor = "0.8.0"
+governor = "0.10.4"
 tokio-util = { version = "0.7", features = ["io"] }
 # For TURN credential generation
-hmac = "0.12"
-sha1 = "0.10"
-base64 = "0.22"
+hmac = "0.13"
+sha1 = "0.11"
+base64 = "0.23"
 # E2EE account recovery: X25519 DH proof-of-possession + HKDF (must match the
 # frontend's @noble x25519/hkdf byte-for-byte).
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 # Device attestation: verifies the Ed25519 signature a client produces to prove
 # WHICH of the account's devices a connection is (see ws.rs). Already present
 # transitively via jsonwebtoken; promoted to a direct dependency because we now
 # call it ourselves.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 # The wake transport is a trait object (src/wake) so the FCM doorbell, the
 # no-credentials no-op and test recorders are interchangeable — what makes the
 # layer testable without a Firebase project. Already present transitively;
 # promoted because we call it ourselves (same as ed25519-dalek above).
 async-trait = "0.1"
-hkdf = "0.12"
+hkdf = "0.13"
 # For email sending
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
 # Used by the SFU control plane for the LiveKit RemoveParticipant admin call
 # (src/sfu.rs), so it must be a real dependency, not dev-only.
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "blocking"] }
 
 [dev-dependencies]
-axum-test = "14"
-tower = "0.4"
+axum-test = "21"
+tower = "0.5"
 tokio-test = "0.4"
 rsa = { version = "0.9", features = ["pem"] }   # test-only: mints the throwaway FCM signing key in-process
 # Cross-language known-answer test for the media frame AEAD (tests/media_aead_kat.rs).
 # The SERVER never encrypts media — it relays opaque frames — so this is a dev
 # dependency only. The native host agent (Phase 6) will take it as a real one.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 
 # Workaround for Windows PDB linker errors (LNK1318)
 # WORKSPACE-WIDE since the [workspace] above: a root profile governs every

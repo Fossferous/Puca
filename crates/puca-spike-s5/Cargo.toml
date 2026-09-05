@@ -17,7 +17,7 @@ path = "src/main.rs"
 # the whole design down the wrong road.
 puca-capture = { path = "../puca-capture" }
 puca-input = { path = "../puca-input" }
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",

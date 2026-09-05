@@ -14,7 +14,7 @@ license = "AGPL-3.0-or-later"
 # screen) — but neither can WGC, and that boundary belongs to the SYSTEM service
 # work regardless.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
@@ -38,10 +38,10 @@ windows = { version = "0.58", features = [
 # a persisted restore_token plus PipeWire, which is a much larger piece — and
 # per the plan, X11 first covers most self-hosters at about a third of the cost.
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", default-features = false, features = ["shm"] }
+x11rb = { version = "0.14", default-features = false, features = ["shm"] }
 
 # The X11 live test draws a known colour on the display and asserts the capture
 # returns exactly that -- an assertion a stub or a black buffer cannot pass.
 # Drawing needs the same X client the implementation uses.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-x11rb = { version = "0.13", default-features = false, features = ["shm"] }
+x11rb = { version = "0.14", default-features = false, features = ["shm"] }

@@ -11,20 +11,20 @@ publish = false
 # a multi-threaded runtime on a box already running Postgres, Caddy and coturn
 # would be pure overhead.
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "signal", "io-util"] }
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 # The whole runtime crypto surface: sign the attestation transcript. Everything
 # else the waker presents (device id, auth record, auth signature) is static
 # text produced once at provisioning and read from a file.
-ed25519-dalek = "2"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-sha2 = "0.10"
-base64 = "0.22"
-getrandom = "0.2"
+ed25519-dalek = "3"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+sha2 = "0.11"
+base64 = "0.23"
+getrandom = "0.4"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Shares the TLS stack with tokio-tungstenite's native-tls rather than pulling
 # in a second one.
-reqwest = { version = "0.11", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
