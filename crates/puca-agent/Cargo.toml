@@ -40,7 +40,7 @@ hmac = "0.12"
 # The device-control session key now lives in the agent rather than above it —
 # see src/control_key.rs for why. Versions match the root Cargo.toml so the two
 # implementations of the same wire format cannot drift apart.
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = "0.10"
 aes-gcm = "0.10"
 getrandom = "0.2"
