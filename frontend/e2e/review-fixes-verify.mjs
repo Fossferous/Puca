@@ -85,7 +85,8 @@ async function login(username, password) {
 /** A raw WS client that buckets every frame it receives and tracks closure. */
 function connect(token) {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`${WS}?token=${token}`);
+        // Bearer subprotocol: ?token= has been refused since 0.9.1 (it landed in access logs).
+        const ws = new WebSocket(WS, ['bearer', token]);
         const handle = { ws, frames: [], closed: false, closeCode: null };
         ws.on('message', (d) => { try { handle.frames.push(JSON.parse(d.toString())); } catch { /* ignore */ } });
         ws.on('close', (code) => { handle.closed = true; handle.closeCode = code; });
@@ -106,6 +107,14 @@ async function main() {
     const idB = (await api('GET', '/profile', null, tB)).body.id;
     const idC = (await api('GET', '/profile', null, tC)).body.id;
     check('setup/three users registered + logged in', !!(idA && idB && idC), `A=${idA} B=${idB} C=${idC}`);
+
+    // Since the 2026-09-05 boundary fixes the "allow DMs from server members"
+    // flag really means server members: B's cold open below is accepted only
+    // because A and B share a server. C joins nothing and stays the stranger.
+    const rel = await api('POST', '/servers', { name: `rel_${RUN}` }, tA);
+    const relInv = await api('POST', `/servers/${rel.body.id}/invites`, { max_uses: 5, expires_in_hours: 1 }, tA);
+    const relJoin = await api('POST', `/invites/${relInv.body.code}/join`, {}, tB);
+    check('setup/A and B share a server (the DM rule needs it)', relJoin.status < 300, `status=${relJoin.status}`);
 
     // === DM directionality =================================================
     // B opens a conversation with A and messages first (A's flag is still on).

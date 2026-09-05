@@ -239,6 +239,18 @@ async function main() {
     }
 
     // --- Stage: DM pairwise ---
+    // Since the 2026-09-05 boundary fixes a DM between accounts that share no
+    // server is refused unless they are friends or the recipient wrote first
+    // (the "allow DMs from server members" flag now really means server
+    // members). The three accounts are strangers at this point, so give them
+    // one shared server before the DM stage; the channel-key stage below
+    // creates its own server and is unaffected.
+    {
+        const rel = await apiFetch('POST', '/servers', { name: `dmrel_${RUN}` }, A.token);
+        const relInv = await apiFetch('POST', `/servers/${rel.id}/invites`, { max_uses: 5, expires_in_hours: 1 }, A.token);
+        await apiFetch('POST', `/invites/${relInv.code}/join`, {}, B.token);
+        await apiFetch('POST', `/invites/${relInv.code}/join`, {}, C.token);
+    }
     section('Stage: DM pairwise (X25519 + AES-GCM)');
     {
         const bPub = (await apiFetch('GET', `/users/${B.id}/public-key`, null, A.token)).public_key;
@@ -572,6 +584,33 @@ async function main() {
         const r3 = await refusedWith(t1);
         const gone = sql(`SELECT deleted_at IS NOT NULL FROM users WHERE id=${uid};`);
         check('proof/delete-account succeeds from the session that proved', r3 === 'accepted' && gone === 't', `${r3} deleted_at=${gone}`);
+    }
+
+    // --- Stage: identity key is write-once for a v3 account (PATCH /keys/public) ---
+    // These four assertions used to live in tests/audit-fixes-live.mjs, which
+    // mints bare bearers; the route has required a recent password proof since
+    // 0.8.130, so only a rig that signs in through SRP can exercise the
+    // write-once rule itself. The identity key is the anchor of every TOFU pin
+    // in the product: replacing an established one is an account takeover.
+    section('Stage: identity key is write-once for a v3 account');
+    {
+        const F = await registerUser(`fay_${RUN}`, 'passwordFay1!');
+        const tF = (await loginUser(F.username, F.password)).token;   // proof bound to this session
+        const patchStatus = async (public_key) => {
+            try { await apiFetch('PATCH', '/keys/public', { public_key }, tF); return 200; }
+            catch (e) { const m = /→ (\d{3})/.exec(e.message); return m ? Number(m[1]) : e.message; }
+        };
+        const other = makeIdentity(randomBytes(32)).publicKeyEncoded;
+        const s409 = await patchStatus(other);
+        check('identity/replacing an established v3 identity key is refused (409)', s409 === 409, `status=${s409}`);
+        const stored = sql(`SELECT public_key FROM users WHERE username='${F.username}';`);
+        check('identity/the established key is unchanged after the refused replace', stored === F.identity.publicKeyEncoded);
+        const s200 = await patchStatus(F.identity.publicKeyEncoded);
+        check('identity/idempotent re-upload of the same key succeeds (200)', s200 === 200, `status=${s200}`);
+        const s400 = await patchStatus('not-a-key');
+        check('identity/a malformed identity key is rejected (400)', s400 === 400, `status=${s400}`);
+        // POSITIVE CONTROL that the proof is what a bare bearer lacks: a token
+        // minted without SRP is refused with 401 in tests/audit-fixes-live.mjs.
     }
 
     // --- Stage: per-session revocation (the `sid` claim, migration 055) ---

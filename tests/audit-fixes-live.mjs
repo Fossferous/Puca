@@ -156,32 +156,45 @@ console.log(`\n=== remove_role must enforce the same hierarchy as assign_role ==
     const lowRole = psql1(`INSERT INTO server_roles (server_id, name, color, permissions, position, is_default)
                            VALUES ('${srvV.id}', 'Low', '#95A5A6', 1, 2, false) RETURNING id`);
     psql(`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ('${srvV.id}', ${M.id}, ${lowRole})`);
+    // Since the 2026-09-05 boundary fixes a non-administrator may not change
+    // THEIR OWN roles (a role can carry a channel overwrite, so self-service
+    // assignment or removal opened hidden channels). This used to strip the
+    // moderator's own low role and expect success; it now expects the refusal,
+    // and the hierarchy semantics it was really about are asserted on another
+    // member in tests/boundary-audit-live.mjs (F8).
     const ok = await api('DELETE', `/servers/${srvV.id}/members/${M.id}/roles/${lowRole}`, null, M.t);
-    check('moderator can still remove a role below their own', ok.status < 300, `status=${ok.status}`);
+    check('moderator cannot change their OWN roles (self-target refused)', ok.status === 403, `status=${ok.status}`);
 }
 
 console.log(`\n=== update_public_key is write-once for a v3 account ===`);
 {
+    // SKIPPED here since PATCH /keys/public started requiring a recent password
+    // proof (recovery_handlers::require_password_proof): a stolen bearer is the
+    // threat model for a key-custody write, so a minted JWT alone now answers
+    // 401 and the four assertions below can no longer reach the write-once
+    // guard from this harness. They are kept, not deleted — the behaviour is
+    // still a requirement — and the proof-bearing rig that CAN exercise them is
+    // frontend/e2e/e2ee-live-verify.mjs ("Stage: password proof is bound to the
+    // session that spends it"), which signs in over SRP and re-proves.
+    const skip = (name) => console.log(`SKIP  ${name}  (needs a password proof; asserted in frontend/e2e/e2ee-live-verify.mjs, "Stage: identity key is write-once for a v3 account")`);
     const K = mkUser('key');
     const mine = 'x25519:' + Buffer.alloc(32, 7).toString('base64');
     const attacker = 'x25519:' + Buffer.alloc(32, 9).toString('base64');
     psql(`UPDATE users SET public_key = '${mine}' WHERE id = ${K.id}`);
 
+    // What a bare bearer gets today, and the reason for the skips below.
     const r = await api('PATCH', '/keys/public', { public_key: attacker }, K.t);
-    check('replacing an established v3 identity key is refused', r.status === 409, `status=${r.status}`);
+    check('a bare bearer token cannot touch the identity key (401: password proof required)', r.status === 401, `status=${r.status}`);
+    skip('replacing an established v3 identity key is refused (409)');
     const stored = psql1(`SELECT public_key FROM users WHERE id = ${K.id}`);
     check('stored identity key is unchanged', stored === mine, `stored=${stored}`);
 
-    const same = await api('PATCH', '/keys/public', { public_key: mine }, K.t);
-    check('idempotent re-upload of the same key still succeeds', same.status < 300, `status=${same.status}`);
-    const bad = await api('PATCH', '/keys/public', { public_key: 'not-a-key' }, K.t);
-    check('malformed identity key is rejected', bad.status === 400, `status=${bad.status}`);
+    skip('idempotent re-upload of the same key still succeeds');
+    skip('malformed identity key is rejected (400)');
 
-    // A legacy v2 account must still be able to publish during migration.
-    const L = mkUser('legacy');
-    psql(`UPDATE users SET key_version = 2, public_key = NULL WHERE id = ${L.id}`);
-    const legacy = await api('PATCH', '/keys/public', { public_key: attacker }, L.t);
-    check('legacy v2 migration can still publish its key', legacy.status < 300, `status=${legacy.status}`);
+    // A legacy v2 account must still be able to publish during migration —
+    // also behind the proof now.
+    skip('legacy v2 migration can still publish its key (no proof-bearing v2 fixture exists; the v3 rule is asserted live in e2ee-live-verify)');
 }
 
 console.log(`\n=== update_profile input validation ===`);
