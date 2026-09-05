@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mediaE2eeExplanation, localMediaBlockNotice } from '../api/rtc/e2eeStatus';
+import { mediaE2eeExplanation, localMediaBlockNotice, localMediaNotice } from '../api/rtc/e2eeStatus';
 
 /**
  * The PRE-JOIN notice. The badge tooltip only exists once a peer is present
@@ -38,6 +38,46 @@ describe('localMediaBlockNotice', () => {
         const s = localMediaBlockNotice({ ...base, required: false, sfuMode: true })!;
         expect(s).toMatch(/encrypted-only/i);
         expect(s).toMatch(/joining will fail/i);
+    });
+});
+
+describe('localMediaNotice (the same notice, with its severity)', () => {
+    const base = { supported: false, required: true, serverRequired: false, sfuMode: false };
+
+    it('says nothing on a supported engine (positive control for the rig)', () => {
+        expect(localMediaNotice({ ...base, supported: true })).toBeNull();
+        expect(localMediaNotice({ ...base, supported: true, required: false })).toBeNull();
+    });
+
+    it('BLOCKS under enforcement, with exactly the text the text-only view returns', () => {
+        const n = localMediaNotice(base)!;
+        expect(n.level).toBe('blocked');
+        expect(n.text).toBe(localMediaBlockNotice(base));
+    });
+
+    it('WARNS, but does not block, when the user turned enforcement off on a mesh call', () => {
+        // The old helper was silent here — "not required" then read as
+        // "encrypted anyway". The call still goes ahead: the text-only view
+        // stays null, so nothing that keys on it blocks the join.
+        const i = { ...base, required: false };
+        const n = localMediaNotice(i)!;
+        expect(n.level).toBe('warning');
+        expect(n.text).toMatch(/will not be end-to-end encrypted/i);
+        expect(n.text).toMatch(/pass through the server/i);
+        expect(n.text).toContain('Require encryption for calls');
+        expect(localMediaBlockNotice(i)).toBeNull();
+    });
+
+    it('on an SFU channel blocks whatever the setting: the join itself refuses', () => {
+        expect(localMediaNotice({ ...base, required: false, sfuMode: true })!.level).toBe('blocked');
+    });
+
+    it('the remedy names a Chromium browser before the native apps: the API is Chromium’s, not Windows’s', () => {
+        // A Linux or macOS user has Chrome available; sending them only to
+        // "the Windows or Android app" sends them somewhere they may not be.
+        for (const i of [base, { ...base, serverRequired: true }, { ...base, required: false }, { ...base, sfuMode: true }]) {
+            expect(localMediaNotice(i)!.text).toMatch(/Chromium-based browser \(Chrome, Edge or Brave\)/);
+        }
     });
 });
 

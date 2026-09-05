@@ -22,12 +22,16 @@ const NO_ENCODED_TRANSFORM = 'it has no WebRTC Encoded Transform API — Firefox
  * find a switch that is not there reads as the switch being gone. And the
  * remedy names WINDOWS, not "desktop": the macOS and Linux shells embed
  * WebKit, which lacks exactly the API this message is about, so telling a
- * Linux user to use the desktop app sends them to the same failure.
+ * Linux user to use the desktop app sends them to the same failure. What a
+ * Linux or macOS user CAN do is open a Chromium-based browser — the API is
+ * Chromium's — so the remedy names that first, before the native apps.
  */
+const CHROMIUM_OR_NATIVE = 'a Chromium-based browser (Chrome, Edge or Brave) or the Windows or Android app';
+
 function localUnsupportedRemedy(serverRequired: boolean): string {
     return serverRequired
-        ? 'This server requires encrypted calls, so the way to join from here is the Windows or Android app.'
-        : 'Use the Windows or Android app — or, to call from this browser anyway, turn off “Require encryption for calls” in Settings → Privacy & Safety; your voice and video then pass through the server in a form it can access.';
+        ? `This server requires encrypted calls, so the way to join from here is ${CHROMIUM_OR_NATIVE}.`
+        : `Use ${CHROMIUM_OR_NATIVE} — or, to call from this browser anyway, turn off “Require encryption for calls” in Settings → Privacy & Safety; your voice and video then pass through the server in a form it can access.`;
 }
 
 /**
@@ -87,18 +91,47 @@ export interface LocalMediaBlockInputs {
 }
 
 /**
- * The notice to show BEFORE joining (and to keep showing while joined) when
- * this engine cannot satisfy the encryption that is required — or null when
- * nothing is blocked. Visible text, not a tooltip: the hover popup on the
- * E2EE badge only mounts once a peer is present, and nothing warned a user
- * on Firefox or Safari that pressing Join would put them in a call where
- * nobody can hear them.
+ * The notice to show BEFORE joining (and to keep showing while joined), with
+ * its severity. Visible text, not a tooltip: the hover popup on the E2EE badge
+ * only mounts once a peer is present, and nothing warned a user on Firefox or
+ * Safari that pressing Join would put them in a call where nobody can hear
+ * them.
+ *
+ *  - `blocked`: joining puts the user in a call where nothing plays (or, on
+ *    an SFU channel, the join refuses). Opening the channel must not
+ *    auto-join into that; a deliberate press of Join still may.
+ *  - `warning`: the call goes ahead, transport-only — the user turned
+ *    enforcement off on an engine that cannot encrypt.
+ *  - null: nothing to say.
  */
-export function localMediaBlockNotice(i: LocalMediaBlockInputs): string | null {
+export type LocalMediaNoticeLevel = 'blocked' | 'warning';
+
+export function localMediaNotice(i: LocalMediaBlockInputs): { level: LocalMediaNoticeLevel; text: string } | null {
     if (i.supported) return null;
     if (i.sfuMode) {
-        return 'Calls in this channel are encrypted-only, and this browser can’t encrypt live media (no WebRTC Encoded Transform API). Joining will fail here — use the Windows or Android app.';
+        return {
+            level: 'blocked',
+            text: `Calls in this channel are encrypted-only, and this browser can’t encrypt live media (no WebRTC Encoded Transform API). Joining will fail here — use ${CHROMIUM_OR_NATIVE}.`,
+        };
     }
-    if (!i.required) return null;
-    return `Voice is blocked in this browser: it can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}), and encryption is required for calls. If you join, your microphone and camera are not sent and nobody’s voice or video plays. ${localUnsupportedRemedy(i.serverRequired)}`;
+    if (!i.required) {
+        // The user turned enforcement off on an engine that cannot encrypt.
+        // Their choice — but said once, in plain sight, before Join, so "not
+        // required" is never mistaken for "encrypted anyway".
+        return {
+            level: 'warning',
+            text: `This call will not be end-to-end encrypted: this browser can’t encrypt live media (${NO_ENCODED_TRANSFORM}), and “Require encryption for calls” is off, so your voice and video pass through the server in a form it can access. For an encrypted call, use ${CHROMIUM_OR_NATIVE}.`,
+        };
+    }
+    return {
+        level: 'blocked',
+        text: `Voice is blocked in this browser: it can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}), and encryption is required for calls. If you join, your microphone and camera are not sent and nobody’s voice or video plays. ${localUnsupportedRemedy(i.serverRequired)}`,
+    };
+}
+
+/** The blocking cases of `localMediaNotice`, as text; null when the call may
+ *  go ahead (including the transport-only warning, which does not block). */
+export function localMediaBlockNotice(i: LocalMediaBlockInputs): string | null {
+    const n = localMediaNotice(i);
+    return n && n.level === 'blocked' ? n.text : null;
 }

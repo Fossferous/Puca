@@ -25,6 +25,19 @@ one-line summary; this file is the full story. Versions follow
   derivation such a client used rather than assuming the new one — assuming it
   would have locked those accounts out of every current client.
 
+### Changed
+- **Opening a voice channel no longer drops you into a silent call.** On a
+  browser that cannot end-to-end encrypt live media (Firefox, Safari, iOS) with
+  “Require encryption for calls” on — the default — the app used to auto-join
+  the channel anyway, muting you and everyone else by design, and only then
+  show the notice explaining why. The notice now comes first and the auto-join
+  does not fire; Join Voice is still there if you want it, and the notice says
+  what to do instead: a Chromium-based browser, or the Windows or Android app.
+- **Turning that setting off now says what you get.** With encryption not
+  required, the same browsers used to join with no notice at all, which read as
+  “encrypted anyway”. A warning now sits above Join: the call will be
+  transport-encrypted only, and the server can access your voice and video.
+
 ### Fixed
 - **Updating part of your profile no longer fails.** Changing, say, your bio
   without also changing your status hit a bad SQL placeholder and returned an

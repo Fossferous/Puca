@@ -4,7 +4,9 @@ import { webrtcManager } from '../api/webrtc';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { setSfuControlSender } from '../api/rtc/controlDc';
 import type { MediaE2eeReason } from '../api/rtc/types';
-import { mediaE2eeExplanation, localMediaBlockNotice } from '../api/rtc/e2eeStatus';
+import { mediaE2eeExplanation, localMediaNotice } from '../api/rtc/e2eeStatus';
+import { isMediaE2eeSupported } from '../api/rtc/mediaCrypto';
+import { isE2EESupported } from 'livekit-client';
 import { loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
@@ -495,6 +497,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         window.addEventListener('settingsChanged', onChange);
         return () => window.removeEventListener('settingsChanged', onChange);
     }, [serverRequireMediaE2ee]);
+
+    // Can THIS engine encrypt live media on the transport this channel uses?
+    // Both probes are static feature detection — mesh is Chromium's
+    // createEncodedStreams, SFU is livekit's (which also accepts the standard
+    // RTCRtpScriptTransform) — so the answer is known on the FIRST render.
+    // The polled `mediaSecure.supported` carries the same value but starts
+    // optimistic, and the mount-time auto-join ran before the first poll
+    // landed: a Firefox user under the default enforcement was auto-joined
+    // into a call where nothing played, and only then told why.
+    const engineSupported = sfuMode ? isE2EESupported() : isMediaE2eeSupported();
+    const preJoinNotice = localMediaNotice({
+        supported: engineSupported,
+        required: requireE2ee,
+        serverRequired: serverRequireMediaE2ee,
+        sfuMode,
+    });
     const voiceDetectorCleanups = useRef<Map<number, () => void>>(new Map());
 
     // Refs for event listeners to allow cleanup
@@ -2200,7 +2218,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Auto-join voice when the panel mounts (user clicked a voice channel)
     useEffect(() => {
         // Auto-join when mounted
-        if (!isInVoice && !isConnecting) {
+        // Not into a call this engine cannot take part in: the notice above
+        // the Join button says why and what to do, and a deliberate press of
+        // Join still works (media stays fail-closed either way) — but nobody is
+        // dropped into a silent call by merely clicking the channel. This is
+        // the mount render's closure, which is exactly when the decision is
+        // made; it cannot go stale here.
+        if (!isInVoice && !isConnecting && preJoinNotice?.level !== 'blocked') {
             joinVoice();
         }
 
@@ -2940,27 +2964,20 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 />
             )}
 
-            {/* This engine cannot do what the call requires: say so in plain
-                sight, before Join and for as long as it holds. The E2EE badge's
-                tooltip explains the same thing, but it only mounts once a peer
-                is present and only on hover — a Firefox/Safari user under the
-                default enforcement otherwise joined a call where nobody could
-                hear them and nothing on screen said why. `mediaSecure.supported`
-                is the probe for the transport in use (mesh vs SFU), polled. */}
-            {(() => {
-                const notice = localMediaBlockNotice({
-                    supported: mediaSecure.supported,
-                    required: requireE2ee,
-                    serverRequired: serverRequireMediaE2ee,
-                    sfuMode,
-                });
-                return notice ? (
-                    <div className="voice-e2ee-blocked" role="status">
-                        <span className="voice-e2ee-blocked-icon" aria-hidden="true"><WarningIcon /></span>
-                        <span>{notice}</span>
-                    </div>
-                ) : null;
-            })()}
+            {/* This engine cannot do what the call requires — or can, only
+                without encryption: say so in plain sight, before Join and for
+                as long as it holds. The E2EE badge's tooltip explains the same
+                thing, but it only mounts once a peer is present and only on
+                hover — a Firefox/Safari user under the default enforcement
+                otherwise joined a call where nobody could hear them and nothing
+                on screen said why. Static probe, not the polled summary: see
+                `engineSupported`. */}
+            {preJoinNotice ? (
+                <div className={preJoinNotice.level === 'blocked' ? 'voice-e2ee-blocked' : 'voice-e2ee-warning'} role="status">
+                    <span className="voice-e2ee-blocked-icon" aria-hidden="true"><WarningIcon /></span>
+                    <span>{preJoinNotice.text}</span>
+                </div>
+            ) : null}
 
             {/* Connection Status */}
             {!isInVoice ? (

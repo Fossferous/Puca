@@ -48,6 +48,21 @@
     margin-top: 1px;
 }
 
+/* "This call will be transport-only" — the user turned enforcement off on an
+   engine that cannot encrypt. Same layout as the blocked notice, amber rather
+   than red: a consequence to know about, not a wall. */
+.voice-e2ee-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: #ffe2b0;
+    background: rgba(191, 130, 40, 0.15);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 /* Connection Info */
 .voice-connection-info {
     padding: 8px 10px;
