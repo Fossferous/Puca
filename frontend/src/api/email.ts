@@ -28,12 +28,16 @@ export async function resetPassword(
     token: string,
     username: string,
     salt: string,
-    verifier: string
+    verifier: string,
+    // Which derivation produced `verifier` (auth.ts SRP_VERSION_CURRENT). The
+    // server must be told, or it records the legacy one and the account is
+    // unopenable.
+    srpVersion: number,
 ): Promise<MessageResponse> {
     const response = await fetch(`${API_URL}/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, username, salt, verifier }),
+        body: JSON.stringify({ token, username, salt, verifier, srp_version: srpVersion }),
     });
 
     if (!response.ok) {

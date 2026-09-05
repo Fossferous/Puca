@@ -59,9 +59,9 @@ export default function ResetPassword({ token, onSuccess, onBack }: ResetPasswor
 
         try {
             // Generate new SRP credentials
-            const { salt, verifier } = await generateVerifierForReset(username, password);
+            const { salt, verifier, srp_version } = await generateVerifierForReset(username, password);
 
-            await resetPassword(token, username, salt, verifier);
+            await resetPassword(token, username, salt, verifier, srp_version);
             setStatus('success');
             setMessage('Password reset successfully! You can now log in with your new password.');
         } catch (err) {

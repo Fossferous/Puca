@@ -401,8 +401,10 @@ This is the short version. The long version is
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — read it
 before trusting either version.
 
-- **Authentication**: SRP-6a, 2048-bit group (RFC 5054), SHA-256. Your
-  password never leaves your device, not even as a hash.
+- **Authentication**: SRP-6a, 2048-bit group (RFC 5054), SHA-256 proofs, with
+  the verifier derived by **Argon2id** at the same cost as the key wrap since
+  0.9.3 — earlier accounts move across on their next sign-in. Your password
+  never leaves your device, not even as a hash.
 - **Identity & E2EE keys**: a random per-account seed, wrapped under your
   password with **Argon2id** (m=19456 KiB, t=2, p=1) and independently under
   a 12-word recovery code — so a password reset recovers your history

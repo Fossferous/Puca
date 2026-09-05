@@ -363,10 +363,17 @@ Your identity seed is stored on the server wrapped under a password-derived key 
 m=19456 KiB, t=2, p=1) and under a recovery-phrase key. The server never sees the seed or
 either wrapping key.
 
-**But the same database row holds the SRP verifier, and SRP here applies no stretching at
-all:** `x = SHA-256(salt ‖ SHA-256(username:password))`. Two SHA-256 calls. So an attacker
-with a database dump attacks the verifier at roughly one hash per guess, not the Argon2id
-blob at ~0.4s per guess — about four orders of magnitude cheaper.
+**The same database row holds the SRP verifier.** Until 0.9.3 SRP applied no stretching at
+all: `x = SHA-256(salt ‖ SHA-256(username:password))`, two SHA-256 calls, so an attacker
+with a database dump attacked the verifier at roughly one hash per guess — about four
+orders of magnitude cheaper than the Argon2id blob beside it. Since 0.9.3 the verifier is
+derived at the same Argon2id cost (`x = Argon2id(password, salt ‖ username)`, m=19456 KiB,
+t=2, p=1): every new registration, password change and reset uses it, and an existing
+account is moved across inside its first successful sign-in from a current client. The
+server records which derivation each account uses (`srp_version`) and cannot perform the
+move itself, because it never sees the password. **An account whose owner has not signed in
+since the upgrade still carries the SHA-256 verifier**, and a database dump taken before
+then is attackable at the old rate regardless.
 
 Practically: **seed confidentiality against a database thief reduces to your password
 strength.** There is also no forward secrecy for message history — DM keys derive from

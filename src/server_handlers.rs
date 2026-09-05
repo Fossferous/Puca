@@ -1084,25 +1084,29 @@ pub async fn update_profile(
     // Build dynamic update query
     let mut updates = Vec::new();
     let mut binds: Vec<String> = Vec::new();
+    let mut param_idx = 1;
 
     if let Some(ref status) = payload.status {
-        updates.push("status = $1");
+        updates.push(format!("status = ${param_idx}"));
         binds.push(status.clone());
+        param_idx += 1;
     }
     if let Some(ref custom_status) = payload.custom_status {
-        updates.push("custom_status = $2");
+        updates.push(format!("custom_status = ${param_idx}"));
         binds.push(custom_status.clone());
+        param_idx += 1;
     }
     if let Some(ref bio) = payload.bio {
-        updates.push("bio = $3");
+        updates.push(format!("bio = ${param_idx}"));
         binds.push(bio.clone());
+        param_idx += 1;
     }
 
     if updates.is_empty() {
         return StatusCode::OK.into_response();
     }
 
-    let query = format!("UPDATE users SET {} WHERE id = $4", updates.join(", "));
+    let query = format!("UPDATE users SET {} WHERE id = ${param_idx}", updates.join(", "));
     let mut q = sqlx::query(&query);
     for b in &binds {
         q = q.bind(b);

@@ -4,6 +4,32 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.3 — unreleased
+
+### Security
+- **Your sign-in verifier is now derived with Argon2id.** The server never sees
+  your password; what it stores is an SRP verifier, and until now that verifier
+  was derived with two plain SHA-256 calls — so someone holding a copy of the
+  database could test guesses against it about ten thousand times faster than
+  against the Argon2id-wrapped identity key beside it. New accounts, password
+  changes and every kind of reset now derive the verifier at the same Argon2id
+  cost as that wrap. **Existing accounts move across automatically the next
+  time you sign in** from a current client: the app proves your password the
+  usual way and, in that same exchange, hands the server a replacement
+  verifier, which it accepts only because the proof succeeded. There is no
+  separate "upgrade" request that a stolen session could call. Until you sign
+  in, your account keeps the old verifier; a database copy taken before then is
+  as attackable as it always was.
+- Older clients keep working: a client from before this release still signs in
+  and can still register or reset a password, and the server records which
+  derivation such a client used rather than assuming the new one — assuming it
+  would have locked those accounts out of every current client.
+
+### Fixed
+- **Updating part of your profile no longer fails.** Changing, say, your bio
+  without also changing your status hit a bad SQL placeholder and returned an
+  error; the query is now built from the fields actually present.
+
 ## 0.9.2 — 2026-09-03
 
 A follow-up to 0.9.1 for one problem that could not fix itself, plus the

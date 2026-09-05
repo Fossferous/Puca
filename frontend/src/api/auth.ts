@@ -8,10 +8,37 @@
  */
 
 import { apiClient } from './client';
+import { argon2id } from '@noble/hashes/argon2.js';
 
 // SRP-2048 group parameters from RFC 5054
 const N_HEX = 'AC6BDB41324A9A9BF166DE5E1389582FAF72B6651987EE07FC3192943DB56050A37329CBB4A099ED8193E0757767A13DD52312AB4B03310DCD7F48A9DA04FD50E8083969EDB767B0CF6095179A163AB3661A05FBD5FAAAE82918A9962F0B93B855F97993EC975EEAA80D740ADBF4FF747359D041D5C33EA71D281E446B14773BCA97B43A23FB801676BD207A436C6481F1D2B9078717461A5B9D32E688F87748544523B524B0D57D5EA77A2775D2ECFA032CFBDBF52FB3786160279004E57AE6AF874E7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFBB694B5C803D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73';
 const G_HEX = '02';
+
+// ============ SRP verifier derivation (srp_version) ============
+//
+// Which KDF turns (salt, username, password) into the SRP private value x.
+// The server stores this per account (migration 059), tells the client which
+// one to use in login step 1, and records which one a client used whenever a
+// verifier is written. The server never derives x itself.
+//
+//   1  x = SHA-256(salt ‖ SHA-256(lower(username) ":" password)). Two hash
+//      calls, no stretching: a database thief attacks the verifier at one
+//      hash per guess. Every account created before 0.9.3 is here, and so is
+//      any verifier a pre-0.9.3 client writes (it omits the field, and the
+//      server defaults to 1 — defaulting to 2 would strand that account,
+//      because the next current client would derive Argon2id against a
+//      SHA-256 verifier and never match).
+//   2  x = Argon2id(password, salt ‖ lower(username); m=19456 KiB, t=2,
+//      p=1, 32 bytes) — the same cost as the password wrap in e2ee.ts, so
+//      the verifier is no longer ~10^4x cheaper to attack than the seed it
+//      sits beside. Registration, password change and every reset derive
+//      this; a v1 account is upgraded transparently in its first successful
+//      login exchange (see srpExchange), when the client provably knows the
+//      password and the server has just verified it.
+const SRP_VERSION_CURRENT = 2;
+const SRP_ARGON2_M = 19_456; // KiB (19 MiB)
+const SRP_ARGON2_T = 2;
+const SRP_ARGON2_P = 1;
 
 // ============ Utility Functions ============
 
@@ -210,11 +237,49 @@ async function computeIdentityHash(username: string, password: string): Promise<
 }
 
 /**
- * Compute x = H(salt | identity_hash)
+ * Compute x = H(salt | identity_hash) — srp_version 1.
  */
 async function computeX(salt: Uint8Array, identityHash: Uint8Array): Promise<bigint> {
     const xHash = await H(salt, identityHash);
     return BigInt('0x' + bytesToHex(xHash));
+}
+
+/**
+ * Compute x = Argon2id(password, salt ‖ lower(username)) — srp_version 2.
+ *
+ * The username goes into the Argon2 SALT rather than the message so that two
+ * accounts with the same password (and, by chance, the same salt bytes) still
+ * get different x. Lowercased because login is case-insensitive — the server
+ * matches LOWER(username) — so the derivation must not depend on how the
+ * name was typed. 32 bytes out, so x < 2^256 exactly as for v1.
+ */
+function computeXv2(salt: Uint8Array, username: string, password: string): bigint {
+    const encoder = new TextEncoder();
+    const user = encoder.encode(username.toLowerCase());
+    const argonSalt = new Uint8Array(salt.length + user.length);
+    argonSalt.set(salt, 0);
+    argonSalt.set(user, salt.length);
+    const xBytes = argon2id(encoder.encode(password), argonSalt, {
+        m: SRP_ARGON2_M, t: SRP_ARGON2_T, p: SRP_ARGON2_P, dkLen: 32,
+    });
+    return BigInt('0x' + bytesToHex(xBytes));
+}
+
+/** x under whichever derivation the server says this account uses. */
+async function computeXFor(version: number, salt: Uint8Array, username: string, password: string): Promise<bigint> {
+    if (version === 1) return computeX(salt, await computeIdentityHash(username, password));
+    if (version === 2) return computeXv2(salt, username, password);
+    // A later server may add a v3 this build cannot derive. Guessing v1 would
+    // just be a wrong password with a misleading error.
+    throw new Error('This server uses a sign-in format this app does not understand — please update the app');
+}
+
+/** A fresh salt + verifier under the CURRENT derivation, for every path that
+ *  writes credentials: registration, password change, and all three resets. */
+function freshVerifier(username: string, password: string): { salt: Uint8Array; v: bigint } {
+    const salt = randomBytes(32); // 32 bytes = 64 hex chars (SRP salt)
+    const x = computeXv2(salt, username, password);
+    return { salt, v: computeVerifier(x) };
 }
 
 /**
@@ -320,10 +385,7 @@ import { thisDeviceId, clearThisDeviceId } from './thisDevice';
 // ============ Public API ============
 
 export async function register(username: string, password: string, inviteCode?: string): Promise<void> {
-    const salt = randomBytes(32); // 32 bytes = 64 hex chars (SRP salt)
-    const identityHash = await computeIdentityHash(username, password);
-    const x = await computeX(salt, identityHash);
-    const v = computeVerifier(x);
+    const { salt, v } = freshVerifier(username, password);
     const saltHex = bytesToHex(salt);
 
     // v3 key custody: a random identity seed (independent of the password),
@@ -336,6 +398,7 @@ export async function register(username: string, password: string, inviteCode?: 
         username,
         salt_hex: saltHex,
         verifier_hex: bigIntToPaddedHex(v, N_BYTES),
+        srp_version: SRP_VERSION_CURRENT,
         public_key: identity.publicKeyEncoded,
         wrap_salt: material.wrapSalt,
         recovery_salt: material.recoverySalt,
@@ -355,18 +418,17 @@ export async function register(username: string, password: string, inviteCode?: 
 }
 
 /**
- * Generate new SRP verifier for password reset
- * Returns salt and verifier in hex format
+ * A new SRP salt + verifier for a password change or reset, in hex, plus the
+ * srp_version the caller MUST send alongside: a server not told which
+ * derivation produced a verifier assumes the legacy one, and the account
+ * could then never be opened.
  */
-export async function generateVerifierForReset(username: string, password: string): Promise<{ salt: string; verifier: string }> {
-    const salt = randomBytes(32); // 32 bytes = 64 hex chars
-    const identityHash = await computeIdentityHash(username, password);
-    const x = await computeX(salt, identityHash);
-    const v = computeVerifier(x);
-
+export async function generateVerifierForReset(username: string, password: string): Promise<{ salt: string; verifier: string; srp_version: number }> {
+    const { salt, v } = freshVerifier(username, password);
     return {
         salt: bytesToHex(salt),
         verifier: bigIntToPaddedHex(v, N_BYTES),
+        srp_version: SRP_VERSION_CURRENT,
     };
 }
 
@@ -384,11 +446,13 @@ export async function generateVerifierForReset(username: string, password: strin
 async function srpExchange(username: string, password: string): Promise<string> {
     const { a, A } = generateClientEphemeral();
 
-    const step1Response: { salt_hex: string; b_pub_hex: string; attempt_id?: string } = await apiClient.post('/auth/login/step1', {
+    const step1Response: { salt_hex: string; b_pub_hex: string; attempt_id?: string; srp_version?: number } = await apiClient.post('/auth/login/step1', {
         username,
         a_pub_hex: bigIntToPaddedHex(A, N_BYTES),
     });
-    const { salt_hex, b_pub_hex, attempt_id } = step1Response;
+    // A server predating migration 059 sends no version; every account it
+    // holds is SHA-256.
+    const { salt_hex, b_pub_hex, attempt_id, srp_version = 1 } = step1Response;
 
     const salt = hexToBytes(salt_hex);
     const B = hexToBigInt(b_pub_hex);
@@ -397,16 +461,31 @@ async function srpExchange(username: string, password: string): Promise<string> 
     const u = await computeU(A, B);
     if (u === 0n) throw new Error('Invalid scrambling parameter');
 
-    const identityHash = await computeIdentityHash(username, password);
-    const x = await computeX(salt, identityHash);
+    const x = await computeXFor(srp_version, salt, username, password);
     const S = await computeClientSession(a, B, x, u);
+    // The Rust srp crate uses S directly (not H(S)) for M1: in process_reply
+    // the "key" is the raw premaster secret S as minimal big-endian bytes.
     const K = bigIntToMinimalBytes(S);
     const M1 = await computeM1(A, B, K);
+
+    // A legacy-derivation account is upgraded IN this exchange. The password
+    // is in hand, and the server applies the new material only after M1 has
+    // verified — so nothing but a successful login with the real password can
+    // rewrite the verifier, and there is no separate endpoint for a stolen
+    // bearer token to call. Derived before step 2 so the exchange stays one
+    // round-trip; a v2 account sends nothing, and a server that predates the
+    // field ignores it.
+    let upgrade: { new_salt_hex: string; new_verifier_hex: string } | undefined;
+    if (srp_version < SRP_VERSION_CURRENT) {
+        const fresh = freshVerifier(username, password);
+        upgrade = { new_salt_hex: bytesToHex(fresh.salt), new_verifier_hex: bigIntToPaddedHex(fresh.v, N_BYTES) };
+    }
 
     const step2Response: { hamk_hex: string; token: string } = await apiClient.post('/auth/login/step2', {
         username,
         m_hex: bytesToHex(M1),
         ...(attempt_id ? { attempt_id } : {}),
+        ...(upgrade ?? {}),
     });
 
     const expectedM2 = await computeM2(A, M1, K);
@@ -453,55 +532,7 @@ export class RetiredKeyFormatError extends Error {
 }
 
 export async function login(username: string, password: string): Promise<string> {
-    // Step 1: Generate ephemeral and send A
-    const { a, A } = generateClientEphemeral();
-
-    const step1Response: { salt_hex: string; b_pub_hex: string; attempt_id?: string } = await apiClient.post('/auth/login/step1', {
-        username,
-        a_pub_hex: bigIntToPaddedHex(A, N_BYTES),
-    });
-
-    const { salt_hex, b_pub_hex, attempt_id } = step1Response;
-
-    // Parse server response
-    const salt = hexToBytes(salt_hex);
-    const B = hexToBigInt(b_pub_hex);
-
-    if (B % N === 0n) {
-        throw new Error('Invalid server public key');
-    }
-
-    // Compute session
-    const u = await computeU(A, B);
-    if (u === 0n) {
-        throw new Error('Invalid scrambling parameter');
-    }
-
-    const identityHash = await computeIdentityHash(username, password);
-    const x = await computeX(salt, identityHash);
-    const S = await computeClientSession(a, B, x, u);
-
-    // The Rust srp crate uses S directly (not H(S)) for M1 computation
-    // In process_reply: let m1 = compute_m1(&a_pub.to_bytes_be(), &b_pub.to_bytes_be(), &key.to_bytes_be());
-    // where 'key' is the raw premaster secret S, not H(S)
-    const K = bigIntToMinimalBytes(S);
-
-    const M1 = await computeM1(A, B, K);
-
-    const step2Response: { hamk_hex: string; token: string } = await apiClient.post('/auth/login/step2', {
-        username,
-        m_hex: bytesToHex(M1),
-        ...(attempt_id ? { attempt_id } : {}),
-    });
-
-    const { hamk_hex, token } = step2Response;
-
-    // Verify server's proof
-    const expectedM2 = await computeM2(A, M1, K);
-    if (hamk_hex.toLowerCase() !== bytesToHex(expectedM2).toLowerCase()) {
-        throw new Error('Server verification failed - possible MITM attack');
-    }
-
+    const token = await srpExchange(username, password);
     localStorage.setItem('auth_token', token);
     await restoreIdentityAfterLogin(username, password);
     return token;
@@ -688,7 +719,7 @@ export async function recoverWithCode(
     const proof = computeRecoveryProof(seed, challenge.server_ephemeral, challenge.challenge, username.toLowerCase());
     if (!proof) throw new Error('Could not build recovery proof.');
 
-    const { salt, verifier } = await generateVerifierForReset(username, newPassword);
+    const { salt, verifier, srp_version } = await generateVerifierForReset(username, newPassword);
     const { wrapSalt, seedWrappedPw, pwKdfIterations, pwKdf } = await rewrapForNewPassword(seed, newPassword);
 
     await apiClient.post('/auth/recovery/reset', {
@@ -696,6 +727,7 @@ export async function recoverWithCode(
         proof,
         new_salt_hex: salt,
         new_verifier_hex: verifier,
+        new_srp_version: srp_version,
         new_wrap_salt: wrapSalt,
         new_seed_wrapped_pw: seedWrappedPw,
         new_pw_kdf_iterations: pwKdfIterations,
@@ -740,12 +772,13 @@ export async function changePassword(
     await proveCurrentPassword(username, currentPassword);
 
     // New SRP verifier + a fresh (argon2id) password wrap of the SAME seed.
-    const { salt, verifier } = await generateVerifierForReset(username, newPassword);
+    const { salt, verifier, srp_version } = await generateVerifierForReset(username, newPassword);
     const { wrapSalt, seedWrappedPw, pwKdfIterations, pwKdf } = await rewrapForNewPassword(seed, newPassword);
 
     await apiClient.post('/keys/change-password', {
         new_salt_hex: salt,
         new_verifier_hex: verifier,
+        new_srp_version: srp_version,
         new_wrap_salt: wrapSalt,
         new_seed_wrapped_pw: seedWrappedPw,
         new_pw_kdf_iterations: pwKdfIterations,
@@ -1095,20 +1128,8 @@ export function logout(): void {
  */
 export async function resetPasswordMigration(username: string, newPassword: string): Promise<void> {
 
-    // 1. Generate new random salt
-    const salt = new Uint8Array(32);
-    crypto.getRandomValues(salt);
-
-    // 2. Compute new verifier (using lowercase username)
-    // x = H(s, H(I | ":" | P))
-    const identityHash = await computeIdentityHash(username, newPassword);
-    const x = await H(salt, identityHash);
-
-    // v = g^x % N
-    const xBig = BigInt('0x' + bytesToHex(x));
-    const gBig = BigInt('0x' + G_HEX);
-    const NBig = BigInt('0x' + N_HEX);
-    const vBig = modPow(gBig, xBig, NBig);
+    // Fresh salt and verifier under the current derivation.
+    const { salt, v: vBig } = freshVerifier(username, newPassword);
 
     // 3. Send to backend
     // Need to pad verifier to match key size (2048 bits / 256 bytes) if needed
@@ -1119,6 +1140,7 @@ export async function resetPasswordMigration(username: string, newPassword: stri
         username,
         salt_hex: bytesToHex(salt),
         verifier_hex: vHex,
+        srp_version: SRP_VERSION_CURRENT,
     });
 }
 
@@ -1127,4 +1149,10 @@ export async function resetPasswordMigration(username: string, newPassword: stri
  * maths is matched to a Rust implementation and a test that cannot reach these
  * cannot prove they still agree.
  */
-export const __testing = { modPowSecret, modPowPublic, N, g };
+export const __testing = {
+    modPowSecret, modPowPublic, N, g, N_BYTES, getK, H,
+    computeIdentityHash, computeX, computeXv2, computeXFor, computeVerifier,
+    computeU, computeM1, computeM2,
+    hexToBigInt, hexToBytes, bytesToHex, bigIntToMinimalBytes, bigIntToPaddedHex,
+    SRP_VERSION_CURRENT,
+};

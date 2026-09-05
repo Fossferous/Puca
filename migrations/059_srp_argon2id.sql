@@ -1,0 +1,17 @@
+-- Migration 059: record which KDF derived each account's SRP verifier.
+--
+-- srp_version = 1: x = SHA-256(salt || SHA-256(lower(username) ":" password)).
+--                  Two hash calls, no stretching. Every account created before
+--                  0.9.3 is here, and so is any verifier a client predating
+--                  0.9.3 writes (it omits the field; the server defaults to 1).
+-- srp_version = 2: x = Argon2id(password, salt || lower(username);
+--                  m = 19456 KiB, t = 2, p = 1, 32 bytes) -- the same cost as
+--                  the password wrap beside it. Derived by 0.9.3+ clients on
+--                  registration, password change and every reset, and applied
+--                  to a v1 account inside its first successful login exchange.
+--
+-- The server never derives x. It tells a client which derivation an account
+-- uses (login step 1) and records which one a client used when it writes a
+-- verifier. Defaulting a missing value to anything but 1 strands the account:
+-- the next current client would derive Argon2id against a SHA-256 verifier.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS srp_version SMALLINT NOT NULL DEFAULT 1;

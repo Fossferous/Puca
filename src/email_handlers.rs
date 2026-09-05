@@ -31,6 +31,10 @@ pub struct ResetPasswordRequest {
     pub username: String,
     pub salt: String,
     pub verifier: String,
+    /// Which derivation produced `verifier` (migration 059); omitted by a
+    /// client predating 0.9.3, which derived SHA-256 — so `None` means 1.
+    #[serde(default)]
+    pub srp_version: Option<crate::handlers::SrpVersion>,
 }
 
 #[derive(Serialize)]
@@ -528,10 +532,11 @@ pub async fn reset_password(
     // well past its 24h TTL. Every other credential-rewriting path
     // (change_password, recovery_reset) already does both halves.
     if let Err(e) = sqlx::query(
-        "UPDATE users SET salt = $1, verifier = $2, token_version = token_version + 1 WHERE id = $3"
+        "UPDATE users SET salt = $1, verifier = $2, srp_version = $3, token_version = token_version + 1 WHERE id = $4"
     )
         .bind(&salt)
         .bind(&verifier)
+        .bind(payload.srp_version.map(crate::handlers::SrpVersion::get).unwrap_or(1))
         .bind(user_id)
         .execute(&state.pool)
         .await

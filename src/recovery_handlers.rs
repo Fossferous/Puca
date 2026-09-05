@@ -95,6 +95,10 @@ pub struct RecoveryResetRequest {
     pub new_pw_kdf_iterations: Option<i32>,
     /// KDF for the new password wrap: "argon2id" (current) or NULL/"pbkdf2".
     pub new_pw_kdf: Option<String>,
+    /// Which derivation produced new_verifier_hex (migration 059): 1 = SHA-256
+    /// — what a client predating 0.9.3 means by omitting this — 2 = Argon2id.
+    #[serde(default)]
+    pub new_srp_version: Option<crate::handlers::SrpVersion>,
     /// Optional: rotate the recovery code at the same time.
     pub new_recovery_salt: Option<String>,
     pub new_seed_wrapped_rc: Option<String>,
@@ -295,6 +299,10 @@ pub struct ChangePasswordRequest {
     pub new_seed_wrapped_pw: String,
     pub new_pw_kdf_iterations: Option<i32>,
     pub new_pw_kdf: Option<String>,
+    /// Which derivation produced new_verifier_hex (migration 059): 1 = SHA-256
+    /// — what a client predating 0.9.3 means by omitting this — 2 = Argon2id.
+    #[serde(default)]
+    pub new_srp_version: Option<crate::handlers::SrpVersion>,
 }
 
 /// POST /keys/change-password — authenticated password change. The client has
@@ -333,8 +341,8 @@ pub async fn change_password(
     // for this account, so a stolen bearer token can't survive the change.
     let result = sqlx::query(
         "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
-         pw_kdf_iterations = $5, pw_kdf = $6, token_version = token_version + 1 \
-         WHERE id = $7 AND key_version >= 3",
+         pw_kdf_iterations = $5, pw_kdf = $6, srp_version = $7, token_version = token_version + 1 \
+         WHERE id = $8 AND key_version >= 3",
     )
     .bind(&salt)
     .bind(&verifier)
@@ -342,6 +350,7 @@ pub async fn change_password(
     .bind(&req.new_seed_wrapped_pw)
     .bind(req.new_pw_kdf_iterations)
     .bind(&req.new_pw_kdf)
+    .bind(req.new_srp_version.map(crate::handlers::SrpVersion::get).unwrap_or(1))
     .bind(claims.sub as i32)
     .execute(&state.pool)
     .await;
@@ -609,9 +618,9 @@ pub async fn recovery_reset(
             sqlx::query_as(
                 // token_version bump (M1): a recovery reset evicts all outstanding JWTs.
                 "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
-             recovery_salt = $5, seed_wrapped_rc = $6, pw_kdf_iterations = $7, pw_kdf = $8, \
+             recovery_salt = $5, seed_wrapped_rc = $6, pw_kdf_iterations = $7, pw_kdf = $8, srp_version = $9, \
              force_password_reset = FALSE, token_version = token_version + 1 \
-             WHERE id = $9 RETURNING id",
+             WHERE id = $10 RETURNING id",
             )
             .bind(&salt)
             .bind(&verifier)
@@ -621,6 +630,7 @@ pub async fn recovery_reset(
             .bind(rc)
             .bind(req.new_pw_kdf_iterations)
             .bind(&req.new_pw_kdf)
+            .bind(req.new_srp_version.map(crate::handlers::SrpVersion::get).unwrap_or(1))
             .bind(account_id)
             .fetch_optional(&state.pool)
             .await
@@ -628,8 +638,8 @@ pub async fn recovery_reset(
             sqlx::query_as(
                 // token_version bump (M1): a recovery reset evicts all outstanding JWTs.
                 "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
-             pw_kdf_iterations = $5, pw_kdf = $6, force_password_reset = FALSE, \
-             token_version = token_version + 1 WHERE id = $7 RETURNING id",
+             pw_kdf_iterations = $5, pw_kdf = $6, srp_version = $7, force_password_reset = FALSE, \
+             token_version = token_version + 1 WHERE id = $8 RETURNING id",
             )
             .bind(&salt)
             .bind(&verifier)
@@ -637,6 +647,7 @@ pub async fn recovery_reset(
             .bind(&req.new_seed_wrapped_pw)
             .bind(req.new_pw_kdf_iterations)
             .bind(&req.new_pw_kdf)
+            .bind(req.new_srp_version.map(crate::handlers::SrpVersion::get).unwrap_or(1))
             .bind(account_id)
             .fetch_optional(&state.pool)
             .await

@@ -23,6 +23,45 @@ const MAX_DISPLAY_NAME_LEN: usize = 64;
 
 // --- DTOs ---
 
+/// Which key-derivation produced an SRP verifier a client is sending us
+/// (migration 059): 1 = SHA-256, 2 = Argon2id. See `SRP_VERSION_CURRENT` in
+/// the client's auth.ts for the derivations themselves.
+///
+/// Validated at the TYPE level so a body carrying any other value is rejected
+/// by the JSON extractor before a handler runs. The alternative — storing
+/// whatever arrived — strands the account: login step 1 would announce a
+/// version no client can derive, and nothing could ever open it again.
+///
+/// A client predating 0.9.3 omits the field entirely. Every handler that
+/// accepts one defaults that to 1, and that is the ONLY safe default: such a
+/// client derived SHA-256, and recording 2 would make the account unopenable
+/// by every current client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SrpVersion(i16);
+
+impl SrpVersion {
+    pub fn get(self) -> i16 {
+        self.0
+    }
+}
+
+impl TryFrom<i16> for SrpVersion {
+    type Error = String;
+    fn try_from(v: i16) -> Result<Self, String> {
+        match v {
+            1 | 2 => Ok(SrpVersion(v)),
+            other => Err(format!("unknown srp_version {other}")),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SrpVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = i16::deserialize(d)?;
+        SrpVersion::try_from(v).map_err(<D::Error as serde::de::Error>::custom)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub username: String,
@@ -41,6 +80,10 @@ pub struct RegisterRequest {
     /// Shared registration invite code — required only when the server has
     /// REGISTRATION_INVITE_CODE set (closed registration). Absent otherwise.
     pub invite_code: Option<String>,
+    /// Which derivation produced verifier_hex (migration 059). Absent from a
+    /// client predating 0.9.3, which derived SHA-256 — so `None` means 1.
+    #[serde(default)]
+    pub srp_version: Option<SrpVersion>,
 }
 
 /// Constant-time byte-slice equality, so the registration code isn't matched
@@ -102,6 +145,10 @@ pub struct LoginStep1Response {
     /// Opaque id for THIS attempt; the client echoes it in step-2 so concurrent
     /// logins for the same username don't clobber each other.
     pub attempt_id: String,
+    /// The derivation this account's verifier was made with (migration 059),
+    /// so the client computes the matching x. A real v1 account and an unknown
+    /// name both answer 1 — see the fake branch in login_step_1.
+    pub srp_version: i16,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +158,13 @@ pub struct LoginStep2Request {
     /// From step-1. Absent for old clients (server falls back to the newest row).
     #[serde(default)]
     pub attempt_id: Option<String>,
+    /// Replacement credentials for an srp_version-1 account, derived under the
+    /// current KDF (migration 059). Applied ONLY after this proof verifies —
+    /// see login_step_2. Absent from v2 accounts and from clients before 0.9.3.
+    #[serde(default)]
+    pub new_salt_hex: Option<String>,
+    #[serde(default)]
+    pub new_verifier_hex: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +175,10 @@ pub struct LoginStep2Response {
 
 #[derive(Deserialize)]
 pub struct ResetPasswordRequest {
+    /// Which derivation produced verifier_hex (migration 059); omitted by a
+    /// client predating 0.9.3, which derived SHA-256 — so `None` means 1.
+    #[serde(default)]
+    pub srp_version: Option<SrpVersion>,
     pub username: String,
     pub salt_hex: String,
     pub verifier_hex: String,
@@ -288,12 +346,13 @@ pub async fn register(
         && payload.seed_wrapped_pw.is_some()
         && payload.seed_wrapped_rc.is_some();
     let key_version = if is_v3 { 3 } else { 2 };
+    let srp_version: i16 = payload.srp_version.map(SrpVersion::get).unwrap_or(1);
 
     // Insert into database with public key + optional wrap material
     let result = sqlx::query(
         "INSERT INTO users (username, salt, verifier, public_key, key_version, \
-         wrap_salt, recovery_salt, seed_wrapped_pw, seed_wrapped_rc, pw_kdf_iterations, pw_kdf) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+         wrap_salt, recovery_salt, seed_wrapped_pw, seed_wrapped_rc, pw_kdf_iterations, pw_kdf, srp_version) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&payload.username)
     .bind(&salt)
@@ -306,6 +365,7 @@ pub async fn register(
     .bind(&payload.seed_wrapped_rc)
     .bind(payload.pw_kdf_iterations)
     .bind(&payload.pw_kdf)
+    .bind(srp_version)
     .execute(&state.pool)
     .await;
 
@@ -332,8 +392,8 @@ pub async fn login_step_1(
     //    treated exactly like an unknown username — it takes the synthesised
     //    path below, so a tombstone is unauthenticatable AND indistinguishable
     //    from a name that never existed.
-    let user: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT salt, verifier FROM users WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL",
+    let user: Option<(Vec<u8>, Vec<u8>, i16)> = sqlx::query_as(
+        "SELECT salt, verifier, srp_version FROM users WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL",
     )
     .bind(&payload.username)
     .fetch_optional(&state.pool)
@@ -348,8 +408,8 @@ pub async fn login_step_1(
     // step-1 response is indistinguishable from a real account. `real_user`
     // gates the DB write below — no login_attempt is stored for the fake path, so
     // step-2 returns the same 401 a wrong password produces.
-    let (salt, verifier, real_user) = match user {
-        Some((s, v)) => (s, v, true),
+    let (salt, verifier, real_user, srp_version) = match user {
+        Some((s, v, ver)) => (s, v, true, ver),
         None => (
             pseudo_material(
                 &state.jwt_secret,
@@ -364,6 +424,16 @@ pub async fn login_step_1(
                 256,
             ),
             false,
+            // An unknown name answers srp_version 1. When migration 059 lands
+            // every real account IS 1, and each becomes 2 only after its owner
+            // signs in with a current client — so 1 is what keeps an unknown
+            // name indistinguishable from the population through the rollout.
+            // What remains is inherent to a mixed population: a caller can
+            // tell "exists and has signed in recently" (2) from "unknown or
+            // dormant" (1). It shrinks as accounts migrate; once they have,
+            // flip this to 2 and the residual inverts to the smaller set,
+            // "exists and dormant".
+            1,
         ),
     };
 
@@ -417,6 +487,7 @@ pub async fn login_step_1(
         salt_hex: hex::encode(&salt),
         b_pub_hex: hex::encode(&b_pub),
         attempt_id,
+        srp_version,
     }))
 }
 
@@ -614,6 +685,49 @@ pub async fn login_step_2(
 
     // Successful auth — clear this username's failure streak (M3).
     state.clear_login_failures(&payload.username);
+
+    // A legacy (srp_version 1) account sends replacement credentials with its
+    // proof — see srpExchange in the client. They are applied HERE and nowhere
+    // else: after M1 has verified, so only a login with the real password can
+    // rewrite the verifier, and never through an endpoint a bearer token alone
+    // could reach. An earlier draft of this feature had exactly that endpoint,
+    // and it was a password change without the password.
+    //
+    // Best effort: a failed upgrade must not fail a correct login; the account
+    // stays on v1 and the next login tries again. `AND srp_version = 1` makes
+    // a stale attempt (two logins racing) a no-op rather than a downgrade or a
+    // second rewrite under a different salt.
+    if let (Some(ns), Some(nv)) = (payload.new_salt_hex.as_deref(), payload.new_verifier_hex.as_deref()) {
+        let decoded = if ns.len() == 64 && nv.len() == 512 {
+            hex::decode(ns).ok().zip(hex::decode(nv).ok())
+        } else {
+            None
+        };
+        match decoded {
+            Some((new_salt, new_verifier)) => {
+                match sqlx::query(
+                    "UPDATE users SET salt = $1, verifier = $2, srp_version = 2 WHERE id = $3 AND srp_version = 1",
+                )
+                .bind(&new_salt)
+                .bind(&new_verifier)
+                .bind(user_id as i32)
+                .execute(&state.pool)
+                .await
+                {
+                    Ok(r) if r.rows_affected() > 0 => tracing::info!(
+                        "SRP verifier upgraded to Argon2id (account {})",
+                        crate::logtag::user_tag(&payload.username)
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("SRP verifier upgrade failed; account stays on v1: {:?}", e),
+                }
+            }
+            None => tracing::warn!(
+                "malformed SRP upgrade material ignored (account {})",
+                crate::logtag::user_tag(&payload.username)
+            ),
+        }
+    }
 
     // This is the ONE place the server verifies knowledge of the password, so
     // it is the only place a password proof may be recorded. Endpoints that
@@ -897,10 +1011,11 @@ pub async fn reset_password(
 
             // Update salt and verifier, clear force_password_reset flag
             let result = sqlx::query(
-                "UPDATE users SET salt = $1, verifier = $2, force_password_reset = FALSE WHERE id = $3"
+                "UPDATE users SET salt = $1, verifier = $2, srp_version = $3, force_password_reset = FALSE WHERE id = $4"
             )
             .bind(&salt)
             .bind(&verifier)
+            .bind(payload.srp_version.map(SrpVersion::get).unwrap_or(1))
             .bind(user_id)
             .execute(&state.pool)
             .await;
@@ -1937,6 +2052,41 @@ mod account_deletion_residue_tests {
                 q.contains("WHERE"),
                 "a statement with no WHERE clause would hit every row: {q}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod srp_version_tests {
+    use super::SrpVersion;
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        #[serde(default)]
+        srp_version: Option<SrpVersion>,
+    }
+
+    #[test]
+    fn omitted_is_none_and_every_caller_defaults_that_to_legacy() {
+        let b: Body = serde_json::from_str("{}").unwrap();
+        assert_eq!(b.srp_version, None);
+        assert_eq!(b.srp_version.map(SrpVersion::get).unwrap_or(1), 1);
+    }
+
+    #[test]
+    fn the_two_known_versions_deserialize() {
+        for (json, want) in [("{\"srp_version\":1}", 1), ("{\"srp_version\":2}", 2)] {
+            let b: Body = serde_json::from_str(json).unwrap();
+            assert_eq!(b.srp_version.map(SrpVersion::get), Some(want));
+        }
+    }
+
+    #[test]
+    fn anything_else_is_a_body_error_not_a_default() {
+        // Storing an unknown version would strand the account: login step 1
+        // would announce it and no client could derive x.
+        for json in ["{\"srp_version\":0}", "{\"srp_version\":3}", "{\"srp_version\":-1}"] {
+            assert!(serde_json::from_str::<Body>(json).is_err(), "{json}");
         }
     }
 }
