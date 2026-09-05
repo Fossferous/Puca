@@ -36,25 +36,25 @@ puca-rtc = { path = "../puca-rtc" }
 # MD5(username:realm:password). The same hmac/sha1 the SERVER already uses to
 # mint these REST credentials, so the two ends of the scheme agree by
 # construction rather than by two independent implementations of it.
-hmac = "0.12"
+hmac = "0.13"
 # The device-control session key now lives in the agent rather than above it —
 # see src/control_key.rs for why. Versions match the root Cargo.toml so the two
 # implementations of the same wire format cannot drift apart.
-hkdf = "0.12"
-sha2 = "0.10"
-aes-gcm = "0.10"
-getrandom = "0.2"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-sha1 = "0.10"
-md-5 = "0.10"
+hkdf = "0.13"
+sha2 = "0.11"
+aes-gcm = "0.11"
+getrandom = "0.4"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+sha1 = "0.11"
+md-5 = "0.11"
 # The agent owns the socket and the clock, so it drives str0m directly rather
 # than through puca-rtc — sans-IO means the event loop lives with whoever
 # has the socket.
-str0m = "0.21"
+str0m = "0.23"
 base64 = "0.23.0"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
@@ -96,7 +96,7 @@ vp8 = ["puca-encode/vp8"]
 # Only to PLAY the controller in tests: sign a real unattended-access challenge
 # the way a peer would, so the authorisation gate is exercised end to end
 # rather than stubbed into always-true.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 
 # The Unix-socket transport (src/unix_sock.rs): SO_PEERCRED, getuid/getppid,
 # dup2 for the log redirect. Linux only — that is the platform with capture

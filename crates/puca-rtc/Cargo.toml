@@ -16,4 +16,4 @@ puca-encode = { path = "../puca-encode" }
 #
 # wincrypto rather than the default: it uses Windows' own crypto for DTLS, so
 # the agent does not carry an OpenSSL build or its redistribution question.
-str0m = "0.21"
+str0m = "0.23"
