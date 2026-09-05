@@ -38,10 +38,15 @@ pub struct WrapMaterial {
     pub recovery_salt: String,
     pub seed_wrapped_pw: String,
     pub seed_wrapped_rc: String,
-    /// PBKDF2 iterations used for the password wrap (versioned KDF upgrade).
     pub pw_kdf_iterations: Option<i32>,
-    /// Password-wrap KDF: "argon2id" (current) or NULL/"pbkdf2" (legacy).
     pub pw_kdf: Option<String>,
+    /// DM v4 history key, re-wrapped under the NEW recovery code (migration
+    /// 060). Required whenever the account already has one: a new code that
+    /// cannot open the history key would lock every v4 message for good.
+    #[serde(default)]
+    pub history_pubkey: Option<String>,
+    #[serde(default)]
+    pub history_wrapped_rc: Option<String>,
 }
 
 /// Body for POST /keys/rewrap-pw — a password-only wrap refresh (used to raise
@@ -60,10 +65,16 @@ pub struct WrapResponse {
     pub key_version: i32,
     pub wrap_salt: Option<String>,
     pub seed_wrapped_pw: Option<String>,
-    /// PBKDF2 iterations the password blob was wrapped at (NULL ⇒ legacy 210k).
     pub pw_kdf_iterations: Option<i32>,
-    /// Password-wrap KDF: "argon2id" or NULL (legacy PBKDF2).
     pub pw_kdf: Option<String>,
+    /// For unlocking DM history on a device with the recovery code: the salt
+    /// the code is stretched with, and the history key wrapped under it. The
+    /// seed's own recovery wrap is deliberately NOT here — a device that can
+    /// open the history key must not thereby get the identity seed too; that
+    /// stays behind the recovery-reset challenge.
+    pub recovery_salt: Option<String>,
+    pub history_pubkey: Option<String>,
+    pub history_wrapped_rc: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +112,12 @@ pub struct RecoveryResetRequest {
     pub new_srp_version: Option<crate::handlers::SrpVersion>,
     /// Optional: rotate the recovery code at the same time.
     pub new_recovery_salt: Option<String>,
+    /// With a rotation, the history key re-wrapped under the new code
+    /// (migration 060); refused without it when the account has one.
+    #[serde(default)]
+    pub new_history_pubkey: Option<String>,
+    #[serde(default)]
+    pub new_history_wrapped_rc: Option<String>,
     pub new_seed_wrapped_rc: Option<String>,
 }
 
@@ -171,8 +188,8 @@ pub async fn get_wrap_material(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let row: Option<(i32, Option<String>, Option<String>, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT key_version, wrap_salt, seed_wrapped_pw, pw_kdf_iterations, pw_kdf FROM users WHERE id = $1",
+    let row: Option<(i32, Option<String>, Option<String>, Option<i32>, Option<String>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT key_version, wrap_salt, seed_wrapped_pw, pw_kdf_iterations, pw_kdf, recovery_salt, history_pubkey, history_wrapped_rc FROM users WHERE id = $1",
     )
     .bind(claims.sub as i32)
     .fetch_optional(&state.pool)
@@ -180,13 +197,16 @@ pub async fn get_wrap_material(
     .unwrap_or(None);
 
     match row {
-        Some((key_version, wrap_salt, seed_wrapped_pw, pw_kdf_iterations, pw_kdf)) => {
+        Some((key_version, wrap_salt, seed_wrapped_pw, pw_kdf_iterations, pw_kdf, recovery_salt, history_pubkey, history_wrapped_rc)) => {
             Json(WrapResponse {
                 key_version,
                 wrap_salt,
                 seed_wrapped_pw,
                 pw_kdf_iterations,
                 pw_kdf,
+                recovery_salt,
+                history_pubkey,
+                history_wrapped_rc,
             })
             .into_response()
         }
@@ -214,9 +234,31 @@ pub async fn set_wrap_material(
     if let Err(msg) = validate_pw_kdf_iterations(m.pw_kdf_iterations) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
+    if let Err(msg) = crate::handlers::validate_history_key_pair(&m.history_pubkey, &m.history_wrapped_rc) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    // A new recovery code replaces the ONLY wrap of the history key. A client
+    // that does not send a re-wrap (one from before 0.9.3) must not be allowed
+    // to strand every v4 message behind a code that no longer opens the key.
+    if m.history_wrapped_rc.is_none() {
+        let has: Option<(bool,)> = sqlx::query_as("SELECT history_pubkey IS NOT NULL FROM users WHERE id = $1")
+            .bind(claims.sub as i32)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+        if matches!(has, Some((true,))) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "This account has a message-history key that a new recovery code must re-wrap. Update this app, then generate the code again.",
+            )
+                .into_response();
+        }
+    }
     let result = sqlx::query(
         "UPDATE users SET key_version = 3, wrap_salt = $1, recovery_salt = $2, \
-         seed_wrapped_pw = $3, seed_wrapped_rc = $4, pw_kdf_iterations = $5, pw_kdf = $6 WHERE id = $7",
+         seed_wrapped_pw = $3, seed_wrapped_rc = $4, pw_kdf_iterations = $5, pw_kdf = $6, \
+         history_pubkey = COALESCE($8, history_pubkey), history_wrapped_rc = COALESCE($9, history_wrapped_rc) \
+         WHERE id = $7",
     )
     .bind(&m.wrap_salt)
     .bind(&m.recovery_salt)
@@ -225,6 +267,8 @@ pub async fn set_wrap_material(
     .bind(m.pw_kdf_iterations)
     .bind(&m.pw_kdf)
     .bind(claims.sub as i32)
+    .bind(&m.history_pubkey)
+    .bind(&m.history_wrapped_rc)
     .execute(&state.pool)
     .await;
 
@@ -613,12 +657,32 @@ pub async fn recovery_reset(
     // it from the UPDATE itself cannot fail independently — a separate lookup
     // could error after a successful reset and silently skip the eviction.
     // users.id is SERIAL, so the decode is i32.
+    if let Err(msg) = crate::handlers::validate_history_key_pair(&req.new_history_pubkey, &req.new_history_wrapped_rc) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    if req.new_recovery_salt.is_some() && req.new_history_wrapped_rc.is_none() {
+        // Rotating the code without re-wrapping the history key would strand
+        // every v4 message; see set_wrap_material.
+        let has: Option<(bool,)> = sqlx::query_as("SELECT history_pubkey IS NOT NULL FROM users WHERE id = $1")
+            .bind(account_id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+        if matches!(has, Some((true,))) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "This account has a message-history key that a new recovery code must re-wrap. Update this app, then try again.",
+            )
+                .into_response();
+        }
+    }
     let result: Result<Option<(i32,)>, sqlx::Error> =
         if let (Some(rs), Some(rc)) = (&req.new_recovery_salt, &req.new_seed_wrapped_rc) {
             sqlx::query_as(
                 // token_version bump (M1): a recovery reset evicts all outstanding JWTs.
                 "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
              recovery_salt = $5, seed_wrapped_rc = $6, pw_kdf_iterations = $7, pw_kdf = $8, srp_version = $9, \
+             history_pubkey = COALESCE($11, history_pubkey), history_wrapped_rc = COALESCE($12, history_wrapped_rc), \
              force_password_reset = FALSE, token_version = token_version + 1 \
              WHERE id = $10 RETURNING id",
             )
@@ -632,6 +696,8 @@ pub async fn recovery_reset(
             .bind(&req.new_pw_kdf)
             .bind(req.new_srp_version.map(crate::handlers::SrpVersion::get).unwrap_or(1))
             .bind(account_id)
+            .bind(&req.new_history_pubkey)
+            .bind(&req.new_history_wrapped_rc)
             .fetch_optional(&state.pool)
             .await
         } else {

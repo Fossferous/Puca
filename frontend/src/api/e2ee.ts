@@ -137,14 +137,29 @@ export interface Envelope {
     /** 2 = the original format (no associated data). 3 = context-bound:
      *  the AES-GCM tag also covers an AAD string naming the channel, epoch
      *  and sender (or DM sender and recipient), recomputed by the reader
-     *  from the row's own metadata. Same JSON shape; only `v` changes. */
-    v: 2 | 3;
+     *  from the row's own metadata. Same JSON shape; only `v` changes.
+     *  4 (DMs only) = sealed under a random per-message key that is wrapped
+     *  to session keys and the account history keys (`w`), and authenticated
+     *  by `mac`; see sealDmEnvelopeV4. */
+    v: 2 | 3 | 4;
     /** "dm" for pairwise, "ch" for channel/group, "self" for encrypt-to-self. */
     t: 'dm' | 'ch' | 'self';
     /** Channel key epoch (channel messages only). */
     epoch?: number;
     /** base64( nonce || ciphertext ). */
     ct: string;
+    /** v4: the message key, wrapped once per key that may open it. */
+    w?: DmV4Wrap[];
+    /** v4: HMAC over the sealed record under the pairwise identity key. */
+    mac?: string;
+}
+
+/** One wrap of a v4 message key: `to` the X25519 public key it is for, `e`
+ *  the ephemeral public key of this wrap, `k` base64(nonce||AES-GCM(key)). */
+export interface DmV4Wrap {
+    to: string;
+    e: string;
+    k: string;
 }
 
 /**
@@ -324,7 +339,7 @@ export const EMIT_ENVELOPE_V3 = true;
  *  reader-first client (reads v(N+1), still writes vN — a legitimate edit)
  *  from a stale one that would re-seal raw JSON over the ciphertext (refused).
  *  Bump this with parseEnvelopeEx's accepted versions, never ahead of them. */
-export const MAX_READABLE_ENVELOPE_VERSION = 3;
+export const MAX_READABLE_ENVELOPE_VERSION = 4;
 
 const AAD_PREFIX = 'puca/v3/';
 
@@ -408,6 +423,203 @@ export async function sealDmEnvelope(
     const key = deriveSymmetricKey(shared, HKDF_DM_INFO);
     if (version === 3) return { v: 3, t: 'dm', ct: await aesEncrypt(key, plaintext, dmAad(ctx)) };
     return { v: 2, t: 'dm', ct: await aesEncrypt(key, plaintext) };
+}
+
+// ---------------------------------------------------------------------------
+// DM envelope v4: a per-message key held only by devices and the recovery code
+// ---------------------------------------------------------------------------
+//
+// v2/v3 sealed a DM under HKDF(x25519(myIdentity, theirIdentity)). Both
+// identity keys derive from seeds the password unwraps, so a database copy
+// plus one cracked password read that conversation in full, forever.
+//
+// v4 seals each message under a fresh random key `mk` and wraps `mk` to every
+// key that is allowed to open it — the session keys of each side's current
+// devices and each account's history key (dmKeys.ts). None of those derive
+// from the password: session keys are minted on the device and never leave
+// it; the history key's private half is wrapped under the recovery code only.
+// So a cracked password reads nothing sent as v4. That is the property. It is
+// NOT per-message ratcheting: a device's session key opens whatever was
+// wrapped to it during that session. The security model says exactly this.
+//
+// Authentication: no static DH goes into the body key any more, so a server
+// holding the (public) session keys could forge a v4 envelope. `mac` is an
+// HMAC under a key derived from the pairwise identity DH — the same pinned
+// identity keys v3 relied on — over the whole sealed record, wraps included,
+// so nothing can be added, removed or re-pointed without the sender's
+// identity key. Either party can compute it (no non-repudiation, as v3).
+
+const HKDF_DM_V4_WRAP_INFO = utf8('sovereign-dm-v4-wrap-v1');
+const HKDF_DM_V4_AUTH_INFO = utf8('sovereign-dm-v4-auth-v1');
+
+export interface X25519Keypair {
+    privateKey: Uint8Array;
+    publicKey: Uint8Array;
+    /** Prefixed base64, the form published and compared (same as identity keys). */
+    publicKeyEncoded: string;
+}
+
+export function generateX25519Keypair(): X25519Keypair {
+    return keypairFromPrivate(x25519.utils.randomPrivateKey());
+}
+
+export function keypairFromPrivate(privateKey: Uint8Array): X25519Keypair {
+    if (privateKey.length !== 32) throw new Error('X25519 private key must be 32 bytes');
+    const publicKey = x25519.getPublicKey(privateKey);
+    return { privateKey, publicKey, publicKeyEncoded: encodePublicKey(publicKey) };
+}
+
+function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+}
+
+/** Wrap a 32-byte key to an X25519 public key: fresh ephemeral DH, HKDF
+ *  bound to both public keys, AES-GCM under the same AAD as the body. */
+async function wrapKeyTo(pubEncoded: string, key: Uint8Array, aad: Uint8Array): Promise<DmV4Wrap | null> {
+    const pub = decodePublicKey(pubEncoded);
+    if (!pub || pub.length !== 32) return null;
+    const eph = generateX25519Keypair();
+    const ss = x25519.getSharedSecret(eph.privateKey, pub);
+    const kek = hkdf(sha256, ss, concat(eph.publicKey, pub), HKDF_DM_V4_WRAP_INFO, 32);
+    return { to: pubEncoded, e: eph.publicKeyEncoded, k: await aesEncrypt(kek, toBase64(key), aad) };
+}
+
+async function unwrapKeyFrom(wrap: DmV4Wrap, mine: X25519Keypair, aad: Uint8Array): Promise<Uint8Array | null> {
+    const eph = decodePublicKey(wrap.e);
+    if (!eph || eph.length !== 32) return null;
+    try {
+        const ss = x25519.getSharedSecret(mine.privateKey, eph);
+        const kek = hkdf(sha256, ss, concat(eph, mine.publicKey), HKDF_DM_V4_WRAP_INFO, 32);
+        const key = fromBase64(await aesDecrypt(kek, wrap.k, aad));
+        return key.length === 32 ? key : null;
+    } catch {
+        return null;
+    }
+}
+
+function dmV4AuthKey(identity: Identity, peerPublicKeyEncoded: string): Uint8Array | null {
+    const peer = decodePublicKey(peerPublicKeyEncoded);
+    if (!peer || peer.length !== 32) return null;
+    const ss = x25519.getSharedSecret(identity.privateKey, peer);
+    return hkdf(sha256, ss, undefined, HKDF_DM_V4_AUTH_INFO, 32);
+}
+
+function dmV4Record(ctx: DmContext, ct: string, w: DmV4Wrap[]): string {
+    return canonicalJson({ v: 4, t: 'dm', s: ctx.senderId, r: ctx.recipientId, ct, w });
+}
+
+/**
+ * Seal a DM as v4. `targets` is every public key the message key must be
+ * wrapped to (dmKeys.v4Targets): the recipient's session keys and history
+ * key, and the sender's own — so the sender's other devices, and a future
+ * device with the recovery code, can read it too. Null if any target key is
+ * not a valid X25519 key: a malformed key is a reason to refuse, never to
+ * quietly wrap to fewer keys than the caller asked for.
+ */
+export async function sealDmEnvelopeV4(
+    identity: Identity,
+    peerPublicKeyEncoded: string,
+    targets: string[],
+    plaintext: string,
+    ctx: DmContext,
+): Promise<Envelope | null> {
+    const authKey = dmV4AuthKey(identity, peerPublicKeyEncoded);
+    if (!authKey) return null;
+    const unique = [...new Set(targets)];
+    if (unique.length === 0) return null;
+    const mk = crypto.getRandomValues(new Uint8Array(32));
+    const aad = dmAad(ctx);
+    const ct = await aesEncrypt(mk, plaintext, aad);
+    const w: DmV4Wrap[] = [];
+    for (const to of unique) {
+        const wrap = await wrapKeyTo(to, mk, aad);
+        if (!wrap) return null;
+        w.push(wrap);
+    }
+    const mac = toBase64(hmac(sha256, authKey, utf8(dmV4Record(ctx, ct, w))));
+    return { v: 4, t: 'dm', ct, w, mac };
+}
+
+export type DmV4Open =
+    | { kind: 'ok'; plaintext: string }
+    /** Authentic, but not wrapped to any key this device holds. */
+    | { kind: 'locked' }
+    /** Not authentic, not shaped like v4, or a wrap this device holds the
+     *  key for does not open — treat as tampered. */
+    | { kind: 'bad' };
+
+/**
+ * Open a v4 DM with whichever of `keys` (this device's session keys, then the
+ * history key if unlocked) it was wrapped to. The MAC is checked FIRST, under
+ * the pinned peer identity, so a forged or altered envelope is rejected
+ * before any key material is touched; a genuine envelope this device cannot
+ * open is reported as locked, which is a different thing from tampering.
+ */
+export async function openDmEnvelopeV4(
+    identity: Identity,
+    peerPublicKeyEncoded: string,
+    envelope: Envelope,
+    ctx: DmContext,
+    keys: X25519Keypair[],
+): Promise<DmV4Open> {
+    if (envelope.v !== 4 || envelope.t !== 'dm' || !Array.isArray(envelope.w) || typeof envelope.mac !== 'string') {
+        return { kind: 'bad' };
+    }
+    const wraps = envelope.w;
+    if (!wraps.every(x => x && typeof x.to === 'string' && typeof x.e === 'string' && typeof x.k === 'string')) {
+        return { kind: 'bad' };
+    }
+    const authKey = dmV4AuthKey(identity, peerPublicKeyEncoded);
+    if (!authKey) return { kind: 'bad' };
+    let given: Uint8Array;
+    try {
+        given = fromBase64(envelope.mac);
+    } catch {
+        return { kind: 'bad' };
+    }
+    const expected = hmac(sha256, authKey, utf8(dmV4Record(ctx, envelope.ct, wraps)));
+    if (!constantTimeEqual(expected, given)) return { kind: 'bad' };
+    const aad = dmAad(ctx);
+    let sawMine = false;
+    for (const wrap of wraps) {
+        const mine = keys.find(k => k.publicKeyEncoded === wrap.to);
+        if (!mine) continue;
+        sawMine = true;
+        const mk = await unwrapKeyFrom(wrap, mine, aad);
+        if (!mk) continue;
+        try {
+            return { kind: 'ok', plaintext: await aesDecrypt(mk, envelope.ct, aad) };
+        } catch {
+            return { kind: 'bad' };
+        }
+    }
+    // A wrap addressed to us that did not open under our key is tampering
+    // (the MAC covers `w`, so it is not a transport error); none for us at
+    // all is simply a message this device was not given.
+    return sawMine ? { kind: 'bad' } : { kind: 'locked' };
+}
+
+/** Wrap a raw 32-byte key under the recovery code, exactly as the identity
+ *  seed is (same salt, same stretch), so the history key has the same
+ *  custody as the seed's recovery wrap — and no other. */
+export async function wrapKeyUnderRecovery(key: Uint8Array, recoveryCode: string, recoverySaltB64: string): Promise<string | null> {
+    const entropy = recoveryCodeEntropy(recoveryCode);
+    if (!entropy) return null;
+    return aesEncrypt(await recoveryKEK(entropy, fromBase64(recoverySaltB64)), toBase64(key));
+}
+
+export async function unwrapKeyUnderRecovery(blob: string, recoveryCode: string, recoverySaltB64: string): Promise<Uint8Array | null> {
+    const entropy = recoveryCodeEntropy(recoveryCode);
+    if (!entropy) return null;
+    try {
+        const key = fromBase64(await aesDecrypt(await recoveryKEK(entropy, fromBase64(recoverySaltB64)), blob));
+        return key.length === 32 ? key : null;
+    } catch {
+        return null;
+    }
 }
 
 export async function decryptDM(
@@ -1190,6 +1402,9 @@ export function parseEnvelopeEx(content: string): ParsedEnvelope {
     const shaped = !!p && typeof p.v === 'number' && (p.t === 'dm' || p.t === 'ch' || p.t === 'self') && typeof p.ct === 'string';
     if (!shaped) return { kind: 'plaintext' };
     if (p.v === 2 || p.v === 3) return { kind: 'envelope', env: parsed as Envelope };
+    // v4 exists for DMs only; a v4 channel or self envelope is something no
+    // client of ours produced, and the reader must not guess at it.
+    if (p.v === 4 && p.t === 'dm') return { kind: 'envelope', env: parsed as Envelope };
     return { kind: 'unsupported-version', v: p.v as number };
 }
 
@@ -1223,10 +1438,48 @@ export function isEncrypted(content: string): boolean {
  *
  * Pure and side-effect free so every decrypt path can tag its output uniformly.
  */
-export type MessageEncState = 'secure' | 'legacy' | 'failed';
+export type MessageEncState = 'secure' | 'legacy' | 'unexpected' | 'failed';
 export function messageEncState(wire: string, decrypted: string): MessageEncState {
     if (isUndecryptable(decrypted)) return 'failed';
     return isEncrypted(wire) ? 'secure' : 'legacy';
+}
+
+/**
+ * Sharpen `legacy` into `unexpected` for plaintext rows that arrived AFTER
+ * this conversation was already carrying encrypted messages. Pre-E2EE history
+ * is plaintext and older than every sealed row; a plaintext row newer than a
+ * sealed one was not written by any client of ours — the server (or someone
+ * with its database) put it there. Labelled, not hidden: the security model
+ * explains why. Pure, over rows already classified; `at` is the row's
+ * created_at (ISO or epoch), compared as time.
+ */
+export function markUnexpectedPlaintext<T extends { encState?: MessageEncState; created_at?: string | number }>(rows: T[]): T[] {
+    const t = (r: T): number => {
+        const v = r.created_at;
+        if (typeof v === 'number') return v < 1e12 ? v * 1000 : v;
+        const ms = v ? Date.parse(v) : NaN;
+        return Number.isFinite(ms) ? ms : NaN;
+    };
+    let firstSecure = Infinity;
+    for (const r of rows) {
+        if (r.encState === 'secure') {
+            const ms = t(r);
+            if (Number.isFinite(ms) && ms < firstSecure) firstSecure = ms;
+        }
+    }
+    if (!Number.isFinite(firstSecure)) return rows;
+    return rows.map(r => {
+        if (r.encState !== 'legacy') return r;
+        const ms = t(r);
+        return Number.isFinite(ms) && ms > firstSecure ? { ...r, encState: 'unexpected' as const } : r;
+    });
+}
+
+/** A plaintext message arriving LIVE in a conversation that encrypts is never
+ *  legitimate: every client that can send here seals. */
+export function liveEncState(wire: string, decrypted: string, conversationEncrypts: boolean): MessageEncState {
+    const s = messageEncState(wire, decrypted);
+    return s === 'legacy' && conversationEncrypts ? 'unexpected' : s;
 }
 
 // --- Identity persistence & session ---

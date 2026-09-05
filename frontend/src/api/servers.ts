@@ -388,15 +388,13 @@ export function listPinnedMessages(channelId: number): Promise<PinnedMessage[]> 
 
 // --- E2EE Channel Message Support (group keys) ---
 
-import {
-    serializeEnvelope,
+import { serializeEnvelope,
     encryptChannelMessage,
     decryptChannelMessage as decryptWithChannelKey,
     parseEnvelopeEx,
     SecureSendError,
     messageEncState,
-    type MessageEncState,
-} from './e2ee';
+    type MessageEncState, markUnexpectedPlaintext } from './e2ee';
 import { MAX_READABLE_ENVELOPE_VERSION } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
 import { isUndecryptable, ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
@@ -499,13 +497,16 @@ export async function decryptChannelContent(channelId: number, content: string, 
 /** Decrypt an array of channel messages in place, tagging each with its E2EE
  *  state (secure / legacy-plaintext / failed) so the UI can flag passthrough. */
 export async function decryptChannelMessages(channelId: number, messages: Message[]): Promise<Message[]> {
-    return Promise.all(
+    const rows = await Promise.all(
         messages.map(async (msg) => {
             const wire = msg.content;
             const text = await decryptChannelContent(channelId, wire, msg.user_id);
             return { ...msg, content: text, encState: messageEncState(wire, text) };
         })
     );
+    // Plaintext newer than a sealed row in the same channel was not written
+    // by a client of ours: badge it as unexpected, not as legacy.
+    return markUnexpectedPlaintext(rows);
 }
 
 // --- Unread Counts ---

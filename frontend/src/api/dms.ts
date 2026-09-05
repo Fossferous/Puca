@@ -74,8 +74,7 @@ export function getDMMessages(conversationId: string, limit: number = 50): Promi
  */
 // --- E2EE Support (pairwise) ---
 
-import {
-    getActiveIdentity,
+import { getActiveIdentity,
     encryptDM,
     decryptDM,
     encryptSelf,
@@ -84,11 +83,11 @@ import {
     serializeEnvelope,
     SecureSendError,
     messageEncState,
-    type MessageEncState,
-} from './e2ee';
+    type MessageEncState, sealDmEnvelopeV4, openDmEnvelopeV4, markUnexpectedPlaintext, liveEncState } from './e2ee';
 import { resolvePinnedIdentityKey } from './keyVerification';
 import { currentUserIdFromToken } from './auth';
-import { isUndecryptable, ENC_SIGN_IN, ENC_UNVERIFIED_SENDER, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
+import { dmKeysFor, v4Eligible, v4Targets, openingKeys } from './dmKeys';
+import { isUndecryptable, ENC_SIGN_IN, ENC_UNVERIFIED_SENDER, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION, ENC_HISTORY_LOCKED } from './decryptMarkers';
 
 /** Signed-in user id, straight from the JWT (no verification needed here —
  *  this only decides which key shape to use for our OWN conversation). */
@@ -164,7 +163,27 @@ export async function encryptDMContent(content: string, recipientUserId: number)
     }
     const me = currentUserId();
     if (me === null) throw new SecureSendError("Can't send securely — you appear to be signed out. Sign in again.");
-    const env = await encryptDM(identity, recipientPublicKey, content, { senderId: me, recipientId: recipientUserId });
+    const ctx = { senderId: me, recipientId: recipientUserId };
+    // v4 when BOTH accounts can take it (dmKeys.v4Eligible): every recent
+    // session of both has a session key and reads v4, and both have a history
+    // key. One older client on either side keeps the conversation on v3 —
+    // an existing install is never sent a message it cannot open.
+    let keys: [Awaited<ReturnType<typeof dmKeysFor>>, Awaited<ReturnType<typeof dmKeysFor>>] | null = null;
+    try {
+        keys = await Promise.all([dmKeysFor(recipientUserId), dmKeysFor(me)]);
+    } catch {
+        keys = null; // a transient failure to read keys means v3, not a failed send
+    }
+    if (keys && v4Eligible(keys[0], keys[1])) {
+        const env4 = await sealDmEnvelopeV4(identity, recipientPublicKey, v4Targets(keys[0], keys[1]), content, ctx);
+        if (!env4) {
+            // A malformed key in the set is a reason to refuse, not to fall
+            // back to a weaker seal the caller did not ask for.
+            throw new SecureSendError("Can't send securely — a device key in this conversation is malformed. Please try again.");
+        }
+        return serializeEnvelope(env4);
+    }
+    const env = await encryptDM(identity, recipientPublicKey, content, ctx);
     if (!env) {
         throw new SecureSendError("Can't send securely — encryption failed. Please try again.");
     }
@@ -218,13 +237,23 @@ export async function decryptDMContent(content: string, partnerUserId: number, s
     // that decides the DIRECTION the v3 tag was sealed under. A pairwise key
     // is symmetric, so this is exactly what the key does not authenticate.
     const me = currentUserId();
-    if (env.v === 3) {
+    if (env.v === 3 || env.v === 4) {
         if (me === null) return ENC_SIGN_IN;
         if (senderId !== me && senderId !== partnerUserId) return ENC_CONTEXT_MISMATCH;
     }
     // v2 ignores the context entirely; the fallback below only keeps the
     // call well-typed when no token is present (a test rig, never the app).
     const recipientId = senderId === me ? partnerUserId : (me ?? partnerUserId);
+    if (env.v === 4) {
+        // Authenticated under the same pinned partner key, then opened with
+        // whichever session or history key this device holds (dmKeys.ts).
+        // "locked" is a genuine message this device was not given a key for —
+        // the recovery code unlocks it here — and is kept apart from tampering.
+        const opened = await openDmEnvelopeV4(identity, partnerKey, env, { senderId, recipientId }, openingKeys());
+        if (opened.kind === 'ok') return opened.plaintext;
+        if (opened.kind === 'locked') return ENC_HISTORY_LOCKED;
+        return ENC_CONTEXT_MISMATCH;
+    }
     const plain = await decryptDM(identity, partnerKey, env, { senderId, recipientId });
     if (plain !== null) return plain;
     return env.v === 3 ? ENC_CONTEXT_MISMATCH : ENC_CANNOT_DECRYPT;
@@ -235,11 +264,20 @@ export async function decryptDMContent(content: string, partnerUserId: number, s
  * other participant in the conversation.
  */
 export async function decryptDMMessages(messages: DMMessage[], partnerUserId: number): Promise<DMMessage[]> {
-    return Promise.all(
+    const rows = await Promise.all(
         messages.map(async (msg) => {
             const wire = msg.content;
             const text = await decryptDMContent(wire, partnerUserId, msg.sender_id);
             return { ...msg, content: text, encState: messageEncState(wire, text) };
         })
     );
+    // Plaintext newer than a sealed row in the same conversation was not
+    // written by a client of ours: badge it as unexpected, not as legacy.
+    return markUnexpectedPlaintext(rows);
+}
+
+/** encState for a DM arriving live: a plaintext one is never legitimate —
+ *  every client that can send a DM seals it. */
+export function liveDmEncState(wire: string, decrypted: string): ReturnType<typeof messageEncState> {
+    return liveEncState(wire, decrypted, true);
 }

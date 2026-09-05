@@ -27,6 +27,7 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { RcGlobals } from './components/RcGlobals';
 import { RecoveryCodeModal } from './components/RecoveryCodeModal';
 import { IdentityBanner } from './components/IdentityBanner';
+import { wireSessionDmKeyPublish } from './api/dmKeys';
 import { HotkeyBlockedBanner } from './components/HotkeyBlockedBanner';
 import { InviteLanding } from './components/InviteLanding';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
@@ -125,6 +126,11 @@ function App() {
   // Desktop suspend / session-lock feed for the clip replay buffer: the buffer
   // must not survive a hibernation (RAM → hiberfil.sys). No-op off Tauri.
   useEffect(() => { void wireSystemSuspendHook(); }, []);
+  // This session's DM key goes to the server on EVERY socket open, whoever
+  // opened it: the sign-in form connects the socket itself (Login.tsx), so a
+  // publish sequenced inside the connect attempt below never ran on a fresh
+  // sign-in (dmKeys.ts has the story). Idempotent; wired once.
+  useEffect(() => { wireSessionDmKeyPublish(); }, []);
 
   // Clip consent protocol (docs/CLIPS.md): subscribe to the doorbell frames
   // once, and hand the protocol module a wiper so a declined / expired /

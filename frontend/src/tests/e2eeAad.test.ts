@@ -195,7 +195,7 @@ describe('the channel message wrapper (servers.decryptChannelContent)', () => {
         await editChannelMessageEncrypted(7, 'm1', 'fixed typo');
         // The edit tells the server the highest envelope version it can open, so a
         // reader-first build is never mistaken for a stale one.
-        expect(patch).toHaveBeenLastCalledWith('/channels/7/messages/m1', expect.objectContaining({ reads_up_to: 3, content: expect.stringContaining('"v":3') }));
+        expect(patch).toHaveBeenLastCalledWith('/channels/7/messages/m1', expect.objectContaining({ reads_up_to: 4, content: expect.stringContaining('"v":3') }));
         patch.mockRestore();
         await expect(editChannelMessageEncrypted(7, 'm1', ENC_CONTEXT_MISMATCH)).rejects.toThrow(/can't be edited/);
         await expect(editChannelMessageEncrypted(7, 'm1', ENC_KEY_UNAVAILABLE)).rejects.toThrow(/can't be edited/);
@@ -221,7 +221,7 @@ describe('the checklist wrappers (tasks.ts) seal under the CREATOR, never the ed
         expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, expect.any(String), { kind: 'chan-taskatt', channelId: 7, senderId: 99 });
         await expect(updateChannelTask(7, 1, { description: ENC_KEY_UNAVAILABLE }, 99)).rejects.toThrow(/decrypt-failure marker/);
         expect(patch).not.toHaveBeenCalledWith('/tasks/1', expect.objectContaining({ description: expect.stringContaining('[Encrypted') }));
-        expect(patch).toHaveBeenCalledWith('/tasks/1', expect.objectContaining({ reads_up_to: 3 }));
+        expect(patch).toHaveBeenCalledWith('/tasks/1', expect.objectContaining({ reads_up_to: 4 }));
         post.mockRestore(); patch.mockRestore();
     });
 
@@ -264,7 +264,9 @@ describe('the DM wrapper (dms.decryptDMContent) with the real primitives', () =>
             expect(await decryptDMContent(v3, 8, 41)).toBe(ENC_CONTEXT_MISMATCH);  // direction flipped
             const v2 = JSON.stringify(await seal(2));
             expect(await decryptDMContent(v2, 8, 999)).toBe('hi');
-            expect(await decryptDMContent(JSON.stringify({ v: 4, t: 'dm', ct: 'x' }), 8, 8)).toBe(ENC_UNSUPPORTED_VERSION);
+            expect(await decryptDMContent(JSON.stringify({ v: 5, t: 'dm', ct: 'x' }), 8, 8)).toBe(ENC_UNSUPPORTED_VERSION);
+            // a v4 DM without its wraps and MAC is not a version problem but a forged one
+            expect(await decryptDMContent(JSON.stringify({ v: 4, t: 'dm', ct: 'x' }), 8, 8)).toBe(ENC_CONTEXT_MISMATCH);
             const chInDmRow = JSON.stringify(await sealChannelEnvelope(CK, 3, 'x', ctx, 2));
             expect(await decryptDMContent(chInDmRow, 8, 8)).toBe(ENC_CANNOT_DECRYPT);
             expect(await decryptDMContent('plain legacy text', 8, 8)).toBe('plain legacy text');

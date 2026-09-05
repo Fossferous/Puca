@@ -371,6 +371,7 @@ import {
     type PwKdf,
 } from './e2ee';
 import { setPendingRecoveryCode, markRecoveryCodeUnacknowledged } from './recoveryPrompt';
+import { newHistoryKeyMaterial, rewrapHistoryKey, getHistoryKey, storeHistoryKey, clearDmKeys } from './dmKeys';
 import { clearChannelKeyCache } from './channelKeys';
 import { resetIceConfigCache } from './iceConfig';
 import { clearBlobCache } from './attachments';
@@ -393,12 +394,17 @@ export async function register(username: string, password: string, inviteCode?: 
     const seed = generateIdentitySeed();
     const identity = makeIdentity(seed);
     const { material, recoveryCode } = await buildWrapMaterial(seed, password);
+    // The DM v4 history key: its private half is wrapped under the recovery
+    // code just minted, and under nothing else (dmKeys.ts).
+    const history = await newHistoryKeyMaterial(recoveryCode, material.recoverySalt);
 
     await apiClient.post('/auth/register', {
         username,
         salt_hex: saltHex,
         verifier_hex: bigIntToPaddedHex(v, N_BYTES),
         srp_version: SRP_VERSION_CURRENT,
+        history_pubkey: history.historyPubkey,
+        history_wrapped_rc: history.historyWrappedRc,
         public_key: identity.publicKeyEncoded,
         wrap_salt: material.wrapSalt,
         recovery_salt: material.recoverySalt,
@@ -411,6 +417,7 @@ export async function register(username: string, password: string, inviteCode?: 
     });
 
     setActiveIdentity(identity);
+    storeHistoryKey(history.priv); // this device made it; it may read history
     // Surfaced by RecoveryCodeModal after the user logs in. The marker
     // outlives a reload; the code itself deliberately does not.
     setPendingRecoveryCode(recoveryCode);
@@ -815,6 +822,7 @@ export async function regenerateRecoveryCode(username: string, currentPassword: 
         seed_wrapped_pw: string | null;
         pw_kdf_iterations: number | null;
         pw_kdf: PwKdf | null;
+        history_pubkey?: string | null;
     } = await apiClient.get('/keys/wrap');
     if (wrap.key_version < 3 || !wrap.wrap_salt || !wrap.seed_wrapped_pw) {
         throw new Error('This account is not set up for recovery codes. Ask your server operator.');
@@ -825,9 +833,25 @@ export async function regenerateRecoveryCode(username: string, currentPassword: 
     );
     if (!seed) throw new Error('Current password is incorrect.');
 
+    // The new code replaces the ONLY wrap of the DM history key. If this
+    // account has one, this device must hold it to re-wrap it — a new code
+    // that cannot open the history key would lock every v4 message for good.
+    // An account without one gets one now: that is how existing accounts
+    // turn v4 on.
+    const held = getHistoryKey();
+    if (wrap.history_pubkey && !held) {
+        throw new Error('Unlock your message history on this device first (open a direct message and enter your current recovery code), then generate a new one.');
+    }
+    if (wrap.history_pubkey && held && held.publicKeyEncoded !== wrap.history_pubkey) {
+        throw new Error('The history key on this device is not the one this account uses. Sign out and in again, then unlock history with your current recovery code.');
+    }
+
     await proveCurrentPassword(username, currentPassword);
 
     const { material, recoveryCode } = await buildWrapMaterial(seed, currentPassword);
+    const history = held
+        ? await rewrapHistoryKey(held.privateKey, recoveryCode, material.recoverySalt)
+        : await newHistoryKeyMaterial(recoveryCode, material.recoverySalt);
     await apiClient.post('/keys/rewrap', {
         wrap_salt: material.wrapSalt,
         recovery_salt: material.recoverySalt,
@@ -835,7 +859,10 @@ export async function regenerateRecoveryCode(username: string, currentPassword: 
         seed_wrapped_rc: material.seedWrappedRc,
         pw_kdf_iterations: material.pwKdfIterations,
         pw_kdf: material.pwKdf,
+        history_pubkey: history.historyPubkey,
+        history_wrapped_rc: history.historyWrappedRc,
     });
+    storeHistoryKey(history.priv);
     return recoveryCode;
 }
 
@@ -1073,6 +1100,7 @@ export function logout(): void {
     // again with the box unticked, which requires being signed out.
     localStorage.removeItem(REMEMBER_ME_KEY);
     clearActiveIdentity(); // Clear E2EE identity on logout
+    clearDmKeys(); // session and history keys must not outlive the session on a shared machine
     clearIdentityRestoreFailure(); // a missing identity is not missing once signed out
     clearChannelKeyCache();
     // Secrets and personal data that outlived a sign-out. Everything below is

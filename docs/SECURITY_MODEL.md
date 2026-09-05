@@ -380,9 +380,55 @@ since the upgrade still carries the SHA-256 verifier**, and a database dump take
 then is attackable at the old rate regardless.
 
 Practically: **seed confidentiality against a database thief reduces to your password
-strength.** There is also no forward secrecy for message history — DM keys derive from
-long-term identity keys, so recovering the seed recovers all past DMs. And the decrypted
-seed sits in `localStorage` on your device, described in the code as password-equivalent.
+strength.** And the decrypted seed sits in `localStorage` on your device, described in the
+code as password-equivalent.
+
+### What the seed no longer unlocks: direct messages sealed as v4 (0.9.3)
+
+Until 0.9.3 every DM was sealed under a key derived from the two long-term identity keys,
+and those derive from the seed — so recovering the seed (a cracked password, above)
+recovered every DM the account ever exchanged. **v4 changes what the seed can reach.** Each
+direct message is sealed under a fresh random key, and that key is wrapped only to:
+
+- the **session keys** of each side's signed-in devices — an X25519 key a client mints
+  for its session, keeps private on that device, and publishes against its server
+  session (`token_sessions.dm_pubkey`); a new sign-in mints a new one, revoking the
+  session retires it;
+- each account's **history key** — its private half wrapped under the 12-word recovery
+  code and under nothing else (`users.history_wrapped_rc`).
+
+None of those derive from the password. **A database copy plus a cracked password reads no
+v4 message.** What it does read: v2/v3 history (already stored, cannot be re-sealed
+without every device re-encrypting it — an optional later migration), and anything a
+device with a stolen session key was sent during that session. This is not per-message
+ratcheting: a session key opens whatever was wrapped to it while the session lived. The
+recovery code is the root secret by design — someone holding it reads everything, as they
+could already reset the password.
+
+Sender authentication does not come from the body key any more (it is random), so a
+server holding the public session keys could forge an envelope. Every v4 envelope carries
+an HMAC under a key derived from the pairwise identity DH — the same pinned identity keys
+v3 relied on — over the whole sealed record, wraps included: nothing can be added,
+removed or re-pointed. Either party can compute it (no non-repudiation, as before).
+
+**What a user sees.** A device signed in with only the password receives new v4 messages
+normally (they are wrapped to its session key) and shows older v4 messages as locked until
+the recovery code is entered on that device — once, kept locally. Regenerating the recovery
+code re-wraps the history key under the new code; a client from before 0.9.3 is refused
+that operation by the server, because a code that cannot open the history key would lock
+every v4 message for good. Accounts from before 0.9.3 have no history key until their
+owner regenerates the recovery code from a current client; until both sides of a
+conversation have one, and every recently-seen session on both sides can read v4, the
+conversation stays on v3 — nothing an existing install has can be sent a message it cannot
+open. A session not seen for fourteen days is not counted; its owner, returning with a
+pre-0.9.3 client, sees v4 rows as "update the app".
+
+**One consequence to know before upgrading (0.9.3, SEC-01).** The first sign-in from a
+current client replaces the SHA-256 SRP verifier with an Argon2id one. Clients that are
+already signed in keep working; a client from before 0.9.3 can no longer make a *fresh*
+sign-in to that account until it updates — it derives the old verifier and cannot prove the
+password. Desktop auto-updates and the mobile bundle updates over the air, so this reaches
+only an install that has neither.
 
 Use a long, unique password here. It is doing more work than passwords usually do.
 

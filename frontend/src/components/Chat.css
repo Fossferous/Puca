@@ -2602,6 +2602,62 @@ body.voice-drag-active {
 [data-theme="light"] .not-encrypted-tag {
     color: #8a5a00;
 }
+/* Plaintext that arrived after the conversation was sealed: this is the
+   server's doing, not a legacy row, and it reads as danger, not caution. */
+.not-encrypted-tag.unexpected {
+    color: var(--text-danger, #f23f43);
+}
+[data-theme="light"] .not-encrypted-tag.unexpected {
+    color: #a11a1a;
+}
+
+/* "Older messages are locked on this device" — above a DM conversation
+   whose v4 messages this device holds no key for. Same visual family as the
+   voice notices: a visible line, not a tooltip. */
+.history-lock-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 8px 12px 4px;
+    padding: 8px 12px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--text-warning, #f0b232);
+    background: rgba(191, 140, 60, 0.12);
+    border: 1px solid rgba(191, 140, 60, 0.35);
+    border-radius: 6px;
+}
+[data-theme="light"] .history-lock-banner {
+    color: #8a5a00;
+    background: rgba(191, 140, 60, 0.15);
+}
+.history-lock-banner-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: 16px;
+    margin-top: 2px;
+}
+.history-lock-banner-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+.history-lock-banner-body > button { align-self: flex-start; }
+.history-lock-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.history-lock-form input {
+    flex: 1 1 220px;
+    min-width: 0;
+}
+.history-lock-error {
+    flex-basis: 100%;
+    color: var(--text-danger, #f23f43);
+}
 
 /* ---- Composer autocomplete (@members / #channels) ---- */
 .input-wrapper { position: relative; }

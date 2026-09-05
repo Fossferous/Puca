@@ -405,6 +405,10 @@ before trusting either version.
   the verifier derived by **Argon2id** at the same cost as the key wrap since
   0.9.3 — earlier accounts move across on their next sign-in. Your password
   never leaves your device, not even as a hash.
+- **Direct messages**: since 0.9.3, sealed under per-message keys held only
+  by your devices and your recovery code — a cracked password reads none of
+  them (not per-message forward secrecy; `docs/SECURITY_MODEL.md` §7 says
+  exactly what it is and is not).
 - **Identity & E2EE keys**: a random per-account seed, wrapped under your
   password with **Argon2id** (m=19456 KiB, t=2, p=1) and independently under
   a 12-word recovery code — so a password reset recovers your history

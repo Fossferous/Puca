@@ -81,8 +81,11 @@ import {
     type DMConversation,
     type DMMessage,
     type SearchUserResult,
+    liveDmEncState,
 } from '../api/dms';
-import { SecureSendError, messageEncState, type MessageEncState } from '../api/e2ee';
+import { SecureSendError, liveEncState, type MessageEncState } from '../api/e2ee';
+import { ENC_HISTORY_LOCKED } from '../api/decryptMarkers';
+import { unlockHistoryWithRecoveryCode, type UnlockResult } from '../api/dmKeys';
 import { HomeSidebar } from './HomeSidebar';
 import { encryptAndUploadRef, parseEncAttachment } from '../api/attachments';
 import { FileTooLargeError, MAX_UPLOAD_BYTES, discardUpload } from '../api/uploads';
@@ -280,6 +283,19 @@ function toDisplayMessages(history: ApiMessage[]): DisplayMessage[] {
  * gets no chrome. Mirrors the `.edited-tag` placement next to MessageContent.
  */
 function NotEncryptedBadge({ encState }: { encState?: MessageEncState }) {
+    if (encState === 'unexpected') {
+        // Plaintext that arrived AFTER this conversation was carrying sealed
+        // messages: no client of ours writes that. Named, not merely flagged.
+        return (
+            <span
+                className="not-encrypted-tag unexpected"
+                title="Not encrypted — and unexpected: this conversation is end-to-end encrypted, and this message arrived after that was in place. No app of ours wrote it as plaintext; treat it as something the server inserted."
+            >
+                <WarningIcon />
+                <span>Not encrypted — unexpected</span>
+            </span>
+        );
+    }
     if (encState !== 'legacy') return null;
     return (
         <span
@@ -289,6 +305,64 @@ function NotEncryptedBadge({ encState }: { encState?: MessageEncState }) {
             <WarningIcon />
             <span>Not encrypted</span>
         </span>
+    );
+}
+
+/**
+ * Shown above a DM conversation when some of its messages are v4 envelopes
+ * this device holds no key for — wrapped to other sessions and to the
+ * account's history key, which the recovery code unlocks. The code is used
+ * on this device only; nothing about it is sent anywhere (dmKeys.ts).
+ */
+function HistoryLockBanner({ onUnlock }: { onUnlock: (code: string) => Promise<UnlockResult> }) {
+    const [open, setOpen] = useState(false);
+    const [code, setCode] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    const submit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (busy || !code.trim()) return;
+        setBusy(true);
+        setError('');
+        try {
+            const r = await onUnlock(code.trim());
+            if (r === 'ok') { setOpen(false); setCode(''); }
+            else if (r === 'wrong-code') setError('That is not this account’s recovery code.');
+            else setError('This account has no message-history key yet — generate a new recovery code in Settings → My Account first.');
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Could not unlock history.');
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <div className="history-lock-banner" role="status">
+            <span className="history-lock-banner-icon" aria-hidden="true"><WarningIcon /></span>
+            <div className="history-lock-banner-body">
+                <span>
+                    Some older messages here are locked on this device: they were sealed for your other
+                    devices and for your recovery code, not for your password. Enter the 12-word code
+                    to read them here — it stays on this device.
+                </span>
+                {!open ? (
+                    <button type="button" className="secondary-btn" onClick={() => setOpen(true)}>Enter recovery code</button>
+                ) : (
+                    <form className="history-lock-form" onSubmit={submit} autoComplete="off">
+                        <input
+                            type="password"
+                            placeholder="word1 word2 word3 …"
+                            value={code}
+                            onChange={e => setCode(e.target.value)}
+                            autoComplete="off"
+                            required
+                        />
+                        <button type="submit" className="secondary-btn" disabled={busy || !code.trim()}>{busy ? 'Unlocking…' : 'Unlock'}</button>
+                        <button type="button" className="secondary-btn" onClick={() => { setOpen(false); setCode(''); setError(''); }}>Cancel</button>
+                        {error && <div className="history-lock-error">{error}</div>}
+                    </form>
+                )}
+            </div>
+        </div>
     );
 }
 
@@ -1925,7 +1999,7 @@ export function Chat({ onLogout }: ChatProps) {
                     sender_display_name: payload.sender.display_name || null,
                     content: displayContent,
                     created_at: new Date(payload.timestamp * 1000).toISOString(),
-                    encState: messageEncState(payload.content, displayContent),
+                    encState: liveDmEncState(payload.content, displayContent),
                 };
 
                 setDmMessages(prev => {
@@ -2266,7 +2340,7 @@ export function Chat({ onLogout }: ChatProps) {
                         sender: payload.sender,
                         content: displayContent,
                         timestamp: payload.timestamp,
-                        encState: messageEncState(payload.content, displayContent),
+                        encState: liveEncState(payload.content, displayContent, prev.some(m => m.encState === 'secure')),
                         clip_consent: payload.clip_consent ?? undefined,
                     }];
                 });
@@ -5026,10 +5100,21 @@ export function Chat({ onLogout }: ChatProps) {
                         />
                     ) : (
                         /* Messages - show when in chat mode */
-                        currentDM ? (
-                            // DM messages — same grouped layout + date dividers as
-                            // server channels so the conversation reads cleanly.
-                            visibleDmMessages.map((msg, idx) => {
+                        currentDM ? (<>
+                            {visibleDmMessages.some(m => m.content === ENC_HISTORY_LOCKED) && (
+                                <HistoryLockBanner onUnlock={async (code) => {
+                                    const r = await unlockHistoryWithRecoveryCode(code);
+                                    if (r === 'ok') {
+                                        // Re-read the conversation now that the history key is here.
+                                        const raw = await getDMMessages(currentDM.id);
+                                        setDmMessages(await decryptDMMessages(raw, currentDM.other_user_id));
+                                    }
+                                    return r;
+                                }} />
+                            )}
+                            {/* DM messages — same grouped layout + date dividers as
+                                server channels so the conversation reads cleanly. */}
+                            {visibleDmMessages.map((msg, idx) => {
                                 const prevMsg = idx > 0 ? visibleDmMessages[idx - 1] : null;
                                 const ts = parseServerTimestampSecs(msg.created_at);
                                 const prevTs = prevMsg ? parseServerTimestampSecs(prevMsg.created_at) : 0;
@@ -5123,8 +5208,8 @@ export function Chat({ onLogout }: ChatProps) {
                                         </div>
                                     </React.Fragment>
                                 );
-                            })
-                        ) : (
+                            })}
+                        </>) : (
                             // Server channel messages (with collection headers if in collection view)
                             <>
                             {/* Under one page of history means we're looking at the very

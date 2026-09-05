@@ -28,6 +28,10 @@ export const ENC_CONTEXT_MISMATCH = '[Encrypted — does not belong here]';
 /** An envelope whose version this build does not implement. Shown instead
  *  of the raw JSON a too-old parser used to render as plaintext. */
 export const ENC_UNSUPPORTED_VERSION = '[Encrypted — unsupported version, update the app]';
+/** A v4 DM this device cannot open: it was wrapped to other sessions and to
+ *  the account's history key, which this device has not unlocked. Not a
+ *  failure of the message — enter the recovery code here to read it. */
+export const ENC_HISTORY_LOCKED = '[Encrypted — enter your recovery code to read older messages here]';
 /** Task-side wording (predates the shared marker set; kept for compatibility). */
 export const TASK_DECRYPT_FAILED = '[Unable to decrypt]';
 export const TASK_IDENTITY_LOCKED = '[Locked — log in again to decrypt]';
@@ -40,6 +44,7 @@ export const DECRYPT_FAILURE_MARKERS: ReadonlySet<string> = new Set([
     ENC_UNVERIFIED_SENDER,
     ENC_CONTEXT_MISMATCH,
     ENC_UNSUPPORTED_VERSION,
+    ENC_HISTORY_LOCKED,
     TASK_DECRYPT_FAILED,
     TASK_IDENTITY_LOCKED,
 ]);

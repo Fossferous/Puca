@@ -84,6 +84,14 @@ pub struct RegisterRequest {
     /// client predating 0.9.3, which derived SHA-256 — so `None` means 1.
     #[serde(default)]
     pub srp_version: Option<SrpVersion>,
+    /// DM v4 history key (migration 060): the public half, and the private
+    /// half wrapped under the recovery code. Absent from clients before 0.9.3;
+    /// such an account stays on v3 DMs until it regenerates its recovery code
+    /// from a current client.
+    #[serde(default)]
+    pub history_pubkey: Option<String>,
+    #[serde(default)]
+    pub history_wrapped_rc: Option<String>,
 }
 
 /// Constant-time byte-slice equality, so the registration code isn't matched
@@ -347,12 +355,15 @@ pub async fn register(
         && payload.seed_wrapped_rc.is_some();
     let key_version = if is_v3 { 3 } else { 2 };
     let srp_version: i16 = payload.srp_version.map(SrpVersion::get).unwrap_or(1);
+    if let Err(msg) = validate_history_key_pair(&payload.history_pubkey, &payload.history_wrapped_rc) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
 
     // Insert into database with public key + optional wrap material
     let result = sqlx::query(
         "INSERT INTO users (username, salt, verifier, public_key, key_version, \
-         wrap_salt, recovery_salt, seed_wrapped_pw, seed_wrapped_rc, pw_kdf_iterations, pw_kdf, srp_version) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+         wrap_salt, recovery_salt, seed_wrapped_pw, seed_wrapped_rc, pw_kdf_iterations, pw_kdf, srp_version, history_pubkey, history_wrapped_rc) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     )
     .bind(&payload.username)
     .bind(&salt)
@@ -366,6 +377,8 @@ pub async fn register(
     .bind(payload.pw_kdf_iterations)
     .bind(&payload.pw_kdf)
     .bind(srp_version)
+    .bind(&payload.history_pubkey)
+    .bind(&payload.history_wrapped_rc)
     .execute(&state.pool)
     .await;
 
@@ -1457,6 +1470,137 @@ pub async fn get_user_public_key(
         })
         .into_response(),
         None => (StatusCode::NOT_FOUND, "User not found").into_response(),
+    }
+}
+
+/// A history-key pair as a client submits it: both halves or neither, each of
+/// a size an honest client produces. The server stores them opaquely.
+pub fn validate_history_key_pair(pubkey: &Option<String>, wrapped: &Option<String>) -> Result<(), &'static str> {
+    match (pubkey, wrapped) {
+        (None, None) => Ok(()),
+        (Some(p), Some(w)) => {
+            if p.len() < 8 || p.len() > 128 || p.chars().any(|c| c.is_control()) {
+                return Err("history_pubkey is malformed");
+            }
+            if w.len() < 16 || w.len() > 512 || w.chars().any(|c| c.is_control()) {
+                return Err("history_wrapped_rc is malformed");
+            }
+            Ok(())
+        }
+        _ => Err("history_pubkey and history_wrapped_rc must be sent together"),
+    }
+}
+
+/// Sessions the server counts when deciding whether every client of an
+/// account can open a v4 envelope. A session not seen for longer than this
+/// is ignored — its owner, coming back, may find v4 messages it must update
+/// (or unlock with the recovery code) to read; the FAQ says so. Mirrored by
+/// RECENT_SESSION_DAYS in the client.
+const DM_RECENT_SESSION_DAYS: i32 = 14;
+
+#[derive(Serialize)]
+pub struct DmKeysResponse {
+    pub user_id: i64,
+    /// The account's history key, or None for an account that has not set one up.
+    pub history_pubkey: Option<String>,
+    /// Session keys of every recently-seen, unrevoked session that published one.
+    pub sessions: Vec<String>,
+    /// Every recently-seen session published a session key and reads v4.
+    pub all_sessions_v4: bool,
+}
+
+/// GET /users/:user_id/dm-keys — what a v4 direct message to (or from) this
+/// user must be wrapped to, and whether every client they use can open one.
+/// The user themself, or someone who already shares a DM conversation with
+/// them: the identity key is public to any member, but a list of session
+/// keys says how many devices someone uses, which a stranger has no claim on.
+pub async fn get_user_dm_keys(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<i64>,
+    Extension(claims): Extension<crate::auth::Claims>,
+) -> impl IntoResponse {
+    let me = claims.sub as i32;
+    let target = user_id as i32;
+    if me != target {
+        let shares: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM dm_conversations WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1) LIMIT 1",
+        )
+        .bind(me)
+        .bind(target)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+        if shares.is_none() {
+            return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
+        }
+    }
+    let history: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT history_pubkey FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(target)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+    let Some((history_pubkey,)) = history else {
+        return (StatusCode::NOT_FOUND, "User not found").into_response();
+    };
+    let rows: Vec<(Option<String>, Option<i16>)> = sqlx::query_as(
+        "SELECT dm_pubkey, reads_up_to FROM token_sessions \
+         WHERE user_id = $1 AND revoked_at IS NULL AND last_seen_at > NOW() - make_interval(days => $2)",
+    )
+    .bind(target)
+    .bind(DM_RECENT_SESSION_DAYS)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let mut sessions: Vec<String> = rows.iter().filter_map(|(p, _)| p.clone()).collect();
+    sessions.sort();
+    sessions.dedup();
+    let all_sessions_v4 = !rows.is_empty()
+        && rows.iter().all(|(p, r)| p.is_some() && r.map_or(false, |r| r >= 4));
+    Json(DmKeysResponse { user_id, history_pubkey, sessions, all_sessions_v4 }).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SessionDmKeyRequest {
+    pub dm_pubkey: String,
+    /// The highest envelope version this client can open.
+    pub reads_up_to: i16,
+}
+
+/// PATCH /keys/session-dm — this session's DM key and readable version.
+/// Bound to the caller's own session id, so one device cannot publish a key
+/// for another; revoking the session retires the key with it.
+pub async fn set_session_dm_key(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(payload): Json<SessionDmKeyRequest>,
+) -> impl IntoResponse {
+    if claims.sid.is_empty() {
+        // A token from before per-session ids; its next renewal mints one.
+        return (StatusCode::BAD_REQUEST, "this session has no id yet; it will after the next token renewal").into_response();
+    }
+    if payload.dm_pubkey.len() < 8 || payload.dm_pubkey.len() > 128 || payload.dm_pubkey.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "dm_pubkey is malformed").into_response();
+    }
+    if !(2..=32).contains(&payload.reads_up_to) {
+        return (StatusCode::BAD_REQUEST, "reads_up_to is out of range").into_response();
+    }
+    match sqlx::query(
+        "UPDATE token_sessions SET dm_pubkey = $1, reads_up_to = $2 WHERE sid = $3 AND user_id = $4 AND revoked_at IS NULL",
+    )
+    .bind(&payload.dm_pubkey)
+    .bind(payload.reads_up_to)
+    .bind(&claims.sid)
+    .bind(claims.sub as i32)
+    .execute(&state.pool)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::OK.into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "session not found").into_response(),
+        Err(e) => {
+            tracing::error!("Failed to set session DM key: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

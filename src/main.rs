@@ -792,6 +792,7 @@ async fn main() -> anyhow::Result<()> {
         )
         // E2EE public key endpoints
         .route("/users/search", get(handlers::search_users)) // Must come before :user_id route
+        .route("/users/:user_id/dm-keys", get(handlers::get_user_dm_keys))
         .route(
             "/users/:user_id/public-key",
             get(handlers::get_user_public_key),
@@ -876,6 +877,7 @@ async fn main() -> anyhow::Result<()> {
         // client verify this account's device enrolment records. TOFU-pinned
         // by peers, same trust posture as users.public_key.
         .route("/keys/signing", patch(device_handlers::set_signing_key))
+        .route("/keys/session-dm", patch(handlers::set_session_dm_key))
         .route(
             "/users/:user_id/signing-key",
             get(device_handlers::get_signing_key),

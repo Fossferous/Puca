@@ -6,6 +6,7 @@ import { fetchBlockedUsers, setBlockedLocal } from './blockStore';
 import { clearAllHiddenMessages, hiddenMessageCount } from './hiddenMessagesStore';
 import { changePassword, deleteAccount, requestEmailChange, logoutEverywhere, logout, regenerateRecoveryCode } from '../api/auth';
 import { showRecoveryCode } from '../api/recoveryPrompt';
+import { getHistoryKey, unlockHistoryWithRecoveryCode, type UnlockResult } from '../api/dmKeys';
 import { PrivacyDisclosure } from './PrivacyDisclosure';
 import { AccountExportCard } from './AccountExportCard';
 import { currentAppVersion } from '../api/appVersion';
@@ -338,6 +339,38 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const [pwError, setPwError] = useState('');
     // Regenerate recovery code: armed ⇒ the password field + warning show.
     const [rcArmed, setRcArmed] = useState(false);
+    // Forward-secret DMs (v4): does this account have a history key, and does
+    // THIS device hold it? Read once per open; the unlock form updates it.
+    const [fsAccount, setFsAccount] = useState<'unknown' | 'off' | 'on'>('unknown');
+    const [fsDevice, setFsDevice] = useState<boolean>(() => getHistoryKey() !== null);
+    const [fsCode, setFsCode] = useState('');
+    const [fsOpen, setFsOpen] = useState(false);
+    const [fsStatus, setFsStatus] = useState<'idle' | 'working' | 'error'>('idle');
+    const [fsError, setFsError] = useState('');
+    useEffect(() => {
+        let cancelled = false;
+        apiClient.get('/keys/wrap')
+            .then((w: unknown) => { const r = w as { history_pubkey?: string | null }; if (!cancelled) setFsAccount(r.history_pubkey ? 'on' : 'off'); })
+            .catch(() => { if (!cancelled) setFsAccount('unknown'); });
+        return () => { cancelled = true; };
+    }, []);
+    const handleUnlockHistory = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (fsStatus === 'working' || !fsCode.trim()) return;
+        setFsStatus('working');
+        setFsError('');
+        try {
+            const r: UnlockResult = await unlockHistoryWithRecoveryCode(fsCode.trim());
+            if (r === 'ok') { setFsDevice(true); setFsOpen(false); setFsCode(''); setFsStatus('idle'); }
+            else {
+                setFsError(r === 'wrong-code' ? 'That is not this account’s recovery code.' : 'This account has no message-history key yet.');
+                setFsStatus('error');
+            }
+        } catch (err) {
+            setFsError(err instanceof Error ? err.message : 'Could not unlock history.');
+            setFsStatus('error');
+        }
+    };
     const [rcPassword, setRcPassword] = useState('');
     const [rcStatus, setRcStatus] = useState<'idle' | 'working' | 'error'>('idle');
     const [rcError, setRcError] = useState('');
@@ -1351,6 +1384,58 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <div className="password-change-error">{pwError}</div>
                                         )}
                                     </form>
+                                </div>
+
+                                <h3>Forward-secret direct messages</h3>
+                                <div className="settings-card">
+                                    {fsAccount === 'off' ? (
+                                        <p className="settings-hint">
+                                            <strong>Not set up on this account.</strong> Direct messages are sealed under
+                                            keys derived from your password. Generate a new recovery code below to turn
+                                            this on: from then on, each message is sealed under a key held only by your
+                                            devices and your recovery code — a cracked password no longer reads your
+                                            history. People you message need it on too; until then, that conversation
+                                            stays as it is.
+                                        </p>
+                                    ) : fsAccount === 'on' ? (
+                                        <>
+                                            <p className="settings-hint">
+                                                <strong>On.</strong> New direct messages are sealed under keys your password
+                                                cannot unlock. {fsDevice
+                                                    ? 'Message history is unlocked on this device.'
+                                                    : 'Older messages are locked on this device until you enter your recovery code here; new ones arrive normally.'}
+                                            </p>
+                                            {!fsDevice && (!fsOpen ? (
+                                                <button className="secondary-btn" onClick={() => setFsOpen(true)}>
+                                                    Unlock history on this device
+                                                </button>
+                                            ) : (
+                                                <form className="password-change-form" onSubmit={handleUnlockHistory} autoComplete="off">
+                                                    <input
+                                                        type="password"
+                                                        placeholder="Your 12-word recovery code"
+                                                        value={fsCode}
+                                                        onChange={e => setFsCode(e.target.value)}
+                                                        autoComplete="off"
+                                                        required
+                                                    />
+                                                    {fsStatus === 'error' && fsError && (
+                                                        <div className="password-change-error">{fsError}</div>
+                                                    )}
+                                                    <div className="settings-actions">
+                                                        <button type="button" className="secondary-btn" onClick={() => { setFsOpen(false); setFsCode(''); setFsStatus('idle'); }}>
+                                                            Cancel
+                                                        </button>
+                                                        <button type="submit" className="secondary-btn" disabled={fsStatus === 'working' || !fsCode.trim()}>
+                                                            {fsStatus === 'working' ? 'Unlocking…' : 'Unlock'}
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            ))}
+                                        </>
+                                    ) : (
+                                        <p className="settings-hint">Checking this account’s key setup…</p>
+                                    )}
                                 </div>
 
                                 <h3>Recovery code</h3>

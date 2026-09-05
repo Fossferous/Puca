@@ -7,6 +7,27 @@ one-line summary; this file is the full story. Versions follow
 ## 0.9.3 — unreleased
 
 ### Security
+- **Direct messages are now sealed under keys your password cannot unlock.**
+  Until now a DM was sealed under a key derived from both people's identity
+  keys — and your identity key is what your password unwraps, so someone with
+  a copy of the server's database who cracked your password could read every
+  DM you ever exchanged. Each DM is now sealed under a fresh random key that is
+  wrapped only to your devices' session keys and to your account's history key,
+  whose private half is wrapped under your 12-word recovery code and nothing
+  else. A cracked password reads none of them. On a new device, new messages
+  arrive as usual; older ones show as locked until you enter the recovery code
+  there, once. **Accounts from before this release turn it on by generating a
+  new recovery code in Settings → My Account**; a conversation switches only
+  when both people have, and every device either of you has used in the last
+  two weeks can read the new format — nothing you have installed is sent a
+  message it cannot open. Messages from before the switch stay as they were.
+  This is not per-message forward secrecy; the security model says exactly
+  what it is.
+- **A message that was never encrypted, in a conversation that is, is now
+  labelled as such.** Every plaintext row already carried a "Not encrypted"
+  tag. One that arrives *after* the conversation was carrying sealed messages
+  — which no app of ours would write — is now badged "Not encrypted —
+  unexpected" in red: the server, or someone with its database, put it there.
 - **Your sign-in verifier is now derived with Argon2id.** The server never sees
   your password; what it stores is an SRP verifier, and until now that verifier
   was derived with two plain SHA-256 calls — so someone holding a copy of the
@@ -23,7 +44,16 @@ one-line summary; this file is the full story. Versions follow
 - Older clients keep working: a client from before this release still signs in
   and can still register or reset a password, and the server records which
   derivation such a client used rather than assuming the new one — assuming it
-  would have locked those accounts out of every current client.
+  would have locked those accounts out of every current client. **One
+  consequence:** once you have signed in from a current app, an app from before
+  this release can no longer make a *fresh* sign-in to that account until it
+  updates; already-signed-in ones are unaffected. Desktop updates itself and the
+  mobile app updates over the air.
+- **The Windows build can now sign its binaries.** Nothing changes until a
+  certificate exists: with none configured the build is unsigned exactly as
+  before. When one is (an environment variable; see `docs/CODE_SIGNING.md`),
+  the app, the installer and the helper binaries are signed in the one order
+  that keeps auto-update working.
 
 ### Added
 - **Linux hosting transport (groundwork; the Linux desktop app is still

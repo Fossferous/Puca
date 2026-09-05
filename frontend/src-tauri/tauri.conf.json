@@ -46,6 +46,8 @@
         "type": "embedBootstrapper",
         "silent": true
       },
+      "//signCommand": "Authenticode, in the one place it can go: Tauri runs this on the app binary and the installer BEFORE producing the updater's minisign .sig, so a signed installer still auto-updates. scripts/sign-windows.mjs signs only when a certificate is configured in the environment and exits 0 otherwise (unsigned build, as today). Sidecars are signed where build-agent.mjs stages them.",
+      "signCommand": "node scripts/sign-windows.mjs \"%1\"",
       "nsis": {
         "installerHooks": "installer-hooks.nsh"
       }

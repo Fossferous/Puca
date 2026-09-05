@@ -18,10 +18,32 @@ your device; the server stores ciphertext and forwards it. It necessarily sees
 the traffic.
 
 Two things are deliberately not hidden, and are documented rather than glossed
-over: there is no forward secrecy for message history, and identity keys are
-trust-on-first-use, so a server that is malicious *the first time* you meet
-someone can substitute a key. [`docs/SECURITY_MODEL.md`](SECURITY_MODEL.md) is
-the honest version, written for a reader who does not trust the project.
+over. Identity keys are trust-on-first-use, so a server that is malicious *the
+first time* you meet someone can substitute a key. And forward secrecy is
+partial: since 0.9.3, direct messages are sealed under keys your password cannot
+unlock — a copy of the database plus a cracked password reads none of them —
+but messages from before that, and anything a stolen device was sent during its
+session, are not covered, and there is no per-message ratchet.
+[`docs/SECURITY_MODEL.md`](SECURITY_MODEL.md) is the honest version, written for
+a reader who does not trust the project.
+
+## Why does it ask for my recovery code on a new device?
+
+Because your password deliberately cannot unlock your message history any more.
+When you sign in on a new device with just the password, new direct messages
+arrive normally; older ones show as locked until you enter the 12-word recovery
+code on that device — once, and it stays there. Entering it is what proves you
+are you and not someone who cracked the password against a copy of the server.
+If you never saved your code, generate a new one in **Settings → My Account** on
+a device that already has your history unlocked (the app refuses to let a device
+that does not hold the history key retire the old code, because that would lock
+your history for good).
+
+Accounts created before 0.9.3 do not have this on until their owner generates a
+new recovery code from a current client; a conversation moves to the new format
+only when both people have done that and every device either of you has used in
+the last two weeks can read it. Nothing you already have installed is ever sent
+a message it cannot open.
 
 ## What does it cost to run?
 
@@ -133,6 +155,16 @@ Because the installers are **not code-signed**. There is no Authenticode
 certificate, so SmartScreen shows "Windows protected your PC" on first run and
 you have to choose **More info → Run anyway**. A certificate costs money
 annually and ties a legal identity to the binary; there isn't one yet.
+
+## After I updated, my old device can't sign in
+
+Since 0.9.3 the first sign-in from a current app replaces your account's password
+verifier with a much stronger one (Argon2id). Devices that are already signed in
+keep working. A device still running an app from before 0.9.3 cannot make a
+*fresh* sign-in to that account until it updates — it computes the old verifier
+and the server, correctly, will not accept it. Desktop updates itself and the
+Android app updates its bundle over the air, so this only affects an install that
+has done neither.
 
 ## My antivirus called it a trojan. Is it?
 

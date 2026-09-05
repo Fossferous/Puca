@@ -23,6 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, copyFileSync, existsSync, statSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { signFile } from './sign-windows.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -263,6 +264,10 @@ if (process.platform === 'win32') {
     // is the whole point of a guard like this.
     assertStamped(stagedSvc, 'puca-service');
     console.log(`[build-agent] staged puca-service (${svcSize} bytes)`);
+    // Tauri's signCommand covers the app binary and the installer, not the
+    // sidecars it bundles: sign them here, before bundling, or they ship
+    // unsigned inside a signed installer.
+    signFile(stagedSvc);
 }
 
 // A zero-byte or absurdly small binary means a broken build that would ship as
@@ -286,5 +291,6 @@ assertStamped(staged, 'puca-agent');
 // carry it.
 if (process.platform === 'win32') {
     assertCarriesFrozenLabel(staged, 'puca-agent');
+    signFile(staged);
 }
 console.log(`[build-agent] staged ${staged} (${bytes} bytes)`);
