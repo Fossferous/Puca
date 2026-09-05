@@ -230,14 +230,26 @@ pub async fn join_via_invite(
         return (StatusCode::OK, "Already a member").into_response();
     }
 
-    // Check if user is banned — don't consume a use.
+    // Check if user is banned — don't consume a use. NOT `.unwrap_or(None)`:
+    // this is the only ban gate on the path, and folding a query error into
+    // "not banned" would re-admit a banned user on any transient failure.
     let is_banned: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM bans WHERE server_id = $1 AND user_id = $2")
+        match sqlx::query_as("SELECT 1 FROM bans WHERE server_id = $1 AND user_id = $2")
             .bind(&server_id)
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("join_via_invite: ban lookup failed for server {}: {:?}", server_id, e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not verify ban status",
+                )
+                    .into_response();
+            }
+        };
 
     if is_banned.is_some() {
         return (StatusCode::FORBIDDEN, "You are banned from this server").into_response();

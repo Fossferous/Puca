@@ -229,7 +229,9 @@ async fn check_list_owner(
     match owner {
         None => Err((StatusCode::NOT_FOUND, "List not found")),
         Some((owner_id,)) if owner_id == claims.sub => Ok(()),
-        Some(_) => Err((StatusCode::FORBIDDEN, "Access denied")),
+        // Same answer as a missing list: a 403 here told any account which
+        // sequential list ids belong to someone (see check_channel_access).
+        Some(_) => Err((StatusCode::NOT_FOUND, "List not found")),
     }
 }
 
@@ -326,11 +328,10 @@ async fn validate_parent(
     match parent {
         None => return Err((StatusCode::BAD_REQUEST, "Parent task not found")),
         Some((p_channel, p_list)) => {
+            // Same message as a missing parent: a distinct one confirmed that a
+            // guessed task id exists in some checklist the caller cannot see.
             if p_channel != channel_id || p_list != list_id {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Parent task is in a different checklist",
-                ));
+                return Err((StatusCode::BAD_REQUEST, "Parent task not found"));
             }
         }
     }
@@ -944,8 +945,9 @@ pub async fn reorder_task(
             match np {
                 Ok(Some((pc, pl))) if pc == channel_id && pl == list_id => {}
                 Ok(Some(_)) => {
+                    // Same message as a missing parent (see validate_parent).
                     let _ = tx.rollback().await;
-                    return (StatusCode::BAD_REQUEST, "Parent task is in a different checklist").into_response();
+                    return (StatusCode::BAD_REQUEST, "Parent task not found").into_response();
                 }
                 Ok(None) => {
                     let _ = tx.rollback().await;

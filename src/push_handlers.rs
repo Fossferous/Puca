@@ -266,15 +266,19 @@ pub async fn get_notification_preferences(
 ) -> Result<Json<NotificationPreferencesResponse>, (StatusCode, String)> {
     let user_id = claims.sub as i32;
 
+    // The booleans are nullable in the schema (migration 005, DEFAULT TRUE).
+    // PATCH never writes a NULL, but decoding one into `bool` would 500 this
+    // GET; COALESCE reads it as the same "on" the wake gate (wake/sender.rs)
+    // reads, so the two never disagree about what a row means.
     let prefs: Option<(bool, bool, bool, bool, bool, Option<String>, Option<String>)> =
         sqlx::query_as(
             r#"
-        SELECT 
-            push_enabled,
-            push_messages,
-            push_mentions,
-            push_dms,
-            push_friend_requests,
+        SELECT
+            COALESCE(push_enabled, TRUE),
+            COALESCE(push_messages, TRUE),
+            COALESCE(push_mentions, TRUE),
+            COALESCE(push_dms, TRUE),
+            COALESCE(push_friend_requests, TRUE),
             TO_CHAR(quiet_hours_start, 'HH24:MI') as quiet_start,
             TO_CHAR(quiet_hours_end, 'HH24:MI') as quiet_end
         FROM notification_preferences 

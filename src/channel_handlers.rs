@@ -756,9 +756,12 @@ pub async fn get_channel_feed(
     let mut feed_children = Vec::new();
 
     for (child_id, child_name) in children {
+        // A feed entry IS message history, so the same two bits GET /messages
+        // needs: a child the caller may see but may not read the history of is
+        // left out rather than shown with bodies the message list refuses.
         let visible = child_perms
             .get(&(child_id as i64))
-            .map(|p| p.has(Permissions::VIEW_CHANNEL))
+            .map(|p| p.has(Permissions::VIEW_CHANNEL) && p.has(Permissions::READ_MESSAGE_HISTORY))
             .unwrap_or(false);
         if !visible {
             continue;

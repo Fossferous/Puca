@@ -462,6 +462,30 @@ pub async fn delete_role(
         )
             .into_response();
     }
+    // A role the actor HOLDS is off limits below owner/administrator, for the
+    // same reason assign_role and remove_role refuse self-targeting: deleting
+    // it cascades its channel overwrites away (migration 033), so a MANAGE_ROLES
+    // holder could drop their own deny and open a channel hidden from them.
+    if !authority.is_privileged() {
+        let holds: Option<(i32,)> = match sqlx::query_as(
+            "SELECT 1 FROM member_roles WHERE server_id = $1 AND role_id = $2 AND user_id = $3",
+        )
+        .bind(&server_id)
+        .bind(role_id)
+        .bind(claims.sub as i32)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("delete_role: membership lookup failed for role {}: {:?}", role_id, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify role membership").into_response();
+            }
+        };
+        if holds.is_some() {
+            return (StatusCode::FORBIDDEN, "Cannot change your own roles").into_response();
+        }
+    }
 
     let _ = sqlx::query("DELETE FROM server_roles WHERE id = $1 AND server_id = $2")
         .bind(role_id)
@@ -516,6 +540,15 @@ pub async fn assign_role(
     // bits they don't themselves hold (an ADMINISTRATOR role below their position
     // would otherwise be a clean self-escalation).
     let authority = get_role_authority(&state.pool, &server_id, claims.sub).await;
+    // Self-targeting is refused below owner/administrator. The two guards that
+    // follow reason about SERVER bits, but VIEW is decided by per-channel
+    // overwrites, which a role with zero server bits can carry. A MANAGE_ROLES
+    // holder who could hand THEMSELVES such a role would open a channel the
+    // owner hid from them; the same applies to stripping their own deny role
+    // (remove_role). Assigning to other members keeps the usual semantics.
+    if user_id == claims.sub && !authority.is_privileged() {
+        return (StatusCode::FORBIDDEN, "Cannot change your own roles").into_response();
+    }
     if !authority.is_privileged() {
         if target_position >= authority.highest_position {
             return (
@@ -582,6 +615,11 @@ pub async fn remove_role(
         None => return (StatusCode::NOT_FOUND, "Role not found on this server").into_response(),
     };
     let authority = get_role_authority(&state.pool, &server_id, claims.sub).await;
+    // See assign_role: removing your OWN role can drop a deny overwrite and
+    // restore VIEW on a channel hidden from you. Owner/administrator only.
+    if user_id == claims.sub && !authority.is_privileged() {
+        return (StatusCode::FORBIDDEN, "Cannot change your own roles").into_response();
+    }
     if !authority.is_privileged() && target_position >= authority.highest_position {
         return (
             StatusCode::FORBIDDEN,

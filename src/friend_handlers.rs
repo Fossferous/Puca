@@ -142,14 +142,21 @@ pub async fn send_friend_request(
     // someone they blocked). Deliberately doesn't reveal which direction.
     // Widths matched to this SQL text's other users (dm_handlers, ws — both
     // i32; the columns are INT4). See the 22P03 note in device_token.rs.
-    let blocked: Option<(i32,)> = sqlx::query_as(
+    // Fail CLOSED on a query error — a block is a deny list.
+    let blocked: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM blocked_users WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)"
     )
     .bind(sender_id as i32)
     .bind(receiver_id as i32)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("friend request: block lookup failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify block status").into_response();
+        }
+    };
     if blocked.is_some() {
         return (
             StatusCode::FORBIDDEN,
@@ -310,14 +317,21 @@ pub async fn accept_request(
     // same bidirectional rule as send_friend_request, enforced at accept time.
     // Widths matched to this SQL text's other users (dm_handlers, ws — both
     // i32; the columns are INT4). See the 22P03 note in device_token.rs.
-    let blocked: Option<(i32,)> = sqlx::query_as(
+    // Fail CLOSED on a query error — a block is a deny list.
+    let blocked: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM blocked_users WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)"
     )
     .bind(sender_id as i32)
     .bind(receiver_id as i32)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("friend request: block lookup failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify block status").into_response();
+        }
+    };
     if blocked.is_some() {
         return (
             StatusCode::FORBIDDEN,

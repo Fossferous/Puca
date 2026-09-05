@@ -760,6 +760,35 @@ pub async fn move_member_voice(
             .into_response();
     }
 
+    // The target must be a member of THIS server. Every check that follows
+    // passes for a server owner against ANY user id on the instance
+    // (ADMINISTRATOR satisfies MOVE_MEMBERS, can_moderate short-circuits for an
+    // owner actor), and the voice-room lookup below is global — so a self-owned
+    // server was an "is user X in a call anywhere?" oracle for any account.
+    // Same status and body as "not in a voice channel" so the two cases cannot
+    // be told apart.
+    let target_is_member = match sqlx::query_as::<_, (i32,)>(
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2",
+    )
+    .bind(&server_id)
+    .bind(user_id as i32)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(row) => row.is_some(),
+        Err(e) => {
+            tracing::error!("voice move: membership lookup failed for server {}: {:?}", server_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not verify membership",
+            )
+                .into_response();
+        }
+    };
+    if !target_is_member {
+        return (StatusCode::CONFLICT, "That member is not in a voice channel").into_response();
+    }
+
     // Rank hierarchy, exactly as kick/ban: never act on the owner, an
     // administrator, or an equal-ranked moderator.
     if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
@@ -809,11 +838,11 @@ pub async fn move_member_voice(
         return (StatusCode::CONFLICT, "That member is not in a voice channel").into_response();
     };
     if source_server != server_id {
-        return (
-            StatusCode::FORBIDDEN,
-            "That member is in a voice channel on another server",
-        )
-            .into_response();
+        // Deliberately the SAME answer as "not in a voice channel": a member of
+        // this server being in a call on another server is that other server's
+        // presence, and a distinct status here reported it to this one's
+        // moderators.
+        return (StatusCode::CONFLICT, "That member is not in a voice channel").into_response();
     }
 
     let Some(to_channel_id) = payload.channel_id else {
@@ -1186,6 +1215,62 @@ pub async fn create_report(
         .is_some_and(|m| m.len() > 128)
     {
         return (StatusCode::BAD_REQUEST, "Invalid reported_message_id").into_response();
+    }
+
+    // Scope the referenced ids to THIS server. Both used to be stored verbatim,
+    // so a reporter could hand the mod queue a message id from a channel they
+    // cannot see (or a DM), and a user id with no connection to the server —
+    // the queue then resolved that username from the global users table.
+    if let Some(mid) = payload.reported_message_id.as_deref() {
+        let in_server: Option<(i32,)> = match sqlx::query_as(
+            "SELECT 1 FROM messages m JOIN channels c ON c.id = m.channel_id \
+             WHERE m.id = $1 AND c.server_id = $2",
+        )
+        .bind(mid)
+        .bind(&server_id)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("create_report: message scope lookup failed: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create report").into_response();
+            }
+        };
+        if in_server.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "reported_message_id is not a message in this server",
+            )
+                .into_response();
+        }
+    }
+    if let Some(reported) = payload.reported_user_id {
+        // A member of this server, or the author of the reported message (they
+        // may have left since writing it).
+        let related: (bool,) = match sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2) \
+                 OR EXISTS(SELECT 1 FROM messages WHERE id = $3 AND user_id = $2)",
+        )
+        .bind(&server_id)
+        .bind(reported as i32)
+        .bind(&payload.reported_message_id)
+        .fetch_one(&state.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("create_report: user scope lookup failed: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create report").into_response();
+            }
+        };
+        if !related.0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                "reported_user_id is not a member of this server",
+            )
+                .into_response();
+        }
     }
 
     // Rate-limit report creation per reporter per server: reports are unbounded

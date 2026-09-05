@@ -99,6 +99,26 @@ fn plain(status: StatusCode, msg: &'static str) -> Response {
     (status, msg).into_response()
 }
 
+/// The presence predicate every other roster uses (list_server_members): a
+/// VISIBLE session — the phone's background delivery socket does not count —
+/// AND the user has not hidden their presence. `state.sessions.contains_key`
+/// alone reported a hidden user, or one whose phone was merely reachable, as
+/// online to the clipper.
+fn approver_online(state: &AppState, uid: UserId, hidden: &HashSet<UserId>) -> bool {
+    state.is_user_visibly_online(uid) && !hidden.contains(&uid)
+}
+
+/// Entitlement is re-checked against the CURRENT permission set on every clip
+/// read and vote. The approver list is a snapshot taken at proposal time, and a
+/// user kicked, banned or VIEW-denied since must not keep reading the proposal
+/// (channel names, proposer, counts) or casting a vote on it. Fails closed.
+async fn still_views_voice_channel(state: &AppState, voice_channel_id: i64, user: UserId) -> bool {
+    matches!(
+        get_user_channel_permissions(&state.pool, voice_channel_id, user).await,
+        ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
+    )
+}
+
 // ---- fan-out ------------------------------------------------------------------
 
 /// The doorbell. Live sockets get ClipProposed; an offline approver gets a
@@ -232,7 +252,9 @@ fn vote_str(v: ClipVote) -> &'static str {
     }
 }
 
-fn view_for(state: &AppState, p: &ClipProposal, viewer: UserId) -> ClipView {
+/// `hidden` is the set of approver ids with show_online_status off (see
+/// approver_online); callers resolve it once per proposal with ws::hidden_members.
+fn view_for(state: &AppState, p: &ClipProposal, viewer: UserId, hidden: &HashSet<UserId>) -> ClipView {
     let now = Instant::now();
     let now_ms = now_unix_ms();
     let is_proposer = viewer == p.proposer;
@@ -255,7 +277,7 @@ fn view_for(state: &AppState, p: &ClipProposal, viewer: UserId) -> ClipView {
         resolved: p.approved_at.is_some(),
         approved: p.approved_at.is_some(),
         approvers: if is_proposer {
-            Some(p.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: state.sessions.contains_key(&v.user_id), in_window: v.in_window }).collect())
+            Some(p.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: approver_online(state, v.user_id, hidden), in_window: v.in_window }).collect())
         } else {
             None
         },
@@ -465,10 +487,12 @@ pub async fn propose_clip(
         expires: now + clip_proposal_ttl() + if solo { CLIP_UPLOAD_GRACE } else { Duration::ZERO },
         approved_at: if solo { Some(now) } else { None },
     };
+    let approver_ids: Vec<UserId> = proposal.votes.iter().map(|v| v.user_id).collect();
+    let hidden = crate::ws::hidden_members(&state, &approver_ids).await;
     let resp = ProposeClipResponse {
         clip_id: clip_id.clone(),
         expires_in_ms: proposal.expires.saturating_duration_since(now).as_millis() as i64,
-        approvers: proposal.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: state.sessions.contains_key(&v.user_id), in_window: v.in_window }).collect(),
+        approvers: proposal.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: approver_online(&state, v.user_id, &hidden), in_window: v.in_window }).collect(),
         solo, resolved: solo, approved: solo,
     };
     notify_proposed(&state, &proposal);
@@ -484,6 +508,17 @@ pub async fn vote_clip(
     Json(req): Json<VoteRequest>,
 ) -> Response {
     let user = claims.sub;
+    // Live entitlement first, OUTSIDE the entry lock (the resolver awaits, and a
+    // DashMap guard held across an await risks a shard deadlock). The snapshot
+    // check under the lock below still runs; this one catches an approver who
+    // has been kicked, banned or VIEW-denied since the proposal was made.
+    let voice_cid = match state.clip_proposals.get(&clip_id) {
+        Some(p) if p.is_voter(user) => p.voice_channel_id,
+        _ => return plain(StatusCode::NOT_FOUND, "No such clip request"),
+    };
+    if !still_views_voice_channel(&state, voice_cid, user).await {
+        return plain(StatusCode::NOT_FOUND, "No such clip request");
+    }
     // Mutate under the entry lock; collect what to broadcast, then release.
     enum After { Vote(ClipProposal), Approved(ClipProposal), Declined(ClipProposal) }
     let (status, body, after) = {
@@ -543,9 +578,19 @@ pub async fn cancel_clip(State(state): State<Arc<AppState>>, Extension(claims): 
 
 /// GET /clips/:clip_id — proposer or listed approver; everyone else 404.
 pub async fn get_clip(State(state): State<Arc<AppState>>, Extension(claims): Extension<Claims>, Path(clip_id): Path<String>) -> Response {
-    let Some(p) = live_proposal(&state, &clip_id) else { return plain(StatusCode::NOT_FOUND, "No such clip request"); };
-    if p.proposer != claims.sub && !p.is_voter(claims.sub) { return plain(StatusCode::NOT_FOUND, "No such clip request"); }
-    let view = view_for(&state, &p, claims.sub);
+    // Clone out of the map before awaiting anything (DashMap guard + await =
+    // shard deadlock risk); the proposal is small.
+    let p: ClipProposal = {
+        let Some(r) = live_proposal(&state, &clip_id) else { return plain(StatusCode::NOT_FOUND, "No such clip request"); };
+        if r.proposer != claims.sub && !r.is_voter(claims.sub) { return plain(StatusCode::NOT_FOUND, "No such clip request"); }
+        r.clone()
+    };
+    if !still_views_voice_channel(&state, p.voice_channel_id, claims.sub).await {
+        return plain(StatusCode::NOT_FOUND, "No such clip request");
+    }
+    let approver_ids: Vec<UserId> = p.votes.iter().map(|v| v.user_id).collect();
+    let hidden = crate::ws::hidden_members(&state, &approver_ids).await;
+    let view = view_for(&state, &p, claims.sub, &hidden);
     Json(view).into_response()
 }
 
@@ -559,10 +604,21 @@ pub struct PendingResponse {
 /// cap, so a doorbell can legitimately be lost.
 pub async fn list_pending_clips(State(state): State<Arc<AppState>>, Extension(claims): Extension<Claims>) -> Response {
     let now = Instant::now();
-    let proposals: Vec<ClipView> = state.clip_proposals.iter()
+    // Snapshot first (no awaits while iterating the map), then drop every
+    // proposal whose voice channel the caller can no longer VIEW.
+    let candidates: Vec<ClipProposal> = state.clip_proposals.iter()
         .filter(|p| now < p.expires && (p.proposer == claims.sub || p.is_voter(claims.sub)))
-        .map(|p| view_for(&state, &p, claims.sub))
+        .map(|p| p.clone())
         .collect();
+    let mut proposals: Vec<ClipView> = Vec::with_capacity(candidates.len());
+    for p in candidates {
+        if !still_views_voice_channel(&state, p.voice_channel_id, claims.sub).await {
+            continue;
+        }
+        let approver_ids: Vec<UserId> = p.votes.iter().map(|v| v.user_id).collect();
+        let hidden = crate::ws::hidden_members(&state, &approver_ids).await;
+        proposals.push(view_for(&state, &p, claims.sub, &hidden));
+    }
     Json(PendingResponse { proposals }).into_response()
 }
 

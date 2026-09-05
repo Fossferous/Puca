@@ -243,7 +243,36 @@ async fn handle_socket(
         // that found nobody home. Delivery sessions ONLY — replaying a
         // DirectMessage into a WebView would double-render an open chat, and
         // visible clients repaint from REST state on connect anyway.
+        //
+        // Re-authorized against the CURRENT permission set: a frame was parked
+        // while the user could VIEW its channel, and a kick or a deny may have
+        // landed since. Handing it over anyway told a removed member which
+        // channel got a message, when, and from whom. DirectMessage frames
+        // need no check — they were addressed to this user as a participant.
+        let mut views_cache: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
         for msg in state.drain_undelivered(user_id) {
+            if let ServerMessage::MessageNotification { channel_id, .. } = &msg {
+                let still_views = match views_cache.get(channel_id) {
+                    Some(&v) => v,
+                    None => {
+                        let v = matches!(
+                            get_user_channel_permissions(&state.pool, *channel_id, user_id).await,
+                            ChannelPermAccess::Allowed { perms, .. }
+                                if perms.has(Permissions::VIEW_CHANNEL)
+                        );
+                        views_cache.insert(*channel_id, v);
+                        v
+                    }
+                };
+                if !still_views {
+                    tracing::info!(
+                        "dropping parked notification for user {} on channel {}: no longer entitled",
+                        user_id,
+                        channel_id
+                    );
+                    continue;
+                }
+            }
             state.send_to_conn(user_id, conn_id, msg);
         }
     } else {
@@ -765,7 +794,7 @@ fn hidden_on_error(ids: &[UserId]) -> std::collections::HashSet<UserId> {
 /// self-healing, and is strictly preferable to leaking a user who asked to
 /// appear offline. `user_shows_online` above still fails OPEN — deliberately,
 /// and it says so: it gates a connect, not a roster.
-async fn hidden_members(
+pub(crate) async fn hidden_members(
     state: &Arc<AppState>,
     ids: &[UserId],
 ) -> std::collections::HashSet<UserId> {
@@ -1870,9 +1899,13 @@ async fn handle_message(
             // committed before eviction runs, so re-checking after the insert
             // is guaranteed to see any deny this join raced against.
             if let Some(cid) = parse_channel_room(&room_id).or_else(|| parse_voice_room(&room_id)) {
+                // Same bits as the gate above: a voice room needs CONNECT too.
+                let recheck_connect = parse_voice_room(&room_id).is_some();
                 let still_allowed = matches!(
                     get_user_channel_permissions(&state.pool, cid, user_id).await,
-                    ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
+                    ChannelPermAccess::Allowed { perms, .. }
+                        if perms.has(Permissions::VIEW_CHANNEL)
+                            && (!recheck_connect || perms.has(Permissions::CONNECT))
                 );
                 if !still_allowed {
                     if let Some(mut room) = state.rooms.get_mut(&room_id) {
@@ -2099,7 +2132,9 @@ async fn handle_message(
                 // still inject a live, visible ChatMessage over the socket —
                 // making the timeout advisory on this path. Scoped to the
                 // server that owns this channel via the join.
-                let timed_out: Option<(i32,)> = sqlx::query_as(
+                // Fail CLOSED on a query error: a timeout is a deny list, and
+                // `unwrap_or(None)` made any transient failure lift it.
+                let timed_out: Option<(i32,)> = match sqlx::query_as(
                     "SELECT 1 FROM member_timeouts mt \
                      JOIN channels c ON c.server_id = mt.server_id \
                      WHERE c.id = $1 AND mt.user_id = $2 AND mt.expires_at > NOW() LIMIT 1",
@@ -2108,7 +2143,13 @@ async fn handle_message(
                 .bind(user_id as i32)
                 .fetch_optional(&state.pool)
                 .await
-                .unwrap_or(None);
+                {
+                    Ok(row) => row,
+                    Err(e) => {
+                        tracing::error!("ChatMessage: timeout lookup failed for user {}: {:?}", user_id, e);
+                        return Err("Could not verify timeout status".to_string());
+                    }
+                };
                 if timed_out.is_some() {
                     return Err("You are timed out in this server".to_string());
                 }
@@ -3489,7 +3530,8 @@ async fn handle_message(
             // the frontend sends DMs over this WS path — so without the same
             // check here, blocking a user does not actually stop their DMs.
             // blocked_users columns are INT4, so bind as i32.
-            let blocked: Option<(i32,)> = sqlx::query_as(
+            // Fail CLOSED on a query error — a block is a deny list.
+            let blocked: Option<(i32,)> = match sqlx::query_as(
                 "SELECT 1 FROM blocked_users \
                  WHERE (blocker_id = $1 AND blocked_id = $2) \
                     OR (blocker_id = $2 AND blocked_id = $1)",
@@ -3498,7 +3540,13 @@ async fn handle_message(
             .bind(to_user_id as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::error!("DirectMessage: block lookup failed for user {}: {:?}", user_id, e);
+                    return Err("Could not verify block status".to_string());
+                }
+            };
             if blocked.is_some() {
                 return Err("You cannot message this user".to_string());
             }
@@ -3506,7 +3554,7 @@ async fn handle_message(
             // Same parity for the friends-only DM privacy flag: the Settings
             // toggle is enforced here because THIS is the path DMs travel.
             if !crate::dm_handlers::recipient_accepts_dms(&state, user_id, to_user_id).await {
-                return Err("This user only accepts direct messages from friends".to_string());
+                return Err("This user only accepts direct messages from friends and people who share a server with them".to_string());
             }
 
             // Get or create conversation (ensure consistent ordering)
@@ -3570,7 +3618,11 @@ async fn handle_message(
             };
             if !state.send_to_user(to_user_id, dm.clone()) && to_user_id != user_id {
                 state.enqueue_undelivered(to_user_id, dm);
-                crate::wake::sender::wake_user(&state, to_user_id);
+                crate::wake::sender::wake_user_kind(
+                    &state,
+                    to_user_id,
+                    crate::wake::sender::WakeKind::DirectMessage,
+                );
             }
 
             // Also echo back to sender for confirmation
@@ -3656,6 +3708,16 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
         );
     }
 
+    // 2) The eviction sweep itself, with a scheduled retry if its scope query
+    // fails (see evict_sweep).
+    evict_sweep(state, server_id, 3).await;
+}
+
+/// The eviction half of [`broadcast_perms_changed_and_evict`]: remove from
+/// this server's live rooms (mesh `channel_<id>` / `voice_<id>` and SFU) every
+/// member whose current permissions no longer satisfy the JOIN gate. Also the
+/// body of the delayed retry a failed scope query schedules for itself.
+async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
     // 2) Snapshot the candidate rooms first — the resolver awaits, and holding
     // DashMap guards across await points risks shard deadlocks.
     let snapshot: Vec<(String, i64, Vec<UserId>)> = state
@@ -3671,8 +3733,10 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
     }
 
     // Restrict to rooms whose channel belongs to THIS server (one query).
+    // `None` = the query failed and the scope is UNKNOWN; see sweep_keeps for
+    // what the sweep then does with each member, and the retry below.
     let candidate_ids: Vec<i64> = snapshot.iter().map(|(_, cid, _)| *cid).collect();
-    let in_server: std::collections::HashSet<i64> = match sqlx::query_as::<_, (i32,)>(
+    let scope: Option<std::collections::HashSet<i64>> = match sqlx::query_as::<_, (i32,)>(
         "SELECT id FROM channels WHERE server_id = $1 AND id::bigint = ANY($2)",
     )
     .bind(server_id)
@@ -3680,35 +3744,64 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
     .fetch_all(&state.pool)
     .await
     {
-        Ok(rows) => rows.into_iter().map(|(id,)| id as i64).collect(),
+        Ok(rows) => Some(rows.into_iter().map(|(id,)| id as i64).collect()),
         Err(e) => {
+            // This is the only revocation path for live room subscriptions and
+            // the ChannelPermsChanged broadcast has already told the moderator
+            // it worked, so giving up here left a kicked or denied member
+            // subscribed to live frames for the socket's lifetime. Fail CLOSED
+            // — but bounded: with the scope unknown, every room on the instance
+            // is a candidate, and evicting them all on one transient error
+            // would drop every call and silently stall every open channel for
+            // users who never rejoin. So act only on what RESOLVES (a member of
+            // this server who now lacks the bits, or is no longer a member at
+            // all), leave what cannot be resolved to a retry, and leave other
+            // servers' rooms alone.
             tracing::error!(
-                "broadcast_perms_changed_and_evict: channel scope query failed for server {}: {}",
+                "eviction sweep: channel scope query failed for server {}: {} — acting on what resolves, retrying in {} s ({} retries left)",
                 server_id,
-                e
+                e,
+                sweep_backoff_secs(retries_left),
+                retries_left
             );
-            return;
+            if retries_left > 0 {
+                let state = Arc::clone(state);
+                let sid = server_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(sweep_backoff_secs(retries_left))).await;
+                    // Through the type-erased wrapper: the sweep spawns its own
+                    // retry, so its future would otherwise contain itself, and
+                    // the compiler could neither size it nor prove it Send.
+                    evict_sweep_boxed(state, sid, retries_left - 1).await;
+                });
+            }
+            None
         }
     };
+    let scope_known = scope.is_some();
 
-    // Re-run the resolver per (channel, member), cached — a user sitting in both
-    // channel_<id> and voice_<id> resolves once.
-    let mut allowed_cache: std::collections::HashMap<(i64, UserId), bool> =
+    // Re-run the resolver per (channel, member, needs-CONNECT), cached — a user
+    // sitting in both channel_<id> and voice_<id> resolves once per gate shape.
+    let mut allowed_cache: std::collections::HashMap<(i64, UserId, bool), bool> =
         std::collections::HashMap::new();
     for (room_id, cid, room_members) in snapshot {
-        if !in_server.contains(&cid) {
-            continue;
+        if let Some(set) = &scope {
+            if !set.contains(&cid) {
+                continue;
+            }
         }
+        // The sweep must mirror the JoinRoom gate: a voice room requires
+        // CONNECT as well as VIEW. Re-checking VIEW alone meant a CONNECT deny
+        // forbade future joins and left the present occupant in the call with
+        // no time bound.
+        let need_connect = parse_voice_room(&room_id).is_some();
         for member_id in room_members {
-            let allowed = match allowed_cache.get(&(cid, member_id)) {
+            let allowed = match allowed_cache.get(&(cid, member_id, need_connect)) {
                 Some(&ok) => ok,
                 None => {
-                    let ok = matches!(
-                        get_user_channel_permissions(&state.pool, cid, member_id).await,
-                        ChannelPermAccess::Allowed { perms, .. }
-                            if perms.has(Permissions::VIEW_CHANNEL)
-                    );
-                    allowed_cache.insert((cid, member_id), ok);
+                    let access = get_user_channel_permissions(&state.pool, cid, member_id).await;
+                    let ok = sweep_keeps(scope_known, server_id, &access, need_connect);
+                    allowed_cache.insert((cid, member_id, need_connect), ok);
                     ok
                 }
             };
@@ -3814,8 +3907,10 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
             let Some(cid) = crate::sfu::channel_id_from_room(r.key()) else {
                 continue;
             };
-            if !in_server.contains(&cid) {
-                continue;
+            if let Some(set) = &scope {
+                if !set.contains(&cid) {
+                    continue;
+                }
             }
             // Distinct user ids currently in this SFU room (identities are u<id>#<nonce>).
             let mut uids: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -3831,14 +3926,14 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
         out
     };
     for (cid, uid) in sfu_targets {
-        let allowed = match allowed_cache.get(&(cid, uid)) {
+        // An SFU room is always voice: the token gate (sfu.rs get_sfu_token)
+        // requires VIEW and CONNECT, so the sweep does too.
+        let allowed = match allowed_cache.get(&(cid, uid, true)) {
             Some(&ok) => ok,
             None => {
-                let ok = matches!(
-                    get_user_channel_permissions(&state.pool, cid, uid).await,
-                    ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
-                );
-                allowed_cache.insert((cid, uid), ok);
+                let access = get_user_channel_permissions(&state.pool, cid, uid).await;
+                let ok = sweep_keeps(scope_known, server_id, &access, true);
+                allowed_cache.insert((cid, uid, true), ok);
                 ok
             }
         };
@@ -3852,6 +3947,84 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
             cid,
             server_id
         );
+    }
+}
+
+/// [`evict_sweep`] behind a `dyn Future` so the retry it spawns can await it
+/// without the recursive future type (see the spawn in evict_sweep).
+fn evict_sweep_boxed(
+    state: Arc<AppState>,
+    server_id: String,
+    retries_left: u8,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move { evict_sweep(&state, &server_id, retries_left).await })
+}
+
+/// Seconds to wait before re-running a sweep whose scope query failed:
+/// 2 s, then 8 s, then 30 s.
+fn sweep_backoff_secs(retries_left: u8) -> u64 {
+    match retries_left {
+        3 => 2,
+        2 => 8,
+        _ => 30,
+    }
+}
+
+/// The sweep's verdict for one (room, member): `true` keeps them, `false`
+/// evicts. With a KNOWN scope every room reaching here belongs to this
+/// server, so any refusal — including a lookup that could not resolve —
+/// evicts: fail closed. With the scope UNKNOWN (the scope query failed) only
+/// what resolves cleanly is acted on: a member whose channel resolves to
+/// another server is left alone, a member of THIS server who lacks the bits
+/// or is no longer a member is evicted, and one who cannot be resolved at
+/// all is left to the scheduled retry rather than dropped on a guess.
+fn sweep_keeps(scope_known: bool, server_id: &str, access: &ChannelPermAccess, need_connect: bool) -> bool {
+    match access {
+        ChannelPermAccess::Allowed { server_id: sid, perms } => {
+            if !scope_known && sid != server_id {
+                return true;
+            }
+            perms.has(Permissions::VIEW_CHANNEL) && (!need_connect || perms.has(Permissions::CONNECT))
+        }
+        ChannelPermAccess::NotMember => false,
+        ChannelPermAccess::NotFound => !scope_known,
+    }
+}
+
+#[cfg(test)]
+mod sweep_keeps_tests {
+    use super::sweep_keeps;
+    use crate::permissions::{ChannelPermAccess, Permissions};
+
+    fn allowed(sid: &str, perms: Permissions) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed { server_id: sid.into(), perms }
+    }
+
+    #[test]
+    fn known_scope_mirrors_the_join_gate() {
+        let v = Permissions::VIEW_CHANNEL;
+        let vc = Permissions::VIEW_CHANNEL | Permissions::CONNECT;
+        assert!(sweep_keeps(true, "s", &allowed("s", vc), true));
+        assert!(!sweep_keeps(true, "s", &allowed("s", v), true), "a voice room needs CONNECT too");
+        assert!(sweep_keeps(true, "s", &allowed("s", v), false), "a text room needs VIEW only");
+        assert!(!sweep_keeps(true, "s", &allowed("s", Permissions::CONNECT), false));
+    }
+
+    #[test]
+    fn known_scope_fails_closed_on_the_unresolvable() {
+        assert!(!sweep_keeps(true, "s", &ChannelPermAccess::NotFound, false));
+        assert!(!sweep_keeps(true, "s", &ChannelPermAccess::NotMember, false));
+    }
+
+    #[test]
+    fn unknown_scope_acts_only_on_what_resolves() {
+        // Another server's room resolves cleanly: not ours to evict.
+        assert!(sweep_keeps(false, "s", &allowed("other", Permissions::empty()), true));
+        // This server's member who lost the bits, or is no longer a member: evicted.
+        assert!(!sweep_keeps(false, "s", &allowed("s", Permissions::empty()), false));
+        assert!(!sweep_keeps(false, "s", &ChannelPermAccess::NotMember, false));
+        // Unresolvable (a lookup that failed): left to the retry, not dropped on a guess.
+        assert!(sweep_keeps(false, "s", &ChannelPermAccess::NotFound, false));
     }
 }
 

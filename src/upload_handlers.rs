@@ -207,6 +207,24 @@ pub async fn delete_file(
     Path(file_id): Path<String>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    // Uploader first, everything else second. The in-use probe below is
+    // unscoped, so answering it before the ownership check told any account
+    // whether an arbitrary uuid was someone's live avatar, icon, sound or emoji
+    // (409) rather than unknown (404). A file the caller does not own must be
+    // indistinguishable from one that does not exist. An invalid uuid string
+    // errors on the cast -> treated as no row -> 404.
+    let mine: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM uploaded_files WHERE id = $1::uuid AND uploader_id = $2",
+    )
+    .bind(&file_id)
+    .bind(claims.sub as i32)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+    if mine.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     // Refuse while something still points at it. `users.avatar_file_id` and
     // `servers.icon_file_id` are plain TEXT with NO foreign key (001_init.sql,
     // 002_add_display_name.sql), so nothing at the database level stops this
@@ -267,14 +285,19 @@ pub struct UploadedFileResponse {
     pub cap: Option<String>,
 }
 
-/// FILES_ENFORCE_CAP=1 turns on phase 2: a row that carries a capability
-/// hash is served only to a caller who presents the capability. Off by
-/// default — phase 1 stores it, CHECKS one when presented, and does not yet
-/// require it, so clients that predate the feature keep working until every
-/// client in the field sends the capability it holds. NULL rows (older
-/// uploads, avatars, icons, sounds, emoji, clip parts) are never gated.
+/// Phase 2 of per-file capabilities: a row that carries a capability hash is
+/// served only to a caller who presents the capability. ON by default since
+/// every client has sent the capability it holds since 0.8.134 and production
+/// has enforced it since 2026-09-02; the default-off period existed only so
+/// older clients kept working while they updated. `FILES_ENFORCE_CAP=0` turns
+/// it off (phase 1: store, check when presented, never require). NULL rows
+/// (older uploads, avatars, icons, sounds, emoji, clip parts) are never gated
+/// in either phase.
 fn files_enforce_cap() -> bool {
-    std::env::var("FILES_ENFORCE_CAP").map(|v| v == "1").unwrap_or(false)
+    match std::env::var("FILES_ENFORCE_CAP") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => true,
+    }
 }
 
 /// The GET /files decision, kept pure for its tests. `stored` is the SHA-256

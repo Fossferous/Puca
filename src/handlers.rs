@@ -1634,9 +1634,12 @@ pub struct DmKeysResponse {
 
 /// GET /users/:user_id/dm-keys — what a v4 direct message to (or from) this
 /// user must be wrapped to, and whether every client they use can open one.
-/// The user themself, or someone who already shares a DM conversation with
-/// them: the identity key is public to any member, but a list of session
-/// keys says how many devices someone uses, which a stranger has no claim on.
+/// The user themself, or someone with a relationship the caller cannot
+/// manufacture (dm_handlers::users_share_context -- friends, a shared server
+/// while they accept DMs from server members, or they already wrote to you):
+/// the identity key is public to any member, but a list of session keys says
+/// how many devices someone uses, which a stranger has no claim on. A bare
+/// conversation row is not enough, because the caller can create one.
 pub async fn get_user_dm_keys(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
@@ -1660,6 +1663,13 @@ pub async fn get_user_dm_keys(
         let Some((user1, a1, a2)) = shares else {
             return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
         };
+        // The conversation row alone proves nothing: the caller can create one
+        // with anybody (start_conversation). Require a relationship the caller
+        // cannot manufacture, or a session census of any account (device count,
+        // recency, protocol version) was one POST /dms away. Same 404 as above.
+        if !crate::dm_handlers::users_share_context(&state.pool, claims.sub, user_id).await {
+            return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
+        }
         attestation = if user1 == i64::from(target) { a1 } else { a2 };
     }
     let account: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(

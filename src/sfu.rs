@@ -483,6 +483,20 @@ pub(crate) fn publish_sources(perms: Permissions) -> (bool, Vec<&'static str>) {
     (!sources.is_empty(), sources)
 }
 
+/// May this user be in the channel's SFU room right now? The same VIEW+CONNECT
+/// pair `get_sfu_token` gates the mint on, re-applied to a resolved access so
+/// the join-time webhook can ask it again. Fails CLOSED: NotFound (which is
+/// also what a DB error resolves to) and NotMember both mean "not entitled" —
+/// a re-joining member we cannot vouch for is evicted, never waved through.
+pub(crate) fn sfu_entitled(access: &ChannelPermAccess) -> bool {
+    match access {
+        ChannelPermAccess::Allowed { perms, .. } => {
+            perms.has(Permissions::VIEW_CHANNEL) && perms.has(Permissions::CONNECT)
+        }
+        ChannelPermAccess::NotFound | ChannelPermAccess::NotMember => false,
+    }
+}
+
 #[derive(Serialize)]
 struct LiveKitClaims<'a> {
     iss: &'a str,
@@ -886,9 +900,60 @@ pub async fn livekit_webhook(
                 .pointer("/participant/identity")
                 .and_then(|v| v.as_str())
             {
-                let mut u = state.sfu_rooms.entry(room).or_default();
-                u.reservations.remove(identity);
-                u.participants.insert(identity.to_string(), Instant::now());
+                let channel_id = channel_id_from_room(&room);
+                let user_id = user_id_from_identity(identity);
+                {
+                    // Record first, in a scope of its own: the map guard must be
+                    // gone before any await, and the eviction below finds this
+                    // user's identities through this very entry.
+                    let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+                    u.reservations.remove(identity);
+                    u.participants.insert(identity.to_string(), Instant::now());
+                }
+                // Re-authorize the join. A join token is minted against the
+                // perms of that moment and LiveKit checks only its signature,
+                // so a member kicked, banned or VIEW/CONNECT-denied inside the
+                // 20-minute TTL — or holding tokens stockpiled beforehand,
+                // whose identities the perms-change sweep never saw — can
+                // reconnect after every eviction. This webhook is the one
+                // server-side point that observes a (re)join, so the mint-time
+                // gate is re-run here and a no-longer-entitled participant is
+                // removed. Spawned: eviction awaits a RemoveParticipant round
+                // trip, and the webhook response must not wait on LiveKit.
+                match (channel_id, user_id) {
+                    (Some(cid), Some(uid)) => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let access =
+                                get_user_channel_permissions(&state.pool, cid, uid).await;
+                            if sfu_entitled(&access) {
+                                return;
+                            }
+                            let reason = match access {
+                                ChannelPermAccess::NotFound => "channel not found or lookup failed",
+                                ChannelPermAccess::NotMember => "not a member of the server",
+                                ChannelPermAccess::Allowed { .. } => "VIEW_CHANNEL or CONNECT denied",
+                            };
+                            tracing::warn!(
+                                "SFU join re-auth: evicting user {} from sfu channel {} ({})",
+                                uid,
+                                cid,
+                                reason
+                            );
+                            evict_user_from_channel(&state, cid, uid).await;
+                        });
+                    }
+                    _ => {
+                        // Only the API secret can mint a token for a room or
+                        // identity outside our naming scheme, and there is no
+                        // user to evict — but it should never happen, so say so.
+                        tracing::warn!(
+                            "SFU join re-auth: unrecognised room {:?} / identity {:?}, not re-checked",
+                            room,
+                            identity
+                        );
+                    }
+                }
             }
         }
         "participant_left" => {
@@ -1081,6 +1146,38 @@ livekit_packet_bytes{direction=\"outgoing\",transmission=\"initial\"} 4242\n";
         assert_eq!(unmeasured_room_kbps(6, 5, 1), 0);
         // Nobody settled (fresh room): identical to the full worst-case model.
         assert_eq!(unmeasured_room_kbps(0, 5, 0), room_egress_kbps(5, 0));
+    }
+}
+
+#[cfg(test)]
+mod sfu_entitled_tests {
+    use super::sfu_entitled;
+    use crate::permissions::{ChannelPermAccess, Permissions};
+
+    fn allowed(perms: Permissions) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed { server_id: "s".into(), perms }
+    }
+
+    #[test]
+    fn needs_both_view_and_connect() {
+        assert!(sfu_entitled(&allowed(Permissions::VIEW_CHANNEL | Permissions::CONNECT)));
+        assert!(!sfu_entitled(&allowed(Permissions::VIEW_CHANNEL)), "VIEW alone is a text-channel reader, not a voice seat");
+        assert!(!sfu_entitled(&allowed(Permissions::CONNECT)), "CONNECT without VIEW is a hidden channel — the mint gate 404s it");
+        assert!(!sfu_entitled(&allowed(Permissions::SPEAK | Permissions::VIDEO | Permissions::STREAM)), "publish bits do not imply a seat");
+    }
+
+    #[test]
+    fn administrator_bypasses_like_the_mint_gate() {
+        assert!(sfu_entitled(&allowed(Permissions::ADMINISTRATOR)));
+    }
+
+    /// NotFound is also what a failed DB lookup resolves to (permissions.rs
+    /// fails closed), so this is the "resolve error means evict" case.
+    #[test]
+    fn unresolvable_or_outsider_is_not_entitled() {
+        assert!(!sfu_entitled(&ChannelPermAccess::NotFound));
+        assert!(!sfu_entitled(&ChannelPermAccess::NotMember));
+        assert!(!sfu_entitled(&allowed(Permissions::empty())), "a role-fetch DB error resolves to Allowed with empty perms");
     }
 }
 

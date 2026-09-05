@@ -66,7 +66,10 @@ fn default_limit() -> i32 {
 /// never who you may write to. Three ways through:
 ///
 /// 1. They are accepted friends.
-/// 2. The recipient's `allow_dms_from_server_members` is on.
+/// 2. The recipient's `allow_dms_from_server_members` is on AND the two share
+///    a server — the flag says "server members" and since the 2026-09-05
+///    boundary fixes it means exactly that. Before, "on" (the default) let
+///    any account on the instance open a conversation with anyone.
 /// 3. The recipient has already sent a message in this conversation — having
 ///    opened a channel yourself is consent to be answered in it.
 ///
@@ -78,8 +81,7 @@ fn default_limit() -> i32 {
 ///
 /// This is the server-side enforcement for the Settings toggle — like the block
 /// check below, client-side hiding alone would be trivially bypassed. Fails
-/// open on a missing recipient (that case surfaces as its own 404 in the
-/// caller).
+/// CLOSED: a missing or deleted recipient, and a lookup error, both refuse.
 pub(crate) async fn recipient_accepts_dms(
     state: &Arc<AppState>,
     sender: i64,
@@ -93,7 +95,12 @@ pub(crate) async fn recipient_accepts_dms(
     if sender == recipient {
         return true;
     }
-    let row: Option<(bool, bool, bool)> = sqlx::query_as(
+    // The flag says "server members", so relying on it requires a shared
+    // server. Without that term any account on the instance could open a
+    // conversation with anyone whose flag was on (the default) — which also
+    // made the "must already share a conversation" gate on GET /users/:id/dm-keys
+    // self-satisfiable. Friends and a recipient who wrote first stay exempt.
+    let row: Result<Option<(bool, bool, bool, bool)>, sqlx::Error> = sqlx::query_as(
         "SELECT u.allow_dms_from_server_members, \
                 EXISTS(SELECT 1 FROM friends f \
                        WHERE (f.user1_id = $1 AND f.user2_id = $2) \
@@ -102,23 +109,80 @@ pub(crate) async fn recipient_accepts_dms(
                        JOIN dm_conversations c ON c.id = m.conversation_id \
                        WHERE m.sender_id = $2 \
                          AND ((c.user1_id = $1 AND c.user2_id = $2) \
-                           OR (c.user1_id = $2 AND c.user2_id = $1))) \
-         FROM users u WHERE u.id = $2",
+                           OR (c.user1_id = $2 AND c.user2_id = $1))), \
+                EXISTS(SELECT 1 FROM server_members a \
+                       JOIN server_members b ON b.server_id = a.server_id \
+                       WHERE a.user_id = $1 AND b.user_id = $2) \
+         FROM users u WHERE u.id = $2 AND u.deleted_at IS NULL",
     )
     .bind(sender)
     .bind(recipient)
     .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
+    .await;
     match row {
-        Some((allows, are_friends, recipient_wrote_first)) => {
-            allows || are_friends || recipient_wrote_first
+        Ok(Some((allows, are_friends, recipient_wrote_first, share_server))) => {
+            are_friends || recipient_wrote_first || (allows && share_server)
         }
-        None => true,
+        // No live recipient: nothing to accept. (The REST caller has already
+        // answered 404 for this case; the WS path has no other existence check.)
+        Ok(None) => false,
+        // Fail CLOSED — this is a consent gate. `unwrap_or(None)` used to fold
+        // a query error into the permissive arm.
+        Err(e) => {
+            tracing::error!(
+                "recipient_accepts_dms: lookup failed for {} -> {}: {:?}",
+                sender,
+                recipient,
+                e
+            );
+            false
+        }
     }
 }
 
-const DMS_NOT_ACCEPTED: &str = "This user only accepts direct messages from friends";
+/// May `me` learn `target`'s DM key material (GET /users/:id/dm-keys)?
+/// Friends, a shared server (while the target accepts DMs from server
+/// members), or a target who has already written to `me`. A
+/// bare dm_conversations row is NOT evidence of a relationship — the caller can
+/// create one unilaterally — so the read gate must not rest on it. Self is
+/// always allowed. Fails closed.
+pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i64) -> bool {
+    if me == target {
+        return true;
+    }
+    // The SAME rule as recipient_accepts_dms, so the docs can say so: a shared
+    // server counts only while the target's "Allow DMs from server members" is
+    // on; friends and a target who already wrote to `me` always do.
+    match sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM friends f \
+                       WHERE (f.user1_id = $1 AND f.user2_id = $2) \
+                          OR (f.user1_id = $2 AND f.user2_id = $1)) \
+             OR (u.allow_dms_from_server_members \
+                 AND EXISTS(SELECT 1 FROM server_members a \
+                            JOIN server_members b ON b.server_id = a.server_id \
+                            WHERE a.user_id = $1 AND b.user_id = $2)) \
+             OR EXISTS(SELECT 1 FROM dm_messages m \
+                       JOIN dm_conversations c ON c.id = m.conversation_id \
+                       WHERE m.sender_id = $2 \
+                         AND ((c.user1_id = $1 AND c.user2_id = $2) \
+                           OR (c.user1_id = $2 AND c.user2_id = $1))) \
+         FROM users u WHERE u.id = $2 AND u.deleted_at IS NULL",
+    )
+    .bind(me)
+    .bind(target)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some((related,))) => related,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::error!("users_share_context: lookup failed for {} -> {}: {:?}", me, target, e);
+            false
+        }
+    }
+}
+
+const DMS_NOT_ACCEPTED: &str = "This user only accepts direct messages from friends and people who share a server with them";
 
 // --- Handlers ---
 
@@ -227,13 +291,16 @@ pub async fn start_conversation(
     // UNIQUE(user1_id, user2_id) constraint accepts as one row, so there is
     // exactly one self-conversation per user.
 
-    // Verify the other user exists and get their display_name
-    let user_exists: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT username, display_name FROM users WHERE id = $1")
-            .bind(other_user_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
+    // Verify the other user exists (and is not a tombstone — a deleted account's
+    // username was otherwise still resolvable by id here) and get their
+    // display_name.
+    let user_exists: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT username, display_name FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(other_user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
 
     let (other_username, other_display_name) = match user_exists {
         Some((username, display_name)) => (username, display_name),
@@ -275,7 +342,8 @@ pub async fn start_conversation(
     // direction) and the friends-only DM privacy flag. An existing
     // conversation above is still returned — history stays viewable; the
     // send path enforces the same rules per message.
-    let blocked: Option<(i32,)> = sqlx::query_as(
+    // Fail CLOSED on a query error — a block is a deny list.
+    let blocked: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM blocked_users \
          WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)",
     )
@@ -283,7 +351,13 @@ pub async fn start_conversation(
     .bind(other_user_id as i32)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("start_conversation: block lookup failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify block status").into_response();
+        }
+    };
     if blocked.is_some() {
         return (StatusCode::FORBIDDEN, "You cannot message this user").into_response();
     }
@@ -452,7 +526,8 @@ pub async fn send_message(
 
     // Enforce blocks server-side: if either participant has blocked the other,
     // DMs cannot be sent (client-side hiding alone would be trivially bypassed).
-    let blocked: Option<(i32,)> = sqlx::query_as(
+    // Fail CLOSED on a query error — a block is a deny list.
+    let blocked: Option<(i32,)> = match sqlx::query_as(
         r#"
         SELECT 1 FROM blocked_users b
         JOIN dm_conversations c ON c.id = $1
@@ -463,7 +538,13 @@ pub async fn send_message(
     .bind(&conversation_id)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("send_message (DM): block lookup failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify block status").into_response();
+        }
+    };
 
     if blocked.is_some() {
         return (StatusCode::FORBIDDEN, "You cannot message this user").into_response();
@@ -472,7 +553,9 @@ pub async fn send_message(
     // Enforce the recipient's friends-only DM flag per message (not just at
     // conversation creation) so turning it ON takes effect immediately for
     // existing conversations too.
-    let other: Option<(i64,)> = sqlx::query_as(
+    // Fail CLOSED: this lookup feeds the only consent gate on the send path,
+    // and `unwrap_or(None)` skipped the gate entirely on a query error.
+    let other: Option<(i64,)> = match sqlx::query_as(
         "SELECT CASE WHEN user1_id = $2 THEN user2_id ELSE user1_id END \
          FROM dm_conversations WHERE id = $1",
     )
@@ -480,11 +563,20 @@ pub async fn send_message(
     .bind(claims.sub)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
-    if let Some((recipient_id,)) = other {
-        if !recipient_accepts_dms(&state, claims.sub, recipient_id).await {
-            return (StatusCode::FORBIDDEN, DMS_NOT_ACCEPTED).into_response();
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("send_message (DM): recipient lookup failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify recipient settings").into_response();
         }
+    };
+    let Some((recipient_id,)) = other else {
+        // The participant check above found the row; its vanishing since is a
+        // deleted conversation, not a licence to skip consent.
+        return (StatusCode::FORBIDDEN, "Not a participant of this conversation").into_response();
+    };
+    if !recipient_accepts_dms(&state, claims.sub, recipient_id).await {
+        return (StatusCode::FORBIDDEN, DMS_NOT_ACCEPTED).into_response();
     }
 
     let message_id = Uuid::new_v4().to_string();

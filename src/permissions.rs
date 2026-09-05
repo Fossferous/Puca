@@ -1164,3 +1164,44 @@ mod invite_expiry_clamp_tests {
         assert!(when < chrono::Utc::now() + chrono::Duration::days(366));
     }
 }
+
+#[cfg(test)]
+mod migration_061_constants {
+    //! Migration 061 (retire the Discord-layout @everyone mask from 004) is
+    //! plain SQL and cannot name these constants, so the literals it writes
+    //! are pinned here: if DEFAULT_MEMBER ever changes, the migration's
+    //! replacement value must be revisited before this test is updated.
+    use super::Permissions;
+
+    #[test]
+    fn default_member_is_the_value_migration_061_assumes() {
+        assert_eq!(Permissions::DEFAULT_MEMBER.bits(), 226527063);
+    }
+
+    #[test]
+    fn migration_061_replacement_is_default_member_plus_the_046_and_033_grants() {
+        // 35920 = ATTACH_FILES | ADD_REACTIONS | VIDEO | STREAM | USE_VOICE_ACTIVITY,
+        // the bits migration 046 ORed onto every pre-existing @everyone; 033
+        // ORed MANAGE_TASKS onto every role of a then-existing server on purpose.
+        let grant_046 = Permissions::from_bits_truncate(35920);
+        assert_eq!((Permissions::DEFAULT_MEMBER | grant_046 | Permissions::MANAGE_TASKS).bits(), 260083543);
+    }
+
+    #[test]
+    fn migration_061_exclusion_is_manage_server_or_administrator() {
+        assert_eq!((Permissions::MANAGE_SERVER | Permissions::ADMINISTRATOR).bits(), 4718592);
+    }
+
+    #[test]
+    fn the_004_fossil_mask_really_grants_governance_bits() {
+        let fossil = Permissions::from_bits_truncate(104324673);
+        assert!(fossil.contains(Permissions::MANAGE_CHANNELS));
+        assert!(fossil.contains(Permissions::MANAGE_ROLES));
+        assert!(fossil.contains(Permissions::KICK_MEMBERS));
+        assert!(fossil.contains(Permissions::BAN_MEMBERS));
+        // ...while a healthy @everyone holds none of them.
+        assert!(!Permissions::DEFAULT_MEMBER.intersects(
+            Permissions::MANAGE_CHANNELS | Permissions::MANAGE_ROLES | Permissions::KICK_MEMBERS | Permissions::BAN_MEMBERS
+        ));
+    }
+}

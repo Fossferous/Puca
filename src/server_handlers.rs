@@ -457,14 +457,26 @@ pub async fn join_server(
         return (StatusCode::FORBIDDEN, "This server is invite-only").into_response();
     }
 
-    // Check if user is banned
+    // Check if user is banned. NOT `.unwrap_or(None)`: this is the only ban
+    // gate on the path, and folding a query error into "not banned" would
+    // re-admit a banned user on any transient failure. Refuse instead.
     let is_banned: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM bans WHERE server_id = $1 AND user_id = $2")
+        match sqlx::query_as("SELECT 1 FROM bans WHERE server_id = $1 AND user_id = $2")
             .bind(&server_id)
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("join_server: ban lookup failed for server {}: {:?}", server_id, e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not verify ban status",
+                )
+                    .into_response();
+            }
+        };
 
     if is_banned.is_some() {
         return (StatusCode::FORBIDDEN, "You are banned from this server").into_response();
@@ -1162,18 +1174,20 @@ pub async fn mark_channel_read(
     Path(channel_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    // Access control: only members of the channel's server may touch read state.
-    let is_member: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM channels c JOIN server_members sm ON sm.server_id = c.server_id \
-         WHERE c.id = $1 AND sm.user_id = $2",
-    )
-    .bind(channel_id)
-    .bind(claims.sub as i32)
-    .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
-    if is_member.is_none() {
-        return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
+    // Access control: the VIEW gate. This used to check server membership
+    // only, so a member VIEW-denied on a channel got 200 here and 403 for a
+    // nonexistent id — an existence oracle over hidden channels, which are
+    // trivially enumerable because channel ids are sequential. Every refusal is
+    // the SAME 404, including a non-member's: the read routes keep 403 for
+    // non-members so a client can say "not a member", but nothing needs that
+    // distinction on a write of read-state, and 403-vs-404 would confirm to an
+    // outsider which channel ids exist.
+    match crate::permissions::get_user_channel_permissions(&state.pool, channel_id, claims.sub)
+        .await
+    {
+        crate::permissions::ChannelPermAccess::Allowed { perms, .. }
+            if perms.has(crate::permissions::Permissions::VIEW_CHANNEL) => {}
+        _ => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
     }
 
     // Use channel_read_state table which tracks last_read_at timestamp
@@ -1455,10 +1469,11 @@ pub async fn get_voice_users(
         return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
     }
 
-    // Voice rooms are keyed per-channel. Accept the new namespaced id
-    // `voice_<channelId>` AND, for backward-compat while clients roll over, the
-    // legacy bare channel name — restricting to this server's channels so we
-    // don't leak voice presence from every server.
+    // Voice rooms are keyed per-channel as `voice_<channelId>` and ONLY that
+    // (ws.rs join_target mints no other shape). This used to also accept the
+    // channel's bare NAME as a legacy room key, which let any account name a
+    // channel in a server they own `voice_<N>` and read the live roster of
+    // channel N on any server — channel ids are a shared sequential counter.
     // channels.id is SERIAL (INT4) — decode as i32, not i64 (an INT4→i64 decode
     // fails at runtime and unwrap_or_default would silently blank voice presence).
     let channels: Vec<(i32, String)> =
@@ -1500,7 +1515,7 @@ pub async fn get_voice_users(
                 p.has(crate::permissions::Permissions::VIEW_CHANNEL)
             })
         })
-        .flat_map(|(id, name)| [format!("voice_{}", id), name])
+        .map(|(id, _name)| format!("voice_{}", id))
         .collect();
 
     let mut voice_users = Vec::new();

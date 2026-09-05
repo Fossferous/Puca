@@ -192,17 +192,54 @@ pub async fn send_message(
 
     // Timeout enforcement: a timed-out member cannot send until it expires.
     // (Without this check the timeout feature was advisory only.)
-    let timed_out: Option<(i32,)> = sqlx::query_as(
+    // Fail CLOSED on a query error: a timeout is a deny list, and folding an
+    // error into "not timed out" lifted it on any transient failure.
+    let timed_out: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM member_timeouts WHERE server_id = $1 AND user_id = $2 AND expires_at > NOW() LIMIT 1",
     )
     .bind(&server_id)
     .bind(claims.sub as i32)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("send_message: timeout lookup failed for user {}: {:?}", claims.sub, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not verify timeout status").into_response();
+        }
+    };
 
     if timed_out.is_some() {
         return (StatusCode::FORBIDDEN, "You are timed out in this server").into_response();
+    }
+
+    // A reply must point at a message in THIS channel. The id used to be stored
+    // verbatim, so a member could plant a pointer into a channel they cannot
+    // see; nothing dereferenced it server-side, but a dangling cross-channel
+    // reference is not a shape any client produces. messages.channel_id is
+    // INT4 — bind i32.
+    if let Some(rid) = payload.reply_to_id.as_deref() {
+        let same_channel: Option<(i32,)> = match sqlx::query_as(
+            "SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2",
+        )
+        .bind(rid)
+        .bind(channel_id as i32)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("send_message: reply_to lookup failed: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to send message").into_response();
+            }
+        };
+        if same_channel.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "reply_to_id is not a message in this channel",
+            )
+                .into_response();
+        }
     }
 
     // Slowmode: enforce a minimum gap between a user's messages in this channel.
@@ -384,7 +421,11 @@ pub async fn send_message(
                 // socket the signal summons. Google never carries it.
                 if !state.send_to_user(member_id, notif.clone()) {
                     state.enqueue_undelivered(member_id, notif.clone());
-                    crate::wake::sender::wake_user(&state, member_id);
+                    crate::wake::sender::wake_user_kind(
+                        &state,
+                        member_id,
+                        crate::wake::sender::WakeKind::ChannelMessage,
+                    );
                 }
             }
 
@@ -780,7 +821,38 @@ pub async fn get_message_edits(
     // Access control: only members who can VIEW the channel may read edit
     // history. Without this any authenticated user could read any message's
     // prior content by id (broken access control / info disclosure).
-    let (_server_id, _perms) = require_channel_view!(state, channel_id, claims.sub);
+    let (_server_id, perms) = require_channel_view!(state, channel_id, claims.sub);
+    // Prior content IS message history: same bit, same answer as get_messages.
+    if !perms.has(Permissions::READ_MESSAGE_HISTORY) {
+        return (
+            StatusCode::FORBIDDEN,
+            "You do not have permission to read message history in this channel",
+        )
+            .into_response();
+    }
+
+    // The message must belong to the channel that was just authorized, exactly
+    // as pin_message checks. The JOIN below already kept a foreign id's history
+    // out of the response, but it answered 200 [] — the same shape as "no
+    // edits" — where every other message-addressed route answers 404 for a
+    // message outside the path channel. messages.channel_id is INT4.
+    let in_channel: Option<(i32,)> = match sqlx::query_as(
+        "SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2",
+    )
+    .bind(&message_id)
+    .bind(channel_id as i32)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("get_message_edits: message lookup failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load edit history").into_response();
+        }
+    };
+    if in_channel.is_none() {
+        return (StatusCode::NOT_FOUND, "Message not found").into_response();
+    }
 
     // edited_at is a timestamp — cast to ::text so it decodes into String (otherwise
     // query_as errors and .unwrap_or_default() silently drops the whole edit history).
@@ -901,7 +973,17 @@ pub async fn list_pinned_messages(
     Path(channel_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let (_server_id, _perms) = require_channel_view!(state, channel_id, claims.sub);
+    let (_server_id, perms) = require_channel_view!(state, channel_id, claims.sub);
+    // Pins return message bodies, so the history bit applies exactly as it does
+    // to GET /messages — a member denied history could otherwise read every
+    // pinned message.
+    if !perms.has(Permissions::READ_MESSAGE_HISTORY) {
+        return (
+            StatusCode::FORBIDDEN,
+            "You do not have permission to read message history in this channel",
+        )
+            .into_response();
+    }
 
     // NOTE: channel_id/user_id are INT4 (decode as i32) and created_at/pinned_at
     // are timestamps (cast to ::text) — decoding them as i64/String otherwise makes
