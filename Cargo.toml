@@ -87,7 +87,7 @@ ed25519-dalek = "2"
 # layer testable without a Firebase project. Already present transitively;
 # promoted because we call it ourselves (same as ed25519-dalek above).
 async-trait = "0.1"
-hkdf = "0.12"
+hkdf = "0.13"
 # For email sending
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
 # Used by the SFU control plane for the LiveKit RemoveParticipant admin call
