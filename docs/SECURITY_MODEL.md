@@ -103,21 +103,25 @@ browser's WebCrypto — not home-made.
 
 ### The honest limit
 
-**The server does not enforce this, and nothing marks a message as having been encrypted.**
+**The server does not enforce this; the client is what tells you.**
 
 All three write paths bind the client's string verbatim (`src/message_handlers.rs:200`,
-`src/dm_handlers.rs:493`, `src/ws.rs:2612`) with no envelope validation. `key_epoch` is a
-client-supplied nullable integer documented as "None = plaintext". On the read side,
-content that isn't a recognised envelope is returned unchanged and rendered as ordinary
-text with no badge —
-[`servers.ts:460`](../frontend/src/api/servers.ts#L460): `if (!env || env.t !== 'ch')
-return content;`
+`src/dm_handlers.rs:493`, `src/ws.rs:2612`) with no envelope validation, and `key_epoch`
+is a client-supplied nullable integer documented as "None = plaintext". That is not a gap
+the server could close: the attacker in this section *is* the server, and a server
+validating its own writes proves nothing to you.
 
 So: **confidentiality of real ciphertext is structural** — the operator genuinely cannot
 read it, because they never hold an unwrapped key. But **the guarantee that what you are
-reading was ever encrypted is client-side only.** An active, malicious operator could
-inject plaintext into the database and you would not be able to tell it apart from a
-decrypted message.
+reading was ever encrypted is client-side only.** Content that is not a recognised
+envelope is returned as ordinary text, and the client marks it: every such row — in
+channels and DMs, live and from history — carries a visible **"Not encrypted"** tag
+(`NotEncryptedBadge` in `frontend/src/components/Chat.tsx`, driven by `messageEncState`),
+so a plaintext message an operator injected is distinguishable from a decrypted one.
+What the client does not do is refuse to show it: pre-E2EE history consists of exactly
+such rows, and hiding them would hide real messages. An injected plaintext message is
+therefore *labelled*, not *blocked*, and the label is only as trustworthy as the client
+you are running.
 
 > **And "they never hold an unwrapped key" was not always true.** The 2026-08-20 audit
 > found that the client accepted a wrapped channel key from any user id the server put on
