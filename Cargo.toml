@@ -98,6 +98,7 @@ reqwest = { version = "0.11", features = ["json", "blocking"] }
 axum-test = "14"
 tower = "0.4"
 tokio-test = "0.4"
+rsa = { version = "0.9", features = ["pem"] }   # test-only: mints the throwaway FCM signing key in-process
 # Cross-language known-answer test for the media frame AEAD (tests/media_aead_kat.rs).
 # The SERVER never encrypts media — it relays opaque frames — so this is a dev
 # dependency only. The native host agent (Phase 6) will take it as a real one.
