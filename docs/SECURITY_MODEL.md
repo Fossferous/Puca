@@ -712,3 +712,80 @@ a grace period (mark for deletion, purge after N days) so an accidental deletion
 is recoverable, and the release notes have to say so. Until then, the honest
 statement is the one above: **your account becomes unusable and unidentifiable,
 your files do not go away.**
+
+---
+
+## 12. Who else on the server can see what: the permission boundary
+
+Everything above is about the operator. This section is about the other people
+signed in to the same server — the boundary between a member and a non-member,
+and between a member and a channel that has been hidden from them. An
+adversarial audit of that boundary (2026-09-05) confirmed the headline: **no
+non-member can read content.** It also found a set of smaller leaks and stale
+grants around the line, all of which are closed. The ones worth knowing about,
+because they change what a member can do:
+
+**Manage Roles cannot be used on yourself unless you are an administrator.**
+Assigning or removing a role checks that the role sits below your highest and
+carries no permission bit you lack (`assign_role` / `remove_role`,
+[`src/role_handlers.rs`](../src/role_handlers.rs)). But a role's per-channel
+overwrites are not bits. A role with *zero* permissions passes the subset test,
+and if it carries an allow overwrite for `VIEW_CHANNEL` on a hidden channel,
+giving it to yourself opens that channel; removing from yourself the role that
+carries the *deny* does the same. So a caller who is not the owner or an
+administrator gets `403 Cannot change your own roles` when the target is
+themselves. Administrators are exempt because they can see every channel
+already — the check buys nothing against them.
+
+**Revoking CONNECT now removes you from the call, on both transports.** The
+eviction sweep that runs after a kick, ban or permission change
+(`broadcast_perms_changed_and_evict`, [`src/ws.rs`](../src/ws.rs)) used to
+re-check `VIEW_CHANNEL` only, while both join gates require `CONNECT` as well:
+a member denied CONNECT could not rejoin, but was never removed. It now
+re-checks CONNECT for voice rooms and evicts from the mesh room (`RoomLeft`)
+and from the SFU room alike.
+
+**Queued and in-flight state is re-authorised against the permissions you have
+now, not the ones you had.** Message notifications parked for a device that
+was offline are dropped at delivery when the channel is one you can no longer
+see (the delivery branch of `handle_socket`, [`src/ws.rs`](../src/ws.rs): each parked `MessageNotification` has VIEW re-resolved before it is sent; a visible client's parked queue is discarded outright). A live clip
+proposal ([`docs/CLIPS.md`](CLIPS.md)) checks, on every read and every vote,
+that the caller can still VIEW the voice channel it was recorded in; a kicked
+or newly hidden-from member gets a 404 and their vote no longer counts. The
+approver list's `online` flag is what everyone else sees — visibly online *and*
+"Show online status" on — rather than raw socket presence.
+
+**Servers created before migration 004 carried a mask nobody chose.** That
+migration backfilled an `@everyone` role into every server that existed at
+the time with the literal `104324673`
+([`migrations/004_add_missing_tables.sql`](../migrations/004_add_missing_tables.sql)).
+That number is Discord's default `@everyone` value, and under this schema's
+bit layout ([`src/permissions.rs`](../src/permissions.rs)) it decodes to
+`MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS` and `BAN_MEMBERS` for every
+member — and, because a base `MANAGE_CHANNELS` always retains VIEW
+(`layer_overwrite_rows`), every "hide this channel from that role" overwrite on
+such a server was inert. Servers created after that migration got the ordinary
+member defaults and were never affected. Migration 061
+([`migrations/061_retire_discord_everyone_mask.sql`](../migrations/061_retire_discord_everyone_mask.sql))
+resets the rows that still carry that whole mask to what 004 should have
+written, and first bumps those servers' member generation, which makes clients
+rotate the channel keys so the next epoch is wrapped only for the members the
+corrected permissions still let see each channel. If you are a
+member of such a server you will notice you have lost channel and role
+management you never should have had; the owner can grant it back through a
+real role. Nothing here recovers what a member may already have seen.
+
+**Two people who share no server cannot open a conversation** unless they are
+friends or the recipient wrote first. The Settings toggle **"Allow DMs from
+server members"** now means precisely that (`recipient_accepts_dms`,
+[`src/dm_handlers.rs`](../src/dm_handlers.rs)): with it on, anyone who shares
+a server with you may write to you; with it off, only friends and people you
+have written to yourself. A stranger who shares no server is refused whichever
+way it is set — before, the flag's name promised a shared-server test that the
+code never made, so any account could open a conversation with any user id,
+including a deleted account's tombstone, and then read back the target's
+display name and the list of their signed per-device DM keys (a device count).
+Both routes now apply the same relationship rule; the deleted-account case is
+a 404.
+
+None of this changes §2: the operator still sees all of it.

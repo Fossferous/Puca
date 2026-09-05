@@ -53,6 +53,7 @@ in this file is not registered there, so what IS listed is real.
 | GET | `/servers/:id/channels` | ✅ | List channels |
 | POST | `/servers/:id/channels` | ✅ | Create channel |
 | POST | `/servers/:id/channels/reorder` | ✅ | Reorder channels |
+| GET | `/servers/:id/voice-users` | ✅ | Who is in which voice channel of this server, limited to the channels the caller can VIEW. Rooms are matched by channel **id** only (`voice_<id>`); a channel's name is never read as a room id, so a channel called `voice_42` in a server you own no longer shows you the occupants of channel 42 somewhere else. |
 
 ---
 
@@ -61,13 +62,14 @@ in this file is not registered there, so what IS listed is real.
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/channels/:id/messages` | ✅ | Get messages (paginated) |
-| POST | `/channels/:id/messages` | ✅ | Send message |
+| POST | `/channels/:id/messages` | ✅ | Send message. A `reply_to_id` must name a message in **this** channel; one from any other channel (or a DM) is a 400. |
 | PATCH | `/channels/:id/messages/:message_id` | ✅ | Edit message |
 | DELETE | `/channels/:id/messages/:message_id` | ✅ | Delete message |
-| GET | `/channels/:id/messages/:message_id/edits` | ✅ | Edit history of a message |
-| GET | `/channels/:id/pins` | ✅ | List pinned messages |
+| GET | `/channels/:id/messages/:message_id/edits` | ✅ | Edit history of a message. Needs `READ_MESSAGE_HISTORY` in the channel, the same bit `GET /messages` checks; without it, 403. |
+| GET | `/channels/:id/pins` | ✅ | List pinned messages. Needs `READ_MESSAGE_HISTORY` in the channel (pins are message bodies); without it, 403. |
 | POST | `/channels/:id/messages/:message_id/pin` | ✅ | Pin message |
 | DELETE | `/channels/:id/messages/:message_id/pin` | ✅ | Unpin message |
+| POST | `/channels/:id/read` | ✅ | Mark the channel read. Gated on VIEW like every other channel route: 404 when the channel does not exist **or** the caller is a member who cannot see it (deliberately the same answer, so the route is not an existence check for hidden channels), and the same 404 for a non-member: nothing needs the 403 distinction on a write of read-state, and 403-vs-404 would confirm to an outsider which channel ids exist. |
 
 > **There is no server-side message search, and there cannot be one.** Message
 > content is stored end-to-end encrypted, so the column holds ciphertext. A
@@ -88,8 +90,8 @@ in this file is not registered there, so what IS listed is real.
 | POST | `/servers/:id/roles` | ✅ | Create role |
 | PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role |
 | DELETE | `/servers/:id/roles/:role_id` | ✅ | Delete role |
-| PUT | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Assign role |
-| DELETE | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Remove role |
+| PUT | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Assign role. Needs Manage Roles, a role below your highest, and no bit you lack. A caller who is not an administrator (or the owner) may not target **themselves**: 403 `Cannot change your own roles`. A role's channel overwrites are not bits, so without this a Manage Roles holder could give themselves a permission-less role whose allow overwrite opens a hidden channel. |
+| DELETE | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Remove role. Same rules as assign, including the self-target refusal — removing from yourself the role that carries a deny overwrite would restore the channel it hides. |
 
 ---
 
@@ -115,7 +117,8 @@ in this file is not registered there, so what IS listed is real.
 | POST | `/servers/:id/bans/:user_id` | ✅ | Ban member |
 | DELETE | `/servers/:id/bans/:user_id` | ✅ | Unban member |
 | GET | `/servers/:id/bans` | ✅ | List bans |
-| POST | `/servers/:id/reports` | ✅ | Report a message or a member to the server's moderators (any member) |
+| POST | `/servers/:id/voice-move/:user_id` | ✅ | Move a member between this server's voice channels (Move Members). 409 `That member is not in a voice channel` for **any** target not currently in a voice channel of this server — a non-member, a member who is in a call in some other server, and a member who is simply not in voice all get the same answer, so the route says nothing about where anyone else is. |
+| POST | `/servers/:id/reports` | ✅ | Report a message or a member to the server's moderators (any member). `reported_message_id` must be a message in this server and `reported_user_id` must be a member of it (or the author of that message); anything else is a 400, so a report cannot plant a foreign message id or a stranger's name in the moderators' queue. |
 | GET | `/servers/:id/reports` | ✅ | List reports (moderators) |
 
 ---
@@ -134,7 +137,8 @@ in this file is not registered there, so what IS listed is real.
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | POST | `/upload` | ✅ | Upload file (multipart). With request header `X-Puca-Want-Cap: 1` the response also carries `cap`, a per-file capability returned exactly once (the server stores only its SHA-256). With request header `X-Puca-Channel: <channel id>` (sent by the official apps for chat and checklist attachments) the upload is refused with 403 unless the caller holds `ATTACH_FILES` in that channel — checked before any body byte is read. Uploads naming no channel are not gated. |
-| GET | `/files/:id` | ✅ | Get file. A file uploaded with a capability is checked against request header `X-Puca-File-Cap` when one is presented; a wrong one is a 404 (no existence oracle). With `FILES_ENFORCE_CAP=1` on the server the header is required for such files; files without a capability (older uploads, avatars, icons, sounds, emoji, clip parts) are never gated. |
+| GET | `/files/:id` | ✅ | Get file. A file uploaded with a capability is served only to a caller presenting it in request header `X-Puca-File-Cap`; a missing or wrong one is a 404 (no existence oracle). This enforcement is **on by default**; `FILES_ENFORCE_CAP=0` on the server drops back to checking a capability only when one is presented, which lets a client older than 0.8.134 keep fetching but also lets any signed-in account that learns a file id fetch it. Files without a capability (older uploads, avatars, icons, sounds, emoji, clip parts) are never gated. |
+| DELETE | `/files/:id` | ✅ | Delete a file you uploaded. 404 unless the caller is the uploader — decided **before** the in-use check, so the 409 for a file still referenced as an avatar, sound, icon or emoji is only ever seen by its owner and does not confirm other people's file ids. |
 
 ---
 
@@ -143,9 +147,10 @@ in this file is not registered there, so what IS listed is real.
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/dms` | ✅ | List DM conversations |
-| POST | `/dms` | ✅ | Create/get a DM conversation with a user |
+| POST | `/dms` | ✅ | Create/get a DM conversation with a user. 404 for an id that does not exist **or** belongs to a deleted account (a tombstone is not DM-able). 403 `DMS_NOT_ACCEPTED` unless the recipient is a friend, has already written to you, or shares a server with you **and** has "Allow DMs from server members" on — a stranger who shares no server is refused whatever the flag says. |
 | GET | `/dms/:conversation_id/messages` | ✅ | Get DM messages |
 | POST | `/dms/:conversation_id/messages` | ✅ | Send DM |
+| GET | `/users/:user_id/dm-keys` | ✅ | The signed per-device DM keys a sender wraps a v4 message to. Same relationship rule as `POST /dms` (friends, or a shared server while their "Allow DMs from server members" is on, or they already wrote to you), and 404 rather than 403 when it fails — how many devices someone uses is not a stranger's to count, and having opened a conversation yourself no longer satisfies the check. |
 
 ---
 
@@ -201,4 +206,4 @@ track that arrives without an announcement is held, not shown.
 
 ---
 
-*Last Updated: 2026-09-02*
+*Last Updated: 2026-09-05*

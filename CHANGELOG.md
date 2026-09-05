@@ -4,6 +4,71 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+An adversarial audit of the boundary between members and non-members confirmed
+that nobody outside a server can read its content, and found a set of smaller
+leaks and stale grants around that line. All of them are closed here; most are
+invisible in normal use, and the ones you may notice are listed first.
+
+### Security
+- **Members of the oldest servers may lose channel and role management they
+  never should have had.** A very early database migration gave the
+  `@everyone` role of every server that already existed when it ran a
+  permission mask copied from another product's number layout; under ours it
+  read as Manage Channels, Manage Roles, Kick and Ban for every member, and
+  Manage Channels also made every "hide this channel from that role" rule
+  inert (the same mask also handed everyone the voice moderation controls:
+  mute, move, priority speaker). Servers created since were never affected.
+  Those `@everyone` rows are now reset to the ordinary member defaults plus
+  the anyone-can-manage-checklists behaviour those servers were deliberately
+  left with, and the affected servers' channel keys rotate; if a control
+  disappeared from your sidebar, that is why, and the owner can grant it back
+  through a real role.
+- **Revoking "Connect" on a voice channel now removes the person from the
+  call**, in both mesh and SFU calls. Until now it only stopped them
+  rejoining.
+- **You cannot use Manage Roles on yourself** unless you are an administrator
+  or the owner. A role's per-channel overrides are not permissions, so a
+  moderator could give themselves a permission-less role whose override opened
+  a hidden channel, or remove from themselves the role whose override hid it.
+- **Losing access to a channel now stops its notifications too.** Message
+  notifications that were waiting for you to come back online, and clip
+  proposals still open for a vote, are re-checked against what you can see
+  now: a kicked, banned or newly hidden-from member no longer receives them,
+  cannot vote, and cannot fetch the proposal.
+- **Direct messages between two people who share no server are refused**
+  unless they are friends or the recipient wrote first. The Settings toggle
+  "Allow DMs from server members" now means exactly that: with it on, people
+  who share a server with you can write to you; with it off, only friends and
+  people you have written to. A deleted account can no longer be messaged, and
+  the per-device keys a sender needs are handed out under the same rule.
+- **Pinned messages and edit histories respect "Read Message History".** A
+  member denied that permission could read message bodies through both.
+- **A private moderator queue can no longer be salted.** A report must name a
+  message in this server, and a person who is a member of it (or the author of
+  that message); the moderators' list no longer shows names or ids that were
+  planted from elsewhere.
+- **Attachment capabilities are enforced by default.** A file uploaded with a
+  capability is served only to a client presenting it, so an account that has
+  been kicked, or that merely learned a file id, no longer fetches the blob.
+  Every official client has sent the capability since 0.8.134; self-hosters
+  with older clients still in the field can set `FILES_ENFORCE_CAP=0` while
+  they update.
+- **Several routes gave away whether an id exists, or where someone else
+  is.** Marking a channel read, deleting someone else's file, moving a member
+  who is in a call on another server, reading a stranger's personal checklist,
+  parenting a task to one in another list, and replying to a message from
+  another channel all answered differently for "does not exist" and "not
+  yours"; each now gives one answer that says nothing about what you cannot
+  see. Listing who is in voice accepted a channel's *name* as a room id, so a
+  channel named after another server's room showed its occupants; rooms are
+  now matched by id only.
+- **Safety checks no longer fail open on a database error.** Ban, timeout,
+  block and accepts-DMs lookups refuse when the database cannot answer,
+  rather than treating "no answer" as "allowed"; the same for whether a clip
+  approver shows as online, which also now honours "Show online status".
+
 ## 0.9.3 — 2026-09-05
 
 ### Security
