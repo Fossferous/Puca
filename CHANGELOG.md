@@ -4,7 +4,7 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## 0.9.3 — unreleased
+## 0.9.3 — 2026-09-05
 
 ### Security
 - **Direct messages are now sealed under keys your password cannot unlock.**
