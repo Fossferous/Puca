@@ -46,6 +46,8 @@ mod stream;
 
 #[cfg(windows)]
 mod pipe;
+#[cfg(target_os = "linux")]
+mod unix_sock;
 
 /// Ctrl+Alt+Del, which no process but the SYSTEM service can raise.
 #[cfg(windows)]
@@ -228,14 +230,26 @@ fn main() {
         std::process::exit(2);
     }
 
+    // `--pipe` is the endpoint the launcher chose: a named pipe on Windows, a
+    // socket path on Linux. The default is only for running by hand.
+    #[cfg(windows)]
     let pipe_name = arg("--pipe").unwrap_or_else(|| {
         format!(r"\\.\pipe\sovereign-agent-{}", std::process::id())
     });
+    #[cfg(target_os = "linux")]
+    let pipe_name = arg("--pipe")
+        .unwrap_or_else(|| unix_sock::default_socket_path().to_string_lossy().into_owned());
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let pipe_name = arg("--pipe").unwrap_or_default();
 
     // Before anything that might have something to report.
     #[cfg(windows)]
     if let Some(path) = arg("--log") {
         redirect_stderr_to(&path);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(path) = arg("--log") {
+        unix_sock::redirect_stderr_to(&path);
     }
 
     // DIE WITH THE APP.
@@ -260,6 +274,14 @@ fn main() {
             watch_parent(pid);
             // Release before dying: the app being gone must not strand a key
             // down in whatever window had focus.
+            puca_input::release_all();
+            std::process::exit(0);
+        });
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = arg("--parent-pid").and_then(|p| p.parse::<u32>().ok()) {
+        std::thread::spawn(move || {
+            unix_sock::watch_parent(pid);
             puca_input::release_all();
             std::process::exit(0);
         });
@@ -293,11 +315,30 @@ fn main() {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        let _ = (pipe_name, token);
-        eprintln!("puca-agent: only implemented on Windows so far.");
-        eprintln!("Linux hosting needs PipeWire/X11 capture and uinput injection.");
+        println!("puca-agent listening on {pipe_name}");
+        let ua_record = arg("--ua-record");
+        if let Err(e) = unix_sock::serve(
+            std::path::Path::new(&pipe_name),
+            token,
+            flavour,
+            ua_record.as_deref(),
+        ) {
+            eprintln!("puca-agent: {e}");
+            puca_input::release_all();
+            std::process::exit(1);
+        }
+    }
+
+    // Kept as the cross-compile guard: the crate must build for a target it
+    // does not serve, so a Windows- or Linux-only assumption cannot creep
+    // into code that is meant to be shared.
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (pipe_name, token, flavour);
+        eprintln!("puca-agent: no transport for this platform (Windows: named pipe; Linux: Unix socket).");
+        eprintln!("macOS has no capture or injection backend yet either.");
         std::process::exit(2);
     }
 }

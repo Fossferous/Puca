@@ -44,7 +44,7 @@ means someone has actually run it, not that the code exists.
 | Watching a shared screen | yes | yes | yes | yes | yes |
 | Sharing *your* screen | yes | browser | browser | — | — |
 | **Controlling** another machine | yes | **yes, in a browser** | **yes, in a browser** | yes | yes |
-| **Being** controlled | **yes** | not yet | no | no | no |
+| **Being** controlled | **yes** | in progress (below) | no | no | no |
 | Native desktop app | **shipped** | builds, unreleased | builds, unreleased | n/a | n/a |
 | Notifications while closed | yes | no | no | yes | no |
 
@@ -61,8 +61,9 @@ Linux and macOS users because the controller is the same web code on every
 platform — there is no per-platform controller to port, which is exactly why it
 works everywhere and why the *host* side does not.
 
-**Being controlled is Windows-only today**, and that is the one real gap. See
-below for why.
+**Being controlled is Windows-only in the apps you can download today.** The
+Linux desktop build now carries the piece that was missing (below); it is not
+yet released. See below for what that does and does not mean.
 
 ## Why is remote control one-way outside Windows?
 
@@ -75,10 +76,17 @@ platform-specific to port.
 **Being controlled** needs native screen capture and input injection. On Windows
 that is DXGI Desktop Duplication and `SendInput`. Ports of both **already exist
 for Linux** — X11 capture via MIT-SHM and injection via XTEST — and their live
-tests pass against a real X server. What is missing is the pipe between the
-desktop app and the helper process that does the capturing: on Windows it is a
-named pipe, and there is no Unix-socket equivalent yet. Until that exists, a
-Linux machine cannot be a host no matter how good the capture code is.
+tests pass against a real X server. The last missing piece was the link between
+the desktop app and the helper process that does the capturing: on Windows a
+named pipe, and until 0.9.3 nothing at all on Linux. That link now exists — a
+Unix socket, owner-only (a 0700 directory, a 0600 socket) and with every
+connection's uid checked by the kernel before the token handshake — and the
+Linux helper has been exercised over it end to end, headless. What has **not**
+happened yet is a full session: a controller driving a Linux desktop through the
+Linux app on a real X11 session. That needs the Linux desktop build to be built
+and run, which nobody has done outside CI. So: the code is there; the claim is
+not yet. Unattended access (the Windows service that answers at the lock screen)
+has no Linux counterpart at all.
 
 macOS has no capture or injection backend at all. That is genuinely unwritten,
 not merely unwired.

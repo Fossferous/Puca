@@ -97,3 +97,10 @@ vp8 = ["puca-encode/vp8"]
 # the way a peer would, so the authorisation gate is exercised end to end
 # rather than stubbed into always-true.
 ed25519-dalek = "2"
+
+# The Unix-socket transport (src/unix_sock.rs): SO_PEERCRED, getuid/getppid,
+# dup2 for the log redirect. Linux only — that is the platform with capture
+# and injection backends; the transport is not offered where nothing behind
+# it works.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -25,6 +25,8 @@ use std::os::windows::fs::OpenOptionsExt;
 const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
 #[cfg(windows)]
 const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 
 /// Where the agent writes what it is doing.
 ///
@@ -40,6 +42,23 @@ fn agent_log_path() -> String {
 }
 
 /// The agent binary, alongside the app executable.
+/// Where the Linux agent's socket goes. `$XDG_RUNTIME_DIR` is tmpfs, 0700 and
+/// cleared at logout — the right home for a per-session endpoint. The agent
+/// creates the `puca` subdirectory (0700) and the socket (0600) and checks the
+/// peer's uid on every connection; this only picks the name.
+#[cfg(target_os = "linux")]
+fn linux_socket_path() -> String {
+    let dir = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(rt) if !rt.is_empty() => format!("{rt}/puca"),
+        _ => {
+            use std::os::unix::fs::MetadataExt;
+            let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
+            format!("/tmp/puca-{uid}")
+        }
+    };
+    format!("{dir}/agent-{}.sock", std::process::id())
+}
+
 fn agent_path() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -52,7 +71,13 @@ struct Connection {
     reader: BufReader<std::fs::File>,
     #[cfg(windows)]
     writer: std::fs::File,
+    // Linux: the agent listens on a Unix socket (crates/puca-agent/src/unix_sock.rs).
+    #[cfg(target_os = "linux")]
+    reader: BufReader<UnixStream>,
+    #[cfg(target_os = "linux")]
+    writer: UnixStream,
     child: Option<std::process::Child>,
+    /// The endpoint: a pipe name on Windows, a socket path on Linux.
     pipe_name: String,
 }
 
@@ -224,9 +249,55 @@ fn describe_open_error(e: &std::io::Error) -> String {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn connect(socket_path: &str, token: &str, attempts: u32) -> Result<Connection, String> {
+    let mut last = String::new();
+    for _ in 0..attempts {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => {
+                let reader = stream
+                    .try_clone()
+                    .map_err(|e| format!("could not clone the socket: {e}"))?;
+                let mut conn = Connection {
+                    reader: BufReader::new(reader),
+                    writer: stream,
+                    child: None,
+                    pipe_name: socket_path.to_string(),
+                };
+                let hello = format!(
+                    r#"{{"cmd":"hello","token":"{token}","version":2}}"#
+                );
+                let reply = exchange(&mut conn, &hello)?;
+                if !reply.contains("\"ok\":\"hello\"") {
+                    return Err(format!("the agent refused our token: {reply}"));
+                }
+                return Ok(conn);
+            }
+            Err(e) => {
+                last = describe_connect_error(&e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    Err(format!("could not connect to {socket_path}: {last}"))
+}
+
+#[cfg(target_os = "linux")]
+fn describe_connect_error(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            format!("no agent is listening on that socket yet ({e})")
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            format!("this caller is not allowed to open that socket ({e})")
+        }
+        _ => e.to_string(),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn connect(_pipe_name: &str, _token: &str, _attempts: u32) -> Result<Connection, String> {
-    Err("the host agent is only implemented on Windows".to_string())
+    Err("the host agent has no transport on this platform (Windows: named pipe; Linux: Unix socket)".to_string())
 }
 
 /// Ceiling on ONE pipe exchange (write + read_line) for HOT commands.
@@ -237,7 +308,7 @@ fn connect(_pipe_name: &str, _token: &str, _attempts: u32) -> Result<Connection,
 /// above any healthy hot exchange (inject <1ms, session_status ~ms); past
 /// it, the read is cancelled and the caller's error path restarts the agent
 /// — for a pipe wedged that long, a 1.5s restart beats a frozen forever.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const REPLY_DEADLINE_MS: u64 = 15_000;
 
 /// Ceiling for everything else. Some commands are LEGITIMATELY slow while
@@ -249,7 +320,7 @@ const REPLY_DEADLINE_MS: u64 = 15_000;
 /// live session the agent hosts over a share that merely went away. Two
 /// minutes still bounds the wedge class — nothing waits forever — without
 /// executing sessions for slowness the old code survived.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const SLOW_REPLY_DEADLINE_MS: u64 = 120_000;
 
 /// The exchange deadline for one request, picked by its `cmd`.
@@ -258,7 +329,7 @@ const SLOW_REPLY_DEADLINE_MS: u64 = 120_000;
 /// wrongly classed slow merely waits up to two minutes when wedged, while
 /// one wrongly classed hot gets its host agent killed mid-session for being
 /// slow — the asymmetric cost decides the default.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn deadline_ms_for(request: &str) -> u64 {
     const HOT: &[&str] = &[
         "inject",
@@ -417,9 +488,47 @@ fn exchange_with_deadline(
     Ok(line.trim().to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn exchange(conn: &mut Connection, request: &str) -> Result<String, String> {
+    // The Windows path needs a watchdog thread to cancel a pipe read that
+    // never returns; a socket takes a deadline per call, same policy
+    // (deadline_ms_for), same wording when it fires — the caller drops and
+    // restarts the connection on either message.
+    let deadline_ms = deadline_ms_for(request);
+    let deadline = Some(std::time::Duration::from_millis(deadline_ms));
+    conn.writer.set_write_timeout(deadline).ok();
+    conn.reader.get_ref().set_read_timeout(deadline).ok();
+    let timed_out = |e: &std::io::Error| {
+        matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+    };
+    conn.writer
+        .write_all(format!("{request}\n").as_bytes())
+        .map_err(|e| {
+            if timed_out(&e) {
+                format!("the agent did not accept a request within {}s — restarting the agent connection", deadline_ms / 1000)
+            } else {
+                format!("could not write to the agent: {e}")
+            }
+        })?;
+    conn.writer.flush().ok();
+
+    let mut line = String::new();
+    conn.reader.read_line(&mut line).map_err(|e| {
+        if timed_out(&e) {
+            format!("the agent did not answer within {}s — restarting the agent connection", deadline_ms / 1000)
+        } else {
+            format!("could not read from the agent: {e}")
+        }
+    })?;
+    if line.is_empty() {
+        return Err("the agent closed the connection".to_string());
+    }
+    Ok(line.trim_end().to_string())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn exchange(_conn: &mut Connection, _request: &str) -> Result<String, String> {
-    Err("the host agent is only implemented on Windows".to_string())
+    Err("the host agent has no transport on this platform (Windows: named pipe; Linux: Unix socket)".to_string())
 }
 
 /// Start the agent if it is not already running, and connect.
@@ -475,7 +584,12 @@ fn ensure_started(connect_attempts: u32) -> Result<(), String> {
     })?;
 
     let token = new_token();
+    #[cfg(windows)]
     let pipe_name = format!(r"\\.\pipe\sovereign-agent-{}", std::process::id());
+    #[cfg(target_os = "linux")]
+    let pipe_name = linux_socket_path();
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let pipe_name = format!("puca-agent-{}", std::process::id());
 
     // CREATE_NO_WINDOW: the agent is a console binary, so spawning it without
     // this pops a terminal in the user's face every time they start a session —

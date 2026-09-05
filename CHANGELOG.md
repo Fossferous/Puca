@@ -25,6 +25,17 @@ one-line summary; this file is the full story. Versions follow
   derivation such a client used rather than assuming the new one — assuming it
   would have locked those accounts out of every current client.
 
+### Added
+- **Linux hosting transport (groundwork; the Linux desktop app is still
+  unreleased).** The Linux helper that captures the screen and injects input
+  (X11) has existed for a while; what it lacked was any way for the desktop app
+  to reach it — on Windows that is a named pipe. It now has a Unix socket:
+  owner-only (0700 directory, 0600 socket), one client at a time, and every
+  connection's uid checked by the kernel before the token handshake. Exercised
+  end to end against the built helper, headless. A full controller session
+  through a Linux host has not yet been run; the FAQ says exactly where that
+  stands.
+
 ### Changed
 - **Opening a voice channel no longer drops you into a silent call.** On a
   browser that cannot end-to-end encrypt live media (Firefox, Safari, iOS) with
