@@ -50,7 +50,7 @@ md-5 = "0.10"
 # The agent owns the socket and the clock, so it drives str0m directly rather
 # than through puca-rtc — sans-IO means the event loop lives with whoever
 # has the socket.
-str0m = "0.21"
+str0m = "0.23"
 base64 = "0.23.0"
 
 [target.'cfg(windows)'.dependencies]
