@@ -44,6 +44,37 @@ Self-hosting **relocates** trust. It does not remove it. With a hosted closed-so
 trust a vendor's PKI, which you cannot inspect. Here you trust whoever runs the server and builds
 the installer — and you *can* inspect that. That is the actual trade, stated honestly.
 
+### Known limits, in one place
+
+Each of these is explained where it belongs; this is the list to read before deciding
+whether the tool fits your threat model.
+
+- **Metadata is visible to the operator.** Who talks to whom, when, how much, which
+  channels and calls you are in. Content is sealed; the shape of your life on the server
+  is not (§2). This is the largest gap between this tool and a metadata-minimising
+  messenger such as Signal.
+- **Forward secrecy is per session, not per message.** A stolen session key opens what
+  was sent to that device during that session, and there is no ratcheting to heal after a
+  device compromise. The 12-word recovery code is a root secret that opens all history, by
+  design, so history survives losing every device (§7).
+- **The browser client runs whatever the server serves.** An operator, or anyone who
+  controls the CDN in front of the server, can hand a web user modified JavaScript. The
+  desktop and Android apps update only over signed channels whose keys never touch the
+  server; use those if this matters to you (§1, trust #1).
+- **Calls are end-to-end encrypted only where the engine allows it.** Chromium-based
+  clients seal media frames; other engines fall back to transport encryption with a notice,
+  and "Require encryption for calls" (on by default) refuses rather than falls back (§4).
+- **Nothing here is post-quantum.** Every key agreement is X25519. A future quantum
+  computer could recover those keys from the public halves, and the ciphertext it would
+  need is exactly what the database stores indefinitely — the "harvest now, decrypt
+  later" case. No such machine exists today; treat content as secret for years, not
+  decades, until a hybrid key agreement lands.
+- **No outside human has audited this.** It has been reviewed hard, repeatedly and
+  adversarially, by machines, and its findings fixed (§8); an independent cryptographer
+  has not read it. The DM v4 design shipped in 0.9.3 is days old.
+- **The Windows build is not code-signed** until the operator buys a certificate; the
+  pipeline is in place and idle (`docs/CODE_SIGNING.md`).
+
 ---
 
 ## 2. What the server operator can see

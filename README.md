@@ -401,6 +401,12 @@ This is the short version. The long version is
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — read it
 before trusting either version.
 
+- **What it does not protect you from**, before anything reassuring: the
+  operator sees all metadata; forward secrecy is per session, not per
+  message, and the recovery code opens all history by design; the browser
+  client runs whatever the server serves; nothing is post-quantum; and no
+  outside human has audited the code. The list, with the reasoning, is
+  `docs/SECURITY_MODEL.md` §1 "Known limits".
 - **Authentication**: SRP-6a, 2048-bit group (RFC 5054), SHA-256 proofs, with
   the verifier derived by **Argon2id** at the same cost as the key wrap since
   0.9.3 — earlier accounts move across on their next sign-in. Your password
