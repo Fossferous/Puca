@@ -3298,7 +3298,14 @@ export function Chat({ onLogout }: ChatProps) {
             })
             .catch(err => {
                 console.error('Failed to start DM:', err);
-                alert('Could not start that conversation. They may have blocked you, or you may be offline.');
+                // A 403 is a standing refusal with its reason in the body (the
+                // recipient only accepts DMs from friends and server-mates, or
+                // a block); offering "try again" for it sends the user in
+                // circles. Show what the server said, and the remedy.
+                const refusal = err instanceof ApiError && err.status === 403 && err.message
+                    ? `${err.message}. Send them a friend request, or join a server they are in.`
+                    : null;
+                alert(refusal ?? 'Could not start that conversation. You may be offline.');
             });
     };
 
@@ -4168,7 +4175,11 @@ export function Chat({ onLogout }: ChatProps) {
                     canModerate={currentServer?.owner_id === currentUser?.sub}
                     onReport={currentServer && userContextMenuTarget.userId !== currentUserId
                         ? () => setReportTarget({
-                            serverId: currentServer.id,
+                            // A voice participant is reported to the server whose
+                            // call they are in, which is not always the server
+                            // being viewed; the report route now checks the
+                            // reported user is a member of the named server.
+                            serverId: (userContextMenuTarget.isInVoice && userContextMenuVoiceChannel?.server_id) || currentServer.id,
                             userId: userContextMenuTarget.userId,
                             username: userContextMenuTarget.username,
                         })

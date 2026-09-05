@@ -56,7 +56,11 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
             ? `${what} — you appear to be offline. Check your connection and try again.`
             : statusOf(err) === 404
                 ? `${what} — that request no longer exists. It may have been withdrawn.`
-                : `${what} — the server refused. Try again in a moment.`;
+                : statusOf(err) === 403 && err instanceof Error && err.message
+                    // A standing refusal with its reason in the body (the DM
+                    // rule, a block) — retrying would never help.
+                    ? `${what} — ${err.message}.`
+                    : `${what} — the server refused. Try again in a moment.`;
 
     const loadData = useCallback(async (background = false) => {
         if (!background) setLoading(true);

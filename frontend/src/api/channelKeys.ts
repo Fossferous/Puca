@@ -27,6 +27,13 @@ import { currentUserIdFromToken } from './auth';
 
 interface ChannelKeyState {
     currentEpoch: number;
+    /** Highest epoch that exists in the channel for ANYONE (server `max_epoch`).
+     *  Rotation targets max(currentEpoch, maxEpoch) + 1: any member may create
+     *  MAX+1 wrapped only for themselves, and a client that always tried
+     *  currentEpoch + 1 collided with such a squatted epoch, took the 409, kept
+     *  the old key, and never rotated again — a departing member could pin the
+     *  live channel key in place indefinitely. */
+    maxEpoch: number;
     currentGeneration: number;   // server's current member generation
     epochGeneration: number;     // generation the current epoch was minted for
     keys: Map<number, Uint8Array>; // epoch -> channel key
@@ -42,6 +49,9 @@ interface ChannelKeyState {
 
 interface ServerKeysResponse {
     current_epoch: number;
+    /** Highest epoch that exists for anyone. Absent from servers older than
+     *  the field; treated as current_epoch then. */
+    max_epoch?: number;
     current_generation: number;
     epoch_generation: number;
     keys: {
@@ -169,7 +179,7 @@ async function attributeWrapper(
 async function loadKeys(channelId: number): Promise<ChannelKeyState> {
     const identity = getActiveIdentity();
     const keys = new Map<number, Uint8Array>();
-    if (!identity) return { currentEpoch: 0, currentGeneration: 0, epochGeneration: 0, keys };
+    if (!identity) return { currentEpoch: 0, maxEpoch: 0, currentGeneration: 0, epochGeneration: 0, keys };
 
     const resp: ServerKeysResponse = await apiClient.get(`/channels/${channelId}/keys`);
     let currentRefusedUnverifiable = false;
@@ -309,11 +319,18 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
     }
     return {
         currentEpoch,
+        maxEpoch: Math.max(resp.max_epoch ?? 0, resp.current_epoch ?? 0, currentEpoch),
         currentGeneration: resp.current_generation ?? 0,
         epochGeneration: resp.epoch_generation ?? 0,
         keys,
         currentRefusedUnverifiable,
     };
+}
+
+/** The epoch a rotation must create: past every epoch that exists, not just
+ *  past the one we hold (see ChannelKeyState.maxEpoch). */
+function nextEpoch(state: ChannelKeyState): number {
+    return Math.max(state.currentEpoch, state.maxEpoch) + 1;
 }
 
 /**
@@ -453,6 +470,7 @@ export async function ensureChannelKey(
         raiseEpochFloor(channelId, 1);
         cache.set(channelId, {
             currentEpoch: 1,
+            maxEpoch: 1,
             currentGeneration: state.currentGeneration,
             epochGeneration: state.currentGeneration,
             keys: new Map([[1, key]]),
@@ -470,7 +488,7 @@ export async function ensureChannelKey(
     // under it. Convergent — the new epoch carries our own id, so the next load
     // pins it and stops rotating. Historical epochs stay readable throughout.
     if (state.currentRefusedUnverifiable) {
-        const newEpoch = state.currentEpoch + 1;
+        const newEpoch = nextEpoch(state);
         const key = await mintEpoch(channelId, newEpoch, state.currentGeneration);
         if (!key) return null; // e.g. no member keys yet — can't send this round
         const newKeys = new Map(state.keys);
@@ -478,6 +496,7 @@ export async function ensureChannelKey(
         raiseEpochFloor(channelId, newEpoch);
         cache.set(channelId, {
             currentEpoch: newEpoch,
+            maxEpoch: newEpoch,
             currentGeneration: state.currentGeneration,
             epochGeneration: state.currentGeneration,
             keys: newKeys,
@@ -493,7 +512,7 @@ export async function ensureChannelKey(
     // Membership changed: rotate to a new epoch wrapped only for current members.
     // Only a holder of the current key can rotate (so history stays readable).
     if (held) {
-        const newEpoch = state.currentEpoch + 1;
+        const newEpoch = nextEpoch(state);
         const key = await mintEpoch(channelId, newEpoch, state.currentGeneration);
         if (!key) {
             // Couldn't rotate (e.g. no members with keys); keep using current.
@@ -504,6 +523,7 @@ export async function ensureChannelKey(
         raiseEpochFloor(channelId, newEpoch);
         cache.set(channelId, {
             currentEpoch: newEpoch,
+            maxEpoch: newEpoch,
             currentGeneration: state.currentGeneration,
             epochGeneration: state.currentGeneration,
             keys: newKeys,

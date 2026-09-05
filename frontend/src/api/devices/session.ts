@@ -177,6 +177,51 @@ class RateCounter {
  *  so the frontend, which had it as a bare literal in the mobile menu, gets a
  *  name as well. */
 export const ALL_DISPLAYS = 255;
+
+/** The Tauri core module, imported once and shared. Every caller in this file
+ *  loads it lazily (a web host has no Tauri, and the import must not run at
+ *  module load), and several of them fire within the same tick — the consent
+ *  prompt's release and the display wake, for one. Two overlapping dynamic
+ *  imports of one module are fine for a browser but not for every module
+ *  loader this code runs under (vitest's mock registry hands the second caller
+ *  `undefined` while the first is in flight), and the wake's silent catch then
+ *  hid the failure. One promise, awaited by all, ends the overlap. */
+let tauriCoreModule: Promise<typeof import('@tauri-apps/api/core')> | null = null;
+function tauriCore(): Promise<typeof import('@tauri-apps/api/core')> {
+    if (!tauriCoreModule) tauriCoreModule = import('@tauri-apps/api/core');
+    return tauriCoreModule;
+}
+
+/**
+ * HOST: may a capture-target change the peer asks for be honoured, given what
+ * the person at this machine consented to?
+ *
+ * `consented` is the screen picked in the consent prompt's "Screen to share",
+ * or null when nobody was asked (an armed host, a host with no picker) — then
+ * any screen is allowed and the agent's own bounds check is the only limit.
+ * "All displays" consents to every screen, so narrowing to one is fine. One
+ * screen consents to THAT screen only: neither another index nor the
+ * composite, which contains the screens they left out, is covered.
+ *
+ * A pure function because the consent used to be a starting point rather
+ * than a boundary — nothing compared a later `set-monitor` against it, so a
+ * peer widened "Display 2" to every screen with one frame and no second
+ * prompt. The server relays the frame unread and the agent accepts any
+ * in-range index or 255, so the host is the only place this can be checked.
+ */
+export function monitorWithinConsent(consented: number | null, wanted: number): boolean {
+    if (consented === null || consented === ALL_DISPLAYS) return true;
+    return wanted === consented;
+}
+
+/** May this session's peer blank (privacy-overlay) or otherwise act on the
+ *  host machine itself? The share vocabulary is `control | view_only | files`
+ *  with no separate privacy capability, so `control` is the line — the same
+ *  one the input injector and the power handler draw. A same-account session
+ *  (no share) is the owner's own device and always may. */
+export function peerMayActOnHost(share: { capabilities: string[] } | null): boolean {
+    return !share || share.capabilities.includes('control');
+}
 import { currentUserId } from './index';
 import { thisDeviceId } from '../thisDevice';
 
@@ -524,6 +569,13 @@ interface Internal extends DeviceControlSession {
      *  licenses answerOffer to fall back to output 0 if the composite cannot
      *  start; a screen a person picked is never silently swapped. */
     monitorDefaulted: boolean;
+    /** HOST: the screen the person at this machine picked in the consent
+     *  prompt, or null when nobody was asked (armed, or no picker). Kept
+     *  apart from `monitor`, which is what is being captured NOW and moves
+     *  with every honoured `set-monitor` — this one never moves, and every
+     *  later capture-target request is checked against it
+     *  (monitorWithinConsent). */
+    consentedMonitor: number | null;
     pc: RTCPeerConnection | null;
     eph: ControlEphemeral;
     /** RAW 32-byte session key — sealControl/openControl take bytes. */
@@ -623,7 +675,7 @@ function updateTrayIndicator(): void {
         try {
             const { isTauri } = await import('../platform');
             if (!isTauri()) return;
-            const { invoke } = await import('@tauri-apps/api/core');
+            const { invoke } = await tauriCore();
             // Forwarding is reported to the tray too, because it is the ONE
             // thing happening on a host that the screen does not show: a remote
             // party reaching services on this machine leaves no visible trace.
@@ -768,13 +820,25 @@ async function announceMonitors(s: Internal, opts?: { evenIfSingle?: boolean }):
     if (s.phase === 'ended' || sessions.get(s.id) !== s) return;
     try {
         const backend = await getHostBackend();
-        const monitors = await backend.listMonitors();
+        const all = await backend.listMonitors();
+        // Only what the person here consented to. A single-screen pick means
+        // the peer is told about that screen and nothing else — the labels and
+        // geometry of the screens they declined are exactly what the
+        // set-monitor refusal (monitorWithinConsent) exists to keep from them.
+        const consented = s.consentedMonitor;
+        const monitors = (consented === null || consented === ALL_DISPLAYS)
+            ? all
+            : all.filter((m, i) => (m.id ?? i) === consented);
+        // A pick that narrowed several screens to one is still announced as a
+        // one-entry list: it names the screen (and its geometry) the viewer is
+        // actually looking at, and retires any wider list they held.
+        const narrowed = monitors.length === 1 && all.length > 1;
         // A single-screen machine normally offers no switcher at all — but
         // after a TOPOLOGY change the controller is holding a list of screens
         // that no longer exist, and the one-entry announce is what retires it
         // (the switcher, the edge-hop chips and the zoom-follow maths all
         // read that list).
-        if (monitors.length > 1 || (opts?.evenIfSingle && monitors.length === 1)) {
+        if (monitors.length > 1 || narrowed || (opts?.evenIfSingle && monitors.length === 1)) {
             await sendSignal(s, {
                 kind: 'monitors',
                 monitors: monitors.map((m, i) => ({
@@ -2751,7 +2815,7 @@ export async function connectToDevice(
         stream: null, captureSize: null, error: null,
         pc: null, eph: generateControlEphemeral(), key: null,
         sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
-        agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, monitors: [], activeMonitor: null,
+        agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
         filesChannel: null,
         inputChannel: null, inputProved: false, inputDcSeq: 0,
@@ -3200,7 +3264,7 @@ export function installDeviceSessions(): void {
                 stream: null, captureSize: null, error: null,
                 pc: null, eph: generateControlEphemeral(), key: null,
                 sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
-                agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, monitors: [], activeMonitor: null,
+                agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
                 filesChannel: null,
                 inputChannel: null, inputProved: false, inputDcSeq: 0,
@@ -3338,7 +3402,7 @@ export function installDeviceSessions(): void {
                 // requestHostConsent already auto-denies on its own
                 // deadline, so an unseen prompt still resolves.
                 try {
-                    const { invoke } = await import('@tauri-apps/api/core');
+                    const { invoke } = await tauriCore();
                     await invoke('attention_main_window', { mode: 'surface' });
                 } catch { /* not Tauri, or the window is already up */ }
                 void (async () => {
@@ -3364,11 +3428,15 @@ export function installDeviceSessions(): void {
                 );
                 // Prompt answered (or its deadline fired): stop sitting on
                 // top of whatever the person at this machine is doing.
-                void import('@tauri-apps/api/core')
+                void tauriCore()
                     .then(({ invoke }) => invoke('release_attention_topmost'))
                     .catch(() => { /* not Tauri / older build */ });
                 if (!consent) return false;
                 s.monitor = consent.monitor;
+                // The boundary, recorded separately from the moving target:
+                // `set-monitor` below is checked against THIS, so the peer
+                // can narrow "All displays" but never widen "Display 2".
+                s.consentedMonitor = consent.monitor;
                 return true;
             };
 
@@ -3451,14 +3519,22 @@ export function installDeviceSessions(): void {
             // await between any guard and start_stream. The agent backend
             // also wakes itself (display_wake.rs); this covers the webview
             // host, where no native wake exists.
-            if (!s.filesOnly) {
-                void (async () => {
-                    try {
-                        const { invoke } = await import('@tauri-apps/api/core');
+            //
+            // `s.filesOnly` is still the constructor's false here — the offer
+            // has not arrived — so the one thing knowable about the session's
+            // kind is the share: a grantee holding neither 'control' nor
+            // 'view_only' can never get a screen, and a connect from them
+            // must not light this machine's panels.
+            const shareGrantsScreen = !s.share
+                || s.share.capabilities.includes('control')
+                || s.share.capabilities.includes('view_only');
+            if (!s.filesOnly && shareGrantsScreen) {
+                void tauriCore()
+                    .then(async ({ invoke }) => {
                         await invoke('inject_input', { event: { t: 'rmove', dx: 1, dy: 0 } });
                         await invoke('inject_input', { event: { t: 'rmove', dx: -1, dy: 0 } });
-                    } catch { /* not a Tauri host — nothing to wake with */ }
-                })();
+                    })
+                    .catch(() => { /* not a Tauri host — nothing to wake with */ });
             }
             // EVERY SCREEN BY DEFAULT. `s.monitor` is still null here whenever
             // nobody chose a screen — an armed host, which never prompts — and
@@ -3558,7 +3634,16 @@ export function installDeviceSessions(): void {
             // this machine's display names, and a controller that has not yet
             // authenticated has no business reading them. Released with the held
             // offer instead, on the same event.
-            if (!(s.uaRequired && !s.uaVerified)) void announceMonitors(s);
+            //
+            // NOT for a SHARE session at all, yet. Whether the friend opened
+            // Files or Control arrives only in the sealed offer, one round trip
+            // from here, and a grantee holding neither 'control' nor
+            // 'view_only' — whom the offer handler refuses a screen — was being
+            // handed the display names and desktop geometry first. A share's
+            // list goes out with its answer instead (see the 'offer' arm). A
+            // same-account controller is the owner's own device, so its list
+            // still goes out here.
+            if (!s.share && !(s.uaRequired && !s.uaVerified)) void announceMonitors(s);
 
             if (challenge) {
                 // Silence must not be a way through. Without a deadline an
@@ -4485,6 +4570,19 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // a controller that never proved the passphrase.
             if (s.uaRequired && !s.uaVerified) return;
             const wanted = data.monitor;
+            // THE CONSENT BOUNDARY. The person at this machine picked a screen
+            // in the consent prompt; that pick is checked here, on the host,
+            // because nothing else can — the relay does not read this frame
+            // and the agent honours any in-range index or the composite. Told
+            // as a failure, so the viewer's picker does not lie about what it
+            // is showing.
+            if (!monitorWithinConsent(s.consentedMonitor, wanted)) {
+                void sendSignal(s, {
+                    kind: 'monitor-failed',
+                    reason: 'The person at that computer shared only one screen.',
+                });
+                return;
+            }
             void (async () => {
                 try {
                     const backend = await getHostBackend();
@@ -4577,6 +4675,19 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // An armed host must not blank its screen for a peer that
             // never proved the passphrase; same gate as input.
             if (s.uaRequired && !s.uaVerified) return;
+            // A share without 'control' may not blank this machine either —
+            // the gate input and power already carry, and this arm lacked. The
+            // overlay is excluded from capture, so a view-only peer that could
+            // raise it would keep watching the real desktop while the person
+            // here sees black. Answered rather than dropped: the stock viewer
+            // offers the toggle, and a silent drop leaves it looking stuck.
+            if (!peerMayActOnHost(s.share)) {
+                void sendSignal(s, {
+                    kind: 'privacy-failed',
+                    reason: 'this share is view-only — only a controller may blank the screen',
+                });
+                return;
+            }
             void (async () => {
                 const enabled = data.enabled === true;
                 try {
@@ -4672,7 +4783,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                                     s.monitor = 0;
                                 }
                             } catch { /* the announce below degrades the same way */ }
-                            void announceMonitors(s, { evenIfSingle: true });
+                            // A files-only session has no screen to switch,
+                            // so it is not told the new layout.
+                            if (!s.filesOnly) void announceMonitors(s, { evenIfSingle: true });
                         }
                         return;
                     }
@@ -5032,7 +5145,14 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 // frame surviving the same network event that caused the
                 // restart. Acked with the standard privacy-active so the
                 // controller's toggle reflects what actually happened.
-                if (data.privacy === true && !s.filesOnly) {
+                //
+                // Same capability gate as the set-privacy arm: this is a
+                // second route to the same overlay, and a fix on one arm
+                // alone would leave a view-only peer re-blanking the owner
+                // through a restart. Silent here — the controller's own
+                // privacyActive is false, so it did not ask for a state it
+                // could have.
+                if (data.privacy === true && !s.filesOnly && peerMayActOnHost(s.share)) {
                     try {
                         const backend = await getHostBackend();
                         if (!backend.setPrivacyMode) throw new Error('this host cannot blank its screen');
@@ -5149,6 +5269,12 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
               s.pendingOffer = data.sdp;
               return;
           }
+          // A SHARE session's screen list goes out HERE, not at connect (see
+          // the connect handler): only now has the offer said whether the
+          // friend opened Files or Control, and the capability refusal above
+          // has run. A files-only session gets no list — display names and
+          // desktop geometry are screen information, and it has no screen.
+          if (s.share && !s.filesOnly) void announceMonitors(s);
           try {
               await answerOffer(s, data.sdp);
               armHostControlGuard(s);

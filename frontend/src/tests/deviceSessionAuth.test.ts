@@ -13,7 +13,7 @@
  * and assert on what reaches the OS — injection and clipboard — rather than on
  * any flag.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 
 // --- the seams. Everything below the session layer is replaced so the test
 // --- observes exactly what would have hit the machine.
@@ -27,7 +27,19 @@ const setMonitor = vi.fn(async (..._a: unknown[]) => {});
 const updateStream = vi.fn(async (..._a: unknown[]) => {});
 const getStreamQuality = vi.fn(async (..._a: unknown[]) => ({ fps: 30, bitrate_kbps: 4000 }));
 const powerAction = vi.fn(async (..._a: unknown[]) => {});
+/** The privacy overlay — a topmost black window EXCLUDED from capture, so the
+ *  person at the host sees black while the peer keeps the real picture. What
+ *  the set-privacy arm reaches; mocked so the tests can see WHO may reach it. */
+const setPrivacyMode = vi.fn(async (..._a: unknown[]) => {});
 const displayTopologyChanged = vi.fn(async () => {});
+/** Tauri's `invoke`, which the connect handler uses for the display wake (two
+ *  synthetic 1px mouse moves). Mocked so a test can observe whether a connect
+ *  physically touched the host at all; every other call site in session.ts is
+ *  best-effort and indifferent to whether it resolves. */
+const tauriInvoke = vi.fn(async (..._a: unknown[]) => undefined);
+vi.mock('@tauri-apps/api/core', () => ({
+    invoke: (...a: unknown[]) => tauriInvoke(...a),
+}));
 /** What listMonitors answers — the topology tests shrink it to one screen. */
 let monitorsList: Array<Record<string, unknown>> = [];
 const writeLocalClipboard = vi.fn(async () => {});
@@ -74,6 +86,7 @@ vi.mock('../api/devices/hostBackend', () => ({
         updateStream: (...a: unknown[]) => updateStream(...a),
         getStreamQuality: (...a: unknown[]) => getStreamQuality(...a),
         displayTopologyChanged: () => displayTopologyChanged(),
+        setPrivacyMode: (...a: unknown[]) => setPrivacyMode(...a),
         setFileAccess: (...a: unknown[]) => setFileAccess(...a),
         // Optional on the interface; a phone host has none. `hasPowerAction`
         // false leaves it undefined so the arm's "cannot lock or shut down
@@ -184,6 +197,15 @@ vi.mock('../api/devices/unattendedHost', () => ({
 
 import { sealControl } from '../api/e2ee';
 
+/** The module under test, loaded AFTER this file's own consts exist. A static
+ *  import would be hoisted alongside the vi.mock calls, and session.ts's static
+ *  import of './clipboard' would then run that mock's factory — which reads
+ *  `writeLocalClipboard` eagerly — before the const is initialised. */
+let sessionMod: typeof import('../api/devices/session');
+beforeAll(async () => {
+    sessionMod = await import('../api/devices/session');
+});
+
 /**
  * Drain pending async work, INCLUDING macrotasks.
  *
@@ -269,6 +291,12 @@ beforeEach(() => {
     verifyUaResponse.mockImplementation(async () => false);
     updateStream.mockClear();
     getStreamQuality.mockClear();
+    // mockReset, not mockClear: a mockRejectedValueOnce that a refused frame
+    // never consumed would otherwise fail the NEXT test's switch.
+    setMonitor.mockReset();
+    setMonitor.mockImplementation(async () => {});
+    setPrivacyMode.mockClear();
+    tauriInvoke.mockClear();
     armControlGuard.mockClear();
     releaseControlGuard.mockClear();
     noteControlActivity.mockClear();
@@ -746,6 +774,9 @@ describe('switching screens mid-session', () => {
      */
     it('a host acts on set-monitor and confirms what is actually showing', async () => {
         armed = false;
+        // The person here shared EVERY screen, so narrowing to one is within
+        // what they consented to (the boundary itself is tested below).
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
         const { key } = await activeHostSession();
         setMonitor.mockClear();
         const before = sent.length;
@@ -765,6 +796,9 @@ describe('switching screens mid-session', () => {
      */
     it('reports a failure instead of pretending it switched', async () => {
         armed = false;
+        // Every screen consented to, so the refusal under test is the
+        // BACKEND's, not the consent boundary's.
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
         const { key } = await activeHostSession();
         setMonitor.mockRejectedValueOnce(new Error('cannot switch screens mid-session'));
         const before = sent.length;
@@ -1349,6 +1383,9 @@ describe('an armed host ignores capture control until the passphrase is proved',
         // unarmed host — so this proves the three handlers were not simply
         // switched off for everyone.
         armed = false;
+        // Every screen consented to, so the consent boundary is not what
+        // decides the set-monitor below.
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
         const { key } = await activeHostSession();
         setMonitor.mockClear();
         updateStream.mockClear();
@@ -1433,5 +1470,267 @@ describe('a host session arms the physical kill switch', () => {
 
         expect(injectEvent, 'positive control: the rig really did inject').toHaveBeenCalled();
         expect(noteControlActivity).toHaveBeenCalledWith('ds-test');
+    });
+});
+
+/**
+ * THE CONSENT DIALOG'S "SCREEN TO SHARE" IS A BOUNDARY, NOT A STARTING POINT.
+ *
+ * The person at an unarmed host picks a screen; until this change the pick
+ * reached the FIRST capture and nothing else — the `set-monitor` arm compared
+ * the peer's request against nothing, so one sealed frame widened "Display 2"
+ * to every screen (255) or moved it to the primary, with no second prompt.
+ * The server relays the frame unread and the agent accepts any in-range index
+ * or the composite, so the host is the only place this can be enforced.
+ *
+ * Each refusal here has a sibling in which the same frame IS honoured, so a
+ * refusal cannot be a handler that stopped working.
+ */
+describe('the consented screen bounds every later set-monitor', () => {
+    it('pure: one screen covers that screen only; All displays covers each; nobody-asked covers all', () => {
+        expect(sessionMod.monitorWithinConsent(2, 2)).toBe(true);
+        expect(sessionMod.monitorWithinConsent(2, 0), 'another screen').toBe(false);
+        expect(sessionMod.monitorWithinConsent(2, sessionMod.ALL_DISPLAYS), 'the composite contains the screens left out').toBe(false);
+        expect(sessionMod.monitorWithinConsent(sessionMod.ALL_DISPLAYS, 1), 'narrowing every-screen to one').toBe(true);
+        expect(sessionMod.monitorWithinConsent(sessionMod.ALL_DISPLAYS, sessionMod.ALL_DISPLAYS)).toBe(true);
+        expect(sessionMod.monitorWithinConsent(null, 3), 'an armed host: nobody picked, agent bounds apply').toBe(true);
+        expect(sessionMod.monitorWithinConsent(null, sessionMod.ALL_DISPLAYS)).toBe(true);
+    });
+
+    it('refuses to widen a single consented screen to every display, and says so', async () => {
+        armed = false;
+        consentAnswer = { monitor: 2 };
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+        const before = sent.length;
+
+        await signal(key, { kind: 'set-monitor', monitor: sessionMod.ALL_DISPLAYS });
+
+        expect(setMonitor, 'the capture must not move off the consented screen').not.toHaveBeenCalled();
+        const kinds = await sentKinds(key, before);
+        expect(kinds, 'the viewer is told, so its picker does not lie').toContain('monitor-failed');
+        expect(kinds).not.toContain('monitor-active');
+    });
+
+    it('refuses to move a single consented screen to a different one', async () => {
+        armed = false;
+        consentAnswer = { monitor: 2 };
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+
+        await signal(key, { kind: 'set-monitor', monitor: 0 });
+
+        expect(setMonitor).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: the consented screen itself may be re-requested', async () => {
+        armed = false;
+        consentAnswer = { monitor: 2 };
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+        const before = sent.length;
+
+        await signal(key, { kind: 'set-monitor', monitor: 2 });
+
+        expect(setMonitor).toHaveBeenCalledWith('ds-test', 2);
+        expect(await sentKinds(key, before)).toContain('monitor-active');
+    });
+
+    it('POSITIVE CONTROL: "All displays" consent lets the viewer narrow to one screen', async () => {
+        armed = false;
+        consentAnswer = { monitor: sessionMod.ALL_DISPLAYS };
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+
+        await signal(key, { kind: 'set-monitor', monitor: 1 });
+
+        expect(setMonitor).toHaveBeenCalledWith('ds-test', 1);
+    });
+
+    it('a share peer is bound by the pick too — the boundary is consent, not capability', async () => {
+        armed = false;
+        shareCaps = ['control'];
+        consentAnswer = { monitor: 1 };
+        const { key } = await activeHostSession();
+        setMonitor.mockClear();
+
+        await signal(key, { kind: 'set-monitor', monitor: sessionMod.ALL_DISPLAYS });
+
+        expect(setMonitor, 'control over the mouse is not consent to the other screens').not.toHaveBeenCalled();
+    });
+
+    it('the initial capture starts on the consented screen (the boundary and the start agree)', async () => {
+        armed = false;
+        consentAnswer = { monitor: 1 };
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        expect(agentAnswerOffer).toHaveBeenCalledWith('ds-test', expect.any(String), 1, { dataOnly: false });
+    });
+});
+
+/**
+ * PRIVACY MODE IS AN ACTION ON THE OWNER'S MACHINE, SO IT NEEDS 'control'.
+ *
+ * The overlay is a topmost black window excluded from capture: the person at
+ * the host sees black while the peer keeps receiving the real desktop. The
+ * set-privacy arm carried only the role and passphrase gates — both dead for a
+ * share session — so a view-only friend could blank the owner's monitors and
+ * keep watching. The grant vocabulary is control | view_only | files with no
+ * privacy capability of its own, so the line is the one input and power draw.
+ * The restart-offer's `privacy: true` is a second route to the same overlay
+ * and is gated the same way.
+ */
+describe('blanking the owner\'s screen needs a share with control', () => {
+    it('pure: no share (the owner\'s own device) or control may; view-only and files may not', () => {
+        expect(sessionMod.peerMayActOnHost(null)).toBe(true);
+        expect(sessionMod.peerMayActOnHost({ capabilities: ['control'] })).toBe(true);
+        expect(sessionMod.peerMayActOnHost({ capabilities: ['control', 'files'] })).toBe(true);
+        expect(sessionMod.peerMayActOnHost({ capabilities: ['view_only'] })).toBe(false);
+        expect(sessionMod.peerMayActOnHost({ capabilities: ['view_only', 'files'] })).toBe(false);
+        expect(sessionMod.peerMayActOnHost({ capabilities: ['files'] })).toBe(false);
+    });
+
+    it('a VIEW-ONLY share cannot raise the privacy overlay, and is told why', async () => {
+        armed = false;
+        shareCaps = ['view_only'];
+        const { key } = await activeHostSession();
+        const before = sent.length;
+
+        await signal(key, { kind: 'set-privacy', enabled: true });
+
+        expect(setPrivacyMode, 'the owner\'s monitors must stay lit').not.toHaveBeenCalled();
+        const kinds = await sentKinds(key, before);
+        expect(kinds).toContain('privacy-failed');
+        expect(kinds, 'and must not claim the screen went dark').not.toContain('privacy-active');
+    });
+
+    it('POSITIVE CONTROL: a share WITH control blanks and is acked', async () => {
+        armed = false;
+        shareCaps = ['control'];
+        const { key } = await activeHostSession();
+        const before = sent.length;
+
+        await signal(key, { kind: 'set-privacy', enabled: true });
+
+        expect(setPrivacyMode).toHaveBeenCalledWith('ds-test', true);
+        expect(await sentKinds(key, before)).toContain('privacy-active');
+    });
+
+    it('POSITIVE CONTROL: the owner\'s own device (no share) blanks as before', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'set-privacy', enabled: true });
+        expect(setPrivacyMode).toHaveBeenCalledWith('ds-test', true);
+    });
+
+    it('a VIEW-ONLY share cannot re-blank through a restart-offer either', async () => {
+        armed = false;
+        shareCaps = ['view_only'];
+        const { key } = await activeHostSession();
+
+        await signal(key, { kind: 'restart-offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n', privacy: true });
+
+        expect(agentAnswerOffer, 'the restart itself is answered — view-only may watch').toHaveBeenCalled();
+        expect(setPrivacyMode, 'the second route to the overlay is closed too').not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: a control share\'s restart-offer re-blanks', async () => {
+        armed = false;
+        shareCaps = ['control'];
+        const { key } = await activeHostSession();
+
+        await signal(key, { kind: 'restart-offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n', privacy: true });
+
+        expect(setPrivacyMode).toHaveBeenCalledWith('ds-test', true);
+    });
+});
+
+/**
+ * A SHARE GRANTEE LEARNS THIS MACHINE'S SCREENS ONLY ONCE IT IS KNOWN TO HAVE ONE.
+ *
+ * The connect handler announced the monitor list — OS display names and
+ * desktop-space geometry — the moment the session went active, behind a
+ * passphrase gate that is dead for every share session (a share never issues
+ * the challenge). Whether the friend opened Files or Control arrives one round
+ * trip later in the sealed offer, and a grantee holding only 'files' — whom
+ * the offer handler then refuses a screen — had already been handed the
+ * layout. So for a share the list now rides with the ANSWER, once the offer
+ * has said what the session is for; a files-only session never gets one.
+ *
+ * Same-account sessions are the owner's own devices and keep announcing at
+ * connect (pinned by deviceArmedIce.test.ts); the last test here is that
+ * positive control, so "nothing announced" cannot be a rig that never
+ * enumerates.
+ */
+describe('a share is told the screen layout only for a screen session', () => {
+    const twoScreens = [
+        { id: 0, label: 'Main', left: 0, top: 0, width: 1920, height: 1080 },
+        { id: 1, label: 'Side', left: 1920, top: 0, width: 1920, height: 1080 },
+    ];
+    const OFFER = 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
+    const FILES_OFFER = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
+
+    it('a files-only share is never told the layout — not at connect, not after its offer', async () => {
+        armed = false;
+        shareCaps = ['files'];
+        monitorsList = twoScreens;
+        const { key } = await activeHostSession();
+        expect(await sentKinds(key, 0), 'nothing at connect').not.toContain('monitors');
+
+        await signal(key, { kind: 'offer', sdp: FILES_OFFER, filesOnly: true });
+        expect(await sentKinds(key, 0), 'nothing with the answer either').not.toContain('monitors');
+    });
+
+    it('a view-only share is told nothing at connect, and the layout with its screen answer', async () => {
+        armed = false;
+        shareCaps = ['view_only'];
+        monitorsList = twoScreens;
+        const { key } = await activeHostSession();
+        expect(await sentKinds(key, 0), 'the kind is not knowable yet').not.toContain('monitors');
+
+        const before = sent.length;
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        const kinds = await sentKinds(key, before);
+        expect(kinds, 'POSITIVE CONTROL: a screen session gets its switcher').toContain('monitors');
+        expect(kinds).toContain('answer');
+    });
+
+    it('a screen-capable share that opened FILES is still told nothing', async () => {
+        armed = false;
+        shareCaps = ['control', 'files'];
+        monitorsList = twoScreens;
+        const { key } = await activeHostSession();
+
+        await signal(key, { kind: 'offer', sdp: FILES_OFFER, filesOnly: true });
+
+        expect(await sentKinds(key, 0)).not.toContain('monitors');
+    });
+
+    it('a files-only share connect does not wake the owner\'s panels', async () => {
+        armed = false;
+        shareCaps = ['files'];
+        await activeHostSession();
+        // The wake runs from an async IIFE behind a dynamic import: give it the
+        // same settle the positive control gets, or this passes vacuously.
+        await settle();
+        const wakes = tauriInvoke.mock.calls.filter(c => c[0] === 'inject_input');
+        expect(wakes, 'synthetic input on a machine whose screen was never granted').toEqual([]);
+    });
+
+    it('POSITIVE CONTROL: a view-only share connect does wake them (two opposite 1px moves)', async () => {
+        armed = false;
+        shareCaps = ['view_only'];
+        await activeHostSession();
+        await settle();
+        const wakes = tauriInvoke.mock.calls.filter(c => c[0] === 'inject_input');
+        expect(wakes.length).toBe(2);
+    });
+
+    it('POSITIVE CONTROL: the owner\'s own device is told at connect, as before', async () => {
+        armed = false;
+        monitorsList = twoScreens;
+        const { key } = await activeHostSession();
+        await settle();
+        expect(await sentKinds(key, 0)).toContain('monitors');
     });
 });
