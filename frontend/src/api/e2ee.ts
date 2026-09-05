@@ -1453,16 +1453,20 @@ export function messageEncState(wire: string, decrypted: string): MessageEncStat
  * explains why. Pure, over rows already classified; `at` is the row's
  * created_at (ISO or epoch), compared as time.
  */
-export function markUnexpectedPlaintext<T extends { encState?: MessageEncState; created_at?: string | number }>(rows: T[]): T[] {
+export function markUnexpectedPlaintext<T extends { encState?: MessageEncState; created_at?: string | number; wireSealed?: boolean }>(rows: T[]): T[] {
     const t = (r: T): number => {
         const v = r.created_at;
         if (typeof v === 'number') return v < 1e12 ? v * 1000 : v;
         const ms = v ? Date.parse(v) : NaN;
         return Number.isFinite(ms) ? ms : NaN;
     };
+    // A row that was SEALED on the wire is evidence the conversation was
+    // encrypting at that time, whether or not this device could open it: a
+    // v4 row locked behind the recovery code is still an envelope. Callers
+    // that know the wire pass `wireSealed`; `secure` covers the rest.
     let firstSecure = Infinity;
     for (const r of rows) {
-        if (r.encState === 'secure') {
+        if (r.encState === 'secure' || r.wireSealed === true) {
             const ms = t(r);
             if (Number.isFinite(ms) && ms < firstSecure) firstSecure = ms;
         }
@@ -1631,4 +1635,44 @@ export function clearActiveIdentity(): void {
     } catch {
         // ignore
     }
+}
+
+// --- DM signing-key attestation (dmKeys.ts ensureSignAttestation) ----------
+//
+// The account signing key vouches for DM keys; something must vouch for the
+// signing key. What a sender already trusts about a peer is the peer's
+// identity key (pinned, covered by the safety number) — so the peer vouches
+// for its signing key UNDER THE PAIRWISE IDENTITY SECRET: an HMAC only the
+// two identity private keys can produce or check. The server, which never
+// holds one, can neither forge nor substitute it.
+
+export function dmSignAttestRecord(authorId: number, peerId: number, accountSignPub: string): string {
+    return canonicalJson({ t: 'puca-dm-sign-attest-v1', u: authorId, p: peerId, k: accountSignPub });
+}
+
+function dmSignAttestKey(identity: Identity, peerPublicKeyEncoded: string): Uint8Array | null {
+    const peer = decodePublicKey(peerPublicKeyEncoded);
+    if (!peer || peer.length !== 32) return null;
+    try {
+        const ss = x25519.getSharedSecret(identity.privateKey, peer);
+        return hkdf(sha256, ss, undefined, utf8('puca-dm-sign-attest-v1'), 32);
+    } catch {
+        return null; // a low-order or otherwise invalid point: nothing to key with
+    }
+}
+
+/** The attestation MAC an author publishes for a peer; null for a malformed peer key. */
+export function dmSignAttestMac(identity: Identity, peerPublicKeyEncoded: string, record: string): string | null {
+    const key = dmSignAttestKey(identity, peerPublicKeyEncoded);
+    return key ? toBase64(hmac(sha256, key, utf8(record))) : null;
+}
+
+/** Does a served attestation match what this identity computes for the peer? Constant-time. */
+export function dmSignAttestMatches(identity: Identity, peerPublicKeyEncoded: string, record: string, givenB64: string | null | undefined): boolean {
+    if (!givenB64) return false;
+    const key = dmSignAttestKey(identity, peerPublicKeyEncoded);
+    if (!key) return false;
+    let given: Uint8Array;
+    try { given = fromBase64(givenB64); } catch { return false; }
+    return constantTimeEqual(hmac(sha256, key, utf8(record)), given);
 }

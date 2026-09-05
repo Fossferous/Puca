@@ -371,7 +371,8 @@ import {
     type PwKdf,
 } from './e2ee';
 import { setPendingRecoveryCode, markRecoveryCodeUnacknowledged } from './recoveryPrompt';
-import { newHistoryKeyMaterial, rewrapHistoryKey, getHistoryKey, storeHistoryKey, clearDmKeys } from './dmKeys';
+import { newHistoryKeyMaterial, rewrapHistoryKey, getHistoryKey, storeHistoryKey, storePendingHistoryKey, adoptPendingHistoryKey, clearDmKeys, accountSignPubFor } from './dmKeys';
+import { fetchPublicConfig } from './publicConfig';
 import { clearChannelKeyCache } from './channelKeys';
 import { resetIceConfigCache } from './iceConfig';
 import { clearBlobCache } from './attachments';
@@ -386,6 +387,7 @@ import { thisDeviceId, clearThisDeviceId } from './thisDevice';
 // ============ Public API ============
 
 export async function register(username: string, password: string, inviteCode?: string): Promise<void> {
+    await assertServerRecordsVerifierVersion();
     const { salt, v } = freshVerifier(username, password);
     const saltHex = bytesToHex(salt);
 
@@ -396,7 +398,7 @@ export async function register(username: string, password: string, inviteCode?: 
     const { material, recoveryCode } = await buildWrapMaterial(seed, password);
     // The DM v4 history key: its private half is wrapped under the recovery
     // code just minted, and under nothing else (dmKeys.ts).
-    const history = await newHistoryKeyMaterial(recoveryCode, material.recoverySalt);
+    const history = await newHistoryKeyMaterial(recoveryCode, material.recoverySalt, identity);
 
     await apiClient.post('/auth/register', {
         username,
@@ -405,6 +407,10 @@ export async function register(username: string, password: string, inviteCode?: 
         srp_version: SRP_VERSION_CURRENT,
         history_pubkey: history.historyPubkey,
         history_wrapped_rc: history.historyWrappedRc,
+        history_pubkey_sig: history.historyPubkeySig,
+        // The Ed25519 key that vouches for every DM key this account publishes
+        // (dmKeys.ts); peers pin it on first contact like the identity key.
+        account_sign_pub: accountSignPubFor(identity),
         public_key: identity.publicKeyEncoded,
         wrap_salt: material.wrapSalt,
         recovery_salt: material.recoverySalt,
@@ -417,11 +423,29 @@ export async function register(username: string, password: string, inviteCode?: 
     });
 
     setActiveIdentity(identity);
-    storeHistoryKey(history.priv); // this device made it; it may read history
+    // This device made the history key and may read history — but there is
+    // no token yet to scope it to, so it waits under the username until the
+    // sign-in that follows registration adopts it (dmKeys.ts).
+    storePendingHistoryKey(username, history.priv);
     // Surfaced by RecoveryCodeModal after the user logs in. The marker
     // outlives a reload; the code itself deliberately does not.
     setPendingRecoveryCode(recoveryCode);
     markRecoveryCodeUnacknowledged();
+}
+
+/**
+ * Refuse to WRITE an Argon2id verifier to a server that cannot record which
+ * derivation produced it. A server from before migration 059 has no
+ * `srp_version` field: it would drop ours silently, file the verifier as
+ * SHA-256, and the account could never sign in again — for a registration,
+ * before its recovery code was ever shown (0.9.3 review, X0/X1). `/config`
+ * announces the server's version; a server that does not is too old. Sign-in
+ * itself is unaffected: it reads the version the server reports.
+ */
+async function assertServerRecordsVerifierVersion(): Promise<void> {
+    const cfg = await fetchPublicConfig();
+    if (cfg.srpVersion !== null && cfg.srpVersion >= SRP_VERSION_CURRENT) return;
+    throw new Error('This server needs to be updated before an account can be created or a password changed from this app. Ask the person who runs it to update it, then try again.');
 }
 
 /**
@@ -431,6 +455,7 @@ export async function register(username: string, password: string, inviteCode?: 
  * could then never be opened.
  */
 export async function generateVerifierForReset(username: string, password: string): Promise<{ salt: string; verifier: string; srp_version: number }> {
+    await assertServerRecordsVerifierVersion();
     const { salt, v } = freshVerifier(username, password);
     return {
         salt: bytesToHex(salt),
@@ -541,6 +566,7 @@ export class RetiredKeyFormatError extends Error {
 export async function login(username: string, password: string): Promise<string> {
     const token = await srpExchange(username, password);
     localStorage.setItem('auth_token', token);
+    adoptPendingHistoryKey(username); // a key registration parked for this account
     await restoreIdentityAfterLogin(username, password);
     return token;
 }
@@ -849,9 +875,15 @@ export async function regenerateRecoveryCode(username: string, currentPassword: 
     await proveCurrentPassword(username, currentPassword);
 
     const { material, recoveryCode } = await buildWrapMaterial(seed, currentPassword);
-    const history = held
-        ? await rewrapHistoryKey(held.privateKey, recoveryCode, material.recoverySalt)
-        : await newHistoryKeyMaterial(recoveryCode, material.recoverySalt);
+    // An account that HAS a history key gets it re-wrapped (this device holds
+    // it, checked above). An account WITHOUT one always gets a fresh one —
+    // never a key this device happens to hold: on a shared machine that could
+    // be another account's, and adopting it would hand that account's history
+    // to whoever holds this code (review, finding C2).
+    const identity = makeIdentity(seed);
+    const history = wrap.history_pubkey && held
+        ? await rewrapHistoryKey(held.privateKey, recoveryCode, material.recoverySalt, identity)
+        : await newHistoryKeyMaterial(recoveryCode, material.recoverySalt, identity);
     await apiClient.post('/keys/rewrap', {
         wrap_salt: material.wrapSalt,
         recovery_salt: material.recoverySalt,
@@ -861,6 +893,7 @@ export async function regenerateRecoveryCode(username: string, currentPassword: 
         pw_kdf: material.pwKdf,
         history_pubkey: history.historyPubkey,
         history_wrapped_rc: history.historyWrappedRc,
+        history_pubkey_sig: history.historyPubkeySig,
     });
     storeHistoryKey(history.priv);
     return recoveryCode;
@@ -1155,6 +1188,7 @@ export function logout(): void {
  * Generates new SRP salt/verifier and sends to backend
  */
 export async function resetPasswordMigration(username: string, newPassword: string): Promise<void> {
+    await assertServerRecordsVerifierVersion();
 
     // Fresh salt and verifier under the current derivation.
     const { salt, v: vBig } = freshVerifier(username, newPassword);

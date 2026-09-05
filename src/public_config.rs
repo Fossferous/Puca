@@ -31,7 +31,17 @@ pub struct PublicConfig {
     /// Whether `POST /auth/register` will refuse a request that carries no
     /// (or the wrong) invite code.
     pub registration_invite_required: bool,
+    /// The newest SRP verifier derivation this server records (migration
+    /// 059): 2 = Argon2id. A client refuses to WRITE a verifier to a server
+    /// that does not announce at least the version it derives, because a
+    /// server predating the field would file an Argon2id verifier as SHA-256
+    /// and the account could never sign in again (0.9.3 review, X0/X1).
+    pub srp_version: i16,
 }
+
+/// Mirrors `SRP_VERSION_CURRENT` in the client (auth.ts) and the highest
+/// `SrpVersion` handlers.rs accepts.
+pub const SRP_VERSION_CURRENT: i16 = 2;
 
 /// Normalise the raw `APP_URL` value: trimmed, trailing slashes dropped, and
 /// only an absolute http(s) URL counts — a relative path or a bare host
@@ -63,6 +73,7 @@ pub async fn get_public_config() -> Json<PublicConfig> {
         registration_invite_required: invite_required_from(
             std::env::var("REGISTRATION_INVITE_CODE").ok(),
         ),
+        srp_version: SRP_VERSION_CURRENT,
     })
 }
 
@@ -122,6 +133,7 @@ mod tests {
             registration_invite_required: v["registration_invite_required"]
                 .as_bool()
                 .expect("registration_invite_required must be a bool"),
+            srp_version: v["srp_version"].as_i64().expect("srp_version must be a number") as i16,
         }
     }
 
@@ -134,7 +146,7 @@ mod tests {
         let got = fetch_config().await;
         assert_eq!(
             got,
-            PublicConfig { app_url: None, registration_invite_required: false }
+            PublicConfig { app_url: None, registration_invite_required: false, srp_version: SRP_VERSION_CURRENT }
         );
 
         // Set ⇒ both flip, and the code itself is NOT in the body.

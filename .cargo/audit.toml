@@ -4,12 +4,18 @@
 
 [advisories]
 ignore = [
-    # RUSTSEC-2023-0071 — "Marvin Attack": timing sidechannel in the `rsa` crate.
-    # Pulled in transitively by `jsonwebtoken`, which supports RSA-signed JWTs.
-    # This service signs and verifies JWTs with HS256 (HMAC-SHA256) ONLY and never
-    # performs any RSA private-key operation, so the vulnerable code path is never
-    # reached. No fixed `rsa` release exists upstream. Re-evaluate immediately if we
-    # ever adopt RS256/RS384/RS512 tokens.
+    # RUSTSEC-2023-0071 — "Marvin Attack": timing sidechannel in the `rsa` crate,
+    # pulled in by `jsonwebtoken`. User-facing tokens are HS256 and never touch it.
+    # ONE RSA private-key operation DOES happen: with FCM wake configured
+    # (FCM_PROJECT_ID + FCM_SERVICE_ACCOUNT_FILE), src/wake/fcm.rs signs an RS256
+    # service-account assertion on every OAuth token refresh (~hourly). Marvin
+    # needs an attacker who can submit chosen inputs and time the private-key
+    # operation; here the message is built by this process from fixed claims and
+    # the current time, the only party that ever sees the signature is Google,
+    # and no network peer can trigger or time the signing. Judged unreachable on
+    # that basis, not on "no RSA at all". No fixed `rsa` release exists upstream.
+    # Re-evaluate if any RSA private-key operation is ever driven by
+    # client-supplied input.
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2026-0258 - "h2 unbounded empty DATA frames" (DoS), h2 0.3.27,

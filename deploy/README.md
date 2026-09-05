@@ -398,7 +398,9 @@ deploy/ops/check-versions.sh                             # every surface, every 
 ```
 
 Order: **clients before the backend**, unless a client needs a server change
-to exist first. Each subcommand uploads to **every** host in `hosts.conf`,
+to exist first. 0.9.3 is one such release: ship the backend first — a current
+client refuses to write credentials to an older server, and the older client
+keeps working against the new one. Each subcommand uploads to **every** host in `hosts.conf`,
 verifies over that host's own loopback, publishes each artifact's SHA-256 in
 `SHA256SUMS.txt` (the installers are not code-signed — the checksum is what
 users compare; the page tells them how), ships the download page with the

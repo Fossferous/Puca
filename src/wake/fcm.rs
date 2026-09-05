@@ -222,13 +222,14 @@ mod tests {
     /// Throwaway keypair per run — a committed private key is a private key,
     /// test or not.
     fn test_account() -> ServiceAccount {
-        let out = std::process::Command::new("openssl")
-            .args(["genrsa", "2048"])
-            .output()
-            .expect("openssl genrsa");
+        // Minted here, not by shelling out to openssl: the test must not
+        // depend on a binary being on PATH, and the `rsa` dev-dependency
+        // exists for exactly this.
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+        let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("rsa keygen");
         ServiceAccount {
             client_email: "svc@example.iam.gserviceaccount.com".into(),
-            private_key: String::from_utf8(out.stdout).unwrap(),
+            private_key: key.to_pkcs8_pem(LineEnding::LF).expect("pkcs8 pem").to_string(),
             token_uri: default_token_uri(),
         }
     }

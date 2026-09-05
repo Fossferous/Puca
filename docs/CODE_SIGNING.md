@@ -43,7 +43,7 @@ AZURE_CODESIGNING_DLIB=C:\path\to\Azure.CodeSigning.Dlib.dll
 ```
 
 Either way: `AUTHENTICODE_TIMESTAMP_URL` (default `http://timestamp.digicert.com`)
-and `SIGNTOOL_PATH` (otherwise the newest Windows Kits `signtool.exe` is used).
+and `SIGNTOOL_PATH` (otherwise a `signtool.exe` on PATH, else the newest Windows Kits one).
 
 ## Checking it worked
 

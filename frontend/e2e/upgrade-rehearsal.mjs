@@ -424,6 +424,22 @@ try {
     check('...and new v4 messages arrive live on the new device', await appears(B3.page, 'alice v4 second', 15000));
     check('...still v4', lastDmVersion() === '4');
 
+    // ---- The server lists a "session" of its own for bob (review C0). Its key
+    // carries a signature the account never made, so alice must wrap to every
+    // legitimate key and NOT to this one — and stay on v4.
+    console.log('\n=== a session key the server made up');
+    const attackerKey = 'x25519:' + Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 255)).toString('base64');
+    const bogusSig = Buffer.alloc(64, 7).toString('base64');
+    sql(`INSERT INTO token_sessions (sid, user_id, dm_pubkey, dm_pubkey_sig, reads_up_to) VALUES ('attacker-${Date.now().toString(36)}', ${userId(BOB)}, '${attackerKey}', '${bogusSig}', 4)`);
+    await pause(31_000); // past alice's key cache
+    await openDm(A2.page, BOB);
+    await sendHere(A2.page, 'alice after the server listed a fake session');
+    check('...the message is still v4', lastDmVersion() === '4', lastDmVersion());
+    const wrapsTo = sql(`SELECT string_agg(w->>'to', ' ') FROM dm_messages, jsonb_array_elements(content::jsonb->'w') w WHERE id = (SELECT id FROM dm_messages ORDER BY created_at DESC LIMIT 1)`);
+    check('SIGNED KEYS: the made-up session is NOT among the wrap targets', !wrapsTo.includes(attackerKey), `targets: ${wrapsTo.split(' ').length}`);
+    check('...and bob still reads it on his live device', await appears(B3.page, 'alice after the server listed a fake session', 15000));
+    sql(`DELETE FROM token_sessions WHERE sid LIKE 'attacker-%'`);
+
     // ================================================================ SEC-04
     console.log('\n=== a plaintext row inserted server-side');
     sql(`INSERT INTO dm_messages (id, conversation_id, sender_id, content, created_at) VALUES (gen_random_uuid()::text, '${conv.id}', ${userId(ALICE)}, 'this was never sealed', NOW())`);

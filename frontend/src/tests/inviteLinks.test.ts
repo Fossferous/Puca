@@ -72,17 +72,20 @@ describe('pending invite stash', () => {
 describe('GET /config parsing', () => {
     it('normalises a good answer and refuses non-http URLs', () => {
         expect(parsePublicConfig({ app_url: 'https://app.example.org/', registration_invite_required: true }))
-            .toEqual({ appUrl: 'https://app.example.org', registrationInviteRequired: true });
+            .toEqual({ appUrl: 'https://app.example.org', registrationInviteRequired: true, srpVersion: null });
         expect(parsePublicConfig({ app_url: 'app.example.org', registration_invite_required: false }))
-            .toEqual({ appUrl: null, registrationInviteRequired: false });
+            .toEqual({ appUrl: null, registrationInviteRequired: false, srpVersion: null });
         expect(parsePublicConfig({ app_url: null, registration_invite_required: false }))
-            .toEqual({ appUrl: null, registrationInviteRequired: false });
+            .toEqual({ appUrl: null, registrationInviteRequired: false, srpVersion: null });
     });
 
     it('is "unknown" (null gate) for garbage, so the sign-up form fails closed', () => {
-        expect(parsePublicConfig('<html>')).toEqual({ appUrl: null, registrationInviteRequired: null });
-        expect(parsePublicConfig({})).toEqual({ appUrl: null, registrationInviteRequired: null });
+        expect(parsePublicConfig('<html>')).toEqual({ appUrl: null, registrationInviteRequired: null, srpVersion: null });
+        expect(parsePublicConfig({})).toEqual({ appUrl: null, registrationInviteRequired: null, srpVersion: null });
         expect(parsePublicConfig({ registration_invite_required: 'yes' }).registrationInviteRequired).toBeNull();
+        // The verifier-version announcement (0.9.3): an integer, else unknown.
+        expect(parsePublicConfig({ srp_version: 2 }).srpVersion).toBe(2);
+        expect(parsePublicConfig({ srp_version: '2' }).srpVersion).toBeNull();
     });
 
     it('fetches /config once and caches; a 404 from an old server is "unknown", not a throw', async () => {
@@ -90,7 +93,7 @@ describe('GET /config parsing', () => {
         const fetchMock = vi.fn(async () => new Response('not found', { status: 404 }));
         vi.stubGlobal('fetch', fetchMock);
         const a = await fetchPublicConfig();
-        expect(a).toEqual({ appUrl: null, registrationInviteRequired: null });
+        expect(a).toEqual({ appUrl: null, registrationInviteRequired: null, srpVersion: null });
         expect(fetchMock).toHaveBeenCalledTimes(1);
         expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/config$/);
 

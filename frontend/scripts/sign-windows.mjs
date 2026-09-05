@@ -25,9 +25,9 @@
  *     AZURE_CODESIGNING_DLIB=C:\path\to\Azure.CodeSigning.Dlib.dll
  *   Either way:
  *     AUTHENTICODE_TIMESTAMP_URL   (default http://timestamp.digicert.com)
- *     SIGNTOOL_PATH                (else the newest Windows Kits signtool is found)
+ *     SIGNTOOL_PATH                (else a signtool.exe on PATH, else the newest Windows Kits one)
  *
- * Usage (what Tauri runs):  node scripts/sign-windows.mjs "<file>"
+ * Usage (what Tauri runs):  node scripts/sign-windows.mjs <file>   (no quotes: Tauri splits on spaces, no shell)
  * Also importable: signFile(path) -> true if signed, false if not configured.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -74,12 +74,14 @@ export function signingConfig(env = process.env) {
  * is signed.
  */
 export function signFile(filePath, env = process.env) {
-    if (!existsSync(filePath)) throw new Error(`[sign-windows] no such file: ${filePath}`);
     const cfg = signingConfig(env);
     if (!cfg) {
+        // Nothing configured: the unsigned build of today, and nothing about
+        // the path may make this branch fail — it runs on every Windows build.
         console.log(`[sign-windows] no signing configured; ${filePath} stays unsigned`);
         return false;
     }
+    if (!existsSync(filePath)) throw new Error(`[sign-windows] no such file: ${filePath}`);
     if (process.platform !== 'win32') throw new Error('[sign-windows] Authenticode signing runs on Windows (signtool); cross-signing is not set up');
     const signtool = findSigntool();
     if (!signtool) throw new Error('[sign-windows] signing is configured but signtool.exe was not found (install the Windows SDK or set SIGNTOOL_PATH)');
@@ -113,9 +115,13 @@ export function signFile(filePath, env = process.env) {
     }
 }
 
-// CLI: what Tauri's signCommand runs.
+// CLI: what Tauri's signCommand runs. Tauri splits the string form of
+// signCommand on spaces and passes each token as a raw argv element — no
+// shell, so quotes in the config arrive as literal characters. The config
+// carries none, and a matched pair is stripped here anyway so a quoted path
+// can never turn into "no such file".
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-    const files = process.argv.slice(2);
+    const files = process.argv.slice(2).map(f => f.replace(/^"(.*)"$/, '$1'));
     if (files.length === 0) {
         console.error('usage: node scripts/sign-windows.mjs <file> [<file>...]');
         process.exit(2);

@@ -47,6 +47,10 @@ pub struct WrapMaterial {
     pub history_pubkey: Option<String>,
     #[serde(default)]
     pub history_wrapped_rc: Option<String>,
+    /// Signature over dmKeyRecord('history', user, history_pubkey) by the
+    /// account signing key; required with history_pubkey.
+    #[serde(default)]
+    pub history_pubkey_sig: Option<String>,
 }
 
 /// Body for POST /keys/rewrap-pw — a password-only wrap refresh (used to raise
@@ -118,6 +122,8 @@ pub struct RecoveryResetRequest {
     pub new_history_pubkey: Option<String>,
     #[serde(default)]
     pub new_history_wrapped_rc: Option<String>,
+    #[serde(default)]
+    pub new_history_pubkey_sig: Option<String>,
     pub new_seed_wrapped_rc: Option<String>,
 }
 
@@ -234,7 +240,7 @@ pub async fn set_wrap_material(
     if let Err(msg) = validate_pw_kdf_iterations(m.pw_kdf_iterations) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
-    if let Err(msg) = crate::handlers::validate_history_key_pair(&m.history_pubkey, &m.history_wrapped_rc) {
+    if let Err(msg) = crate::handlers::validate_history_key_pair(&m.history_pubkey, &m.history_wrapped_rc, &m.history_pubkey_sig) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     // A new recovery code replaces the ONLY wrap of the history key. A client
@@ -257,7 +263,8 @@ pub async fn set_wrap_material(
     let result = sqlx::query(
         "UPDATE users SET key_version = 3, wrap_salt = $1, recovery_salt = $2, \
          seed_wrapped_pw = $3, seed_wrapped_rc = $4, pw_kdf_iterations = $5, pw_kdf = $6, \
-         history_pubkey = COALESCE($8, history_pubkey), history_wrapped_rc = COALESCE($9, history_wrapped_rc) \
+         history_pubkey = COALESCE($8, history_pubkey), history_wrapped_rc = COALESCE($9, history_wrapped_rc), \
+         history_pubkey_sig = COALESCE($10, history_pubkey_sig) \
          WHERE id = $7",
     )
     .bind(&m.wrap_salt)
@@ -269,6 +276,7 @@ pub async fn set_wrap_material(
     .bind(claims.sub as i32)
     .bind(&m.history_pubkey)
     .bind(&m.history_wrapped_rc)
+    .bind(&m.history_pubkey_sig)
     .execute(&state.pool)
     .await;
 
@@ -657,7 +665,7 @@ pub async fn recovery_reset(
     // it from the UPDATE itself cannot fail independently — a separate lookup
     // could error after a successful reset and silently skip the eviction.
     // users.id is SERIAL, so the decode is i32.
-    if let Err(msg) = crate::handlers::validate_history_key_pair(&req.new_history_pubkey, &req.new_history_wrapped_rc) {
+    if let Err(msg) = crate::handlers::validate_history_key_pair(&req.new_history_pubkey, &req.new_history_wrapped_rc, &req.new_history_pubkey_sig) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     if req.new_recovery_salt.is_some() && req.new_history_wrapped_rc.is_none() {
@@ -683,6 +691,7 @@ pub async fn recovery_reset(
                 "UPDATE users SET salt = $1, verifier = $2, wrap_salt = $3, seed_wrapped_pw = $4, \
              recovery_salt = $5, seed_wrapped_rc = $6, pw_kdf_iterations = $7, pw_kdf = $8, srp_version = $9, \
              history_pubkey = COALESCE($11, history_pubkey), history_wrapped_rc = COALESCE($12, history_wrapped_rc), \
+             history_pubkey_sig = COALESCE($13, history_pubkey_sig), \
              force_password_reset = FALSE, token_version = token_version + 1 \
              WHERE id = $10 RETURNING id",
             )
@@ -698,6 +707,7 @@ pub async fn recovery_reset(
             .bind(account_id)
             .bind(&req.new_history_pubkey)
             .bind(&req.new_history_wrapped_rc)
+            .bind(&req.new_history_pubkey_sig)
             .fetch_optional(&state.pool)
             .await
         } else {

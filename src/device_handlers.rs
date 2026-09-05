@@ -1472,27 +1472,32 @@ pub struct SetSigningKeyRequest {
 
 /// PATCH /keys/signing — publish this account's Ed25519 signing public key.
 ///
-/// Same trust posture as users.public_key (the X25519 DM identity key): the
-/// server stores what the client says, peers TOFU-pin it and treat any later
-/// change as loud. Overwriting is allowed — an account recovery legitimately
-/// rotates the seed — and the pin on every peer is what surfaces a malicious
-/// flip, not a server-side freeze this server could bypass anyway.
+/// WRITE-ONCE for a bare bearer token since 0.9.3
+/// (handlers::record_account_sign_pub): the key derives from the seed, so
+/// every device of the account publishes the same value, and DM v4 session
+/// keys are verified against it — a stolen token must not be able to swap
+/// it. A session that has just proved the password may replace it (an owner
+/// recovering from a first write that was not theirs); peers accept the
+/// served key only through the pairwise attestation anyway.
 pub async fn set_signing_key(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<SetSigningKeyRequest>,
 ) -> Result<Json<RevokeResponse>, (StatusCode, String)> {
     check_len("account_sign_pub", &payload.account_sign_pub, MAX_FIELD_LEN)?;
-    if !payload.account_sign_pub.starts_with("ed25519:") {
-        return Err(bad("account_sign_pub must be ed25519:-prefixed"));
+    // The same shape rule the DM-key publish applies to this column.
+    if let Err(msg) = crate::handlers::validate_account_sign_pub(&payload.account_sign_pub) {
+        return Err(bad(msg));
     }
-    sqlx::query("UPDATE users SET account_sign_pub = $1 WHERE id = $2")
-        .bind(&payload.account_sign_pub)
-        .bind(claims.sub as i32)
-        .execute(&state.pool)
-        .await
-        .map_err(db_error)?;
-    Ok(Json(RevokeResponse { revoked: true }))
+    let may_replace = state.password_recently_proven(claims.sub, claims.sst);
+    match crate::handlers::record_account_sign_pub(&state.pool, claims.sub as i32, &payload.account_sign_pub, may_replace).await {
+        Ok(true) => Ok(Json(RevokeResponse { revoked: true })),
+        Ok(false) => Err((
+            StatusCode::CONFLICT,
+            "this account already published a different signing key".to_string(),
+        )),
+        Err(e) => Err(db_error(e)),
+    }
 }
 
 #[derive(Debug, Serialize)]

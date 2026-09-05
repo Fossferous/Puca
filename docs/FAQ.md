@@ -32,8 +32,13 @@ a reader who does not trust the project.
 Because your password deliberately cannot unlock your message history any more.
 When you sign in on a new device with just the password, new direct messages
 arrive normally; older ones show as locked until you enter the 12-word recovery
-code on that device — once, and it stays there. Entering it is what proves you
-are you and not someone who cracked the password against a copy of the server.
+code on that device. It stays there until you sign out of that device (signing
+out removes it, and you will be asked for the code again). Entering it is what
+proves you are you and not someone who cracked the password against a copy of
+the server. The server cannot quietly add itself as a reader either: every key
+a message is sealed to is signed by the account it belongs to, that signing
+key is vouched for between the two of you in a form the server cannot forge,
+and the app checks both before using any key.
 If you never saved your code, generate a new one in **Settings → My Account** on
 a device that already has your history unlocked (the app refuses to let a device
 that does not hold the history key retire the old code, because that would lock

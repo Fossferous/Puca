@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import {
-    makeIdentity, generateIdentitySeed, generateX25519Keypair, keypairFromPrivate,
+    makeIdentity, generateIdentitySeed, generateX25519Keypair, keypairFromPrivate, deriveAccountSigningKey,
+    dmSignAttestRecord, dmSignAttestMac, dmSignAttestMatches,
     sealDmEnvelopeV4, openDmEnvelopeV4, serializeEnvelope, parseEnvelopeEx, isEncrypted,
     wrapKeyUnderRecovery, unwrapKeyUnderRecovery, generateRecoveryCode,
     markUnexpectedPlaintext, liveEncState, messageEncState,
     MAX_READABLE_ENVELOPE_VERSION, type Envelope, type DmContext,
 } from '../api/e2ee';
-import { v4Eligible, v4Targets, type DmKeyInfo } from '../api/dmKeys';
+import { v4Eligible, v4Targets, verifyDmKeyInfo, signDmKey, dmKeyRecord, type DmKeyInfo, type RawDmKeyInfo } from '../api/dmKeys';
 import { ENC_HISTORY_LOCKED, isUndecryptable } from '../api/decryptMarkers';
 
 /**
@@ -133,21 +134,21 @@ describe('the history key under the recovery code', () => {
 });
 
 describe('v4Eligible — the rollout gate (pure)', () => {
-    const on: DmKeyInfo = { history_pubkey: 'x25519:AAAA', sessions: ['x25519:s1'], all_sessions_v4: true };
+    const on: DmKeyInfo = { history_pubkey: 'x25519:AAAA', sessions: ['x25519:s1'], all_sessions_v4: true, rejected: 0 };
     it('needs a history key, at least one recent session, and every recent session on v4 — on BOTH sides', () => {
         expect(v4Eligible(on, on)).toBe(true);
         expect(v4Eligible({ ...on, history_pubkey: null }, on)).toBe(false);
         expect(v4Eligible(on, { ...on, history_pubkey: null })).toBe(false);
         // one 0.9.2 client on either side (no key, no reads_up_to) keeps v3
-        expect(v4Eligible({ ...on, all_sessions_v4: false }, on)).toBe(false);
-        expect(v4Eligible(on, { ...on, all_sessions_v4: false })).toBe(false);
+        expect(v4Eligible({ ...on, all_sessions_v4: false, rejected: 0 }, on)).toBe(false);
+        expect(v4Eligible(on, { ...on, all_sessions_v4: false, rejected: 0 })).toBe(false);
         // an account nobody has opened recently gets v3, so its owner can read
         // what arrived with only a password
-        expect(v4Eligible({ ...on, sessions: [], all_sessions_v4: false }, on)).toBe(false);
+        expect(v4Eligible({ ...on, sessions: [], all_sessions_v4: false, rejected: 0 }, on)).toBe(false);
     });
     it('targets are both sides’ sessions plus both history keys, de-duplicated', () => {
-        const mine: DmKeyInfo = { history_pubkey: 'x25519:HM', sessions: ['x25519:m1', 'x25519:m2'], all_sessions_v4: true };
-        const theirs: DmKeyInfo = { history_pubkey: 'x25519:HT', sessions: ['x25519:t1', 'x25519:m1'], all_sessions_v4: true };
+        const mine: DmKeyInfo = { history_pubkey: 'x25519:HM', sessions: ['x25519:m1', 'x25519:m2'], all_sessions_v4: true, rejected: 0 };
+        const theirs: DmKeyInfo = { history_pubkey: 'x25519:HT', sessions: ['x25519:t1', 'x25519:m1'], all_sessions_v4: true, rejected: 0 };
         expect(v4Targets(theirs, mine).sort()).toEqual(['x25519:HM', 'x25519:HT', 'x25519:m1', 'x25519:m2', 'x25519:t1']);
     });
 });
@@ -180,5 +181,96 @@ describe('SEC-04: plaintext after encryption is "unexpected", not "legacy"', () 
         expect(liveEncState('plain text', 'plain text', true)).toBe('unexpected');
         expect(liveEncState('plain text', 'plain text', false)).toBe('legacy');
         expect(liveEncState('{"v":3,"t":"dm","ct":"AAAA"}', 'hi', true)).toBe('secure');
+    });
+});
+
+describe('the served key list is data, not truth: every entry must verify under the account signing key', () => {
+    const owner = deriveAccountSigningKey(makeIdentity(generateIdentitySeed()));
+    const stranger = deriveAccountSigningKey(makeIdentity(generateIdentitySeed()));
+    const s1 = generateX25519Keypair().publicKeyEncoded;
+    const s2 = generateX25519Keypair().publicKeyEncoded;
+    const h = generateX25519Keypair().publicKeyEncoded;
+    const signed = (kind: 'session' | 'history', key: string, by = owner) => ({ key, sig: signDmKey(kind, key, by) });
+
+    it('keys the account signed are wrap targets; nothing is rejected', () => {
+        const raw: RawDmKeyInfo = { account_sign_pub: owner.publicKeyEncoded, history: signed('history', h), sessions: [signed('session', s1), signed('session', s2)], all_sessions_v4: true };
+        const info = verifyDmKeyInfo(raw, owner.publicKeyEncoded);
+        expect(info).toEqual({ history_pubkey: h, sessions: [s1, s2], all_sessions_v4: true, rejected: 0 });
+        expect(v4Targets(info, info).sort()).toEqual([h, s1, s2].sort());
+    });
+
+    it('a "session" the server appended with no signature is never wrapped to (C0)', () => {
+        const attacker = generateX25519Keypair().publicKeyEncoded;
+        const raw: RawDmKeyInfo = { history: signed('history', h), sessions: [signed('session', s1), { key: attacker, sig: 'AAAA' }, { key: attacker }], all_sessions_v4: true };
+        const info = verifyDmKeyInfo(raw, owner.publicKeyEncoded);
+        expect(info.sessions).toEqual([s1]);
+        expect(info.rejected).toBe(2);
+        expect(v4Targets(info, info)).not.toContain(attacker);
+    });
+
+    it('a key signed by a DIFFERENT account is rejected — a signature is only as good as the pinned signer', () => {
+        const raw: RawDmKeyInfo = { history: signed('history', h, stranger), sessions: [signed('session', s1, stranger), signed('session', s2)], all_sessions_v4: true };
+        const info = verifyDmKeyInfo(raw, owner.publicKeyEncoded);
+        expect(info.sessions).toEqual([s2]);
+        expect(info.history_pubkey).toBeNull();
+        expect(info.rejected).toBe(2);
+    });
+
+    it('a history-key signature cannot be presented as a session-key one (the role is in the record)', () => {
+        const raw: RawDmKeyInfo = { sessions: [{ key: h, sig: signDmKey('history', h, owner) }], all_sessions_v4: true };
+        expect(verifyDmKeyInfo(raw, owner.publicKeyEncoded).sessions).toEqual([]);
+        expect(dmKeyRecord('session', h)).not.toBe(dmKeyRecord('history', h));
+    });
+
+    it('with no trusted signing key (missing, or a pin conflict) NOTHING verifies and v4 is off', () => {
+        const raw: RawDmKeyInfo = { history: signed('history', h), sessions: [signed('session', s1)], all_sessions_v4: true };
+        const info = verifyDmKeyInfo(raw, null);
+        expect(info).toEqual({ history_pubkey: null, sessions: [], all_sessions_v4: false, rejected: 2 });
+        expect(v4Eligible(info, info)).toBe(false);
+    });
+
+    it('a tampered key under a genuine signature fails, and so does a malformed key', () => {
+        const other = generateX25519Keypair().publicKeyEncoded;
+        const raw: RawDmKeyInfo = { sessions: [{ key: other, sig: signDmKey('session', s1, owner) }, { key: 'not-a-key', sig: signDmKey('session', 'not-a-key', owner) }], all_sessions_v4: true };
+        const info = verifyDmKeyInfo(raw, owner.publicKeyEncoded);
+        expect(info.sessions).toEqual([]);
+        expect(info.rejected).toBe(2);
+    });
+});
+
+describe('the signing key is vouched for under the pairwise identity secret, not on sight', () => {
+    const a = makeIdentity(generateIdentitySeed());
+    const b = makeIdentity(generateIdentitySeed());
+    const mallory = makeIdentity(generateIdentitySeed());
+    const bSign = deriveAccountSigningKey(b).publicKeyEncoded;
+
+    it('what bob publishes for alice is exactly what alice recomputes from bob’s pinned identity key', () => {
+        const record = dmSignAttestRecord(2, 1, bSign);
+        const mac = dmSignAttestMac(b, a.publicKeyEncoded, record);
+        expect(mac).toMatch(/^[A-Za-z0-9+/=]{40,}$/);
+        expect(dmSignAttestMatches(a, b.publicKeyEncoded, record, mac)).toBe(true);
+    });
+
+    it('a server that substitutes the signing key cannot produce the attestation (no identity private key)', () => {
+        const attackerSign = deriveAccountSigningKey(mallory).publicKeyEncoded;
+        const record = dmSignAttestRecord(2, 1, attackerSign);
+        // The best a server can do is sign with a key IT holds — not bob’s or alice’s identity.
+        const forged = dmSignAttestMac(mallory, a.publicKeyEncoded, record);
+        expect(dmSignAttestMatches(a, b.publicKeyEncoded, record, forged)).toBe(false);
+        // …or replay bob’s genuine attestation of his REAL key against the substituted one.
+        const genuine = dmSignAttestMac(b, a.publicKeyEncoded, dmSignAttestRecord(2, 1, bSign));
+        expect(dmSignAttestMatches(a, b.publicKeyEncoded, record, genuine)).toBe(false);
+    });
+
+    it('an attestation is bound to the pair and direction; it neither transfers to a third user nor reverses', () => {
+        const record = dmSignAttestRecord(2, 1, bSign);
+        const mac = dmSignAttestMac(b, a.publicKeyEncoded, record);
+        expect(dmSignAttestMatches(mallory, b.publicKeyEncoded, record, mac)).toBe(false);
+        expect(dmSignAttestMatches(a, b.publicKeyEncoded, dmSignAttestRecord(1, 2, bSign), mac)).toBe(false);
+        expect(dmSignAttestMatches(a, b.publicKeyEncoded, record, null)).toBe(false);
+        expect(dmSignAttestMatches(a, b.publicKeyEncoded, record, 'not base64!!')).toBe(false);
+        expect(dmSignAttestMac(b, 'garbage', record)).toBeNull();
+        expect(dmSignAttestMac(b, 'x25519:AAAA', record)).toBeNull(); // wrong length
+        expect(dmSignAttestMac(b, 'x25519:' + btoa(String.fromCharCode(...new Uint8Array(32))), record)).toBeNull(); // low-order point
     });
 });

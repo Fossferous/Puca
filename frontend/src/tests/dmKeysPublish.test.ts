@@ -17,13 +17,16 @@ vi.mock('../api/client', () => ({
     },
 }));
 
-import { wireSessionDmKeyPublish, currentSessionId } from '../api/dmKeys';
+import { wireSessionDmKeyPublish, currentSessionId, dmKeyRecord, storePendingHistoryKey, adoptPendingHistoryKey, getHistoryKey } from '../api/dmKeys';
+import { setActiveIdentity, clearActiveIdentity, makeIdentity, generateIdentitySeed, deriveAccountSigningKey, verifyWithAccountKey } from '../api/e2ee';
 import { MAX_READABLE_ENVELOPE_VERSION } from '../api/e2ee';
 
 // The global setup replaces localStorage with inert vi.fn()s; back them with a
 // real store so the token and the minted key actually persist between calls.
 const store = new Map<string, string>();
+const identity = makeIdentity(generateIdentitySeed());
 beforeAll(() => {
+    setActiveIdentity(identity); // the key is signed with the account signing key derived from it
     (localStorage.getItem as Mock).mockImplementation((k: string) => store.get(k) ?? null);
     (localStorage.setItem as Mock).mockImplementation((k: string, v: string) => { store.set(k, String(v)); });
     (localStorage.removeItem as Mock).mockImplementation((k: string) => { store.delete(k); });
@@ -46,10 +49,14 @@ describe('the session DM key is published on socket open', () => {
         wireSessionDmKeyPublish();
         await open();
         expect(patch).toHaveBeenCalledTimes(1);
-        const [url, body] = patch.mock.calls[0] as [string, { dm_pubkey: string; reads_up_to: number }];
+        const [url, body] = patch.mock.calls[0] as [string, { dm_pubkey: string; dm_pubkey_sig: string; account_sign_pub: string; reads_up_to: number }];
         expect(url).toBe('/keys/session-dm');
         expect(body.reads_up_to).toBe(MAX_READABLE_ENVELOPE_VERSION);
         expect(body.dm_pubkey.length).toBeGreaterThan(30);
+        // Signed by the account signing key, and the key it names is the one derived here.
+        const signer = deriveAccountSigningKey(identity);
+        expect(body.account_sign_pub).toBe(signer.publicKeyEncoded);
+        expect(verifyWithAccountKey(signer.publicKeyEncoded, dmKeyRecord('session', body.dm_pubkey), body.dm_pubkey_sig)).toBe(true);
     });
 
     it('a reconnect of the same session is free', async () => {
@@ -89,5 +96,40 @@ describe('the session DM key is published on socket open', () => {
         expect(patch.mock.calls.length).toBe(before + 2);
         await open();
         expect(patch.mock.calls.length).toBe(before + 2);
+    });
+});
+
+describe('without an unlocked identity nothing is published', () => {
+    it('waits for the next open instead of publishing an unsigned key', async () => {
+        const before = patch.mock.calls.length;
+        clearActiveIdentity();
+        localStorage.setItem('auth_token', tokenWith({ sub: 1, sid: 'sid-four' }));
+        await open();
+        expect(patch.mock.calls.length).toBe(before);
+        setActiveIdentity(identity);
+        await open();
+        expect(patch.mock.calls.length).toBe(before + 1);
+    });
+});
+
+describe('the history key minted at registration reaches the account that registered (re-review C1)', () => {
+    it('is parked under the username, adopted by that username’s sign-in, and never by another account', () => {
+        const priv = new Uint8Array(32).fill(9);
+        localStorage.removeItem('auth_token');
+        storePendingHistoryKey('Erin', priv);
+        expect(getHistoryKey()).toBeNull(); // no account yet: nothing is scoped
+        // Some other account signs in on this machine first: it must not inherit Erin's key.
+        localStorage.setItem('auth_token', tokenWith({ sub: 7, sid: 'sid-other' }));
+        adoptPendingHistoryKey('frank');
+        expect(getHistoryKey()).toBeNull();
+        // Erin signs in: the parked key becomes hers, under her account id.
+        localStorage.setItem('auth_token', tokenWith({ sub: 3, sid: 'sid-erin' }));
+        adoptPendingHistoryKey('erin');
+        expect(getHistoryKey()?.privateKey).toEqual(priv);
+        // …and the parking slot is gone, so a later sign-in of anyone finds nothing there.
+        localStorage.setItem('auth_token', tokenWith({ sub: 7, sid: 'sid-other-2' }));
+        expect(getHistoryKey()).toBeNull();
+        adoptPendingHistoryKey('erin');
+        expect(getHistoryKey()).toBeNull();
     });
 });

@@ -16,13 +16,25 @@ one-line summary; this file is the full story. Versions follow
   whose private half is wrapped under your 12-word recovery code and nothing
   else. A cracked password reads none of them. On a new device, new messages
   arrive as usual; older ones show as locked until you enter the recovery code
-  there, once. **Accounts from before this release turn it on by generating a
+  there — it stays until that device signs out. **Accounts from before this release turn it on by generating a
   new recovery code in Settings → My Account**; a conversation switches only
   when both people have, and every device either of you has used in the last
   two weeks can read the new format — nothing you have installed is sent a
   message it cannot open. Messages from before the switch stay as they were.
   This is not per-message forward secrecy; the security model says exactly
   what it is.
+- **The server cannot add itself as a reader of those messages.** Every key a
+  message is sealed to — each device's session key and the account's history
+  key — is signed by the account, and a sender checks each signature before
+  using it. The signing key itself is vouched for to each contact under the
+  two identity keys already pinned between them (the ones the safety number
+  covers), in a form the server cannot compute. A key the server lists on
+  its own is ignored; a signing key it substitutes fails that check and the
+  conversation stays as it was. Published keys are write-once, so a stolen
+  session token cannot replace them.
+- **Sign-in timing no longer depends on your password.** The secret exponents
+  in the SRP exchange go through a fixed-width Montgomery ladder with exponent
+  blinding.
 - **A message that was never encrypted, in a conversation that is, is now
   labelled as such.** Every plaintext row already carried a "Not encrypted"
   tag. One that arrives *after* the conversation was carrying sealed messages
@@ -67,6 +79,13 @@ one-line summary; this file is the full story. Versions follow
   stands.
 
 ### Changed
+- The Lite build's description now says what it is: it cannot be remotely
+  controlled (no host agent is installed), but it is not a build with the
+  screen-capture code compiled out — no build that can share a screen could
+  be. The README, the FAQ and the installer text were corrected.
+- A new FAQ (`docs/FAQ.md`) says what works on each platform, and the security
+  model now says that the client — not the server — is what marks a message
+  that was never encrypted.
 - **Opening a voice channel no longer drops you into a silent call.** On a
   browser that cannot end-to-end encrypt live media (Firefox, Safari, iOS) with
   “Require encryption for calls” on — the default — the app used to auto-join
@@ -83,6 +102,18 @@ one-line summary; this file is the full story. Versions follow
 - **Updating part of your profile no longer fails.** Changing, say, your bio
   without also changing your status hit a bad SQL placeholder and returned an
   error; the query is now built from the fields actually present.
+
+### Upgrading
+- **Update the server first, then the clients.** A current client refuses to
+  create an account or change a password against a server older than this
+  release: that server could not record which derivation produced the
+  verifier, and the account would never sign in again. An older client keeps
+  working against the new server — it signs in, reads and sends — as rehearsed
+  with a real 0.9.2 client against this backend.
+- If you have enrolled a computer as a remote-control host, its background
+  service holds sessions of its own. Sessions it created before this update
+  count as "recent" for up to two weeks, so forward-secret DMs to and from
+  that account may start up to two weeks after the update rather than at once.
 
 ## 0.9.2 — 2026-09-03
 

@@ -340,7 +340,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     // Regenerate recovery code: armed ⇒ the password field + warning show.
     const [rcArmed, setRcArmed] = useState(false);
     // Forward-secret DMs (v4): does this account have a history key, and does
-    // THIS device hold it? Read once per open; the unlock form updates it.
+    // THIS device hold it? Re-read every time the modal OPENS — it stays
+    // mounted for the whole session, so a mount-time read would keep saying
+    // "not set up" after the user did exactly what the card asked (review,
+    // C5/C7). The regenerate and unlock handlers update it too.
     const [fsAccount, setFsAccount] = useState<'unknown' | 'off' | 'on'>('unknown');
     const [fsDevice, setFsDevice] = useState<boolean>(() => getHistoryKey() !== null);
     const [fsCode, setFsCode] = useState('');
@@ -348,12 +351,14 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const [fsStatus, setFsStatus] = useState<'idle' | 'working' | 'error'>('idle');
     const [fsError, setFsError] = useState('');
     useEffect(() => {
+        if (!isOpen) return;
         let cancelled = false;
+        setFsDevice(getHistoryKey() !== null);
         apiClient.get('/keys/wrap')
             .then((w: unknown) => { const r = w as { history_pubkey?: string | null }; if (!cancelled) setFsAccount(r.history_pubkey ? 'on' : 'off'); })
             .catch(() => { if (!cancelled) setFsAccount('unknown'); });
         return () => { cancelled = true; };
-    }, []);
+    }, [isOpen]);
     const handleUnlockHistory = async (e: React.FormEvent) => {
         e.preventDefault();
         if (fsStatus === 'working' || !fsCode.trim()) return;
@@ -444,6 +449,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             // Shown by RecoveryCodeModal (mounted in the authed layout, above
             // this modal), acknowledge-gated like the first one.
             showRecoveryCode(code);
+            // Regeneration is what turns forward-secret DMs on for an older
+            // account, and this device now holds the history key.
+            setFsAccount('on');
+            setFsDevice(true);
             setRcArmed(false);
             setRcPassword('');
             setRcStatus('idle');

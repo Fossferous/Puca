@@ -85,7 +85,7 @@ import {
 } from '../api/dms';
 import { SecureSendError, liveEncState, type MessageEncState } from '../api/e2ee';
 import { ENC_HISTORY_LOCKED } from '../api/decryptMarkers';
-import { unlockHistoryWithRecoveryCode, type UnlockResult } from '../api/dmKeys';
+import { unlockHistoryWithRecoveryCode, ensureSignAttestation, type UnlockResult } from '../api/dmKeys';
 import { HomeSidebar } from './HomeSidebar';
 import { encryptAndUploadRef, parseEncAttachment } from '../api/attachments';
 import { FileTooLargeError, MAX_UPLOAD_BYTES, discardUpload } from '../api/uploads';
@@ -342,7 +342,7 @@ function HistoryLockBanner({ onUnlock }: { onUnlock: (code: string) => Promise<U
                 <span>
                     Some older messages here are locked on this device: they were sealed for your other
                     devices and for your recovery code, not for your password. Enter the 12-word code
-                    to read them here — it stays on this device.
+                    to read them here — it stays on this device until you sign out.
                 </span>
                 {!open ? (
                     <button type="button" className="secondary-btn" onClick={() => setOpen(true)}>Enter recovery code</button>
@@ -3278,6 +3278,9 @@ export function Chat({ onLogout }: ChatProps) {
         // Staleness guard: on a fast A→B switch, A's slower fetch must not
         // land its messages under B's header.
         openDMFetchRef.current = conversation.id;
+        // Vouch for this account's DM signing key to the other side (once per
+        // conversation per run) — what lets THEM send us v4 (dmKeys.ts).
+        void ensureSignAttestation(conversation.id, conversation.other_user_id);
         getDMMessages(conversation.id)
             .then(msgs => decryptDMMessages(msgs, conversation.other_user_id))
             .then(msgs => {
@@ -5103,11 +5106,15 @@ export function Chat({ onLogout }: ChatProps) {
                         currentDM ? (<>
                             {visibleDmMessages.some(m => m.content === ENC_HISTORY_LOCKED) && (
                                 <HistoryLockBanner onUnlock={async (code) => {
+                                    const conv = currentDM;
                                     const r = await unlockHistoryWithRecoveryCode(code);
                                     if (r === 'ok') {
-                                        // Re-read the conversation now that the history key is here.
-                                        const raw = await getDMMessages(currentDM.id);
-                                        setDmMessages(await decryptDMMessages(raw, currentDM.other_user_id));
+                                        // Re-read the conversation now that the history key is
+                                        // here — under the same staleness guard as the loader
+                                        // above: the user may have switched DMs meanwhile.
+                                        const raw = await getDMMessages(conv.id);
+                                        const msgs = await decryptDMMessages(raw, conv.other_user_id);
+                                        if (openDMFetchRef.current === conv.id) setDmMessages(msgs);
                                     }
                                     return r;
                                 }} />

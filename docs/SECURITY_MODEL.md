@@ -88,7 +88,10 @@ That matters most in §5.
 Yes, and the send path fails closed rather than falling back to plaintext.
 
 - **DMs:** X25519 ECDH → HKDF-SHA256 (`sovereign-dm-v2`) → AES-256-GCM with a fresh
-  12-byte random nonce ([`e2ee.ts:265`](../frontend/src/api/e2ee.ts#L265)).
+  12-byte random nonce (`sealDmEnvelope` in [`e2ee.ts`](../frontend/src/api/e2ee.ts)) —
+  and, since 0.9.3, once both sides can read it, the **v4 envelope** instead: a fresh
+  random key per message, wrapped to each side's signed session and history keys, so a
+  cracked password reads none of it (`sealDmEnvelopeV4`; §7 below).
 - **Channels:** a random 32-byte group key per epoch, wrapped per member client-side. The
   server stores only wrapped blobs and never holds an unwrapped channel key
   (`migrations/014_e2ee_channel_keys.sql`, `src/key_handlers.rs`).
@@ -397,6 +400,32 @@ direct message is sealed under a fresh random key, and that key is wrapped only 
 - each account's **history key** — its private half wrapped under the 12-word recovery
   code and under nothing else (`users.history_wrapped_rc`).
 
+**WHO VOUCHES FOR THOSE KEYS.** The server keeps the list of an account's keys; it does
+not get to write it. Every published key carries a signature by the account's Ed25519
+signing key (`users.account_sign_pub`, the key device enrolment already publishes;
+`dmKeys.ts` `dmKeyRecord`), over a record naming the key's role and value. A sender
+verifies each entry against that signing key and wraps to NOTHING that fails, so a server
+that lists an extra "session" of its own gets nothing (the review of 2026-09-05 found the
+first cut trusted that list, which would have let an operator read every v4 DM silently —
+fixed before release).
+
+And the signing key is not taken on sight either. Each account vouches for it to each
+contact **under the PAIRWISE IDENTITY SECRET**: an HMAC over the signing key, keyed by
+X25519 between the two identity keys — which only the two identity private keys can
+produce or check (`e2ee.ts` `dmSignAttestMac`, stored per conversation, published by a
+client whenever it opens the conversation). The sender recomputes it from the peer's
+*pinned* identity key — the one the safety number covers — and trusts the served signing
+key only when the two agree. A server that substitutes a signing key fails that check
+(the re-review of the first fix found that a bare trust-on-first-use pin on the signing key
+gave a hostile server one silent shot per conversation at upgrade time; this closed it),
+and the conversation simply stays on v3 — which those same pinned identity keys protect.
+The signing key and
+each session's key are write-once on the server for a bare bearer token, so a stolen
+token cannot replace them; a session that has just proved the password may replace the
+signing key, which is how an owner recovers from a first write that was not theirs. What a server CAN still do is hold a conversation on v3 — the rollout gate below
+is its word — or keep listing a session the owner revoked (revocation is the server's to
+honour); it cannot add a reader.
+
 None of those derive from the password. **A database copy plus a cracked password reads no
 v4 message.** What it does read: v2/v3 history (already stored, cannot be re-sealed
 without every device re-encrypting it — an optional later migration), and anything a
@@ -413,8 +442,9 @@ removed or re-pointed. Either party can compute it (no non-repudiation, as befor
 
 **What a user sees.** A device signed in with only the password receives new v4 messages
 normally (they are wrapped to its session key) and shows older v4 messages as locked until
-the recovery code is entered on that device — once, kept locally. Regenerating the recovery
-code re-wraps the history key under the new code; a client from before 0.9.3 is refused
+the recovery code is entered on that device — it then stays there until that device signs
+out (sign-out removes it; the code is asked for again). Regenerating the recovery code
+re-wraps the history key under the new code; a client from before 0.9.3 is refused
 that operation by the server, because a code that cannot open the history key would lock
 every v4 message for good. Accounts from before 0.9.3 have no history key until their
 owner regenerates the recovery code from a current client; until both sides of a
@@ -604,8 +634,10 @@ fail or take other people's history with it. Concretely
 (`delete_account`, `src/handlers.rs`), all inside one transaction:
 
 **Cleared on your row.** Username becomes `deleted#<id>`; display name, avatar,
-join/leave sounds, email, public key, both wrapped identity seeds and both KDF
-salts are nulled; the SRP salt and verifier are replaced with fresh RANDOM bytes
+join/leave sounds, email, public key, both wrapped identity seeds, both KDF
+salts, the DM history key (its public half, its recovery-code wrap and its signature)
+and the account signing key are nulled; every session row is revoked, which retires
+its DM session key; the SRP salt and verifier are replaced with fresh RANDOM bytes
 (not zeroes — a zero verifier is forgeable); `deleted_at` is set and
 `token_version` is bumped, which revokes every outstanding JWT. Every live
 socket for the account is hung up after the commit.

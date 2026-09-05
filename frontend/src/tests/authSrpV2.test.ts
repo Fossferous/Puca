@@ -37,6 +37,15 @@ vi.mock('../api/client', () => ({
     },
 }));
 
+// The WRITE paths (register, generateVerifierForReset) first ask /config
+// whether the server records srp_version at all; one that does not is refused
+// rather than handed an Argon2id verifier it would file as SHA-256 — the
+// account could never sign in again (auth.ts assertServerRecordsVerifierVersion).
+// The answer follows the fake server's legacy flag.
+vi.mock('../api/publicConfig', () => ({
+    fetchPublicConfig: async () => ({ appUrl: null, registrationInviteRequired: null, srpVersion: fakeServer.legacyServer ? null : 2 }),
+}));
+
 import { login, register, generateVerifierForReset, __testing as T } from '../api/auth';
 
 type Account = { salt: Uint8Array; v: bigint; srp_version: number };
@@ -183,6 +192,18 @@ describe('SRP verifier derivation (srp_version)', { timeout: 60_000 }, () => {
         const { salt, verifier, srp_version } = await generateVerifierForReset('Heidi', 'new-pass-word');
         expect(srp_version).toBe(2);
         expect(T.hexToBigInt(verifier)).toBe(T.computeVerifier(T.computeXv2(T.hexToBytes(salt), 'Heidi', 'new-pass-word')));
+    });
+
+    it('a server that cannot record the derivation is refused a verifier — nothing reaches it; a current server is accepted', async () => {
+        fakeServer.legacyServer = true;
+        await expect(register('ivan', 'ivan-pass-word')).rejects.toThrow(/needs to be updated/);
+        await expect(generateVerifierForReset('ivan', 'ivan-pass-word')).rejects.toThrow(/needs to be updated/);
+        expect(wire.posts.some(p => p.url === '/auth/register')).toBe(false);
+        // Positive control: the same calls succeed once the server announces the version.
+        fakeServer.legacyServer = false;
+        await register('ivan', 'ivan-pass-word');
+        expect(wire.posts.some(p => p.url === '/auth/register')).toBe(true);
+        await expect(generateVerifierForReset('ivan', 'ivan-pass-word')).resolves.toMatchObject({ srp_version: 2 });
     });
 });
 

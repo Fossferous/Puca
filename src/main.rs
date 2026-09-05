@@ -704,6 +704,10 @@ async fn main() -> anyhow::Result<()> {
             "/dms/:conversation_id/messages",
             post(dm_handlers::send_message),
         )
+        .route(
+            "/dms/:conversation_id/sign-attest",
+            patch(handlers::set_dm_sign_attestation),
+        )
         // Friend endpoints
         .route("/friends", get(friend_handlers::list_friends))
         .route(

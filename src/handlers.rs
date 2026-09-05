@@ -92,6 +92,15 @@ pub struct RegisterRequest {
     pub history_pubkey: Option<String>,
     #[serde(default)]
     pub history_wrapped_rc: Option<String>,
+    /// Signature over dmKeyRecord('history', history_pubkey) by the account
+    /// signing key; required with history_pubkey (see dmKeys.ts).
+    #[serde(default)]
+    pub history_pubkey_sig: Option<String>,
+    /// The account's Ed25519 signing key (`ed25519:` + base64), published at
+    /// registration so the first DM to this account can already verify its
+    /// session keys. Also published by PATCH /keys/signing and /keys/session-dm.
+    #[serde(default)]
+    pub account_sign_pub: Option<String>,
 }
 
 /// Constant-time byte-slice equality, so the registration code isn't matched
@@ -355,15 +364,21 @@ pub async fn register(
         && payload.seed_wrapped_rc.is_some();
     let key_version = if is_v3 { 3 } else { 2 };
     let srp_version: i16 = payload.srp_version.map(SrpVersion::get).unwrap_or(1);
-    if let Err(msg) = validate_history_key_pair(&payload.history_pubkey, &payload.history_wrapped_rc) {
+    if let Err(msg) = validate_history_key_pair(&payload.history_pubkey, &payload.history_wrapped_rc, &payload.history_pubkey_sig) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    if let Some(k) = &payload.account_sign_pub {
+        if let Err(msg) = validate_account_sign_pub(k) {
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
     }
 
     // Insert into database with public key + optional wrap material
     let result = sqlx::query(
         "INSERT INTO users (username, salt, verifier, public_key, key_version, \
-         wrap_salt, recovery_salt, seed_wrapped_pw, seed_wrapped_rc, pw_kdf_iterations, pw_kdf, srp_version, history_pubkey, history_wrapped_rc) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+         wrap_salt, recovery_salt, seed_wrapped_pw, seed_wrapped_rc, pw_kdf_iterations, pw_kdf, srp_version, \
+         history_pubkey, history_wrapped_rc, history_pubkey_sig, account_sign_pub) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(&payload.username)
     .bind(&salt)
@@ -379,6 +394,8 @@ pub async fn register(
     .bind(srp_version)
     .bind(&payload.history_pubkey)
     .bind(&payload.history_wrapped_rc)
+    .bind(&payload.history_pubkey_sig)
+    .bind(&payload.account_sign_pub)
     .execute(&state.pool)
     .await;
 
@@ -421,6 +438,8 @@ pub async fn login_step_1(
     // step-1 response is indistinguishable from a real account. `real_user`
     // gates the DB write below — no login_attempt is stored for the fake path, so
     // step-2 returns the same 401 a wrong password produces.
+    // Only an unknown name needs the population's answer; the count is cached.
+    let unknown_version = if user.is_none() { unknown_name_srp_version(&state.pool).await } else { 1 };
     let (salt, verifier, real_user, srp_version) = match user {
         Some((s, v, ver)) => (s, v, true, ver),
         None => (
@@ -437,16 +456,15 @@ pub async fn login_step_1(
                 256,
             ),
             false,
-            // An unknown name answers srp_version 1. When migration 059 lands
-            // every real account IS 1, and each becomes 2 only after its owner
-            // signs in with a current client — so 1 is what keeps an unknown
-            // name indistinguishable from the population through the rollout.
-            // What remains is inherent to a mixed population: a caller can
-            // tell "exists and has signed in recently" (2) from "unknown or
-            // dormant" (1). It shrinks as accounts migrate; once they have,
-            // flip this to 2 and the residual inverts to the smaller set,
-            // "exists and dormant".
-            1,
+            // An unknown name answers with whatever srp_version MOST real
+            // accounts have right now (unknown_name_srp_version): every real
+            // account is 1 when migration 059 lands, and each becomes 2 as
+            // its owner signs in from a current client, so a fixed answer
+            // would at some point single out either the migrated or the
+            // unmigrated. Tracking the majority keeps an unknown name inside
+            // the largest set at every stage; what a caller can still learn
+            // is only "this name is unknown OR in the majority".
+            unknown_version,
         ),
     };
 
@@ -1475,20 +1493,106 @@ pub async fn get_user_public_key(
 
 /// A history-key pair as a client submits it: both halves or neither, each of
 /// a size an honest client produces. The server stores them opaquely.
-pub fn validate_history_key_pair(pubkey: &Option<String>, wrapped: &Option<String>) -> Result<(), &'static str> {
-    match (pubkey, wrapped) {
-        (None, None) => Ok(()),
-        (Some(p), Some(w)) => {
+pub fn validate_history_key_pair(
+    pubkey: &Option<String>,
+    wrapped: &Option<String>,
+    sig: &Option<String>,
+) -> Result<(), &'static str> {
+    match (pubkey, wrapped, sig) {
+        (None, None, None) => Ok(()),
+        (Some(p), Some(w), Some(g)) => {
             if p.len() < 8 || p.len() > 128 || p.chars().any(|c| c.is_control()) {
                 return Err("history_pubkey is malformed");
             }
             if w.len() < 16 || w.len() > 512 || w.chars().any(|c| c.is_control()) {
                 return Err("history_wrapped_rc is malformed");
             }
-            Ok(())
+            validate_key_sig(g).map_err(|_| "history_pubkey_sig is malformed")
         }
-        _ => Err("history_pubkey and history_wrapped_rc must be sent together"),
+        _ => Err("history_pubkey, history_wrapped_rc and history_pubkey_sig must be sent together"),
     }
+}
+
+fn base64_len(s: &str) -> Option<usize> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).ok().map(|b| b.len())
+}
+
+/// An Ed25519 signature as the client encodes it: base64 of exactly 64 bytes.
+pub fn validate_key_sig(sig: &str) -> Result<(), &'static str> {
+    if sig.len() > 128 || base64_len(sig) != Some(64) {
+        return Err("signature is malformed");
+    }
+    Ok(())
+}
+
+/// `ed25519:` + base64 of exactly 32 bytes, the form dmKeys.ts and the device
+/// enrolment code both publish. Strict on purpose: this column is write-once
+/// below, so junk must not be storable at all.
+pub fn validate_account_sign_pub(key: &str) -> Result<(), &'static str> {
+    let Some(body) = key.strip_prefix("ed25519:") else {
+        return Err("account_sign_pub is malformed");
+    };
+    if key.len() > 128 || base64_len(body) != Some(32) {
+        return Err("account_sign_pub is malformed");
+    }
+    Ok(())
+}
+
+/// Record the account signing key an account publishes. WRITE-ONCE for a
+/// bare bearer token: a key already on the row must be the same one, so a
+/// stolen token cannot swap in a key of its own. A session that has just
+/// PROVED THE PASSWORD (`may_replace`, from password_recently_proven — every
+/// fresh sign-in records one) may replace it: the key derives from the
+/// identity seed, so the owner's devices all agree on it, and this is how
+/// an owner recovers if a first write was not theirs. Ok(true) = recorded,
+/// replaced, or already equal; Ok(false) = a different key is on the row
+/// and the caller may not replace it.
+pub async fn record_account_sign_pub(pool: &sqlx::PgPool, user_id: i32, key: &str, may_replace: bool) -> Result<bool, sqlx::Error> {
+    let r = if may_replace {
+        sqlx::query("UPDATE users SET account_sign_pub = $1 WHERE id = $2")
+            .bind(key)
+            .bind(user_id)
+            .execute(pool)
+            .await?
+    } else {
+        sqlx::query(
+            "UPDATE users SET account_sign_pub = $1 WHERE id = $2 AND (account_sign_pub IS NULL OR account_sign_pub = $1)",
+        )
+        .bind(key)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+    };
+    Ok(r.rows_affected() > 0)
+}
+
+/// The srp_version an UNKNOWN username answers with in login step 1: the one
+/// MOST real accounts have, re-counted at most every five minutes. See the
+/// comment at the call site for why a constant cannot do this job.
+static UNKNOWN_SRP_VERSION: std::sync::Mutex<Option<(std::time::Instant, i16)>> = std::sync::Mutex::new(None);
+const UNKNOWN_SRP_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+pub(crate) async fn unknown_name_srp_version(pool: &sqlx::PgPool) -> i16 {
+    if let Ok(g) = UNKNOWN_SRP_VERSION.lock() {
+        if let Some((at, v)) = *g {
+            if at.elapsed() < UNKNOWN_SRP_VERSION_TTL {
+                return v;
+            }
+        }
+    }
+    let v: i16 = sqlx::query_scalar::<_, i16>(
+        "SELECT srp_version FROM users WHERE deleted_at IS NULL GROUP BY srp_version ORDER BY count(*) DESC, srp_version DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(1);
+    if let Ok(mut g) = UNKNOWN_SRP_VERSION.lock() {
+        *g = Some((std::time::Instant::now(), v));
+    }
+    v
 }
 
 /// Sessions the server counts when deciding whether every client of an
@@ -1498,14 +1602,33 @@ pub fn validate_history_key_pair(pubkey: &Option<String>, wrapped: &Option<Strin
 /// RECENT_SESSION_DAYS in the client.
 const DM_RECENT_SESSION_DAYS: i32 = 14;
 
+/// A published DM key together with the account's signature over it — the
+/// client verifies the signature against the TOFU-pinned account signing key
+/// and wraps to NOTHING that fails (dmKeys.ts verifyDmKeyInfo).
+#[derive(Serialize)]
+pub struct SignedDmKey {
+    pub key: String,
+    pub sig: String,
+}
+
 #[derive(Serialize)]
 pub struct DmKeysResponse {
     pub user_id: i64,
+    /// The account's Ed25519 signing key. Not trusted on sight: the client
+    /// checks `attestation` (below) before it verifies anything under it.
+    pub account_sign_pub: Option<String>,
+    /// The target's attestation of that signing key TO THE CALLER — an HMAC
+    /// under the pairwise identity secret, stored on the shared conversation
+    /// row by the target's own client (set_dm_sign_attestation). None for
+    /// oneself, or until the target's client has opened the conversation.
+    pub attestation: Option<String>,
     /// The account's history key, or None for an account that has not set one up.
-    pub history_pubkey: Option<String>,
-    /// Session keys of every recently-seen, unrevoked session that published one.
-    pub sessions: Vec<String>,
-    /// Every recently-seen session published a session key and reads v4.
+    pub history: Option<SignedDmKey>,
+    /// Session keys of every recently-seen, unrevoked, human session that
+    /// published one. Device-token sessions (the headless host service) are
+    /// not DM readers and are not listed — nor counted below.
+    pub sessions: Vec<SignedDmKey>,
+    /// Every recently-seen human session published a signed key and reads v4.
     pub all_sessions_v4: bool,
 }
 
@@ -1521,55 +1644,138 @@ pub async fn get_user_dm_keys(
 ) -> impl IntoResponse {
     let me = claims.sub as i32;
     let target = user_id as i32;
+    let mut attestation: Option<String> = None;
     if me != target {
-        let shares: Option<(i32,)> = sqlx::query_as(
-            "SELECT 1 FROM dm_conversations WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1) LIMIT 1",
+        // user1_id/user2_id are BIGINT since migration 019: decode as i64, or
+        // the row silently reads as "no conversation" (unwrap_or below).
+        let shares: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT user1_id, user1_sign_attest, user2_sign_attest FROM dm_conversations \
+             WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1) LIMIT 1",
         )
         .bind(me)
         .bind(target)
         .fetch_optional(&state.pool)
         .await
         .unwrap_or(None);
-        if shares.is_none() {
+        let Some((user1, a1, a2)) = shares else {
             return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
-        }
+        };
+        attestation = if user1 == i64::from(target) { a1 } else { a2 };
     }
-    let history: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT history_pubkey FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(target)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
-    let Some((history_pubkey,)) = history else {
+    let account: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT history_pubkey, history_pubkey_sig, account_sign_pub FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(target)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+    let Some((history_pubkey, history_pubkey_sig, account_sign_pub)) = account else {
         return (StatusCode::NOT_FOUND, "User not found").into_response();
     };
-    let rows: Vec<(Option<String>, Option<i16>)> = sqlx::query_as(
-        "SELECT dm_pubkey, reads_up_to FROM token_sessions \
-         WHERE user_id = $1 AND revoked_at IS NULL AND last_seen_at > NOW() - make_interval(days => $2)",
+    let history = match (history_pubkey, history_pubkey_sig) {
+        (Some(key), Some(sig)) => Some(SignedDmKey { key, sig }),
+        _ => None,
+    };
+    // Client sessions only (NOT headless): the host service mints device-token
+    // sessions that never publish a key and never read a DM, and counting them
+    // would hold every enrolled account on v3 for good. (device_id is NOT the
+    // discriminator — every attested app session carries one.)
+    let rows: Vec<(Option<String>, Option<String>, Option<i16>)> = sqlx::query_as(
+        "SELECT dm_pubkey, dm_pubkey_sig, reads_up_to FROM token_sessions \
+         WHERE user_id = $1 AND revoked_at IS NULL AND NOT headless \
+           AND last_seen_at > NOW() - make_interval(days => $2)",
     )
     .bind(target)
     .bind(DM_RECENT_SESSION_DAYS)
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
-    let mut sessions: Vec<String> = rows.iter().filter_map(|(p, _)| p.clone()).collect();
-    sessions.sort();
-    sessions.dedup();
+    let mut sessions: Vec<SignedDmKey> = rows
+        .iter()
+        .filter_map(|(p, g, _)| match (p, g) {
+            (Some(key), Some(sig)) => Some(SignedDmKey { key: key.clone(), sig: sig.clone() }),
+            _ => None,
+        })
+        .collect();
+    sessions.sort_by(|a, b| a.key.cmp(&b.key));
+    sessions.dedup_by(|a, b| a.key == b.key);
     let all_sessions_v4 = !rows.is_empty()
-        && rows.iter().all(|(p, r)| p.is_some() && r.map_or(false, |r| r >= 4));
-    Json(DmKeysResponse { user_id, history_pubkey, sessions, all_sessions_v4 }).into_response()
+        && rows.iter().all(|(p, g, r)| p.is_some() && g.is_some() && r.map_or(false, |r| r >= 4));
+    Json(DmKeysResponse { user_id, account_sign_pub, attestation, history, sessions, all_sessions_v4 }).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DmSignAttestRequest {
+    /// base64 HMAC-SHA256 over dmSignAttestRecord(me, peer, my account_sign_pub)
+    /// under HKDF(X25519(my identity, peer identity), 'puca-dm-sign-attest-v1').
+    pub mac: String,
+}
+
+/// PATCH /dms/:conversation_id/sign-attest — the caller vouches, to the other
+/// participant, for its own account signing key. The server stores the MAC on
+/// the caller's side of the conversation row and serves it back through
+/// /users/:id/dm-keys; it cannot compute or forge one (it never holds an
+/// identity private key), and the peer's client checks it before trusting
+/// any signature under that signing key. Overwriting is fine: the peer only
+/// ever accepts a MAC that matches what it computes itself.
+pub async fn set_dm_sign_attestation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(payload): Json<DmSignAttestRequest>,
+) -> impl IntoResponse {
+    if payload.mac.len() < 40 || payload.mac.len() > 128 || payload.mac.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return (StatusCode::BAD_REQUEST, "mac is malformed").into_response();
+    }
+    if conversation_id.len() > 64 || conversation_id.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "bad conversation id").into_response();
+    }
+    let me = claims.sub as i32;
+    match sqlx::query(
+        "UPDATE dm_conversations SET \
+            user1_sign_attest = CASE WHEN user1_id = $2 THEN $1 ELSE user1_sign_attest END, \
+            user2_sign_attest = CASE WHEN user2_id = $2 THEN $1 ELSE user2_sign_attest END \
+         WHERE id = $3 AND (user1_id = $2 OR user2_id = $2)",
+    )
+    .bind(&payload.mac)
+    .bind(me)
+    .bind(&conversation_id)
+    .execute(&state.pool)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::OK.into_response(),
+        Ok(_) => (StatusCode::FORBIDDEN, "Not a participant of this conversation").into_response(),
+        Err(e) => {
+            tracing::error!("Failed to store DM signing-key attestation: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]
 pub struct SessionDmKeyRequest {
     pub dm_pubkey: String,
+    /// Signature over dmKeyRecord('session', dm_pubkey) by the account signing
+    /// key below.
+    pub dm_pubkey_sig: String,
+    /// The account signing key that made the signature (`ed25519:` + base64);
+    /// recorded write-once on the account (record_account_sign_pub).
+    pub account_sign_pub: String,
     /// The highest envelope version this client can open.
     pub reads_up_to: i16,
 }
 
 /// PATCH /keys/session-dm — this session's DM key and readable version.
+///
 /// Bound to the caller's own session id, so one device cannot publish a key
-/// for another; revoking the session retires the key with it.
+/// for another; revoking the session retires the key with it. WRITE-ONCE per
+/// session: a key already on the row must be the same one (reads_up_to may
+/// still rise). A stolen bearer token therefore cannot swap in a key of its
+/// own — and even a fresh session it opens cannot make a signature the
+/// account's peers will accept, because the signing key derives from the
+/// identity seed the thief does not hold. The client publishes once per
+/// session and keeps the private half beside the token, so it never needs a
+/// second, different publish.
 pub async fn set_session_dm_key(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -1582,21 +1788,61 @@ pub async fn set_session_dm_key(
     if payload.dm_pubkey.len() < 8 || payload.dm_pubkey.len() > 128 || payload.dm_pubkey.chars().any(|c| c.is_control()) {
         return (StatusCode::BAD_REQUEST, "dm_pubkey is malformed").into_response();
     }
+    if validate_key_sig(&payload.dm_pubkey_sig).is_err() {
+        return (StatusCode::BAD_REQUEST, "dm_pubkey_sig is malformed").into_response();
+    }
+    if let Err(msg) = validate_account_sign_pub(&payload.account_sign_pub) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
     if !(2..=32).contains(&payload.reads_up_to) {
         return (StatusCode::BAD_REQUEST, "reads_up_to is out of range").into_response();
     }
+    let uid = claims.sub as i32;
+    let may_replace = state.password_recently_proven(claims.sub, claims.sst);
+    match record_account_sign_pub(&state.pool, uid, &payload.account_sign_pub, may_replace).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::CONFLICT,
+                "this account already published a different signing key; sign out and in again on this device",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to record account signing key: {:?}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
     match sqlx::query(
-        "UPDATE token_sessions SET dm_pubkey = $1, reads_up_to = $2 WHERE sid = $3 AND user_id = $4 AND revoked_at IS NULL",
+        "UPDATE token_sessions SET dm_pubkey = $1, dm_pubkey_sig = $2, reads_up_to = $3 \
+         WHERE sid = $4 AND user_id = $5 AND revoked_at IS NULL AND NOT headless \
+           AND (dm_pubkey IS NULL OR dm_pubkey = $1)",
     )
     .bind(&payload.dm_pubkey)
+    .bind(&payload.dm_pubkey_sig)
     .bind(payload.reads_up_to)
     .bind(&claims.sid)
-    .bind(claims.sub as i32)
+    .bind(uid)
     .execute(&state.pool)
     .await
     {
         Ok(r) if r.rows_affected() > 0 => StatusCode::OK.into_response(),
-        Ok(_) => (StatusCode::NOT_FOUND, "session not found").into_response(),
+        Ok(_) => {
+            // Distinguish "no such live session" from "it already holds
+            // another key" — the second is what the write-once rule refuses.
+            let taken: Option<(bool,)> = sqlx::query_as(
+                "SELECT dm_pubkey IS NOT NULL FROM token_sessions WHERE sid = $1 AND user_id = $2 AND revoked_at IS NULL AND NOT headless",
+            )
+            .bind(&claims.sid)
+            .bind(uid)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+            match taken {
+                Some((true,)) => (StatusCode::CONFLICT, "this session already published a different key").into_response(),
+                _ => (StatusCode::NOT_FOUND, "session not found").into_response(),
+            }
+        }
         Err(e) => {
             tracing::error!("Failed to set session DM key: {:?}", e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -1659,7 +1905,10 @@ pub async fn update_public_key(
         }
     }
 
-    let result = sqlx::query("UPDATE users SET public_key = $1 WHERE id = $2")
+    // A new identity key means a new seed, and the account signing key derives
+    // from the seed: clear the published one so the next publish (which is
+    // write-once, record_account_sign_pub) can set the new value.
+    let result = sqlx::query("UPDATE users SET public_key = $1, account_sign_pub = NULL WHERE id = $2")
         .bind(&payload.public_key)
         .bind(claims.sub as i32)
         .execute(&state.pool)
@@ -1790,6 +2039,10 @@ const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     // MAC and internal IPs that nothing can ever decrypt again. `name` is NOT
     // NULL, so it is replaced rather than nulled.
     "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
+    // Sessions carry the DM session keys (migration 060): a tombstone must not
+    // keep advertising keys nobody will ever open, and the token_version bump
+    // above already made every token dead.
+    "UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
 ];
 
 /// DELETE /account — tombstone the account.
@@ -1884,6 +2137,10 @@ pub async fn delete_account(
             recovery_salt = NULL, \
             seed_wrapped_pw = NULL, \
             seed_wrapped_rc = NULL, \
+            history_pubkey = NULL, \
+            history_wrapped_rc = NULL, \
+            history_pubkey_sig = NULL, \
+            account_sign_pub = NULL, \
             deleted_at = NOW(), \
             token_version = token_version + 1 \
          WHERE id = $1",
@@ -2132,6 +2389,23 @@ mod account_deletion_residue_tests {
     /// (a separate statement, because it binds the operator's grace period),
     /// and purged by the retention sweep in main.rs once it passes.
     #[test]
+    fn dm_key_validators_accept_the_client_shape_and_nothing_looser() {
+        use base64::Engine;
+        let b64 = |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![7u8; n]);
+        assert!(super::validate_key_sig(&b64(64)).is_ok());
+        assert!(super::validate_key_sig(&b64(63)).is_err());
+        assert!(super::validate_key_sig(&b64(65)).is_err());
+        assert!(super::validate_key_sig("not base64!!").is_err());
+        assert!(super::validate_account_sign_pub(&format!("ed25519:{}", b64(32))).is_ok());
+        assert!(super::validate_account_sign_pub(&format!("ed25519:{}", b64(31))).is_err());
+        assert!(super::validate_account_sign_pub(&format!("x25519:{}", b64(32))).is_err());
+        assert!(super::validate_account_sign_pub("ed25519:junkjunkjunkjunkjunkjunkjunkjunkjunkjunkjunk").is_err());
+        assert!(super::validate_history_key_pair(&None, &None, &None).is_ok());
+        assert!(super::validate_history_key_pair(&Some("x25519:abcdefgh".into()), &Some("w".repeat(20)), &None).is_err(), "sig required with the key");
+        assert!(super::validate_history_key_pair(&Some("x25519:abcdefgh".into()), &Some("w".repeat(20)), &Some(b64(64))).is_ok());
+    }
+
+    #[test]
     fn the_cleanup_list_is_exactly_what_we_decided() {
         let expected: &[&str] = &[
             "DELETE FROM device_tokens WHERE user_id = $1",
@@ -2148,6 +2422,7 @@ mod account_deletion_residue_tests {
             "DELETE FROM device_share_invites WHERE owner_user = $1 OR grantee_user = $1",
             "DELETE FROM channel_keys WHERE recipient_id = $1",
             "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
+            "UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
         ];
         assert_eq!(
             ACCOUNT_DELETE_CLEANUP, expected,

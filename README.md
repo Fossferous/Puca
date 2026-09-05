@@ -407,7 +407,9 @@ before trusting either version.
   never leaves your device, not even as a hash.
 - **Direct messages**: since 0.9.3, sealed under per-message keys held only
   by your devices and your recovery code — a cracked password reads none of
-  them (not per-message forward secrecy; `docs/SECURITY_MODEL.md` §7 says
+  them. New accounts have this from registration; accounts created earlier
+  switch over once both people generate a new recovery code in Settings → My
+  Account (not per-message forward secrecy; `docs/SECURITY_MODEL.md` §7 says
   exactly what it is and is not).
 - **Identity & E2EE keys**: a random per-account seed, wrapped under your
   password with **Argon2id** (m=19456 KiB, t=2, p=1) and independently under

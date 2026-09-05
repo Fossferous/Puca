@@ -20,9 +20,13 @@ export interface PublicConfig {
     /** true/false from the server; null when the probe failed (old server,
      *  offline) and the client must fail closed on its own. */
     registrationInviteRequired: boolean | null;
+    /** The newest SRP verifier derivation the server records (2 = Argon2id),
+     *  or null for a server too old to say — which auth.ts treats as "do not
+     *  write a verifier here". */
+    srpVersion: number | null;
 }
 
-const UNKNOWN: PublicConfig = { appUrl: null, registrationInviteRequired: null };
+const UNKNOWN: PublicConfig = { appUrl: null, registrationInviteRequired: null, srpVersion: null };
 
 let cached: Promise<PublicConfig> | null = null;
 
@@ -30,14 +34,15 @@ let cached: Promise<PublicConfig> | null = null;
  *  something else (a proxy's HTML error page, say) is "unknown", not a throw. */
 export function parsePublicConfig(body: unknown): PublicConfig {
     if (!body || typeof body !== 'object') return UNKNOWN;
-    const b = body as { app_url?: unknown; registration_invite_required?: unknown };
+    const b = body as { app_url?: unknown; registration_invite_required?: unknown; srp_version?: unknown };
     const appUrl = typeof b.app_url === 'string' && /^https?:\/\//i.test(b.app_url)
         ? b.app_url.replace(/\/+$/, '')
         : null;
     const gate = typeof b.registration_invite_required === 'boolean'
         ? b.registration_invite_required
         : null;
-    return { appUrl, registrationInviteRequired: gate };
+    const srpVersion = typeof b.srp_version === 'number' && Number.isInteger(b.srp_version) ? b.srp_version : null;
+    return { appUrl, registrationInviteRequired: gate, srpVersion };
 }
 
 export function fetchPublicConfig(): Promise<PublicConfig> {

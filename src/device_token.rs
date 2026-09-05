@@ -243,7 +243,9 @@ pub async fn device_token(
             tracing::error!("device_token mint failed: {e}");
             bad("that device could not be verified")
         })?;
-    if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id) VALUES ($1, $2, $3)")
+    // `headless`: this session belongs to the host service, not to a client
+    // that reads DMs — the v4 rollout gate leaves it out (migration 060).
+    if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
         .bind(&sid)
         .bind(user_id as i32)
         .bind(&payload.device_id)

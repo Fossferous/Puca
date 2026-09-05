@@ -394,7 +394,7 @@ import { serializeEnvelope,
     parseEnvelopeEx,
     SecureSendError,
     messageEncState,
-    type MessageEncState, markUnexpectedPlaintext } from './e2ee';
+    type MessageEncState, markUnexpectedPlaintext, isEncrypted } from './e2ee';
 import { MAX_READABLE_ENVELOPE_VERSION } from './e2ee';
 import { ensureChannelKey, getChannelKeyForEpoch } from './channelKeys';
 import { isUndecryptable, ENC_KEY_UNAVAILABLE, ENC_CANNOT_DECRYPT, ENC_CONTEXT_MISMATCH, ENC_UNSUPPORTED_VERSION } from './decryptMarkers';
@@ -501,7 +501,7 @@ export async function decryptChannelMessages(channelId: number, messages: Messag
         messages.map(async (msg) => {
             const wire = msg.content;
             const text = await decryptChannelContent(channelId, wire, msg.user_id);
-            return { ...msg, content: text, encState: messageEncState(wire, text) };
+            return { ...msg, content: text, encState: messageEncState(wire, text), wireSealed: isEncrypted(wire) };
         })
     );
     // Plaintext newer than a sealed row in the same channel was not written

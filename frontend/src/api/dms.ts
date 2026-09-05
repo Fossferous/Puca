@@ -83,7 +83,7 @@ import { getActiveIdentity,
     serializeEnvelope,
     SecureSendError,
     messageEncState,
-    type MessageEncState, sealDmEnvelopeV4, openDmEnvelopeV4, markUnexpectedPlaintext, liveEncState } from './e2ee';
+    type MessageEncState, sealDmEnvelopeV4, openDmEnvelopeV4, markUnexpectedPlaintext, liveEncState, isEncrypted } from './e2ee';
 import { resolvePinnedIdentityKey } from './keyVerification';
 import { currentUserIdFromToken } from './auth';
 import { dmKeysFor, v4Eligible, v4Targets, openingKeys } from './dmKeys';
@@ -268,7 +268,7 @@ export async function decryptDMMessages(messages: DMMessage[], partnerUserId: nu
         messages.map(async (msg) => {
             const wire = msg.content;
             const text = await decryptDMContent(wire, partnerUserId, msg.sender_id);
-            return { ...msg, content: text, encState: messageEncState(wire, text) };
+            return { ...msg, content: text, encState: messageEncState(wire, text), wireSealed: isEncrypted(wire) };
         })
     );
     // Plaintext newer than a sealed row in the same conversation was not
