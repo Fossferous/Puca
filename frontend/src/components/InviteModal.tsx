@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { createInvite, listInvites, deleteInvite, type Invite } from '../api/servers';
+import {
+    createInvite, listInvites, deleteInvite, type Invite,
+    INVITE_EXPIRY_CHOICES, INVITE_DEFAULT_EXPIRY_HOURS,
+} from '../api/servers';
 import { fetchPublicConfig } from '../api/publicConfig';
 import { inviteLink } from '../api/pendingInvite';
 import { statusOf } from '../api/client';
@@ -27,9 +30,11 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
     // predates /config), and the bare code is what gets shared.
     const [appUrl, setAppUrl] = useState<string | null>(null);
 
-    // Invite options
+    // Invite options. `expiresIn` is ALWAYS sent, never omitted: an omitted
+    // field is the server's default, and "Never" is the explicit 0 — see
+    // INVITE_NEVER_EXPIRES.
     const [maxUses, setMaxUses] = useState<number | undefined>(undefined);
-    const [expiresIn, setExpiresIn] = useState<number | undefined>(24); // hours
+    const [expiresIn, setExpiresIn] = useState<number>(INVITE_DEFAULT_EXPIRY_HOURS); // hours
 
     const loadInvites = useCallback(async () => {
         setIsLoading(true);
@@ -142,17 +147,15 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
 
                     <div className="invite-options">
                         <div className="invite-option">
-                            <label>Expire After</label>
+                            <label htmlFor="invite-expiry">Expire After</label>
                             <select
-                                value={expiresIn ?? 'never'}
-                                onChange={e => setExpiresIn(e.target.value === 'never' ? undefined : Number(e.target.value))}
+                                id="invite-expiry"
+                                value={expiresIn}
+                                onChange={e => setExpiresIn(Number(e.target.value))}
                             >
-                                <option value="1">1 hour</option>
-                                <option value="6">6 hours</option>
-                                <option value="12">12 hours</option>
-                                <option value="24">1 day</option>
-                                <option value="168">7 days</option>
-                                <option value="never">Never</option>
+                                {INVITE_EXPIRY_CHOICES.map(c => (
+                                    <option key={c.hours} value={c.hours}>{c.label}</option>
+                                ))}
                             </select>
                         </div>
 
@@ -200,6 +203,14 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
                                             <span>{invite.uses}{invite.max_uses ? `/${invite.max_uses}` : ''} uses</span>
                                             <span>•</span>
                                             <span>{formatExpiry(invite.expires_at)}</span>
+                                            {/* Attribution (0.9.5): a manager can tell whose code
+                                                this is; older backends send no creator. */}
+                                            {invite.creator_username && (
+                                                <>
+                                                    <span>•</span>
+                                                    <span className="invite-creator">by {invite.creator_username}</span>
+                                                </>
+                                            )}
                                         </div>
                                     </div>
                                     <div className="invite-item-actions">

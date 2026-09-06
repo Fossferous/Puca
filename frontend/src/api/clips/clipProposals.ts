@@ -35,8 +35,9 @@ export interface ClipApprover { id: number; username: string; online: boolean; i
 export interface OutgoingProposal {
     clipId: string;
     voiceChannelId: number;
-    targetChannelId: number;
-    targetChannelName: string;
+    /** null when the server redacted the target: this approver cannot view that channel. */
+    targetChannelId: number | null;
+    targetChannelName: string | null;
     durationMs: number;
     /** WHO is required (shown); HOW MANY approved is a count — votes stay anonymous. */
     approvers: ClipApprover[];
@@ -55,8 +56,9 @@ export interface IncomingProposal {
     serverId: string;
     voiceChannelId: number;
     voiceChannelName: string;
-    targetChannelId: number;
-    targetChannelName: string;
+    /** null when the server redacted the target: this approver cannot view that channel. */
+    targetChannelId: number | null;
+    targetChannelName: string | null;
     durationMs: number;
     endedAgoMs: number;
     /** Received-at, so "ending N minutes ago" keeps ticking without a re-fetch. */
@@ -116,8 +118,8 @@ interface ServerClipView {
     server_id: string;
     voice_channel_id: number;
     voice_channel_name: string;
-    target_channel_id: number;
-    target_channel_name: string;
+    target_channel_id: number | null;
+    target_channel_name: string | null;
     duration_ms: number;
     ended_ago_ms: number;
     expires_in_ms: number;

@@ -59,6 +59,7 @@ import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
+import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
 import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon } from './Icons';
@@ -934,6 +935,44 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             requestJoinAnnounce(payload.streamer.id, payload.streamer.username);
         };
 
+        // Shared by StreamStopped AND UserLeft (see shouldTearDownDepartedPeer
+        // for why both must do it): close the mesh peer and everything that
+        // rode it. Idempotent — the stock client's StopStream-then-LeaveRoom
+        // runs it twice, and closePeer on an unknown peer only bumps the
+        // generation, which is what we want for a build still in flight.
+        const retireDepartedPeer = (userId: number) => {
+            const ev = { roomId, userId };
+            const ctx = {
+                roomId,
+                currentUserId,
+                inVoice: isInVoiceRef.current,
+                sfuMode,
+                sfuSessionAlive: sfuMode && sfuManager.hasParticipant(userId),
+            };
+            if (!shouldTearDownDepartedPeer(ev, ctx)) return;
+            webrtcManager.closePeer(userId);
+            document.getElementById(`audio-${userId}`)?.remove();
+            // Their activity detector polls a stream that is now dead; the
+            // in-call StreamStopped handler already drops it, UserLeft did
+            // not, and a stale interval keeps voting on their indicator.
+            const cleanup = voiceDetectorCleanups.current.get(userId);
+            if (cleanup) {
+                cleanup();
+                voiceDetectorCleanups.current.delete(userId);
+            }
+            // Their camera rode the pc too: drop the tile AND the badge, and
+            // notify -- the stage subscribes to that, not to the roster.
+            globalCameraUsers.delete(userId);
+            globalCameraStreams.delete(userId);
+            notifyStreamStateChange();
+            setSpeakingUsers(prev => {
+                if (!prev.has(userId)) return prev;
+                const next = new Set(prev);
+                next.delete(userId);
+                return next;
+            });
+        };
+
         const handleStreamStopped = (msg: ServerMessage) => {
             const payload = msg.payload as { room_id: string; streamer_id: number };
 
@@ -974,12 +1013,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // Removing it here silenced them PERMANENTLY ("voice stopped until
             // I disconnected and reconnected"). Their WS rejoin replays
             // StreamStarted and the roster heals; the audio must survive.
-            if (isInVoiceRef.current && payload.streamer_id !== currentUserId
-                && !(sfuMode && sfuManager.hasParticipant(payload.streamer_id))) {
-                webrtcManager.closePeer(payload.streamer_id);
-                const audio = document.getElementById(`audio-${payload.streamer_id}`);
-                audio?.remove();
-            }
+            // (All of that now lives in shouldTearDownDepartedPeer.)
+            retireDepartedPeer(payload.streamer_id);
             // Gone before we chimed: no late chime, and announceLeave stays
             // silent because announceJoin never recorded them.
             dropPendingJoin(payload.streamer_id);
@@ -1164,6 +1199,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // and dropPendingJoin/refresh are idempotent.
             dropPendingJoin(payload.user_id);
             globalVoiceUsers.get(roomId)?.delete(payload.user_id);
+            // MEDIA teardown, not just roster: UserLeft can be the ONLY event
+            // a departure produces (a LeaveRoom with no StopStream before it,
+            // or an evicted member holding no streamer claim), and the mesh pc
+            // to the leaver otherwise stays open with our mic on it — they
+            // keep hearing the room from outside every roster and beyond the
+            // reach of every eviction path. Same predicate and same steps as
+            // StreamStopped, so a leaver mid-share also loses their tile.
+            retireDepartedPeer(payload.user_id);
+            sharingAnnouncedRef.current.stopped(payload.user_id);
+            setScreenSharers(prev => {
+                if (!prev.has(payload.user_id)) return prev;
+                const newMap = new Map(prev);
+                newMap.delete(payload.user_id);
+                return newMap;
+            });
+            deselectStream(payload.user_id);
             refreshVoiceUsersList();
             announceLeave(payload.user_id);
         };

@@ -185,6 +185,10 @@ export interface Invite {
     max_uses: number | null;
     expires_at: string | null;
     created_at: string;
+    /** Who minted it. Absent from a backend older than 0.9.5 (the client
+     *  ships first), so readers must tolerate both missing. */
+    creator_id?: number;
+    creator_username?: string;
 }
 
 export interface InviteInfo {
@@ -203,8 +207,31 @@ export interface PublicServer {
 
 // --- Invite API ---
 
+/** `expires_in_hours` for an invite that never expires. Since 0.9.5 an OMITTED
+ *  field gets the server's seven-day default (a member who was later kicked or
+ *  banned used to leave eternal codes behind), so "never" has to be sent by
+ *  name; against an older backend 0 is clamped to one hour, which is the safe
+ *  side to fail on. */
+export const INVITE_NEVER_EXPIRES = 0;
+
+/** What the invite dialogs offer, in hours; `INVITE_NEVER_EXPIRES` last. */
+export const INVITE_EXPIRY_CHOICES: ReadonlyArray<{ hours: number; label: string }> = [
+    { hours: 1, label: '1 hour' },
+    { hours: 6, label: '6 hours' },
+    { hours: 12, label: '12 hours' },
+    { hours: 24, label: '1 day' },
+    { hours: 168, label: '7 days' },
+    { hours: 720, label: '30 days' },
+    { hours: INVITE_NEVER_EXPIRES, label: 'Never' },
+];
+
+/** The dialogs' preselected lifetime; matches the server's default. */
+export const INVITE_DEFAULT_EXPIRY_HOURS = 168;
+
 export function createInvite(
     serverId: string,
+    /** `expires_in_hours`: hours, `INVITE_NEVER_EXPIRES` (0) for never, or
+     *  omitted for the server default (7 days). `max_uses` omitted = no limit. */
     options: { max_uses?: number; expires_in_hours?: number } = {}
 ): Promise<Invite> {
     return apiClient.post(`/servers/${serverId}/invites`, options);

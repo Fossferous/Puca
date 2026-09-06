@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
     updateServerSettings, listChannels,
     listInvites, createInvite, deleteInvite,
+    INVITE_EXPIRY_CHOICES, INVITE_DEFAULT_EXPIRY_HOURS,
     listBans, unbanMember, listReports, resolveReport, listAuditLog,
 } from '../api/servers';
 import { uploadFile, discardUpload } from '../api/uploads';
@@ -103,6 +104,9 @@ export function ServerSettingsModal({
     const [invites, setInvites] = useState<Invite[]>([]);
     const [invitesLoading, setInvitesLoading] = useState(false);
     const [copiedCode, setCopiedCode] = useState<string | null>(null);
+    // Always sent explicitly: an omitted field is the server's 7-day default
+    // and "Never" is INVITE_NEVER_EXPIRES (0). See InviteModal.
+    const [inviteExpiryHours, setInviteExpiryHours] = useState<number>(INVITE_DEFAULT_EXPIRY_HOURS);
     // The web app's PUBLIC address (GET /config), fetched on open so the copy
     // below can run synchronously inside the click — never this webview's
     // origin, which is tauri.localhost on the desktop. See InviteModal.
@@ -310,7 +314,7 @@ export function ServerSettingsModal({
     // Invite handlers
     const handleCreateInvite = async () => {
         try {
-            const invite = await createInvite(serverId, { expires_in_hours: 24 });
+            const invite = await createInvite(serverId, { expires_in_hours: inviteExpiryHours });
             setInvites([invite, ...invites]);
             copyToClipboard(invite.code);
         } catch (err) {
@@ -583,6 +587,21 @@ export function ServerSettingsModal({
                                 <button className="primary-btn" onClick={handleCreateInvite}>+ Create Invite</button>
                             </div>
 
+                            {/* Same choices as InviteModal; a setting without a control is a
+                                feature nobody can use, and "Never" must be chosen on purpose. */}
+                            <div className="form-group">
+                                <label htmlFor="settings-invite-expiry">New invites expire after</label>
+                                <select
+                                    id="settings-invite-expiry"
+                                    value={inviteExpiryHours}
+                                    onChange={e => setInviteExpiryHours(Number(e.target.value))}
+                                >
+                                    {INVITE_EXPIRY_CHOICES.map(c => (
+                                        <option key={c.hours} value={c.hours}>{c.label}</option>
+                                    ))}
+                                </select>
+                            </div>
+
                             {invitesLoading ? (
                                 <div className="loading">Loading invites...</div>
                             ) : invites.length === 0 ? (
@@ -594,6 +613,11 @@ export function ServerSettingsModal({
                                             <div className="invite-info">
                                                 <code>{invite.code}</code>
                                                 <span className="invite-uses">{invite.uses}{invite.max_uses ? `/${invite.max_uses}` : ''} uses</span>
+                                                {/* Attribution (0.9.5): whose code this is. Absent
+                                                    from an older backend, so conditional. */}
+                                                {invite.creator_username && (
+                                                    <span className="invite-uses">by {invite.creator_username}</span>
+                                                )}
                                             </div>
                                             <div className="invite-actions">
                                                 <button className={`copy-btn ${copiedCode === invite.code ? 'copied' : ''}`} onClick={() => copyToClipboard(invite.code)}>

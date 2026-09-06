@@ -168,7 +168,7 @@ export function ClipApprovalPrompt() {
                         {!shown.you.stillInCall && shown.you.inWindow && <> You were in that call at the time.</>}
                         {!shown.you.inWindow && <> The server did not see you in that call during the clip; {who}'s app listed you as there.</>}
                     </p>
-                    <p>If everyone approves it will be posted to <strong>#{shown.targetChannelName}</strong>.</p>
+                    <p>If everyone approves it will be posted to <strong>{shown.targetChannelName ? `#${shown.targetChannelName}` : 'a channel you cannot see'}</strong>.</p>
                     <p className="clip-approval-standing">
                         <ShieldCheckIcon size={13} /> Nothing has been uploaded. The clip is only on {who}'s PC, and Púca deletes it there the moment anyone declines.
                     </p>
