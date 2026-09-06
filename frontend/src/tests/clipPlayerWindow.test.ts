@@ -164,6 +164,14 @@ async function makeManifest(): Promise<{ manifest: ClipManifest; fetchPart: (id:
 
 const env = { hasMediaSource: true, isTypeSupported: () => true };
 const settle = () => new Promise<void>(r => setTimeout(r, 0));
+/** Settle until `cond` holds, up to `max` ticks. The pump runs on WebCrypto
+ *  and microtask hops whose count varies with the host, so a fixed number of
+ *  ticks is a race (CI saw "expected 11 to be 12" on an unchanged test); a
+ *  bounded wait for the state itself is not, and it cannot pass vacuously —
+ *  the caller still asserts the condition afterwards. */
+const settleUntil = async (cond: () => boolean, max = 400): Promise<void> => {
+    for (let i = 0; i < max && !cond(); i++) await settle();
+};
 
 describe('windowed MSE clip player (the 257 MB "SourceBuffer is full" fix)', () => {
     it('attach() resolves once the FIRST media part is in, well before the whole clip', async () => {
@@ -198,7 +206,7 @@ describe('windowed MSE clip player (the 257 MB "SourceBuffer is full" fix)', () 
                 await settle();
                 expect(sb.bytes).toBeLessThanOrEqual(QUOTA);
             }
-            await settle();
+            await settleUntil(() => new Set(sb.appends).size === N);
             expect(onError).not.toHaveBeenCalled();
             // Every part was reached across the walk (played through), and the
             // buffer stayed bounded far under quota the whole time — the exact
@@ -239,12 +247,15 @@ describe('windowed MSE clip player (the 257 MB "SourceBuffer is full" fix)', () 
             const sb = video._ms!.sb!;
             const before = sb.appends.length;
             video.seekTo((N - 2) * PART_MS / 1000); // near the end
-            for (let i = 0; i < 12; i++) await settle();
             // It buffered around the seek target without having appended all
             // the intervening parts contiguously first.
             const t = (N - 2) * PART_MS / 1000;
-            let covers = false;
-            for (let i = 0; i < sb.buffered.length; i++) if (sb.buffered.start(i) <= t + 0.5 && t <= sb.buffered.end(i) + 0.5) covers = true;
+            const coversTarget = () => {
+                for (let i = 0; i < sb.buffered.length; i++) if (sb.buffered.start(i) <= t + 0.5 && t <= sb.buffered.end(i) + 0.5) return true;
+                return false;
+            };
+            await settleUntil(coversTarget);
+            const covers = coversTarget();
             expect(covers).toBe(true);
             expect(sb.appends.length - before).toBeLessThan(N); // did not stream the whole gap
             player.destroy();

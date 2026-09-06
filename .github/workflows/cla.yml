@@ -51,7 +51,9 @@ jobs:
           path-to-signatures: '.github/cla-signatures.json'
           path-to-document: 'https://raw.githubusercontent.com/Fossferous/Puca/main/CLA.md'
           branch: 'cla-signatures'
-          allowlist: Fossferous
+          # Bots cannot sign: Dependabot and the Actions bot open PRs that
+          # must not sit red on the CLA check (every Dependabot PR did, 0906).
+          allowlist: Fossferous,dependabot[bot],dependabot*,github-actions[bot]
           custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
           custom-notsigned-prcomment: >
             Thanks for the contribution! Before this can be merged, please
