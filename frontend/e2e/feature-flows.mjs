@@ -221,22 +221,42 @@ async function main() {
     check('block/user (2xx)', block.status < 300, `status=${block.status}`);
     const blocked = await must('GET', '/blocked', null, A.t);
     check('block/list shows blocked user', Array.isArray(blocked) && blocked.length >= 1, `count=${blocked.length}`);
-    // A block in either direction refuses friend requests — B (the blocked
-    // side) must not be able to reach A through the friend system. A and B
-    // are still friends here, so unfriend first to hit the block gate, then
-    // restore nothing (the DM-privacy section below re-manages friendship).
-    await api('DELETE', `/friends/${B.id}`, null, A.t);
+    // A block in either direction hides friend requests from the RECIPIENT.
+    // Since 0.9.5 the request answers 201 exactly like any other (a 403 was a
+    // block-status oracle, re-audit r2-1-L1-03) and IS written: a repeat 409s
+    // and the sender's outgoing list shows it like a real pending request (a
+    // silent no-write was the same oracle one request later, review finding
+    // 11), while the recipient's incoming list, status and accept/reject
+    // behave as if it had never been sent. The block itself already dissolved
+    // the friendship (r2-1-L1-01), so no unfriend is needed to reach the gate.
     const frBlocked = await api('POST', '/friends/request', { user_id: A.id }, B.t);
-    check('block/friend request from blocked user refused (403)', frBlocked.status === 403, `status=${frBlocked.status}`);
+    check('block/friend request from blocked user answers like success (no oracle)', frBlocked.status === 201, `status=${frBlocked.status}`);
+    const outB = await api('GET', '/friends/requests/outgoing', null, B.t);
+    check('block/...and the sender sees it as a real pending request (outgoing)', outB.status === 200 && Array.isArray(outB.body) && outB.body.some(r => r.receiver_id === A.id), `status=${outB.status} body=${JSON.stringify(outB.body).slice(0, 120)}`);
+    const incA = await api('GET', '/friends/requests/incoming', null, A.t);
+    check('block/...but the blocker receives no request', incA.status === 200 && Array.isArray(incA.body) && !incA.body.some(r => r.sender_id === B.id), `status=${incA.status} body=${JSON.stringify(incA.body).slice(0, 120)}`);
     const frBlocker = await api('POST', '/friends/request', { user_id: B.id }, A.t);
-    check('block/friend request from blocker refused too (403)', frBlocker.status === 403, `status=${frBlocker.status}`);
-    await api('DELETE', `/users/${B.id}/block`, null, A.t);
-    // Unblocked → the friend system works again (re-befriend for the DM
-    // privacy section, which relies on A↔B friendship).
+    check('block/friend request from blocker answers like success too', frBlocker.status === 201, `status=${frBlocker.status}`);
+    const incB = await api('GET', '/friends/requests/incoming', null, B.t);
+    check('block/...and the blocked side receives nothing either', incB.status === 200 && Array.isArray(incB.body) && !incB.body.some(r => r.sender_id === A.id), `status=${incB.status} body=${JSON.stringify(incB.body).slice(0, 120)}`);
+    const unblock = await api('DELETE', `/users/${B.id}/block`, null, A.t);
+    check('block/unblock (2xx)', unblock.status < 300, `status=${unblock.status}`);
+    // Unblocked -> the friend system works again. The unblock deletes the
+    // pair's pending rows (moderation_handlers::unblock_user), so this is a
+    // FRESH request: 201, and B now actually receives it. The previous check
+    // accepted any 2xx, which the blocked path answers too - it could not
+    // fail (review finding 16); B's incoming list is what distinguishes
+    // "delivered" from "swallowed". (Re-befriend for the DM privacy section,
+    // which relies on A<->B friendship.)
     const frAgain = await api('POST', '/friends/request', { user_id: B.id }, A.t);
-    check('block/unblock restores friend requests (2xx)', frAgain.status < 300, `status=${frAgain.status}`);
+    check('block/unblock restores friend requests (201, a fresh request)', frAgain.status === 201, `status=${frAgain.status}`);
     const incoming2 = await must('GET', '/friends/requests/incoming', null, B.t);
-    if (incoming2[0]) await api('POST', `/friends/requests/${incoming2[0].id}/accept`, {}, B.t);
+    const fromA = Array.isArray(incoming2) ? incoming2.find(r => r.sender_id === A.id) : undefined;
+    check('block/...and B\'s incoming list now DOES carry A\'s request', !!fromA, `count=${Array.isArray(incoming2) ? incoming2.length : '?'} body=${JSON.stringify(incoming2).slice(0, 120)}`);
+    if (fromA) {
+        const acc2 = await api('POST', `/friends/requests/${fromA.id}/accept`, {}, B.t);
+        check('block/...and B accepts it (2xx)', acc2.status < 300, `status=${acc2.status}`);
+    }
 
     section('DM privacy (allow_dms_from_server_members + show_online_status)');
     // The flags ride the profile and default ON.
