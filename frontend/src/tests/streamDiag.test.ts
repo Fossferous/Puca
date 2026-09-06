@@ -21,6 +21,7 @@ vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics: voiceD
 
 import {
     holdStreamDiag, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
+    setStreamDiagProbe, streamDiagIntervalMs,
 } from '../api/streamDiag';
 
 function logLines(): string[] {
@@ -129,5 +130,67 @@ describe('streamDiag sampler', () => {
         await Promise.resolve();
         expect(invokeMock).not.toHaveBeenCalled();
         expect(streamDiagHolders()).toEqual([]);
+    });
+});
+
+describe('streamDiag: the viewer\'s side of a slow share', () => {
+    const inbound = {
+        ssrc: 1, framesReceived: 300, framesDecoded: 300, framesDropped: 0, fps: 30, size: '1920x1080',
+        decoder: 'libvpx', jitterBufferMs: 240, jitterBufferTargetMs: 230, jitterBufferMinMs: 14,
+        processingMs: 245, assemblyMs: 1, decodeMs: 2.1, interFrameMs: 33, freezeCount: 3, freezeMs: 900,
+        pauseCount: 0, packetsLost: 12, nack: 4, pli: 1, keyFrames: 2, bytes: 1,
+    };
+    const pair = { rttMs: 180, outKbps: 900, inKbps: null, local: 'relay/udp/tcp', remote: 'host/udp', protocol: 'tcp' };
+
+    it('a mesh peer\'s DELAY fields are logged — jitter buffer, processing, decode, the pair\'s protocol', async () => {
+        meshDiagMock.mockResolvedValue([
+            { userId: 7, rtp: [], latency: { inbound: [inbound], outbound: [], pair, remoteInbound: [] } },
+        ]);
+        await sampleOnce();
+        await streamDiagSettled();
+        const [line] = logLines();
+        expect(line).toContain('mesh peer=7 in fps=30');
+        expect(line).toContain('jb=240ms(target 230)');
+        expect(line).toContain('proc=245ms');
+        expect(line).toContain('dec=2.1ms');
+        expect(line).toContain('freeze=3');
+        expect(line).toContain('pair=tcp relay/udp/tcp->host/udp rtt=180ms');
+    });
+
+    it('an SFU viewer\'s subscribed share is logged by peer and source', async () => {
+        voiceDiagMock.mockResolvedValue({
+            localRtp: [],
+            remoteRtp: [{ userId: 9, source: 'screen_share', latency: { inbound: [inbound], outbound: [], pair: null, remoteInbound: [] } }],
+        });
+        await sampleOnce();
+        await streamDiagSettled();
+        const [line] = logLines();
+        expect(line).toContain('sfu peer=9 source=screen_share in fps=30');
+        expect(line).toContain('jb=240ms');
+    });
+
+    it('the probe line leads every sample — the native sink caps a line at 2000 chars', async () => {
+        meshDiagMock.mockResolvedValue([
+            { userId: 7, rtp: [], latency: { inbound: [inbound], outbound: [], pair, remoteInbound: [] } },
+        ]);
+        setStreamDiagProbe(() => 'rc=viewer peer=7 lane=relay');
+        try {
+            await sampleOnce();
+            await streamDiagSettled();
+            expect(logLines()[0].startsWith('rc=viewer peer=7 lane=relay | '), 'first, never the fragment a big call cuts off').toBe(true);
+        } finally {
+            setStreamDiagProbe(null);
+        }
+    });
+
+    it('a live remote-control holder samples every second; a bare capture every five', () => {
+        holdStreamDiag('voice-share');
+        expect(streamDiagIntervalMs()).toBe(5000);
+        holdStreamDiag('rc-viewer');
+        expect(streamDiagIntervalMs(), 'a pacer spike lasts a few hundred ms').toBe(1000);
+        releaseStreamDiag('rc-viewer');
+        expect(streamDiagIntervalMs(), 'back to the capture cadence').toBe(5000);
+        releaseStreamDiag('voice-share');
+        expect(streamDiagIntervalMs()).toBe(0);
     });
 });

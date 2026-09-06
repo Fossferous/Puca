@@ -1,13 +1,14 @@
 import { wsClient } from '../websocket';
 import { getRtcConfigAsync } from './config';
 import {
-    CTL_STATE_LABEL, forgetControlChannels, registerControlChannel,
+    CTL_STATE_LABEL, CTL_STREAM_ID, forgetControlChannels, registerControlChannel,
 } from './controlDc';
 import { withRelayOnlyIfRequested } from '../iceConfig';
 import { MediaManager } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
+import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
 import { AnnouncedVideoGate } from './announcedVideo';
 
 export { classifyRemoteVideo } from './announcedVideo';
@@ -977,24 +978,32 @@ export class WebRTCManager {
                 : effectiveConfig,
         );
 
-        // P2P INPUT LANES (W5/R2 — see rtc/controlDc.ts). Created AT
+        // P2P INPUT LANE (W5/R2 — see rtc/controlDc.ts). Created AT
         // CONSTRUCTION, before any offer: a channel added later renegotiates
-        // the pc, and these must cost zero extra ICE (max-bundle means they
-        // share the existing transport). Both sides create; the registry
-        // keeps one channel per lane and closes the loser. remoteControl
-        // gates real input on a sealed app-level HELLO, never on these being
-        // open — an open channel proves SCTP, not that the peer understands
-        // the frames.
+        // the pc, and it must cost zero extra ICE (max-bundle means it
+        // shares the existing transport). NEGOTIATED with a fixed stream id
+        // on both sides, so the two ends share ONE channel and nothing is
+        // announced in-band — the first cut had both sides create in-band
+        // and the registry close the duplicate that arrived, which closed
+        // the peer's own channel: both ends lost the lane and every session
+        // rode the relay (see CTL_STREAM_ID). remoteControl gates real input
+        // on a sealed app-level HELLO, never on this being open — an open
+        // channel proves SCTP, not that the peer understands the frames.
         // Behind the FOLDED LITERAL: a lite build has no remote control, so it
         // neither opens the lane nor carries rtc/controlDc (rc-exclusion-guard
         // fails the build if the real module enters the graph).
         if (__RC_ENABLED__) try {
-            registerControlChannel(userId, pc.createDataChannel(CTL_STATE_LABEL, { ordered: true }));
+            registerControlChannel(userId, pc.createDataChannel(CTL_STATE_LABEL, {
+                ordered: true, negotiated: true, id: CTL_STREAM_ID,
+            }));
         } catch (e) {
             // A runtime without data channels keeps the relay path — the
             // permanent fallback, not a degraded mode.
             console.warn('[WebRTC] control data channels unavailable:', e);
         }
+        // Nothing arrives here from a current peer (a negotiated channel is
+        // never announced); an OLDER peer still announces its in-band channel
+        // and the registry adopts it so that pairing gets the lane too.
         pc.ondatachannel = (ev) => {
             if (__RC_ENABLED__ && ev.channel.label === CTL_STATE_LABEL) registerControlChannel(userId, ev.channel);
         };
@@ -1607,14 +1616,34 @@ export class WebRTCManager {
      * (encoderImplementation: libvpx = software, MediaFoundation/NVENC =
      * hardware); inbound video reports `decoder`. A 2026-08-20 field report
      * could not be attributed because these were dropped here.
+     *
+     * `latency` carries the DELAY fields (rtc/statsSummary.ts): jitter
+     * buffer, processing, decode, encode, pacer delay, the selected pair's
+     * protocol and RTT — which stage owns a slow share. `receivers` reads
+     * back the jitter-buffer hints receiverLatency.ts wrote, so an
+     * assignment that silently did nothing is visible as such.
+     *
+     * With `windowMs`, the delay and rate fields are measured over that
+     * window (two reads) instead of since the track started — use it while
+     * it feels slow: `await __pucaMeshDiag(5000)`.
      */
-    async meshDiagnostics(): Promise<Record<string, unknown>[]> {
+    async meshDiagnostics(windowMs?: number): Promise<Record<string, unknown>[]> {
         const out: Record<string, unknown>[] = [];
+        const before = new Map<UserId, RTCStatsReport>();
+        if (windowMs && windowMs > 0) {
+            for (const [userId, peer] of this.peers) {
+                try { before.set(userId, await peer.connection.getStats()); } catch { /* closed */ }
+            }
+            await new Promise(r => setTimeout(r, windowMs));
+        }
         for (const [userId, peer] of this.peers) {
             const pc = peer.connection;
             const rtp: Record<string, unknown>[] = [];
+            let latency: RtcLatencySummary | null = null;
             try {
                 const stats = await pc.getStats();
+                const prev = before.get(userId);
+                latency = prev && windowMs ? summariseRtcStatsDelta(prev, stats, windowMs) : summariseRtcStats(stats);
                 stats.forEach((s) => {
                     if (s.type === 'outbound-rtp' || s.type === 'inbound-rtp') {
                         const r = s as unknown as Record<string, unknown>;
@@ -1644,6 +1673,9 @@ export class WebRTCManager {
                     ? `${s.track.kind}:${s.track.readyState}${s.track.enabled ? '' : ':disabled'}`
                     : 'null'),
                 rtp,
+                latency,
+                receivers: receiverHints(pc.getReceivers()),
+                ...(windowMs ? { windowMs } : {}),
             });
         }
         return out;

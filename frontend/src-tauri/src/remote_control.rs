@@ -37,11 +37,32 @@ fn inject_tx() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<InjectJob>> 
         let _ = std::thread::Builder::new()
             .name("input-inject".into())
             .spawn(move || {
+                // Microseconds of work per event; what this thread must never
+                // do is wait behind a game's threads for a CPU slice, because
+                // that wait is pointer lag on the far end. HIGHEST within our
+                // class (ABOVE_NORMAL while a share is boosted). Not
+                // TIME_CRITICAL: that is the hook thread's budget, which has
+                // an OS deadline this does not.
+                #[cfg(windows)]
+                // SAFETY: plain Win32 calls on the current thread's own
+                // pseudo-handle; failure is logged and the thread runs at the
+                // default priority, exactly as before.
+                unsafe {
+                    use windows::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+                    };
+                    if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) {
+                        log::warn!("[inject] could not raise worker thread priority: {e:?}");
+                    }
+                }
                 for job in rx {
                     match job {
                         InjectJob::Event(ev) => {
+                            // log, not eprintln: the release build is
+                            // windows_subsystem = "windows", so stderr goes
+                            // nowhere and a refused injection was invisible.
                             if let Err(e) = inject(ev) {
-                                eprintln!("[inject] {e}");
+                                log::warn!("[inject] {e}");
                             }
                         }
                         InjectJob::ReleaseAll(ack) => {

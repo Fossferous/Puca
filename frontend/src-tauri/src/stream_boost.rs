@@ -22,11 +22,21 @@
 //! silent sweep.
 //!
 //! What it does now: while active, every descendant `msedgewebview2.exe` of
-//! this app process sitting at NORMAL is raised to ABOVE_NORMAL (CPU). A
-//! re-apply tick catches processes Chromium spawns or re-prioritises
-//! mid-share. On release, each process is restored to the CPU class it had —
-//! after re-checking it is STILL one of our webview processes, so a recycled
-//! pid is never touched.
+//! this app process sitting at NORMAL is raised to ABOVE_NORMAL (CPU) — and
+//! so is THIS process. The 0.8.111 walk was strict-descendant and left the
+//! app process itself at NORMAL, which is the process that owns the Tauri
+//! UI thread servicing every IPC request (each remote-control inject is
+//! one) and the `input-inject` worker that calls SendInput — the two hops
+//! between the host page's inject call and the desktop. That is the whole
+//! case for it. The measurement that motivated the input-path work
+//! (frontend/e2e/rc-latency-2peer.mjs, BUSY=host) loads the host PAGE's
+//! main thread and stops at the page's inject call, so it says the input
+//! leg is the contention-sensitive half (p50 25 ms / p90 65 ms against 1 ms
+//! idle while the video leg moved 5 ms) and argues for the coalescer and
+//! the batched IPC; it does not reach this process. A re-apply tick
+//! catches processes Chromium spawns or re-prioritises mid-share. On
+//! release, each process is restored to the CPU class it had — after
+//! re-checking it is STILL one of ours, so a recycled pid is never touched.
 //!
 //! Deliberately NOT active for the armed clip replay buffer: nobody is
 //! watching that capture live, and taking GPU/CPU time from the game to feed
@@ -168,8 +178,12 @@ mod imp {
         rows
     }
 
-    fn our_webview_pids() -> Vec<u32> {
-        descendants_named(&snapshot(), std::process::id(), WEBVIEW_EXE)
+    /// The processes on the live path: every WebView2 descendant, plus this
+    /// process (the IPC servicing thread and the input-inject worker).
+    fn our_pids() -> Vec<u32> {
+        let mut pids = descendants_named(&snapshot(), std::process::id(), WEBVIEW_EXE);
+        pids.push(std::process::id());
+        pids
     }
 
     /// Raise `pid`'s CPU priority to ABOVE_NORMAL. Returns what changed,
@@ -209,7 +223,7 @@ mod imp {
     /// Boost every current webview descendant not already boosted. Returns
     /// the number of processes currently held boosted.
     fn apply() -> usize {
-        let pids = our_webview_pids();
+        let pids = our_pids();
         let mut state = STATE.lock().unwrap();
         if !state.active {
             return 0; // released while we were snapshotting — don't re-boost
@@ -264,11 +278,11 @@ mod imp {
         if drained.is_empty() {
             return 0;
         }
-        // Re-verify each pid is STILL one of our webview processes before
-        // touching it: a pid can be recycled by an unrelated process between
-        // boost and release, and priorities of strangers are not ours to set.
+        // Re-verify each pid is STILL one of ours before touching it: a pid
+        // can be recycled by an unrelated process between boost and release,
+        // and priorities of strangers are not ours to set.
         let still_ours: std::collections::HashSet<u32> =
-            our_webview_pids().into_iter().collect();
+            our_pids().into_iter().collect();
         let mut restored = 0;
         for (pid, boosted) in drained {
             if still_ours.contains(&pid) {
@@ -289,11 +303,11 @@ pub fn set_stream_boost(active: bool) -> Result<u32, String> {
     {
         if active {
             let n = imp::activate();
-            log::info!("[stream-boost] on ({n} webview process(es))");
+            log::info!("[stream-boost] on ({n} process(es), app process included)");
             Ok(n as u32)
         } else {
             let n = imp::deactivate();
-            log::info!("[stream-boost] off ({n} webview process(es))");
+            log::info!("[stream-boost] off ({n} process(es))");
             Ok(n as u32)
         }
     }

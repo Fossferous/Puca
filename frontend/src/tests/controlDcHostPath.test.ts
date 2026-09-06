@@ -12,8 +12,9 @@
  *   - the shared rate cap and coalescer, via handleIncomingInput,
  *   - and only while this host is actually sharing.
  *
- * The seam is the Tauri `inject_input` invoke: what reaches it is what lands
- * on the desktop, so that is what these tests count.
+ * The seam is the Tauri `inject_input_batch` invoke (per-event
+ * `inject_input` for an older binary): what reaches it is what lands on the
+ * desktop, so that is what these tests count.
  */
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -35,6 +36,10 @@ vi.mock('../api/websocket', () => ({
 vi.mock('../api/platform', () => ({ isTauri: () => true, isMobile: () => false }));
 vi.mock('@tauri-apps/api/core', () => ({
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        // Events reach the desktop in batches now (one IPC round trip per
+        // coalesced motion + state event, in order); the per-event command
+        // is the fallback for an older binary. Both land here.
+        if (cmd === 'inject_input_batch') { injected.push(...(args?.events as unknown[])); return undefined; }
         if (cmd === 'inject_input') { injected.push(args?.event); return undefined; }
         if (cmd === 'list_anticheat_processes') return [];      // nothing blocking
         if (cmd === 'list_monitors') return { monitors: [], virt_left: 0, virt_top: 0, virt_width: 0, virt_height: 0 };
@@ -62,7 +67,8 @@ let viewerIdentityPub = '';
 vi.mock('../api/dms', () => ({ getCachedPublicKey: async () => viewerIdentityPub }));
 
 import {
-    FRAME_HELLO, FRAME_SEALED_INPUT, registerControlChannel, resetControlChannels,
+    FRAME_HELLO, FRAME_SEALED_INPUT, controlDcReady, decodeFrame, registerControlChannel,
+    resetControlChannels,
 } from '../api/rtc/controlDc';
 import {
     makeIdentity, generateControlEphemeral, deriveControlSessionKey, sealControlBytes,
@@ -195,5 +201,124 @@ describe('what the host will and will not inject from a data channel', () => {
         raw.onmessage!({ data: 'text' } as unknown as MessageEvent);
         await settle();
         expect(injected).toHaveLength(0);
+    });
+});
+
+describe('two sessions at once — ending one must not touch the other', () => {
+    /** Drive THIS user into a VIEWER session with `peerId` (the identity
+     *  mock serves the same key for every id) and return the key that peer
+     *  holds, so it can seal a hello. */
+    async function activeViewerWith(peerId: number): Promise<Uint8Array> {
+        const rc = await import('../api/remoteControl');
+        const me = makeIdentity(new Uint8Array(32).fill(3));
+        const peer = makeIdentity(new Uint8Array(32).fill(4));
+        sent.length = 0;
+        rc.requestControl(peerId, 'other');
+        await settle();
+        const req = sent.find(m => m.type === 'ControlRequest' && m.payload?.target_user === peerId);
+        const myEph = req?.payload?.eph as string;
+        expect(myEph).toBeTruthy();
+        const theirEph = generateControlEphemeral();
+        handlers.get('ControlResponse')!({
+            payload: { from_user: peerId, granted: true, eph: theirEph.pubEncoded, cap_w: 1920, cap_h: 1080 },
+        });
+        await settle();
+        const key = deriveControlSessionKey(peer.privateKey, me.publicKeyEncoded, theirEph.priv, myEph);
+        expect(key).not.toBeNull();
+        sent.length = 0;
+        return key!;
+    }
+
+    async function helloFrom(raw: ReturnType<typeof fakeDc>['raw'], key: Uint8Array) {
+        raw.onmessage!({ data: await frameFor(key, 0, FRAME_HELLO) } as MessageEvent);
+        await settle();
+    }
+
+    it('ending the HOST session leaves a live VIEWER session with ANOTHER peer on its lane', async () => {
+        await activeHost();                       // hosting VIEWER (42)
+        const OTHER = 43;
+        const otherKey = await activeViewerWith(OTHER);
+        const other = fakeDc();
+        const otherFrames: Uint8Array[] = [];
+        (other.raw as unknown as { send: (b: ArrayBuffer) => void }).send = (b) => { otherFrames.push(new Uint8Array(b)); };
+        registerControlChannel(OTHER, other.dc);
+        await helloFrom(other.raw, otherKey);
+        expect(controlDcReady(OTHER, 'viewer'), 'the viewer session is on its lane').toBe(true);
+
+        const rc = await import('../api/remoteControl');
+        rc.revokeControl();                       // the HOST session ends
+        await settle();
+        expect(controlDcReady(OTHER, 'viewer'), 'the viewer session must keep it').toBe(true);
+
+        otherFrames.length = 0;
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        expect(sent.filter(m => m.type === 'ControlInput'), 'not demoted to the relay').toHaveLength(0);
+        expect(otherFrames.filter(f => decodeFrame(f)!.kind === FRAME_SEALED_INPUT)).toHaveLength(1);
+    });
+
+    it('mutual control over ONE connection: ending my host session keeps my viewer session on the lane', async () => {
+        await activeHost();                       // VIEWER (42) controls me...
+        const myViewerKey = await activeViewerWith(VIEWER); // ...while I control them
+        const { dc, raw } = fakeDc();
+        const frames: Uint8Array[] = [];
+        (raw as unknown as { send: (b: ArrayBuffer) => void }).send = (b) => { frames.push(new Uint8Array(b)); };
+        registerControlChannel(VIEWER, dc);
+        // Their hello for MY viewer session (sealed under that session's key).
+        await helloFrom(raw, myViewerKey);
+        expect(controlDcReady(VIEWER, 'viewer')).toBe(true);
+        expect(controlDcReady(VIEWER, 'host'), 'no hello for my host session yet').toBe(false);
+
+        const rc = await import('../api/remoteControl');
+        rc.revokeControl();
+        await settle();
+        expect(controlDcReady(VIEWER, 'viewer'), 'one flag per peer would have cleared this').toBe(true);
+        frames.length = 0;
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        expect(sent.filter(m => m.type === 'ControlInput')).toHaveLength(0);
+        expect(frames.filter(f => decodeFrame(f)!.kind === FRAME_SEALED_INPUT)).toHaveLength(1);
+    });
+});
+
+describe('injection order across batches', () => {
+    it('a click that arrives after its move left on the leading edge still lands AFTER it', async () => {
+        const key = await activeHost();
+        const { dc, raw } = fakeDc();
+        registerControlChannel(VIEWER, dc);
+        raw.onmessage!({ data: await frameFor(key, 0, FRAME_HELLO) } as MessageEvent);
+        await settle();
+        injected.length = 0;
+        // Slow the FIRST invoke down: a fast second invoke racing it is the
+        // exact hazard. The mock records arrival order at the injector.
+        const core = await import('@tauri-apps/api/core');
+        const real = core.invoke as (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+        let stalled = false;
+        (core as { invoke: typeof real }).invoke = async (cmd, args) => {
+            if (!stalled && cmd === 'inject_input_batch') {
+                stalled = true;
+                await new Promise(r => setTimeout(r, 15));
+            }
+            return real(cmd, args);
+        };
+        try {
+            const move = JSON.stringify({ s: 1, e: { t: 'move', x: 0.5, y: 0.5 } });
+            const down = JSON.stringify({ s: 2, e: { t: 'down', button: 0 } });
+            for (const body of [move, down]) {
+                const bytes = await sealControlBytes(key, body);
+                const wire = new Uint8Array(bytes.length + 1);
+                wire[0] = FRAME_SEALED_INPUT;
+                wire.set(bytes, 1);
+                raw.onmessage!({ data: wire.buffer.slice(0) } as MessageEvent);
+                await settle(2); // the move leaves on the leading edge before the click arrives
+            }
+            await new Promise(r => setTimeout(r, 40));
+            await settle();
+            expect(injected.map(e => (e as { t: string }).t), 'move first, whatever the IPC did').toEqual(['move', 'down']);
+        } finally {
+            (core as { invoke: typeof real }).invoke = real;
+        }
     });
 });

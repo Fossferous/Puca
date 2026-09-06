@@ -10,6 +10,7 @@
  */
 export const CTL_STATE_LABEL = 'sov-ctl-s';
 export const CTL_SFU_TOPIC = 'sov-ctl';
+export const CTL_STREAM_ID = 32;
 export function registerControlChannel(_peerId: number, _dc: RTCDataChannel): void {}
 export function forgetControlChannels(_peerId: number): void {}
 export function deliverSfuControlFrame(_peerId: number, _payload: Uint8Array<ArrayBufferLike>): void {}

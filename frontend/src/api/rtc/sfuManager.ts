@@ -29,6 +29,7 @@ import { ensureChannelKey } from '../channelKeys';
 import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
+import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
 import type { MediaE2eeReason, MediaE2eeStatus, RemoteStreamCallback } from './types';
 
 interface SfuTokenResponse {
@@ -608,8 +609,28 @@ export class SfuManager {
      *   peer-unencrypted    — they are publishing in the clear
      *   encrypted           — working
      */
-    async voiceDiagnostics(): Promise<Record<string, unknown>> {
+    async voiceDiagnostics(windowMs?: number): Promise<Record<string, unknown>> {
         const room = this.room;
+        // Windowed reads (see meshDiagnostics): first pass now, second after
+        // the window; delay fields are then over the window only.
+        const before = new Map<string, RTCStatsReport>();
+        if (windowMs && windowMs > 0 && room) {
+            for (const pub of room.localParticipant.trackPublications.values()) {
+                const sender = pub.track?.sender;
+                if (sender) { try { before.set(`local:${pub.trackSid}`, await sender.getStats()); } catch { /* detached */ } }
+            }
+            for (const p of room.remoteParticipants.values()) {
+                for (const pub of p.trackPublications.values()) {
+                    const receiver = pub.track?.receiver;
+                    if (receiver) { try { before.set(`remote:${pub.trackSid}`, await receiver.getStats()); } catch { /* detached */ } }
+                }
+            }
+            await new Promise(r => setTimeout(r, windowMs));
+        }
+        const summarise = (key: string, stats: RTCStatsReport): RtcLatencySummary => {
+            const prev = before.get(key);
+            return prev && windowMs ? summariseRtcStatsDelta(prev, stats, windowMs) : summariseRtcStats(stats);
+        };
         // Outbound RTP truth per local publication (mic / camera / share),
         // same entry shape as meshDiagnostics so the two paths read side by
         // side. `limit` (qualityLimitationReason) names the starved resource
@@ -623,6 +644,9 @@ export class SfuManager {
             if (!sender) continue;
             try {
                 const stats = await sender.getStats();
+                // The sender's delay fields (encode time, pacer delay, the
+                // publisher pair) ride on each entry as `latency`.
+                const latency = summarise(`local:${pub.trackSid}`, stats);
                 stats.forEach((s) => {
                     if (s.type !== 'outbound-rtp') return;
                     const r = s as unknown as Record<string, unknown>;
@@ -638,13 +662,38 @@ export class SfuManager {
                             limitDurations: r.qualityLimitationDurations,
                         }),
                         ...(r.encoderImplementation !== undefined && { encoder: r.encoderImplementation }),
+                        ...(r.kind === 'video' && { latency }),
                     });
                 });
             } catch { /* sender detached mid-iteration */ }
         }
+        // What THIS end receives. A viewer on the SFU path used to get no
+        // numbers at all about the share they were complaining about — the
+        // peers block below carries subscription booleans only. One row per
+        // subscribed video publication: the SUBSCRIBER transport's jitter
+        // buffer, processing and decode times, and its selected pair (a
+        // different peer connection from the publisher's, so its own row).
+        const remoteRtp: Record<string, unknown>[] = [];
+        for (const p of room?.remoteParticipants.values() ?? []) {
+            const uid = userIdFromIdentity(p.identity);
+            for (const pub of p.trackPublications.values()) {
+                const receiver = pub.track?.receiver;
+                if (!receiver || pub.kind !== Track.Kind.Video) continue;
+                try {
+                    const stats = await receiver.getStats();
+                    remoteRtp.push({
+                        userId: uid, identity: p.identity, source: String(pub.source),
+                        latency: summarise(`remote:${pub.trackSid}`, stats),
+                        receivers: receiverHints([receiver]),
+                    });
+                } catch { /* receiver detached mid-iteration */ }
+            }
+        }
         return {
             connected: !!room,
+            ...(windowMs ? { windowMs } : {}),
             localRtp,
+            remoteRtp,
             // Noise-suppression state. "RNNoise isn't working" reports had no
             // evidence to attach before this: read `noise.modeNeedsGraph` with
             // `noise.graphLive` — true/false together means the graph failed to
@@ -912,5 +961,5 @@ export const sfuManager = new SfuManager();
 //     await __pucaVoiceDiag()
 if (typeof window !== 'undefined') {
     (window as unknown as Record<string, unknown>).__pucaVoiceDiag =
-        () => sfuManager.voiceDiagnostics();
+        (windowMs?: number) => sfuManager.voiceDiagnostics(windowMs);
 }

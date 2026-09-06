@@ -30,9 +30,10 @@ import {
     type ControlEphemeral,
 } from './e2ee';
 import {
-    FRAME_HELLO, FRAME_SEALED_INPUT, controlDcReady, forgetControlChannels, forgetSfuControl,
-    markHelloSeen, markSfuHelloSeen, sendControlFrame, sendHello, sendSfuControlFrame,
-    setControlFrameHandler, setControlHelloProvider, sfuControlReady,
+    FRAME_HELLO, FRAME_SEALED_INPUT, controlDcCongested, controlDcReady, disarmControlChannels,
+    forgetSfuControl, markHelloSeen, markSfuHelloSeen, sendControlFrame, sendHello,
+    sendSfuControlFrame, setControlFrameHandler, setControlHelloProvider, sfuControlReady,
+    type CtlRole,
 } from './rtc/controlDc';
 import { getCachedPublicKey } from './dms';
 import { pinServedIdentityKey } from './keyVerification';
@@ -244,6 +245,57 @@ function beginHostCrypto(viewerId: number, viewerEphPub: string | undefined): st
     return myEph.pubEncoded;
 }
 
+// --- Field evidence while a session is live ---------------------------------
+//
+// The unattended log sampler (streamDiag.ts) used to be held only by the
+// SHARER, so a viewer complaining that control felt a second behind had no
+// numbers at all. Both roles now hold it for the life of a session, which
+// also switches it to a faster cadence, and it prints which pipe the input
+// is on. Loaded lazily and serialised on one chain: the sampler pulls in
+// both transports, which a test of this module must not have to stub, and a
+// hold followed at once by a release must land in that order.
+let diagChain: Promise<void> = Promise.resolve();
+function diag(fn: (m: typeof import('./streamDiag')) => void): void {
+    diagChain = diagChain
+        .then(() => import('./streamDiag'))
+        .then((m) => { fn(m); })
+        .catch(() => { /* the sampler is evidence, never a dependency */ });
+}
+
+/** Which pipe input for our `role`'s session with `peerId` rides right now. */
+export function controlLaneFor(peerId: number, role: CtlRole): 'mesh-dc' | 'sfu-data' | 'relay' {
+    if (controlDcReady(peerId, role)) return 'mesh-dc';
+    if (sfuControlReady(peerId, role)) return 'sfu-data';
+    return 'relay';
+}
+
+/** One line for the sampler: the live sessions and their lanes, or null. */
+function laneProbe(): string | null {
+    const parts: string[] = [];
+    if (state.controlling?.status === 'active') parts.push(`rc=viewer peer=${state.controlling.userId} lane=${controlLaneFor(state.controlling.userId, 'viewer')}`);
+    if (state.controlledBy) parts.push(`rc=host peer=${state.controlledBy.userId} lane=${controlLaneFor(state.controlledBy.userId, 'host')}`);
+    return parts.length ? parts.join(' ') : null;
+}
+
+/** A session became live for `peerId`: hold the sampler, and if no P2P lane
+ *  has armed within a couple of seconds say so ONCE — the lane silently
+ *  failing to come up was invisible for a whole release. */
+function sessionLive(holder: 'rc-viewer' | 'rc-host', peerId: number): void {
+    diag((m) => m.holdStreamDiag(holder));
+    setTimeout(() => {
+        const live = holder === 'rc-viewer'
+            ? state.controlling?.userId === peerId && state.controlling.status === 'active'
+            : state.controlledBy?.userId === peerId;
+        if (live && controlLaneFor(peerId, holder === 'rc-viewer' ? 'viewer' : 'host') === 'relay') {
+            console.info(`[p2p-input] peer ${peerId}: no P2P lane after 2 s — input rides the relay`);
+        }
+    }, 2000);
+}
+
+function sessionOver(holder: 'rc-viewer' | 'rc-host'): void {
+    diag((m) => m.releaseStreamDiag(holder));
+}
+
 const listeners = new Set<(s: ControlState) => void>();
 let wired = false;
 
@@ -311,13 +363,45 @@ function underRateCap(): boolean {
     return true;
 }
 
-async function injectRaw(event: ControlEvent): Promise<void> {
-    if (!isTauri()) return;
+/** True once the running binary answered that it has no batch command —
+ *  then every batch goes event by event for the rest of the process. */
+let injectBatchUnsupported = false;
+
+function isMissingCommand(e: unknown, name: string): boolean {
+    const msg = String(e);
+    return /not found|unknown|not allowed/i.test(msg) && msg.includes(name);
+}
+
+/**
+ * Hand a batch of events to the native injector in ONE round trip, in order.
+ *
+ * Each invoke is its own request to the IPC protocol (a fetch to
+ * ipc://localhost), and two un-awaited invokes have no ordering guarantee
+ * between them: the worker's FIFO preserves the order it was GIVEN, and
+ * the first cut gave it a positioning move and the click that depends on it
+ * as two racing requests. One batch, one request, one order — and half the
+ * IPC traffic per move-then-click.
+ *
+ * An older binary has no `inject_input_batch`: its "not found" is remembered
+ * and the per-event command is used from then on, awaited one after another
+ * so the order still holds.
+ */
+async function injectRaw(events: ControlEvent[]): Promise<void> {
+    if (!isTauri() || events.length === 0) return;
     try {
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('inject_input', { event });
+        if (!injectBatchUnsupported) {
+            try {
+                await invoke('inject_input_batch', { events });
+                return;
+            } catch (e) {
+                if (!isMissingCommand(e, 'inject_input_batch')) throw e;
+                injectBatchUnsupported = true;
+            }
+        }
+        for (const event of events) await invoke('inject_input', { event });
     } catch (e) {
-        console.warn('[control] inject_input failed:', e);
+        console.warn('[control] inject failed:', e);
     }
 }
 
@@ -333,22 +417,38 @@ let inFlushTimer: ReturnType<typeof setTimeout> | null = null;
 // after a quiet window injects immediately instead of waiting out a timer.
 let lastInFlush = 0;
 
-function flushIncoming() {
+/** Take the pending motion out of the coalescer, in injection order. */
+function drainIncoming(): ControlEvent[] {
     if (inFlushTimer !== null) {
         clearTimeout(inFlushTimer);
         inFlushTimer = null;
     }
     lastInFlush = performance.now();
+    const out: ControlEvent[] = [];
     if (inMove) {
-        void injectRaw(inMove);
+        out.push(inMove);
         inMove = null;
     }
     if (inRmovePending) {
-        void injectRaw({ t: 'rmove', dx: inRmoveDx, dy: inRmoveDy });
+        out.push({ t: 'rmove', dx: inRmoveDx, dy: inRmoveDy });
         inRmoveDx = 0;
         inRmoveDy = 0;
         inRmovePending = false;
     }
+    return out;
+}
+
+// Successive batches are queued in order as well: a move that left on the
+// leading edge as its own batch and the click that arrives right behind it
+// are two batches, and two un-awaited invokes have no relative order.
+let injectChain: Promise<void> = Promise.resolve();
+function inject(events: ControlEvent[]): void {
+    if (events.length === 0) return;
+    injectChain = injectChain.then(() => injectRaw(events)).catch(() => { /* injectRaw logs */ });
+}
+
+function flushIncoming() {
+    inject(drainIncoming());
 }
 
 function handleIncomingInput(event: ControlEvent) {
@@ -376,13 +476,24 @@ function handleIncomingInput(event: ControlEvent) {
         }
         return;
     }
-    flushIncoming(); // preserve ordering: motion lands before the click/key
-    void injectRaw(event);
+    // Preserve ordering: the motion lands before the click/key — in the SAME
+    // batch when it is still pending, and behind the previous batch on the
+    // chain when it already left, so neither can overtake the other.
+    inject([...drainIncoming(), event]);
 }
 
 async function releaseInput() {
+    // The WHOLE coalescer, not just the flags: a delta accumulated but not
+    // yet flushed at teardown otherwise rides into the next session's first
+    // move as a one-off jump.
+    if (inFlushTimer !== null) {
+        clearTimeout(inFlushTimer);
+        inFlushTimer = null;
+    }
     inMove = null;
     inRmovePending = false;
+    inRmoveDx = 0;
+    inRmoveDy = 0;
     if (!isTauri()) return;
     try {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -518,8 +629,8 @@ export function stopControlling() {
     wsClient.send({ type: 'ControlEnd', payload: { target_user: target.userId } });
     state.controlling = null;
     // Capability is per session on this side too — see endHostSession.
-    forgetControlChannels(target.userId);
-    forgetSfuControl(target.userId);
+    disarmControlChannels(target.userId, 'viewer');
+    forgetSfuControl(target.userId, 'viewer');
     viewerCrypto = null;
     viewerEph = null;
     controlHostCapture = null;
@@ -529,6 +640,7 @@ export function stopControlling() {
     // trade only while pointing at things, and on a bad link it means
     // stutter for however long they keep watching.
     setScreenLatencyMinimised(target.userId, false);
+    sessionOver('rc-viewer');
     emit();
 }
 
@@ -626,7 +738,7 @@ let rmoveTimer: ReturnType<typeof setTimeout> | null = null;
 // goes straight out instead of waiting the full window at BOTH ends.
 let lastRmoveFlush = 0;
 
-// Backpressure valve: while the socket holds more than this many unsent
+// Backpressure valve: while the pipe holds more than this many unsent
 // bytes, MOTION FLUSHES ARE HELD — the pending position keeps superseding and
 // the delta accumulator keeps summing, so nothing is lost, it is just late.
 // Holding at the FLUSH (not dropping in rawSend) is the load-bearing choice:
@@ -634,8 +746,20 @@ let lastRmoveFlush = 0;
 // drained from the accumulator (distance lost forever) and binned the
 // positioning move the state-event ordering block had just flushed ahead of
 // a click (click teleport). State events are never held.
-const UPLINK_HIGH_WATER_BYTES = 64 * 1024;
+//
+// SIZED IN TIME: a sealed frame is ~100-120 bytes at 60-125 a second, so
+// 4 KiB is three to six hundred milliseconds of motion — the most staleness a
+// stalled link can bank before holding kicks in. The first cut's 64 KiB was
+// five to ten seconds of stale pointer replayed late once the link recovered.
+// Matches CTL_HIGH_WATER_BYTES in rtc/controlDc.ts.
+const UPLINK_HIGH_WATER_BYTES = 4 * 1024;
+/** Is the pipe the frames are ACTUALLY on clear to take more motion? On the
+ *  mesh lane that is the data channel's own buffer; otherwise the socket's.
+ *  (The SFU data path exposes no buffer; the socket's — idle then — is what
+ *  is left to read, so the valve never engages there.) */
 function uplinkClear(): boolean {
+    const target = state.controlling;
+    if (target && controlDcReady(target.userId, 'viewer')) return !controlDcCongested(target.userId);
     return wsClient.bufferedAmount() <= UPLINK_HIGH_WATER_BYTES;
 }
 
@@ -671,8 +795,8 @@ function rawSend(event: ControlEvent) {
     // it at all. Both P2P pipes share one SEQUENCE NAMESPACE (they are never
     // both live for one peer — a call is mesh or SFU) and the relay keeps
     // its own; see the crypto state comment.
-    const viaDc = controlDcReady(targetId);
-    const viaSfu = !viaDc && sfuControlReady(targetId);
+    const viaDc = controlDcReady(targetId, 'viewer');
+    const viaSfu = !viaDc && sfuControlReady(targetId, 'viewer');
     sendChain = sendChain
         .then(async () => {
             if (viewerCrypto !== cc) return; // session torn down mid-flight
@@ -707,8 +831,8 @@ function rawSend(event: ControlEvent) {
                 //    desktop. One transport at a time, and a fallback is
                 //    one-way.
                 dcFellBack(targetId, viaDc ? 'data channel send failed' : 'SFU publish failed');
-                forgetControlChannels(targetId);
-                forgetSfuControl(targetId);
+                disarmControlChannels(targetId, 'viewer');
+                forgetSfuControl(targetId, 'viewer');
             }
             const sealed = await sealControl(
                 cc.key, JSON.stringify({ s: ++cc.seq, e: event }),
@@ -778,19 +902,20 @@ function wireControlDc(): void {
                 // A). Those are two sessions with two different keys on one
                 // peer connection, and taking only the host key left the
                 // other direction permanently on the relay.
-                let plain: string | null = null;
-                for (const k of [asHost?.key, asViewer?.key]) {
+                let role: CtlRole | null = null;
+                for (const [k, r] of [[asHost?.key, 'host'], [asViewer?.key, 'viewer']] as const) {
                     if (!k) continue;
-                    plain = await openControlBytes(k, frame.payload);
-                    if (plain !== null) break;
+                    if (await openControlBytes(k, frame.payload) !== null) { role = r; break; }
                 }
-                if (plain === null) return;
-                // Arm the pipe it ARRIVED ON. A mesh hello says nothing about
-                // an SFU room and the reverse, and arming the wrong one would
-                // send input into a transport that never proved itself.
-                if (viaMesh) markHelloSeen(peerId);
-                else markSfuHelloSeen(peerId);
-                console.info(`[p2p-input] peer ${peerId}: ${viaMesh ? 'mesh data channel' : 'SFU data path'} ready`);
+                if (role === null) return;
+                // Arm the pipe it ARRIVED ON, for the SESSION whose key opened
+                // it. A mesh hello says nothing about an SFU room and the
+                // reverse, and arming the wrong one would send input into a
+                // transport that never proved itself; arming the wrong role
+                // would let one session's proof serve another's.
+                if (viaMesh) markHelloSeen(peerId, role);
+                else markSfuHelloSeen(peerId, role);
+                console.info(`[p2p-input] peer ${peerId}: ${viaMesh ? 'mesh data channel' : 'SFU data path'} ready (as ${role})`);
             }).catch(() => undefined);
             return;
         }
@@ -963,6 +1088,7 @@ export async function respondToControlRequest(granted: boolean) {
         void startGuard();
         void setupMonitorTarget();
         armInactivity();
+        sessionLive('rc-host', req.userId);
         emit();
     } else {
         // Growing mute on re-requests: they only reach me again after the
@@ -987,15 +1113,22 @@ export function revokeControl() {
 /** Tear down all host-side control machinery (guard, held input, monitor, timers). */
 function endHostSession() {
     clearInactivity();
-    // Forget the P2P lanes with the key: capability is per SESSION, and a
-    // hello from the last one must not arm the next.
-    if (hostCrypto) { forgetControlChannels(hostCrypto.peerId); forgetSfuControl(hostCrypto.peerId); }
-    if (viewerCrypto) { forgetControlChannels(viewerCrypto.peerId); forgetSfuControl(viewerCrypto.peerId); }
+    // Disarm the P2P lane of THIS session with its key: capability is per
+    // session, and a hello from the last one must not arm the next. Disarm,
+    // never close — the mesh channel belongs to the peer connection and a
+    // closed SCTP stream never comes back, so closing it here put every
+    // later session of the call on the relay (see
+    // controlDc.disarmControlChannels). Only the HOST role: a viewer session
+    // this user holds at the same time — with another peer, or with this
+    // one — is untouched and must keep its lane (review finding: the first
+    // cut disarmed both and silently demoted the live one to the relay).
+    if (hostCrypto) { disarmControlChannels(hostCrypto.peerId, 'host'); forgetSfuControl(hostCrypto.peerId, 'host'); }
     hostCrypto = null;      // no key ⇒ any further ControlInput is dropped
     pendingViewerEph = null;
     void stopGuard();       // stops the LL hook AND releases held input natively
     void releaseInput();    // also clears JS coalesce buffers
     void clearMonitorTarget();
+    sessionOver('rc-host');
 }
 
 function clearOffered() {
@@ -1039,6 +1172,7 @@ export function initRemoteControl() {
     if (wired) return;
     wired = true;
     wireControlDc();
+    diag((m) => m.setStreamDiagProbe(laneProbe));
 
     // HOST: a viewer wants control of my screen.
     wsClient.on('ControlRequested', async (msg: ServerMessage) => {
@@ -1074,6 +1208,7 @@ export function initRemoteControl() {
             void startGuard();
             void setupMonitorTarget();
             armInactivity();
+            sessionLive('rc-host', p.from_user);
             emit();
             return;
         }
@@ -1172,6 +1307,13 @@ export function initRemoteControl() {
                 // minimised flag behind strands the receiver at zero-buffer
                 // for the life of the tab.
                 setScreenLatencyMinimised(p.from_user, false);
+                // ...and everything else an active session holds: the
+                // sampler holder (else it samples at 1 Hz for the rest of
+                // the tab), the lane capability and the key.
+                sessionOver('rc-viewer');
+                disarmControlChannels(p.from_user, 'viewer');
+                forgetSfuControl(p.from_user, 'viewer');
+                viewerCrypto = null;
                 state.controlling = null;
                 viewerEph = null;
                 emit();
@@ -1190,6 +1332,7 @@ export function initRemoteControl() {
             // measured to matter there. Undone on every path that ends
             // control; plain watching keeps the browser's buffering.
             setScreenLatencyMinimised(hostId, true);
+            sessionLive('rc-viewer', hostId);
             emit();
             // Establish the per-session key before input flows; fail closed if we
             // can't (no identity / key changed / bad material ⇒ never send input).
@@ -1213,6 +1356,10 @@ export function initRemoteControl() {
             // e.g. this user requesting the same host from a second tab), so
             // it must give the jitter buffer back like every other ender.
             setScreenLatencyMinimised(p.from_user, false);
+            sessionOver('rc-viewer');
+            disarmControlChannels(p.from_user, 'viewer');
+            forgetSfuControl(p.from_user, 'viewer');
+            viewerCrypto = null;
             state.controlling = null;
             emit();
         }
@@ -1352,6 +1499,9 @@ function teardownPartner(userId: number, controllingNotice: string) {
         rmoveAccum = { dx: 0, dy: 0 };
         pendingAbsMove = null;
         setScreenLatencyMinimised(userId, false);
+        sessionOver('rc-viewer');
+        disarmControlChannels(userId, 'viewer');
+        forgetSfuControl(userId, 'viewer');
         changed = true;
     }
     if (state.incomingRequest?.userId === userId) {
@@ -1383,6 +1533,8 @@ export function resetRemoteControl() {
     // and the whole point is to also sweep up an entry some null-path
     // orphaned when state.controlling was already gone.
     clearAllScreenLatency();
+    sessionOver('rc-viewer');
+    sessionOver('rc-host');
     viewerCrypto = null;
     viewerEph = null;
     pendingViewerEph = null;

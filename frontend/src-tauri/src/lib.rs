@@ -284,6 +284,26 @@ fn inject_input(event: remote_control::ControlInput) -> Result<(), String> {
     remote_control::inject_queued(event)
 }
 
+/// Inject several events in ONE IPC round trip, in order.
+///
+/// The frontend coalesces pending motion and the state event that depends on
+/// it (a positioning move, then the click) into one batch. As two separate
+/// invokes they were two requests to the IPC protocol with no ordering
+/// guarantee between them — the worker's FIFO can only keep an order it was
+/// given. Each event is queued exactly as `inject_input` would queue it. The
+/// bound is defensive: a batch is at most a few events by construction.
+#[cfg(feature = "remote-control")]
+#[tauri::command]
+fn inject_input_batch(events: Vec<remote_control::ControlInput>) -> Result<(), String> {
+    if events.len() > 64 {
+        return Err("control batch too large".to_string());
+    }
+    for event in events {
+        remote_control::inject_queued(event)?;
+    }
+    Ok(())
+}
+
 /// This device's public identity, creating the keypair on first call.
 /// The private halves stay in device_key.rs and are never returned to JS.
 ///
@@ -1384,6 +1404,8 @@ pub fn run() {
             stop_clip_desktop_audio,
             #[cfg(feature = "remote-control")]
             inject_input,
+            #[cfg(feature = "remote-control")]
+            inject_input_batch,
             device_key_ensure,
             device_key_sign,
             ua_seed_protect,

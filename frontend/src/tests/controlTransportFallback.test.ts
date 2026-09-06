@@ -45,7 +45,7 @@ let hostIdentityPub = '';
 vi.mock('../api/dms', () => ({ getCachedPublicKey: async () => hostIdentityPub }));
 
 import {
-    FRAME_HELLO, FRAME_SEALED_INPUT, decodeFrame, registerControlChannel,
+    CTL_HIGH_WATER_BYTES, FRAME_HELLO, FRAME_SEALED_INPUT, decodeFrame, registerControlChannel,
     resetControlChannels, setSfuControlSender,
 } from '../api/rtc/controlDc';
 import {
@@ -304,5 +304,113 @@ describe('the in-flight fallback — the branch a clean close never reaches', ()
         expect(hellos[0].user).toBe(HOST);
         // And it is a real sealed hello, not a bare marker byte.
         expect(await openControlBytes(key, decodeFrame(hellos[0].frame)!.payload)).toBe('{"hello":1}');
+    });
+});
+
+describe('the lane outlives a control session', () => {
+    async function helloOn(raw: ReturnType<typeof fakeDc>['raw'], key: Uint8Array) {
+        const hello = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
+        const wire = new Uint8Array(hello.length + 1);
+        wire[0] = FRAME_HELLO;
+        wire.set(hello, 1);
+        raw.onmessage!({ data: wire.buffer.slice(0) } as MessageEvent);
+        await settle();
+    }
+
+    it('the SECOND session of a call still rides the channel — ending one disarms, it does not close', async () => {
+        const key1 = await activeViewer();
+        const rc = await import('../api/remoteControl');
+        const { dc, frames, raw } = fakeDc();
+        (raw as unknown as { negotiated: boolean }).negotiated = true;
+        registerControlChannel(HOST, dc);
+        await helloOn(raw, key1);
+        frames.length = 0;
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        expect(sent.filter(m => m.type === 'ControlInput'), 'session 1: the channel').toHaveLength(0);
+        expect(frames.filter(f => decodeFrame(f)!.kind === FRAME_SEALED_INPUT)).toHaveLength(1);
+
+        rc.stopControlling();
+        await settle();
+        // The first cut CLOSED the channel here. A closed SCTP stream never
+        // reopens and nothing re-creates it until the pc is rebuilt, so every
+        // later session of the call silently rode the relay.
+        expect(raw.readyState, 'the pipe belongs to the peer connection, not the session').toBe('open');
+
+        const key2 = await activeViewer();
+        frames.length = 0;
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        expect(sent.filter(m => m.type === 'ControlInput'), 'before the new hello: the relay (capability is per session)').toHaveLength(1);
+
+        await helloOn(raw, key2);
+        frames.length = 0;
+        sent.length = 0;
+        rc.sendControlEvent({ t: 'up', button: 0 });
+        await settle();
+        expect(sent.filter(m => m.type === 'ControlInput'), 'after it: the channel again').toHaveLength(0);
+        const inputs = frames.filter(f => decodeFrame(f)!.kind === FRAME_SEALED_INPUT);
+        expect(inputs).toHaveLength(1);
+        const plain = await openControlBytes(key2, decodeFrame(inputs[0])!.payload);
+        // A fresh session, a fresh channel namespace.
+        expect(JSON.parse(plain!)).toMatchObject({ s: 1, e: { t: 'up', button: 0 } });
+    });
+});
+
+describe('the valve on the lane', () => {
+    async function helloOn(raw: ReturnType<typeof fakeDc>['raw'], key: Uint8Array) {
+        const hello = await sealControlBytes(key, JSON.stringify({ hello: 1 }));
+        const wire = new Uint8Array(hello.length + 1);
+        wire[0] = FRAME_HELLO;
+        wire.set(hello, 1);
+        raw.onmessage!({ data: wire.buffer.slice(0) } as MessageEvent);
+        await settle();
+    }
+    const kinds = (frames: Uint8Array[]) => frames.map(f => decodeFrame(f)!.kind);
+    const inputsOf = async (frames: Uint8Array[], key: Uint8Array) => {
+        const out: unknown[] = [];
+        for (const f of frames) {
+            const d = decodeFrame(f)!;
+            if (d.kind !== FRAME_SEALED_INPUT) continue;
+            out.push(JSON.parse((await openControlBytes(key, d.payload))!).e);
+        }
+        return out;
+    };
+
+    it('a congested channel HOLDS motion at the sender; a click flushes it ahead, on the SAME pipe', async () => {
+        const key = await activeViewer();
+        const rc = await import('../api/remoteControl');
+        const { dc, frames, raw } = fakeDc();
+        registerControlChannel(HOST, dc);
+        await helloOn(raw, key);
+        frames.length = 0;
+        sent.length = 0;
+
+        raw.bufferedAmount = CTL_HIGH_WATER_BYTES + 1;
+        rc.sendControlEvent({ t: 'move', x: 0.25, y: 0.75 });
+        await settle();
+        expect(kinds(frames).filter(k => k === FRAME_SEALED_INPUT), 'motion is held').toHaveLength(0);
+        expect(sent.filter(m => m.type === 'ControlInput'), 'and never rerouted to the relay').toHaveLength(0);
+
+        // The click lands where the pointer was last seen: the held
+        // position goes first, then the click, both on the channel.
+        rc.sendControlEvent({ t: 'down', button: 0 });
+        await settle();
+        expect(sent.filter(m => m.type === 'ControlInput')).toHaveLength(0);
+        expect(await inputsOf(frames, key)).toEqual([
+            { t: 'move', x: 0.25, y: 0.75 },
+            { t: 'down', button: 0 },
+        ]);
+
+        // Drained: motion flows again.
+        raw.bufferedAmount = 0;
+        frames.length = 0;
+        // Past the 16 ms absolute-move window so the leading edge is clear.
+        await new Promise(r => setTimeout(r, 20));
+        rc.sendControlEvent({ t: 'move', x: 0.5, y: 0.5 });
+        await settle();
+        expect(await inputsOf(frames, key)).toEqual([{ t: 'move', x: 0.5, y: 0.5 }]);
     });
 });

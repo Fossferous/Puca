@@ -4,6 +4,65 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Remote-controlling a friend's shared screen felt about a second behind. The
+loop was measured end to end on one machine (a new rig, below) and the parts
+of it the app owns were found and fixed; what a home network adds is now
+readable from the app instead of guessed at.
+
+### Fixed
+- **Remote-control input now actually travels over the call's own
+  peer-to-peer channel.** It never had: both ends created the channel and each
+  closed the copy that arrived — which is the peer's own channel — so every
+  mouse move and click went the long way round through the server (and the
+  edge proxy in front of it) while the app believed it had a direct path,
+  with nothing in any log to say so. The channel is now negotiated once per
+  connection and survives the end of a control session, so the second session
+  in a call is as direct as the first. On a distant server that is two
+  internet legs per event less; on the test machine the lane opens on both
+  ends within a second of the call connecting.
+- **A stalled link no longer banks seconds of stale pointer motion.** The
+  motion valve used to engage at 64 KiB of unsent input — five to ten seconds
+  of movement replayed late once the link recovered — and, on the direct
+  channel, to move frames onto the relay mid-session, where a press and its
+  release could arrive out of order. It engages at 4 KiB now (a few hundred
+  milliseconds), holds motion in place until the pipe drains, and never
+  changes pipe under a session.
+- **Clicks cannot overtake the move that placed them.** The host used to hand
+  the pointer position and the click to the desktop as two separate,
+  un-awaited IPC calls with no ordering between them; a click and any motion
+  still pending now go as one batch, successive batches are queued in order,
+  and there is half the IPC traffic per click.
+- **The host's input path keeps its CPU under a game.** The streaming priority
+  boost skipped the app process itself — the one that services every IPC call
+  and runs the injection worker, the two hops between the host page and the
+  desktop — and the worker ran at normal priority. Both are raised while a
+  share is watched. (What was measured: with the host page's main thread 60%
+  busy, pointer-to-inject-call went from 1 ms to 25 ms typical / 65 ms at the
+  90th percentile while the picture moved 5 ms — the input leg is the
+  contention-sensitive one, which the batching addresses; the boost is for
+  the hops the rig cannot reach.)
+
+### Diagnostics
+- `await __pucaMeshDiag(5000)` and `await __pucaVoiceDiag(5000)` measure the
+  delay of a share over a five-second window of real use: jitter buffer (and
+  the hint the app asked for, read back), processing, decode, encode, the
+  sender's pacer, frames parked in the media-encryption transform, and the
+  selected network path's protocol and round trip — enough to say which stage
+  owns a slow share. An SFU viewer now gets numbers for the tracks it
+  subscribes to; before it got none.
+- The unattended log sampler runs on both ends of a remote-control session,
+  every second, with the same fields and which pipe the input is on
+  (`lane=mesh-dc|sfu-data|relay`); `[p2p-input] peer N: no P2P lane after 2 s`
+  is logged when a session stays on the relay.
+- `frontend/e2e/rc-latency-2peer.mjs` measures glass-to-glass and
+  pointer-to-desktop latency of the in-call share on one machine (loopback,
+  synthetic desktop): 1080p30 measures p50 ≈ 40–60 ms glass to glass and
+  1 ms from the viewer's pointer to the host page's inject call — the floor
+  the app's own pipeline sets (the IPC hop, the worker and the OS injection
+  are outside the rig).
+
 ## 0.9.5 — 2026-09-06
 
 A second adversarial pass over the same boundary, this time against 0.9.4,

@@ -47,28 +47,73 @@
  * frames — str0m and every browser open a channel by label whatever the
  * other end does with it. Input rides the DC only after a sealed HELLO
  * arrives on it, which only a peer holding the session key can produce.
+ *
+ * THE CHANNEL IS NEGOTIATED (`CTL_STREAM_ID`), created once per peer
+ * connection and kept for the connection's life; a control session ending
+ * disarms the capability (`disarmControlChannels`), it does not close the
+ * pipe. Both halves were learned from measuring the first cut, which never
+ * carried a frame — see the constant's comment.
  */
 
 export const CTL_STATE_LABEL = 'sov-ctl-s';
 /** LiveKit data topic for the same frames over an SFU room (R3). */
 export const CTL_SFU_TOPIC = 'sov-ctl';
+/**
+ * The SCTP stream the mesh lane lives on. Both ends create the channel with
+ * this id and `negotiated: true`, so there is exactly ONE channel per peer
+ * connection and no in-band announcement.
+ *
+ * The first cut created the channel in-band on BOTH ends and let this
+ * registry "close the loser" when the peer's copy arrived. That annihilated
+ * the lane: an arrived channel IS the peer's own channel, so closing it
+ * closed the peer's slot, and the peer did the same to ours — both ends lost
+ * their channel a moment after it opened and every session fell back to the
+ * relay, silently, with `[p2p-input] ... ready` never once logged. Measured
+ * 2026-09-06 with two live Chromium peers on loopback: both locals CLOSED
+ * within the first second. The lane had never carried a frame in production.
+ *
+ * 32 sits well above the 0/1 that in-band allocation hands out, so an older
+ * peer's announced channel can never collide with it.
+ */
+export const CTL_STREAM_ID = 32;
 
-/** Above this many unsent bytes on a control channel, frames take the RELAY
- *  instead of queueing behind a congested SCTP association. Matches the WS
- *  path's own high-water mark; without it the queue grows until the
- *  browser's send buffer throws, which is both a memory risk and the worst
- *  possible moment to discover the transport is unusable. */
-export const CTL_HIGH_WATER_BYTES = 64 * 1024;
+/**
+ * Above this many unsent bytes on the control channel the SENDER HOLDS
+ * MOTION — superseding positions, summing deltas, never dropping — until the
+ * channel drains (remoteControl's `uplinkClear`). State events still go.
+ *
+ * Sized in TIME, not memory. A sealed control frame is ~100-120 bytes and
+ * sustained motion emits 60-125 of them a second, so 4 KiB is three to six
+ * hundred milliseconds of motion: the most staleness a stalled link can bank
+ * before the valve engages. The first cut used 64 KiB (the WebSocket path's
+ * figure at the time) — five to ten SECONDS of motion replayed late once the
+ * link recovered — and treated congestion as "not ready", rerouting frames
+ * to the relay: two transports carrying one input stream mid-session is the
+ * ordering hazard the header describes (an `up` overtaking its `down`).
+ * Matches UPLINK_HIGH_WATER_BYTES in remoteControl.ts.
+ */
+export const CTL_HIGH_WATER_BYTES = 4 * 1024;
 
 /** Frame kinds. One byte, so a mis-shaped buffer is refused, not parsed. */
 export const FRAME_HELLO = 0x01;
 export const FRAME_SEALED_INPUT = 0x02;
 
+/**
+ * Which side of a control session THIS end is, for one peer. Capability is
+ * tracked per (peer, role), not per peer: one user can be host to a peer
+ * while viewing another — or host and viewer to the SAME peer at once — and
+ * those are separate sessions with separate keys. The first cut kept one
+ * flag per peer, so ending the host session disarmed the still-live viewer
+ * session's lane (and vice versa) for the rest of the call, silently.
+ */
+export type CtlRole = 'host' | 'viewer';
+
 /** One peer's control channel, from whichever side created it. */
 export interface CtlChannels {
     state: RTCDataChannel | null;
-    /** The peer answered our HELLO (or sent theirs): frames may ride the DC. */
-    helloSeen: boolean;
+    /** The peer's HELLO opened under the session key of this role of OURS:
+     *  frames of that session may ride the DC. */
+    helloSeen: { host: boolean; viewer: boolean };
 }
 
 /** `kind` byte + raw payload bytes → one frame. Raw, not base64: the DC is
@@ -135,26 +180,41 @@ export function setControlHelloProvider(fn: HelloProvider | null): void {
 function entry(peerId: number): CtlChannels {
     let e = byPeer.get(peerId);
     if (!e) {
-        e = { state: null, helloSeen: false };
+        e = { state: null, helloSeen: { host: false, viewer: false } };
         byPeer.set(peerId, e);
     }
     return e;
 }
 
-/** The manager registers each channel as it is created or arrives via
- *  `ondatachannel`. Both sides may create; whoever's label lands first wins
- *  the slot and the other is closed — one channel per lane per peer. */
+/** The manager registers the negotiated channel it creates, and anything
+ *  that still arrives via `ondatachannel` — which can only be an OLDER peer's
+ *  in-band channel (a negotiated one is never announced). One channel per
+ *  peer: the slot holds whichever channel BOTH ends hold.
+ *
+ *  When an in-band channel arrives while we hold the negotiated lane, the
+ *  peer does not know the negotiated id and will only ever read its own
+ *  channel — so its channel is the one input can ride, and we ADOPT it. The
+ *  previous rule ("close the loser") is exactly what killed the lane between
+ *  two current clients: the loser was the peer's own channel. It survives
+ *  only for the residual case of two in-band channels, which no current
+ *  client produces. */
 export function registerControlChannel(peerId: number, dc: RTCDataChannel): void {
     const e = entry(peerId);
     if (e.state && e.state !== dc && e.state.readyState !== 'closed') {
-        try { dc.close(); } catch { /* already gone */ }
-        return;
+        if (e.state.negotiated && !dc.negotiated) {
+            const ours = e.state;
+            e.state = null; // so ours.onclose (async) finds a different holder and stands down
+            try { ours.close(); } catch { /* already gone */ }
+        } else {
+            try { dc.close(); } catch { /* already gone */ }
+            return;
+        }
     }
     e.state = dc;
     // A REBUILT channel starts unproved: the hello belonged to the
     // connection that carried it, and inheriting it would let input ride a
     // transport whose far end never answered on it.
-    e.helloSeen = false;
+    e.helloSeen = { host: false, viewer: false };
     dc.binaryType = 'arraybuffer';
     dc.onmessage = (ev: MessageEvent) => {
         const data = ev.data;
@@ -172,10 +232,13 @@ export function registerControlChannel(peerId: number, dc: RTCDataChannel): void
         cur.state = null;
         // Losing the channel drops the peer back to the relay rather than
         // leaving a capability armed against a transport that is gone.
-        cur.helloSeen = false;
+        cur.helloSeen = { host: false, viewer: false };
     };
 }
 
+/** The peer connection is going away: close the lane and drop the entry.
+ *  Only the mesh manager calls this — a control session ending must NOT,
+ *  see `disarmControlChannels`. */
 export function forgetControlChannels(peerId: number): void {
     const e = byPeer.get(peerId);
     if (!e) return;
@@ -183,26 +246,53 @@ export function forgetControlChannels(peerId: number): void {
     byPeer.delete(peerId);
 }
 
+/**
+ * A control session with this peer ended (or a send on the lane failed and
+ * the session is staying on the relay): drop the CAPABILITY, keep the pipe.
+ *
+ * Capability is per session — a hello from the last session must not arm
+ * the next — and that is all this needs to drop: the next session's key
+ * derivation sends a fresh hello on both ends, sealed under the new key, and
+ * a stale one fails to open. The channel itself belongs to the peer
+ * connection, and closing it here (which the first cut did, via
+ * forgetControlChannels) closed it for the REST OF THE CALL on both ends: a
+ * closed SCTP stream never reopens, and nothing re-creates the channel until
+ * the pc is rebuilt. So the second control session of a call — and every
+ * one after it — silently rode the relay.
+ */
+export function disarmControlChannels(peerId: number, role: CtlRole): void {
+    const e = byPeer.get(peerId);
+    if (e) e.helloSeen[role] = false;
+}
+
 export function controlChannels(peerId: number): CtlChannels | null {
     return byPeer.get(peerId) ?? null;
 }
 
-export function markHelloSeen(peerId: number): void {
-    entry(peerId).helloSeen = true;
+/** The peer's hello opened under the key of OUR `role`'s session with it. */
+export function markHelloSeen(peerId: number, role: CtlRole): void {
+    entry(peerId).helloSeen[role] = true;
 }
 
 /** May input for this peer ride the DC right now? BOTH the app-level hello
  *  and an open state lane — see the header on why readyState alone is not a
- *  capability. */
-export function controlDcReady(peerId: number): boolean {
+ *  capability. Congestion is NOT part of the answer: a backed-up lane is
+ *  still the lane (see `controlDcCongested`); rerouting to the relay while
+ *  it drains put a `down` and its `up` on two transports with no relative
+ *  order. */
+export function controlDcReady(peerId: number, role: CtlRole): boolean {
     const e = byPeer.get(peerId);
-    if (!e || !e.helloSeen || !e.state) return false;
-    if (e.state.readyState !== 'open') return false;
-    // CONGESTION IS NOT READINESS. Queueing behind a stalled association
-    // would grow unboundedly until the browser's send buffer throws — the
-    // relay has its own valve and is the better place to be while this one
-    // drains.
-    return e.state.bufferedAmount <= CTL_HIGH_WATER_BYTES;
+    if (!e || !e.helloSeen[role] || !e.state) return false;
+    return e.state.readyState === 'open';
+}
+
+/** Is the lane backed up past the high-water mark? The sender holds MOTION
+ *  while this is true and keeps state events on the lane — the valve is at
+ *  the sender, the transport does not change. See CTL_HIGH_WATER_BYTES. */
+export function controlDcCongested(peerId: number): boolean {
+    const e = byPeer.get(peerId);
+    if (!e || !e.state || e.state.readyState !== 'open') return false;
+    return e.state.bufferedAmount > CTL_HIGH_WATER_BYTES;
 }
 
 /**
@@ -217,7 +307,9 @@ export function sendControlFrame(
     if (!e) return false;
     const dc = e.state;
     if (!dc || dc.readyState !== 'open') return false;
-    if (dc.bufferedAmount > CTL_HIGH_WATER_BYTES) return false;
+    // No congestion refusal here: what reaches this while the lane is backed
+    // up is a state event the sender chose to send past its valve, and it
+    // must ride THIS ordered pipe behind the motion already queued on it.
     try {
         // Send the BUFFER: TS narrows Uint8Array to ArrayBufferLike, and
         // the DC overload wants a concrete ArrayBuffer.
@@ -245,7 +337,9 @@ export function sendHello(peerId: number, sealed: Uint8Array): boolean {
 
 type SfuSender = (userId: number, frame: Uint8Array) => boolean;
 let sfuSend: SfuSender | null = null;
-const sfuHello = new Set<number>();
+/** `${peerId}:${role}` — per (peer, role), see CtlRole. */
+const sfuHello = new Set<string>();
+const sfuKey = (peerId: number, role: CtlRole) => `${peerId}:${role}`;
 
 /** sfuManager installs its publisher (null when it leaves the room). */
 export function setSfuControlSender(fn: SfuSender | null): void {
@@ -271,12 +365,12 @@ export function deliverSfuControlFrame(peerId: number, payload: Uint8Array<Array
 }
 
 /** The SFU's own capability flag — the same sealed hello, a different pipe. */
-export function markSfuHelloSeen(peerId: number): void {
-    sfuHello.add(peerId);
+export function markSfuHelloSeen(peerId: number, role: CtlRole): void {
+    sfuHello.add(sfuKey(peerId, role));
 }
 
-export function sfuControlReady(peerId: number): boolean {
-    return sfuSend !== null && sfuHello.has(peerId);
+export function sfuControlReady(peerId: number, role: CtlRole): boolean {
+    return sfuSend !== null && sfuHello.has(sfuKey(peerId, role));
 }
 
 /** Publish one frame through the SFU; false = fall back to the relay. */
@@ -289,8 +383,8 @@ export function sendSfuControlFrame(peerId: number, kind: number, payload: Uint8
     }
 }
 
-export function forgetSfuControl(peerId: number): void {
-    sfuHello.delete(peerId);
+export function forgetSfuControl(peerId: number, role: CtlRole): void {
+    sfuHello.delete(sfuKey(peerId, role));
 }
 
 /**

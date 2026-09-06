@@ -10,10 +10,10 @@
  * gate, and end-to-end in remoteControl's own suite.
  */
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
     CTL_HIGH_WATER_BYTES, CTL_STATE_LABEL, FRAME_HELLO, FRAME_SEALED_INPUT,
-    controlChannels, controlDcReady, decodeFrame, encodeFrame, forgetControlChannels,
+    controlChannels, controlDcCongested, controlDcReady, decodeFrame, disarmControlChannels, encodeFrame, forgetControlChannels,
     markHelloSeen, markSfuHelloSeen, registerControlChannel, resetControlChannels,
     deliverSfuControlFrame, forgetSfuControl, sendControlFrame, sendSfuControlFrame,
     setControlFrameHandler, setSfuControlSender, sfuControlReady,
@@ -63,38 +63,94 @@ describe('one lane, deliberately', () => {
         // ordering argument in the module header — which is the point.
         const { dc } = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, dc);
-        markHelloSeen(7);
+        markHelloSeen(7, 'viewer');
         expect(Object.keys(controlChannels(7)!).sort()).toEqual(['helloSeen', 'state']);
     });
 });
 
 describe('the registry', () => {
-    it('keeps ONE channel per lane and closes the loser (both sides create)', () => {
+    it('keeps ONE channel per lane; a second IN-BAND claim is closed (the residual case)', () => {
+        // Two in-band channels can only meet when neither end negotiates —
+        // two OLD clients — and there this rule is the annihilation described
+        // in CTL_STREAM_ID's comment. Between current clients the holder is
+        // negotiated and the branch below never runs; see the next test.
         const mine = fakeDc(CTL_STATE_LABEL);
         const theirs = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, mine.dc);
         registerControlChannel(7, theirs.dc);
         expect(theirs.raw.readyState, 'the second claim is closed, not stored').toBe('closed');
-        markHelloSeen(7);
+        markHelloSeen(7, 'viewer');
         expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(true);
         expect(mine.sent).toHaveLength(1);
+    });
+
+    it('a NEGOTIATED holder adopts an older peer\'s in-band channel and closes only its own', () => {
+        const ours = fakeDc(CTL_STATE_LABEL);
+        (ours.raw as unknown as { negotiated: boolean }).negotiated = true;
+        const theirs = fakeDc(CTL_STATE_LABEL);
+        (theirs.raw as unknown as { negotiated: boolean }).negotiated = false;
+        registerControlChannel(7, ours.dc);
+        registerControlChannel(7, theirs.dc);
+        expect(ours.raw.readyState, 'our negotiated half, which the peer never held').toBe('closed');
+        expect(theirs.raw.readyState, 'the channel BOTH ends hold stays open').toBe('open');
+        expect(controlChannels(7)!.state).toBe(theirs.dc);
+        markHelloSeen(7, 'viewer');
+        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(true);
+        expect(theirs.sent).toHaveLength(1);
+        expect(ours.sent).toHaveLength(0);
+    });
+
+    it('capability is per (peer, ROLE): ending the host session leaves the viewer session armed', () => {
+        // One user can host a peer while viewing another — or host and view
+        // the SAME peer at once. Those are separate sessions with separate
+        // keys; the first cut kept one flag per peer and ending either
+        // session disarmed the other for the rest of the call.
+        const { dc } = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, dc);
+        markHelloSeen(7, 'host');   // their hello opened under my host session's key
+        markHelloSeen(7, 'viewer'); // and one under my viewer session's key
+        expect(controlDcReady(7, 'viewer')).toBe(true);
+        disarmControlChannels(7, 'host');
+        expect(controlDcReady(7, 'host'), 'the session that ended').toBe(false);
+        expect(controlDcReady(7, 'viewer'), 'the one that did not').toBe(true);
+        setSfuControlSender(() => true);
+        markSfuHelloSeen(7, 'host');
+        markSfuHelloSeen(7, 'viewer');
+        forgetSfuControl(7, 'host');
+        expect(sfuControlReady(7, 'host')).toBe(false);
+        expect(sfuControlReady(7, 'viewer')).toBe(true);
+    });
+
+    it('a session ending DISARMS the lane and keeps the pipe; only the pc going away closes it', () => {
+        const { dc, raw } = fakeDc(CTL_STATE_LABEL);
+        registerControlChannel(7, dc);
+        markHelloSeen(7, 'viewer');
+        expect(controlDcReady(7, 'viewer')).toBe(true);
+        disarmControlChannels(7, 'viewer');
+        expect(raw.readyState, 'the channel belongs to the peer connection').toBe('open');
+        expect(controlDcReady(7, 'viewer'), 'capability is per session').toBe(false);
+        markHelloSeen(7, 'viewer'); // the next session\'s hello
+        expect(controlDcReady(7, 'viewer'), 'and the next session can arm the same pipe').toBe(true);
+        forgetControlChannels(7);
+        expect(raw.readyState).toBe('closed');
+        expect(controlDcReady(7, 'viewer')).toBe(false);
     });
 
     it('an OPEN channel is not a capability: the hello is', () => {
         const { dc } = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, dc);
-        expect(controlDcReady(7), 'open but unproved — the relay keeps it').toBe(false);
-        markHelloSeen(7);
-        expect(controlDcReady(7)).toBe(true);
+        expect(controlDcReady(7, 'viewer'), 'open but unproved — the relay keeps it').toBe(false);
+        markHelloSeen(7, 'viewer');
+        expect(controlDcReady(7, 'viewer')).toBe(true);
     });
 
     it('losing the state lane drops the peer back to the relay', () => {
         const state = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, state.dc);
-        markHelloSeen(7);
-        expect(controlDcReady(7)).toBe(true);
+        markHelloSeen(7, 'viewer');
+        expect(controlDcReady(7, 'viewer')).toBe(true);
         state.raw.close();
-        expect(controlDcReady(7), 'a dead lane must not read as capable').toBe(false);
+        expect(controlDcReady(7, 'viewer'), 'a dead lane must not read as capable').toBe(false);
         // And a send over it answers false so the caller falls back.
         expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
     });
@@ -103,17 +159,17 @@ describe('the registry', () => {
         const { dc } = fakeDc(CTL_STATE_LABEL);
         (dc as unknown as { send: () => void }).send = () => { throw new Error('closing'); };
         registerControlChannel(7, dc);
-        markHelloSeen(7);
+        markHelloSeen(7, 'viewer');
         expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
     });
 
     it('forgetting a peer closes its channel and disarms the capability', () => {
         const state = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, state.dc);
-        markHelloSeen(7);
+        markHelloSeen(7, 'viewer');
         forgetControlChannels(7);
         expect(state.raw.readyState).toBe('closed');
-        expect(controlDcReady(7)).toBe(false);
+        expect(controlDcReady(7, 'viewer')).toBe(false);
     });
 
     it('inbound frames reach the handler with their peer; text is ignored', () => {
@@ -128,32 +184,48 @@ describe('the registry', () => {
         expect(seen).toEqual([{ peer: 7, kind: FRAME_HELLO }]);
     });
 
-    it('a CONGESTED channel is not ready — the relay has the valve', () => {
-        const { dc, raw } = fakeDc(CTL_STATE_LABEL);
+    it('a CONGESTED channel stays the transport — the SENDER holds motion, it does not reroute', () => {
+        const { dc, raw, sent } = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, dc);
-        markHelloSeen(7);
-        expect(controlDcReady(7)).toBe(true);
+        markHelloSeen(7, 'viewer');
+        expect(controlDcReady(7, 'viewer')).toBe(true);
+        expect(controlDcCongested(7)).toBe(false);
         raw.bufferedAmount = CTL_HIGH_WATER_BYTES + 1;
-        expect(
-            controlDcReady(7),
-            'queueing behind a stalled association grows until the send buffer throws',
-        ).toBe(false);
-        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(false);
-        // POSITIVE CONTROL: back under the mark and it flows again.
+        // The first cut answered "not ready" here and the caller took the
+        // relay: a `down` on the slow pipe and its `up` on the fast one have
+        // no relative order, which is a button held down on someone else's
+        // desktop. Congestion is reported separately and the sender HOLDS
+        // motion behind it (remoteControl's valve); state events still go
+        // down this ordered pipe, behind whatever is queued on it.
+        expect(controlDcReady(7, 'viewer'), 'rerouting mid-session is the ordering hazard').toBe(true);
+        expect(controlDcCongested(7)).toBe(true);
+        expect(sendControlFrame(7, FRAME_SEALED_INPUT, new Uint8Array([1]))).toBe(true);
+        expect(sent).toHaveLength(1);
+        // POSITIVE CONTROL: back under the mark the flag clears.
         raw.bufferedAmount = 0;
-        expect(controlDcReady(7)).toBe(true);
+        expect(controlDcCongested(7)).toBe(false);
+    });
+
+    it('the high-water mark is sized in TIME — a few hundred ms of motion, not seconds', () => {
+        // A sealed control frame is ~100-120 bytes; sustained motion emits
+        // 60 (absolute) to 125 (relative) of them a second. 64 KiB — the
+        // first cut — banked five to ten seconds of stale pointer to replay.
+        const FRAME_BYTES = 110;
+        expect(CTL_HIGH_WATER_BYTES / FRAME_BYTES / 125, 'at 125 Hz').toBeLessThan(0.4);
+        expect(CTL_HIGH_WATER_BYTES / FRAME_BYTES / 60, 'at 60 Hz').toBeLessThan(0.8);
+        expect(CTL_HIGH_WATER_BYTES / FRAME_BYTES, 'still holds a real burst').toBeGreaterThan(20);
     });
 
     it('a REBUILT channel starts unproved — a hello belongs to its connection', () => {
         const first = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, first.dc);
-        markHelloSeen(7);
-        expect(controlDcReady(7)).toBe(true);
+        markHelloSeen(7, 'viewer');
+        expect(controlDcReady(7, 'viewer')).toBe(true);
         first.raw.close();
         const rebuilt = fakeDc(CTL_STATE_LABEL);
         registerControlChannel(7, rebuilt.dc);
         expect(
-            controlDcReady(7),
+            controlDcReady(7, 'viewer'),
             'the new connection\'s far end has not answered on it',
         ).toBe(false);
     });
@@ -186,11 +258,11 @@ describe('raw vs base64 sealing — one construction, two encodings', () => {
 
 describe('the SFU transport (R3) — same frames, a different pipe', () => {
     it('is not ready until a sender exists AND a hello arrived', () => {
-        expect(sfuControlReady(7), 'no room, no sender').toBe(false);
+        expect(sfuControlReady(7, 'viewer'), 'no room, no sender').toBe(false);
         setSfuControlSender(() => true);
-        expect(sfuControlReady(7), 'a room is not a capability').toBe(false);
-        markSfuHelloSeen(7);
-        expect(sfuControlReady(7)).toBe(true);
+        expect(sfuControlReady(7, 'viewer'), 'a room is not a capability').toBe(false);
+        markSfuHelloSeen(7, 'viewer');
+        expect(sfuControlReady(7, 'viewer')).toBe(true);
     });
 
     it('publishes framed bytes to the right peer and reports a refusal', () => {
@@ -214,10 +286,10 @@ describe('the SFU transport (R3) — same frames, a different pipe', () => {
 
     it('leaving the room disarms every SFU capability', () => {
         setSfuControlSender(() => true);
-        markSfuHelloSeen(7);
-        expect(sfuControlReady(7)).toBe(true);
+        markSfuHelloSeen(7, 'viewer');
+        expect(sfuControlReady(7, 'viewer')).toBe(true);
         setSfuControlSender(null);
-        expect(sfuControlReady(7), 'no publisher, no P2P — back to the relay').toBe(false);
+        expect(sfuControlReady(7, 'viewer'), 'no publisher, no P2P — back to the relay').toBe(false);
     });
 
     it('delivered frames reach the handler flagged as NOT mesh', () => {
@@ -234,10 +306,82 @@ describe('the SFU transport (R3) — same frames, a different pipe', () => {
 
     it('forgetSfuControl drops one peer without disturbing another', () => {
         setSfuControlSender(() => true);
-        markSfuHelloSeen(7);
-        markSfuHelloSeen(8);
-        forgetSfuControl(7);
-        expect(sfuControlReady(7)).toBe(false);
-        expect(sfuControlReady(8)).toBe(true);
+        markSfuHelloSeen(7, 'viewer');
+        markSfuHelloSeen(8, 'viewer');
+        forgetSfuControl(7, 'viewer');
+        expect(sfuControlReady(7, 'viewer')).toBe(false);
+        expect(sfuControlReady(8, 'viewer')).toBe(true);
+    });
+});
+
+describe('why the lane is negotiated', () => {
+    /** Two ends of ONE SCTP stream: closing either end closes both, and each
+     *  end's onclose fires — what a real RTCDataChannel pair does, and what
+     *  the single-channel fakes above cannot show. The FAR end closes on
+     *  `flushCloses()`, not synchronously: a stream reset crosses the wire,
+     *  and in the live measurement both ends had already closed each other's
+     *  channel before either learned its own was gone. */
+    const pendingFar: Array<() => void> = [];
+    const flushCloses = () => { while (pendingFar.length) pendingFar.shift()!(); };
+    function linkedPair(negotiated: boolean) {
+        const mk = () => ({
+            label: CTL_STATE_LABEL,
+            readyState: 'open' as RTCDataChannelState,
+            binaryType: 'blob',
+            bufferedAmount: 0,
+            negotiated,
+            onmessage: null as ((ev: MessageEvent) => void) | null,
+            onopen: null as (() => void) | null,
+            onclose: null as (() => void) | null,
+            send: () => { /* no-op */ },
+            close: () => { /* replaced below */ },
+        });
+        const a = mk();
+        const b = mk();
+        const closeEnd = (end: typeof a) => {
+            if (end.readyState === 'closed') return;
+            end.readyState = 'closed';
+            end.onclose?.();
+        };
+        a.close = () => { closeEnd(a); pendingFar.push(() => closeEnd(b)); };
+        b.close = () => { closeEnd(b); pendingFar.push(() => closeEnd(a)); };
+        return { a: a as unknown as RTCDataChannel, b: b as unknown as RTCDataChannel };
+    }
+
+    /** Two registries — one per peer — so both ends of a call are modelled. */
+    async function twoPeers() {
+        vi.resetModules();
+        const A = await import('../api/rtc/controlDc');
+        vi.resetModules();
+        const B = await import('../api/rtc/controlDc');
+        return { A, B };
+    }
+
+    it('in-band channels created on BOTH ends annihilate each other under "close the loser"', async () => {
+        const { A, B } = await twoPeers();
+        const fromA = linkedPair(false); // A created it: A holds .a, B receives .b
+        const fromB = linkedPair(false);
+        A.registerControlChannel(2, fromA.a);
+        B.registerControlChannel(1, fromB.a);
+        // ondatachannel on each end: the registry closes the "loser" — which
+        // is the OTHER end's own channel. Then the resets cross the wire.
+        A.registerControlChannel(2, fromB.b);
+        B.registerControlChannel(1, fromA.b);
+        flushCloses();
+        expect(A.controlChannels(2)!.state, 'A lost its own channel').toBeNull();
+        expect(B.controlChannels(1)!.state, 'B lost its own channel').toBeNull();
+        expect(A.controlDcReady(2, 'viewer')).toBe(false);
+        expect(B.controlDcReady(1, 'viewer')).toBe(false);
+    });
+
+    it('a negotiated channel is ONE pair both ends hold: nothing arrives, nothing is closed', async () => {
+        const { A, B } = await twoPeers();
+        const lane = linkedPair(true);
+        A.registerControlChannel(2, lane.a);
+        B.registerControlChannel(1, lane.b);
+        A.markHelloSeen(2, 'viewer');
+        B.markHelloSeen(1, 'viewer');
+        expect(A.controlDcReady(2, 'viewer')).toBe(true);
+        expect(B.controlDcReady(1, 'viewer')).toBe(true);
     });
 });
