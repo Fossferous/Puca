@@ -616,6 +616,33 @@ pub async fn remove_timeout(
 
 // --- Blocked Users ---
 
+/// What POST /users/:id/block does once the target has been resolved.
+///
+/// The route must carry no existence bit: before 0.9.5 an id that was never
+/// issued (or one outside the INT4 range) hit the blocked_users FK and
+/// answered 500 while a live OR tombstoned id answered 200 — an enumeration
+/// oracle over the dense id space, the same one closed on /users/:id/public-key
+/// and POST /friends/request this release. So a target that does not exist as
+/// a live account is a silent no-op that answers EXACTLY what a successful
+/// block answers, and nothing is written.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BlockTarget {
+    /// A live account: write the block and tear the relationship down.
+    Write(i32),
+    /// Unallocated, out of range or tombstoned: answer like success, write nothing.
+    SilentOk,
+}
+
+/// `target` is `crate::handlers::path_user_id` of the path id (None = outside
+/// INT4); `live` is whether `SELECT 1 FROM users WHERE id = $1 AND deleted_at
+/// IS NULL` found a row. Pure so the decision is unit-tested.
+pub(crate) fn block_target(target: Option<i32>, live: bool) -> BlockTarget {
+    match target {
+        Some(id) if live => BlockTarget::Write(id),
+        _ => BlockTarget::SilentOk,
+    }
+}
+
 /// Block a user
 pub async fn block_user(
     State(state): State<Arc<AppState>>,
@@ -626,28 +653,105 @@ pub async fn block_user(
         return (StatusCode::BAD_REQUEST, "Cannot block yourself").into_response();
     }
 
-    let result = sqlx::query(
+    // Resolve the target BEFORE the transaction (see BlockTarget). An id the
+    // INT4 column cannot hold is never a live account, so it needs no query.
+    // The probe's SQL text matches every other `deleted_at IS NULL` existence
+    // check so the prepared statement is shared. Fail CLOSED on a DB error:
+    // do not fall through to the INSERT, whose FK error is the very 500 this
+    // removes.
+    let target = match crate::handlers::path_user_id(user_id) {
+        None => BlockTarget::SilentOk,
+        Some(id) => {
+            let live: Option<(i32,)> = match sqlx::query_as(
+                "SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::error!("block_user: target lookup failed: {:?}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user")
+                        .into_response();
+                }
+            };
+            block_target(Some(id), live.is_some())
+        }
+    };
+    let target_id = match target {
+        BlockTarget::Write(id) => id,
+        // Same status and body as the success path below — no existence bit.
+        BlockTarget::SilentOk => return StatusCode::OK.into_response(),
+    };
+
+    // A block ends the relationship, not only the DM path. Until 0.9.5 this
+    // wrote the blocked_users row and nothing else, so an accepted `friends`
+    // row outlived the block and every friendship-derived surface (GET
+    // /friends, /friends/:id/status, presence_audience's UserOnline/UserOffline
+    // fan-out, the dm-keys device census) kept serving the blocked account as
+    // the blocker's friend. The friendship and any pending request in either
+    // direction are torn down in the SAME transaction as the block, so a
+    // failure leaves neither half done. Unblocking does NOT restore the
+    // friendship; the pair has to re-friend. No WS frame is sent: unfriend
+    // (remove_friend) has none either, and FriendsPanel polls every 15 s.
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("block_user: begin failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user").into_response();
+        }
+    };
+    if let Err(e) = sqlx::query(
         "INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
     .bind(claims.sub as i32)
-    .bind(user_id)
-    .execute(&state.pool)
-    .await;
-
-    match result {
-        Ok(_) => {
-            // Blocking must cut off any device share between the two — a share
-            // outliving a block is exactly the harassment vector the block is
-            // for. Both directions, live sessions ended. (The connect gate
-            // also refuses a blocked pair, so this need not be transactional.)
-            crate::device_handlers::revoke_shares_between(&state, claims.sub, user_id).await;
-            StatusCode::OK.into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to block user: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user").into_response()
-        }
+    .bind(target_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!("Failed to block user: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user").into_response();
     }
+    // Same SQL texts and widths as remove_friend (the columns are BIGINT since
+    // migration 019), so the two share prepared statements rather than fight
+    // over them.
+    if let Err(e) = sqlx::query(
+        "DELETE FROM friend_requests WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)"
+    )
+    .bind(claims.sub)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!("block_user: clearing friend requests failed: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user").into_response();
+    }
+    let (u1, u2) = if claims.sub < user_id {
+        (claims.sub, user_id)
+    } else {
+        (user_id, claims.sub)
+    };
+    if let Err(e) = sqlx::query("DELETE FROM friends WHERE user1_id = $1 AND user2_id = $2")
+        .bind(u1)
+        .bind(u2)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::error!("block_user: dissolving friendship failed: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user").into_response();
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("block_user: commit failed: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to block user").into_response();
+    }
+
+    // Blocking must cut off any device share between the two — a share
+    // outliving a block is exactly the harassment vector the block is for.
+    // Both directions, live sessions ended. (The connect gate also refuses a
+    // blocked pair, so this need not be inside the transaction.)
+    crate::device_handlers::revoke_shares_between(&state, claims.sub, user_id).await;
+    StatusCode::OK.into_response()
 }
 
 /// Unblock a user
@@ -656,19 +760,66 @@ pub async fn unblock_user(
     Path(user_id): Path<i64>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let result = sqlx::query("DELETE FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2")
+    // Unblocking does NOT restore a friendship. Blocks made since 0.9.5 have
+    // already dissolved it (block_user), but a block made before then left the
+    // `friends` row on disk, hidden only by list_friends' block filter — so
+    // lifting the block would have resurrected a friendship the blocker ended,
+    // and flipped the friend-request answer for that pair from 201 (blocked,
+    // silent) to 409 "Already friends", a block-status signal by another
+    // route. Purge the pair's rows here too, but ONLY when a block was really
+    // removed: an unblock aimed at someone never blocked must not quietly
+    // unfriend them.
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("unblock_user: begin failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unblock user").into_response();
+        }
+    };
+    let removed = match sqlx::query("DELETE FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2")
         .bind(claims.sub as i32)
         .bind(user_id)
-        .execute(&state.pool)
-        .await;
-
-    match result {
-        Ok(_) => StatusCode::OK.into_response(),
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(r) => r.rows_affected() > 0,
         Err(e) => {
             tracing::error!("Failed to unblock user: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unblock user").into_response()
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unblock user").into_response();
+        }
+    };
+    if removed {
+        if let Err(e) = sqlx::query(
+            "DELETE FROM friend_requests WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)"
+        )
+        .bind(claims.sub)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::error!("unblock_user: clearing friend requests failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unblock user").into_response();
+        }
+        let (u1, u2) = if claims.sub < user_id {
+            (claims.sub, user_id)
+        } else {
+            (user_id, claims.sub)
+        };
+        if let Err(e) = sqlx::query("DELETE FROM friends WHERE user1_id = $1 AND user2_id = $2")
+            .bind(u1)
+            .bind(u2)
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::error!("unblock_user: dissolving legacy friendship failed: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unblock user").into_response();
         }
     }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("unblock_user: commit failed: {:?}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unblock user").into_response();
+    }
+    StatusCode::OK.into_response()
 }
 
 /// List blocked users
@@ -842,6 +993,22 @@ pub async fn move_member_voice(
         // this server being in a call on another server is that other server's
         // presence, and a distinct status here reported it to this one's
         // moderators.
+        return (StatusCode::CONFLICT, "That member is not in a voice channel").into_response();
+    }
+
+    // The ACTOR must be able to see the source channel. MOVE_MEMBERS is a
+    // server-level bit and does not imply VIEW, so a moderator VIEW-denied on
+    // a voice channel still got this far — and every arm below (400 already
+    // there, 403 AFK, 404 bad destination, the null disconnect) then told them
+    // who is in a channel the roster hides from them, and let them evict from
+    // it. Same answer as "not in a voice channel" so a hidden channel's
+    // occupancy reads exactly like no call at all; this runs BEFORE anything
+    // that depends on the destination, or the destination lookup itself would
+    // be the oracle. Fails closed: a DB error resolves to no VIEW.
+    let actor_source_access =
+        crate::permissions::get_user_channel_permissions(&state.pool, from_channel_id, claims.sub)
+            .await;
+    if !actor_sees_channel(&actor_source_access) {
         return (StatusCode::CONFLICT, "That member is not in a voice channel").into_response();
     }
 
@@ -1027,10 +1194,27 @@ pub async fn move_member_voice(
     StatusCode::OK.into_response()
 }
 
+/// True when the caller's resolved access to a channel carries VIEW_CHANNEL
+/// (ADMINISTRATOR passes through `Permissions::has`). NotFound, NotMember and
+/// the fail-closed empty-perms shape all read as blind.
+fn actor_sees_channel(access: &crate::permissions::ChannelPermAccess) -> bool {
+    matches!(
+        access,
+        crate::permissions::ChannelPermAccess::Allowed { perms, .. }
+            if perms.has(Permissions::VIEW_CHANNEL)
+    )
+}
+
+/// True when a reported message resolved through `check_message_view` is one
+/// the reporter can VIEW and it lives in the server the report is filed in. A
+/// DM message resolves to an empty server id and so never matches.
+fn reported_message_in_scope(access: &crate::permissions::ChannelAccess, server_id: &str) -> bool {
+    matches!(access, crate::permissions::ChannelAccess::Allowed(sid) if sid == server_id)
+}
+
 // --- Audit Log ---
 
 /// Log an action to the audit log
-#[allow(dead_code)]
 pub async fn log_audit_action(
     pool: &sqlx::PgPool,
     server_id: &str,
@@ -1221,23 +1405,18 @@ pub async fn create_report(
     // so a reporter could hand the mod queue a message id from a channel they
     // cannot see (or a DM), and a user id with no connection to the server —
     // the queue then resolved that username from the global users table.
+    //
+    // Scoped to what the reporter can VIEW, not merely to the server: the
+    // server-only join that preceded this answered 200 for a message in a
+    // channel the reporter is VIEW-denied on and 400 for a random id, which
+    // was a live existence (and deletion) oracle over hidden channels for any
+    // member, and each hit parked the id in the mod queue. check_message_view
+    // is the gate every other message-id-addressed route uses; VIEW-denied,
+    // nonexistent, DM (empty server id), another server's message and a DB
+    // error all collapse into the one 400 below, byte-identical.
     if let Some(mid) = payload.reported_message_id.as_deref() {
-        let in_server: Option<(i32,)> = match sqlx::query_as(
-            "SELECT 1 FROM messages m JOIN channels c ON c.id = m.channel_id \
-             WHERE m.id = $1 AND c.server_id = $2",
-        )
-        .bind(mid)
-        .bind(&server_id)
-        .fetch_optional(&state.pool)
-        .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::error!("create_report: message scope lookup failed: {:?}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create report").into_response();
-            }
-        };
-        if in_server.is_none() {
+        let access = crate::permissions::check_message_view(&state.pool, mid, claims.sub).await;
+        if !reported_message_in_scope(&access, &server_id) {
             return (
                 StatusCode::BAD_REQUEST,
                 "reported_message_id is not a message in this server",
@@ -1494,6 +1673,38 @@ pub async fn resolve_report(
 }
 
 #[cfg(test)]
+mod block_target_tests {
+    use super::{block_target, BlockTarget};
+
+    /// POST /users/:id/block must not distinguish "never issued", "out of
+    /// INT4 range" and "tombstoned" from each other or from a live target by
+    /// status: the first three are silent no-ops that answer like success.
+    #[test]
+    fn only_a_live_in_range_target_is_written() {
+        assert_eq!(block_target(Some(42), true), BlockTarget::Write(42));
+        // Allocated but tombstoned (deleted_at set): the probe finds no row.
+        assert_eq!(block_target(Some(42), false), BlockTarget::SilentOk);
+        // Never issued: same.
+        assert_eq!(block_target(Some(i32::MAX), false), BlockTarget::SilentOk);
+        // Outside INT4: no query is even made, and `live` cannot be true —
+        // but the decision must not depend on that.
+        assert_eq!(block_target(None, false), BlockTarget::SilentOk);
+        assert_eq!(block_target(None, true), BlockTarget::SilentOk);
+    }
+
+    /// The range check the handler applies is the shared one, so an id the
+    /// column cannot hold never reaches the FK.
+    #[test]
+    fn path_range_matches_the_column() {
+        use crate::handlers::path_user_id;
+        assert_eq!(path_user_id(i64::from(i32::MAX)), Some(i32::MAX));
+        assert_eq!(path_user_id(i64::from(i32::MAX) + 1), None);
+        assert_eq!(path_user_id(i64::MIN), None);
+        assert_eq!(block_target(path_user_id(i64::from(i32::MAX) + 1), true), BlockTarget::SilentOk);
+    }
+}
+
+#[cfg(test)]
 mod crash_resistance_tests {
     use super::*;
 
@@ -1658,5 +1869,60 @@ mod nullable_actor_tests {
                 "057 must stay catalogue-only, found {destructive}: {stmts}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_scope_tests {
+    use super::*;
+    use crate::permissions::{ChannelAccess, ChannelPermAccess};
+
+    fn allowed(perms: Permissions) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed {
+            server_id: "s1".into(),
+            perms,
+        }
+    }
+
+    /// Positive control for the voice-move source gate: a moderator who can
+    /// see the source channel, and an owner/administrator, pass.
+    #[test]
+    fn voice_move_actor_with_view_on_source_passes() {
+        assert!(actor_sees_channel(&allowed(
+            Permissions::VIEW_CHANNEL | Permissions::MOVE_MEMBERS
+        )));
+        assert!(actor_sees_channel(&allowed(Permissions::VIEW_CHANNEL)));
+        assert!(actor_sees_channel(&allowed(Permissions::ADMINISTRATOR)));
+    }
+
+    /// C17: MOVE_MEMBERS (even with CONNECT) does not imply VIEW; a
+    /// VIEW-denied actor is blind to the source, as are the non-member,
+    /// no-such-channel and fail-closed (empty perms) resolutions.
+    #[test]
+    fn voice_move_view_denied_actor_is_blind_to_source() {
+        assert!(!actor_sees_channel(&allowed(
+            Permissions::MOVE_MEMBERS | Permissions::CONNECT
+        )));
+        assert!(!actor_sees_channel(&allowed(Permissions::empty())));
+        assert!(!actor_sees_channel(&ChannelPermAccess::NotMember));
+        assert!(!actor_sees_channel(&ChannelPermAccess::NotFound));
+    }
+
+    /// Positive control for the report scope: a message the reporter can VIEW
+    /// in the server the report is filed in.
+    #[test]
+    fn report_scope_accepts_a_viewable_message_in_this_server() {
+        assert!(reported_message_in_scope(&ChannelAccess::Allowed("s1".into()), "s1"));
+    }
+
+    /// C18: VIEW-denied (check_message_view collapses it to NotFound), a
+    /// nonexistent id, a non-member, another server's message and a DM message
+    /// (empty server id) are all out of scope — one answer for all of them.
+    #[test]
+    fn report_scope_refuses_hidden_foreign_and_dm_messages() {
+        assert!(!reported_message_in_scope(&ChannelAccess::NotFound, "s1"));
+        assert!(!reported_message_in_scope(&ChannelAccess::Forbidden, "s1"));
+        assert!(!reported_message_in_scope(&ChannelAccess::Allowed("s2".into()), "s1"));
+        assert!(!reported_message_in_scope(&ChannelAccess::Allowed(String::new()), "s1"));
     }
 }

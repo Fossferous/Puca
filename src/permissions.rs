@@ -282,6 +282,94 @@ mod tests {
         assert!(effective.has(Permissions::VIEW_CHANNEL));
     }
 
+    // --- C13 (0.9.5): a VIEW deny binds MANAGE_CHANNELS holders too ---
+    // Until 0.9.5 layer_overwrite_rows re-inserted VIEW for any base carrying
+    // MANAGE_CHANNELS, so an @everyone role holding that bit (the 004 fossil,
+    // or an owner's grant) voided every VIEW deny on the server for every
+    // member. Only ADMINISTRATOR overrides a deny now.
+
+    #[test]
+    fn test_layer_manage_channels_role_is_hidden_by_everyone_view_deny() {
+        // MANAGE_CHANNELS reached through a held role (or through @everyone;
+        // the base is the OR of both and the helper cannot tell them apart).
+        let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
+        let rows = [(0, Permissions::VIEW_CHANNEL.bits() as i64, true)];
+        let effective = layer_overwrite_rows(1, base, &rows);
+        assert!(!effective.has(Permissions::VIEW_CHANNEL));
+        // The deny hides the channel; it does not strip the server-level bit
+        // (which no overwrite may touch either way — it is not OVERWRITABLE).
+        assert!(effective.has(Permissions::MANAGE_CHANNELS));
+    }
+
+    #[test]
+    fn test_layer_manage_channels_is_hidden_by_role_view_deny() {
+        // Same rule for a deny carried by one of the member's own roles, which
+        // lands in the non-default bucket (overwrites are per role only; there
+        // is no member-targeted overwrite in this schema).
+        let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
+        let rows = [(0, Permissions::VIEW_CHANNEL.bits() as i64, false)];
+        assert!(!layer_overwrite_rows(1, base, &rows).has(Permissions::VIEW_CHANNEL));
+    }
+
+    #[test]
+    fn test_layer_administrator_keeps_view_through_deny() {
+        // Positive control for the two tests above: the ONLY base that
+        // overrides a VIEW deny is ADMINISTRATOR (the owner resolves to it
+        // before layering in all three resolvers).
+        let base = Permissions::DEFAULT_MEMBER
+            | Permissions::MANAGE_CHANNELS
+            | Permissions::ADMINISTRATOR;
+        let rows = [
+            (0, Permissions::VIEW_CHANNEL.bits() as i64, true),
+            (0, Permissions::VIEW_CHANNEL.bits() as i64, false),
+        ];
+        assert!(layer_overwrite_rows(1, base, &rows).has(Permissions::VIEW_CHANNEL));
+    }
+
+    #[test]
+    fn test_layer_manage_channels_without_deny_keeps_view() {
+        // Positive control: the entitled path. A manager with no deny against
+        // them still sees the channel, with or without unrelated overwrites.
+        let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
+        assert!(layer_overwrite_rows(1, base, &[]).has(Permissions::VIEW_CHANNEL));
+        let rows = [(0, Permissions::SEND_MESSAGES.bits() as i64, true)];
+        let effective = layer_overwrite_rows(1, base, &rows);
+        assert!(effective.has(Permissions::VIEW_CHANNEL));
+        assert!(!effective.has(Permissions::SEND_MESSAGES));
+    }
+
+    #[test]
+    fn test_layer_manage_channels_role_allow_still_beats_everyone_deny() {
+        // Ordinary layering is unchanged for managers: @everyone denies VIEW,
+        // a role they hold re-allows it -> visible, by the allow, not by a
+        // MANAGE_CHANNELS special case.
+        let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
+        let rows = [
+            (0, Permissions::VIEW_CHANNEL.bits() as i64, true),
+            (Permissions::VIEW_CHANNEL.bits() as i64, 0, false),
+        ];
+        assert!(layer_overwrite_rows(1, base, &rows).has(Permissions::VIEW_CHANNEL));
+    }
+
+    #[test]
+    fn test_layer_no_bit_survives_its_own_deny_except_under_admin() {
+        // Sweep: for every OVERWRITABLE bit, a base holding MANAGE_CHANNELS plus
+        // that bit loses it to an @everyone deny. Guards against a future
+        // "manager keeps X" re-insert of any flavour.
+        let base = Permissions::all() & !Permissions::ADMINISTRATOR;
+        for i in 0..64u32 {
+            let bit = Permissions::from_bits_truncate(1u64 << i);
+            if bit.is_empty() || !Permissions::OVERWRITABLE.contains(bit) {
+                continue;
+            }
+            let rows = [(0, bit.bits() as i64, true)];
+            assert!(
+                !layer_overwrite_rows(1, base, &rows).contains(bit),
+                "bit {i} survived its own deny"
+            );
+        }
+    }
+
     #[test]
     fn test_layer_overwrite_grants_task_bits() {
         // A member without MANAGE_TASKS can be granted it per-channel.
@@ -538,9 +626,39 @@ impl Permissions {
 /// overwrites (deny then allow). Rows are (allow, deny, is_default).
 ///
 /// Overwrite masks are clamped to OVERWRITABLE (defense in depth alongside the
-/// PUT-endpoint validation), and a base MANAGE_CHANNELS always retains
-/// VIEW_CHANNEL so channel managers cannot lock themselves (or other managers)
-/// out of a channel they can still administer.
+/// PUT-endpoint validation). Only ADMINISTRATOR (which the server owner
+/// resolves to before layering) overrides a deny: an explicit VIEW_CHANNEL deny
+/// hides the channel from a MANAGE_CHANNELS holder exactly as it does from
+/// anyone else. Until 0.9.5 a base MANAGE_CHANNELS re-inserted VIEW after
+/// layering so managers "could not lock themselves out"; since the base is the
+/// OR of held roles AND @everyone, an @everyone role carrying MANAGE_CHANNELS
+/// (the migration-004 fossil, or an owner's grant) made every VIEW deny on the
+/// server inert for every member, and the key distributor (which shares this
+/// helper) wrapped epoch keys for them. A manager who is VIEW-denied now gets
+/// the same 404 as any other hidden-from member.
+///
+/// That is a LOCKOUT in the client, and it is deliberate — Discord semantics.
+/// The app has no in-app path back into a channel it cannot see: the
+/// overwrite editor (EditChannelModal) opens from the channel's row in the
+/// sidebar, and that list — like the Server Settings channel picker — comes
+/// from listChannels, which omits the denied channel. A Manage Channels holder
+/// who denies VIEW_CHANNEL to a role they themselves hold (or to @everyone on
+/// a server whose @everyone role carries MANAGE_CHANNELS) loses the channel
+/// and its overwrite editor in the client, and gets them back ONLY through
+/// the owner or an ADMINISTRATOR (who override the deny), or by having the
+/// role or the overwrite changed from somewhere it is still reachable: the
+/// role editor (a role holder cannot change their own roles, so that means
+/// another manager or a role edit that lifts the bit for everyone), or the
+/// overwrite routes themselves, which gate on server-level MANAGE_CHANNELS
+/// rather than channel VIEW and so still answer a direct API call for the
+/// hidden channel id. The server does not soften the deny to spare the
+/// client that; a manager who wants a guard rail against it is one the owner
+/// grants ADMINISTRATOR.
+///
+/// All three resolvers (get_user_channel_permissions, the bulk
+/// get_user_channels_permissions and get_channel_viewer_ids) go through this
+/// one function so the VIEW gate, channel listing and key-wrapping viewer set
+/// cannot disagree; do not add a rule to one of them without adding it here.
 fn layer_overwrite_rows(
     channel_id: i64,
     base: Permissions,
@@ -567,11 +685,9 @@ fn layer_overwrite_rows(
         target.allow |= Permissions::from_bits_truncate(allow as u64) & Permissions::OVERWRITABLE;
         target.deny |= Permissions::from_bits_truncate(deny as u64) & Permissions::OVERWRITABLE;
     }
-    let mut perms = compute_channel_permissions(base, &[everyone, merged_roles], None);
-    if base.contains(Permissions::MANAGE_CHANNELS) {
-        perms.insert(Permissions::VIEW_CHANNEL);
-    }
-    perms
+    // No post-layering re-insert of any bit: a deny is a deny for everyone but
+    // an ADMINISTRATOR (compute_channel_permissions short-circuits that base).
+    compute_channel_permissions(base, &[everyone, merged_roles], None)
 }
 
 /// Resolve a channel's owning server and the caller's EFFECTIVE permissions in

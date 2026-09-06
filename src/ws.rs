@@ -245,33 +245,102 @@ async fn handle_socket(
         // visible clients repaint from REST state on connect anyway.
         //
         // Re-authorized against the CURRENT permission set: a frame was parked
-        // while the user could VIEW its channel, and a kick or a deny may have
-        // landed since. Handing it over anyway told a removed member which
-        // channel got a message, when, and from whom. DirectMessage frames
-        // need no check — they were addressed to this user as a participant.
+        // while the user could VIEW its channel (or while nobody blocked the
+        // sender), and a kick, a deny or a block may have landed since. Handing
+        // it over anyway told a removed member which channel got a message,
+        // when, and from whom — and delivered a card from a sender they had
+        // since blocked. Every channel-scoped or sender-scoped parked frame is
+        // re-checked here; the verdicts are memoized per drain (channel_id for
+        // VIEW, sender_id for the block/consent gate).
         let mut views_cache: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
+        let mut dm_ok_cache: std::collections::HashMap<UserId, bool> = std::collections::HashMap::new();
         for msg in state.drain_undelivered(user_id) {
-            if let ServerMessage::MessageNotification { channel_id, .. } = &msg {
-                let still_views = match views_cache.get(channel_id) {
-                    Some(&v) => v,
-                    None => {
-                        let v = matches!(
-                            get_user_channel_permissions(&state.pool, *channel_id, user_id).await,
-                            ChannelPermAccess::Allowed { perms, .. }
-                                if perms.has(Permissions::VIEW_CHANNEL)
-                        );
-                        views_cache.insert(*channel_id, v);
-                        v
+            let keep = match &msg {
+                ServerMessage::MessageNotification { channel_id, .. } => {
+                    match views_cache.get(channel_id) {
+                        Some(&v) => v,
+                        None => {
+                            let v = matches!(
+                                get_user_channel_permissions(&state.pool, *channel_id, user_id).await,
+                                ChannelPermAccess::Allowed { perms, .. }
+                                    if perms.has(Permissions::VIEW_CHANNEL)
+                            );
+                            views_cache.insert(*channel_id, v);
+                            v
+                        }
                     }
-                };
-                if !still_views {
-                    tracing::info!(
-                        "dropping parked notification for user {} on channel {}: no longer entitled",
-                        user_id,
-                        channel_id
-                    );
-                    continue;
                 }
+                // ClipPending carries only a clip_id, so resolve the proposal's
+                // channels and re-run the SAME rule the live/REST clip surfaces
+                // apply (clip_access in clip_handlers: VIEW on the voice channel):
+                // a member kicked/VIEW-denied since the proposal must not get a
+                // consent doorbell for a call they were removed from. Fail
+                // CLOSED: a proposal that has since expired or been swept
+                // resolves to no channels, so the pending frame is dropped
+                // (GET /clips/:id would 404 anyway).
+                ServerMessage::ClipPending { clip_id } => {
+                    // Snapshot the two channel ids, dropping the DashMap guard
+                    // before any await.
+                    let channels = state
+                        .clip_proposals
+                        .get(clip_id)
+                        .map(|p| (p.voice_channel_id, p.target_channel_id));
+                    match channels {
+                        Some((voice_cid, target_cid)) => {
+                            let mut ok = true;
+                            // Only the VOICE channel gates participation: an approver who
+                            // cannot VIEW the pinned target channel still holds a consent
+                            // seat and sees the target REDACTED (review finding 9), so the
+                            // doorbell must still reach them. ClipPending is content-free.
+                            let _ = target_cid;
+                            for cid in [voice_cid] {
+                                let v = match views_cache.get(&cid) {
+                                    Some(&v) => v,
+                                    None => {
+                                        let v = matches!(
+                                            get_user_channel_permissions(&state.pool, cid, user_id).await,
+                                            ChannelPermAccess::Allowed { perms, .. }
+                                                if perms.has(Permissions::VIEW_CHANNEL)
+                                        );
+                                        views_cache.insert(cid, v);
+                                        v
+                                    }
+                                };
+                                if !v {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            ok
+                        }
+                        None => false,
+                    }
+                }
+                // A DirectMessage parked while nobody was home must not be
+                // handed over if a block (either direction) or the recipient's
+                // DM-consent flag now forbids it — the same gate the WS send
+                // path ran once at enqueue time. users_can_dm re-runs exactly
+                // that (conversation exists + no block either way + consent);
+                // fail CLOSED via its own error handling.
+                ServerMessage::DirectMessage { sender, .. } => {
+                    let from = sender.id;
+                    match dm_ok_cache.get(&from) {
+                        Some(&v) => v,
+                        None => {
+                            let v = users_can_dm(&state, from, user_id).await;
+                            dm_ok_cache.insert(from, v);
+                            v
+                        }
+                    }
+                }
+                _ => true,
+            };
+            if !keep {
+                tracing::info!(
+                    "dropping parked frame for user {}: no longer entitled at delivery time",
+                    user_id
+                );
+                continue;
             }
             state.send_to_conn(user_id, conn_id, msg);
         }
@@ -294,7 +363,14 @@ async fn handle_socket(
     let parked = if delivery {
         crate::state::ParkedDelivery { offers: Vec::new(), sender_notes: Vec::new() }
     } else {
-        state.deliver_parked_offers(user_id, conn_id)
+        // Re-run the offer-time gate (users_can_dm) for every parked sender
+        // before delivering: a block or a DM-consent flip since the offer was
+        // parked must stop the card, exactly as the notification drain above
+        // re-checks VIEW. Resolved here (async) and handed to the sync,
+        // guard-holding drain as `sender_ok`; a sender with no verdict is
+        // refused. Fail CLOSED via users_can_dm's own error handling.
+        let ok = resolve_parked_senders_ok(&state, user_id).await;
+        state.deliver_parked_offers(user_id, conn_id, move |from| ok.contains(&from))
     };
     for offer in parked.offers {
         state.send_to_conn(user_id, conn_id, offer);
@@ -523,6 +599,16 @@ async fn handle_socket(
             }
         }
     }
+
+    // Close the socket NOW. The read half is never used again, and the write
+    // half is aborted below, but holding either keeps the TCP connection open
+    // for the whole teardown — including the rejoin-grace sleep further down,
+    // which is about DELAYING ANNOUNCEMENTS, not about keeping a dead socket
+    // alive. Measured: a revoked session that had joined a room stayed open on
+    // the client for the full 8 s grace (WS_REJOIN_GRACE_SECS) after the
+    // server had already unregistered it, so "sign out this device" looked
+    // like it had not worked; a socket in no room closed instantly.
+    drop(receiver);
 
     // Cleanup on disconnect
     tracing::info!("User {} disconnected", user_id);
@@ -754,20 +840,117 @@ async fn handle_socket(
     }
 }
 
+/// The raw `show_online_status` lookup: `Some(value)` for a found row, `None`
+/// for a missing row OR a query error — the caller picks the fail direction.
+/// The announcement call sites go through [`user_shows_online`] (fails open,
+/// deliberately); a call site that MASKS presence must treat `None` as hidden
+/// (see [`target_is_hidden`]).
+pub(crate) async fn show_online_status(state: &Arc<AppState>, user_id: UserId) -> Option<bool> {
+    // i32, matching handlers.rs's copy of this exact SQL text (users.id is
+    // INT4) — see the 22P03 note in device_token.rs.
+    match sqlx::query_as::<_, (bool,)>("SELECT show_online_status FROM users WHERE id = $1")
+        .bind(user_id as i32)
+        .fetch_optional(&state.pool)
+        .await
+    {
+        Ok(row) => row.map(|(b,)| b),
+        Err(e) => {
+            tracing::warn!("show_online_status lookup failed for user {}: {e:?}", user_id);
+            None
+        }
+    }
+}
+
 /// Does this user want their presence visible to others? Fails open to
 /// visible (the column default) on a DB error — presence is not worth
 /// breaking a connect over.
 pub(crate) async fn user_shows_online(state: &Arc<AppState>, user_id: UserId) -> bool {
-    // i32, matching handlers.rs's copy of this exact SQL text (users.id is
-    // INT4) — see the 22P03 note in device_token.rs.
-    sqlx::query_as::<_, (bool,)>("SELECT show_online_status FROM users WHERE id = $1")
-        .bind(user_id as i32)
-        .fetch_optional(&state.pool)
-        .await
-        .ok()
-        .flatten()
-        .map(|(b,)| b)
-        .unwrap_or(true)
+    show_online_status(state, user_id).await.unwrap_or(true)
+}
+
+/// r2-4-L4-02's mask, with the fail direction pinned: is the FileOffer
+/// recipient someone whose online/offline distinction the SENDER must not be
+/// able to observe?
+///
+/// Only a row that positively says `show_online_status = true` un-masks. A
+/// missing row and a query error (`None`) both mask — the opposite default
+/// from [`user_shows_online`], on purpose: that helper gates an announcement,
+/// where the open direction merely announces; this one closes a presence
+/// oracle, where the open direction (a DB blip during the offer) would let the
+/// sender tell hidden-online from offline — the exact bit the mask exists to
+/// hide. A self-transfer is never masked: the sender IS the recipient.
+fn target_is_hidden(to_self: bool, shows_online: Option<bool>) -> bool {
+    !to_self && !matches!(shows_online, Some(true))
+}
+
+/// The client's in-band voice status ping: `__VOICE_STATUS__{json}` sent as a
+/// room ChatMessage into the `voice_<id>` room (frontend `voiceStatus.ts`
+/// `buildVoiceStatus`, VoicePanel `broadcastStatus`). It carries the roster's
+/// muted / deafened / replay-buffer-armed flags; Chat.tsx filters it out of the
+/// message list. Recognition is the client's own rule — a prefix match.
+pub(crate) const VOICE_STATUS_PREFIX: &str = "__VOICE_STATUS__";
+
+fn is_voice_status_ping(content: &str) -> bool {
+    content.starts_with(VOICE_STATUS_PREFIX)
+}
+
+/// What a `ChatMessage` into a channel-backed room (`channel_<id>` or
+/// `voice_<id>`) is admitted as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatAdmission {
+    /// A `__VOICE_STATUS__` ping from a CURRENT OCCUPANT of a voice room:
+    /// broadcast as-is, with no SEND_MESSAGES or member-timeout check.
+    StatusPing,
+    /// Real content from a sender holding VIEW + SEND_MESSAGES: still subject
+    /// to the member-timeout deny list before it is broadcast.
+    Message,
+    Refused,
+}
+
+/// C10, corrected: the voice_<id> ChatMessage branch requires SEND_MESSAGES
+/// like the text branch — EXCEPT for the voice status ping, which is not a
+/// message. It is the only transport for the roster's mute / deafen /
+/// recording-armed state, SEND_MESSAGES is offered as a per-channel overwrite
+/// on voice channels too ("Send messages in text channels"), and a member
+/// holding CONNECT but denied SEND joins the call normally. Gating the ping on
+/// SEND froze such a member's state for the whole room (a muted user rendered
+/// hot-mic; the recording badge never shown) and raised a client alert on
+/// every toggle.
+///
+/// So: a status ping is admitted when the sending CONNECTION is in the voice
+/// room (`conn_in_room` — `joined_rooms` is per-connection, and being in the
+/// room means the VIEW + CONNECT join gate passed) AND the access lookup still
+/// says VIEW + CONNECT (the join-level gate re-asserted, fail closed on a
+/// lookup error). Anything else — real content in either room shape, a status
+/// ping from a non-occupant, a status ping into a TEXT room — keeps the
+/// SEND_MESSAGES gate and the caller's timeout check, exactly as C10 intended:
+/// a non-occupant still cannot inject a spoofed roster state into a call they
+/// have not joined without the bits a message would need.
+fn chat_admission(
+    is_voice_room: bool,
+    content: &str,
+    conn_in_room: bool,
+    access: &ChannelPermAccess,
+) -> ChatAdmission {
+    let perms = match access {
+        ChannelPermAccess::Allowed { perms, .. } => *perms,
+        _ => return ChatAdmission::Refused,
+    };
+    if !perms.has(Permissions::VIEW_CHANNEL) {
+        return ChatAdmission::Refused;
+    }
+    if is_voice_room
+        && conn_in_room
+        && is_voice_status_ping(content)
+        && perms.has(Permissions::CONNECT)
+    {
+        return ChatAdmission::StatusPing;
+    }
+    if perms.has(Permissions::SEND_MESSAGES) {
+        ChatAdmission::Message
+    } else {
+        ChatAdmission::Refused
+    }
 }
 
 /// The fail-closed fallback for [`hidden_members`]: on a DB error EVERY id is
@@ -831,6 +1014,26 @@ fn room_announces_presence(room_id: &str) -> bool {
     parse_voice_room(room_id).is_some()
 }
 
+/// C09 + r2-3-L3-01: on a `LeaveRoom`, emit the over-complete media retraction
+/// (StreamStopped, and any released share/camera) only when THIS connection was
+/// actually in the room (`was_joined`), the room is a voice room, and the user
+/// has FULLY left it (`!still_member` — no other device of theirs remains).
+/// Without `was_joined` a non-occupant could inject retraction frames into a
+/// call they cannot see; without `!still_member` a user still present on another
+/// device would be torn down on every peer.
+fn leave_retracts_media(was_joined: bool, is_voice: bool, still_member: bool) -> bool {
+    was_joined && is_voice && !still_member
+}
+
+/// C09: broadcast the departure `UserLeft` only when THIS connection had joined
+/// (`was_joined`), the user has fully left (`!still_member`), and presence is
+/// announced for the room (voice always, other rooms only for a visible user).
+/// `was_joined` is the fix: a `LeaveRoom` for a guessed room a non-member never
+/// joined must broadcast nothing.
+fn leave_announces_departure(was_joined: bool, still_member: bool, announce_presence: bool) -> bool {
+    was_joined && !still_member && announce_presence
+}
+
 /// Everyone currently sharing a live VOICE room with `user_id` (excluding
 /// themselves).
 ///
@@ -864,6 +1067,12 @@ pub(crate) async fn presence_audience(state: &Arc<AppState>, user_id: UserId) ->
     // INT8, so the UNION column resolves to INT8 — cast both branches to bigint
     // and decode as i64. (Decoding as i32 fails at runtime, and unwrap_or_default
     // would silently turn that into an empty audience — no presence at all.)
+    // r2-1-L1-02: exclude accounts blocked in EITHER direction, so a blocked
+    // account stops receiving the blocker's UserOnline/UserOffline frames. The
+    // block dimension was added to every DM/consent gate but never here, so a
+    // block did not stop the presence stream. blocked_users columns are INT4;
+    // $1 (bigint) and t.uid (bigint) compare fine against them. On a DB error
+    // the whole query already fails CLOSED (empty audience below).
     let rows = sqlx::query_as::<_, (i64,)>(
         "SELECT DISTINCT uid FROM ( \
             SELECT sm2.user_id::bigint AS uid \
@@ -874,7 +1083,12 @@ pub(crate) async fn presence_audience(state: &Arc<AppState>, user_id: UserId) ->
             SELECT (CASE WHEN user1_id = $1 THEN user2_id ELSE user1_id END)::bigint AS uid \
             FROM friends \
             WHERE user1_id = $1 OR user2_id = $1 \
-        ) t",
+        ) t \
+        WHERE NOT EXISTS ( \
+            SELECT 1 FROM blocked_users b \
+            WHERE (b.blocker_id = $1 AND b.blocked_id = t.uid) \
+               OR (b.blocker_id = t.uid AND b.blocked_id = $1) \
+        )",
     )
     .bind(user_id)
     .fetch_all(&state.pool)
@@ -1311,6 +1525,26 @@ async fn users_can_dm(state: &Arc<AppState>, from: UserId, to: UserId) -> bool {
     crate::dm_handlers::recipient_accepts_dms(state, from, to).await
 }
 
+/// The delivery-time `sender_ok` set for `deliver_parked_offers`: the subset of
+/// currently-parked-offer senders who may STILL reach `recipient` (users_can_dm
+/// re-run now). `deliver_parked_offers` holds map guards and cannot await, so
+/// the async gate is resolved here and handed in as a predicate; one resolve
+/// per distinct sender (the set is already deduplicated). A sender who parks an
+/// offer between this call and the drain is simply absent from the set, and the
+/// drain refuses what it has no verdict for. Fails CLOSED via users_can_dm.
+async fn resolve_parked_senders_ok(
+    state: &Arc<AppState>,
+    recipient: UserId,
+) -> std::collections::HashSet<UserId> {
+    let mut ok = std::collections::HashSet::new();
+    for from in state.parked_offer_senders(recipient) {
+        if users_can_dm(state, from, recipient).await {
+            ok.insert(from);
+        }
+    }
+    ok
+}
+
 /// Drop device sessions nobody answered, and accepted ones that have gone
 /// quiet. Both ends are TOLD, for the same reason transfers are: a session that
 /// dies silently is indistinguishable from one that hung, and the host's single
@@ -1420,7 +1654,7 @@ pub fn reap_stale_transfers(state: &Arc<AppState>) {
 pub fn reap_stale_transfers_at(state: &Arc<AppState>, now: std::time::Instant) {
     // Collect first: notifying inside retain() would hold the shard lock
     // across sends.
-    let mut expired: Vec<(String, UserId, UserId, bool, bool)> = Vec::new();
+    let mut expired: Vec<(String, UserId, UserId, bool, bool, bool)> = Vec::new();
     state.file_transfers.retain(|id, t| {
         let ttl = if t.accepted {
             TRANSFER_IDLE_TTL_SECS
@@ -1429,17 +1663,27 @@ pub fn reap_stale_transfers_at(state: &Arc<AppState>, now: std::time::Instant) {
         };
         let alive = now.duration_since(t.touched_at).as_secs() < ttl;
         if !alive {
-            expired.push((id.clone(), t.from, t.to, t.accepted, t.parked_offer.is_some()));
+            expired.push((
+                id.clone(),
+                t.from,
+                t.to,
+                t.accepted,
+                t.parked_offer.is_some(),
+                t.hidden_target,
+            ));
         }
         alive
     });
 
-    for (transfer_id, from, to, accepted, parked) in expired {
+    for (transfer_id, from, to, accepted, parked, hidden_target) in expired {
         let reason = if accepted {
             "the transfer went quiet and timed out".to_string()
-        } else if parked {
+        } else if parked || hidden_target {
             // The offer never reached them at all — a different fact from
             // "they saw it and ignored it", and the sender should know which.
+            // r2-4-L4-02: a hidden recipient reports "never came online" even
+            // when the offer went straight out to their live session, so the
+            // expiry reason cannot distinguish hidden-online from offline.
             "they never came online to receive the offer".to_string()
         } else {
             "they did not respond to the offer".to_string()
@@ -2067,10 +2311,18 @@ async fn handle_message(
         }
 
         ClientMessage::LeaveRoom { room_id } => {
-            joined_rooms.remove(&room_id);
-            state.leave_room(&room_id, user_id, conn_id);
+            // C09: act only when THIS connection was actually in the room.
+            // joined_rooms.remove returns whether this connection had joined;
+            // without gating on it, a LeaveRoom for any guessed room_id
+            // broadcast a spoofed UserLeft (and, below, media retractions) into
+            // a private call the caller cannot even VIEW. leave_room itself is
+            // a no-op for a non-occupant, so nothing else needs the guard.
+            let was_joined = joined_rooms.remove(&room_id);
+            let released = state.leave_room(&room_id, user_id, conn_id);
 
-            // Notify the leaving connection
+            // Notify the leaving connection. Unconditional on purpose: it is
+            // byte-identical for every room id (occupied, empty or nonexistent)
+            // and is emitted before any membership read, so it is no oracle.
             state.send_to_conn(
                 user_id,
                 conn_id,
@@ -2079,26 +2331,84 @@ async fn handle_message(
                 },
             );
 
-            // Notify other room members only when the user has fully left —
-            // another of their devices may still be in the room. Mirrors the
-            // JoinRoom gate: a presence-hidden user was never announced outside
-            // voice, so their departure is not announced either.
-            let still_member = state
-                .rooms
-                .get(&room_id)
-                .map(|r| r.members.contains(&user_id))
-                .unwrap_or(false);
-            let announce_presence =
-                room_announces_presence(&room_id) || user_shows_online(&state, user_id).await;
-            if !still_member && announce_presence {
-                state.broadcast_to_room(
-                    &room_id,
-                    ServerMessage::UserLeft {
+            if was_joined {
+                // "Fully left" — no other connection of this user remains in
+                // the room. Every announcement below is gated on it, mirroring
+                // the disconnect path: a user still present via another device
+                // must not be erased from every roster.
+                let still_member = state
+                    .rooms
+                    .get(&room_id)
+                    .map(|r| r.members.contains(&user_id))
+                    .unwrap_or(false);
+
+                // r2-3-L3-01: a clean LeaveRoom from a VOICE room used to emit
+                // no media retraction at all — only UserLeft, which no client
+                // turns into a peer teardown. Mesh media is peer-to-peer, so
+                // remaining peers kept the leaver's RTCPeerConnection open with
+                // their microphone still on it, invisible to every roster and
+                // beyond every eviction path (which key off state.rooms, which
+                // the leaver just vacated). Emit the SAME over-complete
+                // StreamStopped the eviction path sends — unconditional of any
+                // streamer claim, because MEMBERSHIP is what clients render —
+                // plus the screen-share/camera retractions for whatever this
+                // connection actually released. Viewer-scoped, like every other
+                // StreamStopped emitter. The stock client sends StopStream
+                // first; a second StreamStopped is idempotent (Set/Map delete),
+                // exactly as the eviction path's own belt-and-braces overlap.
+                if leave_retracts_media(was_joined, parse_voice_room(&room_id).is_some(), still_member)
+                {
+                    let msg = ServerMessage::StreamStopped {
                         room_id: room_id.clone(),
-                        user_id,
-                    },
-                    None,
-                );
+                        streamer_id: user_id,
+                    };
+                    state.send_to_user(user_id, msg.clone());
+                    for audience_id in voice_roster_audience(&state, &room_id, user_id).await {
+                        state.send_to_user(audience_id, msg.clone());
+                    }
+                    // Belt-and-braces room-scoped send: reaches whoever holds a
+                    // roster entry even if the viewer resolve failed closed to
+                    // empty. The evictee is already out of the room, so no
+                    // duplicate reaches them.
+                    state.broadcast_to_room(&room_id, msg, None);
+                    if released.screen_sharer {
+                        state.broadcast_to_room(
+                            &room_id,
+                            ServerMessage::ScreenShareStopped {
+                                room_id: room_id.clone(),
+                                streamer_id: user_id,
+                            },
+                            None,
+                        );
+                    }
+                    if released.camera_user {
+                        state.broadcast_to_room(
+                            &room_id,
+                            ServerMessage::CameraStopped {
+                                room_id: room_id.clone(),
+                                user_id,
+                            },
+                            None,
+                        );
+                    }
+                }
+
+                // Notify other room members only when the user has fully left.
+                // Mirrors the JoinRoom gate: a presence-hidden user was never
+                // announced outside voice, so their departure is not announced
+                // either.
+                let announce_presence =
+                    room_announces_presence(&room_id) || user_shows_online(&state, user_id).await;
+                if leave_announces_departure(was_joined, still_member, announce_presence) {
+                    state.broadcast_to_room(
+                        &room_id,
+                        ServerMessage::UserLeft {
+                            room_id: room_id.clone(),
+                            user_id,
+                        },
+                        None,
+                    );
+                }
             }
 
             tracing::info!("User {} left room {}", user_id, room_id);
@@ -2112,19 +2422,34 @@ async fn handle_message(
             if !valid_message_content(&content) {
                 return Err("Invalid message content".to_string());
             }
-            // Message send into a text-channel room requires VIEW + SEND: a
+            // Message send into a channel room requires VIEW + SEND: a
             // non-member (incl. a kicked user with a live token) or a member
             // who is VIEW- or SEND-denied on the channel must not inject a live
             // message. One generic error for every denial so the channel's
             // existence isn't leaked.
-            if let Some(cid) = parse_channel_room(&room_id) {
-                let allowed = matches!(
-                    get_user_channel_permissions(&state.pool, cid, user_id).await,
-                    ChannelPermAccess::Allowed { perms, .. }
-                        if perms.has(Permissions::VIEW_CHANNEL)
-                            && perms.has(Permissions::SEND_MESSAGES)
+            //
+            // C10: BOTH shapes are gated on SEND_MESSAGES. The voice_<id>
+            // branch used to check VIEW alone, so a timed-out / SEND-denied /
+            // CONNECT-denied member who still held VIEW could inject a
+            // __VOICE_STATUS__ frame (broadcast_to_room, no sender-membership
+            // check) into a voice call they cannot join — bypassing
+            // SEND_MESSAGES and the member-timeout deny list the text branch
+            // enforces.
+            //
+            // The one carve-out is the status ping itself, from a connection
+            // that is actually IN the voice room: it is roster state, not a
+            // message, and a CONNECT-holder denied SEND must still be able to
+            // show the room that they are muted / deafened / recording. See
+            // `chat_admission` for the rule and its tests.
+            if let Some(cid) = parse_channel_room(&room_id).or_else(|| parse_voice_room(&room_id)) {
+                let access = get_user_channel_permissions(&state.pool, cid, user_id).await;
+                let admission = chat_admission(
+                    parse_voice_room(&room_id).is_some(),
+                    &content,
+                    joined_rooms.contains(&room_id),
+                    &access,
                 );
-                if !allowed {
+                if admission == ChatAdmission::Refused {
                     return Err("Not a member of this channel's server".to_string());
                 }
                 // Member-timeout enforcement, mirroring the REST send path
@@ -2134,37 +2459,35 @@ async fn handle_message(
                 // server that owns this channel via the join.
                 // Fail CLOSED on a query error: a timeout is a deny list, and
                 // `unwrap_or(None)` made any transient failure lift it.
-                let timed_out: Option<(i32,)> = match sqlx::query_as(
-                    "SELECT 1 FROM member_timeouts mt \
-                     JOIN channels c ON c.server_id = mt.server_id \
-                     WHERE c.id = $1 AND mt.user_id = $2 AND mt.expires_at > NOW() LIMIT 1",
-                )
-                .bind(cid)
-                .bind(user_id as i32)
-                .fetch_optional(&state.pool)
-                .await
-                {
-                    Ok(row) => row,
-                    Err(e) => {
-                        tracing::error!("ChatMessage: timeout lookup failed for user {}: {:?}", user_id, e);
-                        return Err("Could not verify timeout status".to_string());
+                // Skipped for an occupant's status ping: a timed-out member
+                // still in a call must not have their mute state freeze for
+                // everyone else — the timeout silences MESSAGES.
+                let timed_out: Option<(i32,)> = if admission == ChatAdmission::StatusPing {
+                    None
+                } else {
+                    match sqlx::query_as(
+                        "SELECT 1 FROM member_timeouts mt \
+                         JOIN channels c ON c.server_id = mt.server_id \
+                         WHERE c.id = $1 AND mt.user_id = $2 AND mt.expires_at > NOW() LIMIT 1",
+                    )
+                    .bind(cid)
+                    .bind(user_id as i32)
+                    .fetch_optional(&state.pool)
+                    .await
+                    {
+                        Ok(row) => row,
+                        Err(e) => {
+                            tracing::error!(
+                                "ChatMessage: timeout lookup failed for user {}: {:?}",
+                                user_id,
+                                e
+                            );
+                            return Err("Could not verify timeout status".to_string());
+                        }
                     }
                 };
                 if timed_out.is_some() {
                     return Err("You are timed out in this server".to_string());
-                }
-            }
-            // Defense-in-depth: gate voice-room (voice_<id>) ChatMessages too, so
-            // a non-member can't inject a __VOICE_STATUS__ ping into a voice room
-            // they never joined. VIEW only (join-level gate) — these are voice
-            // status pings, not messages, so SEND_MESSAGES doesn't apply.
-            if let Some(cid) = parse_voice_room(&room_id) {
-                let allowed = matches!(
-                    get_user_channel_permissions(&state.pool, cid, user_id).await,
-                    ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
-                );
-                if !allowed {
-                    return Err("Not a member of this channel's server".to_string());
                 }
             }
 
@@ -2540,8 +2863,11 @@ async fn handle_message(
                         .await;
                 }
                 // A parked offer PINNED to this device could not match until
-                // the id was proven; sweep again now that it is.
-                let parked = state.deliver_parked_offers(user_id, conn_id);
+                // the id was proven; sweep again now that it is. Same
+                // delivery-time block/consent re-check as the connect path.
+                let ok = resolve_parked_senders_ok(state, user_id).await;
+                let parked =
+                    state.deliver_parked_offers(user_id, conn_id, move |from| ok.contains(&from));
                 for offer in parked.offers {
                     state.send_to_conn(user_id, conn_id, offer);
                 }
@@ -3239,6 +3565,21 @@ async fn handle_message(
                 // PC-to-pocketed-phone transfers in 0.8.66.
                 state.is_user_visibly_online(target_user)
             };
+            // r2-4-L4-02: a recipient who hides their presence
+            // (show_online_status = false) must look OFFLINE to the sender in
+            // both states, or the FileParked-vs-silence difference is a
+            // presence oracle against the very toggle GET /servers/:id/members
+            // honours. `hidden_target` flattens every sender-facing note: the
+            // offer is reported as parked even when it went straight out to a
+            // hidden-online recipient, the connect-time "reached them" note is
+            // suppressed (state.rs), and expiry reports "never came online"
+            // (reap). The offer itself still reaches an online recipient — only
+            // the SENDER's observable is flattened. Never for a self-transfer.
+            // Fails CLOSED: a lookup error or a missing row masks (only a row
+            // that positively shows online un-masks) — `user_shows_online`'s
+            // open default would let a DB blip re-open the oracle.
+            let hidden_target =
+                target_is_hidden(to_self, show_online_status(&state, target_user).await);
             let parked_offer = if deliverable {
                 None
             } else {
@@ -3268,15 +3609,20 @@ async fn handle_message(
                     from_conn: conn_id,
                     to_conn: None,
                     parked_offer,
+                    hidden_target,
                 },
             );
+            // The reason a hidden-online recipient is masked with: byte-identical
+            // to the genuinely-offline non-self reason, so the two are
+            // indistinguishable to the sender.
+            let offline_reason = "their app isn't connected right now — the offer will reach them when they open Puca (it expires in about 2 minutes)";
             if parked {
                 let reason = if to_self && target_device.is_some() {
                     "that device isn't connected — the offer will reach it when Puca opens there (it expires in about 2 minutes)"
                 } else if to_self {
                     "your other device isn't connected — the offer will reach it when Puca opens there (it expires in about 2 minutes)"
                 } else {
-                    "their app isn't connected right now — the offer will reach them when they open Puca (it expires in about 2 minutes)"
+                    offline_reason
                 };
                 state.send_to_conn(
                     user_id,
@@ -3292,7 +3638,7 @@ async fn handle_message(
             let offer = ServerMessage::FileOffered {
                 from_user: user_id,
                 from_username: username.to_string(),
-                transfer_id,
+                transfer_id: transfer_id.clone(),
                 name,
                 size,
                 mime,
@@ -3317,6 +3663,21 @@ async fn handle_message(
                 }
             } else {
                 state.send_to_user(target_user, offer);
+                // r2-4-L4-02: the offer went straight out (recipient is online),
+                // but a hidden recipient's sender must see exactly what the
+                // offline path shows — a FileParked with the same reason —
+                // rather than the silence that betrays a live visible session.
+                if hidden_target {
+                    state.send_to_conn(
+                        user_id,
+                        conn_id,
+                        ServerMessage::FileParked {
+                            from_user: target_user,
+                            transfer_id,
+                            reason: offline_reason.to_string(),
+                        },
+                    );
+                }
             }
         }
 
@@ -3548,7 +3909,10 @@ async fn handle_message(
                 }
             };
             if blocked.is_some() {
-                return Err("You cannot message this user".to_string());
+                // Same words as the consent refusal below: a block must not be
+                // distinguishable from a privacy setting (re-audit r2-1-L1-03,
+                // review finding 4; the REST DM routes collapse the same way).
+                return Err("This user only accepts direct messages from friends and people who share a server with them".to_string());
             }
 
             // Same parity for the friends-only DM privacy flag: the Settings
@@ -4064,6 +4428,52 @@ pub fn create_token_with_start(
 }
 
 #[cfg(test)]
+mod leave_decision_tests {
+    use super::{leave_announces_departure, leave_retracts_media};
+
+    #[test]
+    fn a_connection_that_never_joined_the_room_does_nothing() {
+        // C09: the whole fix. was_joined = false must suppress BOTH the media
+        // retraction and the departure announcement, whatever else is true —
+        // otherwise a LeaveRoom for a guessed room injects frames into a call
+        // the caller cannot see.
+        assert!(!leave_retracts_media(false, true, false));
+        assert!(!leave_announces_departure(false, false, true));
+    }
+
+    #[test]
+    fn an_entitled_full_leave_retracts_and_announces() {
+        // Positive control: a member who was in the room and fully left.
+        assert!(leave_retracts_media(true, true, false), "voice full-leave retracts media");
+        assert!(leave_announces_departure(true, false, true), "full-leave announces UserLeft");
+    }
+
+    #[test]
+    fn a_user_still_present_on_another_device_is_not_torn_down() {
+        // still_member = true: another connection of theirs holds the room, so
+        // neither the retraction nor the announcement may fire.
+        assert!(!leave_retracts_media(true, true, true));
+        assert!(!leave_announces_departure(true, true, true));
+    }
+
+    #[test]
+    fn media_retraction_is_voice_only() {
+        // r2-3-L3-01 is about the mesh voice pc; a text room has no media pc to
+        // retract, so is_voice = false suppresses it even on a full leave.
+        assert!(!leave_retracts_media(true, false, false));
+        // A text-room departure still announces when presence is shown.
+        assert!(leave_announces_departure(true, false, true));
+    }
+
+    #[test]
+    fn a_hidden_user_outside_voice_is_not_announced() {
+        // announce_presence is false for a hidden user outside voice — their
+        // departure must stay silent, mirroring their silent join.
+        assert!(!leave_announces_departure(true, false, false));
+    }
+}
+
+#[cfg(test)]
 mod crash_resistance_tests {
     use super::*;
 
@@ -4334,6 +4744,179 @@ mod ws_bearer_subprotocol_tests {
         let echoed = "bearer";
         assert_ne!(echoed, parsed);
         assert!(!echoed.contains(tok));
+    }
+}
+
+#[cfg(test)]
+mod file_offer_presence_mask_tests {
+    use super::target_is_hidden;
+
+    /// r2-4-L4-02 review finding 5: the mask must fail CLOSED. Before, the
+    /// call site read `!user_shows_online(..)`, whose `unwrap_or(true)` turned
+    /// a DB blip into "not hidden" and re-opened the oracle.
+    #[test]
+    fn a_lookup_error_or_missing_row_masks() {
+        assert!(target_is_hidden(false, None), "error/missing row must mask");
+    }
+
+    #[test]
+    fn a_hidden_setting_masks() {
+        assert!(target_is_hidden(false, Some(false)));
+    }
+
+    /// The positive control: only an explicit `true` un-masks, so the parked /
+    /// delivered distinction survives for a recipient who shows their status.
+    #[test]
+    fn only_a_positive_shows_online_row_unmasks() {
+        assert!(!target_is_hidden(false, Some(true)));
+    }
+
+    /// A self-transfer is never masked, whatever the row says or fails to say —
+    /// the sender is the recipient and can see their own devices.
+    #[test]
+    fn a_self_transfer_is_never_masked() {
+        assert!(!target_is_hidden(true, None));
+        assert!(!target_is_hidden(true, Some(false)));
+        assert!(!target_is_hidden(true, Some(true)));
+    }
+}
+
+#[cfg(test)]
+mod chat_admission_tests {
+    use super::{chat_admission, is_voice_status_ping, ChatAdmission, VOICE_STATUS_PREFIX};
+    use crate::permissions::{ChannelPermAccess, Permissions};
+
+    fn allowed(perms: Permissions) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed { server_id: "s1".into(), perms }
+    }
+
+    /// Exactly what the client sends (voiceStatus.ts `buildVoiceStatus`).
+    const PING: &str = "__VOICE_STATUS__{\"muted\":true,\"deafened\":false,\"buffering\":false}";
+    const TEXT: &str = "hello everyone";
+
+    fn view_connect() -> Permissions {
+        Permissions::VIEW_CHANNEL | Permissions::CONNECT
+    }
+    fn view_connect_send() -> Permissions {
+        view_connect() | Permissions::SEND_MESSAGES
+    }
+
+    #[test]
+    fn the_prefix_matches_the_client_codec() {
+        assert_eq!(VOICE_STATUS_PREFIX, "__VOICE_STATUS__");
+        assert!(is_voice_status_ping(PING));
+        assert!(is_voice_status_ping(VOICE_STATUS_PREFIX), "bare prefix still parses client-side");
+        assert!(!is_voice_status_ping(TEXT));
+        assert!(!is_voice_status_ping(" __VOICE_STATUS__{}"), "prefix match, not substring");
+        assert!(!is_voice_status_ping("__voice_status__{}"), "case-sensitive like startsWith");
+    }
+
+    /// Findings 8 / 14: a CONNECT-holder denied SEND_MESSAGES who is in the
+    /// call must still propagate mute / deafen / recording state.
+    #[test]
+    fn status_ping_from_an_occupant_without_send_is_admitted_as_a_ping() {
+        assert_eq!(
+            chat_admission(true, PING, true, &allowed(view_connect())),
+            ChatAdmission::StatusPing
+        );
+        // Holding SEND as well changes nothing — still a ping, still exempt
+        // from the timeout check.
+        assert_eq!(
+            chat_admission(true, PING, true, &allowed(view_connect_send())),
+            ChatAdmission::StatusPing
+        );
+    }
+
+    /// C10's point survives: a connection that has NOT joined the voice room
+    /// cannot inject roster state into it without the bits a message needs.
+    #[test]
+    fn status_ping_from_a_non_occupant_is_refused() {
+        assert_eq!(
+            chat_admission(true, PING, false, &allowed(view_connect())),
+            ChatAdmission::Refused
+        );
+        assert_eq!(
+            chat_admission(true, PING, false, &allowed(Permissions::VIEW_CHANNEL)),
+            ChatAdmission::Refused
+        );
+    }
+
+    /// "Anything else keeps the SEND_MESSAGES + timeout gate": a non-occupant
+    /// holding SEND is treated as a message sender, timeout check included.
+    #[test]
+    fn status_ping_from_a_non_occupant_with_send_is_gated_as_a_message() {
+        assert_eq!(
+            chat_admission(true, PING, false, &allowed(view_connect_send())),
+            ChatAdmission::Message
+        );
+    }
+
+    #[test]
+    fn real_content_without_send_is_refused_even_from_an_occupant() {
+        assert_eq!(
+            chat_admission(true, TEXT, true, &allowed(view_connect())),
+            ChatAdmission::Refused
+        );
+        assert_eq!(
+            chat_admission(false, TEXT, true, &allowed(Permissions::VIEW_CHANNEL)),
+            ChatAdmission::Refused
+        );
+    }
+
+    #[test]
+    fn real_content_with_send_is_admitted_as_a_message() {
+        assert_eq!(
+            chat_admission(true, TEXT, true, &allowed(view_connect_send())),
+            ChatAdmission::Message
+        );
+        assert_eq!(
+            chat_admission(
+                false,
+                TEXT,
+                true,
+                &allowed(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
+            ),
+            ChatAdmission::Message
+        );
+    }
+
+    /// The carve-out is for VOICE rooms only: into a text room the ping is
+    /// just a message that happens to start with the prefix.
+    #[test]
+    fn status_ping_into_a_text_room_is_gated_as_a_message() {
+        assert_eq!(
+            chat_admission(false, PING, true, &allowed(view_connect())),
+            ChatAdmission::Refused
+        );
+        assert_eq!(
+            chat_admission(false, PING, true, &allowed(view_connect_send())),
+            ChatAdmission::Message
+        );
+    }
+
+    /// The join-level gate is re-asserted: an occupant whose CONNECT (or VIEW)
+    /// has since been revoked is refused, not exempted.
+    #[test]
+    fn an_occupant_stripped_of_the_join_gate_is_refused() {
+        assert_eq!(
+            chat_admission(true, PING, true, &allowed(Permissions::VIEW_CHANNEL)),
+            ChatAdmission::Refused
+        );
+        assert_eq!(
+            chat_admission(true, PING, true, &allowed(Permissions::CONNECT | Permissions::SEND_MESSAGES)),
+            ChatAdmission::Refused
+        );
+    }
+
+    /// Fail closed: a non-member / not-found / errored lookup admits nothing,
+    /// ping or not, occupant or not.
+    #[test]
+    fn a_denied_lookup_refuses_everything() {
+        for access in [ChannelPermAccess::NotMember, ChannelPermAccess::NotFound] {
+            assert_eq!(chat_admission(true, PING, true, &access), ChatAdmission::Refused);
+            assert_eq!(chat_admission(true, TEXT, true, &access), ChatAdmission::Refused);
+            assert_eq!(chat_admission(false, TEXT, true, &access), ChatAdmission::Refused);
+        }
     }
 }
 

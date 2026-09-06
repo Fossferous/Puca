@@ -109,23 +109,104 @@ fn approver_online(state: &AppState, uid: UserId, hidden: &HashSet<UserId>) -> b
 }
 
 /// Entitlement is re-checked against the CURRENT permission set on every clip
-/// read and vote. The approver list is a snapshot taken at proposal time, and a
-/// user kicked, banned or VIEW-denied since must not keep reading the proposal
-/// (channel names, proposer, counts) or casting a vote on it. Fails closed.
-async fn still_views_voice_channel(state: &AppState, voice_channel_id: i64, user: UserId) -> bool {
+/// read, vote AND fan-out frame. The approver list is a snapshot taken at
+/// proposal time, and a user kicked, banned or VIEW-denied on the VOICE
+/// channel since must not keep reading the proposal (channel names, proposer,
+/// counts), casting a vote on it, or receiving its live frames over a socket
+/// that outlived the kick (kick never closes the socket, and nothing prunes
+/// the snapshot). Fails closed: a resolver error reads as no VIEW
+/// (get_user_channel_permissions answers NotFound / empty perms on a DB
+/// error, never a default-allow).
+///
+/// The TARGET text channel is different: it decides what a participant may
+/// SEE, never whether they are a participant. propose_clip resolves the
+/// target against the proposer only, so an approver can hold a consent seat
+/// for a clip pinned to a channel they cannot VIEW (a public voice channel
+/// plus a staff-only #clips is a legitimate layout). Their voice is in the
+/// footage and approval is unanimous, so refusing them the doorbell or the
+/// vote would not protect the hidden channel — it would deadlock every
+/// proposal in that call into a silent expiry. They stay a full approver;
+/// every field that names the target (id AND name) is redacted to null for
+/// them instead (`ClipAccess::sees_target`, applied by view_for). The frames
+/// themselves — ClipProposed, ClipPending, ClipVoteUpdate, ClipResolved —
+/// carry only the clip id, counts and an outcome, so nothing there needs
+/// redacting.
+async fn views_channel(state: &AppState, channel_id: i64, user: UserId) -> bool {
     matches!(
-        get_user_channel_permissions(&state.pool, voice_channel_id, user).await,
+        get_user_channel_permissions(&state.pool, channel_id, user).await,
         ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL)
     )
+}
+
+/// What one user may do with one proposal right now. `None` = not a
+/// participant (uniform 404 on REST, no frame on the socket).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipAccess {
+    /// The caller can VIEW the target text channel, so the view may name it.
+    /// False = the target's id and name are redacted to null for this caller.
+    pub sees_target: bool,
+}
+
+/// Pure decision from the two live VIEW answers: the voice channel gates
+/// participation, the target channel gates only what the view names. Split
+/// out so the seat/redaction table is testable without a resolver.
+pub fn clip_access_from(views_voice: bool, views_target: bool) -> Option<ClipAccess> {
+    if !views_voice {
+        return None;
+    }
+    Some(ClipAccess { sees_target: views_target })
+}
+
+/// Resolve `clip_access_from` against the live permission set. The target is
+/// only resolved for a participant (one fewer query for a 404), and a resolver
+/// error on the target reads as "cannot see it" — redaction, which fails safe.
+async fn clip_access(state: &AppState, voice_channel_id: i64, target_channel_id: i64, user: UserId) -> Option<ClipAccess> {
+    if !views_channel(state, voice_channel_id, user).await {
+        return None;
+    }
+    clip_access_from(true, views_channel(state, target_channel_id, user).await)
+}
+
+/// The participant gate alone — for the frames that name nothing (doorbell,
+/// tally, outcome), where the target answer would be resolved and thrown away.
+async fn still_views_voice_channel(state: &AppState, voice_channel_id: i64, user: UserId) -> bool {
+    views_channel(state, voice_channel_id, user).await
+}
+
+/// The subset of `candidates` who pass still_views_voice_channel right now.
+/// One resolve per candidate — the same participant rule the REST paths apply
+/// per caller, so a socket can never receive what a GET would 404.
+async fn entitled_of(state: &AppState, p: &ClipProposal, candidates: &[UserId]) -> HashSet<UserId> {
+    let mut out = HashSet::with_capacity(candidates.len());
+    for &u in candidates {
+        if still_views_voice_channel(state, p.voice_channel_id, u).await {
+            out.insert(u);
+        }
+    }
+    out
 }
 
 // ---- fan-out ------------------------------------------------------------------
 
 /// The doorbell. Live sockets get ClipProposed; an offline approver gets a
 /// CONTENT-FREE ClipPending parked for the delivery socket the wake summons.
-fn notify_proposed(state: &Arc<AppState>, p: &ClipProposal) {
+///
+/// Each recipient is re-authorized against the VOICE channel first: the
+/// presence log outlives an eviction, so the snapshot can hold someone kicked
+/// or VIEW-denied between the call and the proposal. They keep their consent
+/// seat (their voice is in the footage, and the proposal fails safe by
+/// expiring unapproved) but get no doorbell, no parked frame and no wake for a
+/// call they were removed from. The TARGET channel is deliberately NOT a
+/// condition here: an approver who cannot see the pinned clips channel must
+/// still be asked, or the proposal can never complete (see ClipAccess). Both
+/// frames carry only the clip id, so there is nothing about the target to
+/// redact; GET /clips/:id does that.
+async fn notify_proposed(state: &Arc<AppState>, p: &ClipProposal) {
     let expires_in_ms = p.expires.saturating_duration_since(Instant::now()).as_millis() as i64;
     for v in &p.votes {
+        if !still_views_voice_channel(state, p.voice_channel_id, v.user_id).await {
+            continue;
+        }
         let live = ServerMessage::ClipProposed { clip_id: p.clip_id.clone(), expires_in_ms };
         if !state.send_to_user(v.user_id, live) {
             state.enqueue_undelivered(v.user_id, ServerMessage::ClipPending { clip_id: p.clip_id.clone() });
@@ -134,15 +215,50 @@ fn notify_proposed(state: &Arc<AppState>, p: &ClipProposal) {
     }
 }
 
-/// Terminal frames: the proposer sees the real outcome; approvers see only
-/// `approved` or `closed`. Best-effort delivery, never parked (waking a phone
-/// to say "that clip expired" is noise on a doorbell budget that exists for
-/// messages; the client reconciles via GET /clips/pending on reconnect).
-pub fn broadcast_resolved(state: &Arc<AppState>, p: &ClipProposal, outcome: ClipOutcome) {
-    state.send_to_user(p.proposer, ServerMessage::ClipResolved { clip_id: p.clip_id.clone(), outcome });
+/// Pure half of the terminal fan-out: who gets a ClipResolved and which
+/// outcome they see. The proposer sees the real outcome; approvers see only
+/// `approved` or `closed` (a veto is never attributed); anyone not in
+/// `entitled` — the caller's live VIEW answer per candidate — gets nothing.
+pub fn resolved_frames(p: &ClipProposal, outcome: ClipOutcome, entitled: &HashSet<UserId>) -> Vec<(UserId, ClipOutcome)> {
     let for_others = if outcome == ClipOutcome::Approved { ClipOutcome::Approved } else { ClipOutcome::Closed };
+    let mut out = Vec::with_capacity(p.votes.len() + 1);
+    if entitled.contains(&p.proposer) {
+        out.push((p.proposer, outcome));
+    }
     for v in &p.votes {
-        state.send_to_user(v.user_id, ServerMessage::ClipResolved { clip_id: p.clip_id.clone(), outcome: for_others });
+        if entitled.contains(&v.user_id) {
+            out.push((v.user_id, for_others));
+        }
+    }
+    out
+}
+
+/// Terminal frames. Best-effort delivery, never parked (waking a phone to say
+/// "that clip expired" is noise on a doorbell budget that exists for messages;
+/// the client reconciles via GET /clips/pending on reconnect) — so only users
+/// holding a connection are even resolved; the rest could not receive anyway.
+pub async fn broadcast_resolved(state: &Arc<AppState>, p: &ClipProposal, outcome: ClipOutcome) {
+    let candidates: Vec<UserId> = std::iter::once(p.proposer)
+        .chain(p.votes.iter().map(|v| v.user_id))
+        .filter(|u| state.sessions.contains_key(u))
+        .collect();
+    let entitled = entitled_of(state, p, &candidates).await;
+    for (uid, o) in resolved_frames(p, outcome, &entitled) {
+        state.send_to_user(uid, ServerMessage::ClipResolved { clip_id: p.clip_id.clone(), outcome: o });
+    }
+}
+
+/// Sync entry for the disconnect path and the sweeper, neither of which can
+/// await this module: the re-check runs on a spawned task. No runtime means no
+/// frames — a frame that cannot be re-authorized is dropped, never sent
+/// unchecked (the client reconciles via GET /clips/pending regardless).
+fn spawn_broadcast_resolved(state: &Arc<AppState>, p: ClipProposal, outcome: ClipOutcome) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            let state = Arc::clone(state);
+            handle.spawn(async move { broadcast_resolved(&state, &p, outcome).await });
+        }
+        Err(_) => tracing::warn!("clip {}: no runtime to re-authorize the {:?} fan-out; frames dropped", p.clip_id, outcome),
     }
 }
 
@@ -215,8 +331,12 @@ pub struct ClipView {
     pub server_id: String,
     pub voice_channel_id: i64,
     pub voice_channel_name: String,
-    pub target_channel_id: i64,
-    pub target_channel_name: String,
+    /// Both `null` for a caller who cannot VIEW the target text channel
+    /// (ClipAccess::sees_target): they are still a full approver of the
+    /// recording, they just are not told where it lands. Always both or
+    /// neither — the id alone would still name a hidden channel.
+    pub target_channel_id: Option<i64>,
+    pub target_channel_name: Option<String>,
     pub duration_ms: i64,
     pub ended_ago_ms: i64,
     pub expires_in_ms: i64,
@@ -252,22 +372,35 @@ fn vote_str(v: ClipVote) -> &'static str {
     }
 }
 
+/// The target fields of a view: the proposal's, or both redacted. Pure so the
+/// redaction is testable; `view_for` is its only caller.
+pub fn target_fields(p: &ClipProposal, access: ClipAccess) -> (Option<i64>, Option<String>) {
+    if access.sees_target {
+        (Some(p.target_channel_id), Some(p.target_channel_name.clone()))
+    } else {
+        (None, None)
+    }
+}
+
 /// `hidden` is the set of approver ids with show_online_status off (see
 /// approver_online); callers resolve it once per proposal with ws::hidden_members.
-fn view_for(state: &AppState, p: &ClipProposal, viewer: UserId, hidden: &HashSet<UserId>) -> ClipView {
+/// `access` is the caller's live clip_access answer — the caller has already
+/// established they are a participant; only `sees_target` is read here.
+fn view_for(state: &AppState, p: &ClipProposal, viewer: UserId, hidden: &HashSet<UserId>, access: ClipAccess) -> ClipView {
     let now = Instant::now();
     let now_ms = now_unix_ms();
     let is_proposer = viewer == p.proposer;
     let mine = p.votes.iter().find(|v| v.user_id == viewer);
     let still_in_call = state.rooms.get(&format!("voice_{}", p.voice_channel_id)).map(|r| r.members.contains(&viewer)).unwrap_or(false);
+    let (target_channel_id, target_channel_name) = target_fields(p, access);
     ClipView {
         clip_id: p.clip_id.clone(),
         proposer: UserInfo::new(p.proposer, p.proposer_username.clone()),
         server_id: p.server_id.clone(),
         voice_channel_id: p.voice_channel_id,
         voice_channel_name: p.voice_channel_name.clone(),
-        target_channel_id: p.target_channel_id,
-        target_channel_name: p.target_channel_name.clone(),
+        target_channel_id,
+        target_channel_name,
         duration_ms: p.duration_ms,
         ended_ago_ms: (now_ms - p.window_end_ms).max(0),
         expires_in_ms: p.expires.saturating_duration_since(now).as_millis() as i64,
@@ -495,8 +628,11 @@ pub async fn propose_clip(
         approvers: proposal.votes.iter().map(|v| ApproverView { id: v.user_id, username: v.username.clone(), online: approver_online(&state, v.user_id, &hidden), in_window: v.in_window }).collect(),
         solo, resolved: solo, approved: solo,
     };
-    notify_proposed(&state, &proposal);
-    state.clip_proposals.insert(clip_id, proposal);
+    // Insert BEFORE the doorbell: notify_proposed now awaits a permission
+    // resolve per approver, and a client that answers the first frame with
+    // GET /clips/:id inside that window must find the proposal, not a 404.
+    state.clip_proposals.insert(clip_id, proposal.clone());
+    notify_proposed(&state, &proposal).await;
     (StatusCode::CREATED, Json(resp)).into_response()
 }
 
@@ -511,7 +647,10 @@ pub async fn vote_clip(
     // Live entitlement first, OUTSIDE the entry lock (the resolver awaits, and a
     // DashMap guard held across an await risks a shard deadlock). The snapshot
     // check under the lock below still runs; this one catches an approver who
-    // has been kicked, banned or VIEW-denied since the proposal was made.
+    // has been kicked, banned or VIEW-denied on the VOICE channel since the
+    // proposal was made. The target channel is NOT a condition: consent to
+    // being recorded does not depend on seeing where the clip is posted, and
+    // VoteResponse names no channel (see ClipAccess).
     let voice_cid = match state.clip_proposals.get(&clip_id) {
         Some(p) if p.is_voter(user) => p.voice_channel_id,
         _ => return plain(StatusCode::NOT_FOUND, "No such clip request"),
@@ -548,18 +687,27 @@ pub async fn vote_clip(
             (StatusCode::OK, VoteResponse { clip_id: clip_id.clone(), state: "declined", approved_count: snap.approved_count() as u32, total: snap.votes.len() as u32 }, After::Declined(snap))
         }
     };
+    // The tally goes to the proposer only, and only while they still pass the
+    // same participant re-check a GET /clips/:id from them would: a proposer
+    // kicked or VIEW-denied since proposing must not watch the consent count
+    // of a call they were removed from over a socket the kick left open. The
+    // frame names no channel, so the target is not resolved here.
     match after {
         After::Vote(p) => {
-            state.send_to_user(p.proposer, ServerMessage::ClipVoteUpdate { clip_id: p.clip_id.clone(), approved_count: p.approved_count() as u32, total: p.votes.len() as u32 });
+            if still_views_voice_channel(&state, p.voice_channel_id, p.proposer).await {
+                state.send_to_user(p.proposer, ServerMessage::ClipVoteUpdate { clip_id: p.clip_id.clone(), approved_count: p.approved_count() as u32, total: p.votes.len() as u32 });
+            }
         }
         After::Approved(p) => {
-            state.send_to_user(p.proposer, ServerMessage::ClipVoteUpdate { clip_id: p.clip_id.clone(), approved_count: p.approved_count() as u32, total: p.votes.len() as u32 });
-            broadcast_resolved(&state, &p, ClipOutcome::Approved);
+            if still_views_voice_channel(&state, p.voice_channel_id, p.proposer).await {
+                state.send_to_user(p.proposer, ServerMessage::ClipVoteUpdate { clip_id: p.clip_id.clone(), approved_count: p.approved_count() as u32, total: p.votes.len() as u32 });
+            }
+            broadcast_resolved(&state, &p, ClipOutcome::Approved).await;
         }
         After::Declined(p) => {
             state.clip_proposals.remove(&p.clip_id);
             bump_denial(&state, p.proposer, p.voice_channel_id);
-            broadcast_resolved(&state, &p, ClipOutcome::Declined);
+            broadcast_resolved(&state, &p, ClipOutcome::Declined).await;
         }
     }
     (status, Json(body)).into_response()
@@ -572,7 +720,7 @@ pub async fn cancel_clip(State(state): State<Arc<AppState>>, Extension(claims): 
         if !is_mine { return plain(StatusCode::NOT_FOUND, "No such clip request"); }
         state.clip_proposals.remove(&clip_id).map(|(_, p)| p)
     };
-    if let Some(p) = removed { broadcast_resolved(&state, &p, ClipOutcome::Cancelled); }
+    if let Some(p) = removed { broadcast_resolved(&state, &p, ClipOutcome::Cancelled).await; }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -585,12 +733,14 @@ pub async fn get_clip(State(state): State<Arc<AppState>>, Extension(claims): Ext
         if r.proposer != claims.sub && !r.is_voter(claims.sub) { return plain(StatusCode::NOT_FOUND, "No such clip request"); }
         r.clone()
     };
-    if !still_views_voice_channel(&state, p.voice_channel_id, claims.sub).await {
+    // Voice channel gates the answer (uniform 404, no oracle); the target
+    // channel only decides whether the view may name it.
+    let Some(access) = clip_access(&state, p.voice_channel_id, p.target_channel_id, claims.sub).await else {
         return plain(StatusCode::NOT_FOUND, "No such clip request");
-    }
+    };
     let approver_ids: Vec<UserId> = p.votes.iter().map(|v| v.user_id).collect();
     let hidden = crate::ws::hidden_members(&state, &approver_ids).await;
-    let view = view_for(&state, &p, claims.sub, &hidden);
+    let view = view_for(&state, &p, claims.sub, &hidden, access);
     Json(view).into_response()
 }
 
@@ -605,19 +755,20 @@ pub struct PendingResponse {
 pub async fn list_pending_clips(State(state): State<Arc<AppState>>, Extension(claims): Extension<Claims>) -> Response {
     let now = Instant::now();
     // Snapshot first (no awaits while iterating the map), then drop every
-    // proposal whose voice channel the caller can no longer VIEW.
+    // proposal whose voice channel the caller can no longer VIEW; a target the
+    // caller cannot VIEW is redacted from the view, not a reason to omit it.
     let candidates: Vec<ClipProposal> = state.clip_proposals.iter()
         .filter(|p| now < p.expires && (p.proposer == claims.sub || p.is_voter(claims.sub)))
         .map(|p| p.clone())
         .collect();
     let mut proposals: Vec<ClipView> = Vec::with_capacity(candidates.len());
     for p in candidates {
-        if !still_views_voice_channel(&state, p.voice_channel_id, claims.sub).await {
+        let Some(access) = clip_access(&state, p.voice_channel_id, p.target_channel_id, claims.sub).await else {
             continue;
-        }
+        };
         let approver_ids: Vec<UserId> = p.votes.iter().map(|v| v.user_id).collect();
         let hidden = crate::ws::hidden_members(&state, &approver_ids).await;
-        proposals.push(view_for(&state, &p, claims.sub, &hidden));
+        proposals.push(view_for(&state, &p, claims.sub, &hidden, access));
     }
     Json(PendingResponse { proposals }).into_response()
 }
@@ -631,7 +782,7 @@ pub fn cancel_proposals_of(state: &Arc<AppState>, user: UserId) {
     let ids: Vec<String> = state.clip_proposals.iter().filter(|p| p.proposer == user).map(|p| p.clip_id.clone()).collect();
     for id in ids {
         if let Some((_, p)) = state.clip_proposals.remove(&id) {
-            broadcast_resolved(state, &p, ClipOutcome::Cancelled);
+            spawn_broadcast_resolved(state, p, ClipOutcome::Cancelled);
         }
     }
 }
@@ -644,7 +795,7 @@ pub fn reap_stale_clips_at(state: &Arc<AppState>, now: Instant, now_ms: i64) {
     let expired: Vec<String> = state.clip_proposals.iter().filter(|p| now >= p.expires).map(|p| p.clip_id.clone()).collect();
     for id in expired {
         if let Some((_, p)) = state.clip_proposals.remove(&id) {
-            broadcast_resolved(state, &p, ClipOutcome::Expired);
+            spawn_broadcast_resolved(state, p, ClipOutcome::Expired);
         }
     }
     state.clip_rate.retain(|_, r| now.duration_since(r.window_start) <= CLIP_RATE_WINDOW);
@@ -718,6 +869,123 @@ mod tests {
     #[test]
     fn empty_everything_is_empty_not_a_panic() {
         assert!(union_approvers(&set(&[]), &[], &set(&[]), 1).is_empty());
+    }
+
+    fn proposal(proposer: UserId, voters: &[UserId]) -> ClipProposal {
+        let now = Instant::now();
+        ClipProposal {
+            clip_id: "c1".into(),
+            proposer,
+            proposer_username: "p".into(),
+            server_id: "s".into(),
+            voice_channel_id: 10,
+            voice_channel_name: "voice".into(),
+            target_channel_id: 20,
+            target_channel_name: "clips".into(),
+            window_start_ms: 0,
+            window_end_ms: 1,
+            duration_ms: MIN_CLIP_MS,
+            votes: voters
+                .iter()
+                .map(|&id| ClipVoter { user_id: id, username: format!("u{id}"), vote: ClipVote::Pending, had_camera: false, had_share: false, in_window: true })
+                .collect(),
+            solo: false,
+            created: now,
+            expires: now + Duration::from_secs(60),
+            approved_at: None,
+        }
+    }
+
+    // Positive control for the two tests below: with everyone still entitled
+    // the fan-out reaches the proposer and every voter, so a missing frame in
+    // the negative cases is the entitlement filter and not an empty fixture.
+    #[test]
+    fn resolved_frames_reach_everyone_still_entitled() {
+        let p = proposal(1, &[2, 3]);
+        let frames = resolved_frames(&p, ClipOutcome::Declined, &set(&[1, 2, 3]));
+        assert_eq!(frames, vec![(1, ClipOutcome::Declined), (2, ClipOutcome::Closed), (3, ClipOutcome::Closed)]);
+    }
+
+    #[test]
+    fn resolved_frames_skip_a_de_entitled_proposer_and_voter() {
+        let p = proposal(1, &[2, 3]);
+        // the proposer was kicked (r2-4-L4-01's live case) and voter 3 is now VIEW-denied
+        let frames = resolved_frames(&p, ClipOutcome::Approved, &set(&[2]));
+        assert_eq!(frames, vec![(2, ClipOutcome::Approved)]);
+        // nobody entitled (resolver down, or everyone gone) means nobody is told
+        assert!(resolved_frames(&p, ClipOutcome::Expired, &set(&[])).is_empty());
+    }
+
+    #[test]
+    fn resolved_frames_collapse_the_outcome_for_approvers() {
+        let p = proposal(1, &[2]);
+        for o in [ClipOutcome::Declined, ClipOutcome::Expired, ClipOutcome::Cancelled] {
+            let frames = resolved_frames(&p, o, &set(&[1, 2]));
+            assert_eq!(frames, vec![(1, o), (2, ClipOutcome::Closed)], "a veto is never attributed to an approver");
+        }
+        assert_eq!(resolved_frames(&p, ClipOutcome::Approved, &set(&[1, 2])), vec![(1, ClipOutcome::Approved), (2, ClipOutcome::Approved)]);
+    }
+
+    /// Build an AppState WITHOUT touching a database (connect_lazy never opens
+    /// a connection): view_for reads only the in-memory rooms and sessions.
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, Arc::new(crate::wake::NullWake))
+    }
+
+    // The seat/redaction table. An approver who cannot VIEW the pinned clips
+    // channel is still a participant — `Some(..)` is exactly the condition
+    // vote_clip, get_clip and list_pending_clips proceed on — but the view
+    // must not name the target for them.
+    #[tokio::test]
+    async fn target_denied_approver_keeps_the_seat_but_sees_the_target_redacted() {
+        let access = clip_access_from(true, false).expect("VIEW on the voice channel alone keeps the consent seat");
+        assert!(!access.sees_target);
+        let state = test_state();
+        let p = proposal(1, &[2, 3]);
+        let view = view_for(&state, &p, 2, &set(&[]), access);
+        assert_eq!(view.target_channel_id, None, "the id alone would still name a hidden channel");
+        assert_eq!(view.target_channel_name, None);
+        // Everything the consent decision needs is still there.
+        assert_eq!(view.voice_channel_id, 10);
+        assert_eq!(view.voice_channel_name, "voice");
+        assert_eq!(view.my_vote, Some("pending"));
+        assert!(view.you.is_some(), "the approver's own flags still come through");
+        assert_eq!(view.approver_count, 2);
+        // On the wire the fields are present-and-null, not absent: an old
+        // client reads `undefined` and `null` differently, and "posted to
+        // #undefined" is not a redaction.
+        let j = serde_json::to_value(&view).unwrap();
+        assert!(j["target_channel_id"].is_null());
+        assert!(j["target_channel_name"].is_null());
+        assert!(j.get("target_channel_id").is_some() && j.get("target_channel_name").is_some());
+    }
+
+    // Positive control for the test above: with VIEW on both channels the
+    // same approver sees the id and the name, so a `None` up there is the
+    // redaction and not view_for never filling the fields in.
+    #[tokio::test]
+    async fn target_viewing_approver_sees_the_target() {
+        let access = clip_access_from(true, true).unwrap();
+        assert!(access.sees_target);
+        let state = test_state();
+        let p = proposal(1, &[2, 3]);
+        let view = view_for(&state, &p, 2, &set(&[]), access);
+        assert_eq!(view.target_channel_id, Some(20));
+        assert_eq!(view.target_channel_name.as_deref(), Some("clips"));
+        assert_eq!(target_fields(&p, access), (Some(20), Some("clips".into())));
+        assert_eq!(target_fields(&p, clip_access_from(true, false).unwrap()), (None, None));
+    }
+
+    // r2-4-L4-01 is unchanged: losing VIEW on the VOICE channel (kick, ban,
+    // deny) means no seat at all, whatever the target answer says — including
+    // the fail-closed case where neither resolve answered.
+    #[test]
+    fn voice_denied_participant_gets_nothing_whatever_the_target_says() {
+        assert_eq!(clip_access_from(false, true), None);
+        assert_eq!(clip_access_from(false, false), None);
     }
 
     #[test]

@@ -140,28 +140,37 @@ pub(crate) async fn recipient_accepts_dms(
     }
 }
 
-/// May `me` learn `target`'s DM key material (GET /users/:id/dm-keys)?
-/// Friends, a shared server (while the target accepts DMs from server
-/// members), or a target who has already written to `me`. A
-/// bare dm_conversations row is NOT evidence of a relationship — the caller can
-/// create one unilaterally — so the read gate must not rest on it. Self is
-/// always allowed. Fails closed.
-pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i64) -> bool {
-    if me == target {
-        return true;
-    }
-    // The SAME rule as recipient_accepts_dms, so the docs can say so: a shared
-    // server counts only while the target's "Allow DMs from server members" is
-    // on; friends and a target who already wrote to `me` always do.
-    match sqlx::query_as::<_, (bool,)>(
-        "SELECT EXISTS(SELECT 1 FROM friends f \
+/// Everything the read gates below decide on, for one ordered pair, read in
+/// ONE statement so the two decisions can never disagree about the facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Relationship {
+    /// Either account has blocked the other.
+    pub blocked: bool,
+    pub friends: bool,
+    /// At least one server has both as members.
+    pub share_server: bool,
+    /// The target's "Allow DMs from server members" flag.
+    pub target_allows_server_dms: bool,
+    /// The target has already sent a message in the pair conversation.
+    pub target_wrote_first: bool,
+}
+
+/// Look the pair up. `None` means "no live target" (unallocated, or a
+/// tombstone) OR a lookup that could not answer — both are refusals to every
+/// caller, and a query error must never read as a relationship.
+async fn relationship(pool: &sqlx::PgPool, me: i64, target: i64) -> Option<Relationship> {
+    match sqlx::query_as::<_, (bool, bool, bool, bool, bool)>(
+        "SELECT EXISTS(SELECT 1 FROM blocked_users bl \
+                       WHERE (bl.blocker_id = $1 AND bl.blocked_id = $2) \
+                          OR (bl.blocker_id = $2 AND bl.blocked_id = $1)), \
+                EXISTS(SELECT 1 FROM friends f \
                        WHERE (f.user1_id = $1 AND f.user2_id = $2) \
-                          OR (f.user1_id = $2 AND f.user2_id = $1)) \
-             OR (u.allow_dms_from_server_members \
-                 AND EXISTS(SELECT 1 FROM server_members a \
-                            JOIN server_members b ON b.server_id = a.server_id \
-                            WHERE a.user_id = $1 AND b.user_id = $2)) \
-             OR EXISTS(SELECT 1 FROM dm_messages m \
+                          OR (f.user1_id = $2 AND f.user2_id = $1)), \
+                EXISTS(SELECT 1 FROM server_members a \
+                       JOIN server_members b ON b.server_id = a.server_id \
+                       WHERE a.user_id = $1 AND b.user_id = $2), \
+                u.allow_dms_from_server_members, \
+                EXISTS(SELECT 1 FROM dm_messages m \
                        JOIN dm_conversations c ON c.id = m.conversation_id \
                        WHERE m.sender_id = $2 \
                          AND ((c.user1_id = $1 AND c.user2_id = $2) \
@@ -173,11 +182,197 @@ pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i6
     .fetch_optional(pool)
     .await
     {
-        Ok(Some((related,))) => related,
-        Ok(None) => false,
+        Ok(Some((blocked, friends, share_server, target_allows_server_dms, target_wrote_first))) => {
+            Some(Relationship { blocked, friends, share_server, target_allows_server_dms, target_wrote_first })
+        }
+        Ok(None) => None,
         Err(e) => {
-            tracing::error!("users_share_context: lookup failed for {} -> {}: {:?}", me, target, e);
-            false
+            tracing::error!("relationship: lookup failed for {} -> {}: {:?}", me, target, e);
+            None
+        }
+    }
+}
+
+/// The dm-keys rule, as a pure decision: friends, a shared server WHILE the
+/// target accepts DMs from server members, or a target who already wrote —
+/// and never across a block.
+///
+/// The block term belongs HERE and only here (C07): /dm-keys is a live
+/// session census (device count, recency, protocol version) that a blocked
+/// ex-contact has no business polling, and nothing the blocker still uses
+/// derives from it. Contrast `identity_context_allows`.
+pub(crate) fn dm_context_allows(r: &Relationship) -> bool {
+    !r.blocked
+        && (r.friends || (r.target_allows_server_dms && r.share_server) || r.target_wrote_first)
+}
+
+/// The identity/signing-key rule. It differs from `dm_context_allows` in two
+/// deliberate ways, both because the key it serves is a DEPENDENCY of things
+/// the caller is still entitled to, not a privilege in itself:
+///
+/// 1. A shared server counts whether or not the target takes DMs from its
+///    members. Every server-mate who can see a channel already receives this
+///    key through GET /channels/:id/member-keys (it is what channel keys are
+///    wrapped to), and voice media E2EE and the DTLS pin derive from it for
+///    every peer in a server voice channel — so conditioning it on a DM
+///    preference would only downgrade those calls to transport-only, not
+///    withhold anything.
+/// 2. A block does NOT refuse it. Blocking evicts nobody from a shared server
+///    or its voice channels, so a blocked pair routinely ends up in the same
+///    call; this route is the SOLE source of the peer identity key the mesh
+///    media key and the DTLS pin are derived from, and the client has no
+///    other fallback. Refusing here silently stripped media E2EE between
+///    exactly those two peers (frames dropped outright under the default
+///    require-E2EE setting, shown as an endless "setting up encryption"), and
+///    since existing DM history is decrypted under the same key, blocking a
+///    DM partner made the thread the server still shows unreadable. The key
+///    is public to whoever it is served to; what a block withholds is
+///    delivery (every DM/file/friend WRITE path refuses a blocked pair) and
+///    the session census above, never the material needed to read what was
+///    already exchanged or to seal a call both are still in.
+pub(crate) fn identity_context_allows(r: &Relationship) -> bool {
+    r.friends || r.share_server || r.target_wrote_first
+}
+
+/// May `me` learn `target`'s DM key material (GET /users/:id/dm-keys)?
+/// Friends, a shared server (while the target accepts DMs from server
+/// members), or a target who has already written to `me` — and never while
+/// either has blocked the other. A
+/// bare dm_conversations row is NOT evidence of a relationship — the caller can
+/// create one unilaterally — so the read gate must not rest on it. Self is
+/// always allowed. Fails closed.
+pub(crate) async fn users_share_context(pool: &sqlx::PgPool, me: i64, target: i64) -> bool {
+    if me == target {
+        return true;
+    }
+    // The SAME rule as recipient_accepts_dms, so the docs can say so: a shared
+    // server counts only while the target's "Allow DMs from server members" is
+    // on; friends and a target who already wrote to `me` always do.
+    //
+    // A block (either direction) overrides all three. Blocking deletes no
+    // friends row and no message, so without this term the disjuncts outlived
+    // the block for good and a blocked ex-contact kept polling the target's
+    // live session census (device count, recency, protocol version) — the
+    // very thing this gate exists to withhold. Every WRITE path refuses a
+    // blocked pair; the read gate has to agree with them.
+    relationship(pool, me, target).await.map_or(false, |r| dm_context_allows(&r))
+}
+
+/// May `me` read `target`'s identity (X25519) or account signing (Ed25519)
+/// public key (GET /users/:id/public-key, /signing-key)? Self, or
+/// `identity_context_allows` above — which, unlike `users_share_context`,
+/// deliberately ignores blocks (see its doc comment for why). Ungated, those
+/// routes were an existence oracle over the dense id space, tombstones
+/// included. Fails closed: no live target, or a lookup error, is the 404.
+pub(crate) async fn users_share_identity_context(pool: &sqlx::PgPool, me: i64, target: i64) -> bool {
+    if me == target {
+        return true;
+    }
+    relationship(pool, me, target).await.map_or(false, |r| identity_context_allows(&r))
+}
+
+/// Every account with a block in EITHER direction with `me`, in one query,
+/// for the REST presence readers (member lists, /users/search): a blocked
+/// pair must read as offline there exactly as `presence_audience` (ws.rs)
+/// already withholds the UserOnline/UserOffline frames — otherwise the WS
+/// fix bought nothing against a client that polls the member list. Callers
+/// fail CLOSED on `Err`: report everyone offline for that request rather
+/// than leak a live status they could not check.
+///
+/// `blocked_users` columns are INT4; the ids are widened in SQL so the caller
+/// gets the `i64` it compares presence against, and `me` is bound as INT8
+/// (Postgres compares int4 = int8 natively) rather than truncated.
+pub(crate) async fn blocked_ids_for(
+    pool: &sqlx::PgPool,
+    me: i64,
+) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT (CASE WHEN b.blocker_id = $1 THEN b.blocked_id ELSE b.blocker_id END)::BIGINT \
+         FROM blocked_users b \
+         WHERE b.blocker_id = $1 OR b.blocked_id = $1",
+    )
+    .bind(me)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+#[cfg(test)]
+mod relationship_gate_tests {
+    use super::{dm_context_allows, identity_context_allows, Relationship};
+
+    const NONE: Relationship = Relationship {
+        blocked: false,
+        friends: false,
+        share_server: false,
+        target_allows_server_dms: true,
+        target_wrote_first: false,
+    };
+
+    /// Positive controls: each disjunct on its own opens both gates.
+    #[test]
+    fn each_relationship_alone_is_enough() {
+        for r in [
+            Relationship { friends: true, ..NONE },
+            Relationship { share_server: true, ..NONE },
+            Relationship { target_wrote_first: true, ..NONE },
+        ] {
+            assert!(dm_context_allows(&r), "{r:?}");
+            assert!(identity_context_allows(&r), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_stranger_gets_nothing() {
+        assert!(!dm_context_allows(&NONE));
+        assert!(!identity_context_allows(&NONE));
+    }
+
+    /// C07: a block beats every disjunct for the dm-keys census. Blocking
+    /// deletes no friends row and no message, so this term is the only thing
+    /// that ends the blocked account's read access to it.
+    #[test]
+    fn a_block_overrides_every_relationship_for_dm_keys() {
+        let all = Relationship { friends: true, share_server: true, target_wrote_first: true, ..NONE };
+        assert!(dm_context_allows(&all));
+        let blocked = Relationship { blocked: true, ..all };
+        assert!(!dm_context_allows(&blocked));
+    }
+
+    /// The identity key is NOT withheld across a block: it is what mesh voice
+    /// media E2EE, the DTLS pin and existing DM history decrypt under, and a
+    /// block evicts nobody from a shared voice channel. Each disjunct still
+    /// opens the gate on its own with a block present; a blocked STRANGER is
+    /// still refused (the oracle stays closed).
+    #[test]
+    fn a_block_does_not_withhold_the_identity_key() {
+        for r in [
+            Relationship { blocked: true, friends: true, ..NONE },
+            Relationship { blocked: true, share_server: true, ..NONE },
+            Relationship { blocked: true, target_wrote_first: true, ..NONE },
+        ] {
+            assert!(identity_context_allows(&r), "{r:?}");
+            // ...and the same pair is still refused the session census.
+            assert!(!dm_context_allows(&r), "{r:?}");
+        }
+        assert!(!identity_context_allows(&Relationship { blocked: true, ..NONE }));
+    }
+
+    /// The other place the two gates differ: a shared server with the target's
+    /// "Allow DMs from server members" off still serves the identity key
+    /// (member-keys already does) but not the session census.
+    #[test]
+    fn server_dm_preference_gates_only_the_dm_keys() {
+        let r = Relationship { share_server: true, target_allows_server_dms: false, ..NONE };
+        assert!(!dm_context_allows(&r));
+        assert!(identity_context_allows(&r));
+        // The preference is about SERVER members: it never touches a friend
+        // or someone who already wrote.
+        for r in [
+            Relationship { friends: true, target_allows_server_dms: false, ..NONE },
+            Relationship { target_wrote_first: true, target_allows_server_dms: false, ..NONE },
+        ] {
+            assert!(dm_context_allows(&r), "{r:?}");
         }
     }
 }
@@ -343,6 +538,12 @@ pub async fn start_conversation(
     // conversation above is still returned — history stays viewable; the
     // send path enforces the same rules per message.
     // Fail CLOSED on a query error — a block is a deny list.
+    //
+    // A block answers with the SAME status and body as the consent refusal
+    // below. A distinct "you cannot message this user" let any account tell
+    // "they blocked me" from "they only take DMs from friends/server-mates"
+    // in one request — the same one-bit oracle send_friend_request closed
+    // (r2-1-L1-03). Nothing is written either way.
     let blocked: Option<(i32,)> = match sqlx::query_as(
         "SELECT 1 FROM blocked_users \
          WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)",
@@ -359,7 +560,7 @@ pub async fn start_conversation(
         }
     };
     if blocked.is_some() {
-        return (StatusCode::FORBIDDEN, "You cannot message this user").into_response();
+        return (StatusCode::FORBIDDEN, DMS_NOT_ACCEPTED).into_response();
     }
     if !recipient_accepts_dms(&state, current_user_id, other_user_id).await {
         return (StatusCode::FORBIDDEN, DMS_NOT_ACCEPTED).into_response();
@@ -527,6 +728,10 @@ pub async fn send_message(
     // Enforce blocks server-side: if either participant has blocked the other,
     // DMs cannot be sent (client-side hiding alone would be trivially bypassed).
     // Fail CLOSED on a query error — a block is a deny list.
+    //
+    // The refusal is the SAME status and body as the consent refusal further
+    // down, so a block is indistinguishable from a privacy setting (the
+    // block-status oracle, r2-1-L1-03). No row is written, no frame delivered.
     let blocked: Option<(i32,)> = match sqlx::query_as(
         r#"
         SELECT 1 FROM blocked_users b
@@ -547,7 +752,7 @@ pub async fn send_message(
     };
 
     if blocked.is_some() {
-        return (StatusCode::FORBIDDEN, "You cannot message this user").into_response();
+        return (StatusCode::FORBIDDEN, DMS_NOT_ACCEPTED).into_response();
     }
 
     // Enforce the recipient's friends-only DM flag per message (not just at

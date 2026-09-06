@@ -33,6 +33,11 @@ pub struct InviteResponse {
     pub max_uses: Option<i32>,
     pub expires_at: Option<String>,
     pub created_at: String,
+    /// Who minted it. Stored since migration 004 but never projected until
+    /// 0.9.5, so a manager reviewing the list after a ban could not tell which
+    /// codes the banned member had left behind.
+    pub creator_id: i64,
+    pub creator_username: String,
 }
 
 #[derive(Serialize)]
@@ -67,6 +72,26 @@ pub(crate) const MAX_EXPIRY_HOURS: i32 = 8760;
 
 pub(crate) fn clamp_expiry_hours(hours: i32) -> i32 {
     hours.clamp(MIN_EXPIRY_HOURS, MAX_EXPIRY_HOURS)
+}
+
+/// Lifetime an invite gets when the request names none: seven days.
+pub(crate) const DEFAULT_EXPIRY_HOURS: i32 = 168;
+
+/// Resolve the request's `expires_in_hours` into the lifetime actually stored;
+/// `None` means "never expires".
+///
+/// An ABSENT field used to mean "never". Every member holds CREATE_INVITE, so a
+/// body of `{}` minted an eternal, unlimited code, and one that outlived its
+/// creator's kick or ban was a standing door for any other account they
+/// controlled (r2-6-L6-01). Absent now means DEFAULT_EXPIRY_HOURS; "never"
+/// must be asked for by name, as an explicit 0, so the dialog can still offer
+/// it. Any other explicit value is clamped exactly as before.
+pub(crate) fn resolve_expiry_hours(requested: Option<i32>) -> Option<i32> {
+    match requested {
+        None => Some(DEFAULT_EXPIRY_HOURS),
+        Some(0) => None,
+        Some(hours) => Some(clamp_expiry_hours(hours)),
+    }
 }
 
 // --- Handlers ---
@@ -111,15 +136,15 @@ pub async fn create_invite(
     // evaluates `0 < 0` = false and the invite is born unusable.
     let max_uses = payload.max_uses.filter(|&n| n > 0);
 
-    // Clamp the lifetime. `Duration::hours(i32::MAX as i64)` is ~245,000 years:
-    // the timestamp it produces overflows the column's range on the way in, and
-    // a negative value produces an invite born expired while the response tells
-    // the creator it expires in the past. 1 hour .. 1 year (8760 h) covers every
-    // real use; an ABSENT field still means "never expires", unchanged.
-    let expires_at = payload
-        .expires_in_hours
-        .map(clamp_expiry_hours)
+    // Resolve and clamp the lifetime (see resolve_expiry_hours for why an
+    // absent field no longer means "never"). The clamp matters:
+    // `Duration::hours(i32::MAX as i64)` is ~245,000 years, whose timestamp
+    // overflows the column's range on the way in, and a negative value makes an
+    // invite born expired while the response tells the creator it expires in
+    // the past. 1 hour .. 1 year (8760 h) covers every real use.
+    let expires_at = resolve_expiry_hours(payload.expires_in_hours)
         .map(|hours| chrono::Utc::now() + chrono::Duration::hours(hours as i64));
+    let expires_at_text = expires_at.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string());
 
     let created_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let result = sqlx::query(
@@ -129,7 +154,7 @@ pub async fn create_invite(
     .bind(&server_id)
     .bind(claims.sub as i32)
     .bind(max_uses)
-    .bind(expires_at.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+    .bind(&expires_at_text)
     .bind(&created_at)
     .execute(&state.pool)
     .await;
@@ -139,6 +164,27 @@ pub async fn create_invite(
         tracing::error!("create_invite failed: {:?}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create invite").into_response();
     }
+
+    // Minting a door into the server is a moderation-relevant act: without this
+    // row an owner auditing after a ban had no signal a code existed, let alone
+    // whose it was (r2-6-L6-02). The code goes in `details` because the invite
+    // has no integer id for `target_id`; the audit log is ADMINISTRATOR-only,
+    // a strictly smaller audience than the MANAGE_SERVER list that shows every
+    // live code anyway.
+    crate::moderation_handlers::log_audit_action(
+        &state.pool,
+        &server_id,
+        "invite_create",
+        claims.sub,
+        None,
+        Some("invite"),
+        Some(&format!(
+            "{code}: {} uses, expires {}",
+            max_uses.map_or_else(|| "unlimited".to_string(), |n| n.to_string()),
+            expires_at_text.as_deref().unwrap_or("never"),
+        )),
+    )
+    .await;
 
     let server: (String,) = sqlx::query_as("SELECT name FROM servers WHERE id = $1")
         .bind(&server_id)
@@ -152,8 +198,10 @@ pub async fn create_invite(
         server_name: server.0,
         uses: 0,
         max_uses,
-        expires_at: expires_at.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-        created_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        expires_at: expires_at_text,
+        created_at,
+        creator_id: claims.sub,
+        creator_username: claims.username.clone(),
     })
     .into_response()
 }
@@ -341,6 +389,19 @@ pub async fn join_via_invite(
 
     match server {
         Some((id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes)) => {
+            // The pinned clip channel may be one the new member cannot VIEW
+            // (the pin validator accepts any text channel of the server), and
+            // list_channels hides such a channel's existence from them. Echoing
+            // the raw pin here handed a brand-new member the hidden channel's
+            // id at first contact (r2-5-L5-01); the helper answers None unless
+            // the caller can VIEW it, and fails closed.
+            let clip_channel_id = crate::server_handlers::visible_clip_channel_id(
+                &state.pool,
+                claims.sub as i32,
+                &server_id,
+                clip_channel_id,
+            )
+            .await;
             Json(ServerResponse {
                 id,
                 name,
@@ -396,10 +457,14 @@ pub async fn list_invites(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_SERVER permission").into_response();
     }
 
-    let invites: Vec<(String, String, i32, Option<i32>, Option<String>, String)> = sqlx::query_as(
-        "SELECT i.code, s.name, i.uses, i.max_uses, i.expires_at, i.created_at 
-         FROM server_invites i 
+    // Attribution rides along: creator_id is NOT NULL with an FK to users, and
+    // account deletion is a tombstone UPDATE (the row survives as
+    // `deleted#<id>`), so a plain JOIN loses nothing.
+    let invites: Vec<(String, String, i32, Option<i32>, Option<String>, String, i32, String)> = sqlx::query_as(
+        "SELECT i.code, s.name, i.uses, i.max_uses, i.expires_at, i.created_at, u.id, u.username
+         FROM server_invites i
          JOIN servers s ON i.server_id = s.id
+         JOIN users u ON u.id = i.creator_id
          WHERE i.server_id = $1
          ORDER BY i.created_at DESC",
     )
@@ -411,7 +476,7 @@ pub async fn list_invites(
     let response: Vec<InviteResponse> = invites
         .into_iter()
         .map(
-            |(code, server_name, uses, max_uses, expires_at, created_at)| InviteResponse {
+            |(code, server_name, uses, max_uses, expires_at, created_at, creator_id, creator_username)| InviteResponse {
                 code,
                 server_id: server_id.clone(),
                 server_name,
@@ -419,6 +484,8 @@ pub async fn list_invites(
                 max_uses,
                 expires_at,
                 created_at,
+                creator_id: creator_id as i64,
+                creator_username,
             },
         )
         .collect();
@@ -457,11 +524,67 @@ pub async fn delete_invite(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_SERVER permission").into_response();
     }
 
-    let _ = sqlx::query("DELETE FROM server_invites WHERE code = $1 AND server_id = $2")
+    // Not `let _ =`: a failed DELETE left the code live while the caller was
+    // told 200, and a revocation that did not happen must not be reported as
+    // one. A code that was already gone still answers 200 (the caller's intent
+    // holds either way) and is not logged, so the audit log records only
+    // revocations that removed something.
+    let deleted = match sqlx::query("DELETE FROM server_invites WHERE code = $1 AND server_id = $2")
         .bind(&code)
         .bind(&server_id)
         .execute(&state.pool)
+        .await
+    {
+        Ok(result) => result.rows_affected() > 0,
+        Err(e) => {
+            tracing::error!("delete_invite failed for server {}: {:?}", server_id, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete invite").into_response();
+        }
+    };
+
+    if deleted {
+        crate::moderation_handlers::log_audit_action(
+            &state.pool,
+            &server_id,
+            "invite_delete",
+            claims.sub,
+            None,
+            Some("invite"),
+            Some(&code),
+        )
         .await;
+    }
 
     StatusCode::OK.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The security half: the shapes the probe used to mint an eternal code
+    /// (`{}` and, by extension, anything without the field) now get the
+    /// seven-day default, and "never" needs to be asked for by name.
+    #[test]
+    fn absent_expiry_defaults_and_never_is_explicit() {
+        assert_eq!(resolve_expiry_hours(None), Some(DEFAULT_EXPIRY_HOURS));
+        assert_eq!(DEFAULT_EXPIRY_HOURS, 168, "seven days, as the dialog offers");
+        assert_eq!(resolve_expiry_hours(Some(0)), None, "explicit 0 = never expires");
+    }
+
+    /// The positive control: explicit lifetimes the dialog offers are stored
+    /// exactly as asked, and out-of-range explicit values still clamp rather
+    /// than falling into either the default or "never".
+    #[test]
+    fn explicit_expiry_is_kept_or_clamped() {
+        for hours in [1, 6, 12, 24, 168, 720, MAX_EXPIRY_HOURS] {
+            assert_eq!(resolve_expiry_hours(Some(hours)), Some(hours), "{hours} is in range");
+        }
+        assert_eq!(resolve_expiry_hours(Some(i32::MAX)), Some(MAX_EXPIRY_HOURS));
+        assert_eq!(resolve_expiry_hours(Some(MAX_EXPIRY_HOURS + 1)), Some(MAX_EXPIRY_HOURS));
+        // A negative value is not a request for "never": it clamps to the floor
+        // exactly as it did before 0 gained its meaning.
+        assert_eq!(resolve_expiry_hours(Some(-1)), Some(MIN_EXPIRY_HOURS));
+        assert_eq!(resolve_expiry_hours(Some(i32::MIN)), Some(MIN_EXPIRY_HOURS));
+    }
 }

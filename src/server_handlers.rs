@@ -249,6 +249,38 @@ pub async fn create_server(
 // ban-checked path — not minted lazily by whoever hits an endpoint first.
 // Existing server_members rows for that id are untouched by the removal.
 
+/// The pinned clips channel as THIS caller may see it: `Some(id)` only when
+/// they can VIEW that channel of that server, else `None`.
+///
+/// The pin validator (update_server_settings) accepts any text channel of the
+/// server — the owner chooses it, and a hidden staff channel is a legitimate
+/// choice — while list_channels hides a VIEW-denied channel's existence from
+/// a member entirely. Echoing the raw column therefore handed every member
+/// (and a brand-new joiner, invite_handlers.rs) the integer id of a channel
+/// the rest of the API refuses to admit exists (r2-5-L5-01). A member who
+/// cannot see the pin cannot propose into it either (propose_clip re-gates
+/// the target), so nulling it costs the entitled path nothing.
+///
+/// FAIL CLOSED: NotFound, NotMember, a channel that belongs to another server,
+/// no VIEW bit and a resolver error (which get_user_channel_permissions maps
+/// to NotFound / empty perms, never a default-allow) all read as `None`.
+pub async fn visible_clip_channel_id(
+    pool: &sqlx::PgPool,
+    user_id: i32,
+    server_id: &str,
+    clip_channel_id: Option<i32>,
+) -> Option<i32> {
+    let cid = clip_channel_id?;
+    match crate::permissions::get_user_channel_permissions(pool, cid as i64, user_id as i64).await {
+        crate::permissions::ChannelPermAccess::Allowed { server_id: sid, perms }
+            if sid == server_id && perms.has(crate::permissions::Permissions::VIEW_CHANNEL) =>
+        {
+            Some(cid)
+        }
+        _ => None,
+    }
+}
+
 /// List servers user is a member of
 pub async fn list_servers(
     State(state): State<Arc<AppState>>,
@@ -271,27 +303,27 @@ pub async fn list_servers(
     .await
     .unwrap_or_default();
 
-    let response: Vec<ServerResponse> = servers
-        .into_iter()
-        .map(
-            |(id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes)| {
-                ServerResponse {
-                    id,
-                    name,
-                    owner_id: owner_id as i64,
-                    created_at,
-                    icon_file_id,
-                    description,
-                    require_media_e2ee,
-                    clips_enabled,
-                    clip_max_seconds,
-                    clip_channel_id: clip_channel_id.map(|c| c as i64),
-                    is_public,
-                    afk_timeout_minutes,
-                }
-            },
-        )
-        .collect();
+    // One VIEW resolve per pinned server (only servers that carry a pin cost a
+    // query); a member's rail is short, and the alternative — the raw column —
+    // is the hidden-channel id leak described on visible_clip_channel_id.
+    let mut response: Vec<ServerResponse> = Vec::with_capacity(servers.len());
+    for (id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes) in servers {
+        let clip_channel_id = visible_clip_channel_id(&state.pool, claims.sub as i32, &id, clip_channel_id).await;
+        response.push(ServerResponse {
+            id,
+            name,
+            owner_id: owner_id as i64,
+            created_at,
+            icon_file_id,
+            description,
+            require_media_e2ee,
+            clips_enabled,
+            clip_max_seconds,
+            clip_channel_id: clip_channel_id.map(|c| c as i64),
+            is_public,
+            afk_timeout_minutes,
+        });
+    }
 
     Json(response)
 }
@@ -409,13 +441,34 @@ pub async fn list_server_members(
     .await
     .unwrap_or_default();
 
+    // A block in either direction reads as offline too, mirroring the WS
+    // presence fan-out (ws::presence_audience) — the stock client polls this
+    // list, so a REST reader without the block term hands a blocked co-member
+    // the blocker's live transitions the push side was gated to withhold.
+    // Fail CLOSED: if the block set cannot be read, everyone in this response
+    // is offline rather than risk leaking one blocked pair.
+    let blocked: Option<std::collections::HashSet<i64>> =
+        match crate::dm_handlers::blocked_ids_for(&state.pool, claims.sub).await {
+        Ok(set) => Some(set),
+        Err(e) => {
+            tracing::warn!(
+                "list_server_members: block lookup failed, reporting every member offline: {:?}",
+                e
+            );
+            None
+        }
+    };
+
     // Check which members are currently online (have active WebSocket session).
     // A member hiding their status reads as offline to everyone but themselves.
     let response: Vec<MemberResponse> = members
         .into_iter()
         .map(|(id, username, display_name, shows_online)| {
             let id = id as i64;
-            let is_online = state.is_user_visibly_online(id) && (shows_online || id == claims.sub);
+            let not_blocked = blocked.as_ref().is_some_and(|set| !set.contains(&id));
+            let is_online = not_blocked
+                && state.is_user_visibly_online(id)
+                && (shows_online || id == claims.sub);
             MemberResponse {
                 id,
                 username,
@@ -1412,15 +1465,70 @@ pub async fn mark_server_read(
         return (StatusCode::FORBIDDEN, "Not a member of this server").into_response();
     }
 
+    // Only channels the caller can VIEW — the same gate mark_channel_read
+    // applies per channel. The old INSERT ... SELECT wrote a read-state row for
+    // EVERY channel of the server, hidden ones included (C34): a write the
+    // caller is not entitled to make, and one that silently marked as read
+    // whatever was posted while the channel was hidden if VIEW is restored
+    // later. The response stays a bare 200 either way (no channel ids in it),
+    // so nothing here discloses which channels were skipped. Fail closed: a
+    // channel list or resolver error refuses rather than writing everything.
+    let channel_ids: Vec<i64> = match sqlx::query_scalar("SELECT id::bigint FROM channels WHERE server_id = $1")
+        .bind(&server_id)
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!("mark_server_read: channel list failed for server {}: {:?}", server_id, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to mark read").into_response();
+        }
+    };
+    let perms = match crate::permissions::get_user_channels_permissions(
+        &state.pool,
+        &server_id,
+        claims.sub,
+        &channel_ids,
+    )
+    .await
+    {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::error!("mark_server_read: permission resolve failed for server {}: {:?}", server_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to resolve permissions",
+            )
+                .into_response();
+        }
+    };
+    let viewable: Vec<i64> = channel_ids
+        .into_iter()
+        .filter(|cid| {
+            perms.get(cid).map_or(false, |p| {
+                p.has(crate::permissions::Permissions::VIEW_CHANNEL)
+            })
+        })
+        .collect();
+    if viewable.is_empty() {
+        // Nothing the caller may mark; a member of a server whose every
+        // channel is hidden from them gets the same 200 as before.
+        return StatusCode::OK.into_response();
+    }
+
+    // c.server_id is kept in the predicate so a stale id list can never write
+    // outside this server; c.id (INT4) = ANY(int8[]) compares via the int48
+    // operator, no cast needed.
     let result = sqlx::query(
         "INSERT INTO channel_read_state (user_id, channel_id, last_read_at)
          SELECT $1, c.id, CURRENT_TIMESTAMP
          FROM channels c
-         WHERE c.server_id = $2
+         WHERE c.server_id = $2 AND c.id = ANY($3)
          ON CONFLICT (user_id, channel_id) DO UPDATE SET last_read_at = CURRENT_TIMESTAMP",
     )
     .bind(claims.sub as i32)
     .bind(&server_id)
+    .bind(&viewable)
     .execute(&state.pool)
     .await;
 

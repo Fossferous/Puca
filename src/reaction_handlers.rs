@@ -13,13 +13,18 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::Claims;
-use crate::permissions::{check_message_view, check_message_view_perms, ChannelAccess, Permissions};
+use crate::permissions::{check_message_view_perms, ChannelAccess, Permissions};
 use crate::protocol::ServerMessage;
 use crate::state::AppState;
 
 /// Notify everyone viewing the message's channel that its reactions changed,
 /// so their UIs refetch in real time (the standard chat-app pattern). DM messages notify both
 /// conversation participants directly.
+///
+/// Deliberately VIEW-gated only (the room is joined on VIEW, ws.rs): live
+/// traffic reaches everyone who can see the channel, exactly as a live
+/// ChatMessage does. READ_MESSAGE_HISTORY governs the BACKLOG, which is why
+/// the REST routes below require it while this content-free frame does not.
 async fn broadcast_reaction_update(state: &AppState, message_id: &str) {
     let channel: Option<(i32,)> = sqlx::query_as("SELECT channel_id FROM messages WHERE id = $1")
         .bind(message_id)
@@ -59,25 +64,26 @@ async fn broadcast_reaction_update(state: &AppState, message_id: &str) {
     }
 }
 
-/// Resolve message access, returning early on failure. Channel messages
-/// require VIEW_CHANNEL on their channel (a VIEW-denied member sees 404, same
-/// as a missing message); DM messages require being a participant.
-macro_rules! require_message_member {
-    ($state:expr, $message_id:expr, $user_id:expr) => {
-        match check_message_view(&$state.pool, &$message_id, $user_id).await {
-            ChannelAccess::Allowed(server_id) => server_id,
-            ChannelAccess::NotFound => {
-                return (StatusCode::NOT_FOUND, "Message not found").into_response()
-            }
-            ChannelAccess::Forbidden => {
-                return (StatusCode::FORBIDDEN, "Not a member of this server").into_response()
-            }
-        }
-    };
+/// Whether a caller who has already passed the VIEW gate may touch a message's
+/// reactions. `perms` is None for a DM message (no roles apply; the participant
+/// check already ran), else the caller's effective channel permissions.
+///
+/// Reactions are BACKLOG state: the roster names who reacted to a message that
+/// may be hours old, and a reaction row lands on a message the caller may not
+/// be able to fetch. Every sibling backlog read (get_messages,
+/// get_message_edits, list_pinned_messages, the feed) requires
+/// READ_MESSAGE_HISTORY on top of VIEW, and a VIEW-holding member denied
+/// history was 403'd on the message list yet could pull the full reactor
+/// roster here (C04). Same bit, same answer, on all three reaction routes.
+pub(crate) fn may_touch_reactions(perms: Option<Permissions>) -> bool {
+    perms.map_or(true, |p| p.has(Permissions::READ_MESSAGE_HISTORY))
 }
 
-/// Same, but also yields the caller's effective channel permissions (None for a
-/// DM message, where roles do not apply) so a handler can check a further bit.
+/// Resolve message access, returning early on failure, and yield the caller's
+/// effective channel permissions (None for a DM message, where roles do not
+/// apply) so a handler can check a further bit. Channel messages require
+/// VIEW_CHANNEL on their channel (a VIEW-denied member sees 404, same as a
+/// missing message); DM messages require being a participant.
 macro_rules! require_message_member_perms {
     ($state:expr, $message_id:expr, $user_id:expr) => {
         match check_message_view_perms(&$state.pool, &$message_id, $user_id).await {
@@ -90,6 +96,24 @@ macro_rules! require_message_member_perms {
             }
         }
     };
+}
+
+/// The gate every reaction route uses: VIEW (above) plus READ_MESSAGE_HISTORY
+/// (see may_touch_reactions). The refusal is the one get_messages gives a
+/// history-denied member — 403, not 404: VIEW passed, so the channel's
+/// existence is already known to this caller and there is nothing to hide.
+macro_rules! require_message_history {
+    ($state:expr, $message_id:expr, $user_id:expr) => {{
+        let (server_id, perms) = require_message_member_perms!($state, $message_id, $user_id);
+        if !may_touch_reactions(perms) {
+            return (
+                StatusCode::FORBIDDEN,
+                "You do not have permission to read message history in this channel",
+            )
+                .into_response();
+        }
+        (server_id, perms)
+    }};
 }
 
 // --- DTOs ---
@@ -148,7 +172,7 @@ pub(crate) fn valid_emoji(emoji: &str) -> bool {
 /// A DB error fails CLOSED to "blocked" is too aggressive (it would break
 /// reactions on every channel message on a transient error), so this fails
 /// OPEN to false only for the block lookup itself — the caller has already
-/// proven view/participant access via `require_message_member!`, so the worst
+/// proven view/history/participant access via `require_message_history!`, so the worst
 /// case here is a blocked user's reaction slipping through on a DB blip, not
 /// disclosure.
 async fn dm_reaction_blocked(state: &AppState, message_id: &str) -> bool {
@@ -177,7 +201,7 @@ pub async fn add_reaction(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<AddReactionRequest>,
 ) -> impl IntoResponse {
-    let (_server_id, perms) = require_message_member_perms!(state, message_id, claims.sub);
+    let (_server_id, perms) = require_message_history!(state, message_id, claims.sub);
 
     // ADD_REACTIONS is an editable role bit ("React to messages with emoji")
     // that nothing checked, so a member explicitly denied it could still react.
@@ -264,7 +288,10 @@ pub async fn remove_reaction(
     Path((message_id, emoji)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let _server_id = require_message_member!(state, message_id, claims.sub);
+    // Same history gate as get_reactions: the DELETE is self-scoped, but a row
+    // on a backlog message the caller cannot read should not be theirs to
+    // touch either way (write half of C04).
+    let (_server_id, _perms) = require_message_history!(state, message_id, claims.sub);
 
     // user_id is INTEGER (i32) in PostgreSQL
     let result = sqlx::query(
@@ -298,7 +325,10 @@ pub async fn get_reactions(
     Path(message_id): Path<String>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let _server_id = require_message_member!(state, message_id, claims.sub);
+    // VIEW + READ_MESSAGE_HISTORY: the roster below names who reacted to a
+    // backlog message, which is exactly what get_messages withholds from a
+    // history-denied member (C04).
+    let (_server_id, _perms) = require_message_history!(state, message_id, claims.sub);
 
     // Get grouped reactions with user info
     // user_id is INTEGER (i32) in PostgreSQL
@@ -537,5 +567,25 @@ mod crash_resistance_tests {
         assert!(!valid_emoji(&"x".repeat(MAX_EMOJI_LEN + 1)));
         // A megabyte "emoji" (the unbounded-row-growth lever) is rejected.
         assert!(!valid_emoji(&"a".repeat(1_000_000)));
+    }
+
+    // Positive control for the refusal below: a member holding VIEW plus
+    // history, an ADMINISTRATOR, and a DM participant (no roles, `None`) all
+    // pass, so a refusal in the sibling test is the history bit and not a
+    // gate that refuses everyone.
+    #[test]
+    fn reactions_admit_history_holders_admins_and_dm_participants() {
+        assert!(may_touch_reactions(Some(Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY)));
+        assert!(may_touch_reactions(Some(Permissions::ADMINISTRATOR)));
+        assert!(may_touch_reactions(None));
+    }
+
+    // C04: VIEW alone is what the old gate accepted. History-denied means no
+    // roster read and no reaction write, matching get_messages' refusal.
+    #[test]
+    fn reactions_refuse_a_view_only_member() {
+        assert!(!may_touch_reactions(Some(Permissions::VIEW_CHANNEL)));
+        assert!(!may_touch_reactions(Some(Permissions::VIEW_CHANNEL | Permissions::ADD_REACTIONS)));
+        assert!(!may_touch_reactions(Some(Permissions::empty())));
     }
 }

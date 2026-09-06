@@ -686,6 +686,24 @@ pub async fn list_members_with_roles(
     .await
     .unwrap_or_default();
 
+    // A block in either direction reads as offline, mirroring the WS presence
+    // fan-out (ws::presence_audience): useServerMembers polls this route every
+    // 10 s, so without the block term a blocked co-member reconstructs the
+    // blocker's online/offline transitions the push side now withholds.
+    // Fail CLOSED: if the block set cannot be read, every member in this
+    // response is offline rather than risk leaking one blocked pair.
+    let blocked: Option<std::collections::HashSet<i64>> =
+        match crate::dm_handlers::blocked_ids_for(&state.pool, claims.sub).await {
+        Ok(set) => Some(set),
+        Err(e) => {
+            tracing::warn!(
+                "list_members_with_roles: block lookup failed, reporting every member offline: {:?}",
+                e
+            );
+            None
+        }
+    };
+
     let mut result: Vec<MemberWithRoles> = Vec::new();
 
     for (
@@ -740,8 +758,12 @@ pub async fn list_members_with_roles(
             username,
             display_name,
             server_nickname,
-            // Hidden status reads as offline to everyone but the user themself.
-            is_online: state.is_user_visibly_online(user_id as i64)
+            // Hidden status reads as offline to everyone but the user themself;
+            // a blocked pair (either direction) reads as offline outright.
+            is_online: blocked
+                .as_ref()
+                .is_some_and(|set| !set.contains(&(user_id as i64)))
+                && state.is_user_visibly_online(user_id as i64)
                 && (shows_online || user_id as i64 == claims.sub),
             roles,
             top_role_color: top_color,

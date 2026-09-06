@@ -151,13 +151,19 @@ const FRIENDS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM (
     WHERE f.user1_id = $1::bigint OR f.user2_id = $1::bigint \
     ORDER BY f.created_at, u.id) t";
 
+// A request sent across a block is stored but hidden from the recipient on
+// every reader (friend_handlers, review finding 11); the export is a reader too.
 const FRIEND_REQUESTS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM ( \
     SELECT fr.id, \
            CASE WHEN fr.sender_id = $1::bigint THEN 'sent' ELSE 'received' END AS direction, \
            u.id AS user_id, u.username, fr.status, (fr.created_at AT TIME ZONE 'UTC') AS created_at \
     FROM friend_requests fr \
     JOIN users u ON u.id = (CASE WHEN fr.sender_id = $1::bigint THEN fr.receiver_id ELSE fr.sender_id END) \
-    WHERE fr.sender_id = $1::bigint OR fr.receiver_id = $1::bigint \
+    WHERE fr.sender_id = $1::bigint 
+       OR (fr.receiver_id = $1::bigint 
+           AND NOT EXISTS (SELECT 1 FROM blocked_users b 
+                           WHERE (b.blocker_id = fr.sender_id AND b.blocked_id = fr.receiver_id) 
+                              OR (b.blocker_id = fr.receiver_id AND b.blocked_id = fr.sender_id))) \
     ORDER BY fr.created_at, fr.id) t";
 
 const BLOCKED_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM ( \

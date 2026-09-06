@@ -371,9 +371,10 @@ pub struct RevokeResponse {
 /// DELETE /devices/:id — revoke.
 ///
 /// Three things have to happen or revocation is theatre: the row is marked, any
-/// live socket attested as that device is HUNG UP (reusing the same
-/// `Session.kill` that account deletion and password change use), and the
-/// user's other devices are told so their lists update.
+/// live socket attested as that device OR authenticated on a session the
+/// device proved is HUNG UP (reusing the same `Session.kill` that account
+/// deletion and password change use), and the user's other devices are told so
+/// their lists update.
 ///
 /// Idempotent: revoking an already-revoked device answers 200, because the
 /// caller's intent ("this device must not have access") is already satisfied
@@ -405,12 +406,23 @@ pub async fn revoke_device(
     // then on) or expires on its own clock within a day — a bounded residual
     // that a token_version bump would close only by signing out every OTHER
     // device of the user, which is the wrong trade for a lost phone.
-    sqlx::query("UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL")
-        .bind(user_id)
-        .bind(&device_id)
-        .execute(&state.pool)
-        .await
-        .map_err(db_error)?;
+    //
+    // RETURNING the sids, because the socket kill below has to reach exactly
+    // what this UPDATE reached. The binding is on the SID, not the connection:
+    // a second socket opened on the same JWT that never attested, or one
+    // opened on a device-minted token, carries no in-memory device id and was
+    // invisible to kill_device_sessions — it kept sending and receiving as
+    // the user until the JWT's own expiry.
+    let revoked_sids: Vec<(String,)> = sqlx::query_as(
+        "UPDATE token_sessions SET revoked_at = NOW() \
+         WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL \
+         RETURNING sid",
+    )
+    .bind(user_id)
+    .bind(&device_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(db_error)?;
     sqlx::query(
         "UPDATE devices SET revoked_at = NOW() \
          WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
@@ -459,7 +471,19 @@ pub async fn revoke_device(
         );
     }
 
-    state.kill_device_sessions(claims.sub, &device_id);
+    // Both halves of the socket kill: by attested/claimed device id (the
+    // delivery socket never attests, it only claims), AND by every session id
+    // the UPDATE above revoked (a socket on a device-bound sid that never
+    // attested on THAT connection). Same pattern as logout_session.
+    let by_device = state.kill_device_sessions(claims.sub, &device_id);
+    let mut by_sid = 0;
+    for (sid,) in &revoked_sids {
+        by_sid += state.kill_sid_sessions(claims.sub, sid);
+    }
+    tracing::info!(
+        "device revoked for user {}: {} session row(s), {} socket(s) by device, {} by sid",
+        claims.sub, revoked_sids.len(), by_device, by_sid
+    );
     // The revoked phone's wake TOKEN is deliberately left in device_tokens:
     // the table carries no per-device linkage, so a targeted delete is not
     // expressible and a blanket one would silence the user's OTHER Android
@@ -1507,19 +1531,33 @@ pub struct SigningKeyResponse {
 }
 
 /// GET /users/:user_id/signing-key — fetch a user's published signing key.
+///
+/// Gated like GET /users/:id/public-key: the caller themself, or a
+/// relationship the caller cannot manufacture (users_share_identity_context:
+/// friends, any shared server, or they already wrote to you — never a blocked
+/// pair, never a tombstone). Ungated, the route enumerated the id space,
+/// tombstones included. One 404 for every refusal.
 pub async fn get_signing_key(
     State(state): State<Arc<AppState>>,
-    Extension(_claims): Extension<Claims>,
+    Extension(claims): Extension<Claims>,
     Path(user_id): Path<i64>,
 ) -> Result<Json<SigningKeyResponse>, (StatusCode, String)> {
+    let not_found = || (StatusCode::NOT_FOUND, "user not found".to_string());
+    // Range first: `as i32` wrapped 2^32 + N onto row N.
+    let Some(target) = crate::handlers::path_user_id(user_id) else {
+        return Err(not_found());
+    };
+    if !crate::dm_handlers::users_share_identity_context(&state.pool, claims.sub, user_id).await {
+        return Err(not_found());
+    }
     let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT account_sign_pub FROM users WHERE id = $1")
-            .bind(user_id as i32)
+        sqlx::query_as("SELECT account_sign_pub FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(target)
             .fetch_optional(&state.pool)
             .await
             .map_err(db_error)?;
     let Some((key,)) = row else {
-        return Err((StatusCode::NOT_FOUND, "user not found".to_string()));
+        return Err(not_found());
     };
     Ok(Json(SigningKeyResponse {
         user_id,

@@ -1016,9 +1016,13 @@ pub async fn reset_password(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid verifier hex").into_response(),
     };
 
-    // Check if user exists and has force_password_reset=true
+    // Check if user exists and has force_password_reset=true. A tombstone is
+    // not a user: login_step_1 already refuses it, and rewriting its
+    // credentials would only hand an anonymous caller a write on a dead row.
+    // A lookup that cannot answer is treated as "no such user" (fail closed).
     let user: Option<(i32, bool)> = sqlx::query_as(
-        "SELECT id, COALESCE(force_password_reset, FALSE) FROM users WHERE LOWER(username) = LOWER($1)"
+        "SELECT id, COALESCE(force_password_reset, FALSE) FROM users \
+         WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL"
     )
     .bind(&payload.username)
     .fetch_optional(&state.pool)
@@ -1040,19 +1044,70 @@ pub async fn reset_password(
                     .into_response();
             }
 
-            // Update salt and verifier, clear force_password_reset flag
+            // A credential rewrite is a revocation, exactly as in `logout` above
+            // and every other salt+verifier rewrite in the tree: bump
+            // token_version (every outstanding JWT dies), revoke every session
+            // row and every enrolled device (or the devices keep minting fresh
+            // account tokens), in ONE transaction so no half applies. This
+            // path proves no identity at all, so whoever did NOT run it — the
+            // owner holding a stolen-token attacker at bay, or the owner whose
+            // account was just taken — must be signed out everywhere too.
+            let mut tx = match state.pool.begin().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!("reset_password: could not begin transaction for user {}: {:?}", user_id, e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to reset password").into_response();
+                }
+            };
             let result = sqlx::query(
-                "UPDATE users SET salt = $1, verifier = $2, srp_version = $3, force_password_reset = FALSE WHERE id = $4"
+                "UPDATE users SET salt = $1, verifier = $2, srp_version = $3, \
+                 force_password_reset = FALSE, token_version = token_version + 1 \
+                 WHERE id = $4 AND deleted_at IS NULL"
             )
             .bind(&salt)
             .bind(&verifier)
             .bind(payload.srp_version.map(SrpVersion::get).unwrap_or(1))
             .bind(user_id)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await;
+            let result = match result {
+                Ok(r) if r.rows_affected() == 1 => {
+                    sqlx::query(
+                        "UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+                    )
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map(|_| ())
+                }
+                // The row vanished (deleted) between the lookup and the write:
+                // nothing was changed, and `tx` rolls back on drop.
+                Ok(_) => return (StatusCode::NOT_FOUND, "User not found").into_response(),
+                Err(e) => Err(e),
+            };
+            let result = match result {
+                Ok(()) => {
+                    sqlx::query(
+                        "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+                    )
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map(|_| ())
+                }
+                Err(e) => Err(e),
+            };
+            let result = match result {
+                Ok(()) => tx.commit().await,
+                Err(e) => Err(e),
+            };
 
             match result {
-                Ok(_) => {
+                Ok(()) => {
+                    // The bump refuses the next REST call or WS upgrade; an
+                    // already-open socket never re-checks its version, so hang
+                    // up every socket of the account as well.
+                    state.disconnect_user(user_id as i64);
                     tracing::info!("Password reset successful (account {})", crate::logtag::user_tag(&payload.username));
                     (
                         StatusCode::OK,
@@ -1061,6 +1116,8 @@ pub async fn reset_password(
                         .into_response()
                 }
                 Err(e) => {
+                    // Dropping `tx` without commit rolls every statement back,
+                    // so the account is exactly as it was.
                     tracing::error!(
                         "Failed to update password for {}: {:?}",
                         payload.username,
@@ -1468,18 +1525,56 @@ pub struct PublicKeyResponse {
     pub public_key: Option<String>,
 }
 
-/// Get a user's public key for E2EE
+/// A user id taken from a URL segment, as the INT4 `users.id` column stores
+/// it — or None when no such row can exist.
+///
+/// `Path<i64>` accepts 2^32 + N, and `as i32` WRAPS that onto row N: the
+/// query then answered for one account while the response echoed another id,
+/// and a handler that compared the truncated id to the caller's own took its
+/// "self" branch for 2^32 + claims.sub. Every handler that binds a
+/// caller-supplied user id goes through here, BEFORE any comparison with
+/// claims.sub, and treats None exactly like an unallocated id.
+pub(crate) fn path_user_id(user_id: i64) -> Option<i32> {
+    i32::try_from(user_id).ok()
+}
+
+/// Get a user's public key for E2EE.
+///
+/// Gated like get_user_dm_keys, minus the block term: the caller themself, or
+/// a relationship the caller cannot manufacture
+/// (dm_handlers::users_share_identity_context — friends, ANY shared server,
+/// or they already wrote to you; never a tombstone). A block does NOT refuse
+/// it: this key is what mesh voice media E2EE, the DTLS pin and existing DM
+/// history decrypt under, and a block evicts nobody from a shared call — see
+/// identity_context_allows. The key is public to whoever it is served to,
+/// but serving it to EVERY authenticated account made the route an existence
+/// oracle over the dense id space — tombstones included, which /users/search
+/// deliberately hides. Every refusal is the same 404 as an unallocated id.
 pub async fn get_user_public_key(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    Extension(_claims): Extension<crate::auth::Claims>,
+    Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    const NOT_FOUND: (StatusCode, &str) = (StatusCode::NOT_FOUND, "User not found");
+    let Some(target) = path_user_id(user_id) else {
+        return NOT_FOUND.into_response();
+    };
+    if !crate::dm_handlers::users_share_identity_context(&state.pool, claims.sub, user_id).await {
+        return NOT_FOUND.into_response();
+    }
+    // Fail closed: a lookup that cannot answer is the same 404, never a key.
     let result: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT public_key FROM users WHERE id = $1")
-            .bind(user_id as i32)
+        match sqlx::query_as("SELECT public_key FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(target)
             .fetch_optional(&state.pool)
             .await
-            .unwrap_or(None);
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!("get_user_public_key: lookup failed for {}: {:?}", user_id, e);
+                return NOT_FOUND.into_response();
+            }
+        };
 
     match result {
         Some((public_key,)) => Json(PublicKeyResponse {
@@ -1487,7 +1582,7 @@ pub async fn get_user_public_key(
             public_key,
         })
         .into_response(),
-        None => (StatusCode::NOT_FOUND, "User not found").into_response(),
+        None => NOT_FOUND.into_response(),
     }
 }
 
@@ -1645,10 +1740,15 @@ pub async fn get_user_dm_keys(
     Path(user_id): Path<i64>,
     Extension(claims): Extension<crate::auth::Claims>,
 ) -> impl IntoResponse {
+    // Range BEFORE the self/other decision: 2^32 + claims.sub truncated to the
+    // caller's own id and took the self branch below, while the gate inside
+    // the other branch compared the untruncated value. Same 404 as a stranger.
+    let Some(target) = path_user_id(user_id) else {
+        return (StatusCode::NOT_FOUND, "No conversation with this user").into_response();
+    };
     let me = claims.sub as i32;
-    let target = user_id as i32;
     let mut attestation: Option<String> = None;
-    if me != target {
+    if claims.sub != user_id {
         // user1_id/user2_id are BIGINT since migration 019: decode as i64, or
         // the row silently reads as "no conversation" (unwrap_or below).
         let shares: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
@@ -2277,13 +2377,11 @@ pub struct SearchUserResponse {
 /// Search users by username (for DM creation)
 pub async fn search_users(
     State(state): State<Arc<AppState>>,
-    // Deliberately unused, and NOT a missing authorization check: this route
-    // lives on the authenticated router, so being signed in is the gate, and
-    // the query no longer filters by caller now that you can find (and
-    // message) yourself. Named `_claims` so the next reader does not have to
-    // re-derive that — an unused `claims` is normally the signature of a
-    // forgotten membership check in this codebase.
-    Extension(_claims): Extension<crate::auth::Claims>,
+    // NOT a membership check: this route lives on the authenticated router,
+    // so being signed in is the gate, and the query does not filter by caller
+    // now that you can find (and message) yourself. The caller is used only
+    // to hide presence across a block (below).
+    Extension(claims): Extension<crate::auth::Claims>,
     axum::extract::Query(query): axum::extract::Query<SearchUsersQuery>,
 ) -> impl IntoResponse {
     // Require >=2 chars: a 1-char '%x%' is the broadest possible scan for almost
@@ -2342,11 +2440,36 @@ pub async fn search_users(
     .unwrap_or_default();
     let _ = tx.commit().await;
 
+    // A block in either direction reads as offline here, the same rule
+    // presence_audience (ws.rs) applies to the UserOnline/UserOffline frames —
+    // without it, any account could poll this route for the live status the
+    // WS stream had just stopped telling it. Fail CLOSED: if the block set
+    // cannot be read, this request reports everyone offline rather than a
+    // status it could not check.
+    let blocked = match crate::dm_handlers::blocked_ids_for(&state.pool, claims.sub).await {
+        Ok(set) => Some(set),
+        Err(e) => {
+            tracing::warn!(
+                "search_users: block lookup failed for {}; reporting all offline: {:?}",
+                claims.sub,
+                e
+            );
+            None
+        }
+    };
+
     let response: Vec<SearchUserResponse> = users
         .into_iter()
         .map(|(id, username, display_name, shows_online)| {
             // Hidden status reads as offline in search results too.
-            let is_online = shows_online && state.is_user_visibly_online(id as i64);
+            let is_online = match &blocked {
+                Some(set) => {
+                    !set.contains(&(id as i64))
+                        && shows_online
+                        && state.is_user_visibly_online(id as i64)
+                }
+                None => false,
+            };
             SearchUserResponse {
                 id: id as i64,
                 username,
@@ -2380,6 +2503,45 @@ mod tests {
         assert!(!ct_eq(b"code", b"code-longer"));
         assert!(!ct_eq(b"code", b"cod"));
         assert!(!ct_eq(b"", b"x"));
+    }
+}
+
+#[cfg(test)]
+mod path_user_id_tests {
+    use super::path_user_id;
+
+    /// Positive control: every id the INT4 column can hold passes through
+    /// unchanged, so no entitled request is refused by the range check.
+    #[test]
+    fn in_range_ids_are_kept_verbatim() {
+        for id in [1i64, 5, 119, 4_294_967_295 / 2, i64::from(i32::MAX)] {
+            assert_eq!(path_user_id(id), Some(id as i32), "{id}");
+        }
+    }
+
+    /// C08 / C27: the aliases that `as i32` wrapped onto real rows are
+    /// refused outright — 2^32 + N, N - 2^32, and anything past INT4 — so a
+    /// handler can never answer for row N under another id, and never takes
+    /// its self branch for 2^32 + claims.sub.
+    #[test]
+    fn out_of_range_ids_alias_nothing() {
+        let me = 119i64;
+        // The mechanism being closed: `as i32` really did land these on row
+        // `me` (the probe's 2^32 + 119 and 119 - 2^32 both echoed A's own
+        // material). The helper must refuse them instead.
+        assert_eq!((me + (1i64 << 32)) as i32, me as i32);
+        assert_eq!((me - (1i64 << 32)) as i32, me as i32);
+        for id in [
+            me + (1i64 << 32),
+            me - (1i64 << 32),
+            4_294_967_421, // 2^32 + 125, the probe's alias of row 125
+            i64::from(i32::MAX) + 1,
+            i64::from(i32::MIN) - 1,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            assert_eq!(path_user_id(id), None, "{id}");
+        }
     }
 }
 

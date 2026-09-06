@@ -65,6 +65,14 @@ pub struct FileTransfer {
     /// anyway — refusing the offer outright made the feature unusable for the
     /// exact case it was built for (field-confirmed 2026-08-10).
     pub parked_offer: Option<ParkedOffer>,
+    /// The recipient hides their presence (`show_online_status = false`).
+    /// Every sender-facing note this transfer could produce is then shaped so
+    /// the sender cannot tell hidden-online from offline: the offer is
+    /// reported as parked at offer time even when it went straight out, the
+    /// "reached them" note is never sent, and expiry reports "never came
+    /// online". The offer itself still reaches the recipient — only what the
+    /// SENDER observes is flattened. Always false for a self-transfer.
+    pub hidden_target: bool,
 }
 
 /// What a parked-offer sweep produced: offers for the qualifying connection,
@@ -1649,15 +1657,33 @@ impl AppState {
     /// id — a device-pinned offer cannot match before the id is known.
     /// Returns the messages rather than sending, so no map guard is ever held
     /// across a channel send.
-    pub fn deliver_parked_offers(&self, user_id: UserId, conn_id: u64) -> ParkedDelivery {
+    ///
+    /// `sender_ok` is the delivery-time re-run of the gate that admitted the
+    /// offer (`users_can_dm`, resolved by the caller — this function holds a
+    /// map guard and cannot await). The offer-time check ran once, possibly
+    /// minutes ago; a block placed since must stop the card, exactly as the
+    /// undelivered-notification drain re-checks VIEW. A refused offer is left
+    /// PARKED and untouched: no card, no "reached them" note, and the reaper
+    /// later tells the sender it "never came online" — indistinguishable from
+    /// a recipient who never connected, which is the point. Self-transfers
+    /// skip the predicate (one account cannot block itself).
+    pub fn deliver_parked_offers(
+        &self,
+        user_id: UserId,
+        conn_id: u64,
+        sender_ok: impl Fn(UserId) -> bool,
+    ) -> ParkedDelivery {
         // The connecting session's attested device id, for device-pinned offers.
         let my_device: Option<String> = self.device_of_conn(user_id, conn_id);
         let mut delivery = ParkedDelivery { offers: Vec::new(), sender_notes: Vec::new() };
-        let mut dead: Vec<(String, UserId)> = Vec::new();
+        let mut dead: Vec<(String, UserId, bool)> = Vec::new();
         for mut entry in self.file_transfers.iter_mut() {
             let id = entry.key().clone();
             let t = entry.value_mut();
             if t.to != user_id || t.parked_offer.is_none() {
+                continue;
+            }
+            if !t.is_self_transfer() && !sender_ok(t.from) {
                 continue;
             }
             // A self-transfer must never be offered back to the DEVICE that
@@ -1681,7 +1707,7 @@ impl AppState {
                 }
             }
             if !self.conn_is_live(t.from, t.from_conn) {
-                dead.push((id, t.from));
+                dead.push((id, t.from, t.hidden_target));
                 continue;
             }
             let p = t.parked_offer.take().expect("checked is_some above");
@@ -1690,14 +1716,19 @@ impl AppState {
             // parked offer, and "delivered, waiting for them to accept" is a
             // different (true) message. Rides the same FileParked type; old
             // clients ignore it exactly as they ignored the first one.
-            delivery.sender_notes.push((
-                t.from,
-                ServerMessage::FileParked {
-                    from_user: t.to,
-                    transfer_id: id.clone(),
-                    reason: "the offer reached them — waiting for them to accept".to_string(),
-                },
-            ));
+            // NOT for a recipient who hides their presence: this note fires
+            // the instant their client comes up, which made one parked offer
+            // a login alarm against the very toggle that hides them.
+            if !t.hidden_target {
+                delivery.sender_notes.push((
+                    t.from,
+                    ServerMessage::FileParked {
+                        from_user: t.to,
+                        transfer_id: id.clone(),
+                        reason: "the offer reached them — waiting for them to accept".to_string(),
+                    },
+                ));
+            }
             delivery.offers.push(ServerMessage::FileOffered {
                 from_user: t.from,
                 from_username: p.from_username,
@@ -1712,8 +1743,15 @@ impl AppState {
                 ts: p.ts,
             });
         }
-        for (id, from) in dead {
+        for (id, from, hidden_target) in dead {
             self.file_transfers.remove(&id);
+            // Same rule as the "reached them" note: the cancellation is sent
+            // BECAUSE the recipient connected, so for a hidden recipient it
+            // would say exactly what the toggle hides. Their card lived in the
+            // dead tab; the sender's other devices have nothing to update.
+            if hidden_target {
+                continue;
+            }
             delivery.sender_notes.push((
                 from,
                 ServerMessage::FileCancelled {
@@ -1725,6 +1763,20 @@ impl AppState {
             ));
         }
         delivery
+    }
+
+    /// The OTHER party of every two-party offer currently parked for
+    /// `user_id`, deduplicated. The caller resolves `users_can_dm` for each
+    /// (which awaits, so it cannot happen inside `deliver_parked_offers`) and
+    /// hands the verdicts back as that function's `sender_ok`. A sender who
+    /// parks an offer between the two calls is simply not in the verdict map,
+    /// and the caller's predicate refuses what it has no verdict for.
+    pub fn parked_offer_senders(&self, user_id: UserId) -> std::collections::HashSet<UserId> {
+        self.file_transfers
+            .iter()
+            .filter(|t| t.to == user_id && t.parked_offer.is_some() && !t.is_self_transfer())
+            .map(|t| t.from)
+            .collect()
     }
 
     /// Remove a session, returning the other end's `(conn, user)` so it can be
@@ -2218,12 +2270,19 @@ impl AppState {
 
     /// Leave a room (connection-scoped: the user stays a member while any
     /// other of their connections remains joined).
-    pub fn leave_room(&self, room_id: &str, user_id: UserId, conn_id: u64) {
-        let now_empty = if let Some(mut room) = self.rooms.get_mut(room_id) {
-            room.remove_member_conn(user_id, conn_id);
-            room.members.is_empty()
+    ///
+    /// Returns the media this connection released at the USER level, so the
+    /// caller can broadcast the matching *Stopped retractions. This used to be
+    /// discarded, and a clean LeaveRoom then produced no media retraction at
+    /// all: peers kept the mesh RTCPeerConnection to the leaver open, with
+    /// their microphone still on it. Nothing released (or an unknown room)
+    /// reads as all-false.
+    pub fn leave_room(&self, room_id: &str, user_id: UserId, conn_id: u64) -> ReleasedMedia {
+        let (released, now_empty) = if let Some(mut room) = self.rooms.get_mut(room_id) {
+            let released = room.remove_member_conn(user_id, conn_id);
+            (released, room.members.is_empty())
         } else {
-            false
+            (ReleasedMedia::default(), false)
         };
 
         // Guard dropped above. Remove only if STILL empty: remove_if re-checks the
@@ -2234,6 +2293,7 @@ impl AppState {
         if now_empty {
             self.drop_room_if_empty(room_id);
         }
+        released
     }
 
     /// Get username by user ID
@@ -2889,6 +2949,7 @@ mod crash_resistance_tests {
             from_conn: 1,
             to_conn: None,
             parked_offer: None,
+            hidden_target: false,
         }
     }
 
@@ -3064,6 +3125,7 @@ mod crash_resistance_tests {
                 from_conn: 1,
                 to_conn: None,
                 parked_offer: None,
+                hidden_target: false,
             },
         );
         // Accepted and active 10 minutes ago -> well inside the idle TTL.
@@ -3077,6 +3139,7 @@ mod crash_resistance_tests {
                 from_conn: 1,
                 to_conn: Some(2),
                 parked_offer: None,
+                hidden_target: false,
             },
         );
         // Ten minutes after both were touched: past the 2-minute offer TTL,
@@ -3125,6 +3188,7 @@ mod crash_resistance_tests {
                 from_conn,
                 to_conn: None,
                 parked_offer: Some(parked_payload(dev)),
+                hidden_target: false,
             },
         );
     }
@@ -3139,13 +3203,13 @@ mod crash_resistance_tests {
         // The offering socket itself must never collect the offer — that is
         // the dial-a-channel-to-yourself hazard.
         assert!(
-            state.deliver_parked_offers(1, sender_conn).offers.is_empty(),
+            state.deliver_parked_offers(1, sender_conn, |_| true).offers.is_empty(),
             "the offering socket must not be offered its own file"
         );
 
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
         let (second_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None, String::new());
-        let delivered = state.deliver_parked_offers(1, second_conn);
+        let delivered = state.deliver_parked_offers(1, second_conn, |_| true);
         assert_eq!(delivered.offers.len(), 1, "the second device collects the parked offer");
         assert!(
             matches!(&delivered.offers[0], ServerMessage::FileOffered { transfer_id, .. } if transfer_id == "parked1"),
@@ -3160,7 +3224,7 @@ mod crash_resistance_tests {
         );
         // Delivered-once: the payload is consumed, the record stays for accept.
         assert!(
-            state.deliver_parked_offers(1, second_conn).offers.is_empty(),
+            state.deliver_parked_offers(1, second_conn, |_| true).offers.is_empty(),
             "a delivered offer must not be re-delivered"
         );
         assert!(
@@ -3177,7 +3241,7 @@ mod crash_resistance_tests {
         park(&state, "orphan1", 1, 2, 999, None);
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
         let (conn, _, _) = state.register_session(2, "them".into(), tx, false, None, String::new());
-        let delivery = state.deliver_parked_offers(2, conn);
+        let delivery = state.deliver_parked_offers(2, conn, |_| true);
         assert!(
             delivery.offers.is_empty(),
             "nothing to deliver for a transfer whose sender tab died"
@@ -3206,18 +3270,18 @@ mod crash_resistance_tests {
         let (second_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None, String::new());
         // Connected but not yet attested: the pin cannot match.
         assert!(
-            state.deliver_parked_offers(1, second_conn).offers.is_empty(),
+            state.deliver_parked_offers(1, second_conn, |_| true).offers.is_empty(),
             "a device-pinned offer must wait for the device id"
         );
         // The WRONG device attesting must not collect it either.
         state.attest_device(1, second_conn, "dev-phone".into());
         assert!(
-            state.deliver_parked_offers(1, second_conn).offers.is_empty(),
+            state.deliver_parked_offers(1, second_conn, |_| true).offers.is_empty(),
             "a different device must not collect a pinned offer"
         );
         state.attest_device(1, second_conn, "dev-laptop".into());
         assert_eq!(
-            state.deliver_parked_offers(1, second_conn).offers.len(),
+            state.deliver_parked_offers(1, second_conn, |_| true).offers.len(),
             1,
             "the named device collects the offer once attested"
         );
@@ -3239,7 +3303,7 @@ mod crash_resistance_tests {
         let (new_conn, _, _) = state.register_session(1, "me".into(), tx2, false, None, String::new());
         state.attest_device(1, new_conn, "dev-pc".into()); // SAME device, new socket
         assert!(
-            state.deliver_parked_offers(1, new_conn).offers.is_empty(),
+            state.deliver_parked_offers(1, new_conn, |_| true).offers.is_empty(),
             "the same physical device must not collect its own offer via a new socket"
         );
         // A genuinely different device still qualifies.
@@ -3247,7 +3311,7 @@ mod crash_resistance_tests {
         let (phone_conn, _, _) = state.register_session(1, "me".into(), tx3, false, None, String::new());
         state.attest_device(1, phone_conn, "dev-phone".into());
         assert_eq!(
-            state.deliver_parked_offers(1, phone_conn).offers.len(),
+            state.deliver_parked_offers(1, phone_conn, |_| true).offers.len(),
             1,
             "a different device collects it"
         );
@@ -3262,7 +3326,7 @@ mod crash_resistance_tests {
         let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
         let (their_conn, _, _) = state.register_session(2, "them".into(), tx2, false, None, String::new());
         assert_eq!(
-            state.deliver_parked_offers(2, their_conn).offers.len(),
+            state.deliver_parked_offers(2, their_conn, |_| true).offers.len(),
             1,
             "the target's fresh connection collects the held offer"
         );
