@@ -4,6 +4,100 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+A second adversarial pass over the same boundary, this time against 0.9.4,
+looked for what a member who has been removed, blocked, or hidden from a
+channel could still do or learn. It found twenty-five smaller holes in that
+family; all are closed here. The ones you will notice come first.
+
+### Security
+- **Invites expire after 7 days unless you choose otherwise, and stop working
+  when the person who made them leaves.** Both invite dialogs now offer 1 hour
+  to 30 days or Never and preselect 7 days; an invite created without choosing
+  gets 7 days (a client older than this release that picks Never gets 7 days
+  too, until it updates — never-expiring codes now have to be asked for
+  explicitly). When the member who created an invite is kicked, banned, leaves
+  the server, or deletes their account, every invite they created is revoked
+  on the spot, and invites whose creator had already left are removed on
+  upgrade. The invite list shows who created each code, and creating or
+  deleting one is written to the server's audit log.
+- **Blocking someone also unfriends them** and withdraws any pending friend
+  request between you; unblocking does not put the friendship back. Someone
+  you have blocked, or who has blocked you, no longer sees whether you are
+  online anywhere: not in the live online/offline notices, and not in the
+  member list of a server you share, its members-with-roles list, or user
+  search, where you now always read as offline to them. A friend request
+  across a block is a real request on the sender's side — sending it again
+  says "already pending", it sits in their outgoing list — but the other
+  person never sees it: it is missing from their incoming list, and accepting
+  or rejecting it by id answers "not found"; unblocking discards it, which to
+  the sender looks like a rejection. Blocking an id that does not exist, or a
+  deleted account, answers the same empty success as blocking a real one and
+  writes nothing. On upgrade, every friendship and every pending friend
+  request still sitting beside a block made before this release is removed
+  once (migration 063), so people you had blocked disappear from your friends
+  list without any action from you; unblocking one of those older blocks
+  clears anything that pass left behind.
+- **A role with Manage Channels no longer sees channels hidden from it**
+  unless it is Administrator (or the owner). Until now Manage Channels
+  anywhere in your roles — `@everyone` included — quietly overrode every "hide
+  this channel from that role" rule for you; on a server where `@everyone`
+  carried it, hiding a channel did nothing at all. A channel manager who is
+  hidden from a channel cannot open its settings in the app (that editor
+  lives inside the channel); the overwrite API still accepts their
+  server-level Manage Channels, and an administrator or the owner can undo
+  the override for them.
+- **Leaving a call now cuts your media off from the others immediately, and
+  theirs from you**, whether you left or were removed: the remaining
+  participants close the connection the moment the roster drops you, rather
+  than waiting for a separate "stopped streaming" signal that a client could
+  skip.
+- **Your keys are handed out only to people who have a reason to hold
+  them.** A user's identity and signing public keys could be read by any
+  signed-in account for any id; now only that user, their friends, members of
+  a server they share, and people they have written to get them, and a
+  deleted account, a stranger and an impossible id all get the same "not
+  found". A block does not withhold these keys: they are what a shared voice
+  call's media encryption and its connection pin are built from, and what
+  decrypts the direct messages you already have, so blocking someone changes
+  nothing about call encryption or about reading an old conversation. The
+  per-device DM key list, which exists only to send a new direct message, is
+  refused across a block.
+- **Revoking a device signs out every connection that device signed in**, not
+  only the one that proved it was that device.
+- Seeing who reacted to a message, and reacting or un-reacting yourself, now
+  need "Read Message History" in the channel, like the message list does.
+- "Mark server as read" no longer marks channels you cannot see, so getting
+  access to one later no longer hides what was posted in the meantime.
+- A chat message sent into a voice channel now needs Send Messages there and
+  honours timeouts, exactly like a message into a text channel. The mute,
+  deafen and clip-armed status pings of someone who is in the call are
+  exempt: they need only the right to see and connect to the channel, so a
+  member who can join but not send still shows their state to the room.
+- Clip proposals are re-checked against what each person can see at the
+  moment every frame is sent: a proposer or approver who has been removed
+  from the voice channel stops receiving them, cannot vote, and cannot fetch
+  the proposal, and a consent prompt that was waiting for their device to
+  come online is dropped instead of ringing for a call they were removed
+  from. An approver who cannot see the text channel the clip would be posted
+  to is still asked and their vote still counts, but the proposal no longer
+  tells them which channel that is. A server's pinned clips channel is not
+  shown to members who cannot see it.
+- File offers and direct messages waiting for a device to come online are
+  re-checked at delivery: one that a block, or a change to "Allow DMs from
+  server members", now forbids is not handed over.
+- Sending a file to someone who hides their online status now looks the same
+  to the sender whether that person is online or not; the file still reaches
+  them when they are.
+- Moving or disconnecting someone from voice requires being able to see the
+  channel they are in; reporting a message requires being able to read its
+  channel; a friend request to a deleted account answers "User not found",
+  and deleted accounts never appear in friend or request lists; leaving a
+  room you never joined no longer announces you leaving it to the people in
+  it; and the operator-only migration password reset now signs the account
+  out everywhere instead of leaving old sessions and devices valid.
+
 ## 0.9.4 — 2026-09-06
 
 An adversarial audit of the boundary between members and non-members confirmed

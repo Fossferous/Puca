@@ -676,7 +676,9 @@ socket for the account is hung up after the commit.
 **Deleted outright.** Push/device tokens, notification preferences, friends,
 friend requests, blocks, role assignments, server memberships, per-server
 nicknames, email-verification and password-reset tokens, cross-user device
-shares in both directions, and your wrapped channel keys. The role and
+shares in both directions, your wrapped channel keys, and every invite you
+created (the membership rows going away fires migration 062's trigger, the
+same as a kick or a leave). The role and
 membership rows matter more than they look: leaving them behind would silently
 restore your old grants — an Admin role included — if the account ever rejoined.
 
@@ -722,8 +724,11 @@ signed in to the same server — the boundary between a member and a non-member,
 and between a member and a channel that has been hidden from them. An
 adversarial audit of that boundary (2026-09-05) confirmed the headline: **no
 non-member can read content.** It also found a set of smaller leaks and stale
-grants around the line, all of which are closed. The ones worth knowing about,
-because they change what a member can do:
+grants around the line, all of which are closed. A second pass the next day,
+against the tree that closed them, looked for what a member who has been
+removed, blocked or hidden from a channel could still do or learn, and found
+twenty-five more in that family; they are closed in 0.9.5 and marked as such
+below. The ones worth knowing about, because they change what a member can do:
 
 **Manage Roles cannot be used on yourself unless you are an administrator.**
 Assigning or removing a role checks that the role sits below your highest and
@@ -746,14 +751,40 @@ re-checks CONNECT for voice rooms and evicts from the mesh room (`RoomLeft`)
 and from the SFU room alike.
 
 **Queued and in-flight state is re-authorised against the permissions you have
-now, not the ones you had.** Message notifications parked for a device that
-was offline are dropped at delivery when the channel is one you can no longer
-see (the delivery branch of `handle_socket`, [`src/ws.rs`](../src/ws.rs): each parked `MessageNotification` has VIEW re-resolved before it is sent; a visible client's parked queue is discarded outright). A live clip
-proposal ([`docs/CLIPS.md`](CLIPS.md)) checks, on every read and every vote,
-that the caller can still VIEW the voice channel it was recorded in; a kicked
-or newly hidden-from member gets a 404 and their vote no longer counts. The
-approver list's `online` flag is what everyone else sees — visibly online *and*
-"Show online status" on — rather than raw socket presence.
+now, not the ones you had.** Frames parked for a device that was offline are
+re-checked when it connects (the delivery branch of `handle_socket`,
+[`src/ws.rs`](../src/ws.rs); a visible client's parked queue is discarded
+outright): a `MessageNotification` has VIEW re-resolved before it is sent; a
+`ClipPending` is dropped unless the recipient can still VIEW both the voice
+channel the clip came from and the text channel it would be posted to
+(0.9.5 — stricter than the live rule below, so an approver hidden from the
+target channel who was offline at proposal time learns of the proposal from
+`GET /clips/pending` on reconnect rather than from the parked doorbell); a
+parked `DirectMessage` is dropped, and a parked `FileOffered` left
+parked, when a block in either direction or a change to "Allow DMs from
+server members" now forbids the pair (`users_can_dm`, 0.9.5) — the file's
+sender is later told the recipient "never came online", exactly what they are
+told about an absent one. A live clip proposal ([`docs/CLIPS.md`](CLIPS.md))
+checks, on every read and every vote, that the caller can still VIEW the voice
+channel it was recorded in (0.9.5); a kicked or newly hidden-from member gets
+a 404, is omitted from `GET /clips/pending`, and their vote no longer counts.
+The target text channel decides what a participant may *see*, never whether
+they are one: an approver who cannot VIEW the channel the clip would be posted
+to keeps their consent seat — their voice is in the footage and approval is
+unanimous, so refusing them the doorbell or the vote would not protect the
+hidden channel, it would deadlock every proposal in that call into a silent
+expiry — and `target_channel_id` and `target_channel_name` are both `null`
+for them on `GET /clips/:id` and `/clips/pending` (`clip_access` /
+`ClipAccess::sees_target`, [`src/clip_handlers.rs`](../src/clip_handlers.rs);
+before 0.9.5 they read the hidden channel's id and name from the proposal; a
+database error resolving the target reads as redacted, one resolving the
+voice channel as not-a-participant). Every clip frame — proposed, pending,
+vote update, resolved — carries only the clip id, counts and an outcome, and
+is re-authorised per recipient against the voice channel at the moment it is
+sent (`still_views_voice_channel`), so a proposer or approver kicked mid-vote
+stops receiving them over the socket the kick left open. The approver list's
+`online` flag is what everyone else sees — visibly online *and* "Show online
+status" on — rather than raw socket presence.
 
 **Servers created before migration 004 carried a mask nobody chose.** That
 migration backfilled an `@everyone` role into every server that existed at
@@ -762,9 +793,10 @@ the time with the literal `104324673`
 That number is Discord's default `@everyone` value, and under this schema's
 bit layout ([`src/permissions.rs`](../src/permissions.rs)) it decodes to
 `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS` and `BAN_MEMBERS` for every
-member — and, because a base `MANAGE_CHANNELS` always retains VIEW
-(`layer_overwrite_rows`), every "hide this channel from that role" overwrite on
-such a server was inert. Servers created after that migration got the ordinary
+member — and, because a base `MANAGE_CHANNELS` used to retain VIEW through
+any deny (`layer_overwrite_rows`, until 0.9.5 — see the next paragraph),
+every "hide this channel from that role" overwrite on such a server was
+inert. Servers created after that migration got the ordinary
 member defaults and were never affected. Migration 061
 ([`migrations/061_retire_discord_everyone_mask.sql`](../migrations/061_retire_discord_everyone_mask.sql))
 resets the rows that still carry that whole mask to what 004 should have
@@ -774,6 +806,205 @@ corrected permissions still let see each channel. If you are a
 member of such a server you will notice you have lost channel and role
 management you never should have had; the owner can grant it back through a
 real role. Nothing here recovers what a member may already have seen.
+
+**A "hide this channel" overwrite now binds Manage Channels holders too
+(0.9.5).** Before, the resolver put `VIEW_CHANNEL` back after layering for any
+member whose roles carried `MANAGE_CHANNELS`, so that a channel manager could
+not lock themselves out. But a member's base permissions are the OR of every
+role they hold *and* `@everyone`, and the resolver could not tell which role
+the bit came from — so an `@everyone` role carrying Manage Channels (the
+migration-004 fossil above, or an owner ticking that box for `@everyone`)
+made every explicit VIEW deny on the server a no-op for every member, and the
+key distributor, which shares that resolver, wrapped each channel's epoch key
+for them. Migration 061 only repairs rows still carrying the *whole* 004 mask;
+an `@everyone` edited since, or granted the bit deliberately, kept the hole.
+The special case is gone: the only thing that overrides a deny is
+`ADMINISTRATOR` (the owner resolves to it before layering), the same rule
+Discord applies. A Manage Channels holder who is VIEW-denied on a channel now
+gets the same 404 as any other member the channel is hidden from, cannot manage
+it from inside, and is not in its key-wrapping set. In the official client
+this is a real lockout — the channel editor is reached only from the sidebar
+row, and the sidebar and Server Settings omit a channel the caller cannot
+VIEW — so recovery is through the owner or an administrator, through another
+manager editing the role or overwrite from a place they can see, or through
+the overwrite endpoints directly, which gate on *server-level* Manage
+Channels (`require_manage_channels`), not on the channel-effective bit, so
+that honest path stays open even while the channel itself answers 404 (the
+comment on `layer_overwrite_rows` says the same). The VIEW gate, the bulk
+channel listing and the key-wrapping viewer set (`get_channel_viewer_ids`)
+all go through the one layering function, so the three cannot disagree about
+who is a viewer. `MANAGE_CHANNELS` itself still cannot be granted through a
+per-channel allow mask.
+
+**Read Message History covers reactions (0.9.5).** Who reacted to a message,
+and reacting or un-reacting yourself, need `READ_MESSAGE_HISTORY` in the
+channel as well as VIEW (`require_message_history!`,
+[`src/reaction_handlers.rs`](../src/reaction_handlers.rs)) — the bit the
+message list, pins and edit histories already check; a member denied it gets
+the same 403 on all three reaction routes. A reaction roster is a list of who
+was in the conversation, which is history. The live `ReactionUpdate` frame
+stays VIEW-gated: it carries no content. In the same spirit, "mark server as
+read" now writes read-state only for the channels the caller can VIEW
+(`mark_server_read`, [`src/server_handlers.rs`](../src/server_handlers.rs));
+before, it marked a hidden channel read too, so restoring VIEW later hid
+whatever had been posted meanwhile. The route answers a bare 200 either way.
+
+**An invite dies with its creator's membership, and after seven days unless
+told otherwise (0.9.5).** Every member holds Create Invites by default, and
+until now the only statement that ever removed an invite was the Manage Server
+delete route: a member kicked from a private server kept a working door for
+any other account they controlled, and the list did not say whose door it was.
+Migration 062
+([`migrations/062_revoke_departed_member_invites.sql`](../migrations/062_revoke_departed_member_invites.sql))
+adds a row trigger on `server_members` that deletes the departing member's
+invites — kick, ban, leave and account deletion all delete that row, and the
+trigger fires for the cascade too, so there is no sixth site to forget — and
+removes on upgrade any existing invite whose creator is no longer a member. An
+invite created without an explicit lifetime now gets 168 hours
+(`resolve_expiry_hours`, [`src/invite_handlers.rs`](../src/invite_handlers.rs));
+"never" has to be asked for as `expires_in_hours: 0`, which both dialogs send
+when you choose it — a 0.9.4 client choosing Never omits the field and mints a
+7-day code until it updates. The list shows who created each code, and
+creating or deleting one is written to the audit log (`invite_create` /
+`invite_delete`, with the code in the details; the log's readers hold
+`ADMINISTRATOR`, a smaller audience than the Manage Server holders who can
+already list every live code).
+
+**A block is a block everywhere (0.9.5).** Blocking someone now dissolves the
+friendship and any pending friend request between you, in one transaction
+(`block_user`, [`src/moderation_handlers.rs`](../src/moderation_handlers.rs));
+unblocking does not restore it — it deletes any request sent across the
+block meanwhile (below) and any friends row still beside it, only when a
+block row was actually removed, so a stray unblock cannot unfriend anyone.
+Pairs blocked before 0.9.5 still held their friends row, and with it every
+friendship-derived capability the block was meant to end: the blocked
+account stayed on your presence audience, saw you come online and go
+offline, and could read your per-device DM key list. Migration 063
+([`migrations/063_block_dissolves_friendship.sql`](../migrations/063_block_dissolves_friendship.sql))
+removes, once at upgrade, every friends row and every pending friend request
+beside an existing block — an upgrading user's friends list loses everyone
+they had blocked without any action on their part — and the friends list and
+friendship status ignore any friends row beside a block as a second line.
+Presence honours a block on every reader, push and pull alike: the fan-out
+excludes a blocked pair in either direction outright (`presence_audience`,
+[`src/ws.rs`](../src/ws.rs)), and `GET /servers/:id/members`,
+`/servers/:id/members-with-roles` and `GET /users/search` report
+`is_online: false` for anyone with a block against the caller in either
+direction (`blocked_ids_for`, [`src/dm_handlers.rs`](../src/dm_handlers.rs))
+— the official client polls the member list every ten seconds, so gating
+the frames alone would have hidden nothing. All of them fail closed: when the
+block lookup errors, every row in that response reads offline. Blocking an
+id that was never issued, one outside the 32-bit range, or a deleted account
+answers the same empty 200 as a real block and writes nothing
+(`block_target`) — the foreign-key 500 it used to raise was an existence
+oracle over the id space, tombstones included; only a self-block is refused
+(400), and a failed existence probe is a 500 with nothing written. A friend
+request across a block used to be refused with a 403, which told the sender
+which of them had blocked the other (`GET /blocked` shows you your own
+direction). It is now written, and is a real pending request from the
+sender's side — the same bare 201, a repeat answers 409 "already pending", it
+is listed outgoing, `request_sent` is true — and nonexistent from the
+recipient's: absent from their incoming list, `request_received` false with
+no id, and accept or reject on its id answer the route's ordinary 404
+(`hidden_from_recipient`, [`src/friend_handlers.rs`](../src/friend_handlers.rs),
+which also hides when the block lookup fails). Unblocking deletes it, which
+to the sender is indistinguishable from a rejection. No frame or wake is
+sent for a friend request today; whatever adds one must consult that rule.
+The DM routes had the same tell — `POST /dms`, `POST /dms/:id/messages`
+and the WebSocket `DirectMessage` frame answered a blocked pair "You cannot
+message this user" — and now answer the same 403 `DMS_NOT_ACCEPTED` (the
+frame: the same error text) as a recipient who simply does not take DMs
+from the caller. A request to a deleted account is
+a 404, and deleted accounts no longer appear in anyone's friend or request
+lists.
+
+**Your identity keys are served only to people who have a reason to hold them
+(0.9.5).** `GET /users/:id/public-key` and `GET /users/:id/signing-key`
+answered any signed-in account for any id, tombstones included — an
+enumeration oracle for the whole id space. They now answer 404 unless the
+caller is that user, a friend, a member of any server they share, or someone
+that user has already written to; never for a deleted account, and never for
+an id outside the 32-bit range
+(`users_share_identity_context`, [`src/dm_handlers.rs`](../src/dm_handlers.rs);
+`path_user_id`, [`src/handlers.rs`](../src/handlers.rs) — an id 2³² above your
+own used to truncate onto you, which on `/dm-keys` handed the caller their own
+material under an alias). A block is deliberately **not** a refusal here, and
+the two key gates differ on purpose. The per-device DM key list (`/dm-keys`)
+keeps the stricter conversation rule of the next paragraph and now also
+refuses across a block: it exists only to wrap a *new* DM, which a block
+forbids anyway. The identity key is a dependency of things a block does not
+end. A shared server counts whether or not the target takes DMs from its
+members, because every member who can see a channel already receives that
+key through `GET /channels/:id/member-keys` (it is what channel keys are
+wrapped to); the pairwise media key and the DTLS pin between two peers in a
+server voice call derive from it, and a block evicts nobody from a call; and
+the DM history you already hold decrypts under it. Withholding it across a
+block would not have protected anything — it would have silently downgraded
+that pair's call (with "Require encryption for calls" on, the default, their
+media would simply have been dropped both ways behind a permanent "setting up
+encryption"), and turned an existing DM thread, which `start_conversation`
+deliberately keeps readable across a block, into rows rendered as "sender
+key unverified". So a block does not affect call encryption or DM history at
+all: blocked co-members in a call keep pairwise media E2EE and the DTLS pin,
+and blocking a DM partner leaves the existing thread decryptable. A blocked
+*stranger* is still refused, because none of the gate's other terms hold for
+them.
+
+**Leaving a call really leaves it (0.9.5).** A `LeaveRoom` for a voice room now
+retracts the leaver's media to everyone still in it — the same `StreamStopped`,
+`ScreenShareStopped` and `CameraStopped` the eviction path sends — whether or
+not the client sent `StopStream` first, and the official client closes its
+peer connection to anyone the roster drops (`retireDepartedPeer`,
+[`frontend/src/components/VoicePanel.tsx`](../frontend/src/components/VoicePanel.tsx));
+before, a client that skipped `StopStream` kept receiving the call's audio
+after leaving. A `LeaveRoom` for a room the connection never joined now does
+nothing, where it used to broadcast a spoofed "left" for the caller into a
+room they could not see. A chat frame sent into a voice room goes through the
+same gate as one sent into a text channel — VIEW *and* `SEND_MESSAGES`, then
+the member-timeout deny list, failing closed on a database error
+(`chat_admission` in the `ChatMessage` arm, [`src/ws.rs`](../src/ws.rs)); a
+timed-out member, or one who can connect but not send, can no longer inject
+content into a call. The one carve-out is the `__VOICE_STATUS__` ping (mute,
+deafen, clip-armed): from a connection currently joined to that voice room it
+is admitted on VIEW and `CONNECT` alone and skips the timeout list. It is the
+room's only transport for those flags, `SEND_MESSAGES` is offered and
+described everywhere as a text-channel bit, and the clip-armed badge is how
+the others learn the call is being recorded on that machine — so binding it
+to Send Messages froze every such member at "unmuted, not recording" for the
+whole room. A ping from a connection that is not in the room, or anything
+that is not a ping, keeps the full gate. Moving or disconnecting someone from
+voice requires the moderator to be able to VIEW the channel the target is in
+(`move_member_voice`), with the route's existing "not in a voice channel"
+answer otherwise; reporting a message requires being able to VIEW its channel
+(`create_report`, through `check_message_view`), with the same 400 as an
+unknown id. A server's pinned clips channel is reported as `null` to members
+who cannot VIEW it (`visible_clip_channel_id`,
+[`src/server_handlers.rs`](../src/server_handlers.rs)), on the server list and
+on join alike.
+
+**Revoking a device reaches every socket it signed in (0.9.5).**
+`DELETE /devices/:id` used to hang up only the connection that had attested as
+that device; a second socket on the same session, or one opened with a token
+the device minted, stayed up and kept sending and receiving. It now revokes the
+device's sessions and kills every socket authenticated on any of them
+(`revoke_device`, [`src/device_handlers.rs`](../src/device_handlers.rs) — the
+pairing `logout_session` uses). The operator-gated migration password reset
+(`ALLOW_MIGRATION_PASSWORD_RESET`) now does what `change_password` does: bumps
+`token_version`, revokes every session and every enrolled device, and hangs up
+every socket — before, it installed new SRP material and left every
+outstanding token and device valid — and it refuses a deleted account.
+
+**"Show online status" holds against file offers (0.9.5).** A file offered to
+someone hiding their presence used to be delivered silently when they were
+online and parked with a notice to the sender when they were not — a presence
+oracle. The sender now gets the same "parked" note and the same "never came
+online" expiry in both cases, while the offer itself still reaches an online
+recipient (`target_is_hidden` / `show_online_status`,
+[`src/ws.rs`](../src/ws.rs), carried as `hidden_target` in
+[`src/state.rs`](../src/state.rs)). The mask fails closed: a recipient whose
+setting cannot be read — a database error, or no row — is treated as hidden,
+so an outage does not hand the sender the online bit; only a row that
+positively says "show online status" keeps the parked/delivered distinction.
 
 **Two people who share no server cannot open a conversation** unless they are
 friends or the recipient wrote first. The Settings toggle **"Allow DMs from
@@ -786,6 +1017,7 @@ code never made, so any account could open a conversation with any user id,
 including a deleted account's tombstone, and then read back the target's
 display name and the list of their signed per-device DM keys (a device count).
 Both routes now apply the same relationship rule; the deleted-account case is
-a 404.
+a 404. Since 0.9.5 `/dm-keys` also refuses a pair in which either has blocked
+the other — `POST /dms` already did, and the key list did not.
 
 None of this changes §2: the operator still sees all of it.
