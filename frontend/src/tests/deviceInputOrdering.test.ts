@@ -131,6 +131,17 @@ async function settle(rounds = 30): Promise<void> {
     for (let i = 0; i < rounds; i++) await new Promise(r => setTimeout(r, 0));
 }
 
+/** Wait until `cond` holds, polling every 5 ms, for at most `maxMs`. The seal
+ *  and open mocks use REAL timers (25-30 ms), and thirty zero-delay hops are
+ *  ~30 ms on a fast host and less on a loaded CI runner — CI saw "expected
+ *  [0, 1, 2], received [0]" on an unchanged test. Waiting for the state is not a
+ *  race, and it cannot pass vacuously: the caller still asserts the full value. */
+async function settleUntil(cond: () => boolean, maxMs = 3000): Promise<void> {
+    const t0 = Date.now();
+    while (!cond() && Date.now() - t0 < maxMs) await new Promise(r => setTimeout(r, 5));
+    await settle(3); // let the last continuation land
+}
+
 /** A live CONTROLLER session, built through the real handshake. */
 async function controllerSession(): Promise<string> {
     const { installDeviceSessions, connectToDevice, endAllSessions, activeSessions } =
@@ -205,7 +216,7 @@ describe('controller: sealing input', () => {
         sendInput(id, { t: 'down', button: 0 });
         sendInput(id, { t: 'up', button: 0 });
         sendInput(id, { t: 'key', code: 'KeyA', down: true });
-        await settle();
+        await settleUntil(() => sentSequences().length >= 3);
 
         expect(sentSequences()).toEqual([0, 1, 2]);
     });
@@ -218,7 +229,7 @@ describe('controller: sealing input', () => {
         const clip = sendClipboard(id);
         sendInput(id, { t: 'down', button: 0 });
         await clip;
-        await settle();
+        await settleUntil(() => sentSequences().length >= 2);
 
         // The clipboard shares `sendSeq` with input, so sealing it off the
         // queue would burn a number out of order — and the receiver drops both
@@ -242,7 +253,7 @@ describe('host: opening input', () => {
         });
         deliver(0);
         deliver(1);
-        await settle();
+        await settleUntil(() => injectEvent.mock.calls.length >= 2);
 
         const injected = injectEvent.mock.calls.map(c => JSON.parse(String(c[1])).code);
         expect(injected).toEqual(['Key0', 'Key1']);
