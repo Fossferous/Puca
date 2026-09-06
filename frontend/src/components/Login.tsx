@@ -22,6 +22,30 @@ interface LoginProps {
 // so logout() clears the same one.
 const CREDENTIALS_KEY = REMEMBER_ME_KEY;
 
+/**
+ * The message for a 403 from POST /register — the sign-up gate refusing the
+ * code. Not exported (react-refresh/only-export-components would flag a
+ * non-component export from this file); the test drives it through the DOM.
+ *
+ * `pendingInvite` is the code from an invite LINK that brought the visitor
+ * here, or null. When it is set the honest diagnosis changes: the link is
+ * fine, but this server also wants a separate sign-up code — and if what they
+ * typed IS the link's code, say so instead of hinting at typos.
+ */
+function registerRejectedMessage(inviteCode: string, pendingInvite: string | null): string {
+    if (pendingInvite !== null) {
+        if (inviteCode.trim() !== '' && inviteCode.includes(pendingInvite)) {
+            return "That's the code from your invite link — the link is fine, but it is not the sign-up code. This server also needs a separate sign-up code to create an account; ask whoever runs it (or whoever invited you) for that.";
+        }
+        return inviteCode.trim() !== ''
+            ? "That sign-up code wasn't accepted. Your invite link is fine — but this server also needs a separate sign-up code from whoever runs it, and the code in the link is not it. Check what you typed, or ask them for the sign-up code."
+            : 'Your invite link is fine, but this server also needs a separate sign-up code to create an account. Ask whoever runs it (or whoever invited you) for one.';
+    }
+    return inviteCode
+        ? "That invite code wasn't accepted. Check it for typos, or ask whoever invited you for a fresh one — invites can expire or be used up."
+        : 'This server needs an invite code to create an account. Ask whoever runs it for one.';
+}
+
 export function Login({ onLoginSuccess }: LoginProps) {
     // Set when App soft-expired the session (expired JWT) — explains WHY the
     // user is suddenly looking at the login screen. Auto-login (remember-me)
@@ -43,6 +67,14 @@ export function Login({ onLoginSuccess }: LoginProps) {
     const [inviteRequired, setInviteRequired] = useState<boolean | null>(null);
     // An invite link brought the visitor here: say so, and carry it through.
     const pendingInvite = peekPendingInvite();
+    // Two different things were both called "invite code" on this screen. The
+    // link's code (pendingInvite) joins a SERVER once you have an account; the
+    // field below wants the operator's SIGN-UP gate string, which is a separate
+    // secret from whoever runs the server. With both in play a newcomer pasted
+    // the link's code into the field, got a 403, and was told to check it for
+    // typos. Only when both are present does the naming clash — otherwise the
+    // plain wording stays.
+    const linkAndGate = pendingInvite !== null && inviteRequired === true;
 
     // Password reset state
     const [showResetForm, setShowResetForm] = useState(false);
@@ -175,9 +207,14 @@ export function Login({ onLoginSuccess }: LoginProps) {
                     // whose submit endpoint is disabled by default. The first
                     // thing a stranger did wrong produced the most alarming
                     // and least true message in the product.
-                    setError(inviteCode
-                        ? "That invite code wasn't accepted. Check it for typos, or ask whoever invited you for a fresh one — invites can expire or be used up."
-                        : 'This server needs an invite code to create an account. Ask whoever runs it for one.');
+                    //
+                    // And when an INVITE LINK brought them here, the code they
+                    // most likely typed is the one from that link — which is a
+                    // server invite, not the operator's sign-up gate string.
+                    // "Check it for typos" would send them back to retype a
+                    // code that was never going to work. Say what is actually
+                    // missing: the link is fine, a second code is needed.
+                    setError(registerRejectedMessage(inviteCode, pendingInvite));
                 } else if (fetchError.status === 403) {
                     // Password reset required (case-insensitive login migration)
                     setShowResetForm(true);
@@ -419,18 +456,28 @@ export function Login({ onLoginSuccess }: LoginProps) {
                     {isRegistering && inviteRequired !== false && (
                         <div className="form-group">
                             <label htmlFor="inviteCode">
-                                {inviteRequired ? 'Invite code' : 'Invite code (only if this server requires one)'}
+                                {linkAndGate
+                                    ? 'Sign-up code for this server (not the invite link you clicked)'
+                                    : inviteRequired ? 'Invite code' : 'Invite code (only if this server requires one)'}
                             </label>
                             <input
                                 id="inviteCode"
                                 type="text"
                                 value={inviteCode}
                                 onChange={(e) => setInviteCode(e.target.value)}
-                                placeholder={inviteRequired ? 'From your server admin' : 'Leave blank unless you were given one'}
+                                placeholder={linkAndGate
+                                    ? 'From whoever runs this server'
+                                    : inviteRequired ? 'From your server admin' : 'Leave blank unless you were given one'}
                                 autoComplete="off"
                                 required={inviteRequired === true}
                                 disabled={loading}
                             />
+                            {linkAndGate && (
+                                <p className="login-signup-code-hint" style={{ margin: 0, fontSize: '0.8rem', lineHeight: 1.4, color: 'rgba(255, 255, 255, 0.6)' }}>
+                                    Your invite link joins the server once you have an account. This server also
+                                    needs a separate sign-up code to create one — ask whoever invited you for it.
+                                </p>
+                            )}
                         </div>
                     )}
 

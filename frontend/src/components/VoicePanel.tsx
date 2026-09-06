@@ -30,6 +30,7 @@ import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
 import { isTauri, isAndroidApp } from '../api/platform';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
+import { isTouchDevice } from './settingsModal.utils';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import { DeclaredParticipants } from '../api/clips/clipParticipants';
@@ -2430,11 +2431,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     }, [isInVoice, voiceInputMode, isAfkChannel, listenOnly, applyMicGate]);
 
     // Toggle Mute / Toggle Deafen shortcuts (Keybinds tab). Registered only
-    // while in voice — outside a call they no-op by not existing.
+    // while in voice — outside a call they no-op by not existing. Not on a
+    // touch device either: the Keybinds tab is absent there (settingsSections),
+    // and both ship BOUND, so without this gate a phone with a keyboard
+    // attached would keep firing two bindings nobody can see, rebind or clear.
+    // Same predicate as the tab, so the two cannot drift apart.
     const toggleMuteRef = useRef<() => void>(() => { });
     const toggleDeafenRef = useRef<() => void>(() => { });
     useEffect(() => {
-        if (!isInVoice) return;
+        if (!isInVoice || isTouchDevice()) return;
         registerPress('voice.toggleMute', () => loadSettings().toggleMuteBinding, () => toggleMuteRef.current());
         registerPress('voice.toggleDeafen', () => loadSettings().toggleDeafenBinding, () => toggleDeafenRef.current());
         return () => {

@@ -23,6 +23,7 @@ import { setHotkeyCaptureMode } from '../api/hotkeys';
 import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
+import { isTouchDevice, settingsSections } from './settingsModal.utils';
 import { sendTestNotification } from '../api/desktopNotify';
 import {
     mobileBatteryStatus, mobileNotificationStatus, openMobileNotificationSettings,
@@ -32,7 +33,7 @@ import { requestBackgroundLocation, requestForegroundLocation } from '../api/mob
 import { clearAllPlaces, listPlaces, syncTaskPlacesToNative } from '../api/taskPlaces';
 import {
     CheckIcon, CloseIcon, GlobeIcon, HeadphonesIcon, HeartIcon, Icon, LogoutIcon,
-    MicIcon, PlayIcon, RecordIcon, StopIcon, TrashIcon, WarningIcon, type IconName,
+    MicIcon, PlayIcon, RecordIcon, StopIcon, TrashIcon, WarningIcon,
 } from './Icons';
 
 /** Human label for a captured combo. Null = unbound, which is the default for
@@ -1235,17 +1236,15 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         }
     };
 
-    const sections: Array<{ id: string; label: string; icon: IconName }> = [
-        { id: 'account', label: 'My Account', icon: 'user' },
-        { id: 'privacy', label: 'Privacy & Safety', icon: 'lock' },
-        { id: 'appearance', label: 'Appearance', icon: 'palette' },
-        { id: 'accessibility', label: 'Accessibility', icon: 'accessibility' },
-        { id: 'notifications', label: 'Notifications', icon: 'bell' },
-        { id: 'voice', label: 'Voice & Video', icon: 'mic' },
-        { id: 'keybinds', label: 'Keybinds', icon: 'keyboard' },
-        { id: 'language', label: 'Language', icon: 'globe' },
-        { id: 'advanced', label: 'Advanced', icon: 'settings' },
-    ];
+    // "Phone" here is the touch predicate, not the Capacitor app: a phone in a
+    // browser has the same hardware. isMobile() stays for the gates below that
+    // are about the native app itself (its notification plumbing).
+    const phone = isTouchDevice();
+    const sections = settingsSections({ mobile: phone });
+    // A section the nav does not offer must not render either. activeSection
+    // can only be set from the nav today, but the body gate below is what
+    // keeps that true if a deep link or a restored section id ever arrives.
+    const sectionShown = (id: string) => activeSection === id && sections.some(s => s.id === id);
 
     return (
         <div className="settings-modal-overlay" onClick={onClose}>
@@ -1711,10 +1710,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         does not exist — and it sat in Privacy &
                                         Safety, where a phone user is most likely to
                                         be reading carefully. The "Screen control"
-                                        group below takes the other approach and says
-                                        "(desktop app only)" inline, which suits a
-                                        setting that still MEANS something off the
-                                        desktop; this one does not. */}
+                                        group below is hidden on phones for the same
+                                        reason, but in a DESKTOP browser it takes the
+                                        other approach and says "(desktop app only)"
+                                        inline, which suits a setting that still MEANS
+                                        something there; this one does not. */}
                                     {isTauri() && (
                                     <div className="settings-option">
                                         <div className="option-info">
@@ -1736,6 +1736,15 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     )}
                                 </div>
 
+                                {/* NOT ON PHONES. A phone never lets anyone control its
+                                    screen — there is no agent to inject input and no
+                                    kill switch to bind — so both rows would be controls
+                                    over something that cannot happen. A phone in a
+                                    browser is the same phone (isTouchDevice); a desktop
+                                    browser keeps the group unchanged: the kill-switch
+                                    row already says where it applies. */}
+                                {!phone && (
+                                <>
                                 <h3>Screen control</h3>
                                 <div className="settings-card">
                                     <p className="settings-hint">
@@ -1769,6 +1778,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         />
                                     </div>
                                 </div>
+                                </>
+                                )}
 
                                 <h3>Blocked Users</h3>
                                 <div className="settings-card">
@@ -2655,8 +2666,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                             </div>
                         )}
 
-                        {/* Keybinds */}
-                        {activeSection === 'keybinds' && (
+                        {/* Keybinds — absent on phones, see settingsSections(). */}
+                        {sectionShown('keybinds') && (
                             <div className="settings-section">
                                 <h3>Keybinds</h3>
                                 <p className="settings-description">

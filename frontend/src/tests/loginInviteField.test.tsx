@@ -80,3 +80,96 @@ describe('Login: the invite-code field follows /config', () => {
         expect(container.textContent).toMatch(/invited to a server/i);
     });
 });
+
+/**
+ * Two different things used to be called "invite code" on this screen: the
+ * code in a shared invite LINK (joins a server once you have an account) and
+ * the operator's SIGN-UP gate string (needed to create the account at all).
+ * A stranger who arrived by link, on a server with the gate on, pasted the
+ * link's code into a field labelled "Invite code", got a 403, and was told to
+ * check it for typos. The wording changes ONLY when both are in play.
+ */
+const LINK_CODE = 'aBc123Xy';
+const label = () => container.querySelector<HTMLLabelElement>('label[for="inviteCode"]')?.textContent ?? '';
+
+// React tracks the input's value through its own setter; set the prototype's
+// and fire `input` so the controlled component sees the change.
+function typeInto(el: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function submitRegistration(code: string) {
+    const { register } = await import('../api/auth');
+    const rejected = Object.assign(new Error('Forbidden'), { status: 403 });
+    vi.mocked(register).mockRejectedValueOnce(rejected);
+    await act(async () => {
+        typeInto(container.querySelector<HTMLInputElement>('#username')!, 'newcomer');
+        typeInto(container.querySelector<HTMLInputElement>('#password')!, 'longenough1');
+        typeInto(field()!, code);
+    });
+    const form = container.querySelector('form')!;
+    await act(async () => {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(register).toHaveBeenCalled();
+    return container.querySelector('.error-message')?.textContent ?? '';
+}
+
+describe('Login: an invite link plus a sign-up gate are two different codes', () => {
+    it('link + gate: the field is relabelled so it cannot be mistaken for the link, with an explanation', async () => {
+        cfg.gate = true;
+        sessionStorage.setItem('puca_pending_invite_v1', LINK_CODE);
+        await mountRegistering();
+        expect(label()).toMatch(/sign-up code/i);
+        expect(label()).toMatch(/not the invite link/i);
+        expect(field()!.required).toBe(true);
+        expect(container.textContent).toMatch(/separate sign-up code/i);
+    });
+
+    it('gate without a link: today\'s plain label, no sign-up-code talk (positive control for the relabel)', async () => {
+        cfg.gate = true;
+        await mountRegistering();
+        expect(label()).toBe('Invite code');
+        expect(container.textContent).not.toMatch(/sign-up code/i);
+    });
+
+    it('link without a known gate (probe failed): today\'s hedged label, not the relabel', async () => {
+        cfg.gate = null;
+        sessionStorage.setItem('puca_pending_invite_v1', LINK_CODE);
+        await mountRegistering();
+        expect(label()).toMatch(/only if this server requires one/i);
+        expect(label()).not.toMatch(/sign-up code/i);
+    });
+
+    it('403 with a link: the link is fine, a separate sign-up code is what is missing — no "typos"', async () => {
+        cfg.gate = true;
+        sessionStorage.setItem('puca_pending_invite_v1', LINK_CODE);
+        await mountRegistering();
+        const msg = await submitRegistration('operator-gate-string');
+        expect(msg).toMatch(/invite link is fine/i);
+        expect(msg).toMatch(/separate sign-up code/i);
+        expect(msg).not.toMatch(/typos/i);
+    });
+
+    it('403 after pasting the LINK\'s own code into the field: says that is the wrong code, by name', async () => {
+        cfg.gate = true;
+        sessionStorage.setItem('puca_pending_invite_v1', LINK_CODE);
+        await mountRegistering();
+        const msg = await submitRegistration(`https://app.example/invite/${LINK_CODE}`);
+        expect(msg).toMatch(/code from your invite link/i);
+        expect(msg).toMatch(/not the sign-up code/i);
+        expect(msg).not.toMatch(/typos/i);
+    });
+
+    it('403 without a link: today\'s message, typos and all (positive control for the branch)', async () => {
+        cfg.gate = true;
+        await mountRegistering();
+        const msg = await submitRegistration('wrong');
+        expect(msg).toMatch(/invite code wasn't accepted/i);
+        expect(msg).toMatch(/typos/i);
+        expect(msg).not.toMatch(/sign-up code/i);
+    });
+});

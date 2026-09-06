@@ -29,6 +29,13 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
     // until 0.9.2. null = the operator has not set APP_URL (or the server
     // predates /config), and the bare code is what gets shared.
     const [appUrl, setAppUrl] = useState<string | null>(null);
+    // Does THIS server gate sign-up behind a separate code (same GET /config)?
+    // An invite gets a newcomer INTO the server; it does not get them an
+    // ACCOUNT. With the gate on, the link alone dead-ends at the sign-up form,
+    // so the sharer has to send the sign-up code too — say so here, where the
+    // link is copied. true = say it plainly; null = unknown (old server, or
+    // the probe failed), so hedge; false = nothing to add.
+    const [signupGate, setSignupGate] = useState<boolean | null>(null);
 
     // Invite options. `expiresIn` is ALWAYS sent, never omitted: an omitted
     // field is the server's default, and "Never" is the explicit 0 — see
@@ -57,7 +64,11 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
     useEffect(() => {
         if (!isOpen) return;
         let live = true;
-        void fetchPublicConfig().then(c => { if (live) setAppUrl(c.appUrl); });
+        void fetchPublicConfig().then(c => {
+            if (!live) return;
+            setAppUrl(c.appUrl);
+            setSignupGate(c.registrationInviteRequired ?? null);
+        });
         return () => { live = false; };
     }, [isOpen]);
 
@@ -135,8 +146,14 @@ export function InviteModal({ isOpen, onClose, serverId, serverName }: InviteMod
                 <h2>Invite to {serverName}</h2>
                 <p className="invite-subtitle">
                     {appUrl
-                        ? 'Share this link with others to grant access to your server'
+                        ? 'Share this link with others to grant access to your server.'
                         : 'Share this code with others — they paste it into "Join a Server". (This server has no public web address set, so there is no link to give out.)'}
+                    {signupGate === true && (
+                        <> This server also requires a separate sign-up code to create an account — send that too, or the {appUrl ? 'link' : 'invite'} alone stops at the sign-up form.</>
+                    )}
+                    {signupGate === null && (
+                        <> If this server requires a sign-up code to create an account, send that too — the {appUrl ? 'link' : 'invite'} alone will not get a newcomer past the sign-up form.</>
+                    )}
                 </p>
 
                 {error && <div className="invite-error">{error}</div>}
