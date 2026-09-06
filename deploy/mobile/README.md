@@ -71,7 +71,16 @@ paths produce different names for the same release.
 
 ```bash
 cd frontend && npm run build
-( cd dist && zip -r ../puca-web-<ver>.zip . )        # plaintext bundle
+rm -rf ota-src && cp -r dist ota-src && node scripts/cap-index-csp.mjs --index ota-src/index.html
+                                                     # the rm is load-bearing: `cp -r` into an EXISTING
+                                                     # ota-src nests dist/ inside it and leaves the
+                                                     # previous release's index.html at the root, which
+                                                     # the CSP step reports as "already present" (exit 0)
+                                                     # and the zip below then ships under the new version
+( cd ota-src && zip -r ../puca-web-<ver>.zip . )     # plaintext bundle, WITH the Android CSP: the OTA
+                                                     # replaces the APK's index.html, so a bundle zipped
+                                                     # straight from dist/ would remove the policy
+rm -rf ota-src                                       # disposable staging dir (also gitignored)
 node deploy/mobile/encrypt-bundle.mjs \
     puca-web-<ver>.zip ~/.puca/mobile-updater-rsa.key \
     puca-web-<ver>.enc.zip                            # prints {ivSessionKey, checksum}

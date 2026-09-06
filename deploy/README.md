@@ -147,7 +147,7 @@ you must decide:
 | `DATABASE_URL` | `postgres://puca:<db-password>@127.0.0.1/puca` |
 | `CORS_ORIGINS` | `https://chat.example.com,https://app.example.com,tauri://localhost,http://tauri.localhost,https://localhost,capacitor://localhost` — the desktop and Android apps send their own origins; list them or every installed app is blocked while the web app keeps working |
 | `RUST_LOG` | `puca=info,tower_http=warn` |
-| `REGISTRATION_INVITE_CODE` | **set it before the server is reachable.** Unset means anyone who finds the origin can register, and every account carries a storage entitlement with no global cap. With it set, the sign-up form asks for the code on every client — `GET /config` tells clients only *that* one is required (`registration_invite_required`, a boolean; the code itself is never advertised). Hand it to the people you invite; changing it invalidates every invite link already given out |
+| `REGISTRATION_INVITE_CODE` | **set it before the server is reachable.** Unset means anyone who finds the origin can register, and every account carries a storage entitlement with no global cap. With it set, the sign-up form asks for the code on every client — `GET /config` tells clients only *that* one is required (`registration_invite_required`, a boolean; the code itself is never advertised). Hand it to the people you invite; changing it stops anyone who has not registered yet from using the old code (server invite links keep working; they are a different thing) |
 | `APP_URL` | `https://app.example.com` — the web app's public URL. `GET /config` advertises it and every client (desktop, Android, web) builds invite links as `<APP_URL>/invite/<code>`; unset, clients hand out the bare invite code instead. It is also the base of password-reset and verification links, so it is **required if you configure SMTP**: the mail default is `http://localhost:5173`, and every reset mail would point at the recipient's own machine |
 | `TURN_SERVER`, `TURN_SECRET` | section 8 — required for calls between people on different networks |
 | `DATABASE_MAX_CONNECTIONS` | leave unset (20). Keep below Postgres's `max_connections` (default 100) minus headroom for `pg_dump` and psql |
@@ -446,6 +446,7 @@ the server. Drill it where the key lives (`restore-drill.sh`) and on the box
 (`--local`). `healthcheck.sh` runs every five minutes: it restarts a dead or
 hung backend, reports a crash-looping unit, supervises coturn and LiveKit, and
 re-asserts ufw only where ufw was configured.
+When the instance gets a public audience, [`ops/README.md`](ops/README.md#abuse-runbook-the-instance-just-got-a-public-audience) is the abuse runbook: rotating the sign-up gate, removing an account with its uploads, watching storage, ban vs block vs report, and proving the rate limiter is per visitor behind Cloudflare.
 
 The client-signing keys of section 6 never touch the server: run
 [`ops/backup-keys.sh`](ops/backup-keys.sh) on your machine and store its two

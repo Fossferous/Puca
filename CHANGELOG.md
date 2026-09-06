@@ -63,6 +63,76 @@ readable from the app instead of guessed at.
   the app's own pipeline sets (the IPC hop, the worker and the OS injection
   are outside the rig).
 
+A readiness pass before the project is advertised looked at what a stranger
+meets first — the user guide, the sign-up form at the end of an invite link,
+the phone app's settings, the Android app's web view — and at what an operator
+needs on the day strangers arrive. Nothing here changes the protocol or the
+database.
+
+### Changed
+- **The user guide describes the app that ships.** `docs/USER_GUIDE.md` was
+  rewritten against the current client: every control is named by the label
+  or tooltip you will find in the app (Join a Server, Add Reaction, Edit
+  Profile, Upload Avatar, Generate Invite Link, and so on), and the old
+  layout drawing, the developer-server address, the emoji drawn as buttons
+  and the "Create Text Channel" step that stood where "add a reaction" should
+  have been are gone. A lint check now refuses a `localhost:` address or an
+  emoji-as-button anywhere in that file, so it cannot drift that way again.
+- **An invite link and a sign-up code are told apart on the sign-up form.**
+  Some servers require a sign-up code from whoever runs them before an
+  account can be created; that is not the code in an invite link, but the
+  form called both "invite code". When you arrive by an invite link on such a
+  server, the field is now labelled "Sign-up code for this server (not the
+  invite link you clicked)" and a line under it explains that the link joins
+  you to the server once your account exists. If you paste the link's own
+  code there, the error says exactly that instead of telling you to check for
+  typos. The invite dialog's share text tells the person sharing to send the
+  sign-up code along with the link on such servers. Servers with open
+  registration, and sign-ups that did not start from a link, read as before.
+- **The phone app no longer offers settings that cannot do anything on a
+  phone.** The Keybinds tab, and the Screen control group under Privacy &
+  Safety (the remote-control kill-switch hotkey and "Stop when I touch my
+  mouse or keyboard"), are hidden in the Android app: a phone has no host
+  agent to inject input and no kill switch to bind. The Push-to-talk and
+  Push-to-mute key rows under Voice & Video are still there when that input
+  mode is selected. The desktop app and the browser are unchanged.
+- The security model's "check this yourself" recipe and its threat table now
+  say that encryption for calls is required by default (since 0.8.130),
+  matching the setting's actual default.
+
+### Security
+- **The Android app's web view now carries a Content-Security-Policy.** The
+  web origin and the desktop app already had one; the page bundled into the
+  Android app had none. Every APK built through the Android build (full or
+  Lite) now has a policy equivalent to the web origin's header written into
+  its bundled page: scripts only from the app itself, connections only to the
+  server the build was made for (and the call server it hands out per call),
+  no embedded objects. A build without a usable server address fails at this
+  step rather than shipping a policy naming the wrong server. The web app and
+  the desktop app are untouched.
+
+### For self-hosters
+- **An abuse runbook for the day the instance gets a public audience.**
+  `deploy/ops/README.md` now walks through, with every command real and every
+  behaviour cited to the file that defines it: rotating the sign-up code and
+  exactly what that does to codes already handed out (server invite links
+  are unaffected); removing an account and its uploads with `psql`, since
+  there is no instance-level admin API; watching storage against the
+  per-user quotas, which have no global cap; what kick, timeout, ban, block
+  and report each do and where they live; and proving that the rate limiter
+  counts per visitor behind Cloudflare. Linked from the deployment guide.
+- **The health check now catches a collapsed rate limiter.** On a box behind
+  Cloudflare, `healthcheck.sh` asserts every five minutes that the Caddyfile
+  carries the global `servers { trusted_proxies … client_ip_headers
+  CF-Connecting-IP }` block from `deploy/cloudflare/caddy-behind-cloudflare.snippet`;
+  without it every per-visitor limit is keyed on the edge address and the
+  whole internet shares one bucket, so one visitor's burst rate-limits
+  everyone. A missing block, an unreadable Caddyfile, or the nonexistent
+  `{http.request.client_ip}` placeholder each write a FATAL line to
+  `health.log` and syslog; the check never edits or reloads Caddy. Two knobs:
+  `CADDYFILE` for a Caddyfile that lives elsewhere, and `OPS_BEHIND_CLOUDFLARE=1`
+  (or `=0`) to override the Cloudflare detection.
+
 ## 0.9.5 — 2026-09-06
 
 A second adversarial pass over the same boundary, this time against 0.9.4,

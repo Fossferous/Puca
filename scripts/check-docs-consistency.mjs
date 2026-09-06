@@ -211,9 +211,35 @@ for (const f of ['docs/FEATURES.md', 'docs/AUTO_UPDATER_GUIDE.md']) {
     if (tracked([f]).length) fail(f, 'retired document is tracked again (see .gitignore for why it was removed)');
 }
 
+// ---------------------------------------------------------------------------
+// 12. The user guide names controls the way the app labels them. On 2026-09-03
+//     a "fix" commit left it sending users to a Vite dev-server URL and naming
+//     voice/stream buttons by emoji the UI had dropped (the app's chrome is
+//     SVG from Icons.tsx and frontend/scripts/check-no-ui-emoji.mjs keeps it
+//     that way, so an emoji in the guide can only be a control that no longer
+//     looks like that). Quote the tooltip or label instead; see the guide's
+//     opening paragraph. Both user-facing guides (the pair section 4 already
+//     treats as such) — the first cut checked only USER_GUIDE.md while
+//     GETTING_STARTED.md carried the same localhost URL and emoji buttons.
+for (const f of ['docs/USER_GUIDE.md', 'docs/GETTING_STARTED.md']) {
+    const lines = read(f).split('\n');
+    /** Same carve-outs as check-no-ui-emoji.mjs: typography, not iconography. */
+    const TEXT_SYMBOLS = /[©®™↔↕]/gu;
+    const EMOJI = /\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]/u;
+    /** Host-font glyphs the old guide used as buttons (✓ accept, ✕ reject, ➕ join). */
+    const GLYPH_ICON = /[✕✔✓▲▼◀▶＋－⋮⋯➤]/u;
+    lines.forEach((line, i) => {
+        if (/\blocalhost:/.test(line)) {
+            fail(`${f}:${i + 1}`, 'sends the reader to a dev-server URL; say "the Púca app, or your server\'s web address"');
+        }
+        const m = EMOJI.exec(line.replace(TEXT_SYMBOLS, '')) ?? GLYPH_ICON.exec(line);
+        if (m) fail(`${f}:${i + 1}`, `"${m[0]}" — an emoji or host-font glyph standing in for a control; name the button by its tooltip or label (Icons.tsx is SVG, the app never shows this picture)`);
+    });
+}
+
 if (problems.length) {
     console.error(`\ndocs consistency: ${problems.length} problem${problems.length === 1 ? '' : 's'}\n`);
     for (const p of problems) console.error(`  ${p.where}\n    ${p.what}\n`);
     process.exit(1);
 }
-console.log('docs consistency: clean (stale claims, TURN TTL, KDF, recovery docs, ops listing, env coverage, pool default, ExecStart, nginx body size, migration attrs)');
+console.log('docs consistency: clean (stale claims, TURN TTL, KDF, recovery docs, ops listing, env coverage, pool default, ExecStart, nginx body size, migration attrs, user-guide control names)');

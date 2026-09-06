@@ -13,11 +13,11 @@ Welcome! This guide will help you set up and start using Púca.
 
 ### 1. Create an Account
 
-1. Open the application at `http://localhost:5173`
+1. Open the Púca app, or your server's web address in a browser
 2. Click **"Don't have an account? Register"**
 3. Enter a username and password (and the server's invite code, if the owner
    set one)
-4. Click **Register**
+4. Click **Create Account**
 
 You'll be logged in after registration — as soon as you have dealt with the
 next step.
@@ -64,18 +64,15 @@ After logging in, you'll see:
 
 If someone gave you an invite code:
 
-1. Click the **+** button at the bottom of the server list
-2. Select "Join Server"
-3. Enter the invite code
-4. Click **Join**
+1. Click **Join a Server** at the bottom of the server list
+2. Paste the invite link or code and click **Look Up Invite**
+3. Check the server it names, then click **Join Server**
 
 ### Create Your Own Server
 
-1. Click the **+** button in server list
-2. Select "Create Server"
-3. Enter a server name
-4. Choose a template (or start fresh)
-5. Click **Create**
+1. Click **Create a Server** at the bottom of the server list
+2. Enter a server name (and upload an icon if you like)
+3. Click **Create**
 
 You are now the **owner** with full permissions!
 
@@ -85,10 +82,10 @@ You are now the **owner** with full permissions!
 
 ### Upload an Avatar
 
-1. Click **👤** in the server header
-2. Click **"Choose file"**
+1. Click your name in the bar at the bottom of the channel list (tooltip **Edit Profile**)
+2. Under **Avatar**, click **Upload Avatar**
 3. Select an image
-4. Click **Upload Avatar**
+4. Adjust the crop, then click **Save Avatar**
 
 Your avatar now appears in:
 - Messages you send
@@ -118,11 +115,11 @@ Your avatar now appears in:
 
 ### Add Reactions
 1. Hover over a message
-2. Click the **➕** button
+2. Click **Add Reaction** in the hover toolbar
 3. Select an emoji
 
 ### Attach Files
-1. Click **📎** next to message input
+1. Click **Attach file** (the paperclip beside the message box)
 2. Select a file
 3. Send the message
 
@@ -131,7 +128,7 @@ Your avatar now appears in:
 ## Voice Chat
 
 ### Join a Voice Channel
-1. Click on a voice channel (🔊 icon)
+1. Click a voice channel (listed under **Voice Channels**)
 2. Allow microphone access if prompted
 3. You're now connected!
 
@@ -144,39 +141,39 @@ Your avatar now appears in:
 ## Managing Your Server (Owners)
 
 ### Create Channels
-1. Click **+** next to "Text Channels" or "Voice Channels"
-2. Enter channel name
+1. Hover the **Text Channels** or **Voice Channels** heading and click its **Create Text Channel** / **Create Voice Channel** button
+2. Enter a channel name
 3. Click **Create**
 
 ### Create Roles
-1. Click **🛡️** in server header
-2. Click **"+ Create Role"**
-3. Set name, color, and permissions
-4. Click **Save**
+1. Open **Server Settings → Roles**
+2. Click **+ Create Role**
+3. Set **Role Name**, **Role Color** and **Permissions**
+4. Click **Save Changes**
 
 ### Assign Roles
 1. Click on a member in the member list
 2. Toggle role checkboxes in the popup
 
 ### Invite Members
-1. Click **📩** in server header
-2. Click **Create Invite**
-3. Copy and share the code
+1. Right-click the server in the rail and choose **Invite People**
+2. Click **Generate Invite Link**
+3. Click **Copy** on the new entry and share the link
 
 ### Upload Custom Emojis
-1. Click **😎** in server header
-2. Upload an image
+1. Open **Server Settings → Emoji**
+2. Under **Add Emoji**, click **Choose Image** and select a picture
 3. Enter a name (e.g., `pepe`)
-4. Click **Upload**
+4. Click **Add**
 
 ---
 
 ## Tips
 
-- **Owner badge**: 👑 appears next to server owner
+- **Owner badge**: a crown (tooltip **Server Owner**) marks the owner in the member list
 - **Online status**: Green dot = online
 - **Role colors**: Member names show their highest role color
-- **DMs**: Click a user → "Send Message" for private chat
+- **DMs**: Click a user, then **Message** in their profile popup, for a private chat
 
 ---
 
@@ -185,7 +182,7 @@ Your avatar now appears in:
 ### "Failed to connect to server"
 - Check that the backend is running (`cargo run --release`)
 - Try refreshing the page
-- Click "Logout" and login again
+- Click **Sign out** and sign in again
 
 ### Can't create channels/roles
 - Only server owners or users with permissions can do this

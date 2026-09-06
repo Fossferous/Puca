@@ -386,7 +386,7 @@ they're what make the rest credible.
 | Ordinary user | Spoof the requester name to social-engineer your click | **Blocked** — server stamps the real username |
 | Ordinary user | Ask nicely, then alt-tab out of the game once granted | **Reachable** — social, not technical. See §5 |
 | Network attacker on a relay/TURN hop | Read your screen or keystrokes | **Blocked** — DTLS-SRTP / sealed signalling |
-| Network attacker who can terminate TLS | Strip the media-E2EE line and MITM voice | **Reachable while enforcement is off** — see §4 |
+| Network attacker who can terminate TLS | Strip the media-E2EE line and MITM voice | **Blocked by default** (enforcement is ON since 0.8.130); reachable only if the user turned it off — see §4 |
 | Network attacker who can terminate TLS | Substitute an identity key on *first contact* | **Reachable once per peer** (trust-on-first-use); fails closed after |
 | Someone with your password | Enrol a new device on your account | **Reachable** — no second factor on enrolment |
 | Someone with your password | Control your machine from that device | **Blocked** — needs your click at the keyboard, or the separate unattended passphrase |
@@ -638,7 +638,7 @@ rg -n -A12 'Remote-control relay' src/ws.rs
 sed -n '70,82p' frontend/src/api/devices/peerKeys.ts
 rg -n -B2 -A6 'enrolment record verified under the account signing key' \n  frontend/src/api/devices/session.ts
 
-# 6. Is media E2EE enforced? (expect: false — then go turn it on)
+# 6. Is media E2EE enforced? (expect: `requireMediaE2ee: true` — ON by default since 0.8.130; the migration below it deliberately leaves it off on an engine that cannot satisfy it)
 rg -n 'requireMediaE2ee' frontend/src/api/rtc/manager.ts frontend/src/components/settingsStore.ts
 
 # 7. Does CI actually run the crates' tests, or only the backend's?
