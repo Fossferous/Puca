@@ -75,14 +75,16 @@ chmod +x "$TMP/bin"/*
 LOGF="$INSTALL/health.log"
 reset() {   # a healthy, already-monitored host, with ufw active so it stays out of the way
 	rm -rf "$STATE"; mkdir -p "$STATE"
-	rm -f "$CALLS" "$LOGF" "$INSTALL"/.[a-z]* "$INSTALL/.env"
+	rm -f "$CALLS" "$LOGF" "$INSTALL"/.[a-z]* "$INSTALL/.env" "$TMP/Caddyfile"
 	: > "$CALLS"
 	touch "$STATE/active.sandbox"
 	echo any > "$STATE/curl-ok"
 	echo "Status: active" > "$STATE/ufw-status"
 	touch "$INSTALL/.health-http-ok"
 }
-run() { ( cd "$HERE" && CALLS="$CALLS" HC_STATE="$STATE" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" PATH="$TMP/bin:$PATH" "$@" bash ./healthcheck.sh 2>&1 ); }
+# CADDYFILE is pinned into the sandbox so the real /etc/caddy/Caddyfile on the
+# machine running this can never leak into a case (absent = no Caddy here).
+run() { ( cd "$HERE" && CALLS="$CALLS" HC_STATE="$STATE" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" CADDYFILE="$TMP/Caddyfile" PATH="$TMP/bin:$PATH" "$@" bash ./healthcheck.sh 2>&1 ); }
 logtxt() { cat "$LOGF" 2>/dev/null; }
 calls() { cat "$CALLS"; }
 
@@ -225,6 +227,149 @@ run env COTURN_PROBE_PORT=1 ; : > "$LOGF"
 echo 2 > "$STATE/nrestarts.coturn"
 run env COTURN_PROBE_PORT=1
 check "the crash-loop detector runs for coturn too" "$(has "$(logtxt)" 'coturn RESTARTED BY SYSTEMD (NRestarts 0 -> 2)')" "$(logtxt)"
+
+echo
+echo "--- Cloudflare: the global client-IP block is asserted, or every per-IP limit is one bucket ---"
+# The fixtures are the SHIPPED files, so the check is pinned to what the docs
+# tell an operator to install: deploy/cloudflare/caddy-behind-cloudflare.snippet
+# (both blocks) must pass, and deploy/Caddyfile (direct mode) must stay silent
+# where nothing says the box is behind Cloudflare.
+SNIPPET="$HERE/../cloudflare/caddy-behind-cloudflare.snippet"
+DIRECT="$HERE/../Caddyfile"
+# Derived fixtures are built from a CR-stripped copy: on a Windows checkout
+# (text=auto) these files are CRLF and `^}$` would never match. The raw `cp`
+# cases below stay raw on purpose — they prove the checker itself copes.
+snippet() { tr -d '\r' < "$SNIPPET"; }
+COLLAPSE='one bucket for the whole Cloudflare edge'
+cfquiet() { [ "$(has "$1" 'Cloudflare')" = 0 ] && [ "$(has "$1" 'client-IP')" = 0 ] && [ "$(has "$1" 'client_ip')" = 0 ] && echo 1 || echo 0; }
+
+# POSITIVE CONTROL FIRST: the prescribed config passes, so the check CAN pass.
+check "fixture sanity: the snippet still carries both directives" "$([ "$(has "$(cat "$SNIPPET")" 'trusted_proxies static')" = 1 ] && [ "$(has "$(cat "$SNIPPET")" 'client_ip_headers CF-Connecting-IP')" = 1 ] && echo 1 || echo 0)"
+reset; cp "$SNIPPET" "$TMP/Caddyfile"
+run env
+check "the shipped snippet (both blocks) is silent" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+# THE FAILURE THIS EXISTS FOR: the site block was installed, the global block forgotten.
+# (The global options block is the `{` … `}` pair at column 0, first in the file.)
+reset; snippet | sed '/^{$/,/^}$/d' > "$TMP/Caddyfile"
+check "fixture sanity: the site block survives the strip" "$(has "$(cat "$TMP/Caddyfile")" 'header_up X-Forwarded-For {client_ip}')"
+check "fixture sanity: the global block is gone (the word survives only in the header comment)" "$([ "$(grep -Ec '^[[:space:]]*client_ip_headers' "$TMP/Caddyfile")" = 0 ] && echo 1 || echo 0)"
+run env
+check "site block without the global block is FATAL"      "$(has "$(logtxt)" "FATAL $TMP/Caddyfile has no global")" "$(logtxt)"
+check "and says what it costs"                            "$(has "$(logtxt)" "$COLLAPSE")"
+check "and names the snippet to install"                  "$(has "$(logtxt)" 'deploy/cloudflare/caddy-behind-cloudflare.snippet')"
+check "and reaches syslog"                                "$(has "$(calls)" 'logger -t sandbox-health FATAL')" "$(calls)"
+check "detection only: nothing is restarted or reloaded"  "$([ "$(has "$(calls)" 'restart')" = 0 ] && [ "$(has "$(calls)" 'reload')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+
+# The trap the snippet's header names: trusted_proxies INSIDE reverse_proxy does
+# not feed {client_ip}. A grep that ignores scope would pass this.
+reset; snippet | sed '/^{$/,/^}$/d' | sed 's|^\(\treverse_proxy 127.0.0.1:3000 {\)$|\1\n\t\ttrusted_proxies static 173.245.48.0/20\n\t\tclient_ip_headers CF-Connecting-IP|' > "$TMP/Caddyfile"
+check "fixture sanity: both directives present, but inside reverse_proxy" "$([ "$(has "$(cat "$TMP/Caddyfile")" 'trusted_proxies static')" = 1 ] && [ "$(has "$(cat "$TMP/Caddyfile")" 'client_ip_headers CF-Connecting-IP')" = 1 ] && echo 1 || echo 0)" "$(cat "$TMP/Caddyfile")"
+run env
+check "directives inside reverse_proxy do NOT count" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile has no global")" "$(logtxt)"
+
+# Neither does a comment that mentions them.
+reset; { snippet | sed '/^{$/,/^}$/d'; printf '# servers {\n#\ttrusted_proxies static 173.245.48.0/20\n#\tclient_ip_headers CF-Connecting-IP\n# }\n'; } > "$TMP/Caddyfile"
+run env
+check "directives in a comment do NOT count" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile has no global")" "$(logtxt)"
+
+# A servers block that has only ONE of the two is the "set one without the
+# other" failure the snippet warns about.
+reset; snippet | sed '/^[[:space:]]*client_ip_headers CF-Connecting-IP$/d' > "$TMP/Caddyfile"
+check "fixture sanity: client_ip_headers removed" "$([ "$(has "$(cat "$TMP/Caddyfile")" 'client_ip_headers CF-Connecting-IP')" = 0 ] && echo 1 || echo 0)"
+run env
+check "trusted_proxies without client_ip_headers is FATAL" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile has no global")" "$(logtxt)"
+
+# The other trap the snippet names: a placeholder that does not exist.
+reset; snippet | sed 's/{client_ip}/{http.request.client_ip}/' > "$TMP/Caddyfile"
+run env
+check "{http.request.client_ip} is FATAL even with the global block" "$(has "$(logtxt)" 'a placeholder that does not exist')" "$(logtxt)"
+reset; snippet | sed 's/{client_ip}/{http.vars.client_ip}/' > "$TMP/Caddyfile"
+run env
+check "the long form {http.vars.client_ip} is accepted" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+# THE MERGE FAILURE: the snippet's header says "merge these directives into
+# yours if you already have one". An operator who merges the global block into
+# an existing Caddyfile and leaves deploy/Caddyfile's direct-mode
+# `header_up X-Forwarded-For {remote_host}` has a correct global block whose
+# answer the site block throws away. The Caddyfile is no longer evidence of
+# Cloudflare (that grep wants {client_ip}), so the origin lock's ufw tag is what
+# says the box is behind it — as on a real deployment.
+reset; snippet | sed 's/{client_ip}/{remote_host}/' > "$TMP/Caddyfile"
+check "fixture sanity: the global block survived the rewrite"       "$(has "$(cat "$TMP/Caddyfile")" 'client_ip_headers CF-Connecting-IP')"
+check "fixture sanity: the site block now writes {remote_host}"      "$(has "$(cat "$TMP/Caddyfile")" 'header_up X-Forwarded-For {remote_host}')"
+printf 'ufw allow 22/tcp\nufw allow proto tcp from 173.245.48.0/20 to any port 443 comment '"'"'cf-origin'"'"'\n' > "$STATE/ufw-added"
+run env
+check "global block + site block still writing {remote_host} is FATAL" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile writes X-Forwarded-For from {remote_host}")" "$(logtxt)"
+check "and it is NOT blamed on the global block"                       "$([ "$(has "$(logtxt)" 'has no global')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and says what it costs"                                         "$(has "$(logtxt)" "$COLLAPSE")"
+check "and names the line to write"                                    "$(has "$(logtxt)" 'header_up X-Forwarded-For {client_ip}')"
+check "and reaches syslog"                                             "$(has "$(calls)" 'logger -t sandbox-health FATAL')" "$(calls)"
+check "detection only: nothing is restarted or reloaded"               "$([ "$(has "$(calls)" 'restart')" = 0 ] && [ "$(has "$(calls)" 'reload')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+
+# The same file with NO evidence of Cloudflare is left alone: the global block
+# by itself is not evidence, so the FATAL above came from the ufw tag.
+reset; snippet | sed 's/{client_ip}/{remote_host}/' > "$TMP/Caddyfile"
+run env
+check "the same file with no origin lock and no knob is silent" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+# The other half-merge: the new line was added and the old one NOT deleted.
+# The Caddyfile is its own evidence here; a check that stops at "the right line
+# exists" would pass it.
+reset; snippet | sed 's|^\(\treverse_proxy 127.0.0.1:3000 {\)$|\1\n\t\theader_up X-Forwarded-For {remote_host}|' > "$TMP/Caddyfile"
+check "fixture sanity: both header_up lines present" "$([ "$(has "$(cat "$TMP/Caddyfile")" 'header_up X-Forwarded-For {remote_host}')" = 1 ] && [ "$(has "$(cat "$TMP/Caddyfile")" 'header_up X-Forwarded-For {client_ip}')" = 1 ] && echo 1 || echo 0)" "$(cat "$TMP/Caddyfile")"
+run env
+check "a stale {remote_host} line beside the correct one is FATAL" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile writes X-Forwarded-For from {remote_host}")" "$(logtxt)"
+
+# The site block missing entirely: the global block resolves the visitor and
+# nothing hands it to the backend.
+reset; snippet | sed '/^[[:space:]]*header_up X-Forwarded-For {client_ip}$/d' > "$TMP/Caddyfile"
+check "fixture sanity: no header_up X-Forwarded-For line remains" "$([ "$(grep -Ec '^[[:space:]]*header_up[[:space:]]+X-Forwarded-For' "$TMP/Caddyfile")" = 0 ] && echo 1 || echo 0)"
+run env OPS_BEHIND_CLOUDFLARE=1
+check "global block without any header_up X-Forwarded-For is FATAL" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile never writes X-Forwarded-For")" "$(logtxt)"
+check "and names the missing line"                                 "$(has "$(logtxt)" 'header_up X-Forwarded-For {client_ip}')"
+check "and says what it costs"                                     "$(has "$(logtxt)" "$COLLAPSE")"
+
+# POSITIVE CONTROLS for the site-block check: the old line kept as a COMMENT
+# (the tidy way to merge) and a quoted value (Caddyfile syntax allows it) are
+# both correct configs and must stay silent.
+reset; snippet | sed 's|^\(\treverse_proxy 127.0.0.1:3000 {\)$|\1\n\t\t# header_up X-Forwarded-For {remote_host}|' > "$TMP/Caddyfile"
+run env
+check "the old {remote_host} line commented out does NOT count" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+reset; snippet | sed 's/header_up X-Forwarded-For {client_ip}/header_up X-Forwarded-For "{client_ip}"/' > "$TMP/Caddyfile"
+check "fixture sanity: the value is quoted" "$(has "$(cat "$TMP/Caddyfile")" 'header_up X-Forwarded-For "{client_ip}"')"
+run env
+check "a quoted \"{client_ip}\" is accepted" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+# Direct mode: the shipped deploy/Caddyfile on a box nothing says is behind
+# Cloudflare. Its comments mention trusted_proxies; that must not trip anything.
+reset; cp "$DIRECT" "$TMP/Caddyfile"
+run env
+check "direct-mode deploy/Caddyfile with no origin lock is silent" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+# ...but the SAME file on a box whose ufw carries origin-firewall.sh's tag is a
+# Cloudflare deployment that never installed the snippet: the collapse is live.
+reset; cp "$DIRECT" "$TMP/Caddyfile"
+printf 'ufw allow 22/tcp\nufw allow proto tcp from 173.245.48.0/20 to any port 443 comment '"'"'cf-origin'"'"'\nufw deny proto tcp to any port 443 comment '"'"'cf-origin default-deny'"'"'\n' > "$STATE/ufw-added"
+run env
+check "origin lock present + direct-mode Caddyfile is FATAL" "$(has "$(logtxt)" "FATAL $TMP/Caddyfile has no global")" "$(logtxt)"
+
+reset; snippet | sed '/^{$/,/^}$/d' > "$TMP/Caddyfile"
+run env OPS_BEHIND_CLOUDFLARE=0
+check "OPS_BEHIND_CLOUDFLARE=0 silences it (not behind Cloudflare, or not Caddy)" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+reset
+run env
+check "no Caddyfile and no evidence -> silent (nginx box, or no proxy)" "$(cfquiet "$(logtxt)")" "$(logtxt)"
+
+reset
+run env OPS_BEHIND_CLOUDFLARE=1
+check "OPS_BEHIND_CLOUDFLARE=1 with no Caddyfile is FATAL (cannot verify)" "$(has "$(logtxt)" 'FATAL cannot verify client-IP resolution')" "$(logtxt)"
+check "and says how to point it at the real file"                          "$(has "$(logtxt)" 'set CADDYFILE in /etc/default/puca')"
+
+reset; cp "$SNIPPET" "$TMP/Caddyfile"
+run env OPS_BEHIND_CLOUDFLARE=1
+check "OPS_BEHIND_CLOUDFLARE=1 with the snippet installed is silent" "$(cfquiet "$(logtxt)")" "$(logtxt)"
 
 echo
 if [ "$fails" -gt 0 ]; then

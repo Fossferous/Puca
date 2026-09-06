@@ -177,3 +177,131 @@ if command -v ufw >/dev/null 2>&1 && [ "${OPS_MANAGE_UFW:-}" != "0" ]; then
 		fi
 	fi
 fi
+
+# --- Client-IP resolution behind Cloudflare -----------------------------------------
+#
+# Every per-IP ceiling in the backend — the 5/s auth and 50/s API limiters
+# (src/middleware/rate_limit.rs), WS_MAX_CONNS_PER_IP, the upload and download
+# slots — keys on the address `real_client_ip` (src/state.rs) resolves, which
+# behind Caddy is whatever Caddy put in X-Forwarded-For. Behind Cloudflare the
+# TCP peer is always an edge address, and Caddy's {client_ip} placeholder
+# resolves the real visitor ONLY from the global options block that
+# deploy/cloudflare/caddy-behind-cloudflare.snippet prescribes:
+#
+#   {
+#       servers {
+#           trusted_proxies static <Cloudflare ranges>
+#           client_ip_headers CF-Connecting-IP
+#       }
+#   }
+#
+# Without it the placeholder silently falls back to the peer, X-Forwarded-For
+# carries a Cloudflare edge IP, and every limit collapses to ONE bucket shared by
+# the whole internet: one visitor's burst 429s everyone, and an attacker's
+# requests are indistinguishable from the crowd's. Nothing else notices — the
+# site works, the unit is active, the probe passes. (A `trusted_proxies`
+# subdirective inside `reverse_proxy` does NOT feed the placeholder — the
+# snippet's header says why — so it must not count here either, and neither
+# may a comment that merely mentions the directive.)
+#
+# Evidence that this box is behind Cloudflare, either of which is enough: the
+# Caddyfile hands X-Forwarded-For a client_ip placeholder (the snippet's site
+# block was installed), or the ufw rule set carries origin-firewall.sh's
+# `cf-origin` tag (the origin was locked to Cloudflare). A direct-mode
+# Caddyfile (deploy/Caddyfile, {remote_host}) on a box with no origin lock is
+# left alone. Knobs in /etc/default/puca: OPS_BEHIND_CLOUDFLARE=1 forces the
+# assertion (a hand-written or nginx front end), 0 disables it; CADDYFILE
+# names the file (default /etc/caddy/Caddyfile).
+#
+# Detection only, and it repeats every 5 minutes while the condition holds —
+# like the FATAL probe line above, this is a standing misconfiguration, not an
+# event. Nothing here edits a Caddyfile or touches caddy.
+CADDYFILE="${CADDYFILE:-/etc/caddy/Caddyfile}"
+CF_SNIPPET="deploy/cloudflare/caddy-behind-cloudflare.snippet"
+
+#   caddy_behind_cloudflare  -> 0 when this origin is (or is declared) behind Cloudflare
+caddy_behind_cloudflare() {
+	case "${OPS_BEHIND_CLOUDFLARE:-}" in 1) return 0 ;; 0) return 1 ;; esac
+	if [ -r "$CADDYFILE" ] && grep -Eq '^[[:space:]]*header_up[[:space:]]+X-Forwarded-For[[:space:]]+\{(http\.(vars|request)\.)?client_ip\}' "$CADDYFILE"; then
+		return 0
+	fi
+	if command -v ufw >/dev/null 2>&1 && ufw show added 2>/dev/null | grep -q 'cf-origin'; then
+		return 0
+	fi
+	return 1
+}
+
+#   caddy_global_client_ip_block <Caddyfile>  -> 0 when a `servers { … }` block
+#   carries BOTH `trusted_proxies <source …>` and `client_ip_headers … CF-Connecting-IP`.
+#   Comments are stripped first; braces are walked so only directives INSIDE the
+#   servers block count.
+caddy_global_client_ip_block() {
+	awk '
+		{ sub(/#.*/, "") }
+		!srv && /^[[:space:]]*servers([[:space:]]|\{|$)/ { srv = 1; depth = 0; opened = 0 }
+		srv {
+			if ($0 ~ /^[[:space:]]*trusted_proxies[[:space:]]+[^[:space:]]/) tp = 1
+			if ($0 ~ /^[[:space:]]*client_ip_headers[[:space:]]/ && index($0, "CF-Connecting-IP")) cih = 1
+			o = gsub(/\{/, "{"); c = gsub(/\}/, "}")
+			depth += o - c
+			if (o) opened = 1
+			if (opened && depth <= 0) srv = 0
+		}
+		END { exit (tp && cih) ? 0 : 1 }
+	' "$1"
+}
+
+#   caddy_xff_values <Caddyfile>  -> the value of EVERY uncommented
+#   `header_up X-Forwarded-For <value>` line, one per line, quotes stripped;
+#   empty output when the header is never written. This is the site-block half
+#   of the snippet, the one an operator who MERGED the global block into an
+#   existing Caddyfile can leave at deploy/Caddyfile's direct-mode {remote_host}:
+#   the global block then resolves the visitor correctly and the site block
+#   throws the answer away, and the global-block check above stays green.
+caddy_xff_values() {
+	sed -e 's/\r$//' -e 's/#.*//' "$1" | awk '
+		$1 == "header_up" && $2 == "X-Forwarded-For" {
+			v = $3; gsub(/^"|"$/, "", v)
+			print (v == "" ? "<empty>" : v)
+		}'
+}
+
+#   caddy_xff_stale <Caddyfile>  -> prints the first X-Forwarded-For value that is
+#   NOT {client_ip} / {http.vars.client_ip} (nothing when every line is right).
+#   A leftover line counts even beside a correct one: which of two `header_up`
+#   lines for the same field wins is an ordering accident, not a config.
+caddy_xff_stale() {
+	caddy_xff_values "$1" | grep -Ev '^\{(http\.vars\.)?client_ip\}$' | head -n 1
+}
+
+if caddy_behind_cloudflare; then
+	if [ ! -r "$CADDYFILE" ]; then
+		note "FATAL cannot verify client-IP resolution: $CADDYFILE is not readable, yet this origin is behind Cloudflare — set CADDYFILE in /etc/default/puca to the real file, or OPS_BEHIND_CLOUDFLARE=0 if the front end is not Caddy (then verify its real-IP config by hand: without it every per-IP rate limit is one bucket for the whole Cloudflare edge)"
+		logger -t "$SERVICE_NAME-health" "FATAL: behind Cloudflare but $CADDYFILE is unreadable; client-IP resolution unverified"
+	elif ! caddy_global_client_ip_block "$CADDYFILE"; then
+		note "FATAL $CADDYFILE has no global \`servers { trusted_proxies … client_ip_headers CF-Connecting-IP }\` block, and this origin is behind Cloudflare — Caddy's {client_ip} falls back to the edge peer, so EVERY per-IP rate limit is one bucket for the whole Cloudflare edge; install BOTH blocks of $CF_SNIPPET (the global one must be first in the file), then: caddy validate --config $CADDYFILE && systemctl reload caddy"
+		logger -t "$SERVICE_NAME-health" "FATAL: $CADDYFILE lacks the global trusted_proxies/client_ip_headers block; per-IP rate limits collapsed to one bucket behind Cloudflare"
+	elif grep -Eq '^[[:space:]]*header_up[[:space:]]+X-Forwarded-For[[:space:]]+\{http\.request\.client_ip\}' "$CADDYFILE"; then
+		# The trap the snippet's site block names: this placeholder does not
+		# exist, Caddy passes it through VERBATIM, and the backend receives the
+		# literal string — unparseable, so it degrades to the peer.
+		note "FATAL $CADDYFILE writes X-Forwarded-For from {http.request.client_ip}, a placeholder that does not exist — Caddy forwards the literal text and the backend falls back to the edge peer: one rate-limit bucket for the whole Cloudflare edge; use {client_ip} as $CF_SNIPPET does, then: caddy validate --config $CADDYFILE && systemctl reload caddy"
+		logger -t "$SERVICE_NAME-health" "FATAL: $CADDYFILE uses the nonexistent {http.request.client_ip} placeholder; per-IP rate limits collapsed behind Cloudflare"
+	elif ! caddy_xff_values "$CADDYFILE" | grep -q .; then
+		# The global block is right and the site block is missing: the
+		# resolved visitor never reaches the backend, which reads whatever
+		# X-Forwarded-For Caddy builds by default — from the TCP peer, here
+		# a Cloudflare edge address.
+		note "FATAL $CADDYFILE never writes X-Forwarded-For: the site block's \`header_up X-Forwarded-For {client_ip}\` is missing, so the visitor the global \`servers\` block resolved never reaches the backend — Caddy's default X-Forwarded-For is the TCP peer, the Cloudflare edge, so EVERY per-IP rate limit is one bucket for the whole Cloudflare edge; add that line to the reverse_proxy block as $CF_SNIPPET does, then: caddy validate --config $CADDYFILE && systemctl reload caddy"
+		logger -t "$SERVICE_NAME-health" "FATAL: $CADDYFILE has the global trusted_proxies block but no header_up X-Forwarded-For {client_ip}; per-IP rate limits collapsed behind Cloudflare"
+	elif [ -n "$(caddy_xff_stale "$CADDYFILE")" ]; then
+		# The merge failure the snippet's header invites: the global block
+		# was merged into an existing Caddyfile and the direct-mode
+		# `header_up X-Forwarded-For {remote_host}` (deploy/Caddyfile) was
+		# left in place — or left beside the new line. Either way the edge
+		# peer is what the backend keys on.
+		stale="$(caddy_xff_stale "$CADDYFILE")"
+		note "FATAL $CADDYFILE writes X-Forwarded-For from $stale — the global \`servers\` block resolves the visitor, but the site block hands the backend the TCP peer, the Cloudflare edge, so EVERY per-IP rate limit is one bucket for the whole Cloudflare edge; every \`header_up X-Forwarded-For\` in the reverse_proxy block must read \`header_up X-Forwarded-For {client_ip}\` as $CF_SNIPPET does (delete the direct-mode {remote_host} line, do not keep it beside the new one), then: caddy validate --config $CADDYFILE && systemctl reload caddy"
+		logger -t "$SERVICE_NAME-health" "FATAL: $CADDYFILE writes X-Forwarded-For from $stale, not {client_ip}; per-IP rate limits collapsed behind Cloudflare"
+	fi
+fi

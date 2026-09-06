@@ -36,7 +36,12 @@ the second runs **on your machine** and pushes releases to every server.
   supervises coturn and LiveKit where their units are enabled (restart when
   down, one liveness probe each); re-asserts the origin firewall **only on a
   host where ufw was configured** (an SSH allow rule in `ufw show added`, or
-  `OPS_MANAGE_UFW=1`); checks Postgres. Logs to `<install dir>/health.log`.
+  `OPS_MANAGE_UFW=1`); checks Postgres; and on a host behind Cloudflare
+  asserts that the Caddyfile carries the global `servers { trusted_proxies …
+  client_ip_headers CF-Connecting-IP }` block from
+  `deploy/cloudflare/caddy-behind-cloudflare.snippet` — without it every
+  per-IP rate limit is one bucket for the whole Cloudflare edge, and nothing
+  else notices (see **Abuse runbook** §5). Logs to `<install dir>/health.log`.
 - `puca.cron` — the `/etc/cron.d/puca` schedule wiring backup + health up.
 - `ship-offsite.sh` — the rclone uploader `backup.sh` calls when
   `OFFSITE_CMD` points at it (see **Offsite**).
@@ -82,6 +87,8 @@ DB_USER=sovereign          # the Postgres role that owns the database (restore.s
 # OPS_MANAGE_UFW=1                    # force the ufw re-assert (0 = never touch ufw)
 # COTURN_PROBE_PORT=3479              # default: listening-port from /etc/turnserver.conf
 # LIVEKIT_PROBE_URL=http://127.0.0.1:7880/   # default: port: from /opt/livekit/livekit.yaml
+# CADDYFILE=/etc/caddy/Caddyfile     # the file the Cloudflare client-IP assertion reads
+# OPS_BEHIND_CLOUDFLARE=1            # force that assertion (0 = never; default: detect from the Caddyfile / cf-origin ufw rules)
 ```
 
 `DB_USER` matters most on a host built by hand as the `postgres` superuser:
@@ -253,6 +260,310 @@ index (a vite `transformIndexHtml` keyed on the Capacitor build, plus a separate
 OTA build) and a real-device smoke test as the gate, staged after the web vhost
 policy has been live for a release cycle. Do not ship it blind: on mobile it
 arrives as an OTA the user cannot easily roll back.
+
+## Abuse runbook: the instance just got a public audience
+
+Everything below runs **on the box** as root against the names `names.sh`
+resolves (`puca` on a fresh install; substitute yours). Every behaviour cites
+the file that defines it — when this page and the code disagree, the code wins,
+so open the cited file before acting on the disagreement.
+
+There is **no instance-level admin API**. Every moderation route is scoped to
+one server (`/servers/:server_id/…`, `src/moderation_handlers.rs`), and
+`DELETE /account` is self-service only: it demands a fresh password proof that
+only `login_step_2` records (`require_password_proof`,
+`src/recovery_handlers.rs`), which an operator cannot mint. The operator's
+levers are the sign-up gate, `psql`, and the disk. That is by design — the
+server cannot read messages, so it cannot judge them either.
+
+### 1. Rotate the sign-up gate
+
+`REGISTRATION_INVITE_CODE` in `/opt/puca/.env` is ONE shared string. `register`
+(`src/handlers.rs`) compares what the sign-up form sent against it in constant
+time and answers `403 A valid invite code is required to register on this
+server.` on a mismatch. Unset or empty means registration is OPEN to anyone who
+finds the origin, and every account carries a storage entitlement with no
+global cap (section 3). There is no list of codes, no per-code expiry and no
+overlap window.
+
+**What a rotation does to codes already handed out: every old copy dies the
+instant the restarted process is listening.** The variable comes from the
+process environment (`EnvironmentFile=/opt/puca/.env`, `deploy/puca.service`),
+so an edit takes effect only on `systemctl restart puca`; from then on anyone
+still holding the old code — including someone with the sign-up form open at
+that moment — gets the 403 and the client's "That invite code wasn't
+accepted" copy (`registerRejectedMessage`,
+`frontend/src/components/Login.tsx`). Accounts already created are untouched;
+the gate is checked only at `POST /auth/register`. Server invite links
+(`<APP_URL>/invite/<code>`, `src/invite_handlers.rs`) are a different thing and
+keep working — but a newcomer arriving by one who has no account still needs
+the NEW sign-up code, and the client says so.
+
+So rotating without stranding anyone mid-signup is ordering, not a server
+feature: mint the new code, hand it to everyone you are still expecting
+BEFORE the restart, restart at a quiet moment (the restart drops every live
+WebSocket and every call on the box — clients reconnect on their own, calls do
+not), then tell whoever had the old code that it is dead.
+
+```bash
+NEW=$(openssl rand -hex 12)                                       # 24 chars; the check is exact-match
+sudo sed -i "s|^#\? *REGISTRATION_INVITE_CODE=.*|REGISTRATION_INVITE_CODE=$NEW|" /opt/puca/.env
+grep -c '^REGISTRATION_INVITE_CODE=' /opt/puca/.env               # must print 1 — append the line if it prints 0
+sudo systemctl restart puca
+curl -s https://chat.example.com/config | grep -o '"registration_invite_required":[a-z]*'   # :true
+```
+
+`GET /config` (`src/public_config.rs`) tells clients only THAT a code is
+required, never the code. To close registration outright, set a code you give
+to nobody; never "close" it by unsetting the variable — that opens it.
+
+The sign that the code has leaked, before you rotate:
+
+```bash
+sudo -u postgres psql -d puca -c "SELECT id, username, created_at FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 25"
+```
+
+### 2. Find an account and remove it, with its uploads
+
+Find it. Logins match on `LOWER(username)` (`src/handlers.rs`), so search the
+same way, then look at its footprint — owned servers, memberships, storage:
+
+```bash
+sudo -u postgres psql -d puca -c "SELECT id, username, created_at, deleted_at FROM users WHERE LOWER(username) = LOWER('the-name')"
+sudo -u postgres psql -d puca -v uid=42 <<'SQL'
+SELECT id, name FROM servers WHERE owner_id = :uid;
+SELECT s.id, s.name FROM server_members m JOIN servers s ON s.id = m.server_id WHERE m.user_id = :uid;
+SELECT kind, COUNT(*), pg_size_pretty(SUM(size_bytes)) FROM uploaded_files WHERE uploader_id = :uid GROUP BY kind;
+SQL
+```
+
+Then delete exactly as `delete_account` (`src/handlers.rs`) would: a
+**tombstone**, not `DELETE FROM users` — messages, tasks and moderation rows
+reference the account by foreign key, and `docs/SECURITY_MODEL.md` §11 is the
+contract for what stays. The handler refuses (`409`) while the account owns a
+server, because an ownerless server strands its members: if the first query
+returned rows, transfer the server in the app or delete it first
+(`DELETE FROM servers WHERE id = '<id>'` — every table keyed on `server_id`
+cascades, and channels take their messages with them; `delete_server` in
+`src/server_handlers.rs` runs the same statement. The one thing neither
+cascades nor is swept is `message_reactions`, which has no foreign key to
+messages — see section 2; sweep it first with
+`DELETE FROM message_reactions WHERE message_id IN (SELECT m.id FROM messages m JOIN channels c ON c.id = m.channel_id WHERE c.server_id = '<id>')`
+or accept the orphaned rows — no message view can reach them, but each
+reacting user's data export (`REACTIONS_SQL`, `src/export_handlers.rs`) still
+lists them).
+
+The transaction below is the handler's own SQL: the anonymising `UPDATE`, then
+`ACCOUNT_DELETE_CLEANUP` in the order the code runs it, then the upload stamp.
+**If the array in `src/handlers.rs` and this list ever differ, the array is
+right** — copy it, do not trust this page. Two deliberate departures, both
+marked in the SQL: the SRP salt and verifier are randomised with the
+`random()/md5` idiom of `migrations/040_account_deletion_hardening.sql` (the
+code uses `OsRng`; this deployment has no pgcrypto, and the bytes only have to
+be non-zero, because `deleted_at` is what refuses the login), and the uploads
+are stamped `purge_after = NOW()` instead of `NOW() + DELETED_ACCOUNT_FILE_GRACE_DAYS`
+— an abuser's files do not get the grace period a mistaken self-deletion gets.
+
+```bash
+sudo -u postgres psql -d puca -v ON_ERROR_STOP=1 -v uid=42 <<'SQL'
+BEGIN;
+-- src/handlers.rs delete_account: the anonymising UPDATE. deleted_at is what the
+-- login path checks; token_version + 1 evicts every JWT on every device.
+UPDATE users SET
+    username = 'deleted#' || id, display_name = NULL, avatar_file_id = NULL,
+    join_sound_file_id = NULL, leave_sound_file_id = NULL, email = NULL,
+    email_verified = FALSE, public_key = NULL,
+    salt = decode(md5(random()::text || id::text), 'hex'),                      -- migration 040's idiom (no pgcrypto)
+    verifier = (SELECT decode(string_agg(md5(random()::text || g || users.id::text), ''), 'hex')
+                FROM generate_series(1, 16) g),                                 -- 256 random bytes, never zero
+    wrap_salt = NULL, recovery_salt = NULL, seed_wrapped_pw = NULL, seed_wrapped_rc = NULL,
+    history_pubkey = NULL, history_wrapped_rc = NULL, history_pubkey_sig = NULL,
+    account_sign_pub = NULL, deleted_at = NOW(), token_version = token_version + 1
+WHERE id = :uid AND deleted_at IS NULL;
+-- ACCOUNT_DELETE_CLEANUP, src/handlers.rs, in order:
+DELETE FROM device_tokens WHERE user_id = :uid;
+UPDATE devices SET revoked_at = NOW() WHERE user_id = :uid AND revoked_at IS NULL;
+DELETE FROM notification_preferences WHERE user_id = :uid;
+DELETE FROM friends WHERE user1_id = :uid OR user2_id = :uid;
+DELETE FROM friend_requests WHERE sender_id = :uid OR receiver_id = :uid;
+DELETE FROM blocked_users WHERE blocker_id = :uid OR blocked_id = :uid;
+DELETE FROM member_roles WHERE user_id = :uid;
+DELETE FROM server_members WHERE user_id = :uid;
+DELETE FROM server_nicknames WHERE user_id = :uid;
+DELETE FROM email_verification_tokens WHERE user_id = :uid;
+DELETE FROM password_reset_tokens WHERE user_id = :uid;
+DELETE FROM device_share_invites WHERE owner_user = :uid OR grantee_user = :uid;
+DELETE FROM channel_keys WHERE recipient_id = :uid;
+UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = :uid;
+UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = :uid AND revoked_at IS NULL;
+-- UPLOAD_GRACE_STAMP_SQL, src/handlers.rs, with the grace set to zero. A server
+-- icon or custom emoji the account uploaded belongs to the server and stays.
+UPDATE uploaded_files SET purge_after = NOW()
+ WHERE uploader_id = :uid AND purge_after IS NULL
+   AND id::text NOT IN (SELECT icon_file_id FROM servers WHERE icon_file_id IS NOT NULL)
+   AND id::text NOT IN (SELECT file_id FROM custom_emojis WHERE file_id IS NOT NULL)
+   AND id::text NOT IN (SELECT file_id FROM server_emojis WHERE file_id IS NOT NULL);
+COMMIT;
+SQL
+```
+
+What SQL cannot do is hang up the account's live sockets (the handler calls
+`disconnect_user` after its commit). The `token_version` bump refuses the
+account's NEXT request and NEXT WebSocket upgrade, but a socket that is already
+open keeps its in-memory room membership until it drops. To cut it now,
+`systemctl restart puca` (everyone reconnects; calls drop) — or accept that it
+ends at that client's next disconnect.
+
+The stamped uploads are removed by the retention sweep in `src/main.rs`: every
+6 hours, 200 rows per pass, row first and then `uploads/<stored_name>` under
+`WorkingDirectory=/opt/puca` (`deploy/puca.service`). To reclaim the disk now,
+in the sweep's order:
+
+```bash
+sudo -u postgres psql -d puca -tAc "DELETE FROM uploaded_files WHERE uploader_id = 42 AND purge_after IS NOT NULL RETURNING stored_name" \
+  | while IFS= read -r f; do case "$f" in ''|*/*|*..*) continue ;; esac; sudo rm -f -- "/opt/puca/uploads/$f"; done
+```
+
+Their messages stay, as ciphertext attributed to `deleted#<id>`: the server
+cannot read them, and they are other people's conversations too. Spam that
+must go is a moderator's job in the app (`MANAGE_MESSAGES`); for a flood, two
+statements, reactions FIRST:
+
+```sql
+DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE user_id = :uid);
+DELETE FROM messages WHERE user_id = :uid;
+```
+
+Pins, edit history and thread children cascade from the message
+(`migrations/018_create_pinned_messages.sql`, `001_init.sql` `message_edits`,
+`013_message_tasks.sql`). Reactions do NOT: the table the app uses is
+`message_reactions` (`migrations/009_reactions_emojis.sql`), whose
+`message_id` carries no foreign key — `001_init.sql`'s `reactions` table does
+cascade, but nothing in `src/` reads or writes it. `delete_message` in
+`src/message_handlers.rs` sweeps `message_reactions` by hand after every
+single-message delete for exactly this reason; run the sweep first here because
+once the messages are gone nothing links the orphans to the account. Open
+clients see the change on their next history fetch, not by a WebSocket frame.
+
+### 3. Watch storage
+
+Quotas are per ACCOUNT and there is no global cap (`src/upload_handlers.rs`):
+512 MiB of attachments (`UPLOAD_MAX_USER_BYTES`, floor 1 MiB), 5000 files
+(`MAX_USER_FILES`, a constant), and 2 GiB of clip parts (`CLIP_MAX_USER_BYTES`).
+The ceiling on the disk is therefore `accounts × 2.5 GiB`, and the sign-up gate
+is the only global cap. The check is coarse on purpose — it reads the SUM
+before the write, so concurrent uploads can each pass it by one file.
+
+```bash
+du -sh /opt/puca/uploads; df -h /opt/puca                  # what is there, and what is left
+sudo -u postgres psql -d puca <<'SQL'
+SELECT COUNT(*) AS accounts, pg_size_pretty(COUNT(*) * 2560::bigint * 1024 * 1024) AS worst_case FROM users WHERE deleted_at IS NULL;
+SELECT u.id, u.username, COUNT(*) AS files, pg_size_pretty(SUM(f.size_bytes)) AS bytes
+  FROM uploaded_files f JOIN users u ON u.id = f.uploader_id
+ GROUP BY u.id, u.username ORDER BY SUM(f.size_bytes) DESC LIMIT 15;
+SELECT pg_size_pretty(pg_database_size('puca')) AS database;
+SQL
+grep 'backups dir' /opt/puca/backup.log | tail -3           # backup.sh logs the backups size + free space nightly
+```
+
+Every byte of uploads is also archived nightly into `backups/` and kept 14 days
+(`KEEP_DAYS`), so 1 GB of uploads costs up to 15 GB on the same partition until
+`MAX_LOCAL_UPLOAD_ARCHIVES` caps it; `backup.sh` skips the archive rather than
+fill the disk once `BACKUP_MIN_FREE_BYTES` would be breached (see **Backup
+knobs**). Lower the per-user quotas in `.env` (restart to apply) before the disk
+is the thing that says no.
+
+### 4. Ban, block, report — what each is and where it lives
+
+| Lever | Scope | Who may | Route (`src/main.rs`) | Writes | Effect |
+|---|---|---|---|---|---|
+| Kick | one server | `KICK_MEMBERS`, outranking the target | `POST /servers/:id/kick/:uid` | deletes the membership + roles | can rejoin by any invite |
+| Timeout | one server | `KICK_MEMBERS`, outranking the target (lifting it needs only `KICK_MEMBERS`) | `POST /servers/:id/timeout/:uid` (`DELETE` lifts it) | `member_timeouts` row with `expires_at` | muted in that server until it expires |
+| Ban | one server | `BAN_MEMBERS`, outranking the target | `POST /servers/:id/bans/:uid` (`GET …/bans` lists, `DELETE` lifts) | `bans` row; membership + `member_roles` deleted | invite join and public join refuse (`src/invite_handlers.rs`, `src/server_handlers.rs`) |
+| Block | personal | anyone | `POST /users/:uid/block` (`DELETE` unblocks) | `blocked_users`; the friendship and pending requests are torn down in the same transaction | DMs, presence and friend surfaces hide the pair from each other; unblocking does not restore the friendship (`block_user`, `src/moderation_handlers.rs`) |
+| Report | one server | any member, 15 per hour per server | `POST /servers/:id/reports` | `reports` row, `status = 'pending'` | read by `MANAGE_MESSAGES` holders at `GET /servers/:id/reports`, closed by `PATCH /servers/:id/reports/:rid`; resolved rows pruned after `REPORTS_RETENTION_DAYS`, pending never |
+
+"Outranking the target" is `can_moderate` in `src/permissions.rs`, called by
+`kick_member`, `timeout_member` and `ban_member` in `src/moderation_handlers.rs`
+alike: the owner may act on anyone, an administrator on anyone but the owner,
+everyone else only on a member ranked strictly below their own highest role.
+The owner is never kickable, timeout-able or bannable — not by an
+administrator, not by anyone. Kick and ban also refuse yourself outright
+(`Cannot kick yourself`); timeout relies on the rank rule alone, which stops
+everyone but an administrator from timing themselves out. A compromised
+`KICK_MEMBERS` account therefore reaches neither the owner nor an
+administrator.
+
+In the app: right-click a member (`frontend/src/components/UserContextMenu.tsx`
+— Kick, Ban, Report, Block); the ban list and the report queue are in Server
+settings (`frontend/src/components/ServerSettingsModal.tsx`). Kicks, bans and
+timeouts land in that server's audit log (`GET /servers/:id/audit-log`,
+pruned after `AUDIT_RETENTION_DAYS`).
+
+None of these reaches past one server: a banned account keeps its login and
+every other server it is in. The instance-wide equivalents are section 1
+(nobody new gets in) and section 2 (this account is gone). The pending queue
+across every server, for the operator — reasons are what the reporter typed;
+the reported message itself is ciphertext the server cannot show you:
+
+```bash
+sudo -u postgres psql -d puca -c "SELECT r.id, s.name AS server, r.report_type, left(r.reason, 60) AS reason, r.created_at FROM reports r JOIN servers s ON s.id = r.server_id WHERE r.status = 'pending' ORDER BY r.created_at"
+```
+
+### 5. Is the rate limiter per visitor behind Cloudflare?
+
+Every per-IP ceiling keys on `real_client_ip` (`src/state.rs`): the 5/s auth
+and 50/s API limiters (`src/middleware/rate_limit.rs`), `WS_MAX_CONNS_PER_IP`,
+`UPLOAD_MAX_CONCURRENT_PER_IP`, `FILE_MAX_CONCURRENT_PER_IP`. From a loopback
+or private peer — Caddy — it believes `X-Forwarded-For`, so the answer is
+whatever Caddy wrote there. Behind Cloudflare that is the real visitor ONLY
+with the global `servers { trusted_proxies … client_ip_headers CF-Connecting-IP }`
+block of `deploy/cloudflare/caddy-behind-cloudflare.snippet` installed; without
+it `{client_ip}` is the edge address and the whole internet shares one bucket —
+one visitor's burst 429s everyone, and an attacker is indistinguishable from
+the crowd. Three checks, cheapest first:
+
+1. **The healthcheck asserts it** every 5 minutes on any box that is behind
+   Cloudflare (a `{client_ip}` placeholder in the Caddyfile, or
+   `origin-firewall.sh`'s `cf-origin` ufw rules, or `OPS_BEHIND_CLOUDFLARE=1`):
+
+   ```bash
+   grep -c 'one bucket for the whole Cloudflare edge' /opt/puca/health.log    # 0, or you have work to do
+   ```
+
+2. **What Caddy actually loaded**, not what the file looks like:
+
+   ```bash
+   caddy adapt --config /etc/caddy/Caddyfile 2>/dev/null | python3 -c '
+   import json, sys
+   for name, srv in json.load(sys.stdin)["apps"]["http"]["servers"].items():
+       print(name, srv.get("trusted_proxies", {}).get("source"), srv.get("client_ip_headers"))'
+   # expect one line per server like:  srv0 static ['CF-Connecting-IP']  — a None in either column is the collapse
+   ```
+
+3. **From outside**, on a machine that is not on the box's LAN — the snippet's
+   own closing check, with the second half it needs. Two properties, and each
+   test proves only one: headers you send must NOT re-key you (a), and a
+   second visitor must NOT share your bucket (b).
+
+   ```bash
+   # (a) 15 login attempts, each claiming a DIFFERENT origin: the auth limiter
+   #     (5/s, burst 10) must still bite — some 429s — which proves the key is
+   #     your real address, not the header you typed.
+   for i in $(seq 1 15); do
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST https://chat.example.com/auth/login/step1 \
+       -H 'content-type: application/json' -H "X-Forwarded-For: 203.0.113.$i" -H "CF-Connecting-IP: 203.0.113.$i" \
+       -d '{"username":"nobody-here"}'
+   done | sort | uniq -c
+   # (b) in the same second, ONE request from a second public IP (a phone off
+   #     Wi-Fi will do) must NOT be 429. If it is, everyone is one bucket.
+   ```
+
+   A 429 from the backend is a one-line plain-text body; Cloudflare's own rate
+   rule answers with its HTML error page — tell them apart before drawing a
+   conclusion. And one sign from production itself: `journalctl -u puca | grep
+   'WS upgrade refused'` names the address it keyed on (`src/ws.rs`); if that is
+   a Cloudflare range rather than a visitor, the collapse is live.
 
 ## On your machine: shipping releases
 
