@@ -44,4 +44,11 @@ if (syncIdx !== -1) {
     }
     console.log(`[build-lite] syncing the LITE bundle into ${platform} (shared appId com.sovereign.app, appName "Púca Lite")`);
     run('npx', ['cap', 'sync', platform]);
+    // The Android WebView gets its Content-Security-Policy from a <meta> in
+    // the SYNCED index.html (the web dist keeps none; its policy is the server
+    // header). Must run after the sync, which overwrites that file. Same step
+    // as `npm run cap:build:android`; see scripts/cap-index-csp.mjs.
+    if (platform === 'android') {
+        run('node', ['scripts/cap-index-csp.mjs', '--platform', 'android']);
+    }
 }

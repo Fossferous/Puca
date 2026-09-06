@@ -28,7 +28,7 @@
     "cap:ios": "npm run build && npx cap sync ios && npx cap open ios",
     "cap:android": "npm run build && npx cap sync android && npx cap open android",
     "cap:build:ios": "npm run build && npx cap sync ios",
-    "cap:build:android": "npm run build && npx cap sync android",
+    "cap:build:android": "npm run build && npx cap sync android && node scripts/cap-index-csp.mjs --platform android",
     "e2e": "playwright test",
     "e2e:ui": "playwright test --ui",
     "e2e:headed": "playwright test --headed",
