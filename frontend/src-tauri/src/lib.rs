@@ -1343,12 +1343,25 @@ pub fn run() {
             // log::info!/warn! vanished in the installed app and users asked to
             // check for a diagnostic line correctly saw nothing.
             {
-                use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
+                use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
                 // Local-time stamps: users read this log to correlate with what
                 // they just did; UTC lines an hour off caused real confusion.
+                //
+                // Rotation: the plugin's defaults are a 40 000-byte file and
+                // KeepOne (delete-and-restart at the cap). The stream-diag
+                // sampler (api/streamDiag.ts) writes a ~300-byte line every
+                // second on BOTH ends of a remote-control session, so at the
+                // defaults the log self-truncated within two minutes and a
+                // reported slow session had no samples left to read. 2 MB per
+                // file is about two hours of sampling; KeepSome(2) keeps two
+                // dated archives beside the active file (the count excludes
+                // the active one — see the plugin's remove_old_files), so a
+                // whole control session survives in at most ~6 MB on disk.
                 let builder = tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
-                    .timezone_strategy(TimezoneStrategy::UseLocal);
+                    .timezone_strategy(TimezoneStrategy::UseLocal)
+                    .max_file_size(2 * 1024 * 1024)
+                    .rotation_strategy(RotationStrategy::KeepSome(2));
                 let builder = if cfg!(debug_assertions) {
                     builder
                         .target(Target::new(TargetKind::Stdout))

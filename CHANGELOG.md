@@ -4,6 +4,25 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.7 — 2026-09-06
+
+A hotfix for the remote-control work in 0.9.6, found by reviewing that change
+after it shipped.
+
+### Fixed
+- **Ending a control session while input was still queued could leave a key
+  or mouse button held down on the shared machine.** The release that ends a
+  session is now ordered behind every batch of input queued before it, and a
+  batch that belonged to a session which has already ended is dropped instead
+  of injected.
+- **Refused injections no longer flood the diagnostics log.** When the shared
+  machine refuses input (a lock screen, a security prompt, a window running as
+  administrator), the log records the first refusal in full, then a short
+  summary every ten-fold count or five seconds, then one line when injection
+  works again.
+- **The diagnostics log keeps about two hours of a control session** (three
+  files of 2 MB) instead of truncating within minutes.
+
 ## 0.9.6 — 2026-09-06
 
 Remote-controlling a friend's shared screen felt about a second behind. The
@@ -26,9 +45,11 @@ readable from the app instead of guessed at.
   motion valve used to engage at 64 KiB of unsent input — five to ten seconds
   of movement replayed late once the link recovered — and, on the direct
   channel, to move frames onto the relay mid-session, where a press and its
-  release could arrive out of order. It engages at 4 KiB now (a few hundred
-  milliseconds), holds motion in place until the pipe drains, and never
-  changes pipe under a session.
+  release could arrive out of order. On a direct peer-to-peer call (and on
+  the relay) it engages at 4 KiB now (a few hundred milliseconds), holds
+  motion in place until the pipe drains, and never changes pipe under a
+  session. On an SFU call the valve cannot see the data path's queue yet, so
+  it does not engage there.
 - **Clicks cannot overtake the move that placed them.** The host used to hand
   the pointer position and the click to the desktop as two separate,
   un-awaited IPC calls with no ordering between them; a click and any motion
@@ -52,10 +73,17 @@ readable from the app instead of guessed at.
   selected network path's protocol and round trip — enough to say which stage
   owns a slow share. An SFU viewer now gets numbers for the tracks it
   subscribes to; before it got none.
-- The unattended log sampler runs on both ends of a remote-control session,
-  every second, with the same fields and which pipe the input is on
-  (`lane=mesh-dc|sfu-data|relay`); `[p2p-input] peer N: no P2P lane after 2 s`
-  is logged when a session stays on the relay.
+- The unattended log sampler runs on both ends of a remote-control session
+  on desktop, every second, with the same fields and which pipe the input is
+  on (`lane=mesh-dc|sfu-data|relay`); `[p2p-input] peer N: no P2P lane after
+  2 s` is logged when a session stays on the relay. A browser or phone viewer
+  writes no sampler line (there is no log file to write to): read
+  `await __pucaMeshDiag(5000)` from DevTools there instead. The desktop log
+  now rotates at 2 MB with two archives kept, so a session's samples survive;
+  the default 40 KB file self-truncated within minutes of sampling. While the
+  desktop refuses injected input (a lock screen, a UAC prompt, an admin
+  window) the log gets the first refusal in full and a count after that, not
+  one line per mouse move.
 - `frontend/e2e/rc-latency-2peer.mjs` measures glass-to-glass and
   pointer-to-desktop latency of the in-call share on one machine (loopback,
   synthetic desktop): 1080p30 measures p50 ≈ 40–60 ms glass to glass and

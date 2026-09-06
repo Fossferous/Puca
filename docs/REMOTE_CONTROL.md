@@ -20,9 +20,9 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   ends created it in-band and each closed the copy that arrived, which is
   the peer's own channel, so every session fell back to the relay (two WAN
   legs through the edge proxy per mouse move) with nothing in any log to say
-  so. The unattended sampler now prints the lane (`lane=mesh-dc|sfu-data|
-  relay`) for every live session, and `[p2p-input] peer N: no P2P lane after
-  2 s` is logged when a session stays on the relay.
+  so. The unattended sampler (desktop only) now prints the lane
+  (`lane=mesh-dc|sfu-data|relay`) for every live session, and `[p2p-input]
+  peer N: no P2P lane after 2 s` is logged when a session stays on the relay.
 - **Injection:** only the **Windows desktop app** can inject input, via Win32
   `SendInput` (`src-tauri/src/remote_control.rs`). Keys are injected by hardware
   **scan code** (many games ignore virtual-key input). Web/mobile hosts cannot
@@ -139,7 +139,12 @@ exist to say where:
   `rttMs` — anything but `udp` turns loss into a standing queue.
 - The unattended sampler (`%LOCALAPPDATA%\com.sovereign.chat\logs\puca.log`)
   writes the same fields every second while a control session is live on
-  either end, plus `rc=viewer|host peer=N lane=…`.
+  either end **on desktop**, plus `rc=viewer|host peer=N lane=…`. It only runs
+  in the Tauri app (`holdStreamDiag` returns at once elsewhere), so a browser
+  or phone viewer produces no sampler line — read `await __pucaMeshDiag(5000)`
+  from DevTools on that end instead. The log rotates at 2 MB, two archives
+  kept (`puca.log` plus dated copies), so a whole session's samples stay
+  readable.
 - The host page's main thread is the contention-sensitive half: with it 60%
   busy, pointer-to-inject-call measured p50 25 ms / p90 65 ms while the video
   leg moved 5 ms — which is what the coalescer and the batched IPC address.

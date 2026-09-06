@@ -38,6 +38,19 @@ import {
 import { getCachedPublicKey } from './dms';
 import { pinServedIdentityKey } from './keyVerification';
 
+// ONE import promise for the Tauri core, shared by every call site in this
+// file. Two dynamic imports of the same module in flight at once are fine in
+// the webview, but under vitest's module mock the second overlapping one
+// resolves to the UNMOCKED module (its `invoke` throws on the missing
+// __TAURI_INTERNALS__, swallowed by the best-effort catches) — so a test could
+// never see the release that endHostSession issues right behind stopGuard.
+// Same fix as devices/session.ts's tauriCore().
+let tauriCoreModule: Promise<typeof import('@tauri-apps/api/core')> | null = null;
+function tauriCore(): Promise<typeof import('@tauri-apps/api/core')> {
+    if (!tauriCoreModule) tauriCoreModule = import('@tauri-apps/api/core');
+    return tauriCoreModule;
+}
+
 // End a control session that receives no input for this long (stuck/abandoned).
 const INACTIVITY_MS = 90_000;
 // Hard backstop on injected events/sec (real use is far below; blocks floods).
@@ -71,7 +84,7 @@ function clearConsentAttention() {
         consentDeadlineTimer = null;
     }
     if (isTauri()) {
-        void import('@tauri-apps/api/core')
+        void tauriCore()
             .then(({ invoke }) => invoke('release_attention_topmost'))
             .catch(() => { /* older build without the command */ });
     }
@@ -389,7 +402,7 @@ function isMissingCommand(e: unknown, name: string): boolean {
 async function injectRaw(events: ControlEvent[]): Promise<void> {
     if (!isTauri() || events.length === 0) return;
     try {
-        const { invoke } = await import('@tauri-apps/api/core');
+        const { invoke } = await tauriCore();
         if (!injectBatchUnsupported) {
             try {
                 await invoke('inject_input_batch', { events });
@@ -442,9 +455,18 @@ function drainIncoming(): ControlEvent[] {
 // leading edge as its own batch and the click that arrives right behind it
 // are two batches, and two un-awaited invokes have no relative order.
 let injectChain: Promise<void> = Promise.resolve();
+// Bumped by releaseInput: a batch queued for a session that has since been
+// released must not land AFTER that release — it would re-press a key or
+// button the release just let go, and nothing lets go of it again until the
+// app quits. inject() captures the epoch at queue time and, when its turn on
+// the chain comes, drops the batch if the epoch has moved.
+let injectEpoch = 0;
 function inject(events: ControlEvent[]): void {
     if (events.length === 0) return;
-    injectChain = injectChain.then(() => injectRaw(events)).catch(() => { /* injectRaw logs */ });
+    const epoch = injectEpoch;
+    injectChain = injectChain
+        .then(() => (epoch === injectEpoch ? injectRaw(events) : undefined))
+        .catch(() => { /* injectRaw logs */ });
 }
 
 function flushIncoming() {
@@ -494,13 +516,31 @@ async function releaseInput() {
     inRmovePending = false;
     inRmoveDx = 0;
     inRmoveDy = 0;
+    // Anything still parked on the chain belongs to the session being
+    // released: it is dropped when its turn comes (see injectEpoch).
+    injectEpoch++;
     if (!isTauri()) return;
-    try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('release_control_input');
-    } catch {
-        /* best effort */
-    }
+    // The release rides the SAME chain as the batches. Each batch is handed
+    // to the native queue only when the one before it has resolved (an IPC
+    // round trip), so a batch still parked here is NOT yet in the native FIFO
+    // and the native ReleaseAll — ordered only behind what has already
+    // reached that queue — cannot cover it. Invoked directly, the release
+    // overtook such a batch and the batch re-pressed whatever it carried
+    // (regression from serialising the batches; before that every pending
+    // event was issued in the same turn as the release). Chained, the
+    // release runs only after every batch queued before it has been handed
+    // over, and the native ordering does the rest.
+    injectChain = injectChain
+        .then(async () => {
+            try {
+                const { invoke } = await tauriCore();
+                await invoke('release_control_input');
+            } catch {
+                /* best effort */
+            }
+        })
+        .catch(() => { /* best effort */ });
+    await injectChain;
 }
 
 // Map the shared surface to the correct monitor (multi-monitor / negative
@@ -508,7 +548,7 @@ async function releaseInput() {
 async function setupMonitorTarget() {
     if (!isTauri()) return;
     try {
-        const { invoke } = await import('@tauri-apps/api/core');
+        const { invoke } = await tauriCore();
         const ml = await invoke<{
             monitors: Array<{ index: number; left: number; top: number; width: number; height: number; primary: boolean }>;
             virt_left: number; virt_top: number; virt_width: number; virt_height: number;
@@ -539,7 +579,7 @@ async function setupMonitorTarget() {
 async function clearMonitorTarget() {
     if (!isTauri()) return;
     try {
-        const { invoke } = await import('@tauri-apps/api/core');
+        const { invoke } = await tauriCore();
         await invoke('set_control_monitor', { target: null });
     } catch {
         /* best effort */
@@ -567,7 +607,7 @@ function clearInactivity() {
 async function listAnticheat(): Promise<string[]> {
     if (!isTauri()) return [];
     try {
-        const { invoke } = await import('@tauri-apps/api/core');
+        const { invoke } = await tauriCore();
         return await invoke<string[]>('list_anticheat_processes');
     } catch {
         return [];
@@ -587,7 +627,7 @@ async function startGuard() {
         // button and the any-input kill remain.
         const kk = s.remoteControlKillKey;
         const killMods = kk ? ((kk.ctrl ? 1 : 0) | (kk.alt ? 2 : 0) | (kk.shift ? 4 : 0)) : 0;
-        const { invoke } = await import('@tauri-apps/api/core');
+        const { invoke } = await tauriCore();
         await invoke('start_control_guard', {
             anyInput: !!s.remoteControlAnyInputKill,
             killVk: kk ? (kk.keyCode | 0) : 0,
@@ -601,7 +641,7 @@ async function startGuard() {
 async function stopGuard() {
     if (!isTauri()) return;
     try {
-        const { invoke } = await import('@tauri-apps/api/core');
+        const { invoke } = await tauriCore();
         await invoke('stop_control_guard');
     } catch {
         /* best effort */
@@ -1242,7 +1282,7 @@ export function initRemoteControl() {
             const now = Date.now();
             const surface = now - lastAttentionAt > ATTENTION_COOLDOWN_MS;
             if (surface) lastAttentionAt = now;
-            void import('@tauri-apps/api/core')
+            void tauriCore()
                 .then(({ invoke }) => invoke('attention_main_window', { mode: surface ? 'surface' : 'flash' }))
                 .catch(() => { /* older build without the command */ });
             void (async () => {

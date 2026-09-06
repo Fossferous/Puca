@@ -322,3 +322,84 @@ describe('injection order across batches', () => {
         }
     });
 });
+
+describe('release order at session end', () => {
+    it('the release never overtakes a batch still parked on the chain, and a batch queued for the ended session never lands after it', async () => {
+        const key = await activeHost();
+        const { dc, raw } = fakeDc();
+        registerControlChannel(VIEWER, dc);
+        raw.onmessage!({ data: await frameFor(key, 0, FRAME_HELLO) } as MessageEvent);
+        await settle();
+        injected.length = 0;
+        // Batches are handed to the native queue one IPC round trip at a
+        // time. Hold batch 1 inside its invoke (the round trip in flight),
+        // queue batch 2 behind it, then end the session: the release must
+        // not reach the native side ahead of anything the chain still holds,
+        // or the native ReleaseAll (ordered only behind what has already
+        // reached its FIFO) lets the late batch re-press its key for good.
+        const core = await import('@tauri-apps/api/core');
+        const real = core.invoke as (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+        /** Arrival order at the native seam: 'batch:<event kinds>' or 'release'. */
+        const calls: string[] = [];
+        let releaseBatch1!: () => void;
+        const gate = new Promise<void>(r => { releaseBatch1 = r; });
+        let stalled = false;
+        (core as { invoke: typeof real }).invoke = async (cmd, args) => {
+            if (cmd === 'inject_input_batch') {
+                calls.push('batch:' + (args?.events as Array<{ t: string }>).map(e => e.t).join('+'));
+                if (!stalled) { stalled = true; await gate; }
+            } else if (cmd === 'release_control_input') {
+                calls.push('release');
+            }
+            return real(cmd, args);
+        };
+        try {
+            const sealed = async (seq: number, e: object) => {
+                const bytes = await sealControlBytes(key, JSON.stringify({ s: seq, e }));
+                const wire = new Uint8Array(bytes.length + 1);
+                wire[0] = FRAME_SEALED_INPUT;
+                wire.set(bytes, 1);
+                raw.onmessage!({ data: wire.buffer.slice(0) } as MessageEvent);
+                await settle(2);
+            };
+            await sealed(1, { t: 'move', x: 0.5, y: 0.5 });   // batch 1: left on the leading edge, now stalled
+            expect(calls, 'batch 1 is in flight').toEqual(['batch:move']);
+            await sealed(2, { t: 'key', code: 'KeyA', down: true }); // batch 2: parked behind it on the chain
+            expect(calls, 'batch 2 waits for batch 1').toEqual(['batch:move']);
+
+            const rc = await import('../api/remoteControl');
+            rc.revokeControl();                                // endHostSession -> releaseInput
+            await settle();
+            expect(calls, 'the release must wait for batch 1 too').toEqual(['batch:move']);
+
+            releaseBatch1();
+            await settle();
+            expect(calls, 'batch 1, then the release; the key-down queued for the ended session is dropped')
+                .toEqual(['batch:move', 'release']);
+            expect(calls.indexOf('release'), 'nothing is injected after the release').toBe(calls.length - 1);
+            expect(injected.map(e => (e as { t: string }).t), 'the down never reached the desktop').toEqual(['move']);
+        } finally {
+            releaseBatch1();
+            (core as { invoke: typeof real }).invoke = real;
+        }
+    });
+
+    it('nothing in flight: ending the session still releases (the chain must not swallow an idle release)', async () => {
+        await activeHost();
+        const core = await import('@tauri-apps/api/core');
+        const real = core.invoke as (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+        const calls: string[] = [];
+        (core as { invoke: typeof real }).invoke = async (cmd, args) => {
+            if (cmd === 'inject_input_batch' || cmd === 'release_control_input') calls.push(cmd);
+            return real(cmd, args);
+        };
+        try {
+            const rc = await import('../api/remoteControl');
+            rc.revokeControl();
+            await settle();
+            expect(calls).toEqual(['release_control_input']);
+        } finally {
+            (core as { invoke: typeof real }).invoke = real;
+        }
+    });
+});
