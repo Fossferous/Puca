@@ -5063,6 +5063,7 @@ export function Chat({ onLogout }: ChatProps) {
                         />
                     ) : viewMode === 'stream' ? (
                         <StreamStage
+                            currentUserId={currentUserId}
                             onBackToChat={() => setViewMode('chat')}
                             // Mobile: leaving the fullscreen stage KEEPS the
                             // streams playing in the docked mini-player over

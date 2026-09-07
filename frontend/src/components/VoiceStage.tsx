@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
     getVoiceUsersInRoom,
     globalCameraUsers,
@@ -12,7 +12,7 @@ import { SmartAvatar } from './SmartAvatar';
 import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import './VoiceStage.css';
-import { installBackgroundResumeAll } from './deviceStageResume';
+import { CameraVideo } from './CameraVideo';
 
 interface VoiceStageProps {
     roomId: string;
@@ -32,38 +32,6 @@ interface VoiceStageProps {
     onInvite?: () => void;
     /** Open the standard user context menu (volume, profile, …). */
     onUserMenu?: (user: { userId: number; username: string }, pos: { x: number; y: number }) => void;
-}
-
-/** Binds a live camera MediaStream to a <video> — srcObject can't be set
- *  declaratively. `muted` is load-bearing: the sender's mic audio already
- *  plays through the per-user <audio> elements, so an unmuted tile would
- *  double the mic and bypass deafen. Rendered per-user inside a keyed tile so
- *  re-renders never remount it (a reparented <video> pauses and paints black —
- *  see StreamStage's stable-geometry comment). */
-function TileCameraVideo({ stream, mirrored }: { stream: MediaStream; mirrored: boolean }) {
-    const ref = useRef<HTMLVideoElement>(null);
-    useEffect(() => {
-        const el = ref.current;
-        if (el && el.srcObject !== stream) {
-            el.srcObject = stream;
-            // autoplay is not reliable when srcObject lands after mount —
-            // kick playback explicitly (muted video is always allowed).
-            void el.play().catch(() => { /* transient; retried on next bind */ });
-        }
-    }, [stream]);
-    // Android/iOS pause the tile when the app backgrounds and never un-pause
-    // it; the bind effect only acts on stream identity. One listener per
-    // tile, removed with it. Same fix as the stages (deviceStageResume.ts).
-    useEffect(() => installBackgroundResumeAll(() => [ref.current]), []);
-    return (
-        <video
-            ref={ref}
-            className={`vs-camera-video${mirrored ? ' mirrored' : ''}`}
-            autoPlay
-            playsInline
-            muted
-        />
-    );
 }
 
 /**
@@ -148,7 +116,7 @@ export function VoiceStage({
                                     the absolute overlays (badge/chip/button)
                                     stack above it by DOM order. */}
                                 {camStream ? (
-                                    <TileCameraVideo
+                                    <CameraVideo
                                         stream={camStream}
                                         mirrored={user.id === currentUserId}
                                     />
