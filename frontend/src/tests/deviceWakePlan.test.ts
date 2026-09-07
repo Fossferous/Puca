@@ -185,6 +185,29 @@ describe('who is allowed to send a wake packet', () => {
         expect(plan.waker).toBeNull();
     });
 
+    it('names an offline waker instead of telling you to switch a computer on', async () => {
+        // THE MESSAGE THE OWNER ACTUALLY GOT. Their always-on LAN waker had
+        // been refused by the server for five days, so it was offline — and
+        // because the offline check ran before the platform check, the only
+        // survivor was a phone, which produced "leave one of your computers
+        // switched on". The waker had never been switched off.
+        const target = TARGET();
+        const waker = withLan(
+            { id: 'w', name: 'Home Waker', platform: 'linux', online: false },
+            { mac: '9', ip: '192.168.0.9', subnet: '192.168.0' },
+        );
+        const phone = withLan(
+            { id: 'p', name: 'Android phone', platform: 'android' },
+            { mac: '8', ip: '192.168.0.8', subnet: '192.168.0' },
+        );
+        const plan = await planWake(target, [target, waker, phone], 'p');
+        expect(plan.waker).toBeNull();
+        expect(plan.reason).toContain('Home Waker');
+        expect(plan.reason).toMatch(/not connected/);
+        // And it must NOT give the advice for a different situation.
+        expect(plan.reason).not.toMatch(/switched on, on the same network/);
+    });
+
     it('prefers another device over the one asking', async () => {
         const target = TARGET();
         const here = withLan({ id: 'here', name: 'Here' }, { mac: '3', ip: '192.168.0.14', subnet: '192.168.0' });

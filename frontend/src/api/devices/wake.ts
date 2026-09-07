@@ -157,11 +157,22 @@ export async function planWake(
     // LAN cannot work.
     const sameSubnet: VerifiedDevice[] = [];
     const unknownSubnet: VerifiedDevice[] = [];
+    const offlineCapable: VerifiedDevice[] = [];
     let sawIneligiblePlatform = false;
     let wrongSubnet = 0;
 
     for (const d of all) {
-        if (d.id === target.id || !d.online || !d.verified) continue;
+        if (d.id === target.id) continue;
+        // A device that COULD broadcast but is not connected right now is the
+        // most useful thing to name, and the old ordering threw it away: the
+        // offline check came first, so an always-on waker that had been refused
+        // by the server for five days produced "leave one of your computers
+        // switched on" — advice for a machine that had never been switched off.
+        if (!d.online) {
+            if (d.verified && canSendWakePackets(d.platform)) offlineCapable.push(d);
+            continue;
+        }
+        if (!d.verified) continue;
         if (!canSendWakePackets(d.platform)) {
             sawIneligiblePlatform = true;
             continue;
@@ -203,6 +214,17 @@ export async function planWake(
                 (wrongSubnet === 1
                     ? 'The one you have switched on is on a different network.'
                     : 'The ones you have switched on are all on different networks.');
+        } else if (offlineCapable.length > 0) {
+            // Ranked ABOVE the platform branch: if a machine that can do the
+            // job exists and is merely not connected, saying "only the desktop
+            // app can do this" is true and useless. Name the device, because
+            // the fix is to that device.
+            const names = offlineCapable.map(d => d.name);
+            const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+            reason =
+                `${who} would send the wake signal, but ${names.length === 1 ? 'it is' : 'they are'} not connected to ` +
+                `Púca right now. Check ${names.length === 1 ? 'it is' : 'they are'} switched on and can still reach ` +
+                'this server.';
         } else if (sawIneligiblePlatform) {
             reason = 'A wake signal has to be broadcast on your home network, which only ' +
                 'the desktop app can do — a phone or a browser tab cannot. Leave one ' +

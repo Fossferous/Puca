@@ -659,16 +659,50 @@ function watchForRow(opts: {
     if (opts.pollNow) void tick();
 }
 
-/** Does the machine this target belongs to have a sign-in-screen row grouped
- *  with it — i.e. would a cold boot to the Windows login screen be VISIBLE to
- *  the wait, or would the machine come up and stay invisibly unreachable? */
-async function targetHasSignInRow(target: VerifiedDevice, all: VerifiedDevice[]): Promise<boolean> {
+/** How stale a sign-in row may be and still count as evidence that the service
+ *  behind it exists. Generous on purpose: the service only connects while the
+ *  machine is LOCKED or signed out, so a PC in daily use can legitimately go a
+ *  long time without its sign-in row attesting. Months cannot. */
+const SIGN_IN_ROW_CREDIBLE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Would a cold boot to the Windows login screen be VISIBLE to the wait?
+ *
+ * PRESENCE OF THE ROW IS NOT THE ANSWER, which is what this used to return.
+ * The row outlives the service: uninstalling Púca's lock-screen access — or
+ * running the uninstaller's service-removal hook — deletes the service and its
+ * secrets and leaves the device row behind, un-revoked, for ever. The verdict
+ * built on this then asserts the machine WOULD have been reachable at its login
+ * screen and concludes the packet never arrived, sending someone to reflash
+ * their BIOS over a service they removed themselves. Measured on a real machine
+ * on 2026-09-07: the service had been gone for six days and the row was still
+ * there.
+ *
+ * So require the row to have ATTESTED recently. A row that has never attested
+ * at all (`last_seen_at` null — enrolled but never once seen at a sign-in
+ * screen) is not evidence either. */
+async function targetHasSignInRow(
+    target: VerifiedDevice,
+    all: VerifiedDevice[],
+    now = Date.now(),
+): Promise<boolean> {
     try {
         const machine = machineOf(await groupIntoMachines(all), target.id);
-        return machine?.signInRow !== null && machine?.signInRow !== undefined;
+        return signInRowIsCredible(machine?.signInRow ?? null, now);
     } catch {
         return false;
     }
+}
+
+/** Exported for the test: the credibility rule on its own, with no grouping. */
+export function signInRowIsCredible(
+    row: Pick<VerifiedDevice, 'last_seen_at'> | null,
+    now = Date.now(),
+): boolean {
+    if (!row) return false;
+    if (!row.last_seen_at) return false;
+    const seen = Date.parse(row.last_seen_at);
+    if (Number.isNaN(seen)) return false;
+    return now - seen <= SIGN_IN_ROW_CREDIBLE_MS;
 }
 
 /**
@@ -695,7 +729,8 @@ export function timeoutMessage(name: string, watchedSignIn: boolean): string {
     return head +
         'A machine that was fully shut down comes back at the Windows sign-in screen, where Púca has not started ' +
         'yet — so it may have woken and simply be unreachable. Turn on "Reach this computer after it restarts" on it ' +
-        'to be able to connect there.';
+        'to be able to connect there, and check the setting is still on: removing the service leaves this list ' +
+        'unchanged, so a machine can look set up long after it stopped being.';
 }
 
 /** True when the target's recorded interface was wired, false when it was
