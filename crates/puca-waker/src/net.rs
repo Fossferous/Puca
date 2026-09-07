@@ -46,6 +46,80 @@ pub fn backoff_secs(consecutive_failures: u32) -> u64 {
     }
 }
 
+/// Why a dial failed, in the only two categories that call for different
+/// behaviour.
+///
+/// WHY THIS EXISTS. Every dial failure used to collapse into one string and be
+/// paced identically, so a PERMANENT refusal was retried once a minute for
+/// ever, at the same log level as a blip, and the response BODY — the one place
+/// the server says what is wrong — was discarded by `format!("{e}")`.
+///
+/// Measured: this box logged `connect failed: HTTP error: 401 Unauthorized`
+/// 6,743 times over five days while its token-refresh task printed success
+/// every four hours. Nothing in that record says the binary was too old to
+/// authenticate the way the server now requires, which is what had happened;
+/// the server knew, and said so in a body nobody kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialError {
+    /// The server answered the upgrade and REFUSED it. Retrying unchanged will
+    /// not fix this: something about this waker's identity or its protocol is
+    /// no longer acceptable.
+    Auth { status: u16, body: String },
+    /// Anything else — DNS, TCP, TLS, a proxy, a 5xx. Almost always transient.
+    Transport(String),
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialError::Auth { status, body } if body.is_empty() => {
+                write!(f, "connect REFUSED: HTTP {status} (no message from the server)")
+            }
+            DialError::Auth { status, body } => {
+                write!(f, "connect REFUSED: HTTP {status} — {body}")
+            }
+            DialError::Transport(e) => write!(f, "connect failed: {e}"),
+        }
+    }
+}
+
+impl DialError {
+    /// A refusal the server chose to make: 4xx. A 5xx is the server being
+    /// broken rather than this waker being unwelcome, so it stays transport.
+    pub fn is_auth(&self) -> bool {
+        matches!(self, DialError::Auth { status, .. } if (400..500).contains(status))
+    }
+}
+
+/// Classify a tungstenite dial error, KEEPING the response body.
+pub fn describe_dial_error(e: &tokio_tungstenite::tungstenite::Error) -> DialError {
+    use tokio_tungstenite::tungstenite::Error;
+    match e {
+        Error::Http(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp
+                .body()
+                .as_deref()
+                .map(|b| String::from_utf8_lossy(b).trim().to_string())
+                .unwrap_or_default();
+            // Bodies are small JSON or plain text; a runaway one must not turn
+            // a log line into a memory problem.
+            let body: String = body.chars().take(300).collect();
+            DialError::Auth { status, body }
+        }
+        other => DialError::Transport(other.to_string()),
+    }
+}
+
+/// How many consecutive AUTH refusals before the process gives up and exits.
+///
+/// Fifteen, at roughly one a minute, so ~15 minutes of being told "no" before
+/// the unit goes red. Deliberately far above systemd's default start limit
+/// (5 starts in 10 s) — a threshold small enough to restart quickly would trip
+/// that limit and leave the unit permanently dead, which is worse than the
+/// silence this replaces.
+pub const AUTH_REFUSALS_BEFORE_EXIT: u32 = 15;
+
 /// A connection that LIVED resets the failure count; one that died young
 /// increments it — regardless of whether the ending was polite.
 ///
@@ -134,21 +208,21 @@ const READ_DEADLINE: Duration = Duration::from_secs(60);
 const MAX_WS_MESSAGE: usize = 64 * 1024;
 
 /// Hold one socket until it dies. Returns Ok(()) on a clean close.
-pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), String> {
+pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), DialError> {
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(MAX_WS_MESSAGE);
     ws_config.max_frame_size = Some(MAX_WS_MESSAGE);
     let (mut ws, _) =
         tokio_tungstenite::connect_async_with_config(
-            cfg.ws_request(token)?,
+            cfg.ws_request(token).map_err(DialError::Transport)?,
             Some(ws_config),
             false,
         )
             .await
-            .map_err(|e| format!("connect failed: {e}"))?;
+            .map_err(|e| describe_dial_error(&e))?;
     eprintln!("[waker] connected; waiting for the attestation challenge");
 
-    let seed = cfg.seed()?;
+    let seed = cfg.seed().map_err(DialError::Transport)?;
     let ident = crate::identity::Identity {
         device_id: cfg.device_id.clone(),
         device_pub: cfg.device_pub.clone(),
@@ -162,15 +236,15 @@ pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), String> {
     loop {
         let frame = match tokio::time::timeout(READ_DEADLINE, ws.next()).await {
             Err(_) => {
-                return Err(format!(
+                return Err(DialError::Transport(format!(
                     "no traffic for {}s (the server pings every 15s) — treating the connection as dead",
                     READ_DEADLINE.as_secs()
-                ));
+                )));
             }
             Ok(None) => break,
             Ok(Some(f)) => f,
         };
-        let msg = frame.map_err(|e| format!("socket error: {e}"))?;
+        let msg = frame.map_err(|e| DialError::Transport(format!("socket error: {e}")))?;
         let text = match msg {
             Message::Text(t) => t,
             // tokio-tungstenite answers Ping automatically; the server's 15s
@@ -192,7 +266,7 @@ pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), String> {
                 });
                 ws.send(Message::Text(out.to_string()))
                     .await
-                    .map_err(|e| format!("could not answer the challenge: {e}"))?;
+                    .map_err(|e| DialError::Transport(format!("could not answer the challenge: {e}")))?;
             }
             Incoming::Attested => {
                 attested = true;
@@ -312,6 +386,65 @@ mod tests {
     ///  - a socket that lived for HOURS and then died with an error used to
     ///    increment every lap → a healthy link ratcheted to the 60s ceiling
     ///    as though it were flapping.
+    /// THE LINE THAT WAS THROWN AWAY. The server answers a refused upgrade
+    /// with a body saying why; `format!("{e}")` on the tungstenite error
+    /// rendered "HTTP error: 401 Unauthorized" and dropped it. Five days of
+    /// that told nobody the binary was too old to authenticate the way the
+    /// server now requires — which the body said.
+    #[test]
+    fn a_refusal_keeps_the_status_and_the_body() {
+        use tokio_tungstenite::tungstenite::http::Response;
+        let resp = Response::builder()
+            .status(401)
+            .body(Some(b"this client is too old to authenticate".to_vec()))
+            .expect("response");
+        let err = tokio_tungstenite::tungstenite::Error::Http(resp);
+        let got = describe_dial_error(&err);
+        assert_eq!(
+            got,
+            DialError::Auth { status: 401, body: "this client is too old to authenticate".into() }
+        );
+        assert!(got.is_auth());
+        assert!(got.to_string().contains("too old"), "the body must reach the log: {got}");
+    }
+
+    /// A refusal with no body still says which status, and still counts as a
+    /// refusal — an empty body is not a reason to treat it as a network blip.
+    #[test]
+    fn a_bodyless_refusal_is_still_a_refusal() {
+        use tokio_tungstenite::tungstenite::http::Response;
+        let resp = Response::builder().status(403).body(None).expect("response");
+        let got = describe_dial_error(&tokio_tungstenite::tungstenite::Error::Http(resp));
+        assert!(got.is_auth());
+        assert!(got.to_string().contains("403"));
+    }
+
+    /// A 5xx is the SERVER being broken, not this waker being unwelcome:
+    /// retrying is right and exiting after fifteen of them would be wrong.
+    #[test]
+    fn a_server_error_is_not_an_auth_refusal() {
+        use tokio_tungstenite::tungstenite::http::Response;
+        let resp = Response::builder().status(502).body(None).expect("response");
+        assert!(!describe_dial_error(&tokio_tungstenite::tungstenite::Error::Http(resp)).is_auth());
+        let io = tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other("dns"));
+        let got = describe_dial_error(&io);
+        assert!(!got.is_auth());
+        assert!(matches!(got, DialError::Transport(_)));
+    }
+
+    /// The exit threshold must stay clear of systemd's default start limit
+    /// (5 starts in 10 s): a smaller one would restart-loop the unit into a
+    /// permanently dead state, which is worse than the silence it replaces.
+    #[test]
+    fn the_exit_threshold_cannot_trip_systemds_start_limit() {
+        let shortest_gap_secs = backoff_secs(u32::MAX) * AUTH_REFUSALS_BEFORE_EXIT as u64;
+        assert!(
+            AUTH_REFUSALS_BEFORE_EXIT >= 10 && shortest_gap_secs >= 600,
+            "{AUTH_REFUSALS_BEFORE_EXIT} refusals at up to {}s apart is {shortest_gap_secs}s",
+            backoff_secs(u32::MAX)
+        );
+    }
+
     #[test]
     fn pacing_is_decided_by_how_long_the_connection_lived_not_how_it_ended() {
         use std::time::Duration as D;
