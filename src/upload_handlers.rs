@@ -16,6 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -647,9 +648,155 @@ pub async fn upload_file(
 }
 
 /// Get/download a file
+/// Migration 054's own install time: the moment this server began minting
+/// capabilities. An uncapped, unreferenced file created BEFORE it is an
+/// attachment posted by a client that predates capabilities; the only thing
+/// that knows which channel it belongs to is the encrypted message carrying
+/// its id, so the server cannot scope it and it stays fetchable by any
+/// signed-in account (the documented "older uploads keep working" guarantee).
+/// One created AFTER it has no such excuse. `Ok(None)` when the row is
+/// absent (a database that never had capabilities: everything on it is
+/// legacy). A lookup ERROR is returned as such so the caller fails closed —
+/// a transient fault must not serve a stranger a file, the same posture as
+/// the membership probes in permissions.rs.
+async fn cap_era_start(pool: &sqlx::PgPool) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    sqlx::query_scalar::<_, DateTime<Utc>>(
+        "SELECT installed_on FROM _sqlx_migrations WHERE version = 54",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The decision for a file that carries NO capability.
+///
+/// Such a file used to be served to every signed-in account that learned its
+/// id — `file_cap_allows` says "not gated" and nothing else looked. Found on
+/// 2026-09-07: an account sharing no server, friendship or conversation with
+/// the uploader fetched the bytes. Now it is served only when
+/// - the caller uploaded it, or
+/// - it is a REFERENCED asset the caller is entitled to see (`visible_as_asset`):
+///   an avatar or join/leave sound of an account in the caller's identity
+///   context (friends, a shared server, or a conversation that account
+///   started — the same rule that lets the caller see that account at all),
+///   an icon or emoji of a server the caller belongs to (or a public one,
+///   which `/discover` already shows everyone), or a part of a clip posted
+///   in a channel the caller can VIEW, or
+/// - it predates capabilities (see `cap_era_start`), or
+/// - the operator turned enforcement off (`FILES_ENFORCE_CAP=0`), the same
+///   switch that already widens CAPPED files for pre-0.8.134 clients.
+///
+/// Anything else — a post-capability upload that asked for no capability and
+/// is referenced by nothing — is visible to its uploader alone. That shape is
+/// an attachment some client forgot to protect, and refusing it here is the
+/// safety net the upload side cannot be: an avatar and an attachment are
+/// indistinguishable at upload (both `kind = 'attachment'`), so the server
+/// cannot demand a capability there without breaking every avatar.
+fn uncapped_decision(is_uploader: bool, visible_as_asset: bool, is_legacy: bool, enforce: bool) -> bool {
+    is_uploader || visible_as_asset || is_legacy || !enforce
+}
+
+/// Resolve `uncapped_decision`'s inputs for one file. Fails CLOSED on any
+/// database error (logged), like the membership probes in permissions.rs.
+/// Checks run cheapest and most common first, so the everyday avatar fetch
+/// never reaches the migration-table lookup.
+async fn uncapped_file_visible(
+    pool: &sqlx::PgPool,
+    file_id: &str,
+    uploader_id: i64,
+    kind: &str,
+    clip_id: Option<&str>,
+    created_at: Option<DateTime<Utc>>,
+    caller: i64,
+) -> bool {
+    if uploader_id == caller {
+        return true;
+    }
+
+    // Which asset roles this file plays, and whether the caller may see them.
+    // Avatars and sounds hang off ONE account; icons and emoji off servers.
+    // The asset columns are TEXT holding the uuid as text (delete_file's
+    // in-use check compares the same way).
+    let (asset_owner, server_visible): (Option<i32>, bool) = match sqlx::query_as(
+        "SELECT \
+           (SELECT u.id FROM users u \
+             WHERE (u.avatar_file_id = $1 OR u.join_sound_file_id = $1 OR u.leave_sound_file_id = $1) \
+               AND u.deleted_at IS NULL LIMIT 1), \
+           EXISTS (SELECT 1 FROM servers s \
+                    WHERE (s.icon_file_id = $1 \
+                           OR s.id IN (SELECT server_id FROM server_emojis WHERE file_id = $1) \
+                           OR s.id IN (SELECT server_id FROM custom_emojis WHERE file_id = $1)) \
+                      AND (s.is_public \
+                           OR EXISTS (SELECT 1 FROM server_members m \
+                                       WHERE m.server_id = s.id AND m.user_id = $2)))",
+    )
+    .bind(file_id)
+    .bind(caller as i32)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("uncapped_file_visible: asset lookup failed for file {file_id}: {e:?}");
+            return false;
+        }
+    };
+    if server_visible {
+        return true;
+    }
+    if let Some(owner) = asset_owner {
+        // ONE definition of "may see this account" — do not restate it here.
+        if crate::dm_handlers::users_share_identity_context(pool, caller, owner as i64).await {
+            return true;
+        }
+    }
+
+    // A clip part is visible wherever the clip was POSTED: send_message stamps
+    // the proposal id into messages.clip_consent. A proposal not yet posted
+    // has no message, and its parts belong to the proposer alone (the uploader
+    // check above).
+    if kind == "clip" {
+        if let Some(cid) = clip_id {
+            let channel: Option<i32> = sqlx::query_scalar(
+                "SELECT channel_id FROM messages \
+                 WHERE clip_consent IS NOT NULL AND clip_consent->>'proposal_id' = $1 LIMIT 1",
+            )
+            .bind(cid)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("uncapped_file_visible: clip lookup failed for {cid}: {e:?}");
+                None
+            });
+            if let Some(ch) = channel {
+                if let crate::permissions::ChannelPermAccess::Allowed { perms, .. } =
+                    crate::permissions::get_user_channel_permissions(pool, ch as i64, caller).await
+                {
+                    if perms.has(crate::permissions::Permissions::VIEW_CHANNEL) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    let is_legacy = match created_at {
+        None => true,
+        Some(c) => match cap_era_start(pool).await {
+            Ok(Some(era)) => c < era,
+            Ok(None) => true,
+            Err(e) => {
+                tracing::error!("uncapped_file_visible: migration-era lookup failed for file {file_id}: {e:?}");
+                false // fail closed
+            }
+        },
+    };
+    uncapped_decision(false, false, is_legacy, files_enforce_cap())
+}
+
 pub async fn get_file(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
+    Extension(claims): Extension<Claims>,
     headers: axum::http::HeaderMap,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
@@ -676,16 +823,18 @@ pub async fn get_file(
     };
 
     // Get file metadata
-    let file_info: Option<(String, String, String, Option<Vec<u8>>)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let file_info: Option<(String, String, String, Option<Vec<u8>>, i32, String, Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
         // id is uuid; cast the binding (an invalid uuid string errors -> None -> 404).
-        "SELECT stored_name, original_name, mime_type, cap_hash FROM uploaded_files WHERE id = $1::uuid",
+        "SELECT stored_name, original_name, mime_type, cap_hash, uploader_id, kind, clip_id::text, created_at \
+         FROM uploaded_files WHERE id = $1::uuid",
     )
     .bind(&file_id)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
-    let (stored_name, original_name, mime_type, cap_hash) = match file_info {
+    let (stored_name, original_name, mime_type, cap_hash, uploader_id, kind, clip_id, created_at) = match file_info {
         Some(info) => info,
         None => return (StatusCode::NOT_FOUND, "File not found").into_response(),
     };
@@ -694,6 +843,23 @@ pub async fn get_file(
     // same existence oracle delete_file deliberately withholds.
     let presented = headers.get("x-puca-file-cap").and_then(|v| v.to_str().ok());
     if !file_cap_allows(cap_hash.as_deref(), presented, files_enforce_cap()) {
+        return (StatusCode::NOT_FOUND, "File not found").into_response();
+    }
+    // No capability does NOT mean public. Scope the file to the people it is
+    // for (see uncapped_decision); a stranger who merely learned the id gets
+    // the same 404 as above.
+    if cap_hash.is_none()
+        && !uncapped_file_visible(
+            &state.pool,
+            &file_id,
+            uploader_id as i64,
+            &kind,
+            clip_id.as_deref(),
+            created_at,
+            claims.sub,
+        )
+        .await
+    {
         return (StatusCode::NOT_FOUND, "File not found").into_response();
     }
 
@@ -866,5 +1032,157 @@ mod attach_gate_tests {
     fn a_stranger_or_a_missing_channel_is_refused_not_admitted() {
         assert_eq!(attach_gate(Some(&ChannelPermAccess::NotMember)).unwrap_err().0, StatusCode::FORBIDDEN);
         assert_eq!(attach_gate(Some(&ChannelPermAccess::NotFound)).unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod uncapped_file_tests {
+    //! A file with no capability is scoped to the people it is for. Found
+    //! 2026-09-07 by a live probe: a signed-in account sharing nothing with
+    //! the uploader fetched an uncapped file's bytes by id. `file_cap_tests`
+    //! above still says such a row is "never gated" BY THE CAPABILITY — this
+    //! module is the gate that follows it.
+    use super::{uncapped_decision, uncapped_file_visible};
+
+    #[test]
+    fn each_grant_alone_admits_and_no_grant_refuses() {
+        assert!(uncapped_decision(true, false, false, true), "the uploader");
+        assert!(uncapped_decision(false, true, false, true), "an entitled asset viewer");
+        assert!(uncapped_decision(false, false, true, true), "a pre-capability upload");
+        assert!(uncapped_decision(false, false, false, false), "enforcement switched off");
+        // THE FINDING. A post-capability upload nobody references, fetched by
+        // an account that did not upload it, under default enforcement.
+        assert!(
+            !uncapped_decision(false, false, false, true),
+            "a stranger must not be served an uncapped file merely for knowing its id"
+        );
+    }
+
+    /// The real decision against a real database: strangers refused, the
+    /// uploader / co-members / friends / public-server browsers / clip
+    /// viewers admitted, and access ENDING when the relationship does (the
+    /// post-ban case). Skips (prints) without TEST_DATABASE_URL /
+    /// DATABASE_URL, like auth::session_tests.
+    #[tokio::test]
+    async fn a_stranger_cannot_fetch_an_uncapped_file_but_the_people_it_is_for_can() {
+        dotenv::dotenv().ok();
+        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(u) => u,
+            Err(_) => { println!("skipping: no database"); return; }
+        };
+        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
+            Ok(p) => p,
+            Err(_) => { println!("skipping: database unreachable"); return; }
+        };
+        // Under FILES_ENFORCE_CAP=0 every branch below admits; the pure test
+        // pins that switch, this one needs the default.
+        std::env::remove_var("FILES_ENFORCE_CAP");
+
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk_user = |n: &str| {
+            let name = format!("ucf_{n}_{tag}");
+            let pool = pool.clone();
+            async move {
+                let (id,): (i32,) = sqlx::query_as(
+                    "INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id",
+                )
+                .bind(&name).bind(format!("{name}@test.invalid")).bind(b"s".as_ref()).bind(b"v".as_ref())
+                .fetch_one(&pool).await.expect("insert user");
+                id as i64
+            }
+        };
+        let uploader = mk_user("uploader").await;
+        let stranger = mk_user("stranger").await;
+        let other = mk_user("other").await;
+
+        let mk_file = |kind: &'static str, clip: Option<String>| {
+            let pool = pool.clone();
+            async move {
+                let id = uuid::Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO uploaded_files (id, uploader_id, original_name, stored_name, mime_type, size_bytes, kind, clip_id) \
+                     VALUES ($1::uuid, $2, 'f', 'f', 'text/plain', 1, $3, $4::uuid)",
+                )
+                .bind(&id).bind(uploader as i32).bind(kind).bind(clip)
+                .execute(&pool).await.expect("insert file");
+                id
+            }
+        };
+        let vis = |file: &str, who: i64, kind: &'static str, clip: Option<&str>| {
+            let pool = pool.clone();
+            let file = file.to_string();
+            let clip = clip.map(str::to_string);
+            async move {
+                uncapped_file_visible(&pool, &file, uploader, kind, clip.as_deref(), Some(chrono::Utc::now()), who).await
+            }
+        };
+
+        // --- an unreferenced, post-capability upload ---
+        let plain = mk_file("attachment", None).await;
+        assert!(!vis(&plain, stranger, "attachment", None).await, "THE FINDING: a stranger fetched this");
+        assert!(vis(&plain, uploader, "attachment", None).await, "the uploader always may");
+
+        // --- an avatar: visible inside the owner's identity context only ---
+        sqlx::query("UPDATE users SET avatar_file_id = $1 WHERE id = $2").bind(&plain).bind(uploader as i32).execute(&pool).await.unwrap();
+        assert!(!vis(&plain, stranger, "attachment", None).await, "being someone's avatar admits nobody by itself");
+        sqlx::query("INSERT INTO friends (user1_id, user2_id) VALUES ($1, $2)").bind(uploader).bind(stranger).execute(&pool).await.unwrap();
+        assert!(vis(&plain, stranger, "attachment", None).await, "a friend sees the avatar");
+        sqlx::query("DELETE FROM friends WHERE user1_id = $1 AND user2_id = $2").bind(uploader).bind(stranger).execute(&pool).await.unwrap();
+        assert!(!vis(&plain, stranger, "attachment", None).await, "unfriending ends it");
+
+        let shared = format!("srv_shared_{tag}");
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'shared', $2)").bind(&shared).bind(uploader as i32).execute(&pool).await.unwrap();
+        for u in [uploader, stranger] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&shared).bind(u as i32).execute(&pool).await.unwrap();
+        }
+        assert!(vis(&plain, stranger, "attachment", None).await, "a co-member sees the avatar");
+        sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2").bind(&shared).bind(stranger as i32).execute(&pool).await.unwrap();
+        assert!(!vis(&plain, stranger, "attachment", None).await, "kicked/banned/left: access ends with the membership");
+
+        // --- a server icon: members, or anyone once the server is public ---
+        let icon = mk_file("attachment", None).await;
+        let iconed = format!("srv_icon_{tag}");
+        sqlx::query("INSERT INTO servers (id, name, owner_id, icon_file_id) VALUES ($1, 'iconed', $2, $3)").bind(&iconed).bind(uploader as i32).bind(&icon).execute(&pool).await.unwrap();
+        assert!(!vis(&icon, other, "attachment", None).await, "a private server's icon is not for outsiders");
+        sqlx::query("UPDATE servers SET is_public = true WHERE id = $1").bind(&iconed).execute(&pool).await.unwrap();
+        assert!(vis(&icon, other, "attachment", None).await, "/discover shows public icons to everyone");
+        sqlx::query("UPDATE servers SET is_public = false WHERE id = $1").bind(&iconed).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&iconed).bind(other as i32).execute(&pool).await.unwrap();
+        assert!(vis(&icon, other, "attachment", None).await, "a member sees the icon");
+
+        // --- a clip part: wherever the clip was posted, for those who can VIEW it ---
+        let clip_id = uuid::Uuid::new_v4().to_string();
+        let part = mk_file("clip", Some(clip_id.clone())).await;
+        assert!(!vis(&part, other, "clip", Some(&clip_id)).await, "an unposted proposal's parts are the proposer's alone");
+        let clip_srv = format!("srv_clip_{tag}");
+        // `other` OWNS this server, so the resolver grants VIEW without any role rows.
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'clips', $2)").bind(&clip_srv).bind(other as i32).execute(&pool).await.unwrap();
+        let (chan,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name) VALUES ($1, 'general') RETURNING id").bind(&clip_srv).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, channel_id, user_id, content, clip_consent) VALUES ($1, $2, $3, 'clip', $4)")
+            .bind(uuid::Uuid::new_v4().to_string()).bind(chan).bind(uploader as i32)
+            .bind(sqlx::types::Json(serde_json::json!({ "proposal_id": clip_id })))
+            .execute(&pool).await.unwrap();
+        assert!(vis(&part, other, "clip", Some(&clip_id)).await, "a viewer of the channel the clip was posted in");
+        assert!(!vis(&part, stranger, "clip", Some(&clip_id)).await, "not a viewer: not admitted");
+
+        // --- history: an upload older than migration 054 keeps working ---
+        let legacy = mk_file("attachment", None).await;
+        let era: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT installed_on FROM _sqlx_migrations WHERE version = 54").fetch_one(&pool).await.expect("054 applied");
+        let pool2 = pool.clone();
+        let before = era - chrono::Duration::days(1);
+        assert!(uncapped_file_visible(&pool2, &legacy, uploader, "attachment", None, Some(before), stranger).await, "a pre-capability upload is fetchable by any account (no way to scope it)");
+        assert!(!uncapped_file_visible(&pool2, &legacy, uploader, "attachment", None, Some(era + chrono::Duration::seconds(1)), stranger).await, "positive control: one second after the era starts, it is not");
+
+        // cleanup, dependents first
+        let _ = sqlx::query("DELETE FROM messages WHERE channel_id = $1").bind(chan).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(chan).execute(&pool).await;
+        for s in [&shared, &iconed, &clip_srv] {
+            let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1").bind(s).execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(s).execute(&pool).await;
+        }
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE id = $1").bind(uploader as i32).execute(&pool).await;
+        for u in [uploader, stranger, other] {
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(u as i32).execute(&pool).await;
+        }
     }
 }

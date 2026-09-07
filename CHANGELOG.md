@@ -4,6 +4,26 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Security
+- **A file uploaded without a capability could be downloaded by any signed-in
+  account that learned its id.** Message and DM attachments were never
+  exposed (the apps ask for a capability and encrypt them), but avatars,
+  custom join/leave sounds, server icons and emoji are uploaded without one,
+  and `GET /files/:id` served any capability-less file to whoever held a
+  valid session — including someone you had banned, for as long as they kept
+  the id. Found by a live access-control probe on 2026-09-07. Such a file is
+  now served only to its uploader, to the people its owner is visible to
+  (friends, a shared server, a conversation they started) for avatars and
+  sounds, to members of the server (or anyone, once it is public) for icons
+  and emoji, and to viewers of the channel a clip was posted in for its
+  parts. Uploads older than the capability migration keep working for every
+  account, since nothing can scope them. An attachment a client forgot to
+  protect is no longer readable by strangers: it is its uploader's alone.
+  No change for ordinary use; `FILES_ENFORCE_CAP=0` lifts the scoping as it
+  already did for capabilities.
+
 ## 0.9.7 — 2026-09-06
 
 A hotfix for the remote-control work in 0.9.6, found by reviewing that change
