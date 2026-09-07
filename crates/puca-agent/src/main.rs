@@ -27,6 +27,9 @@ mod flavour;
 mod control_key;
 mod dll_search;
 mod composite;
+// Cross-platform decision logic for the Windows-only stream module's
+// display-topology self-heal, kept here so every CI leg compiles and tests it.
+mod topology;
 // Ungated, beside composite for the same reason: plain data used by code that
 // compiles on every platform.
 mod caret_wire;

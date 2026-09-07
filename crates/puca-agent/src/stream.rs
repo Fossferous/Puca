@@ -702,6 +702,10 @@ pub fn start(
     // run() needs its own handle to signal while it is still going.
     let session_id_run = session_id.clone();
     let stream_events_run = stream_events_tx.clone();
+    // The loop's own sender, for the display-topology self-heal to re-enter
+    // the RebuildCapture path. Cloned before the spawn takes command_rx; the
+    // original command_tx still goes to the Stream handle below.
+    let self_tx = command_tx.clone();
 
     let current_fps = Arc::new(AtomicU32::new(fps));
     let current_bitrate_bps = Arc::new(AtomicU32::new(bitrate));
@@ -736,7 +740,7 @@ pub fn start(
                 stream_events_tx: stream_events_tx_clone,
                 reason: Arc::clone(&reason_cell),
             };
-            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, mode, stop_thread, command_rx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel) {
+            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel) {
                 eprintln!("[stream] ended: {e}");
                 if let Ok(mut r) = reason_cell.lock() {
                     *r = e;
@@ -896,6 +900,10 @@ fn run(
     mode: StreamMode,
     stop: Arc<AtomicBool>,
     command_rx: std::sync::mpsc::Receiver<StreamCommand>,
+    // A clone of the loop's OWN command sender, so the display-topology
+    // self-heal can drive the existing RebuildCapture path rather than carry a
+    // second copy of the rebuild. Only ever used to send to this same loop.
+    self_tx: std::sync::mpsc::Sender<StreamCommand>,
     generation: u64,
     file_scope: Arc<Mutex<Option<crate::file_transfer::FileScope>>>,
     audit: Option<crate::file_log::FileAudit>,
@@ -1080,6 +1088,15 @@ fn run(
     // NoChange arm. Separate from the open-retry's nudge: creation can
     // succeed against a sleeping panel and starve afterwards.
     let mut cold_start_renudged = false;
+    // Baseline for the display-topology self-heal: the output enumeration the
+    // capture above was built against. The pump loop compares the live
+    // enumeration to this on a slow clock and self-rebuilds when they diverge
+    // (a monitor detaching after an idle sleep, a GPU re-adding outputs on
+    // wake). Refreshed after every (re)build/switch so it only ever fires on a
+    // genuine change.
+    let mut built_output_sig: crate::topology::OutputSig =
+        crate::topology::outputs_signature(&puca_capture::outputs());
+    let mut topology_checked: Option<Instant> = None;
     let mut pump_stats = PumpStats::default();
     let started_at = Instant::now();
     // The last picture captured from a single screen, kept so a still desktop
@@ -1267,6 +1284,11 @@ fn run(
                             switch_started = Some(Instant::now());
                             eprintln!("[switch] capture committed -> monitor {target_monitor}");
                             current_monitor = target_monitor;
+                            // A switch re-enumerates DXGI too; refresh the
+                            // self-heal baseline so it is not tripped by the
+                            // switch we just performed.
+                            built_output_sig = crate::topology::outputs_signature(&puca_capture::outputs());
+                            topology_checked = Some(Instant::now());
                             // The SAME caret is a different fraction of a
                             // different screen. The generation is bumped
                             // unconditionally rather than only when the
@@ -1353,6 +1375,11 @@ fn run(
                             encoder = None;
                             want_keyframe = true;
                             current_monitor = target_monitor;
+                            // Rebuilt against the current enumeration: reset the
+                            // self-heal baseline so it does not immediately fire
+                            // again on the change that prompted this rebuild.
+                            built_output_sig = crate::topology::outputs_signature(&puca_capture::outputs());
+                            topology_checked = Some(Instant::now());
                             eprintln!("[stream] capture rebuilt for a display-topology change -> monitor {target_monitor}");
                             // The SAME caret is a different fraction of a
                             // different surface — same bookkeeping as a switch.
@@ -1850,6 +1877,54 @@ fn run(
                         }
                         Err(e) => eprintln!("[caret] write failed: {e}"),
                     }
+                }
+            }
+        }
+
+        // --- display-topology self-heal --------------------------------------
+        //
+        // Windows re-shapes the desktop under a live capture with no signal to
+        // this loop: a monitor DPMS-sleeps and detaches after the user walks
+        // away, or a GPU drops and re-adds outputs on wake. The old duplication
+        // then serves a stale or black surface, and until now the only way back
+        // was the controller poking `display_topology_changed` — i.e. a human
+        // rejigging monitors by hand after every idle reconnect (field report
+        // 2026-09-07). Notice it here on the slow clock and drive the SAME
+        // rebuild the poke does by self-sending the command, so there is one
+        // rebuild path, not two. Gated to Video: a DataOnly session has no
+        // capture to rebuild. Runs even with a capture of None — a previous
+        // rebuild that failed is revived by exactly this.
+        if mode == StreamMode::Video && crate::topology::should_recheck_topology(topology_checked, now) {
+            topology_checked = Some(now);
+            let outs = puca_capture::outputs();
+            let sig = crate::topology::outputs_signature(&outs);
+            if crate::topology::topology_differs(&built_output_sig, &sig) {
+                let present: Vec<usize> = outs.iter().map(|o| o.index).collect();
+                let target = crate::topology::remap_monitor_for(current_monitor, &present);
+                eprintln!(
+                    "[stream] display topology changed under the capture ({} -> {} outputs); self-rebuilding for monitor {target}",
+                    built_output_sig.len(),
+                    sig.len()
+                );
+                // The baseline is deliberately NOT advanced here: only a
+                // SUCCESSFUL rebuild (its arm below) refreshes it. So if the
+                // rebuild fails — the desktop still recomposing, the target
+                // briefly unavailable — the next 2 s check sees the same
+                // mismatch and tries again, instead of one shot then a frozen
+                // picture until the human intervenes (the whole bug). The 2 s
+                // clock bounds this to one attempt per interval, never a storm.
+                let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+                if self_tx
+                    .send(StreamCommand::RebuildCapture {
+                        generation,
+                        deadline: now + Duration::from_secs(5),
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                        monitor: target,
+                        reply_tx,
+                    })
+                    .is_err()
+                {
+                    eprintln!("[stream] topology self-heal could not enqueue a rebuild (loop is shutting down)");
                 }
             }
         }
