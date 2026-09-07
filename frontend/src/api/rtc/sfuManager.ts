@@ -40,10 +40,59 @@ interface SfuTokenResponse {
     max_screen_shares: number;
 }
 
+/**
+ * Which simulcast layer to subscribe a remote video track at.
+ *
+ * WHY AN UNFOCUSED CAMERA IS NOT `LOW`. It was, and nothing ever raised it:
+ * `setFocusedRemote` is called only by StreamStage, the SCREEN-SHARE stage,
+ * while the only surface that renders remote cameras is VoiceStage, which
+ * focuses nobody. So `focusedUserId` stayed null for the whole of every call
+ * and every camera sat on the bottom rung — 320x180 at 150 kbps and 15 fps —
+ * upscaled into a tile up to 640x360 CSS px. With dynacast on, the server then
+ * tells the publisher to stop encoding the layers nobody subscribed, so those
+ * pixels were never produced at all: this is not a subscription preference the
+ * renderer could work around. It is the whole of "why does the webcam look so
+ * much worse than Discord", whose default is 720p30.
+ *
+ * MEDIUM is 640x360, which is exactly what the grid gives a tile in a small
+ * call, so this asks for the picture actually being displayed and no more. In a
+ * bigger grid the tiles really are ~320px wide, so the low rung is right there
+ * and the head count is the honest input — see the parameter list.
+ *
+ * THE SERVER'S ADMISSION ARITHMETIC MUST AGREE: `room_egress_kbps` in
+ * src/sfu.rs charges every non-focus subscriber for this rung. Raising it here
+ * alone would make the node admit seats whose real egress it under-counted, so
+ * CAM_MID_KBPS moved with it in the same change.
+ */
+export function subscribedQuality(
+    source: Track.Source,
+    focused: boolean,
+    participants: number,
+): VideoQuality {
+    if (focused) return VideoQuality.HIGH;
+    // A share's text is unreadable at 320x180, and it is the thing people are
+    // looking at; it already asked for MEDIUM at subscribe time. Keeping that
+    // here stops a focus change silently demoting one, which the old shared
+    // ternary did.
+    if (source === Track.Source.ScreenShare) return VideoQuality.MEDIUM;
+    // A camera's rung follows the size its tile is actually rendered at, which
+    // the voice grid derives from the head count (VoiceStage.css: one or two
+    // people share a 640px-wide column, three or more get ~300-360px each).
+    // So: MEDIUM (640x360) for a small call, LOW (320x180) for a grid, which is
+    // roughly the tile size either way and keeps egress inside the node budget.
+    return participants <= GRID_MID_MAX_PARTICIPANTS ? VideoQuality.MEDIUM : VideoQuality.LOW;
+}
+
 // Simulcast ladder — keep in sync with the backend egress model (src/sfu.rs).
 const CAM_LOW = new VideoPreset(320, 180, 150_000, 15);
 const CAM_MID = new VideoPreset(640, 360, 500_000, 20);
 const CAM_HIGH_BITRATE = 2_500_000;
+/// At or below this head count the voice grid gives each tile a wide column, so
+/// an unfocused camera is subscribed at the MID rung. Above it the tiles are
+/// ~320px and the low rung is the right picture. Mirrored by the backend's
+/// admission arithmetic (`room_egress_kbps`, src/sfu.rs) — the two must agree
+/// or the node admits seats whose egress it under-counted.
+const GRID_MID_MAX_PARTICIPANTS = 4;
 const SHARE_BITRATE = 4_500_000;
 
 /// LiveKit's frame-crypto keyring is 16 slots; epochs map onto it mod-16, so
@@ -451,19 +500,29 @@ export class SfuManager {
 
     /**
      * Focus policy (§5.2 of the SFU design): the focused user's video pulls the
-     * HIGH simulcast layer, everyone else's stays LOW. StreamStage calls this
-     * via voiceState when its focus changes.
+     * HIGH simulcast layer. What everyone ELSE gets is decided per source by
+     * `subscribedQuality`, because a camera tile and a screen share are not the
+     * same picture at the same size — see that function.
+     *
+     * StreamStage calls this via voiceState when its focus changes.
      */
+    /** Everyone in the room, us included — what the grid sizes its tiles by. */
+    private participantCount(): number {
+        return (this.room?.remoteParticipants.size ?? 0) + 1;
+    }
+
     setFocusedRemote(userId: number | null): void {
         this.focusedUserId = userId;
         if (!this.room) return;
         for (const participant of this.room.remoteParticipants.values()) {
             const uid = userIdFromIdentity(participant.identity);
-            const quality = uid !== null && uid === userId ? VideoQuality.HIGH : VideoQuality.LOW;
+            const focused = uid !== null && uid === userId;
             for (const pub of participant.trackPublications.values()) {
                 // Only subscribed publications: with autoSubscribe off,
                 // setVideoQuality on an unsubscribed pub warn-logs uselessly.
-                if (pub.kind === 'video' && pub.isSubscribed) pub.setVideoQuality(quality);
+                if (pub.kind === 'video' && pub.isSubscribed) {
+                    pub.setVideoQuality(subscribedQuality(pub.source, focused, this.participantCount()));
+                }
             }
         }
     }
@@ -920,12 +979,16 @@ export class SfuManager {
                 this.onRemoteStream?.(uid, new MediaStream([track.mediaStreamTrack]));
                 break;
             case Track.Source.Camera: {
-                pub.setVideoQuality(uid === this.focusedUserId ? VideoQuality.HIGH : VideoQuality.LOW);
+                pub.setVideoQuality(
+                    subscribedQuality(pub.source, uid === this.focusedUserId, this.participantCount()),
+                );
                 this.onCameraStream?.(uid, new MediaStream([track.mediaStreamTrack]));
                 break;
             }
             case Track.Source.ScreenShare: {
-                pub.setVideoQuality(uid === this.focusedUserId ? VideoQuality.HIGH : VideoQuality.MEDIUM);
+                pub.setVideoQuality(
+                    subscribedQuality(pub.source, uid === this.focusedUserId, this.participantCount()),
+                );
                 // Remote control needs the receiver in hand to drop its
                 // jitter buffer while this share is being DRIVEN (and give it
                 // back after) — this subscription is the only moment the SFU

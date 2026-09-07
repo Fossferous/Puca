@@ -48,7 +48,24 @@ use crate::state::AppState;
 // Simulcast ladder the SFU clients publish (see frontend sfuManager): these
 // drive the egress projection, so keep them in sync with the client.
 const CAM_HIGH_KBPS: u64 = 2_500;
+/// The rung every NON-FOCUS camera subscription actually asks for.
+///
+/// This was 150 (the ladder's bottom rung, 320x180) and the client asked for
+/// exactly that — because nothing ever raised an unfocused camera, cameras were
+/// permanently 320x180 upscaled into a 640x360 tile. The client now subscribes
+/// unfocused cameras at the MID rung (640x360, 500 kbps: `subscribedQuality` in
+/// frontend/src/api/rtc/sfuManager.ts), which is the size the tile actually
+/// renders. THE TWO MUST MOVE TOGETHER: this constant is what admission charges
+/// each subscriber for every other participant, so leaving it at the low rung
+/// would under-count real egress and over-admit seats — trading a sharpness
+/// complaint for a congestion one.
 const CAM_LOW_KBPS: u64 = 150;
+const CAM_MID_KBPS: u64 = 500;
+/// At or below this head count the client subscribes unfocused cameras at the
+/// MID rung, because the voice grid gives each tile a wide column there; above
+/// it the tiles are ~320px and the low rung is what it asks for. Keep in step
+/// with GRID_MID_MAX_PARTICIPANTS in frontend/src/api/rtc/sfuManager.ts.
+const GRID_MID_MAX_PARTICIPANTS: usize = 4;
 const SHARE_KBPS: u64 = 4_500;
 /// WebRTC/SRTP overhead factor applied to media bitrates (×1.15).
 const OVERHEAD_NUM: u64 = 115;
@@ -188,7 +205,8 @@ fn room_egress_kbps(participants: usize, screen_shares: usize) -> u64 {
     } else {
         CAM_HIGH_KBPS
     };
-    let per_subscriber = focus + n.saturating_sub(2) * CAM_LOW_KBPS;
+    let others = if participants <= GRID_MID_MAX_PARTICIPANTS { CAM_MID_KBPS } else { CAM_LOW_KBPS };
+    let per_subscriber = focus + n.saturating_sub(2) * others;
     n * per_subscriber * OVERHEAD_NUM / OVERHEAD_DEN
 }
 
@@ -1013,6 +1031,34 @@ mod tests {
         // admission control.
         let n8 = room_egress_kbps(8, 0);
         assert!((30_500..32_000).contains(&n8), "n8={n8}");
+    }
+
+    /// The camera rung follows the head count, because the client's tiles do.
+    ///
+    /// Unfocused cameras were charged at the ladder's bottom rung for every
+    /// room size, and the client asked for exactly that — which is why a camera
+    /// was 320x180 upscaled into a 640x360 tile in a one-to-one call. The
+    /// client now asks for the MID rung while the grid is small. If this
+    /// arithmetic did not move with it, admission would under-count real egress
+    /// and over-admit seats.
+    #[test]
+    fn a_small_grid_is_charged_for_the_mid_camera_rung() {
+        // N=4: focus + 2 others at the MID rung.
+        assert_eq!(
+            room_egress_kbps(4, 0),
+            4 * (CAM_HIGH_KBPS + 2 * CAM_MID_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN
+        );
+        // N=6 is past the threshold: the tiles are ~320px and so is the rung.
+        assert_eq!(
+            room_egress_kbps(6, 0),
+            6 * (CAM_HIGH_KBPS + 4 * CAM_LOW_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN
+        );
+        // The step at the threshold must be UPWARD as the room SHRINKS — a
+        // smaller room costs more per subscriber, which is the whole point.
+        assert!(
+            room_egress_kbps(4, 0) / 4 > room_egress_kbps(6, 0) / 6,
+            "per-subscriber egress must be higher in a small grid"
+        );
     }
 
     #[test]
