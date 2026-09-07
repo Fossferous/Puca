@@ -42,6 +42,24 @@ const tauriDir = join(here, '..', 'src-tauri');
 const overlay = join(tauriDir, 'tauri.release.json');
 const baseConf = join(tauriDir, 'tauri.conf.json');
 
+/** The one live version in the repo, or undefined if it cannot be read.
+ *
+ *  Passed to cargo as PUCA_VERSION so the APP knows what release it is, the
+ *  same way build-agent.mjs already does for the sidecars. Both crates' own
+ *  Cargo versions are frozen fossils (src-tauri 0.1.0, puca-agent 0.8.21), so
+ *  this is the only honest source — and without it `agent_ipc`'s version-skew
+ *  check reports "unknown" and stays silent rather than guessing. */
+function liveVersion() {
+    try {
+        const conf = JSON.parse(readFileSync(baseConf, 'utf8'));
+        if (typeof conf.version === 'string' && conf.version.trim()) return conf.version.trim();
+        console.warn('[tauri-build] tauri.conf.json has no version field; the app cannot detect a stale sidecar');
+    } catch (e) {
+        console.warn(`[tauri-build] could not read tauri.conf.json (${e.message}); the app cannot detect a stale sidecar`);
+    }
+    return undefined;
+}
+
 /** Read the updater endpoints out of a config file, if it declares any. */
 function endpointsOf(file) {
     try {
@@ -392,7 +410,16 @@ console.log(`[tauri-build] tauri build ${args.join(' ')}`);
 const r = spawnSync('npx', ['tauri', 'build', ...args], {
     stdio: 'inherit',
     shell: true,
-    env: envWithCrtStatic(process.platform, process.env),
+    // PUCA_VERSION reaches the APP crate too, not just the sidecars: it is what
+    // `agent_ipc::app_build_version()` compares against the agent's hello, and
+    // both crates' own Cargo versions are frozen fossils (0.1.0 and 0.8.21), so
+    // this is the only honest source. Absent it, the skew check reports
+    // "unknown" and stays quiet rather than guessing.
+    env: (() => {
+        const v = liveVersion();
+        if (v) console.log(`[tauri-build] stamping the app as ${v} (PUCA_VERSION)`);
+        return { ...envWithCrtStatic(process.platform, process.env), ...(v ? { PUCA_VERSION: v } : {}) };
+    })(),
 });
 if (mergedDir) {
     try { rmSync(mergedDir, { recursive: true, force: true }); } catch { /* best effort */ }
