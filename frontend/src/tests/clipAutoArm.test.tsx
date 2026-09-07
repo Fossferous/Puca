@@ -45,8 +45,12 @@ import type { ClipPolicy } from '../api/clips/clipsUiState';
 
 const policy: ClipPolicy = { available: true, serverClipsEnabled: true, viewerIsOwner: false, serverId: 's1', maxSeconds: 120, pinnedChannelId: null, defaultTargetChannelId: 9, voiceChannelPerms: null };
 
-function setMode(mode: 'off' | 'prompt' | 'auto') {
-    saveSettings({ ...defaultSettings, clipArmOnJoin: mode });
+/** `agreed` mirrors the per-server consent the auto-arm path now requires: a
+ *  member earns automatic arming in a server by arming there once by hand, so
+ *  a test that wants the automatic path must say which server has been agreed
+ *  to. Passing none is the FIRST-JOIN case. */
+function setMode(mode: 'off' | 'prompt' | 'auto', agreed: string[] = ['s1']) {
+    saveSettings({ ...defaultSettings, clipArmOnJoin: mode, clipAutoArmServers: agreed });
 }
 
 // Raw react-dom/client + act (the repo's component-test pattern — no testing-library).
@@ -193,5 +197,45 @@ describe('clipArmOnJoin', () => {
         expect(loadSettings().clipArmOnJoin).toBe('off');
         localStorage.setItem('sovereign_settings', JSON.stringify({ clipArmPromptOnJoin: false }));
         expect(loadSettings().clipArmOnJoin).toBe('off');
+    });
+});
+
+describe('automatic arming is agreed per server, not once for all of them', () => {
+    it('does not arm on the first join to a server it has never armed in', async () => {
+        // THE GAP THIS CLOSES. clipArmOnJoin is one global switch, and the
+        // other half of the decision belongs to whoever owns the server: they
+        // turn clips on. So ticking "arm automatically" once — in a small
+        // server, among friends — silently started a whole-screen recording in
+        // every other server the moment its owner enabled clips, including
+        // servers joined later, with nothing said and nothing asked again.
+        setMode('auto', []);
+        mount();
+        await act(async () => { vi.advanceTimersByTime(900); });
+        await act(async () => { await Promise.resolve(); });
+        expect(armNativeMock, 'a server must be agreed to first').not.toHaveBeenCalled();
+        cleanup();
+    });
+
+    it('arms automatically once that server has been armed in by hand', async () => {
+        // mockReset() in beforeEach clears the implementation too, so the
+        // resolved value has to be set by any test that lets the call through.
+        armNativeMock.mockResolvedValue(undefined);
+        setMode('auto', ['s1']);
+        mount();
+        await act(async () => { vi.advanceTimersByTime(900); });
+        await act(async () => { await Promise.resolve(); });
+        expect(armNativeMock).toHaveBeenCalledTimes(1);
+        cleanup();
+    });
+
+    it('does not let one agreed server speak for another', async () => {
+        // The policy under test carries serverId 's1'; agreeing to 's2' says
+        // nothing about it.
+        setMode('auto', ['s2']);
+        mount();
+        await act(async () => { vi.advanceTimersByTime(900); });
+        await act(async () => { await Promise.resolve(); });
+        expect(armNativeMock).not.toHaveBeenCalled();
+        cleanup();
     });
 });

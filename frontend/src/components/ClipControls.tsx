@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isTauri } from '../api/platform';
-import { loadSettings } from './settingsStore';
+import { loadSettings, saveSettings } from './settingsStore';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { arm, armNative, disarm, seal, getReplayState, isClipCaptureSupported, discardSeal, retrySystemAudio, type ReplayState } from '../api/clips/replayBuffer';
 import { isNativeCaptureSupported } from '../api/clips/nativeCapture';
@@ -31,6 +31,20 @@ interface ClipButtonsProps {
     /** Everyone this client saw in the room whose presence overlaps the clip's
      *  window [windowStartMs, windowEndMs] (D1; api/clips/clipParticipants.ts). */
     getDeclaredParticipants?: (windowStartMs: number, windowEndMs: number) => number[];
+}
+
+/** Has this member agreed to automatic arming in THIS server? */
+export function autoArmAgreed(serverId: string | null): boolean {
+    if (!serverId) return false;
+    return (loadSettings().clipAutoArmServers ?? []).includes(serverId);
+}
+
+/** Record the agreement, once, when they arm here by hand. */
+function rememberAutoArmAgreement(serverId: string | null): void {
+    if (!serverId || loadSettings().clipArmOnJoin !== 'auto') return;
+    const current = loadSettings().clipAutoArmServers ?? [];
+    if (current.includes(serverId)) return;
+    saveSettings({ ...loadSettings(), clipAutoArmServers: [...current, serverId] });
 }
 
 const isArmedPhase = (p: ReplayState['phase']) => p === 'armed' || p === 'sealing' || p === 'sealed' || p === 'uploading';
@@ -85,6 +99,13 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
         if (!inVoice) { autoTriedForRef.current = null; setAutoState('idle'); return; }
         if (armed || replay.phase === 'arming') return;
         if (loadSettings().clipArmOnJoin !== 'auto' || !gate.visible || !gate.armEnabled) return;
+        // PER SERVER, not once for all of them. The other half of this
+        // decision belongs to whoever owns the server: they turn clips on, and
+        // until now that was enough to start a whole-screen recording on the
+        // machine of anyone who had ever ticked "arm automatically" anywhere.
+        // A server earns automatic arming the first time its member arms there
+        // by hand; until then they get the nudge, which is what 'prompt' does.
+        if (!autoArmAgreed(policy.serverId)) { setAutoState('failed'); return; }
         if (!isNativeCaptureSupported()) { setAutoState('failed'); return; } // e.g. non-Windows desktop build
         if (autoTriedForRef.current === roomId) return;
         autoTriedForRef.current = roomId;
@@ -110,7 +131,13 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
 
     const onArm = async () => {
         if (armed) { await disarm('user'); return; }
-        try { await arm(); } catch (e) { console.warn('[clips] arm failed:', e); }
+        try {
+            await arm();
+            // Arming here by hand is the agreement the auto-arm effect waits
+            // for — recorded only on the way IN, so turning the buffer off
+            // again does not revoke it.
+            rememberAutoArmAgreement(policy.serverId);
+        } catch (e) { console.warn('[clips] arm failed:', e); }
     };
     const armTitle = armed
         ? 'Clip buffer on — nothing has left your PC. Click to turn off.'
