@@ -31,8 +31,19 @@
 //! What this module deliberately does NOT do: scale captured frames. The
 //! encoder is configured at the CAPTURED MONITOR'S NATIVE RESOLUTION — the
 //! `Quality` preset's max-width/height only applies to the browser-based
-//! path. A future revision can add a downscale pass if 4K displays prove too
-//! heavy; for v1, correctness over an untested resize routine.
+//! path. A downscale pass would be the wrong lever anyway: the resize would
+//! run AFTER the full GPU-to-staging readback, so it removes none of the
+//! per-frame cost and adds a pass over the surface.
+//!
+//! What it does instead, since the cost is pixels x fps: when the monitor is
+//! bigger than the preset assumed, the excess is folded into the FRAME RATE
+//! (`effective_encode_settings`), and the bitrate follows the cadence so the
+//! member gets roughly the budget their preset's label promised. Before that,
+//! "1080p60 — about 9 Mbps" on a 2560x1440 monitor meant a 2560x1440 60 fps
+//! 16 Mbps encode: 1.78x the work asked for, measured at 73-92% of a core on
+//! a real machine, against docs/CLIPS.md's own bench of ~40% at ~50 fps. That
+//! document already said this loop cannot hold 60 fps at 1440p or above, so
+//! the frames were being dropped regardless; the cadence is now honest.
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -262,6 +273,58 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
     })
 }
 
+/// What the encoder should actually be asked for, given the preset the member
+/// chose and the monitor it turned out to be pointed at.
+///
+/// WHY THE FRAME RATE MOVES AND THE FRAME SIZE DOES NOT. This path never
+/// scales frames (see the module header): the preset's max width/height apply
+/// only to the browser path, so "1080p60" on a 2560x1440 monitor captured
+/// 2560x1440 at 60 fps, and `scale_bitrate` raised the promised ~9 Mbps to
+/// exactly 16 Mbps to match the extra pixels. Cost is pixels x fps, so that is
+/// 1.78x what the member asked for, sustained, for as long as the buffer is
+/// armed. Measured on such a host: 73-92% of a core, against a documented
+/// bench of ~40% at ~50 fps — and docs/CLIPS.md already says the loop cannot
+/// hold 60 fps at 1440p or above as written. It was dropping frames anyway;
+/// this makes the cadence honest instead of aspirational.
+///
+/// A CPU downscale would be the wrong answer even though it sounds like the
+/// obvious one: the resize runs AFTER the full GPU-to-staging readback, so it
+/// removes none of the per-frame cost and adds another pass over the surface.
+/// Trading frame rate is the only lever that actually reduces work here.
+///
+/// So: when the captured frame is bigger than the preset assumed, fold the
+/// excess into the frame rate instead, and carry the bitrate with it so the
+/// member gets roughly the bit budget the label promised.
+pub fn effective_encode_settings(
+    requested_fps: u32,
+    requested_bitrate: u32,
+    assumed_pixels: u64,
+    actual_pixels: u64,
+) -> (u32, u32) {
+    let bitrate = scale_bitrate(requested_bitrate, assumed_pixels, actual_pixels);
+    // A monitor at or under the preset's budget gets exactly what was asked
+    // for — the common 1080p case is untouched.
+    if assumed_pixels == 0 || actual_pixels <= assumed_pixels || requested_fps == 0 {
+        return (requested_fps, bitrate);
+    }
+    // Keep pixels-per-second at the preset's budget, then round to a cadence a
+    // player renders cleanly rather than to whatever the ratio produces. The
+    // floor is 24: below that a clip stops reading as motion, and a member who
+    // wants more can pick a lower-resolution preset — that choice is now real.
+    let budget = (requested_fps as u64).saturating_mul(assumed_pixels) / actual_pixels;
+    let fps = match budget {
+        0..=29 => 24,
+        30..=47 => 30,
+        48..=59 => 48,
+        _ => requested_fps,
+    }
+    .min(requested_fps);
+    // Bits follow the cadence: fewer frames per second need fewer bits per
+    // second for the same picture, and this lands back near the labelled rate.
+    let bitrate = ((bitrate as u64) * fps as u64 / requested_fps as u64).clamp(1_500_000, 20_000_000) as u32;
+    (fps, bitrate)
+}
+
 /// The quality preset's bitrate is tuned for the preset's ASSUMED resolution;
 /// native capture runs at the monitor's real one (never scaled). Scale by the
 /// pixel ratio, clamped so a tiny monitor is not over-bitrated and a 4K one
@@ -407,12 +470,26 @@ pub fn start_video_capture(
     fps: u32,
     bitrate: u32,
     // Pixel count the caller's `bitrate` was tuned for (the preset's
-    // max_width * max_height) — the encoder gets `scale_bitrate` of it.
+    // max_width * max_height) — `effective_encode_settings` reconciles it with
+    // the monitor actually captured.
     assumed_pixels: u64,
     gop_ms: u32,
 ) -> Result<ClipCaptureTarget, String> {
     let mut target = pick_target()?;
-    target.bitrate = scale_bitrate(bitrate, assumed_pixels, target.width as u64 * target.height as u64);
+    let actual_pixels = target.width as u64 * target.height as u64;
+    let (effective_fps, scaled_bitrate) =
+        effective_encode_settings(fps, bitrate, assumed_pixels, actual_pixels);
+    target.bitrate = scaled_bitrate;
+    if effective_fps != fps {
+        // Say it plainly: the member picked a preset and is getting a
+        // different cadence, because their monitor is bigger than the preset
+        // assumed. Silent is how "1080p60" became a 1440p60 encode.
+        log::info!(
+            "Clip capture: {}x{} is larger than this preset assumed, so the buffer records at {} fps, not {} ({} kbps)",
+            target.width, target.height, effective_fps, fps, scaled_bitrate / 1000
+        );
+    }
+    let fps = effective_fps;
 
     let mut waited_ms = 0u32;
     loop {
@@ -461,6 +538,12 @@ pub fn start_video_capture(
 
 #[cfg(windows)]
 pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
+    // SAY SO. This used to flip the flag and nothing else, and the loop's clean
+    // exit was silent too — so the log recorded a start and never a stop, and
+    // "no stop line" proved nothing about whether a capture was still running.
+    // Diagnosing a machine that had been capturing for four and a half hours
+    // took a process-memory scan because of it.
+    log::info!("Clip video capture: stop requested");
     state.stop_signal.store(true, Ordering::SeqCst);
 }
 
@@ -518,6 +601,12 @@ fn video_capture_loop(
     // without a backoff this would peg a core for as long as the condition
     // lasts.
     let mut access_lost_streak: u32 = 0;
+    // A capture nobody is watching should still be able to say what it is
+    // costing: without a heartbeat, hours of recording leave exactly one line.
+    let mut frames_encoded: u64 = 0;
+    let mut bytes_emitted: u64 = 0;
+    let mut last_beat = std::time::Instant::now();
+    const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
 
     while !state.stop_signal.load(Ordering::SeqCst) {
         // The frame is STORED (moved, not cloned) and encoded by reference —
@@ -592,6 +681,7 @@ fn video_capture_loop(
         };
 
         let dur_us = (1_000_000u64 / fps.max(1) as u64).max(1);
+        let emitted_bytes = data.len() as u64;
         let event = ClipVideoChunkEvent {
             data: base64_encode(&data),
             keyframe: encoded.keyframe,
@@ -605,7 +695,30 @@ fn video_capture_loop(
             break; // the window is gone — nothing left to stream to
         }
         last_emit_at = std::time::Instant::now();
+        frames_encoded += 1;
+        bytes_emitted += emitted_bytes;
+        if last_beat.elapsed() >= HEARTBEAT {
+            let secs = start.elapsed().as_secs_f64().max(0.001);
+            log::info!(
+                "Clip video capture: still armed — {:.0}s, {} frames ({:.1} fps), {:.1} Mbit/s, output {}",
+                secs,
+                frames_encoded,
+                frames_encoded as f64 / secs,
+                (bytes_emitted as f64 * 8.0) / secs / 1_000_000.0,
+                target.output_index,
+            );
+            last_beat = std::time::Instant::now();
+        }
     }
+    let secs = start.elapsed().as_secs_f64().max(0.001);
+    log::info!(
+        "Clip video capture stopped: {:.0}s, {} frames ({:.1} fps), {:.1} Mbit/s, output {}",
+        secs,
+        frames_encoded,
+        frames_encoded as f64 / secs,
+        (bytes_emitted as f64 * 8.0) / secs / 1_000_000.0,
+        target.output_index,
+    );
     Ok(())
 }
 
@@ -739,6 +852,52 @@ mod tests {
         let mons = [m(1, r(0, 0, 1920, 1080), true)];
         let (_, reason) = choose_target(fg(r(500, 500, 0, 0)), &mons).unwrap();
         assert_eq!(reason, TargetReason::Primary);
+    }
+
+    /// The measured case, from a real machine on 2026-09-07: the member had
+    /// picked "1080p 60 fps — about 9 Mbps" and the log line read
+    /// "2560x1440 @ 60 fps, 16000 kbps". Cost is pixels x fps, so that was
+    /// 1.78x the work the label promised, sustained, and it showed up as
+    /// 73-92% of a core.
+    #[test]
+    fn a_monitor_larger_than_the_preset_trades_frame_rate_not_frame_size() {
+        let hd = 1920u64 * 1080;
+        let qhd = 2560u64 * 1440;
+        let (fps, bitrate) = effective_encode_settings(60, 9_000_000, hd, qhd);
+        assert_eq!(fps, 30, "1440p at the 1080p60 pixel budget is ~34 fps, so 30");
+        // 16 Mbps for the bigger frame, halved with the cadence, lands back
+        // near the ~9 Mbps the preset's label promised.
+        assert_eq!(bitrate, 8_000_000);
+    }
+
+    /// The common case must be untouched: a 1080p monitor on a 1080p preset
+    /// gets exactly what it asked for, at exactly the labelled bitrate.
+    #[test]
+    fn a_monitor_within_the_preset_is_left_alone() {
+        let hd = 1920u64 * 1080;
+        assert_eq!(effective_encode_settings(60, 9_000_000, hd, hd), (60, 9_000_000));
+        let small = 1600u64 * 900;
+        let (fps, bitrate) = effective_encode_settings(60, 9_000_000, hd, small);
+        assert_eq!(fps, 60);
+        assert!(bitrate < 9_000_000, "a smaller monitor still gets scale_bitrate's reduction");
+    }
+
+    /// 4K on a 1080p preset is four times the pixels; the cadence floor keeps
+    /// the result watchable rather than following the ratio to 15 fps.
+    #[test]
+    fn a_4k_monitor_lands_on_the_cadence_floor() {
+        let hd = 1920u64 * 1080;
+        let uhd = 3840u64 * 2160;
+        let (fps, _) = effective_encode_settings(60, 9_000_000, hd, uhd);
+        assert_eq!(fps, 24);
+    }
+
+    /// Degenerate inputs must not pick the most expensive setting.
+    #[test]
+    fn effective_settings_survive_degenerate_inputs() {
+        assert_eq!(effective_encode_settings(0, 9_000_000, 1, 4).0, 0);
+        let (fps, _) = effective_encode_settings(60, 9_000_000, 0, 4);
+        assert_eq!(fps, 60, "an unknown assumption cannot justify changing the cadence");
     }
 
     #[test]
