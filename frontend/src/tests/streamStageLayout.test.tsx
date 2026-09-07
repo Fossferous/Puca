@@ -24,10 +24,15 @@ import { createRoot, type Root } from 'react-dom/client';
 const STREAMS = new Map<number, { username: string; stream: MediaStream }>();
 let selected: number[] = [];
 let streamers: { userId: number; username: string }[] = [];
-let notify: (() => void) | null = null;
+// MANY subscribers, like the real module: the stage subscribes, and so does
+// the camera rail beneath it. A single-slot stub let the second subscriber
+// silently replace the first, so a change event re-rendered the rail and never
+// the stage — the tests then saw a tile that would not go away.
+const subscribers = new Set<() => void>();
+const notify = () => { for (const cb of [...subscribers]) cb(); };
 
 vi.mock('../components/voiceState', () => ({
-    subscribeToStreamState: (cb: () => void) => { notify = cb; return () => { notify = null; }; },
+    subscribeToStreamState: (cb: () => void) => { subscribers.add(cb); return () => { subscribers.delete(cb); }; },
     subscribeToVoiceUsers: () => () => { /* no voice users in these tests */ },
     getSelectedStreams: () => [...selected],
     getStreamData: (id: number) => STREAMS.get(id) ?? null,
@@ -40,6 +45,11 @@ vi.mock('../components/voiceState', () => ({
     notifyStreamStateChange: vi.fn(),
     globalSpeakingUsers: new Set<number>(),
     getAllVoiceUsers: () => [],
+    // The stage now carries a camera rail below the grid. These tests are
+    // about the GRID's layout contract, so the rail is given an empty world
+    // and renders nothing — but the module stub still has to offer everything
+    // the rail imports, or the whole file fails to load.
+    globalCameraStreams: new Map<number, MediaStream>(),
 }));
 
 /** Mutable so a test can put an ACTIVE remote-control session on a given user. */
@@ -266,7 +276,7 @@ describe('StreamStage layout contract', () => {
         act(() => {
             selected = [1, 3];
             streamers = streamers.filter(s => s.userId !== 2);
-            notify?.();
+            notify();
         });
 
         expect(videos()).toHaveLength(2);
