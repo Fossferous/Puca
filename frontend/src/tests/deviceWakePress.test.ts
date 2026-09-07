@@ -47,6 +47,7 @@ import {
     cancelWake,
     installWakeResultListener,
     timeoutMessage,
+    signInRowIsCredible,
     __resetWakeSessionsForTests,
     type WakeState,
 } from '../api/devices/wakeSession';
@@ -169,6 +170,29 @@ describe('the three-minute verdict', () => {
         expect(unwatched).toMatch(/may have woken/);
         expect(unwatched).toMatch(/Reach this computer after it restarts/);
         expect(unwatched).not.toMatch(/means the packet did not wake it/);
+    });
+
+    it('does not call a sign-in row credible once its service has stopped attesting', () => {
+        // THE CASE THAT SENT SOMEONE TO THEIR BIOS. A device row outlives the
+        // service behind it: removing lock-screen access — or letting the
+        // uninstaller's hook remove the service — deletes the service and its
+        // secrets and leaves the row un-revoked for ever. Measured on a real
+        // machine: the service had been gone six days, the row was still
+        // there, and the verdict told the owner the packet never arrived.
+        const now = Date.parse('2026-09-07T21:00:00Z');
+        const fresh = { last_seen_at: '2026-09-07T09:00:00Z' };
+        const stale = { last_seen_at: '2026-06-01T12:00:00Z' };
+        expect(signInRowIsCredible(fresh, now)).toBe(true);
+        expect(signInRowIsCredible(stale, now)).toBe(false);
+    });
+
+    it('treats a row that has never attested, and a missing one, as no evidence', () => {
+        const now = Date.parse('2026-09-07T21:00:00Z');
+        // Enrolled a minute ago but never once seen at a sign-in screen: the
+        // service may exist and may not, and the verdict must not guess.
+        expect(signInRowIsCredible({ last_seen_at: null }, now)).toBe(false);
+        expect(signInRowIsCredible(null, now)).toBe(false);
+        expect(signInRowIsCredible({ last_seen_at: 'not a date' }, now)).toBe(false);
     });
 
     it('carries the firmware checklist in both cases', () => {

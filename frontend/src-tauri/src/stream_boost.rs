@@ -22,21 +22,24 @@
 //! silent sweep.
 //!
 //! What it does now: while active, every descendant `msedgewebview2.exe` of
-//! this app process sitting at NORMAL is raised to ABOVE_NORMAL (CPU) — and
-//! so is THIS process. The 0.8.111 walk was strict-descendant and left the
-//! app process itself at NORMAL, which is the process that owns the Tauri
-//! UI thread servicing every IPC request (each remote-control inject is
-//! one) and the `input-inject` worker that calls SendInput — the two hops
-//! between the host page's inject call and the desktop. That is the whole
-//! case for it. The measurement that motivated the input-path work
-//! (frontend/e2e/rc-latency-2peer.mjs, BUSY=host) loads the host PAGE's
-//! main thread and stops at the page's inject call, so it says the input
-//! leg is the contention-sensitive half (p50 25 ms / p90 65 ms against 1 ms
-//! idle while the video leg moved 5 ms) and argues for the coalescer and
-//! the batched IPC; it does not reach this process. A re-apply tick
-//! catches processes Chromium spawns or re-prioritises mid-share. On
-//! release, each process is restored to the CPU class it had — after
-//! re-checking it is STILL one of ours, so a recycled pid is never touched.
+//! this app process sitting at NORMAL is raised to ABOVE_NORMAL (CPU). A
+//! re-apply tick catches processes Chromium spawns or re-prioritises
+//! mid-share. On release, each process is restored to the CPU class it had —
+//! after re-checking it is STILL one of ours, so a recycled pid is never
+//! touched.
+//!
+//! THIS PROCESS IS NOT IN THAT SET, and v0.9.6 briefly put it there. The case
+//! made at the time was real — this process owns the Tauri UI thread servicing
+//! every IPC request (each remote-control inject is one) and the
+//! `input-inject` worker that calls SendInput. But those are two THREADS and
+//! `SetPriorityClass` is process-wide, so the class boost also raised the armed
+//! clip replay buffer's capture and encode loop, which the paragraph below
+//! forbids boosting, along with the encoder work-queue and vendor driver
+//! threads it spawns. Measured on a 2560x1440 host: that loop holds 73-92% of a
+//! core on its own, and for two releases it held it at ABOVE_NORMAL against the
+//! user's game for the whole of every share. The inject worker already raises
+//! itself (`remote_control.rs`), which is priority 10 in a NORMAL-class process
+//! — above a game's ordinary threads either way. See `boost_targets`.
 //!
 //! Deliberately NOT active for the armed clip replay buffer: nobody is
 //! watching that capture live, and taking GPU/CPU time from the game to feed
@@ -94,6 +97,35 @@ pub fn descendants_named(rows: &[ProcRow], root: u32, name: &str) -> Vec<u32> {
     out
 }
 
+/// Every pid a boost may touch: the WebView2 descendants doing the capture and
+/// the encode — and NOT this process.
+///
+/// THE APP PROCESS IS DELIBERATELY ABSENT, and putting it back is the exact bug
+/// this function exists to hold shut. v0.9.6 pushed `std::process::id()` into
+/// the boosted set to give the Tauri IPC thread and the `input-inject` worker a
+/// better slice. Both of those are THREADS, and `SetPriorityClass` is
+/// process-wide, so raising the class swept up every other thread in this
+/// process — including the armed clip replay buffer's DXGI capture and encode
+/// loop, which the module header above forbids boosting in as many words, plus
+/// the encoder work-queue and vendor driver threads it creates. Measured on a
+/// 2560x1440 host: that loop alone holds 73-92% of a core, and from 0.9.6 it
+/// held it at ABOVE_NORMAL against the user's game for the whole of every
+/// screen share. "Púca makes games choppy" is the complaint the header set out
+/// to avoid, and this is how it came back.
+///
+/// The input half of that motivation does not need a class boost:
+/// `remote_control`'s inject worker already raises ITSELF to
+/// `THREAD_PRIORITY_HIGHEST` unconditionally, which is priority 10 even in a
+/// NORMAL-class process — above a game's ordinary threads with or without this.
+/// Anything else that wants priority here raises its own thread, not everyone
+/// else's.
+///
+/// Pure, so the composition is testable off Windows.
+#[cfg_attr(not(windows), allow(dead_code))] // exercised by tests + Windows imp
+pub fn boost_targets(rows: &[ProcRow], self_pid: u32, webview_exe: &str) -> Vec<u32> {
+    descendants_named(rows, self_pid, webview_exe)
+}
+
 /// What we changed for one pid, so release knows what to put back.
 #[cfg(windows)]
 #[derive(Clone, Copy)]
@@ -122,7 +154,7 @@ static STATE: std::sync::LazyLock<Mutex<BoostState>> = std::sync::LazyLock::new(
 
 #[cfg(windows)]
 mod imp {
-    use super::{descendants_named, Boosted, ProcRow, STATE};
+    use super::{Boosted, ProcRow, STATE};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -178,12 +210,10 @@ mod imp {
         rows
     }
 
-    /// The processes on the live path: every WebView2 descendant, plus this
-    /// process (the IPC servicing thread and the input-inject worker).
+    /// The processes on the live path: every WebView2 descendant. NOT this
+    /// process — see `boost_targets`, which owns that decision and says why.
     fn our_pids() -> Vec<u32> {
-        let mut pids = descendants_named(&snapshot(), std::process::id(), WEBVIEW_EXE);
-        pids.push(std::process::id());
-        pids
+        super::boost_targets(&snapshot(), std::process::id(), WEBVIEW_EXE)
     }
 
     /// Raise `pid`'s CPU priority to ABOVE_NORMAL. Returns what changed,
@@ -303,7 +333,7 @@ pub fn set_stream_boost(active: bool) -> Result<u32, String> {
     {
         if active {
             let n = imp::activate();
-            log::info!("[stream-boost] on ({n} process(es), app process included)");
+            log::info!("[stream-boost] on ({n} webview process(es); this process stays at NORMAL)");
             Ok(n as u32)
         } else {
             let n = imp::deactivate();
@@ -363,6 +393,37 @@ mod tests {
 
     /// Pid recycling can stitch cycles into the (pid, ppid) relation; the walk
     /// must terminate rather than loop.
+    /// THE REGRESSION TEST for v0.9.6's `pids.push(std::process::id())`.
+    ///
+    /// The app process must never be in the boosted set: `SetPriorityClass` is
+    /// process-wide, so including it raises the armed clip replay buffer's
+    /// capture loop — which the module header forbids — along with every other
+    /// thread here. This asserts the composition, not the walk, because the
+    /// walk was never wrong: `descendants_named` is strict-descendant and has
+    /// always excluded the root. What broke was what got appended to it.
+    #[test]
+    fn the_app_process_is_never_a_boost_target() {
+        let rows = vec![
+            row(100, 1, "puca.exe"),
+            row(200, 100, "msedgewebview2.exe"),
+            row(201, 200, "msedgewebview2.exe"),
+        ];
+        let targets = boost_targets(&rows, 100, "msedgewebview2.exe");
+        assert!(
+            !targets.contains(&100),
+            "the app process must stay at NORMAL — a class boost sweeps up the clip capture thread: {targets:?}"
+        );
+        assert_eq!(targets, vec![200, 201]);
+    }
+
+    /// A host with no webview children (nothing to boost) must yield an EMPTY
+    /// set rather than falling back to this process.
+    #[test]
+    fn no_webview_children_means_nothing_to_boost() {
+        let rows = vec![row(100, 1, "puca.exe"), row(300, 1, "chrome.exe")];
+        assert!(boost_targets(&rows, 100, "msedgewebview2.exe").is_empty());
+    }
+
     #[test]
     fn survives_ppid_cycles_and_self_parents() {
         let rows = vec![

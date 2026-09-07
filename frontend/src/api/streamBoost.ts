@@ -17,6 +17,13 @@
  * clip replay buffer hides the capture bar too, yet must NOT boost: nobody
  * sees that capture live, and taking CPU from the game to feed it would trade
  * this bug for the "Púca makes games choppy" one.
+ *
+ * That exclusion is a property of WHAT GETS RAISED, not just of who holds it.
+ * v0.9.6 added the app process itself to the boosted set, and the clip capture
+ * loop runs on a thread inside that process — so a share raised the buffer too,
+ * for two releases, however carefully this file kept it out of the holder set.
+ * Keeping a holder out of `holders` is necessary and was never sufficient; see
+ * `boost_targets` in src-tauri/src/stream_boost.rs.
  */
 import { isTauri } from './platform';
 

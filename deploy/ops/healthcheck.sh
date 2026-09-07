@@ -112,6 +112,24 @@ if systemctl is-enabled --quiet "$SERVICE_NAME-waker" 2>/dev/null; then
 		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker unhealthy; restarted"
 	fi
 	check_restart_loop "$SERVICE_NAME-waker" "$INSTALL_DIR/.waker-nrestarts.last" "Wake is down"
+	# RUNNING IS NOT THE SAME AS WORKING, and this is the one unit where the
+	# difference is invisible from outside. A waker whose credential the server
+	# refuses keeps its process, keeps its unit active, and retries for ever —
+	# so every check above it passes. One ran that way for five days, logging
+	# about 1,440 refusals a day while its owner believed Wake worked; the
+	# cause was a binary too old to authenticate the way the server had begun
+	# requiring, and a waker is re-shipped BY HAND (ship-waker.sh) rather than
+	# updating with the desktop app, so nothing else was going to catch it.
+	#
+	# Any 4xx on the dial is the same verdict — turned away, needs a human — so
+	# count rather than parse. Both wordings are matched: the old one said
+	# "connect failed", the current one says "connect REFUSED".
+	waker_refusals=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager 2>/dev/null |
+		grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)' || true)
+	if [ "${waker_refusals:-0}" -ge 5 ]; then
+		note "$SERVICE_NAME-waker is RUNNING BUT REFUSED ($waker_refusals refusals in 15 min) — it is up and being turned away, so Wake is dead while every other check passes; re-ship it (deploy/ops/ship-waker.sh) and check its enrolment"
+		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker refused $waker_refusals times in 15min; running but locked out"
+	fi
 fi
 
 # coturn and LiveKit. The backend hands out relay credentials and SFU join

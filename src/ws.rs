@@ -45,6 +45,14 @@ pub struct WsQuery {
     pub device: Option<String>,
 }
 
+/// What a refused upgrade says back.
+///
+/// "Missing token" named neither the cause nor the cure, and it is the one
+/// string a refused client can actually record: the LAN waker kept it in its
+/// journal 6,743 times and it told nobody that the client was simply too old.
+pub const WS_MISSING_TOKEN_BODY: &str =
+    "no token: send it in Sec-WebSocket-Protocol as `bearer, <jwt>` (the ?token= query string was retired in 0.9.1)";
+
 /// The token a browser sent via `Sec-WebSocket-Protocol`.
 ///
 /// WHY THIS HEADER. Browsers cannot set an `Authorization` header on a
@@ -84,20 +92,34 @@ pub async fn ws_handler(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Header first, query second: a client that sends both is a NEW client
-    // talking to this server, and we want it exercising the path we intend to
-    // keep. The query fallback exists only for installs that predate the
-    // change, and refusing them here would sign out every one of them.
+    // THE SUBPROTOCOL IS THE ONLY WAY IN. A token in the query string is
+    // written to every access log on the path, so 0.9.1 retired it — there is
+    // no fallback, and the comment that used to sit here still described one.
+    // That mattered: this is the first thing anyone reads when diagnosing a
+    // client that cannot connect, and it said the opposite of what happens.
     let offered_protocol = bearer_from_subprotocol(&headers);
-    // RETIRED in 0.9.1: a token in the query string is written to every access
-    // log on the path. Every shipped client since 0.9.0 sends the subprotocol;
-    // an older native waker/service simply updates with the desktop app.
     if offered_protocol.is_none() && query.token.is_some() {
-        tracing::info!("ws: refused a query-string token (client older than 0.9.0 — update the app)");
+        // NAME THE CLIENT. A native waker or service does not auto-update with
+        // the desktop app — it is re-shipped by hand — so this line is the only
+        // notice anyone gets that a machine has been locked out. One of them
+        // logged this 1,440 times a day for five days while its owner believed
+        // it was working, because nothing here said WHICH device was calling.
+        // The token cannot be trusted yet, so it is read for LOGGING ONLY.
+        let who = query
+            .token
+            .as_deref()
+            .and_then(|t| validate_token(t, &state.jwt_secret).ok())
+            .map(|c| c.sub.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        tracing::info!(
+            user = %who,
+            device = %query.device.as_deref().unwrap_or("-"),
+            "ws: refused a query-string token — this client is too old (retired in 0.9.1);              a native waker or service must be re-shipped, it does not update with the app"
+        );
     }
     let presented = match offered_protocol.as_deref() {
         Some(t) => t,
-        None => return (StatusCode::UNAUTHORIZED, "Missing token").into_response(),
+        None => return (StatusCode::UNAUTHORIZED, WS_MISSING_TOKEN_BODY).into_response(),
     };
 
     // Validate JWT token before upgrading
@@ -4677,13 +4699,24 @@ mod crash_resistance_tests {
 
 #[cfg(test)]
 mod ws_bearer_subprotocol_tests {
-    use super::bearer_from_subprotocol;
+    use super::{bearer_from_subprotocol, WS_MISSING_TOKEN_BODY};
     use axum::http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderMap, HeaderValue};
 
     fn with_protocol(v: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_str(v).unwrap());
         h
+    }
+
+    /// The refusal body must NAME the cure. A client that cannot connect keeps
+    /// exactly this string in its own log, and "Missing token" told the LAN
+    /// waker's owner nothing across 6,743 refusals.
+    #[test]
+    fn the_refusal_names_the_header_and_the_retirement() {
+        assert!(WS_MISSING_TOKEN_BODY.contains("Sec-WebSocket-Protocol"));
+        assert!(WS_MISSING_TOKEN_BODY.contains("bearer"));
+        assert!(WS_MISSING_TOKEN_BODY.contains("0.9.1"));
+        assert_ne!(WS_MISSING_TOKEN_BODY, "Missing token");
     }
 
     #[test]
@@ -5125,4 +5158,5 @@ mod room_id_gate_tests {
         assert_eq!(parse_channel_room("channel_5"), Some(5));
         assert_eq!(parse_voice_room("voice_5"), Some(5));
     }
+
 }

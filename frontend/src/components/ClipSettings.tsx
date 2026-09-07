@@ -121,6 +121,18 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
             <div className="settings-option">
                 <div className="option-info">
                     <label htmlFor="clip-arm-on-join">When I join a voice call</label>
+                    {/* WHAT 'AUTOMATICALLY' MEANS, BEFORE IT IS CHOSEN.
+                        The consequences used to be rendered only once the
+                        option was already selected, so the dropdown offered
+                        "Arm automatically (no popup)" and explained it after
+                        the fact. Consent that arrives after the act is not
+                        consent, and this one starts a continuous recording of
+                        a whole monitor. */}
+                    <span className="option-hint">
+                        Arming automatically records your whole screen continuously, with no popup, in
+                        every server whose owner has turned clips on. Nothing leaves this computer
+                        until you save a clip and send it.
+                    </span>
                     <span className="option-hint">
                         {settings.clipArmOnJoin === 'auto'
                             ? 'Recording starts by itself when you join a call that allows clips — no popup. It captures the monitor your fullscreen game is on (otherwise your primary monitor), plus system audio and your mic. Everyone in the call sees the buffering marker, and nothing is ever posted without everyone\u2019s approval.'

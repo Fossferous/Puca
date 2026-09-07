@@ -403,3 +403,57 @@ describe('release order at session end', () => {
         }
     });
 });
+
+describe('the hello handshake arms BOTH directions, not just the receiver', () => {
+    it('echoes a hello back when one opens, exactly once per session', async () => {
+        // THE BUG THIS PINS. Each side announces when its own key appears, and
+        // the HOST's appears first — it derives on granting, while the viewer
+        // only derives after the ControlResponse arrives, behind an await that
+        // can include fetching the host's public key. So the host's hello lands
+        // on a viewer with no key yet and is dropped, correctly and silently.
+        // The viewer's own hello then arms the HOST's direction, and the host
+        // never sends another — but the VIEWER is the side that sends input, so
+        // input stayed on the relay for the whole call. Every sampler row of a
+        // real session read lane=relay.
+        const key = await activeHost();
+        const { dc, raw } = fakeDc();
+        const outbound: ArrayBuffer[] = [];
+        raw.send = (b: ArrayBuffer) => { outbound.push(b); };
+        registerControlChannel(VIEWER, dc);
+        // A channel becoming usable ANNOUNCES on its own — that hello is not
+        // the echo under test, and leaving it in the buffer would make this
+        // pass with the echo removed.
+        await settle();
+        outbound.length = 0;
+
+        raw.onmessage!({ data: await frameFor(key, 1, FRAME_HELLO) } as MessageEvent);
+        await settle();
+
+        const kinds = outbound.map(b => decodeFrame(b)?.kind);
+        expect(kinds, 'the host answers a hello with a hello').toContain(FRAME_HELLO);
+
+        // ...and only once, so two peers cannot ping-pong hellos at each other
+        // for the life of the session.
+        const after = outbound.length;
+        raw.onmessage!({ data: await frameFor(key, 2, FRAME_HELLO) } as MessageEvent);
+        await settle();
+        expect(outbound.length, 'a second hello must not be echoed again').toBe(after);
+    });
+
+    it('does not echo a hello it could not open', async () => {
+        // An unsealed or forged hello proves nothing; answering one would tell
+        // an unauthenticated peer that this session exists.
+        await activeHost();
+        const { dc, raw } = fakeDc();
+        const outbound: ArrayBuffer[] = [];
+        raw.send = (b: ArrayBuffer) => { outbound.push(b); };
+        registerControlChannel(VIEWER, dc);
+        await settle();
+        outbound.length = 0; // drop the channel-open announcement
+
+        const wrongKey = new Uint8Array(32).fill(9);
+        raw.onmessage!({ data: await frameFor(wrongKey, 1, FRAME_HELLO) } as MessageEvent);
+        await settle();
+        expect(outbound).toHaveLength(0);
+    });
+});

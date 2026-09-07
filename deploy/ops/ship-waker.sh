@@ -183,6 +183,54 @@ if grep -q "puca-waker" "/etc/systemd/system/$WAKER_NAME.service" && [ "$WAKER_N
 	exit 1
 fi
 
+# THE TOKEN PATH IS COMPILED IN, so rewriting the unit is not enough.
+#
+# `config.rs`'s DEFAULT_TOKEN is "/var/lib/puca-waker/token" and `token_path`
+# is an OPTIONAL config field, so a waker.json written under the project's OLD
+# name carries no such key: a freshly built binary then looks under the CURRENT
+# name while the paired token sits under the old one. The sed above cannot help
+# — nothing in the unit names the token. Measured 2026-09-07 on the very box
+# this script exists for: the ship succeeded, the unit came up, and every tick
+# logged "cannot read the token at /var/lib/puca-waker/token". A working waker
+# was replaced by a differently-broken one, silently.
+#
+# So pin the path explicitly whenever the config does not already carry one,
+# carrying a token written under the other name across so the pairing survives.
+# An operator who set token_path deliberately keeps their value.
+if [ -f "/etc/$WAKER_NAME/waker.json" ]; then
+	WAKER_NAME="$WAKER_NAME" python3 - <<'PY'
+import json, os, shutil, sys
+
+name = os.environ["WAKER_NAME"]
+cfg = f"/etc/{name}/waker.json"
+here = f"/var/lib/{name}/token"
+default = "/var/lib/puca-waker/token"
+
+with open(cfg) as fh:
+    conf = json.load(fh)
+
+if conf.get("token_path"):
+    print(f"token_path already set to {conf['token_path']} — left alone")
+    sys.exit(0)
+
+if not os.path.exists(here) and os.path.exists(default) and os.path.getsize(default) > 0:
+    shutil.copy2(default, here)
+    shutil.chown(here, "svrn-waker", "svrn-waker")
+    os.chmod(here, 0o600)
+    print(f"carried the paired token from {default} to {here}")
+
+conf["token_path"] = here
+tmp = cfg + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(conf, fh, indent=2)
+    fh.write("\n")
+shutil.chown(tmp, "svrn-waker", "svrn-waker")
+os.chmod(tmp, 0o600)
+os.replace(tmp, cfg)
+print(f"pinned token_path to {here}")
+PY
+fi
+
 systemctl daemon-reload
 # Restart only if it was already enabled — a fresh install has no identity yet.
 if systemctl is-enabled --quiet "$WAKER_NAME" 2>/dev/null; then

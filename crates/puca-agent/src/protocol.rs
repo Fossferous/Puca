@@ -29,6 +29,17 @@ use serde::{Deserialize, Serialize};
 /// something is genuinely stale and should say so out loud.
 pub const PROTOCOL_VERSION: u32 = 2;
 
+/// The release this binary was built from, or "unknown".
+///
+/// Read from PUCA_VERSION, which `frontend/scripts/build-agent.mjs` passes from
+/// tauri.conf.json — the one live version in the repo. NOT CARGO_PKG_VERSION:
+/// this crate's own version is the frozen fossil 0.8.21, and a confident wrong
+/// answer is worse than no answer (build.rs says the same about the PE
+/// resource, for the same reason).
+pub fn build_version() -> &'static str {
+    option_env!("PUCA_VERSION").unwrap_or("unknown")
+}
+
 /// Frame rates a stream may be started with or moved to.
 ///
 /// An allowlist rather than a range: these are the values the UI offers, and
@@ -380,6 +391,16 @@ pub enum Response {
     Hello {
         version: u32,
         platform: String,
+        /// The RELEASE this agent was built from, as opposed to `version`,
+        /// which is the wire protocol and is deliberately frozen at 2 so
+        /// additive commands do not break a mixed pair. The two answer
+        /// different questions, and only this one can tell an app that the
+        /// helper beside it is months older than itself.
+        ///
+        /// "unknown" when built outside the release script, which is the
+        /// honest answer for a local `cargo build` — never a guess, and never
+        /// CARGO_PKG_VERSION, which is the fossil 0.8.21 (see build.rs).
+        build: String,
     },
     StreamQualityAck {
         session_id: String,

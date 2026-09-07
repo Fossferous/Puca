@@ -208,6 +208,7 @@ fn connect(pipe_name: &str, token: &str, attempts: u32) -> Result<Connection, St
                 if !reply.contains("\"ok\":\"hello\"") {
                     return Err(format!("the agent refused our token: {reply}"));
                 }
+                warn_on_build_skew(&reply);
                 return Ok(conn);
             }
             Err(e) => {
@@ -217,6 +218,52 @@ fn connect(pipe_name: &str, token: &str, attempts: u32) -> Result<Connection, St
         }
     }
     Err(format!("could not open {pipe_name}: {last}"))
+}
+
+/// The release THIS app was built from, or "unknown" outside the release
+/// script. Deliberately not CARGO_PKG_VERSION: this crate's own version is the
+/// fossil 0.1.0, and tauri.conf.json holds the only live number.
+fn app_build_version() -> &'static str {
+    option_env!("PUCA_VERSION").unwrap_or("unknown")
+}
+
+/// Extract `"build":"..."` from the agent's hello reply, without pulling a JSON
+/// parser into a path that has always worked on substrings. Pure, so the
+/// parsing is testable without a pipe.
+pub fn build_from_reply(reply: &str) -> Option<&str> {
+    let start = reply.find("\"build\":\"")? + 9;
+    let rest = &reply[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// SAY IT WHEN THE HELPER BESIDE US IS NOT OURS.
+///
+/// The app and the agent ship in one installer, so they should always match.
+/// Nothing checked: `agent_path()` accepts any file with the right NAME, and
+/// the hello handshake compares only PROTOCOL_VERSION, which is frozen at 2 on
+/// purpose so additive commands do not break a mixed pair. Version skew was
+/// invisible by construction.
+///
+/// It is not hypothetical. Measured on a real machine on 2026-09-07: a 0.9.7
+/// app launching a 0.8.117 agent, because an in-place update replaced the main
+/// binary and could not replace the sidecar the running copy had locked. The
+/// app said nothing for twelve days. That agent predates sealed input, the
+/// UDP-spoof fix and the file-jail fix.
+///
+/// A WARNING, NOT A REFUSAL: refusing would take remote access away from
+/// exactly the machines already in this state, at the moment they try to use
+/// it, over something a reinstall fixes. Say it loudly instead, on every
+/// connect, so it is in the log a diagnosis actually starts from.
+fn warn_on_build_skew(reply: &str) {
+    let ours = app_build_version();
+    let theirs = build_from_reply(reply).unwrap_or("unknown");
+    if ours == "unknown" || theirs == "unknown" || ours == theirs {
+        return;
+    }
+    log::warn!(
+        "[agent] VERSION SKEW: this app is {ours} but the agent beside it is {theirs}. They ship          together, so one of them did not get replaced — usually an update that could not          overwrite a running helper. Reinstall with the app fully closed."
+    );
 }
 
 /// Turn a failed pipe open into a message that names WHICH of three very
@@ -271,6 +318,7 @@ fn connect(socket_path: &str, token: &str, attempts: u32) -> Result<Connection, 
                 if !reply.contains("\"ok\":\"hello\"") {
                     return Err(format!("the agent refused our token: {reply}"));
                 }
+                warn_on_build_skew(&reply);
                 return Ok(conn);
             }
             Err(e) => {
@@ -980,5 +1028,35 @@ mod tests {
         let out = exchange_with_deadline(&mut conn, "{\"cmd\":\"ping\"}", 5_000);
         assert_eq!(out.expect("an answering agent must succeed"), "{\"ok\":\"pong\"}");
         let _ = server.join();
+    }
+}
+
+#[cfg(test)]
+mod skew_tests {
+    use super::build_from_reply;
+
+    /// The reply is matched on substrings, as the hello check beside it always
+    /// has been — so the parsing needs its own test rather than a claim.
+    #[test]
+    fn a_build_is_read_out_of_a_real_hello_reply() {
+        let reply = r#"{"ok":"hello","version":2,"platform":"windows","build":"0.9.7"}"#;
+        assert_eq!(build_from_reply(reply), Some("0.9.7"));
+    }
+
+    /// An agent too old to report one must read as "no answer", NOT as a
+    /// mismatch — that is the shape of every pre-0.9.8 agent in the field, and
+    /// warning on all of them would be noise nobody reads.
+    #[test]
+    fn an_agent_that_reports_no_build_is_not_a_mismatch() {
+        let reply = r#"{"ok":"hello","version":2,"platform":"windows"}"#;
+        assert_eq!(build_from_reply(reply), None);
+    }
+
+    /// A truncated or malformed field must not panic or return junk.
+    #[test]
+    fn a_malformed_build_field_yields_nothing() {
+        assert_eq!(build_from_reply(r#"{"build":"#), None);
+        assert_eq!(build_from_reply(r#"{"build":"unterminated"#), None);
+        assert_eq!(build_from_reply(r#"{"build":""}"#), Some(""));
     }
 }

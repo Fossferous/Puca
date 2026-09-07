@@ -259,6 +259,20 @@ export const defaultSettings = {
      *  getDisplayMedia can never be made picker-free from JS. One attempt
      *  per room; a failure falls back to the 'prompt' nudge. */
     clipArmOnJoin: 'off' as 'off' | 'prompt' | 'auto',
+    /** Servers where automatic arming has been agreed to, by id.
+     *
+     *  WHY 'auto' IS NOT ENOUGH ON ITS OWN. clipArmOnJoin is one global switch
+     *  and the other half of the decision belongs to a SERVER OWNER: whoever
+     *  turns clips on there. So choosing "arm automatically" once — in a small
+     *  server, among friends — silently consented to a continuous recording of
+     *  the whole screen in every other server the moment its owner enabled
+     *  clips, including servers joined later. Nothing said the preference was
+     *  global, and nothing asked again.
+     *
+     *  A server enters this list the first time the member arms there by hand,
+     *  so the cost is one button press per server and the setting keeps
+     *  meaning what it says everywhere after that. */
+    clipAutoArmServers: [] as string[],
     /** @deprecated Superseded by clipArmOnJoin; a stored `true` is read ONCE
      *  by loadSettings and mapped to 'prompt'. Kept so old profiles still type. */
     clipArmPromptOnJoin: false,

@@ -46,6 +46,7 @@ import {
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
 import { pipSupported } from './streamPopout.utils';
+import { CameraRail } from './CameraRail';
 import { docPipSupported } from './streamDocPip';
 import './StreamStage.css';
 import {
@@ -81,6 +82,10 @@ interface StreamStageProps {
      *  window, and the toggle for it. Optional: absent → no control. */
     poppedStreams?: number[];
     onTogglePopout?: (userId: number) => void;
+    /** Whose tiles to mirror in the camera rail — your own camera, and nobody
+     *  else's. Optional so the rail simply mirrors nothing if a caller has not
+     *  been updated. */
+    currentUserId?: number;
 }
 
 /**
@@ -130,7 +135,7 @@ type StreamContextMenu = {
     isOwn: boolean;
 };
 
-export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTogglePopout }: StreamStageProps) {
+export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTogglePopout, currentUserId = -1 }: StreamStageProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
     const [streamers, setStreamers] = useState<Array<{ userId: number; username: string; stream: MediaStream | null }>>([]);
     const { focusedStreamId: focusedStream, focusMode, setFocusedStream, setFocusMode } = useStreamStore();
@@ -1087,6 +1092,13 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                         </button>
                     ))}
             </div>
+
+            {/* Cameras, BESIDE the streams rather than instead of them.
+                A SIBLING of the grid, never a child and never a wrapper around
+                it: adding cells would move the grid's tiles between parents,
+                and wrapping it would reparent every one of them — which paints
+                a black frame over live video. See the grid's own comment. */}
+            <CameraRail currentUserId={currentUserId} />
 
             {/* Per-stream right-click context menu */}
             {ctxMenu && (

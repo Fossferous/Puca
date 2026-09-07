@@ -68,6 +68,15 @@ cat > "$TMP/bin/sudo" <<'STUB'
 while [ $# -gt 0 ]; do case "$1" in -u) shift 2 ;; -*) shift ;; *) break ;; esac; done
 exec "$@"
 STUB
+# journalctl: prints whatever a case put in journal.<unit>, so the waker's
+# "running but refused" check can be driven without a live journal.
+cat > "$TMP/bin/journalctl" <<'STUB'
+#!/usr/bin/env bash
+echo "journalctl $*" >> "$CALLS"
+u=""
+while [ $# -gt 0 ]; do case "$1" in -u) u="$2"; shift 2 ;; *) shift ;; esac; done
+cat "$HC_STATE/journal.$u" 2>/dev/null || true
+STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/pg_isready"
 printf '#!/usr/bin/env bash\necho "logger $*" >> "$CALLS"\n' > "$TMP/bin/logger"
 chmod +x "$TMP/bin"/*
@@ -179,6 +188,38 @@ check "and keeps its historical state file name"                    "$([ "$(cat 
 reset; touch "$STATE/enabled.sandbox-waker"
 run env
 check "an inactive waker is restarted" "$(has "$(calls)" 'systemctl restart sandbox-waker')" "$(calls)"
+
+# RUNNING BUT REFUSED — the state every other check calls healthy.
+#
+# A waker whose credential the server turns away keeps its process and its
+# active unit, so is-active passes, the restart counter never moves, and
+# nothing above notices. One sat like that for five days at ~1,440 refusals a
+# day while its owner believed Wake worked.
+reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"
+for _ in 1 2 3 4 5 6; do echo "[waker] connect REFUSED: HTTP 401 - too old" >> "$STATE/journal.sandbox-waker"; done
+run env
+check "a running-but-refused waker is called out"    "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" "$(logtxt)"
+check "and names the fix rather than just the fault" "$(has "$(logtxt)" 'ship-waker.sh')" "$(logtxt)"
+check "and is NOT restarted over it"                 "$([ "$(has "$(calls)" 'systemctl restart sandbox-waker')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+
+# The older wording must count too: a box still running the previous binary
+# logs "connect failed: HTTP error: 401", and that is the box this exists for.
+reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"
+for _ in 1 2 3 4 5 6; do echo "[waker] connect failed: HTTP error: 401 Unauthorized" >> "$STATE/journal.sandbox-waker"; done
+run env
+check "the pre-fix wording is counted as well" "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" "$(logtxt)"
+
+# POSITIVE CONTROL: a healthy waker stays silent, or this is a constant alarm.
+reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"
+echo "[waker] attested as abc - ready to wake" > "$STATE/journal.sandbox-waker"
+run env
+check "a healthy waker says nothing" "$([ "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+
+# And a couple of blips are not a lockout.
+reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"
+for _ in 1 2; do echo "[waker] connect REFUSED: HTTP 401" >> "$STATE/journal.sandbox-waker"; done
+run env
+check "two refusals in fifteen minutes is below the bar" "$([ "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
 
 echo
 echo "--- coturn / livekit: gated on is-enabled, restarted when down, probed when up ---"

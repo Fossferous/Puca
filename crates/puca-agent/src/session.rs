@@ -841,6 +841,7 @@ impl Agent {
                     Response::Hello {
                         version: PROTOCOL_VERSION,
                         platform: std::env::consts::OS.to_string(),
+                        build: crate::protocol::build_version().to_string(),
                     }
                 }
                 _ => Response::error("not authenticated"),

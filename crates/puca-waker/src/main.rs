@@ -263,6 +263,7 @@ fn run(cfg_path: Option<PathBuf>) -> i32 {
 
     rt.block_on(async move {
         let mut failures: u32 = 0;
+        let mut auth_refusals: u32 = 0;
 
         // THE REFRESH RUNS ON ITS OWN CLOCK, CONCURRENTLY WITH THE SOCKET.
         //
@@ -358,9 +359,39 @@ fn run(cfg_path: Option<PathBuf>) -> i32 {
             // toward the 60s ceiling as if it were flapping. A connection that
             // LIVED is the thing worth resetting on; anything short-lived is a
             // failure whatever the close frame said.
+            // A REFUSAL IS NOT A BLIP, and pacing them identically is how this
+            // box spent five days logging the same line 6,743 times while the
+            // owner believed it was working. A 4xx means the server looked at
+            // this waker and said no: retrying unchanged cannot fix it, and the
+            // body carries the reason.
             match &outcome {
-                Ok(()) => eprintln!("[waker] socket closed; reconnecting"),
-                Err(e) => eprintln!("[waker] {e}"),
+                Ok(()) => {
+                    auth_refusals = 0;
+                    eprintln!("[waker] socket closed; reconnecting");
+                }
+                Err(e) if e.is_auth() => {
+                    auth_refusals += 1;
+                    eprintln!(
+                        "[waker] {e} (refusal {auth_refusals} of {}) — this waker is being turned away, not dropped;                          if this persists it is enrolment or an out-of-date binary, not the network",
+                        net::AUTH_REFUSALS_BEFORE_EXIT
+                    );
+                    if auth_refusals >= net::AUTH_REFUSALS_BEFORE_EXIT {
+                        // Exit rather than log on for ever: a failed unit is
+                        // visible to systemctl and to the health check, and a
+                        // waker nobody can see the failure of is a waker that
+                        // is silently absent when the owner presses Wake. The
+                        // threshold is ~15 minutes, far above systemd's default
+                        // start limit, so this cannot wedge the unit dead.
+                        eprintln!(
+                            "[waker] FATAL: refused {auth_refusals} times in a row; exiting so this shows up as a                              failed unit instead of a quiet retry loop"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    auth_refusals = 0;
+                    eprintln!("[waker] {e}");
+                }
             }
             failures = net::next_failure_count(failures, dialled.elapsed());
             let wait = net::backoff_secs(failures);
