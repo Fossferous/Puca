@@ -33,8 +33,10 @@ interface ClipButtonsProps {
     getDeclaredParticipants?: (windowStartMs: number, windowEndMs: number) => number[];
 }
 
-/** Has this member agreed to automatic arming in THIS server? */
-export function autoArmAgreed(serverId: string | null): boolean {
+/** Has this member agreed to automatic arming in THIS server?
+ *  Not exported: this file exports components, and eslint's react-refresh rule
+ *  is right that a shared helper belongs beside the setting, not here. */
+function autoArmAgreed(serverId: string | null): boolean {
     if (!serverId) return false;
     return (loadSettings().clipAutoArmServers ?? []).includes(serverId);
 }

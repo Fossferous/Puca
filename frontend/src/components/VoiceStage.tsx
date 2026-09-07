@@ -9,7 +9,7 @@ import {
     subscribeToStreamState,
 } from './voiceState';
 import { SmartAvatar } from './SmartAvatar';
-import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon } from './Icons';
+import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import './VoiceStage.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
@@ -160,6 +160,28 @@ export function VoiceStage({
                                             fallback={<span>{name[0]?.toUpperCase()}</span>}
                                         />
                                     </div>
+                                )}
+                                {/* FULLSCREEN A CAMERA. The grid gives a tile
+                                    a few hundred pixels whatever the call
+                                    size, so a face was a thumbnail and there
+                                    was no way to make it bigger — the stream
+                                    stage has had this button all along and
+                                    cameras do not live there. Fullscreens the
+                                    TILE, not the bare <video>, so the name
+                                    chip and badges stay readable over it, the
+                                    same reason StreamStage does. */}
+                                {camStream && (
+                                    <button
+                                        className="vs-fullscreen-btn"
+                                        title={`Fullscreen ${name}'s camera`}
+                                        aria-label={`Fullscreen ${name}'s camera`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            (e.currentTarget.parentElement as HTMLElement | null)?.requestFullscreen?.();
+                                        }}
+                                    >
+                                        <FullscreenIcon />
+                                    </button>
                                 )}
                                 {streaming && <span className="vs-live-badge">LIVE</span>}
                                 {streaming && user.id !== currentUserId && (
