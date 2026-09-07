@@ -12,8 +12,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { invokeMock, meshDiagMock, voiceDiagMock } = vi.hoisted(() => ({
     invokeMock: vi.fn<(cmd: string, args?: unknown) => Promise<unknown>>().mockResolvedValue(undefined),
-    meshDiagMock: vi.fn<() => Promise<unknown[]>>().mockResolvedValue([]),
-    voiceDiagMock: vi.fn<() => Promise<Record<string, unknown>>>().mockResolvedValue({ localRtp: [] }),
+    meshDiagMock: vi.fn<(windowMs?: number) => Promise<unknown[]>>().mockResolvedValue([]),
+    voiceDiagMock: vi.fn<(windowMs?: number) => Promise<Record<string, unknown>>>().mockResolvedValue({ localRtp: [] }),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
 vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics: meshDiagMock } }));
@@ -21,7 +21,7 @@ vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics: voiceD
 
 import {
     holdStreamDiag, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
-    setStreamDiagProbe, streamDiagIntervalMs,
+    setStreamDiagProbe, streamDiagIntervalMs, sampleWindowMs,
 } from '../api/streamDiag';
 
 function logLines(): string[] {
@@ -192,5 +192,37 @@ describe('streamDiag: the viewer\'s side of a slow share', () => {
         expect(streamDiagIntervalMs(), 'back to the capture cadence').toBe(5000);
         releaseStreamDiag('voice-share');
         expect(streamDiagIntervalMs()).toBe(0);
+    });
+});
+
+describe('the sampler measures a WINDOW, not a lifetime', () => {
+    it('asks both transports for a positive window that fits inside the cadence', async () => {
+        // THE BUG THIS PINS. Both helpers return counters accumulated since the
+        // track started unless they are given a window, and the sampler asked
+        // for neither — so every jb=, proc=, freeze= and lost= it ever wrote
+        // was a lifetime mean printed beside a timestamp it did not describe.
+        // A buffer that climbed 51ms to 88ms across one session never once
+        // logged its current value.
+        meshDiagMock.mockResolvedValue([]);
+        voiceDiagMock.mockResolvedValue({});
+        holdStreamDiag('rc-viewer');
+        await sampleOnce();
+
+        for (const mock of [meshDiagMock, voiceDiagMock]) {
+            const arg = mock.mock.calls.at(-1)?.[0];
+            expect(typeof arg, 'a window must be requested').toBe('number');
+            expect(arg).toBeGreaterThan(0);
+            expect(arg, 'and must fit inside the tick it runs in').toBeLessThan(streamDiagIntervalMs());
+        }
+        releaseStreamDiag('rc-viewer');
+    });
+
+    it('keeps the window inside every cadence it supports', () => {
+        for (const cadence of [1000, 5000]) {
+            expect(sampleWindowMs(cadence)).toBeGreaterThan(0);
+            expect(sampleWindowMs(cadence)).toBeLessThan(cadence);
+        }
+        // Never degenerate, however small the cadence gets.
+        expect(sampleWindowMs(1)).toBeGreaterThanOrEqual(250);
     });
 });

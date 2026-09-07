@@ -27,6 +27,7 @@ import { formatLatencyLine, type RtcLatencySummary } from './rtc/statsSummary';
 /** Cadence while only a capture is held; a keyframe-triggered pacer spike
  *  lasts a few hundred ms and is invisible at 0.2 Hz, so a live remote-
  *  control session (an `rc-*` holder) samples every second instead. */
+let sampling = false;
 const SAMPLE_MS = 5000;
 const SAMPLE_RC_MS = 1000;
 const holders = new Set<string>();
@@ -75,6 +76,24 @@ function latencyOf(row: unknown): RtcLatencySummary | null {
 /** One sampling tick across both transports — exported so a test can drive it
  *  directly instead of racing the interval timer. */
 export async function sampleOnce(): Promise<void> {
+    if (sampling) return; // a windowed tick outran its own cadence; skip, don't stack
+    sampling = true;
+    try {
+        await sampleOnceInner();
+    } finally {
+        sampling = false;
+    }
+}
+
+/** How long each tick watches for, to turn counters into a RATE. */
+export function sampleWindowMs(cadenceMs: number): number {
+    // Comfortably inside the cadence, because the two transports are sampled
+    // concurrently and each holds its window open. Floor so the slowest useful
+    // cadence still measures something real rather than a rounding artefact.
+    return Math.max(250, Math.round(cadenceMs * 0.6));
+}
+
+async function sampleOnceInner(): Promise<void> {
     const lines: string[] = [];
     // FIRST: the native sink caps a line at 2000 chars, and a large mesh
     // call's rows can exceed that — the one fragment that must never be the
@@ -82,7 +101,21 @@ export async function sampleOnce(): Promise<void> {
     const extra = probe?.() ?? null;
     if (extra) lines.push(extra);
 
-    for (const peer of await webrtcManager.meshDiagnostics()) {
+    // WINDOWED, NOT CUMULATIVE. Both helpers return counters since the track
+    // started unless they are given a window, and this asked for neither — so
+    // every jb=, proc=, freeze= and lost= ever written to this log was a
+    // LIFETIME MEAN, not the second it was printed beside. A buffer that grew
+    // 51ms -> 88ms across a session logged a number that was never the current
+    // one, and the whole point of a 1 Hz sampler is to see a spike when it
+    // happens. Sampled concurrently so two windows cost one window of wall
+    // clock, which is what lets the window fit inside the tick.
+    const win = sampleWindowMs(wantedMs());
+    const [mesh, sfu] = await Promise.all([
+        webrtcManager.meshDiagnostics(win),
+        sfuManager.voiceDiagnostics(win),
+    ]);
+
+    for (const peer of mesh) {
         const userId = (peer as { userId?: unknown }).userId;
         for (const r of (peer as { rtp?: Record<string, unknown>[] }).rtp ?? []) {
             if (r.dir === 'outbound-rtp' && r.kind === 'video') {
@@ -96,7 +129,6 @@ export async function sampleOnce(): Promise<void> {
         if (lat) lines.push(`mesh peer=${userId} ${formatLatencyLine(lat)}`);
     }
 
-    const sfu = await sfuManager.voiceDiagnostics();
     for (const r of (sfu as { localRtp?: Record<string, unknown>[] }).localRtp ?? []) {
         if (r.kind === 'video') lines.push(`sfu source=${r.source} ${fmt(r)}`);
     }
