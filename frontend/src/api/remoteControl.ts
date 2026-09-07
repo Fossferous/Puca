@@ -167,8 +167,16 @@ let offerTimer: ReturnType<typeof setTimeout> | null = null;
 // transports means a fast DC move can bump the sequence past a WS click
 // still in flight, and the host drops the click — the exact bug the P2P
 // path exists to avoid creating.
-let viewerCrypto: { peerId: number; key: Uint8Array; seq: number; dcSeq: number } | null = null;
-let hostCrypto: { peerId: number; key: Uint8Array; recvSeq: number; dcRecvSeq: number } | null = null;
+// `helloEchoed` lives on the session object rather than in a module-level map
+// so it is cleared by the same assignment that replaces the key — every path
+// that ends a session already nulls these, and none of them would have
+// remembered to clear a separate set.
+let viewerCrypto:
+    | { peerId: number; key: Uint8Array; seq: number; dcSeq: number; helloEchoed?: boolean }
+    | null = null;
+let hostCrypto:
+    | { peerId: number; key: Uint8Array; recvSeq: number; dcRecvSeq: number; helloEchoed?: boolean }
+    | null = null;
 // My ephemeral as viewer (kept from request until the host's response arrives).
 let viewerEph: ControlEphemeral | null = null;
 // HOST: the viewer's ephemeral public key from their request, until I grant.
@@ -956,6 +964,27 @@ function wireControlDc(): void {
                 if (viaMesh) markHelloSeen(peerId, role);
                 else markSfuHelloSeen(peerId, role);
                 console.info(`[p2p-input] peer ${peerId}: ${viaMesh ? 'mesh data channel' : 'SFU data path'} ready (as ${role})`);
+                // ECHO IT BACK — the half of the handshake the comment above
+                // `sendControlHello` has always promised and nothing did.
+                //
+                // Each side announces when its own key appears, and the HOST's
+                // key appears first: it derives on granting, while the viewer
+                // only derives after the ControlResponse arrives, behind an
+                // await that can include fetching the host's public key. So the
+                // host's hello lands on a viewer with no key yet, is dropped
+                // (unopenable frames must be), and nothing re-sends. The
+                // viewer's own hello then arms the HOST's direction — but the
+                // viewer is the side that sends input, so input stayed on the
+                // relay for the whole session. Measured: every sampler row of
+                // a real call read lane=relay.
+                //
+                // Echoing when a hello OPENS closes that gap in one round trip,
+                // and only once per session key, so two peers cannot ping-pong.
+                const mine = role === 'host' ? asHost : asViewer;
+                if (mine && !mine.helloEchoed) {
+                    mine.helloEchoed = true;
+                    void sendControlHello(peerId, mine.key);
+                }
             }).catch(() => undefined);
             return;
         }
