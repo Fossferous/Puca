@@ -18,6 +18,22 @@ one-line summary; this file is the full story. Versions follow
   dropdown before you choose it: it records your whole screen continuously,
   with no popup, and nothing leaves your computer until you save a clip.
 
+## Unreleased
+
+### Fixed
+- **On a server-routed (SFU) voice channel, one viewer with a weak connection
+  got a frozen slideshow while everyone else was fine.** Screen shares were
+  published as a single 1080p encoding, so the server had nothing smaller to
+  give a viewer who could not carry it: it sent them the same bytes as
+  everyone else and their connection dropped what it could not fit. Measured
+  on a real call: 1920x1080 arriving at 2 frames per second, 899 packets lost
+  and 394 retransmit requests in five seconds, eight and a half seconds
+  frozen, on a machine whose decoder was idle at 2.6 ms a frame. Shares now
+  publish three sizes, so the server can hand a struggling viewer a smaller
+  one instead of a broken large one. What each viewer receives does not go up
+  and for a weak one it falls sharply; the person sharing spends about 1.6
+  Mbps more upstream.
+
 ## 0.9.802 — 2026-09-08
 
 Remote control of a machine you are signed in to stops sending every keystroke

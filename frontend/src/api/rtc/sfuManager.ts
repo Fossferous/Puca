@@ -95,6 +95,69 @@ const CAM_HIGH_BITRATE = 2_500_000;
 const GRID_MID_MAX_PARTICIPANTS = 4;
 const SHARE_BITRATE = 4_500_000;
 
+/// The two rungs published BELOW a screen share's full picture, lowest first
+/// (the order `screenShareSimulcastLayers` documents).
+///
+/// WHY A SHARE NEEDS A LADDER AT ALL. Until now shares were published
+/// `simulcast: false` — one encoding, and therefore nothing smaller for the
+/// server to give a subscriber who cannot carry it. Everything LiveKit does for
+/// a struggling viewer is choosing a lower layer, so with one layer it has no
+/// move to make: the viewer is sent the same bytes as everyone else and loses
+/// whatever their bottleneck drops. Measured from a real call on 2026-09-08,
+/// one viewer on a weak link watching a 1080p share:
+///
+///   size 1920x1080, fps 2, framesReceived 12 in 5 s, framesDropped 0,
+///   packetsLost 899, nack 394, freezeMs 8481, decodeMs 2.6 (hardware)
+///
+/// Nothing was wrong with their machine — the decoder was idle at 2.6 ms a
+/// frame — and nothing had adapted on their behalf. The frames simply never
+/// arrived whole. Two smaller rungs give the server something to fall back to.
+///
+/// H.264 SPECIFICALLY. Measured with frontend/e2e/share-ramp-2pc.mjs against
+/// the engine the app runs on: h264 sustains all three rungs
+/// (1920x1080@56 / 960x540@56 / 480x270@16) because it encodes in hardware,
+/// while the same ladder in VP8 collapses to 19/7/4 fps in software. The
+/// `videoCodec: 'h264'` below was already chosen for smoothness; it is what
+/// makes this affordable.
+///
+/// THE TOP RUNG IS SHARE_BITRATE, and a subscriber only ever receives ONE rung,
+/// so the backend's per-subscriber charge (`SHARE_KBPS`, src/sfu.rs) stays the
+/// correct worst case. A test there reads this file to keep the two in step.
+const SHARE_LOW = new VideoPreset(480, 270, 400_000, 30);
+const SHARE_MID = new VideoPreset(960, 540, 1_200_000, 60);
+
+/**
+ * Everything about how a screen share is published, as a value.
+ *
+ * Pulled out of `startScreenShare` so the contract can be asserted without a
+ * live room and a real track — the same reason `subscribedQuality` is a
+ * function rather than an expression inside the subscribe handler. Every field
+ * here has a measurement or an incident behind it; the test next door pins the
+ * ones that would fail silently.
+ */
+export function screenSharePublishOptions() {
+    return {
+        source: Track.Source.ScreenShare,
+        // Three rungs, so the server has something to give a viewer who cannot
+        // take the full picture. See SHARE_LOW/SHARE_MID.
+        simulcast: true,
+        screenShareSimulcastLayers: [SHARE_LOW, SHARE_MID],
+        // H.264 is hardware-accelerated on almost every device and produces
+        // noticeably smoother output for fast-motion content (games) than VP8,
+        // which is CPU-only on most machines — and measurably so for the ladder
+        // above: h264 holds 56 fps on the top two rungs where VP8 collapses to
+        // 19 and 7.
+        videoCodec: 'h264' as const,
+        videoEncoding: {
+            maxBitrate: SHARE_BITRATE,
+            maxFramerate: 60,
+        },
+        // Under congestion, drop quality (resolution) not framerate.
+        // A choppy game stream is worse than a blurry one.
+        degradationPreference: 'maintain-framerate' as const,
+    };
+}
+
 /// LiveKit's frame-crypto keyring is 16 slots; epochs map onto it mod-16, so
 /// the previous epoch's key survives the switchover window.
 const KEYRING_SIZE = 16;
@@ -463,21 +526,10 @@ export class SfuManager {
         const video = stream.getVideoTracks()[0];
         if (video) {
             this.sharePubs.push(
-                await this.room.localParticipant.publishTrack(video, {
-                    source: Track.Source.ScreenShare,
-                    simulcast: false,
-                    // H.264 is hardware-accelerated on almost every device and
-                    // produces noticeably smoother output for fast-motion content
-                    // (games) than VP8, which is CPU-only on most machines.
-                    videoCodec: 'h264',
-                    videoEncoding: {
-                        maxBitrate: SHARE_BITRATE,
-                        maxFramerate: 60,
-                    },
-                    // Under congestion, drop quality (resolution) not framerate.
-                    // A choppy game stream is worse than a blurry one.
-                    degradationPreference: 'maintain-framerate',
-                }),
+                await this.room.localParticipant.publishTrack(
+                    video,
+                    screenSharePublishOptions(),
+                ),
             );
         }
         const audio = stream.getAudioTracks()[0];

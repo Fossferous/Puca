@@ -1062,6 +1062,46 @@ mod tests {
     }
 
     #[test]
+    fn the_client_publishes_the_share_bitrate_this_file_charges_for() {
+        // ONE NUMBER COMPILED TWICE. `SHARE_KBPS` is what admission charges
+        // every subscriber for every live share; `SHARE_BITRATE` is what the
+        // client actually publishes the top rung at. Nothing connects them but
+        // a comment, and a divergence is silent in the direction that matters:
+        // raise the client and the node admits seats whose egress it
+        // under-counted, which is a congestion incident rather than an error.
+        let client = include_str!("../frontend/src/api/rtc/sfuManager.ts");
+        assert!(
+            client.len() > 20_000,
+            "that is not the real sfuManager.ts ({} bytes) — the path is wrong \
+             and this test is checking nothing",
+            client.len()
+        );
+        let line = client
+            .lines()
+            .find(|l| l.trim_start().starts_with("const SHARE_BITRATE"))
+            .expect("sfuManager.ts no longer declares SHARE_BITRATE");
+        let bps: u64 = line
+            .split('=')
+            .nth(1)
+            .and_then(|v| v.trim().trim_end_matches(';').replace('_', "").parse().ok())
+            .expect("could not read SHARE_BITRATE's value");
+        assert_eq!(
+            bps,
+            SHARE_KBPS * 1000,
+            "the client publishes shares at {bps} bps but admission charges {} bps",
+            SHARE_KBPS * 1000,
+        );
+        // POSITIVE CONTROL for the search: the ladder this charge assumes is
+        // really there, so a future `simulcast: false` cannot pass silently.
+        assert!(
+            client.contains("screenShareSimulcastLayers"),
+            "shares are no longer published with a simulcast ladder — a subscriber \
+             in trouble has nothing smaller to fall back to, and this file's \
+             worst-case charge became the ONLY case"
+        );
+    }
+
+    #[test]
     fn share_focus_replaces_camera_focus_and_extra_shares_stack() {
         // One share swaps the focus cost rather than adding to it: the delta
         // between share and no-share at N=4 is 4 × 2000 × 1.15 = 9.2 Mbps.
@@ -1070,9 +1110,13 @@ mod tests {
             delta,
             4 * (SHARE_KBPS - CAM_HIGH_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN
         );
-        // But each ADDITIONAL live share is charged at full share rate: shares
-        // have no low simulcast layer, so admission must grow with share
-        // count now that the client-side cap defaults to unlimited.
+        // But each ADDITIONAL live share is charged at full share rate. Shares
+        // DO have lower simulcast rungs now (SHARE_LOW/SHARE_MID in
+        // sfuManager.ts), and a subscriber receives exactly one of them — so
+        // charging the top rung is the worst case rather than the only case,
+        // and admission stays conservative instead of becoming wrong. It must
+        // still grow with share count now that the client-side cap defaults to
+        // unlimited.
         let delta2 = room_egress_kbps(4, 2) - room_egress_kbps(4, 1);
         assert_eq!(delta2, 4 * SHARE_KBPS * OVERHEAD_NUM / OVERHEAD_DEN);
     }

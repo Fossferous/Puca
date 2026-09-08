@@ -127,7 +127,37 @@ async function runVariant(page, variant, opts) {
         pc1.onicecandidate = e => e.candidate && pc2.addIceCandidate(e.candidate);
         pc2.onicecandidate = e => e.candidate && pc1.addIceCandidate(e.candidate);
         const inbound = new Promise(res => { pc2.ontrack = e => res(e.track); });
-        const sender = pc1.addTrack(track, stream);
+
+        // SIMULCAST VARIANTS publish through a transceiver, because
+        // sendEncodings is the only way to ask for layers and addTrack has no
+        // equivalent. Three rungs at 1/4, 1/2 and full, which is the shape
+        // LiveKit's `screenShareSimulcastLayers` produces.
+        const simulcast = variant.startsWith('simulcast');
+        const codecWanted = variant.endsWith('vp8') ? 'video/VP8' : 'video/H264';
+        let sender;
+        if (simulcast) {
+            const tr = pc1.addTransceiver(track, {
+                direction: 'sendonly',
+                streams: [stream],
+                sendEncodings: [
+                    { rid: 'q', scaleResolutionDownBy: 4, maxBitrate: 400_000, maxFramerate: 30 },
+                    { rid: 'h', scaleResolutionDownBy: 2, maxBitrate: 1_200_000, maxFramerate: 60 },
+                    { rid: 'f', scaleResolutionDownBy: 1, maxBitrate: MAX_BITRATE, maxFramerate: 60 },
+                ],
+            });
+            // Pin the codec: whether H.264 can simulcast at all in this engine
+            // is the entire question, and letting the browser pick would answer
+            // a different one.
+            if (tr.setCodecPreferences && RTCRtpSender.getCapabilities) {
+                const caps = RTCRtpSender.getCapabilities('video');
+                const wanted = caps.codecs.filter(c => c.mimeType === codecWanted);
+                const rest = caps.codecs.filter(c => c.mimeType !== codecWanted);
+                if (wanted.length) tr.setCodecPreferences([...wanted, ...rest]);
+            }
+            sender = tr.sender;
+        } else {
+            sender = pc1.addTrack(track, stream);
+        }
 
         const offer = await pc1.createOffer();
         let sdp = offer.sdp;
@@ -168,16 +198,41 @@ a=fmtp:${pt} x-google-start-bitrate=${START_BITRATE_KBPS}`,
                     );
             }
         }
+        if (simulcast) {
+            // WHAT AN SFU WOULD ANSWER, and what a second browser will not.
+            // A plain loopback answer carries no `a=simulcast:recv`, so Chromium
+            // disables every rung but the first and the run measures the rig's
+            // negotiation rather than the encoder -- which is exactly what the
+            // first version of this variant did (encodings: 1, only `q` sending).
+            // Only pc1 needs to believe the far end accepts the layers; pc2's
+            // decode is not the question being asked here.
+            const rids = [...offer.sdp.matchAll(/^a=rid:(\w+) send/gm)].map(m => m[1]);
+            if (rids.length > 1 && !/a=simulcast:/.test(ansSdp)) {
+                const ridLines = rids.map(r => `a=rid:${r} recv`).join('\r\n');
+                ansSdp = ansSdp.replace(
+                    /(a=mid:\d+\r\n)/,
+                    `$1${ridLines}\r\na=simulcast:recv ${rids.join(';')}\r\n`,
+                );
+            }
+        }
         await pc1.setRemoteDescription({ type: 'answer', sdp: ansSdp });
 
         // --- the app's own tuning, verbatim ---
+        //
+        // For the simulcast variants the per-rung bitrates were set at
+        // addTransceiver and must NOT be flattened onto encodings[0] here --
+        // doing that is how a simulcast publish quietly becomes a single
+        // layer, which is precisely the failure this run exists to detect.
         const params = sender.getParameters();
         if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-        params.encodings[0].maxBitrate = MAX_BITRATE;
-        params.encodings[0].maxFramerate = 60;
+        if (!simulcast) {
+            params.encodings[0].maxBitrate = MAX_BITRATE;
+            params.encodings[0].maxFramerate = 60;
+        }
         params.degradationPreference =
             variant === 'maintain-resolution' ? 'maintain-resolution' : 'maintain-framerate';
         await sender.setParameters(params);
+        const negotiatedEncodings = sender.getParameters().encodings.length;
 
         await inbound;
 
@@ -190,8 +245,15 @@ a=fmtp:${pt} x-google-start-bitrate=${START_BITRATE_KBPS}`,
             const now = performance.now();
             const dt = (now - prevT) / 1000;
             let out = null, inb = null, pair = null;
+            const layers = [];
             (await pc1.getStats()).forEach(r => {
-                if (r.type === 'outbound-rtp' && r.kind === 'video') out = r;
+                if (r.type === 'outbound-rtp' && r.kind === 'video') {
+                    layers.push(r);
+                    // The full-resolution rung is the one the single-layer
+                    // columns should describe; without this the summary would
+                    // report whichever layer the map happened to yield last.
+                    if (!out || (r.frameWidth ?? 0) > (out.frameWidth ?? 0)) out = r;
+                }
                 if (r.type === 'candidate-pair' && r.nominated) pair = r;
             });
             (await pc2.getStats()).forEach(r => {
@@ -212,6 +274,11 @@ a=fmtp:${pt} x-google-start-bitrate=${START_BITRATE_KBPS}`,
                 limit: out.qualityLimitationReason ?? '?',
                 encoder: out.encoderImplementation ?? '?',
                 rttMs: pair ? Math.round((pair.currentRoundTripTime ?? 0) * 1000) : null,
+                encodings: negotiatedEncodings,
+                layers: layers
+                    .map(r => `${r.rid ?? '-'}:${r.frameWidth ?? 0}x${r.frameHeight ?? 0}@${Math.round(r.framesPerSecond ?? 0)}`)
+                    .sort()
+                    .join(' '),
             });
         }
         clearInterval(timer);
@@ -262,6 +329,11 @@ for (const variant of VARIANTS) {
     console.log(`  -> 720p at ${timeToHeight(series, 720) ?? 'never'} ms, 1080p at ${timeToHeight(series, 1080) ?? 'never'} ms`);
     const peak = series.reduce((a, s) => Math.max(a, s.sentKbps), 0);
     console.log(`  -> peak ${peak} kbps, final ${series.at(-1)?.w}x${series.at(-1)?.h} @ ${series.at(-1)?.fps}`);
+    if (variant.startsWith('simulcast')) {
+        const last = series.at(-1);
+        console.log(`  -> encodings negotiated: ${last?.encodings}`);
+        console.log(`  -> layers actually sent: ${last?.layers || '(none)'}`);
+    }
 }
 
 if (OUT) { writeFileSync(OUT, JSON.stringify(results, null, 2)); console.log(`\nwrote ${OUT}`); }
