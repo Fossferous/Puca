@@ -409,8 +409,13 @@ for entry in "${HOSTS[@]}"; do
 		# a SECOND line, and comparing a two-line string with -ge is a syntax
 		# error rather than a false — it printed a raw bash diagnostic into the
 		# middle of a release check. Keep digits only, and take the last line.
-		refused="$(ssh_to "$entry" "journalctl -u $waker_unit --since -30min --no-pager 2>/dev/null | grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)'" 2>/dev/null | tr -dc '0-9
-' | tail -1)"
+		# `grep -c` EXITS 1 when the count is zero, and a failing command
+		# substitution in an assignment trips `set -e` — so a perfectly healthy
+		# waker killed this script here, after its PASS line and before its own
+		# summary. The check reported nothing at all, which is the second time
+		# this block has done that; hence `|| true` and digits-only parsing.
+		refused="$(ssh_to "$entry" "journalctl -u $waker_unit --since -30min --no-pager 2>/dev/null | grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)'" 2>/dev/null || true)"
+		refused="$(printf '%s' "$refused" | tr -dc '0-9')"
 		refused="${refused:-0}"
 		if [ "$refused" -ge 5 ] 2>/dev/null; then
 			printf 'FAIL  %-22s running but REFUSED %s times in 30 min - locked out, not down\n' \
