@@ -4,6 +4,20 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **"Arm automatically" only reminded you to arm.** 0.9.8 added a second,
+  undocumented condition: automatic arming happened only on a server you had
+  already armed in by hand. The setting still said it applied to every server
+  whose owner has clips on, the refusal was reported as "auto-arm did not
+  start the buffer" — a failure message for a deliberate decision — and
+  nothing told you that arming once by hand was what granted it. Automatic
+  now means automatic, on every server that allows clips, which is what the
+  setting has always said. The consequence is stated in full above the
+  dropdown before you choose it: it records your whole screen continuously,
+  with no popup, and nothing leaves your computer until you save a clip.
+
 ## 0.9.802 — 2026-09-08
 
 Remote control of a machine you are signed in to stops sending every keystroke

@@ -49,8 +49,8 @@ const policy: ClipPolicy = { available: true, serverClipsEnabled: true, viewerIs
  *  member earns automatic arming in a server by arming there once by hand, so
  *  a test that wants the automatic path must say which server has been agreed
  *  to. Passing none is the FIRST-JOIN case. */
-function setMode(mode: 'off' | 'prompt' | 'auto', agreed: string[] = ['s1']) {
-    saveSettings({ ...defaultSettings, clipArmOnJoin: mode, clipAutoArmServers: agreed });
+function setMode(mode: 'off' | 'prompt' | 'auto') {
+    saveSettings({ ...defaultSettings, clipArmOnJoin: mode });
 }
 
 // Raw react-dom/client + act (the repo's component-test pattern — no testing-library).
@@ -200,27 +200,36 @@ describe('clipArmOnJoin', () => {
     });
 });
 
-describe('automatic arming is agreed per server, not once for all of them', () => {
-    it('does not arm on the first join to a server it has never armed in', async () => {
-        // THE GAP THIS CLOSES. clipArmOnJoin is one global switch, and the
-        // other half of the decision belongs to whoever owns the server: they
-        // turn clips on. So ticking "arm automatically" once — in a small
-        // server, among friends — silently started a whole-screen recording in
-        // every other server the moment its owner enabled clips, including
-        // servers joined later, with nothing said and nothing asked again.
-        setMode('auto', []);
+describe('automatic really is automatic, on every server that allows clips', () => {
+    // 0.9.8 gated this per server: automatic arming only happened on a server
+    // its member had already armed in by hand. The intent was to stop a server
+    // OWNER turning clips on and thereby starting a whole-screen recording on
+    // someone who had ticked this setting elsewhere. What it produced was a
+    // setting that said one thing and did another, refusing with "auto-arm did
+    // not start the buffer" — a failure message for a deliberate decision —
+    // and no way to discover that arming by hand once was what granted it.
+    // Removed at the owner's decision on 2026-09-08, risk stated. These pin
+    // the promise the settings text makes, so nobody restores the gate by
+    // halves and leaves the copy behind again.
+
+    it('arms on a server it has never been armed in before', async () => {
+        armNativeMock.mockResolvedValue(undefined);
+        setMode('auto');
         mount();
         await act(async () => { vi.advanceTimersByTime(900); });
         await act(async () => { await Promise.resolve(); });
-        expect(armNativeMock, 'a server must be agreed to first').not.toHaveBeenCalled();
+        expect(armNativeMock, 'no per-server agreement stands between the setting and the buffer')
+            .toHaveBeenCalledTimes(1);
         cleanup();
     });
 
-    it('arms automatically once that server has been armed in by hand', async () => {
-        // mockReset() in beforeEach clears the implementation too, so the
-        // resolved value has to be set by any test that lets the call through.
+    it('keeps no per-server memory to consult', async () => {
+        // The gate is gone from the STORE as well as from the effect. A
+        // leftover list that nothing reads is the thing a later session
+        // rediscovers and wires back up.
         armNativeMock.mockResolvedValue(undefined);
-        setMode('auto', ['s1']);
+        setMode('auto');
+        expect(Object.keys(loadSettings())).not.toContain('clipAutoArmServers');
         mount();
         await act(async () => { vi.advanceTimersByTime(900); });
         await act(async () => { await Promise.resolve(); });
@@ -228,14 +237,15 @@ describe('automatic arming is agreed per server, not once for all of them', () =
         cleanup();
     });
 
-    it('does not let one agreed server speak for another', async () => {
-        // The policy under test carries serverId 's1'; agreeing to 's2' says
-        // nothing about it.
-        setMode('auto', ['s2']);
-        mount();
+    it('still refuses when the SERVER has clips off — the gate that remains', async () => {
+        // POSITIVE CONTROL for the two above: something must still be able to
+        // stop it, or they would pass against a build that armed unconditionally.
+        setMode('auto');
+        mount({ policy: { ...policy, serverClipsEnabled: false } });
         await act(async () => { vi.advanceTimersByTime(900); });
         await act(async () => { await Promise.resolve(); });
         expect(armNativeMock).not.toHaveBeenCalled();
         cleanup();
     });
 });
+        expect(armNativeMock).not.toHaveBeenCalled();

@@ -272,7 +272,6 @@ export const defaultSettings = {
      *  A server enters this list the first time the member arms there by hand,
      *  so the cost is one button press per server and the setting keeps
      *  meaning what it says everywhere after that. */
-    clipAutoArmServers: [] as string[],
     /** @deprecated Superseded by clipArmOnJoin; a stored `true` is read ONCE
      *  by loadSettings and mapped to 'prompt'. Kept so old profiles still type. */
     clipArmPromptOnJoin: false,

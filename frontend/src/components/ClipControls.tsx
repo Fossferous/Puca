@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isTauri } from '../api/platform';
-import { loadSettings, saveSettings } from './settingsStore';
+import { loadSettings } from './settingsStore';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { arm, armNative, disarm, seal, getReplayState, isClipCaptureSupported, discardSeal, retrySystemAudio, type ReplayState } from '../api/clips/replayBuffer';
 import { isNativeCaptureSupported } from '../api/clips/nativeCapture';
@@ -31,22 +31,6 @@ interface ClipButtonsProps {
     /** Everyone this client saw in the room whose presence overlaps the clip's
      *  window [windowStartMs, windowEndMs] (D1; api/clips/clipParticipants.ts). */
     getDeclaredParticipants?: (windowStartMs: number, windowEndMs: number) => number[];
-}
-
-/** Has this member agreed to automatic arming in THIS server?
- *  Not exported: this file exports components, and eslint's react-refresh rule
- *  is right that a shared helper belongs beside the setting, not here. */
-function autoArmAgreed(serverId: string | null): boolean {
-    if (!serverId) return false;
-    return (loadSettings().clipAutoArmServers ?? []).includes(serverId);
-}
-
-/** Record the agreement, once, when they arm here by hand. */
-function rememberAutoArmAgreement(serverId: string | null): void {
-    if (!serverId || loadSettings().clipArmOnJoin !== 'auto') return;
-    const current = loadSettings().clipAutoArmServers ?? [];
-    if (current.includes(serverId)) return;
-    saveSettings({ ...loadSettings(), clipAutoArmServers: [...current, serverId] });
 }
 
 const isArmedPhase = (p: ReplayState['phase']) => p === 'armed' || p === 'sealing' || p === 'sealed' || p === 'uploading';
@@ -101,13 +85,25 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
         if (!inVoice) { autoTriedForRef.current = null; setAutoState('idle'); return; }
         if (armed || replay.phase === 'arming') return;
         if (loadSettings().clipArmOnJoin !== 'auto' || !gate.visible || !gate.armEnabled) return;
-        // PER SERVER, not once for all of them. The other half of this
-        // decision belongs to whoever owns the server: they turn clips on, and
-        // until now that was enough to start a whole-screen recording on the
-        // machine of anyone who had ever ticked "arm automatically" anywhere.
-        // A server earns automatic arming the first time its member arms there
-        // by hand; until then they get the nudge, which is what 'prompt' does.
-        if (!autoArmAgreed(policy.serverId)) { setAutoState('failed'); return; }
+        // AUTOMATIC MEANS AUTOMATIC, on every server whose owner has clips on
+        // — which is what the setting's own text promises, three lines above
+        // the dropdown, before it is chosen.
+        //
+        // 0.9.8 added a second gate here: a server earned automatic arming
+        // only once its member had armed there by hand, so that an owner
+        // turning clips on could not start a whole-screen recording on the
+        // machine of anyone who had ticked this anywhere. The intent was
+        // right and the result was not. The setting said one thing and the
+        // code did another, the refusal was reported as "auto-arm did not
+        // start the buffer" (a failure, which it was not), and nothing said
+        // that arming by hand once was what granted it — so the only
+        // conclusion available to the owner was that the feature was broken.
+        // Reported exactly that way on 2026-09-08 and removed at their
+        // decision, the risk stated: on someone else's server this now arms
+        // with no prompt.
+        //
+        // If it ever comes back it needs a VISIBLE prompt, not a silent
+        // refusal wearing a failure message.
         if (!isNativeCaptureSupported()) { setAutoState('failed'); return; } // e.g. non-Windows desktop build
         if (autoTriedForRef.current === roomId) return;
         autoTriedForRef.current = roomId;
@@ -119,13 +115,7 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
                 .catch((e: unknown) => { console.warn('[clips] auto-arm failed:', e); setAutoState('failed'); });
         }, 800);
         return () => clearTimeout(t);
-    // policy.serverId is read above (the per-server agreement) and belongs
-    // here. In practice roomId already changes whenever the server does, so
-    // adding it changes no behaviour: a re-run with the same room is stopped
-    // by the autoTriedForRef guard before it can arm anything twice. Listed
-    // because a dependency the effect READS and does not declare is a warning
-    // that hides the next one.
-    }, [inVoice, armed, replay.phase, roomId, gate.visible, gate.armEnabled, policy.serverId]);
+    }, [inVoice, armed, replay.phase, roomId, gate.visible, gate.armEnabled]);
 
     // Save-clip hotkey (in-app feed; the native fullscreen feed is wired by
     // VoicePanel's watch list, which dispatches to the same registry id).
@@ -141,10 +131,6 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
         if (armed) { await disarm('user'); return; }
         try {
             await arm();
-            // Arming here by hand is the agreement the auto-arm effect waits
-            // for — recorded only on the way IN, so turning the buffer off
-            // again does not revoke it.
-            rememberAutoArmAgreement(policy.serverId);
         } catch (e) { console.warn('[clips] arm failed:', e); }
     };
     const armTitle = armed
