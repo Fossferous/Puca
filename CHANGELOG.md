@@ -4,7 +4,13 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.801 — 2026-09-08
+
+A security fix that was finished before 0.9.8 and held back from it, plus the
+dependency housekeeping and one gate that would have caught the wake box being
+offline for five days.
+
+### Security
 
 ### Security
 - **A file uploaded without a capability could be downloaded by any signed-in
@@ -23,6 +29,21 @@ one-line summary; this file is the full story. Versions follow
   protect is no longer readable by strangers: it is its uploader's alone.
   No change for ordinary use; `FILES_ENFORCE_CAP=0` lifts the scoping as it
   already did for capabilities.
+
+### Fixed
+- **A shared screen re-derives its capture when the monitor layout changes.**
+  Plugging in, unplugging or rearranging a display used to leave the host
+  streaming a surface that no longer existed.
+
+### Changed
+- Dependency updates: firebase, google-services, twenty frontend packages and
+  the WebRTC library the device path uses. What was held back, and the failure
+  proving why, is in `docs/DEPENDENCY_UPDATES.md`.
+
+### Internal
+- `check-versions.sh` now covers the LAN waker, which is the one shipped piece
+  with no version surface and the one that does not ride a release. It had sat
+  five days behind the server while every other check reported agreement.
 
 ## 0.9.8 — 2026-09-08
 
