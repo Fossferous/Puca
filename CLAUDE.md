@@ -141,6 +141,16 @@ second box as a rollback target, that rollback is only real if it has kept
 receiving every release — otherwise "rolling back" means downgrading every user
 to whatever it was last given, without warning.
 
+**The LAN waker does not ride a release, and `check-versions.sh` now says so.**
+0.9.1 retired the query-string token and moved the waker to a header in the
+SAME commit; the server half shipped, the waker half did not, and every surface
+reported agreement for five days while the Wake button was dead — ~1,440
+refusals a day, found by reading the journal on a hunch. The check now compares
+a fingerprint of `crates/puca-waker` against the one `ship-waker.sh` records in
+`/opt/<unit>/SOURCE_SHA`, and separately fails a waker that is running but
+REFUSED. **Change that crate and the version check fails until you run
+`ship-waker.sh`.**
+
 **Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|installer|
 installer-lite|backend|apk|apk-lite} ...`, never a manual `scp`/`ssh` to one
 box.** A single-host deploy leaves the others silently stale, which looks

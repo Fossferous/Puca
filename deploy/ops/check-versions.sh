@@ -37,6 +37,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=waker-source-sha.sh
+source "$HERE/waker-source-sha.sh"
 # hosts.conf is gitignored (it names your servers); a fresh clone has none.
 # Say what to do rather than dying on a bare `source` error.
 if [ ! -f "$HERE/hosts.conf" ]; then
@@ -347,6 +349,61 @@ for entry in "${HOSTS[@]}"; do
 	else
 		printf 'FAIL  %-22s %s (local dist has %s)\n' "webapp bundle" "${served:-<empty>}" "$local_entry"
 		FAILED+=("$label/webapp")
+	fi
+
+	# THE LAN WAKER, WHICH NOTHING USED TO LOOK AT.
+	#
+	# It is the one shipped artefact with no version surface: no endpoint, no
+	# mention on the download page, and its device row carries no version — so
+	# every check above can pass while it is dead. It is also the one artefact
+	# that does NOT ride a release: ship-waker.sh is a separate single-host
+	# script no release path calls, so it is only as current as the last time
+	# somebody remembered.
+	#
+	# That gap cost five days. 0.9.1 retired the query-string token and moved
+	# the waker to a header IN THE SAME COMMIT; the server half shipped, the
+	# waker half did not, and the box logged ~1,440 refusals a day while this
+	# script reported every surface in agreement. It was found by reading the
+	# journal on a hunch.
+	#
+	# Compare what is INSTALLED against what this tree would build. A hash is
+	# the only honest comparison available: the binary has no --version, and
+	# adding one would still not prove it came from this source. No unit, or no
+	# local build to compare against, is INFO — a waker is optional and lives
+	# on exactly one host.
+	waker_unit=""
+	for candidate in "$SERVICE_NAME-waker" puca-waker sovereign-waker; do
+		if ssh_to "$entry" "systemctl cat $candidate >/dev/null 2>&1"; then
+			waker_unit="$candidate"
+			break
+		fi
+	done
+	if [ -n "$waker_unit" ]; then
+		shipped_sha="$(ssh_to "$entry" "cat /opt/$waker_unit/SOURCE_SHA 2>/dev/null" | tr -d '
+' || true)"
+		local_sha="$(waker_source_sha "$(cd "$HERE/../.." && pwd)")"
+		if [ -z "$shipped_sha" ]; then
+			# Shipped before this record existed. Say so plainly rather than
+			# passing: "no record" is exactly the state that hid the outage.
+			printf 'FAIL  %-22s no SOURCE_SHA on the box - shipped before this check existed; re-ship it (deploy/ops/ship-waker.sh)
+' "LAN waker"
+			FAILED+=("$label/waker-unknown")
+		elif [ "$shipped_sha" = "$local_sha" ]; then
+			printf 'PASS  %-22s built from this source (%s)
+' "LAN waker" "${local_sha:0:12}"
+		else
+			printf 'FAIL  %-22s built from %s, this tree is %s - re-ship it (deploy/ops/ship-waker.sh)
+' "LAN waker" "${shipped_sha:0:12}" "${local_sha:0:12}"
+			FAILED+=("$label/waker-stale")
+		fi
+		# A waker can also be CURRENT and still locked out, which is its other
+		# failure mode and the one that looks healthy from every angle.
+		refused="$(ssh_to "$entry" "journalctl -u $waker_unit --since -30min --no-pager 2>/dev/null | grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)'" || echo 0)"
+		if [ "${refused:-0}" -ge 5 ]; then
+			printf 'FAIL  %-22s running but REFUSED %s times in 30 min - locked out, not down\n' \
+				"LAN waker" "$refused"
+			FAILED+=("$label/waker-refused")
+		fi
 	fi
 	echo
 done

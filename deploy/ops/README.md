@@ -578,7 +578,14 @@ the crowd. Three checks, cheapest first:
   must agree on one version on every host; `--preflight` says whether the
   version you are about to build is still free.
 - `ship-waker.sh` — builds and installs the LAN waker on exactly one host
-  (never a fleet artifact — see its header).
+  (never a fleet artifact — see its header). It records the source it shipped
+  in `/opt/<unit>/SOURCE_SHA`, which is what lets `check-versions.sh` tell a
+  current waker from a stale one.
+- `waker-source-sha.sh` — the fingerprint both of those use. Sourced, not run:
+  it hashes `crates/puca-waker` plus the workspace lock, with line endings
+  normalised so a Windows and a Linux checkout agree. The waker's binary cannot
+  be compared directly — it is built on the deploy host and checked from a
+  Windows tree — and a gate that can never pass is a gate nobody reads.
 - `backup-keys.sh` — bundles the **developer-machine** signing keys (Tauri
   updater key, mobile OTA RSA key, Android keystore, FCM credential) into two
   tarballs, keys and passphrases SEPARATELY, for off-machine storage. Never

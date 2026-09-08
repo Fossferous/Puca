@@ -46,6 +46,12 @@ host_for() {
 	return 1
 }
 BUILD_HOST="$(host_for "$BUILD_LABEL")"
+# Fingerprint the source BEFORE building, and record it on the box beside the
+# binary — see waker-source-sha.sh for why the binary's own hash cannot serve.
+# shellcheck source=waker-source-sha.sh
+source "$HERE/waker-source-sha.sh"
+WAKER_SOURCE_SHA="$(waker_source_sha "$(cd "$HERE/../.." && pwd)")"
+echo "ship-waker: source fingerprint ${WAKER_SOURCE_SHA:0:12}"
 TARGET_HOST="$(host_for "$TARGET_LABEL")"
 
 # The unit name is DETECTED, not assumed.
@@ -150,9 +156,10 @@ scp "${SSH_OPTS[@]}" "$REPO_ROOT/deploy/waker/puca-waker.service" "$TARGET_HOST:
 # rewritten to match it. The shipped unit names /opt/puca-waker; on a box whose
 # waker is called something else, installing it verbatim would point systemd at a
 # directory this script never wrote.
-ssh "${SSH_OPTS[@]}" "$TARGET_HOST" "WAKER_NAME='$WAKER_NAME' bash -s" <<'REMOTE'
+ssh "${SSH_OPTS[@]}" "$TARGET_HOST" "WAKER_NAME='$WAKER_NAME' WAKER_SOURCE_SHA='$WAKER_SOURCE_SHA' bash -s" <<'REMOTE'
 set -e
 : "${WAKER_NAME:?}"
+: "${WAKER_SOURCE_SHA:?}"
 # A dedicated unprivileged account. The waker needs no privilege at all: a
 # subnet broadcast is not a raw socket.
 id svrn-waker >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin svrn-waker
@@ -239,6 +246,11 @@ if systemctl is-enabled --quiet "$WAKER_NAME" 2>/dev/null; then
 fi
 echo "installed: $(/opt/$WAKER_NAME/$WAKER_NAME 2>&1 | head -1 || true)"
 sha256sum "/opt/$WAKER_NAME/$WAKER_NAME"
+# What SOURCE this binary came from, so check-versions.sh can tell a current
+# waker from a stale one. The binary's own hash cannot answer that: it is built
+# here on Linux and the check runs from a Windows working tree.
+printf '%s
+' "$WAKER_SOURCE_SHA" > "/opt/$WAKER_NAME/SOURCE_SHA"
 REMOTE
 
 echo
