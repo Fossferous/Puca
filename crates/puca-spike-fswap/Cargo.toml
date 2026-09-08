@@ -21,4 +21,4 @@ puca-encode = { path = "../puca-encode" }
 
 # Same major/minor as puca-agent and puca-rtc: the whole point is to
 # drive the SAME protocol state machine the agent ships.
-str0m = "0.21"
+str0m = "0.23"
