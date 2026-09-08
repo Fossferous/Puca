@@ -31,18 +31,51 @@ vi.mock('../api/websocket', () => ({
         isConnected: true,
         on: (t: string, h: Handler) => { handlers.set(t, h); },
         send: (m: { type: string; payload?: Record<string, unknown> }) => { sent.push(m); },
+        // The coalescer's motion backpressure reads this. Absent, a test that
+        // sends a MOVE dies inside the gate rather than in an assertion.
+        bufferedAmount: () => 0,
     },
 }));
 
-// Pass-through seal/open: this file is about WHICH PIPE a frame takes, and
-// the crypto has its own cross-language known-answer tests next door.
+// Seal/open stubbed, but NOT key-blind. The first version of this stub
+// ignored the key argument, which was fine while there was one key and became
+// a hole the moment there were two: a frame sealed under the wrong key would
+// have opened here and the test would have passed a controller that could not
+// talk to its own agent. `sealed@<tag>:` carries the key it was sealed with;
+// the plain `sealed:` form is accepted under any key, so every test written
+// before the subkey existed still means what it did.
+const { seals, keyTag } = vi.hoisted(() => ({
+    seals: [] as Array<{ key: Uint8Array; plain: string }>,
+    keyTag: (k: Uint8Array) => Array.from(k.slice(0, 4)).join('.'),
+}));
 vi.mock('../api/e2ee', async (importOriginal) => {
     const real = await importOriginal<typeof import('../api/e2ee')>();
     return {
         ...real,
-        sealControl: async (_key: Uint8Array, plain: string) => `sealed:${plain}`,
-        openControl: async (_key: Uint8Array, blob: string) =>
-            blob.startsWith('sealed:') ? blob.slice('sealed:'.length) : null,
+        sealControl: async (key: Uint8Array, plain: string) => {
+            seals.push({ key, plain });
+            return `sealed:${plain}`;
+        },
+        openControl: async (key: Uint8Array, blob: string) => {
+            if (blob.startsWith('sealed@')) {
+                const i = blob.indexOf(':');
+                return i > 0 && blob.slice('sealed@'.length, i) === keyTag(key)
+                    ? blob.slice(i + 1)
+                    : null;
+            }
+            return blob.startsWith('sealed:') ? blob.slice('sealed:'.length) : null;
+        },
+    };
+});
+
+// The clipboard's own read, so `sendClipboard` can be driven without a real
+// one. Everything else in that module stays real.
+vi.mock('../api/devices/clipboard', async (importOriginal) => {
+    const real = await importOriginal<typeof import('../api/devices/clipboard')>();
+    return {
+        ...real,
+        readLocalClipboardDetailed: async () => ({ ok: true as const, text: 'from the controller' }),
+        writeLocalClipboard: async () => true,
     };
 });
 
@@ -172,6 +205,7 @@ const agentHello = (sid: string) => JSON.stringify({ sid, hello: 'sealed:{"hello
 
 beforeEach(() => {
     sent.length = 0;
+    seals.length = 0;
     channels.clear();
 });
 
@@ -270,5 +304,165 @@ describe('the input channel is unproved until the agent says otherwise', () => {
             + 'a button held on the far machine',
         ).toHaveLength(1);
         expect(dc.written, 'and nothing more went to the dead channel').toHaveLength(1);
+    });
+});
+
+describe('an ATTENDED agent names its own key, and gets frames sealed with it', () => {
+    /** The hello an attended host's agent sends: sealed under the input
+     *  SUBKEY, and saying so. Mirrors input_wire::InputHello with
+     *  v = HELLO_KEY_INPUT_SUBKEY. */
+    const attendedHello = (sid: string, tag: string, v: unknown = 2) =>
+        JSON.stringify({ sid, hello: `sealed@${tag}:{"hello":1}`, v });
+
+    /** The session key this controller ended up with, learned from a frame it
+     *  sealed rather than reached for inside the module. A `move` is used on
+     *  purpose: it is not stateful, so it does not defer the switch. */
+    async function sessionKeyOf(id: string, sendInput: (i: string, e: unknown) => boolean) {
+        seals.length = 0;
+        sendInput(id, { t: 'move', x: 0.5, y: 0.5 });
+        await settle();
+        expect(seals.length, 'precondition: the relay frame was sealed').toBeGreaterThan(0);
+        return seals[0].key;
+    }
+
+    it('opens the hello with the SUBKEY and seals its input with it', async () => {
+        // The end-to-end shape of the fix: the agent holds only the derived
+        // key, says so, and the controller must follow it there. A controller
+        // that kept using the session key would have every frame refused by an
+        // agent that cannot open them — input dead on a channel that just
+        // announced itself working.
+        const { sendInput } = await import('../api/devices/session');
+        const { deriveDeviceInputKey } = await vi.importActual<typeof import('../api/e2ee')>('../api/e2ee');
+        const id = await controllerSession();
+        inputDc().open();
+        const sessionKey = await sessionKeyOf(id, sendInput);
+        const subkey = deriveDeviceInputKey(sessionKey);
+        expect(keyTag(subkey), 'precondition: the two keys are distinguishable')
+            .not.toBe(keyTag(sessionKey));
+
+        inputDc().deliver(attendedHello(id, keyTag(subkey)));
+        await settle();
+        seals.length = 0;
+        sent.length = 0;
+
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+
+        expect(onChannel(), 'the frame took the channel').toHaveLength(1);
+        expect(onRelay(), 'and not the relay as well').toHaveLength(0);
+        // The INPUT frame's seal, chosen by content rather than by position:
+        // sending over the channel also emits the `input-alive` signal, which
+        // is sealed under the session key right behind it, and `seals.at(-1)`
+        // quietly meant that one instead.
+        const inputSeal = seals.find(x => x.plain.includes('"t":"down"'));
+        expect(inputSeal, 'the input frame was sealed').toBeTruthy();
+        expect(keyTag(inputSeal!.key), 'under the key the agent named, not the session key')
+            .toBe(keyTag(subkey));
+        expect(keyTag(inputSeal!.key)).not.toBe(keyTag(sessionKey));
+
+        // AND THE HOST WAS TOLD SOMEBODY IS DRIVING. Its idle revoke is fed
+        // only by input arriving over the relay, so a session that moved off
+        // the relay would be torn down mid-use half an hour later.
+        expect(
+            sent.filter(m => m.type === 'DeviceSignal'),
+            'the direct channel is invisible to the host; this is what replaces it',
+        ).not.toHaveLength(0);
+    });
+
+    it('is not armed by a hello that names the subkey but is sealed with the session key', async () => {
+        // The negative that proves the positive. If the controller opened the
+        // hello with `s.key` regardless of `v`, this would arm — and every
+        // frame after it would be sealed under a key the agent is not holding.
+        const { sendInput } = await import('../api/devices/session');
+        const id = await controllerSession();
+        inputDc().open();
+        const sessionKey = await sessionKeyOf(id, sendInput);
+
+        inputDc().deliver(attendedHello(id, keyTag(sessionKey)));
+        await settle();
+        sent.length = 0;
+
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+        expect(onChannel(), 'nothing may ride a channel proved with the wrong key').toEqual([]);
+        expect(onRelay()).toHaveLength(1);
+    });
+
+    it('ignores a hello naming a key selector it does not know', async () => {
+        const { sendInput } = await import('../api/devices/session');
+        const { deriveDeviceInputKey } = await vi.importActual<typeof import('../api/e2ee')>('../api/e2ee');
+        const id = await controllerSession();
+        inputDc().open();
+        const sessionKey = await sessionKeyOf(id, sendInput);
+
+        // A future agent, a key this build cannot derive. Staying on the relay
+        // is the only safe answer; guessing the session key would be input
+        // sealed for nobody.
+        inputDc().deliver(attendedHello(id, keyTag(deriveDeviceInputKey(sessionKey)), 99));
+        await settle();
+        sent.length = 0;
+
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+        expect(onChannel()).toEqual([]);
+        expect(onRelay()).toHaveLength(1);
+    });
+});
+
+describe('what the direct channel must NOT carry', () => {
+    const armed = async (id: string) => {
+        inputDc().open();
+        inputDc().deliver(agentHello(id));
+        await settle();
+        sent.length = 0;
+    };
+
+    it('sends the CLIPBOARD by relay even with the channel armed', async () => {
+        // THE REGRESSION THIS TEST EXISTS FOR. A clipboard push shares the
+        // input queue but is not a control input: the agent has no clipboard
+        // concept at all, so on the channel it passes every authorisation
+        // check, fails to parse, and is dropped — while `sendClipboard`
+        // returns success and the controller is told "Clipboard sent". Arming
+        // the channel for attended sessions would have broken clipboard
+        // sharing for exactly the sessions the change was written for.
+        const { sendClipboard } = await import('../api/devices/session');
+        const id = await controllerSession();
+        await armed(id);
+
+        const err = await sendClipboard(id);
+
+        expect(err, 'it reports success').toBeNull();
+        expect(onChannel(), 'and it must not have gone to the agent').toEqual([]);
+        expect(onRelay(), 'it goes to the app, which is what applies it').toHaveLength(1);
+    });
+
+    it('sends CTRL+ALT+DEL by relay, so a refusal can come back', async () => {
+        // The agent can inject a SAS but cannot push, so a refusal — no system
+        // service, policy unset — has no way back from there. The relay path
+        // turns the same refusal into an `input-failed` signal, which is the
+        // only reason that button is not a decoration.
+        const { sendInput } = await import('../api/devices/session');
+        const id = await controllerSession();
+        await armed(id);
+
+        sendInput(id, { t: 'sas' });
+        await settle();
+
+        expect(onChannel()).toEqual([]);
+        expect(onRelay()).toHaveLength(1);
+    });
+
+    it('POSITIVE CONTROL: ordinary input on the same armed session takes the channel', async () => {
+        // Without this the two tests above would pass against a session that
+        // never armed at all.
+        const { sendInput } = await import('../api/devices/session');
+        const id = await controllerSession();
+        await armed(id);
+
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+
+        expect(onChannel()).toHaveLength(1);
+        expect(onRelay()).toEqual([]);
     });
 });

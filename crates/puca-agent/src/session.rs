@@ -380,6 +380,66 @@ pub struct StreamKey {
 /// `test_stale_terminal_event_cannot_remove_newer_stream_or_reservation`
 /// pins. Uniform over one key or many, which is what makes the ALL_DISPLAYS
 /// case safe on all four release paths.
+/// Which key, if any, a stream may open input frames with — and which key the
+/// hello will therefore tell the controller to seal with.
+///
+/// A FREE FUNCTION so all four arms are testable without a stream, an offer or
+/// a monitor: the decision is an authorisation one, and the only alternative
+/// was asserting on a local inside a request handler that fails on an invalid
+/// SDP long before it gets here.
+///
+/// The order is the security-relevant part.
+///
+/// 1. `data_only` gets NOTHING. A file browse opens no screen, and
+///    `StartStream`'s own documentation says a session with no screen must not
+///    be able to move a pointer on one. That was true of the pipe path — the
+///    session is never recorded, so `Inject` cannot target it — and quietly
+///    false here until 2026-09-08, because the channel was built from the
+///    sealed map whatever the mode.
+/// 2. A SEALED session's own key WINS over anything a caller offers. The key
+///    came from the X25519 handshake in `OpenSession`; letting a caller
+///    substitute one on the path that reaches `SendInput` would undo that.
+///    The pipe is token-authenticated, so this is depth rather than a hole
+///    being closed — it costs one arm.
+/// 3. An ATTENDED session takes the app's input-only subkey. Until
+///    2026-09-08 this arm did not exist, so such a session sent no hello and
+///    input stayed on the relay for the whole of its life.
+/// 4. Anything else — no sealed session, no `input_auth`, or one whose key is
+///    not 32 base64 bytes — gets `None`, which means no hello and a controller
+///    that stays exactly where it already was.
+fn input_channel_for(
+    session_id: &str,
+    data_only: bool,
+    sealed: Option<([u8; 32], crate::input_wire::InputArm, bool)>,
+    input_auth: Option<&crate::input_wire::InputAuth>,
+    flavour_allows_input: bool,
+) -> Option<std::sync::Arc<crate::input_wire::InputChannel>> {
+    use crate::input_wire::{InputArm, InputChannel, InputKeySource};
+    if data_only {
+        return None;
+    }
+    if let Some((key, arm, ua_ok)) = sealed {
+        return Some(std::sync::Arc::new(InputChannel::new(
+            session_id.to_string(), key, arm, ua_ok, flavour_allows_input,
+            InputKeySource::SealedSession,
+        )));
+    }
+    let a = input_auth?;
+    use base64::Engine;
+    let key: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&a.key)
+        .ok()
+        .and_then(|raw| <[u8; 32]>::try_from(raw).ok())?;
+    Some(std::sync::Arc::new(InputChannel::new(
+        session_id.to_string(),
+        key,
+        if a.granted { InputArm::allowed() } else { InputArm::refused() },
+        a.ua_ok,
+        flavour_allows_input,
+        InputKeySource::AppSubkey,
+    )))
+}
+
 pub(crate) fn release_reservations(
     reservations: &mut HashMap<usize, StreamKey>,
     key: &StreamKey,
@@ -664,6 +724,11 @@ impl Agent {
                 // screen, and a data-only stream takes no monitor reservation
                 // and shows nothing.
                 data_only: false,
+                // This path is the SEALED one by construction — the session was
+                // opened by the service and its key is already here — so there
+                // is nothing for an app to hand down, and the sealed arm wins
+                // regardless.
+                input_auth: None,
             });
             let Response::Streaming { answer_sdp, .. } = started else {
                 // Pass the agent's own refusal through unchanged rather than
@@ -956,7 +1021,9 @@ impl Agent {
             }
 
             #[cfg(windows)]
-            Request::StartStream { session_id, monitor, offer_sdp, fps, bitrate, ice_servers, data_only } => {
+            Request::StartStream {
+                session_id, monitor, offer_sdp, fps, bitrate, ice_servers, data_only, input_auth,
+            } => {
                 if let Some(r) = self.gate(crate::flavour::Capability::Capture) {
                     return r;
                 }
@@ -1002,18 +1069,38 @@ impl Agent {
                     self.monitor_reservations.insert(*k, stream_key.clone());
                 }
 
-                // R4: hand the stream this session's key ONLY when the
-                // agent actually holds one (a sealed session opened through
-                // the service). An attended session's key lives in the app,
-                // so its stream gets None and input keeps the pipe path —
-                // the agent is deliberately not a second client.
+                // R4: which key, if any, this stream may open input frames
+                // with.
+                //
+                // A SEALED session's own key WINS. That ordering is the
+                // security-relevant half: a caller offering an `input_auth`
+                // for a session this agent opened itself would otherwise be
+                // substituting a key of its choosing for the one the X25519
+                // handshake produced, on the very path that reaches SendInput.
+                // The pipe is token-authenticated, so this is defence in
+                // depth rather than a hole being closed — but it costs one
+                // match arm.
+                //
+                // Second: an ATTENDED session, whose key lives in the app.
+                // Until 2026-09-08 this arm did not exist, so every such
+                // session sent no hello and kept input on the relay — see
+                // `InputAuth` for what that cost and what the subkey is.
+                //
+                // Third: NEITHER, for a data-only session. A file browse
+                // opens no screen, and StartStream's own documentation says a
+                // session with no screen must not be able to move a pointer
+                // on one — which was true of the pipe path (`Inject` cannot
+                // target an unrecorded session) and quietly false here, since
+                // the channel was built from the sealed map whatever the mode.
                 let flavour_allows_input =
                     self.flavour.refusal(crate::flavour::Capability::Input).is_none();
-                let input_channel = self.sealed.get(&session_id).map(|s| {
-                    std::sync::Arc::new(crate::input_wire::InputChannel::new(
-                        session_id.clone(), s.key, s.input_arm, s.ua_ok, flavour_allows_input,
-                    ))
-                });
+                let input_channel = input_channel_for(
+                    &session_id,
+                    data_only,
+                    self.sealed.get(&session_id).map(|s| (s.key, s.input_arm, s.ua_ok)),
+                    input_auth.as_ref(),
+                    flavour_allows_input,
+                );
                 match crate::stream::start(
                     &offer_sdp,
                     target_monitor,
@@ -2777,6 +2864,7 @@ mod tests {
             bitrate: None,
             ice_servers: vec![],
             data_only: false,
+            input_auth: None,
         });
         assert!(matches!(resp, Response::Error { .. }));
         assert_eq!(a.monitor_reservations.get(&0), Some(&existing_key));
@@ -2811,6 +2899,7 @@ mod tests {
             bitrate: None,
             ice_servers: vec![],
             data_only,
+            input_auth: None,
         };
 
         // POSITIVE CONTROL: with a picture, the reservation really does block —
@@ -3877,5 +3966,103 @@ mod tests {
             other => panic!("a new agent must not know an old session, got {other:?}"),
         }
     }
+
+    /// 32 bytes of `b`, base64 — the shape `InputAuth::key` must carry.
+    fn subkey_b64(b: u8) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode([b; 32])
+    }
+
+    #[test]
+    fn a_sealed_sessions_own_key_wins_over_anything_a_caller_offers() {
+        // The sealed key came out of the X25519 handshake in OpenSession. A
+        // caller substituting one here would be choosing the key on the path
+        // that ends at SendInput.
+        let auth = crate::input_wire::InputAuth {
+            key: subkey_b64(0xAA), granted: true, ua_ok: true,
+        };
+        let ch = input_channel_for(
+            "s1", false, Some(([0x11; 32], crate::input_wire::InputArm::allowed(), true)),
+            Some(&auth), true,
+        )
+        .expect("a sealed session must still get a channel");
+        assert_eq!(ch.key, [0x11; 32], "the handshake key, not the caller's");
+        assert_eq!(ch.hello_version(), None);
+    }
+
+    #[test]
+    fn an_attended_session_takes_the_apps_subkey_and_its_flags_verbatim() {
+        let auth = crate::input_wire::InputAuth {
+            key: subkey_b64(0xAA), granted: true, ua_ok: true,
+        };
+        let ch = input_channel_for("s1", false, None, Some(&auth), true)
+            .expect("this is the whole point of the change");
+        assert_eq!(ch.key, [0xAA; 32]);
+        assert_eq!(ch.hello_version(), Some(crate::input_wire::HELLO_KEY_INPUT_SUBKEY));
+        assert!(ch.serves(), "granted + proved + a flavour that allows input");
+
+        // The flags are carried, not assumed. Either one missing means no
+        // hello, which leaves the controller on the relay.
+        for (granted, ua_ok) in [(false, true), (true, false), (false, false)] {
+            let a = crate::input_wire::InputAuth {
+                key: subkey_b64(0xAA), granted, ua_ok,
+            };
+            let ch = input_channel_for("s1", false, None, Some(&a), true).unwrap();
+            assert!(!ch.serves(), "granted={granted} ua_ok={ua_ok} must not serve");
+        }
+        // And the flavour still has its own veto, independent of both.
+        let ch = input_channel_for("s1", false, None, Some(&auth), false).unwrap();
+        assert!(!ch.serves(), "a flavour that forbids input overrides the app");
+    }
+
+    #[test]
+    fn a_data_only_session_can_never_move_a_pointer() {
+        // StartStream's own documentation promises this, and it was true of
+        // the pipe path only: a data-only session is never recorded, so
+        // `Inject` cannot target it, while the data CHANNEL was armed from the
+        // sealed map whatever the mode.
+        let auth = crate::input_wire::InputAuth {
+            key: subkey_b64(0xAA), granted: true, ua_ok: true,
+        };
+        let sealed = Some(([0x11; 32], crate::input_wire::InputArm::allowed(), true));
+        assert!(input_channel_for("s1", true, sealed, None, true).is_none());
+        assert!(input_channel_for("s1", true, None, Some(&auth), true).is_none());
+        assert!(input_channel_for("s1", true, sealed, Some(&auth), true).is_none());
+
+        // POSITIVE CONTROL: the identical inputs with a picture DO arm, so
+        // this test is about `data_only` and not about a helper that returns
+        // None for everything.
+        assert!(input_channel_for("s1", false, sealed, None, true).is_some());
+        assert!(input_channel_for("s1", false, None, Some(&auth), true).is_some());
+    }
+
+    #[test]
+    fn a_key_that_is_not_32_bytes_arms_nothing() {
+        // A short, long or unparseable key must leave the controller on the
+        // relay rather than be padded, truncated, or turned into an error that
+        // takes the whole stream down with it.
+        for bad in ["", "not base64!!", "AAAA", &"A".repeat(88)] {
+            let a = crate::input_wire::InputAuth {
+                key: bad.to_string(), granted: true, ua_ok: true,
+            };
+            assert!(
+                input_channel_for("s1", false, None, Some(&a), true).is_none(),
+                "key {bad:?} must not arm a channel",
+            );
+        }
+        // POSITIVE CONTROL for the rig.
+        let good = crate::input_wire::InputAuth {
+            key: subkey_b64(7), granted: true, ua_ok: true,
+        };
+        assert!(input_channel_for("s1", false, None, Some(&good), true).is_some());
+    }
+
+    #[test]
+    fn no_sealed_session_and_no_auth_is_the_old_behaviour() {
+        // The pre-2026-09-08 world, and still what an older app produces: no
+        // channel, no hello, input keeps the relay.
+        assert!(input_channel_for("s1", false, None, None, true).is_none());
+    }
+
 }
 

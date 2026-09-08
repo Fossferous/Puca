@@ -4,13 +4,42 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Controlling your own machine sent every keystroke and mouse move through
+  the server, even when the two devices were in the same room.** The picture
+  came straight across the LAN; the pointer went out to the server and back,
+  so remote control felt a long way behind what the screen was showing. The
+  direct controller-to-agent input channel had been open the whole time and
+  never once used: it arms only when the helper on the host can prove it will
+  serve, and it could only prove that for a session it had opened itself — the
+  lock-screen path. An ordinary session, signed in with the app running, keeps
+  its key in the app, so the helper stayed silent and input took the long way
+  round for the whole of every session. Measured from one machine's own log:
+  fifteen consecutive sessions over a fortnight, not one of them armed. The app
+  now hands its helper an input-only key derived from the session key, so the
+  channel arms and input takes the same short path the video already took. The
+  helper can open input and nothing else — not signalling, not the clipboard —
+  and it was already being handed every one of those events in plain text, so
+  nothing new is trusted with anything. A machine at the lock screen is
+  unchanged, and a controller or helper too old to know about this quietly
+  keeps using the server, exactly as before.
+- **Remote control now survives a dropped connection to the server.** With
+  input on the direct channel, a controller whose WebSocket has gone (a phone
+  that backgrounded, a flaky network) can still drive the machine: the two
+  transports are independent, and refusing to send because one of them is down
+  was right only while it was the only one.
+- **A file-browsing session could reach the input channel.** Browsing a
+  device's files opens no screen, and the documented rule is that a session
+  with no screen cannot move a pointer on one. That was enforced on the path
+  through the app and not on the direct channel. Now both.
+
 ## 0.9.801 — 2026-09-08
 
 A security fix that was finished before 0.9.8 and held back from it, plus the
 dependency housekeeping and one gate that would have caught the wake box being
 offline for five days.
-
-### Security
 
 ### Security
 - **A file uploaded without a capability could be downloaded by any signed-in

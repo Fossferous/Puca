@@ -160,6 +160,16 @@ pub enum Request {
         /// pointer on one.
         #[serde(default)]
         data_only: bool,
+        /// R4 FOR AN ATTENDED SESSION: an input-only subkey, with the
+        /// authorisation that has to come with it. See `input_wire::InputAuth`
+        /// for what it is and why it is not the session key.
+        ///
+        /// Absent is the right answer in two ordinary cases, and neither is an
+        /// error: an app older than the field, and any session this agent
+        /// opened ITSELF — a sealed session already holds the real key, and it
+        /// wins over anything a caller offers (session.rs).
+        #[serde(default)]
+        input_auth: Option<crate::input_wire::InputAuth>,
     },
     /// One ICE candidate trickled by the controller.
     ///

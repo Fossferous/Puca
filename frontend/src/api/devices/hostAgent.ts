@@ -166,9 +166,15 @@ export async function agentAnswerOffer(
         /** Answer and open the data channels, but never capture — how files are
          *  browsed without opening this machine's screen. */
         dataOnly?: boolean;
+        /** R4 for an ATTENDED session: the input-only subkey this app derived,
+         *  with the authorisation that has to travel with it. Absent means the
+         *  agent arms nothing and input keeps the relay, which is what every
+         *  release before this one did. Built in session.ts, because that is
+         *  where the grant and the passphrase gate are known. */
+        inputAuth?: { key: string; granted: boolean; ua_ok: boolean };
     },
 ): Promise<string> {
-    const { fps, bitrateKbps, dataOnly } = opts ?? {};
+    const { fps, bitrateKbps, dataOnly, inputAuth } = opts ?? {};
     // THE AGENT CANNOT FETCH THESE ITSELF — it holds no account token and never
     // speaks to the Púca server, which is the property that makes it safe
     // to run headless. So the app has to hand them over, and until 0.8.6 it did
@@ -198,6 +204,10 @@ export async function agentAnswerOffer(
         bitrate,
         ice_servers: iceServers,
         data_only: dataOnly === true,
+        // Omitted rather than sent as null when there is nothing to arm: the
+        // agent's field is `Option<InputAuth>` with `#[serde(default)]`, and an
+        // older agent ignores it entirely.
+        ...(inputAuth ? { input_auth: inputAuth } : {}),
     });
     const answer = reply.answer_sdp;
     if (!answer) throw new Error('the agent started a stream but returned no answer');

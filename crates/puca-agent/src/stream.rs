@@ -1575,19 +1575,10 @@ fn run(
                             // authorisation gate is already satisfied, so
                             // "proved" and "will actually inject" are one
                             // statement rather than two that can drift.
-                            let serving = input_channel
-                                .as_ref()
-                                .filter(|ch| ch.serves())
-                                .and_then(|ch| {
-                                    crate::control_key::seal(
-                                        &ch.key,
-                                        crate::input_wire::HELLO_PLAINTEXT,
-                                    )
-                                    .map(|sealed| crate::input_wire::InputHello {
-                                        sid: ch.session_id.clone(),
-                                        hello: sealed,
-                                    })
-                                });
+                            let serving = crate::input_wire::hello_for(
+                                input_channel.as_deref(),
+                                |k, p| crate::control_key::seal(k, p),
+                            );
                             match serving {
                                 Some(hello) => {
                                     let bytes =

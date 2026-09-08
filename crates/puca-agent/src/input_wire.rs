@@ -128,6 +128,108 @@ pub const HELLO_PLAINTEXT: &str = r#"{"hello":1}"#;
 pub struct InputHello {
     pub sid: String,
     pub hello: String,
+    /// WHICH KEY OPENS `hello` — and therefore which key the controller must
+    /// seal its frames with.
+    ///
+    /// Absent means the SESSION key: what a sealed session uses, and what
+    /// every agent built before this field existed sent. `2`
+    /// (`HELLO_KEY_INPUT_SUBKEY`) means the input-only subkey the host app
+    /// derived and handed down — see `InputAuth`.
+    ///
+    /// A controller that does not understand the value it is given simply
+    /// fails to open the hello and stays on the relay, which is the safe
+    /// state. So this field can strand nobody: the worst it can do is leave
+    /// input exactly where it already was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u32>,
+}
+
+/// `InputHello::v` for a hello sealed under the app-derived input subkey.
+pub const HELLO_KEY_INPUT_SUBKEY: u32 = 2;
+
+/// R4 FOR AN ATTENDED SESSION: what the host APP hands down so this agent can
+/// serve the input channel of a session it did not open itself.
+///
+/// WHY IT HAD TO EXIST. The agent only ever held a key for a session it opened
+/// (`OpenSession` — the service's lock-screen path), so `StartStream` built an
+/// `InputChannel` only for those. An ordinary session — someone signed in, app
+/// running — derives its key in the app, so the agent had nothing to seal a
+/// hello with, sent none, and the controller correctly kept input on the
+/// relay: controller → server → app → pipe → agent. Measured on the author's
+/// own machine on 2026-09-08, from `agent.log`: fifteen consecutive sessions
+/// over a fortnight, every one of them logging the refusal, not one armed —
+/// while the VIDEO for those same sessions went straight across the LAN. The
+/// pointer was taking an internet round trip to a machine two metres away.
+///
+/// `key` IS NOT THE SESSION KEY. It is HKDF-SHA256 of it under
+/// `sovereign-device-input-v1`, derived identically by the controller, so this
+/// process can open input frames and nothing else — not signalling, not the
+/// clipboard. `control_key.rs` argues that exactly one process should hold a
+/// session key; this keeps that true while still letting the agent prove it
+/// will serve.
+///
+/// And it grants this process no capability it did not already have: on this
+/// path the app ALREADY opens every event and hands it here over the pipe for
+/// `SendInput`. What changes is the route, not who can type.
+///
+/// `granted` and `ua_ok` default to FALSE. An app that predates them has not
+/// said yes, and silence is not consent on an authorisation question.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct InputAuth {
+    /// base64, 32 bytes.
+    pub key: String,
+    /// The app verified a grant that includes control for this session — the
+    /// same question `InputArm` answers for a sealed one.
+    #[serde(default)]
+    pub granted: bool,
+    /// The app's unattended-access gate is satisfied (not required, or already
+    /// proved).
+    #[serde(default)]
+    pub ua_ok: bool,
+}
+
+/// Where an `InputChannel`'s key came from.
+///
+/// Carried rather than inferred because it decides what the hello advertises,
+/// and a hello that names the wrong key is a controller sealing frames this
+/// end cannot open — input silently dead, which is the exact failure mode this
+/// whole module was written to close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKeySource {
+    /// A session this agent opened itself: the key IS the session key.
+    SealedSession,
+    /// An attended session: the host app derived an input-only subkey.
+    AppSubkey,
+}
+
+/// The hello this stream should write when the controller opens the channel,
+/// or `None` when it cannot serve and must say nothing.
+///
+/// EXTRACTED FROM THE STREAM LOOP so it can be tested at all. Everything about
+/// the hello was covered — which key it names, what it serialises to — except
+/// the one place that actually builds and sends one, which lives inside a live
+/// str0m event loop and is reachable only by a real peer connection. A pure
+/// function reached by the loop is a function a test can reach too.
+///
+/// `seal` is passed in for the same reason `accept_frame` takes its opener:
+/// the rules stay testable without the crypto, and this module stays free of
+/// the key type.
+pub fn hello_for<F>(ch: Option<&InputChannel>, seal: F) -> Option<InputHello>
+where
+    F: FnOnce(&[u8; 32], &str) -> Option<String>,
+{
+    // `serves()` and nothing else decides. A hello that promised more than
+    // `accept_frame` grants is the failure this whole module exists to close:
+    // a controller off the relay and onto a channel that drops everything.
+    let ch = ch.filter(|c| c.serves())?;
+    let sealed = seal(&ch.key, HELLO_PLAINTEXT)?;
+    Some(InputHello {
+        sid: ch.session_id.clone(),
+        hello: sealed,
+        // Read off the channel, never decided here: the hello must name the
+        // key this end is actually holding.
+        v: ch.hello_version(),
+    })
 }
 
 /// Parse one channel message. `None` for anything that is not an input
@@ -163,6 +265,8 @@ pub struct InputChannel {
     /// would otherwise reach this path — the exact hole the exhaustive
     /// capability match exists to prevent.
     pub flavour_allows_input: bool,
+    /// Which key `key` is, so the hello can say so. See `InputKeySource`.
+    pub key_source: InputKeySource,
     /// Highest `s` accepted on THIS transport — its own namespace, separate
     /// from the relayed path's (`SealedSession::recv_seq`). The controller
     /// numbers them independently.
@@ -184,12 +288,25 @@ impl InputChannel {
         self.flavour_allows_input && self.arm.granted && self.ua_ok
     }
 
+    /// What the hello must say about `key`.
+    ///
+    /// Derived from the source rather than passed in beside it, so the two
+    /// cannot drift: there is one place that decides, and a test below pins
+    /// both arms of it.
+    pub fn hello_version(&self) -> Option<u32> {
+        match self.key_source {
+            InputKeySource::SealedSession => None,
+            InputKeySource::AppSubkey => Some(HELLO_KEY_INPUT_SUBKEY),
+        }
+    }
+
     pub fn new(
         session_id: String,
         key: [u8; 32],
         arm: InputArm,
         ua_ok: bool,
         flavour_allows_input: bool,
+        key_source: InputKeySource,
     ) -> Self {
         Self {
             session_id,
@@ -197,6 +314,7 @@ impl InputChannel {
             arm,
             ua_ok,
             flavour_allows_input,
+            key_source,
             dc_recv_seq: std::sync::atomic::AtomicI64::new(-1),
         }
     }
@@ -315,7 +433,7 @@ mod tests {
         InputChannel::new(
             "s1".into(), [7u8; 32],
             if granted { InputArm::allowed() } else { InputArm::refused() },
-            true, true,
+            true, true, InputKeySource::SealedSession,
         )
     }
     /// Stand-in opener: echoes the payload as if it decrypted.
@@ -342,7 +460,9 @@ mod tests {
         // Passphrase not proved: the same gate InjectSealed applies, which
         // this path silently lacked until review — NotProved was defined,
         // described, and unreachable.
-        let unproved = InputChannel::new("s1".into(), [7u8; 32], InputArm::allowed(), false, true);
+        let unproved = InputChannel::new(
+            "s1".into(), [7u8; 32], InputArm::allowed(), false, true, InputKeySource::SealedSession,
+        );
         let mut opened = false;
         assert_eq!(
             accept_frame(&unproved, &f, |_k, _p| { opened = true; Some("{}".into()) }),
@@ -351,7 +471,9 @@ mod tests {
         assert!(!opened, "authorisation must come BEFORE decryption");
         // A flavour that may capture but not inject (StartStream gates on
         // Capture, so such a session CAN reach this path).
-        let no_input = InputChannel::new("s1".into(), [7u8; 32], InputArm::allowed(), true, false);
+        let no_input = InputChannel::new(
+            "s1".into(), [7u8; 32], InputArm::allowed(), true, false, InputKeySource::SealedSession,
+        );
         assert_eq!(
             accept_frame(&no_input, &f, |_k, _p| Some("{}".into())),
             Err(InputReject::NotGranted)
@@ -378,6 +500,7 @@ mod tests {
                         if granted { InputArm::allowed() } else { InputArm::refused() },
                         ua,
                         flavour,
+                        InputKeySource::SealedSession,
                     );
                     let accepted = accept_frame(
                         &ch,
@@ -475,4 +598,161 @@ mod tests {
             InputReject::NotProved.describe()
         );
     }
+
+    #[test]
+    fn the_hello_names_the_key_the_channel_is_actually_holding() {
+        // THE DRIFT THAT WOULD KILL INPUT SILENTLY. The controller seals its
+        // frames with whatever key this field names. Name the wrong one and
+        // every frame arrives unopenable — the channel looks alive, `serves()`
+        // is true, and nothing lands. So the mapping is derived from the
+        // source in one place and asserted in both directions here.
+        let sealed = InputChannel::new(
+            "s1".into(), [1u8; 32], InputArm::allowed(), true, true,
+            InputKeySource::SealedSession,
+        );
+        assert_eq!(sealed.hello_version(), None, "a sealed session uses the session key");
+
+        let attended = InputChannel::new(
+            "s1".into(), [2u8; 32], InputArm::allowed(), true, true,
+            InputKeySource::AppSubkey,
+        );
+        assert_eq!(attended.hello_version(), Some(HELLO_KEY_INPUT_SUBKEY));
+        assert_eq!(HELLO_KEY_INPUT_SUBKEY, 2, "the wire value is pinned; controllers switch on it");
+    }
+
+    #[test]
+    fn a_sealed_hello_stays_byte_identical_to_what_older_controllers_expect() {
+        // An agent that ships this field must not change the frame a
+        // controller built before the field existed is parsing. `v` is absent
+        // for the sealed path and skipped on the wire, so the JSON is exactly
+        // what 0.9.x sent.
+        let sealed = serde_json::to_string(&InputHello {
+            sid: "s1".into(), hello: "AAAA".into(), v: None,
+        })
+        .unwrap();
+        assert_eq!(sealed, r#"{"sid":"s1","hello":"AAAA"}"#);
+
+        let attended = serde_json::to_string(&InputHello {
+            sid: "s1".into(), hello: "AAAA".into(), v: Some(HELLO_KEY_INPUT_SUBKEY),
+        })
+        .unwrap();
+        assert_eq!(attended, r#"{"sid":"s1","hello":"AAAA","v":2}"#);
+
+        // And the other direction: a hello from an OLDER agent, with no field
+        // at all, reads as the session key rather than failing to parse.
+        let old: InputHello = serde_json::from_str(r#"{"sid":"s1","hello":"AAAA"}"#).unwrap();
+        assert_eq!(old.v, None);
+    }
+
+    #[test]
+    fn an_input_auth_that_says_nothing_grants_nothing() {
+        // Silence is not consent. An app that sends only the key — an older
+        // one, or one with a bug — must not thereby arm input.
+        let quiet: InputAuth = serde_json::from_str(r#"{"key":"AAAA"}"#).unwrap();
+        assert!(!quiet.granted, "a missing grant must read as refused");
+        assert!(!quiet.ua_ok, "a missing passphrase answer must read as unproved");
+
+        // POSITIVE CONTROL: the fields do arrive when they are sent, so the
+        // assertions above are about the defaults and not about a parser that
+        // ignores the whole object.
+        let loud: InputAuth =
+            serde_json::from_str(r#"{"key":"AAAA","granted":true,"ua_ok":true}"#).unwrap();
+        assert!(loud.granted && loud.ua_ok);
+    }
+
+
+    /// The hello's key selector is one wire contract compiled twice, and it
+    /// fails the way everything on this channel fails: silently. An attended
+    /// agent naming a key the controller does not switch on leaves input on
+    /// the relay for ever, with both ends convinced they did their part.
+    #[test]
+    fn the_controller_switches_on_the_same_key_selector_this_agent_sends() {
+        let client = include_str!("../../../frontend/src/api/devices/session.ts");
+        assert!(
+            client.len() > 100_000,
+            "that is not the real session.ts ({} bytes) — the path is wrong and \
+             this test is checking nothing",
+            client.len()
+        );
+        assert!(
+            client.contains(&format!(
+                "const HELLO_KEY_INPUT_SUBKEY = {HELLO_KEY_INPUT_SUBKEY};"
+            )),
+            "session.ts no longer declares HELLO_KEY_INPUT_SUBKEY = {HELLO_KEY_INPUT_SUBKEY}; \
+             an attended host would name a key the controller never tries"
+        );
+        // POSITIVE CONTROL: the controller really does derive the subkey this
+        // agent is handed, rather than merely holding the number.
+        assert!(
+            client.contains("deriveDeviceInputKey"),
+            "session.ts does not derive the input subkey at all — the search is \
+             broken, or the controller half was reverted"
+        );
+    }
+
+
+    #[test]
+    fn the_hello_a_stream_sends_names_the_key_it_holds_and_seals_with_it() {
+        // The send site itself, not just the pieces it uses. Everything below
+        // was previously reachable only through a live str0m session.
+        let mut sealed_with: Option<[u8; 32]> = None;
+        let attended = InputChannel::new(
+            "s7".into(), [0xAB; 32], InputArm::allowed(), true, true, InputKeySource::AppSubkey,
+        );
+        let hello = hello_for(Some(&attended), |k, p| {
+            sealed_with = Some(*k);
+            assert_eq!(p, HELLO_PLAINTEXT, "the hello's plaintext is a constant, pinned by the controller");
+            Some("sealed".to_string())
+        })
+        .expect("a serving channel must send a hello");
+        assert_eq!(hello.sid, "s7");
+        assert_eq!(hello.v, Some(HELLO_KEY_INPUT_SUBKEY));
+        assert_eq!(
+            sealed_with,
+            Some([0xAB; 32]),
+            "sealed under the channel's own key — under anything else the controller cannot open it",
+        );
+
+        // A sealed session's hello still names no key, so an older controller
+        // reads it exactly as it always did.
+        let sealed_session = InputChannel::new(
+            "s7".into(), [0x11; 32], InputArm::allowed(), true, true, InputKeySource::SealedSession,
+        );
+        assert_eq!(
+            hello_for(Some(&sealed_session), |_k, _p| Some("sealed".into())).unwrap().v,
+            None,
+        );
+    }
+
+    #[test]
+    fn a_stream_that_cannot_serve_says_nothing_at_all() {
+        // Silence is what keeps the controller on the relay. Anything else —
+        // an empty hello, an unsealed marker — is a working transport
+        // abandoned for a dead one.
+        let f = |_k: &[u8; 32], _p: &str| Some("sealed".to_string());
+        assert!(hello_for(None, f).is_none(), "no channel, no hello");
+        for (granted, ua_ok, flavour) in [(false, true, true), (true, false, true), (true, true, false)] {
+            let ch = InputChannel::new(
+                "s7".into(),
+                [7u8; 32],
+                if granted { InputArm::allowed() } else { InputArm::refused() },
+                ua_ok,
+                flavour,
+                InputKeySource::AppSubkey,
+            );
+            assert!(
+                hello_for(Some(&ch), f).is_none(),
+                "granted={granted} ua_ok={ua_ok} flavour={flavour} must send no hello",
+            );
+        }
+        // A seal that fails sends nothing either, rather than a hello with an
+        // empty payload the controller would try to open.
+        let ok = InputChannel::new(
+            "s7".into(), [7u8; 32], InputArm::allowed(), true, true, InputKeySource::AppSubkey,
+        );
+        assert!(hello_for(Some(&ok), |_k, _p| None).is_none());
+        // POSITIVE CONTROL: the same channel with a seal that works DOES.
+        assert!(hello_for(Some(&ok), f).is_some());
+    }
+
 }

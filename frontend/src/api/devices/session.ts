@@ -41,9 +41,11 @@ import { MediaLiveness, INPUT_RECENT_MS } from './mediaLiveness';
 import { debounce } from 'lodash-es';
 import {
     deriveDeviceControlKey,
+    deriveDeviceInputKey,
     generateControlEphemeral,
     openControl,
     sealControl,
+    toBase64,
     type ControlEphemeral,
 } from '../e2ee';
 import { deviceKeyDh } from './deviceKeyRc';
@@ -511,6 +513,35 @@ interface Internal extends DeviceControlSession {
      *  InputChannel. Until it arrives every frame takes the relay — exactly
      *  what shipped and worked before R4. */
     inputProved: boolean;
+    /** CONTROLLER: the key the far end's hello named for this channel, or null
+     *  for the session key.
+     *
+     *  A SEALED session's agent holds the session key itself and seals its
+     *  hello with that. An ATTENDED one holds only the input subkey the host
+     *  app derived and handed down, and says so in the hello's `v`. Frames
+     *  have to go back under whichever key opened the hello, or they arrive
+     *  unopenable and input dies silently on a channel that looks alive —
+     *  which is the failure `inputProved` exists to prevent, arriving by a
+     *  different door.
+     *
+     *  Only meaningful while `inputProved` is true; cleared alongside it, so a
+     *  rebuilt channel can never inherit the key its new far end never named. */
+    inputKey: Uint8Array | null;
+    /** CONTROLLER: when a STATEFUL input event — a button, a key, typed text —
+     *  last went out on the RELAY. 0 for never.
+     *
+     *  THE SWITCH BETWEEN TRANSPORTS IS THE HAZARD. The fallback direction
+     *  already says why, in `sealAndSendInput`: two transports carrying one
+     *  input stream have no relative ordering, so a `down` still crossing the
+     *  slow path while its `up` takes the direct channel lands INVERTED and
+     *  leaves a button held on the far machine. Arming the channel is the same
+     *  switch in the other direction, and it had no such guard: the hello can
+     *  land between two queued sends. A move landing late is self-correcting
+     *  and does not defer anything; a button, a key or typed text is not. */
+    lastRelayInputAt: number;
+    /** CONTROLLER: when this end last told the host it is still driving. 0 for
+     *  never. See `INPUT_ALIVE_MS`. */
+    inputAliveSentAt: number;
     /** CONTROLLER: sequence namespace for the input CHANNEL — separate from
      *  `sendSeq` (the relay's), because the agent tracks the two separately
      *  and a shared counter would let a channel frame invalidate a relayed
@@ -991,7 +1022,12 @@ async function answerOffer(
         // — as this did until the dialog existed — means the agent captures
         // output 0 whatever they chose, so a host that deliberately selected
         // Display 2 shares Display 1 while BOTH ends display "Display 2".
-        const opts = { dataOnly: s.filesOnly, fps: quality?.fps, bitrateKbps: quality?.bitrate_kbps };
+        const opts = {
+            dataOnly: s.filesOnly,
+            fps: quality?.fps,
+            bitrateKbps: quality?.bitrate_kbps,
+            inputAuth: attendedInputAuth(s),
+        };
         let answerSdp: string;
         try {
             answerSdp = await agentAnswerOffer(s.id, sdp, s.monitor, opts);
@@ -1556,8 +1592,9 @@ async function buildControllerPc(s: Internal): Promise<RTCPeerConnection> {
             s.inputChannel = null;
             // The proof belonged to THAT channel. A rebuilt one has to earn
             // it again, or a reconnect would inherit a capability its new far
-            // end never claimed.
+            // end never claimed — and with it the key that far end named.
             s.inputProved = false;
+            s.inputKey = null;
         }
     };
 
@@ -2270,6 +2307,35 @@ export function subscribeCaret(sessionId: string, cb: (r: CaretReport) => void):
 }
 
 /**
+ * `InputHello.v` for a hello sealed under the app-derived input subkey, rather
+ * than under the session key.
+ *
+ * ONE WIRE CONTRACT COMPILED TWICE — the value is
+ * `input_wire::HELLO_KEY_INPUT_SUBKEY` in the agent, and a test there reads
+ * this file to pin the two together. A mismatch would fail the way every
+ * mismatch on this channel fails: silently, with input vanishing onto a
+ * transport whose far end just said it works.
+ */
+const HELLO_KEY_INPUT_SUBKEY = 2;
+
+/**
+ * Which key opens a hello carrying this `v` — a decision, not a lookup, so it
+ * can be tested without a peer connection.
+ *
+ * `'unknown'` is deliberately NOT `'session'`. A future agent naming a key
+ * this build cannot derive must leave the controller where it is; guessing the
+ * session key would mean sealing every subsequent frame under a key the far
+ * end is not holding, and the symptom of that is input silently disappearing
+ * into a channel whose hello just promised it works — the exact failure
+ * `inputProved` was added to end.
+ */
+export function inputHelloKeyChoice(v: unknown): 'session' | 'subkey' | 'unknown' {
+    if (v === undefined || v === null) return 'session';
+    if (v === HELLO_KEY_INPUT_SUBKEY) return 'subkey';
+    return 'unknown';
+}
+
+/**
  * The agent's HELLO on the input channel — the only thing that lets input
  * leave the relay (R4).
  *
@@ -2290,17 +2356,31 @@ async function handleInputHello(s: Internal, dc: RTCDataChannel, raw: unknown): 
     if (typeof raw !== 'string') return;
     let sid: unknown;
     let hello: unknown;
+    let v: unknown;
     try {
-        const parsed = JSON.parse(raw) as { sid?: unknown; hello?: unknown };
+        const parsed = JSON.parse(raw) as { sid?: unknown; hello?: unknown; v?: unknown };
         sid = parsed.sid;
         hello = parsed.hello;
+        v = parsed.v;
     } catch {
         return;
     }
     if (sid !== s.id || typeof hello !== 'string') return;
+    // WHICH KEY the far end holds, stated by the far end. Absent is the
+    // session key — a sealed session, and every agent built before the field
+    // existed. `2` is the input subkey an attended host's app derived and
+    // handed down, which is the only key that agent has.
+    //
+    // An unknown value is treated as an unknown KEY, not as the session one:
+    // guessing would mean sealing frames under a key the far end is not
+    // holding, and the symptom of that is input that vanishes on a channel
+    // whose hello just said it works. Staying on the relay is free.
+    const choice = inputHelloKeyChoice(v);
+    if (choice === 'unknown') return;
+    const key = choice === 'subkey' ? deriveDeviceInputKey(s.key) : null;
     let plain: string | null = null;
     try {
-        plain = await openControl(s.key, hello);
+        plain = await openControl(key ?? s.key, hello);
     } catch {
         return;
     }
@@ -2316,8 +2396,12 @@ async function handleInputHello(s: Internal, dc: RTCDataChannel, raw: unknown): 
     // open was in flight; proving a channel this end no longer holds would
     // arm a transport nobody is listening on.
     if (s.inputChannel !== dc) return;
+    s.inputKey = key;
     s.inputProved = true;
-    console.info(`[p2p-input] session ${s.id}: the agent serves the input channel`);
+    console.info(
+        `[p2p-input] session ${s.id}: the agent serves the input channel` +
+            (key ? ' (attended host, input subkey)' : ''),
+    );
 }
 
 function handleCaretMessage(s: Internal, raw: unknown): void {
@@ -2818,7 +2902,8 @@ export async function connectToDevice(
         agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
         filesChannel: null,
-        inputChannel: null, inputProved: false, inputDcSeq: 0,
+        inputChannel: null, inputProved: false, inputKey: null, inputDcSeq: 0,
+        lastRelayInputAt: 0, inputAliveSentAt: 0,
         caretChannel: null, caretTracking: false, caretCapable: false,
         caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
         fileRoot: null,
@@ -2880,6 +2965,78 @@ export async function connectToDevice(
 }
 
 /**
+ * Events that take the RELAY even when the direct channel is armed and proved.
+ *
+ * The direct channel ends at the AGENT, which knows exactly one vocabulary:
+ * `puca_input::ControlInput` — move, rmove, down, up, wheel, key, text, sas.
+ * Two things travelling this same queue are not in it.
+ *
+ * A CLIPBOARD PUSH IS NOT AN INPUT EVENT. It shares this queue only because it
+ * shares the sequence namespace, and it is opened and applied by the host APP
+ * (`isClipboardEvent` → `writeLocalClipboard`). Sent to the agent it passes
+ * every authorisation check, fails to parse as a control input, and is dropped
+ * with a log line the sender never sees — while `sealAndSendInput` returns
+ * true and the controller is told "Clipboard sent". Arming the channel for
+ * attended sessions would have broken clipboard sharing for exactly the people
+ * the change was written for, silently, on the day it shipped.
+ *
+ * CTRL+ALT+DEL NEEDS AN ANSWER. The agent can inject it, but it cannot push,
+ * so a refusal — no system service, `SoftwareSASGeneration` unset — has no way
+ * back to the controller from there. The relay path turns that same refusal
+ * into an `input-failed` signal, which is the only reason the button is not a
+ * decoration. One rare event per press is worth the round trip.
+ */
+export function inputTakesTheRelay(event: unknown): boolean {
+    if (isClipboardEvent(event)) return true;
+    return (event as { t?: unknown } | null)?.t === 'sas';
+}
+
+/** Input whose ORDER against the next event matters: mis-order a press and its
+ *  release and the far machine is left holding a button or a key. A move is
+ *  self-correcting — the next one replaces it — so it never defers the switch,
+ *  which matters because a hand that keeps moving would otherwise never leave
+ *  the relay at all. */
+function isStatefulInput(event: unknown): boolean {
+    const t = (event as { t?: unknown } | null)?.t;
+    return t === 'down' || t === 'up' || t === 'key' || t === 'text';
+}
+
+/** How long a stateful event that took the relay keeps the direct channel
+ *  waiting. Comfortably past the measured relay round trip (60-120 ms on the
+ *  machine this was diagnosed on) and far below anything a person notices. */
+export const RELAY_QUIET_MS = 250;
+
+/** How often a controller driving over the direct channel tells the host it is
+ *  still there. The host's idle revoke is 30 minutes, so once a minute is two
+ *  orders of magnitude of headroom for a lost frame. */
+export const INPUT_ALIVE_MS = 60_000;
+
+/**
+ * Which transport this event takes — a decision, not a lookup, so the switch
+ * can be tested without a data channel or a clock.
+ */
+/** Is the direct channel a transport this session could use at all right now?
+ *  Proved and open. WHICH EVENTS may take it, and when, is
+ *  `inputUsesTheChannel`'s question — this one answers "is there a second
+ *  transport", which is what the socket-down gate and the coalescer's
+ *  backpressure each need. */
+function inputChannelUsable(s: Internal): boolean {
+    return s.inputProved && !!s.inputChannel && s.inputChannel.readyState === 'open';
+}
+
+export function inputUsesTheChannel(o: {
+    proved: boolean;
+    open: boolean;
+    relayForced: boolean;
+    lastRelayInputAt: number;
+    now: number;
+}): boolean {
+    if (!o.proved || !o.open || o.relayForced) return false;
+    // Nothing stateful has gone the slow way, or it has had time to land.
+    return o.lastRelayInputAt === 0 || o.now - o.lastRelayInputAt >= RELAY_QUIET_MS;
+}
+
+/**
  * Send one input event to the host.
  *
  * Sealed under the session key with a monotonic sequence inside the payload, so
@@ -2901,7 +3058,13 @@ export function sendInput(sessionId: string, event: unknown): boolean {
     // just burns sequence numbers into a void — wsClient.send drops silently
     // below OPEN. The reattach handler restores flow; input typed meanwhile
     // is better lost now than replayed as a burst of stale motion later.
-    if (s.transportDown) return false;
+    //
+    // UNLESS THE DIRECT CHANNEL IS CARRYING IT. That reasoning was exact while
+    // the relay was the only path input ever took, which it was for every
+    // attended session until the agent could be handed a key. A proved data
+    // channel has nothing to do with the WebSocket: refusing here would drop
+    // input the far end would have received, on the one transport still up.
+    if (s.transportDown && !inputChannelUsable(s)) return false;
     // The liveness ladder's gate. Stamped for every event that will actually
     // be sent — including held motion — because "the user is driving and no
     // frames are coming back" is the one signal that separates a dead media
@@ -2929,7 +3092,13 @@ function sendCoalescer(s: Internal): InputCoalescer {
         s.sendCoalescer = new InputCoalescer(
             event => { void sealAndSendInput(s, event); },
             undefined,
-            () => wsClient.bufferedAmount() <= WS_MOTION_HIGH_WATER_BYTES,
+            // Backpressure from the transport motion is ACTUALLY taking. Read
+            // off the socket while the direct channel carries the frames, this
+            // held motion on a queue that was not the one filling up — and,
+            // worse, let a stalled socket throttle a healthy channel.
+            () => (inputChannelUsable(s)
+                ? (s.inputChannel?.bufferedAmount ?? 0) <= WS_MOTION_HIGH_WATER_BYTES
+                : wsClient.bufferedAmount() <= WS_MOTION_HIGH_WATER_BYTES),
         );
     }
     return s.sendCoalescer;
@@ -2961,17 +3130,43 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
         const dc = s.inputChannel;
         // PROVED, not merely open — see `inputProved`. This is the one line
         // that decides whether input reaches the machine at all against a
-        // host that opens the channel and ignores it.
-        const viaDc = !!dc && dc.readyState === 'open' && s.inputProved;
+        // host that opens the channel and ignores it. Plus two things the
+        // channel cannot carry, and the quiet period the switch needs: see
+        // `inputTakesTheRelay` and `inputUsesTheChannel`.
+        const relayForced = inputTakesTheRelay(event);
+        const now = Date.now();
+        const viaDc = inputUsesTheChannel({
+            proved: s.inputProved,
+            open: !!dc && dc.readyState === 'open',
+            relayForced,
+            lastRelayInputAt: s.lastRelayInputAt,
+            now,
+        });
         try {
             if (viaDc) {
+                // UNDER THE KEY THE HELLO NAMED, which for an attended host is
+                // the input subkey and not `s.key`. The relay below always
+                // uses `s.key`: it ends at the app, which holds that one.
                 const sealed = await sealControl(
-                    s.key, JSON.stringify({ s: s.inputDcSeq, e: event }),
+                    s.inputKey ?? s.key, JSON.stringify({ s: s.inputDcSeq, e: event }),
                 );
                 try {
                     dc!.send(JSON.stringify({ sid: s.id, payload: sealed }));
                     s.inputDcSeq++;
                     s.inputRate.tick();
+                    // TELL THE HOST SOMEBODY IS DRIVING. An unattended session
+                    // carries a 30-minute idle revoke, and the only thing that
+                    // ever fed its clock was input arriving over the relay
+                    // (`noteControlActivity`, in the DeviceInputted handler).
+                    // Move input off the relay and that clock stops being fed
+                    // at all: the session is revoked mid-use, half an hour
+                    // after it started, while the person is still typing on it.
+                    // The host cannot see this channel — the agent owns it and
+                    // never pushes — so the end that knows says so.
+                    if (now - s.inputAliveSentAt >= INPUT_ALIVE_MS) {
+                        s.inputAliveSentAt = now;
+                        void sendSignal(s, { kind: 'input-alive' }).catch(() => undefined);
+                    }
                     return true;
                 } catch {
                     // The channel died between the check and the send: fall
@@ -2991,6 +3186,7 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                     // transport at a time; a fallback is one-way.
                     s.inputChannel = null;
                     s.inputProved = false;
+                    s.inputKey = null;
                 }
             }
             const relaySealed = await sealControl(
@@ -2998,6 +3194,11 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
             );
             s.inputRate.tick();
             wsClient.send({ type: 'DeviceInput', payload: { session_id: s.id, event: relaySealed } });
+            // Only what an inversion would actually break, and only when it
+            // really took the slow path — a clipboard push or a Ctrl+Alt+Del
+            // is always relayed and pairs with nothing, so deferring the
+            // switch for it would be a delay that buys nothing.
+            if (!relayForced && isStatefulInput(event)) s.lastRelayInputAt = now;
             return true;
         } catch {
             // A crypto failure must not degrade to sending plaintext.
@@ -3267,7 +3468,8 @@ export function installDeviceSessions(): void {
                 agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
                 filesChannel: null,
-                inputChannel: null, inputProved: false, inputDcSeq: 0,
+                inputChannel: null, inputProved: false, inputKey: null, inputDcSeq: 0,
+        lastRelayInputAt: 0, inputAliveSentAt: 0,
         caretChannel: null, caretTracking: false, caretCapable: false,
                 caretReports: 0, caretDroppedMalformed: 0, caretLast: null, unattended: false,
                 fileRoot: null,
@@ -4161,6 +4363,61 @@ export function installDeviceSessions(): void {
  * mouse nudge must not kick out a friend mid-game), so arming this for device
  * sessions respects that default exactly. The hotkey half is always on.
  */
+/**
+ * HOST: the input-only subkey to hand this session's agent, or undefined to
+ * leave input on the relay.
+ *
+ * WHY THE AGENT NEEDS ANYTHING. It only ever holds a key for a session IT
+ * opened — the service's lock-screen path — so for an ordinary attended
+ * session it had nothing to seal a hello with, sent none, and the controller
+ * correctly kept every keystroke on the relay: controller → server → this app
+ * → pipe → agent. Read the author's own agent.log on 2026-09-08 and it is
+ * fifteen consecutive sessions logging that refusal, while the VIDEO for those
+ * same sessions went straight across the LAN.
+ *
+ * THE GATES ARE THE INJECTOR'S GATES, deliberately re-read from the same
+ * fields rather than remembered from earlier: the grant's control capability
+ * and the unattended passphrase. A gate that lives in two places drifts, so
+ * the agent gets the answer as a value and applies it per frame, and the
+ * relay path keeps applying its own copy for the frames that still take it.
+ *
+ * A files-only session gets nothing at all — it opens no screen, and the agent
+ * refuses a data-only channel on its own side too. Both halves, because either
+ * one alone is a promise resting on the other end's good manners.
+ */
+export function attendedInputGrant(facts: {
+    /** A file browse: no screen, so no pointer. */
+    filesOnly: boolean;
+    /** The session key exists yet — there is nothing to derive from until it does. */
+    hasKey: boolean;
+    /** The grant's capabilities, or null for your OWN device, which has no
+     *  share and grants control. The same reading the relay injector and the
+     *  kill-switch arm both take. */
+    shareCapabilities: string[] | null;
+    uaRequired: boolean;
+    uaVerified: boolean;
+}): { granted: boolean; ua_ok: boolean } | null {
+    if (facts.filesOnly || !facts.hasKey) return null;
+    return {
+        granted: facts.shareCapabilities === null || facts.shareCapabilities.includes('control'),
+        ua_ok: !facts.uaRequired || facts.uaVerified,
+    };
+}
+
+function attendedInputAuth(
+    s: Internal,
+): { key: string; granted: boolean; ua_ok: boolean } | undefined {
+    const grant = attendedInputGrant({
+        filesOnly: s.filesOnly,
+        hasKey: !!s.key,
+        shareCapabilities: s.share ? [...s.share.capabilities] : null,
+        uaRequired: s.uaRequired,
+        uaVerified: s.uaVerified,
+    });
+    if (!grant || !s.key) return undefined;
+    return { key: toBase64(deriveDeviceInputKey(s.key)), ...grant };
+}
+
 function armHostControlGuard(s: Internal): void {
     if (s.role !== 'host' || s.filesOnly) return;
     // A share that grants no control cannot be driven, so the host is not
@@ -4561,6 +4818,19 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 }));
             s.activeMonitor = typeof data.active === 'number' ? data.active : null;
             emit();
+            return;
+        }
+        if (data.kind === 'input-alive') {
+            // The controller is driving over the direct channel, which this
+            // machine cannot observe: the agent owns that channel and has no
+            // way to push what it accepted back up. Same gates as any other
+            // input: only a host acts on it, and an armed host ignores a peer
+            // that never proved the passphrase — otherwise this would be a way
+            // to hold an unattended session open without authorising it.
+            if (s.role !== 'host') return;
+            if (s.uaRequired && !s.uaVerified) return;
+            if (s.share && !s.share.capabilities.includes('control')) return;
+            noteControlActivity(s.id);
             return;
         }
         if (data.kind === 'set-monitor' && typeof data.monitor === 'number') {

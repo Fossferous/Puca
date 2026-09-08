@@ -183,7 +183,7 @@ function utf8(s: string): Uint8Array {
     return new TextEncoder().encode(s);
 }
 
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
@@ -1084,6 +1084,37 @@ export function computeSafetyNumber(pubAEncoded: string, pubBEncoded: string): s
         groups.push(String(n % 100000).padStart(5, '0'));
     }
     return groups.join(' ');
+}
+
+/** HKDF info for the device-input subkey (My Devices, the `input` data channel).
+ *
+ *  The `sovereign-` prefix is a fossil and is kept DELIBERATELY. Every other
+ *  domain in this file carries it, and an HKDF info string is wire format: a
+ *  tidy-up that renamed these would silently stop two ends agreeing on a key,
+ *  which is exactly what a rename did here once before. Uniform and wrong-looking
+ *  beats mixed and inviting. */
+const HKDF_DEVICE_INPUT_INFO = utf8('sovereign-device-input-v1');
+
+/**
+ * The INPUT-ONLY subkey for a My Devices session, derived from its session key.
+ *
+ * Both ends derive it: the controller to seal input frames for the `input` data
+ * channel, and the HOST APP to hand down to its agent so the agent can serve
+ * that channel at all. The agent has never held an attended session's key — it
+ * lives in the app — so before this existed the agent could not prove it would
+ * serve, sent no hello, and every keystroke took the relay: controller →
+ * server → app → pipe → agent, an internet round trip for a controller that is
+ * frequently on the same LAN.
+ *
+ * A SUBKEY RATHER THAN THE SESSION KEY, so what the agent gains is exactly the
+ * ability to open input frames: not signalling, not the clipboard, and no
+ * ability to forge either. That keeps `control_key.rs`'s rule — one process
+ * holds a session key — true on the attended path, and it grants the agent
+ * nothing it did not already have, because the app already hands it every one
+ * of those events in plaintext over the pipe for SendInput.
+ */
+export function deriveDeviceInputKey(sessionKey: Uint8Array): Uint8Array {
+    return hkdf(sha256, sessionKey, undefined, HKDF_DEVICE_INPUT_INFO, 32);
 }
 
 /** AES-256-GCM seal a control payload under a session key → base64(nonce||ct). */

@@ -833,7 +833,15 @@ describe('the screen the host consents to is the screen that streams', () => {
         await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
 
         expect(agentAnswerOffer, 'the chosen screen must reach the capture')
-            .toHaveBeenCalledWith('ds-test', expect.any(String), 2, { dataOnly: false });
+            .toHaveBeenCalledWith('ds-test', expect.any(String), 2, {
+                dataOnly: false,
+                // R4: the host hands its agent an input-only subkey so input
+                // can leave the relay. Asserted rather than loosened, because
+                // the flags in it ARE the authorisation — a test that let
+                // `granted` drift to true on a view-only share would pass
+                // while the agent typed for a peer that may not.
+                inputAuth: { key: expect.any(String), granted: true, ua_ok: true },
+            });
     });
 
     /** An ARMED host never sees the dialog, so it must keep defaulting. */
@@ -846,7 +854,17 @@ describe('the screen the host consents to is the screen that streams', () => {
         await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
         await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
 
-        expect(agentAnswerOffer).toHaveBeenCalledWith('ds-test', expect.any(String), null, { dataOnly: false });
+        expect(agentAnswerOffer).toHaveBeenCalledWith(
+            'ds-test', expect.any(String), null, {
+                dataOnly: false,
+                // R4: the host hands its agent an input-only subkey so input
+                // can leave the relay. Asserted rather than loosened, because
+                // the flags in it ARE the authorisation — a test that let
+                // `granted` drift to true on a view-only share would pass
+                // while the agent typed for a peer that may not.
+                inputAuth: { key: expect.any(String), granted: true, ua_ok: true },
+            },
+        );
     });
 });
 
@@ -1564,7 +1582,15 @@ describe('the consented screen bounds every later set-monitor', () => {
         consentAnswer = { monitor: 1 };
         const { key } = await activeHostSession();
         await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
-        expect(agentAnswerOffer).toHaveBeenCalledWith('ds-test', expect.any(String), 1, { dataOnly: false });
+        expect(agentAnswerOffer).toHaveBeenCalledWith('ds-test', expect.any(String), 1, {
+                dataOnly: false,
+                // R4: the host hands its agent an input-only subkey so input
+                // can leave the relay. Asserted rather than loosened, because
+                // the flags in it ARE the authorisation — a test that let
+                // `granted` drift to true on a view-only share would pass
+                // while the agent typed for a peer that may not.
+                inputAuth: { key: expect.any(String), granted: true, ua_ok: true },
+            });
     });
 });
 
