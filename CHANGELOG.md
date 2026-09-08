@@ -4,7 +4,10 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.803 — 2026-09-08
+
+Screen shares get smaller sizes for viewers who cannot carry the full picture,
+and the person sharing can turn that off.
 
 ### Fixed
 - **"Arm automatically" only reminded you to arm.** 0.9.8 added a second,
@@ -17,10 +20,6 @@ one-line summary; this file is the full story. Versions follow
   setting has always said. The consequence is stated in full above the
   dropdown before you choose it: it records your whole screen continuously,
   with no popup, and nothing leaves your computer until you save a clip.
-
-## Unreleased
-
-### Fixed
 - **On a server-routed (SFU) voice channel, one viewer with a weak connection
   got a frozen slideshow while everyone else was fine.** Screen shares were
   published as a single 1080p encoding, so the server had nothing smaller to
@@ -33,6 +32,14 @@ one-line summary; this file is the full story. Versions follow
   one instead of a broken large one. What each viewer receives does not go up
   and for a weak one it falls sharply; the person sharing spends about 1.6
   Mbps more upstream.
+
+### Added
+- **Settings, Advanced: "Send my screen at several sizes".** On by default,
+  and the switch for the change above. The benefit goes to viewers on slow
+  connections; the cost — two extra encodes and roughly 1.5 Mbps more upload —
+  lands on whoever is sharing, so it is theirs to decline. Turn it off if
+  sharing makes your machine struggle, for instance while playing the game
+  you are sharing.
 
 ## 0.9.802 — 2026-09-08
 
