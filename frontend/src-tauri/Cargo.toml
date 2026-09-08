@@ -52,13 +52,13 @@ log = "0.4"
 tauri = { version = "2.9.4", features = ["devtools", "tray-icon", "image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-process = "2.3.1"
-tauri-plugin-notification = "2"
+tauri-plugin-notification = "2.4.0"
 # The OS Save As dialog for received files / attachments ("Ask where to
 # save files"). Registered for dialog:allow-save only — see capabilities.
 tauri-plugin-dialog = "2"
 # In-place auto-update: banner click downloads the signed installer and
 # relaunches (no manual reinstall). Manifest at https://download.example.com/latest.json.
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.11.0"
 # Remember window size/position/maximized across launches (standard desktop-app behavior).
 tauri-plugin-window-state = "2"
 # Start with the OS, so a device can be reachable without someone launching the
