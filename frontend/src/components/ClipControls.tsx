@@ -119,7 +119,13 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
                 .catch((e: unknown) => { console.warn('[clips] auto-arm failed:', e); setAutoState('failed'); });
         }, 800);
         return () => clearTimeout(t);
-    }, [inVoice, armed, replay.phase, roomId, gate.visible, gate.armEnabled]);
+    // policy.serverId is read above (the per-server agreement) and belongs
+    // here. In practice roomId already changes whenever the server does, so
+    // adding it changes no behaviour: a re-run with the same room is stopped
+    // by the autoTriedForRef guard before it can arm anything twice. Listed
+    // because a dependency the effect READS and does not declare is a warning
+    // that hides the next one.
+    }, [inVoice, armed, replay.phase, roomId, gate.visible, gate.armEnabled, policy.serverId]);
 
     // Save-clip hotkey (in-app feed; the native fullscreen feed is wired by
     // VoicePanel's watch list, which dispatches to the same registry id).
