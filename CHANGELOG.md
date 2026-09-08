@@ -4,7 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.804 — 2026-09-08
+
+A channel setting you change now reaches everybody, not just your own screen.
 
 ### Fixed
 - **Changing a channel's settings only reached the person who changed them.**
