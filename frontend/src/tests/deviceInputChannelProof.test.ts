@@ -207,6 +207,11 @@ beforeEach(() => {
     sent.length = 0;
     seals.length = 0;
     channels.clear();
+    // The arming path logs a line per proof. Harmless in the app, but vitest
+    // ships every console call to its parent over rpc, and a worker that tears
+    // down with one still in flight reports an unhandled rejection against
+    // whichever file happened to be running.
+    vi.spyOn(console, 'info').mockImplementation(() => {});
 });
 
 describe('the input channel is unproved until the agent says otherwise', () => {
