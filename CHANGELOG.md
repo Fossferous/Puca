@@ -4,6 +4,59 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.8 — 2026-09-08
+
+Two failures reported on the same evening — the always-on wake box offline
+since the 2nd, and a PC that could not be reached at its Windows sign-in
+screen — turned out to be one stale binary and one uninstalled service.
+Investigating them turned up a set of defects worth more than either, most of
+them things that were quietly costing performance or telling you something
+untrue.
+
+### Fixed
+- **Sharing your screen no longer takes CPU priority away from your game.** A
+  change in 0.9.6 raised the whole app to above-normal priority while a share
+  was live, which swept up the clip replay buffer's screen capture along with
+  it — the one thing that was never supposed to compete with a game. Only the
+  capture and encode processes are raised now.
+- **Webcams look far better.** A camera you were not focused on was pinned to
+  the lowest quality rung — 320x180 at 15 fps — for the whole call, and
+  because nothing ever subscribed to a better one, the sender stopped
+  producing it. Cameras now follow the size they are actually displayed at.
+- **Remote control stops going the long way round.** The direct
+  computer-to-computer path for your mouse and keys never activated for the
+  person doing the controlling, so every click travelled to the server and
+  back. The handshake that enables it is now answered in both directions.
+- **The clip buffer records at the quality you chose.** On a monitor larger
+  than the preset assumed, "1080p 60 fps" was recording your whole screen at
+  its native resolution and nearly double the bitrate, costing most of a CPU
+  core. The frame rate now follows the monitor, so the cost matches the label.
+- **The wake button explains itself honestly.** When a machine did not come
+  back, it blamed your BIOS even when the reason was that its sign-in-screen
+  service had been removed, and it told you to switch on a computer that was
+  already on rather than naming the one that was offline.
+
+### Added
+- **Watch a webcam beside a screen share.** Cameras now appear in a rail under
+  the streams instead of only on the voice screen, and any camera — there or
+  on the voice screen — can be made fullscreen. Fullscreen also asks for the
+  sharper picture while it fills the display.
+- **Automatic clip arming is agreed per server.** Choosing "arm automatically"
+  once no longer starts a continuous recording of your screen in every other
+  server whose owner turns clips on; each server is agreed to the first time
+  you arm there yourself. The setting also explains what it does before you
+  pick it, rather than after.
+
+### Diagnostics
+- The wake box now reports a refused connection as a refusal rather than a
+  network blip, keeps the server's explanation, and fails visibly instead of
+  retrying in silence — it had been locked out for five days while looking
+  healthy. The server's own refusal now names the cause, the health check
+  notices a wake box that is running but being turned away, and the app warns
+  when its helper program is not the one it shipped with.
+- Latency numbers in the diagnostics log were lifetime averages rather than
+  what was happening at the time. They are now measured over a window.
+
 ## 0.9.7 — 2026-09-06
 
 A hotfix for the remote-control work in 0.9.6, found by reviewing that change
