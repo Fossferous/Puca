@@ -4,6 +4,22 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Changing a channel's settings only reached the person who changed them.**
+  A rename, a category move, a slowmode change or a switch between
+  peer-to-peer and server-routed calls updated the editor's own screen and
+  nobody else's, and everyone else kept the old values until they restarted
+  the app. For most settings that was cosmetic. For the call type it was not:
+  a member whose app still believed the channel was server-routed could not
+  rejoin it at all, because the server refuses the token for a channel that is
+  no longer one. Everyone in the server is now told, and their channel list
+  refreshes. Switching a voice channel's call type also ends the call in
+  progress — the two types cannot be mixed in one room, so everybody is put
+  out together and can rejoin on the new one, rather than half the room
+  quietly losing the other half.
+
 ## 0.9.803 — 2026-09-08
 
 Screen shares get smaller sizes for viewers who cannot carry the full picture,

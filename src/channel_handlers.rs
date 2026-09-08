@@ -467,6 +467,17 @@ pub async fn update_channel(
         return (StatusCode::FORBIDDEN, "Missing manage channels permission").into_response();
     }
 
+    // What the voice transport is BEFORE the update, so a change to it can be
+    // detected afterwards. Read here rather than compared to the payload alone:
+    // `sfu_mode: Some(true)` on a channel already true is not a change, and
+    // putting a live call out for a no-op edit would be its own bug.
+    let before: Option<(i32, bool)> =
+        sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
+            .bind(channel_id as i32)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+
     // If reparenting, the new parent MUST belong to the same server. The FK only
     // enforces existence, not same-server — without this a caller with
     // MANAGE_CHANNELS on their own server could graft their channel under another
@@ -534,7 +545,68 @@ pub async fn update_channel(
     .await;
 
     match result {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => {
+            // TELL EVERYONE, not just the editor. Every member refetches the
+            // channel list, and the refetch applies each reader's own
+            // permissions — which is why this carries the server id and not
+            // the row.
+            let members: Vec<(i32,)> =
+                sqlx::query_as("SELECT user_id FROM server_members WHERE server_id = $1")
+                    .bind(&server_id)
+                    .fetch_all(&state.pool)
+                    .await
+                    .unwrap_or_default();
+            for (member_id,) in &members {
+                state.send_to_user(
+                    *member_id as i64,
+                    crate::protocol::ServerMessage::ChannelUpdated {
+                        server_id: server_id.clone(),
+                    },
+                );
+            }
+
+            // A VOICE TRANSPORT CHANGE ENDS THE CALL IN PROGRESS.
+            //
+            // Mesh and SFU are not interchangeable mid-room: whoever is already
+            // connected keeps negotiating the old one, so the room splits into
+            // two halves that cannot see or hear each other, and anyone who
+            // leaves cannot get back in — a client still holding `sfu_mode:
+            // true` asks for a LiveKit token and is refused with 400. Both were
+            // observed on 2026-09-08.
+            //
+            // So the honest move is to put the room out and let everyone
+            // rejoin on the transport the channel now has. AFTER the broadcast
+            // above, so a client that reconnects immediately reads the new mode
+            // rather than the one it just failed with.
+            if let Some((channel_type, was_sfu)) = before {
+                if voice_transport_changed(channel_type, was_sfu, payload.sfu_mode) {
+                    let room_id = format!("voice_{channel_id}");
+                    // COLLECTED FIRST, deliberately: `rooms` is a DashMap and
+                    // the eviction below both awaits and locks the same shard.
+                    // Holding the Ref across those awaits is the deadlock this
+                    // statement exists to avoid — it ends here, before the loop.
+                    let occupants: Vec<i64> = state
+                        .rooms
+                        .get(&room_id)
+                        .map(|r| r.members.iter().copied().collect())
+                        .unwrap_or_default();
+                    for user_id in occupants {
+                        // cut_sfu: this is an ENFORCED removal — a client that
+                        // ignores RoomLeft would otherwise keep publishing into
+                        // a LiveKit room the channel no longer has.
+                        crate::ws::evict_user_from_voice_room(
+                            &state,
+                            &room_id,
+                            user_id,
+                            true,
+                            crate::ws::SelfNotice::Gone,
+                        )
+                        .await;
+                    }
+                }
+            }
+            StatusCode::OK.into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to update channel: {:?}", e);
             (
@@ -544,6 +616,27 @@ pub async fn update_channel(
                 .into_response()
         }
     }
+}
+
+/// Does this update change a VOICE channel's transport, so the call in progress
+/// has to be put out?
+///
+/// A free function because every arm of it is a decision somebody could get
+/// wrong, and none of them needs a database to check:
+///
+/// * a TEXT channel has no call to end, whatever `sfu_mode` says about it;
+/// * `None` is the ordinary case — the editor sent a rename, or a slowmode
+///   change, and said nothing about the transport. Treating a silent field as
+///   a change would drop everyone out of a call because someone fixed a typo;
+/// * `Some(x)` where x is what it already was is not a change either. The
+///   settings modal sends the whole form every time, so this is what an edit
+///   that touched something ELSE looks like — the common case, and the one
+///   that would hurt most if it ended calls.
+///
+/// Only a real flip returns true.
+pub fn voice_transport_changed(channel_type: i32, before: bool, requested: Option<bool>) -> bool {
+    const VOICE: i32 = 1;
+    channel_type == VOICE && matches!(requested, Some(after) if after != before)
 }
 
 /// Delete a channel
@@ -1048,5 +1141,30 @@ pub async fn delete_overwrite(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_real_voice_transport_flip_ends_the_call() {
+        // The dangerous direction is a FALSE positive: the settings modal sends
+        // the whole form on every save, so most updates carry `sfu_mode` set to
+        // what it already was. Reading that as a change would empty a voice
+        // channel every time somebody renamed it.
+        assert!(!voice_transport_changed(1, false, None), "a rename says nothing about transport");
+        assert!(!voice_transport_changed(1, true, None));
+        assert!(!voice_transport_changed(1, false, Some(false)), "unchanged is not changed");
+        assert!(!voice_transport_changed(1, true, Some(true)));
+
+        // A text channel has no call to end, whatever it says.
+        assert!(!voice_transport_changed(0, false, Some(true)));
+        assert!(!voice_transport_changed(0, true, Some(false)));
+
+        // POSITIVE CONTROL, both directions: a real flip on a voice channel.
+        assert!(voice_transport_changed(1, false, Some(true)), "mesh -> SFU");
+        assert!(voice_transport_changed(1, true, Some(false)), "SFU -> mesh");
     }
 }

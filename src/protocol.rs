@@ -415,6 +415,31 @@ pub enum ServerMessage {
         channel: ChannelInfo,
     },
 
+    /// A channel's SETTINGS changed — name, category, slowmode, AFK, checklist
+    /// or the voice transport. Clients refetch that server's channel list.
+    ///
+    /// WHY THIS HAD TO EXIST. `update_channel` changed the row and told nobody:
+    /// the only client that learned was the one whose editor made the change,
+    /// because it updates its own state locally. Everyone else kept the old
+    /// values indefinitely — until an app restart, which is not a thing anyone
+    /// knows to do.
+    ///
+    /// For a rename that is cosmetic. For `sfu_mode` it is not: a client that
+    /// still believes a channel is server-routed asks for a LiveKit token, and
+    /// `sfu::mint_token` answers 400 "Not an SFU voice channel", so it cannot
+    /// rejoin the call at all. Observed on 2026-09-08 when the owner turned SFU
+    /// off mid-call and the other participant was locked out of the channel.
+    ///
+    /// IDS ONLY, never a channel struct. `ChannelInfo` carries no `sfu_mode`
+    /// (see `VoiceMoved`), so a client that built its voice panel from one
+    /// would negotiate the wrong transport — and a refetch applies the reader's
+    /// OWN permissions, which a pushed struct cannot.
+    /// SERVER ID ONLY. The client refetches the whole list, so a channel id
+    /// buys nothing — and this reaches every member of the server, including
+    /// ones who cannot VIEW the channel that changed. Naming it would tell them
+    /// a channel they cannot see exists and just moved.
+    ChannelUpdated { server_id: String },
+
     /// Channel permissions changed somewhere in this server (an overwrite was
     /// created/updated/deleted, a role's permissions were edited, or a member's
     /// roles changed) — clients refetch the channel list / my_permissions. The

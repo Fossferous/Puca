@@ -1890,6 +1890,28 @@ export function Chat({ onLogout }: ChatProps) {
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
     }, [currentServer?.id]);
 
+    // Live channel SETTINGS changes: somebody renamed a channel, moved it
+    // between categories, changed slowmode, or switched a voice channel
+    // between peer-to-peer and server-routed calls.
+    //
+    // Until this existed the only client that learned was the one whose editor
+    // made the change — it updates its own state locally — and everyone else
+    // kept the old values until an app restart. Harmless for a rename; not for
+    // the voice transport, where a client still holding the old value asks for
+    // a token the server refuses and cannot rejoin the channel at all. The
+    // server evicts anyone in the call when that particular field flips, so
+    // this handler only has to make the NEXT join read the new value.
+    useEffect(() => {
+        const handleChannelUpdated = (msg: ServerMessage) => {
+            const payload = msg.payload as { server_id: string };
+            queryClient.invalidateQueries({ queryKey: keys.channels(payload.server_id) });
+        };
+        wsClient.on('ChannelUpdated', handleChannelUpdated);
+        return () => {
+            wsClient.off('ChannelUpdated', handleChannelUpdated);
+        };
+    }, [queryClient]);
+
     // Live permission changes: someone edited channel overwrites / role bits /
     // member roles in a server → refetch that server's channel list (channels
     // may appear, vanish, or carry different my_permissions). The effect below
