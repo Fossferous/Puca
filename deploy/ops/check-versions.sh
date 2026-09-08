@@ -381,8 +381,15 @@ for entry in "${HOSTS[@]}"; do
 	if [ -n "$waker_unit" ]; then
 		shipped_sha="$(ssh_to "$entry" "cat /opt/$waker_unit/SOURCE_SHA 2>/dev/null" | tr -d '
 ' || true)"
-		local_sha="$(waker_source_sha "$(cd "$HERE/../.." && pwd)")"
-		if [ -z "$shipped_sha" ]; then
+		local_sha="$(waker_source_sha "$(cd "$HERE/../.." && pwd)" || true)"
+		if [ -z "$local_sha" ]; then
+			# No crate to compare against: a partial checkout, or a sandbox. Say
+			# so rather than passing OR failing — this cannot answer the question
+			# either way, and pretending in either direction is what makes a gate
+			# untrustworthy.
+			printf 'INFO  %-22s cannot compare: crates/puca-waker is not in this tree
+' "LAN waker"
+		elif [ -z "$shipped_sha" ]; then
 			# Shipped before this record existed. Say so plainly rather than
 			# passing: "no record" is exactly the state that hid the outage.
 			printf 'FAIL  %-22s no SOURCE_SHA on the box - shipped before this check existed; re-ship it (deploy/ops/ship-waker.sh)

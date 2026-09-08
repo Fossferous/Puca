@@ -28,6 +28,13 @@
 waker_source_sha() {
 	local root="$1"   # repository root
 	local f
+	# A tree without the crate (a partial checkout, or the ship-gates sandbox)
+	# gets an EMPTY fingerprint and a zero exit, never a failure. The callers
+	# run under `set -euo pipefail`, so a `find` on a missing directory here
+	# took the whole version check down with it — the check stopped before its
+	# own summary and reported nothing at all, which is worse than the gap it
+	# was added to close.
+	[ -d "$root/crates/puca-waker" ] && [ -f "$root/Cargo.lock" ] || return 0
 	{
 		find "$root/crates/puca-waker" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -print |
 			LC_ALL=C sort |

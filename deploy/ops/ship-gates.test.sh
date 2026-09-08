@@ -31,7 +31,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- sandbox tree, mirroring the layout the scripts expect -------------------
 mkdir -p "$TMP/deploy/ops" "$TMP/deploy/download-site" "$TMP/bin" "$TMP/frontend/src-tauri" "$TMP/frontend/dist"
-cp "$HERE/dual-ship.sh" "$HERE/check-versions.sh" "$TMP/deploy/ops/"
+# waker-source-sha.sh travels with them: check-versions.sh sources it, so a
+# sandbox without it fails every case with "No such file or directory" rather
+# than testing anything. Add any future sourced helper here too.
+cp "$HERE/dual-ship.sh" "$HERE/check-versions.sh" "$HERE/waker-source-sha.sh" "$TMP/deploy/ops/"
 
 cat > "$TMP/deploy/ops/hosts.conf" <<'CONF'
 HOSTS=("sandbox:root@127.0.0.1")
