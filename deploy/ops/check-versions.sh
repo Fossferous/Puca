@@ -405,8 +405,14 @@ for entry in "${HOSTS[@]}"; do
 		fi
 		# A waker can also be CURRENT and still locked out, which is its other
 		# failure mode and the one that looks healthy from every angle.
-		refused="$(ssh_to "$entry" "journalctl -u $waker_unit --since -30min --no-pager 2>/dev/null | grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)'" || echo 0)"
-		if [ "${refused:-0}" -ge 5 ]; then
+		# A trailing `|| echo 0` on a command that already printed a count adds
+		# a SECOND line, and comparing a two-line string with -ge is a syntax
+		# error rather than a false — it printed a raw bash diagnostic into the
+		# middle of a release check. Keep digits only, and take the last line.
+		refused="$(ssh_to "$entry" "journalctl -u $waker_unit --since -30min --no-pager 2>/dev/null | grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)'" 2>/dev/null | tr -dc '0-9
+' | tail -1)"
+		refused="${refused:-0}"
+		if [ "$refused" -ge 5 ] 2>/dev/null; then
 			printf 'FAIL  %-22s running but REFUSED %s times in 30 min - locked out, not down\n' \
 				"LAN waker" "$refused"
 			FAILED+=("$label/waker-refused")
