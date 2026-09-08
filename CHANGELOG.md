@@ -4,7 +4,11 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.802 — 2026-09-08
+
+Remote control of a machine you are signed in to stops sending every keystroke
+through the server.
+
 
 ### Fixed
 - **Controlling your own machine sent every keystroke and mouse move through
