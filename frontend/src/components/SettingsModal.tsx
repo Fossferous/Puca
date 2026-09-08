@@ -2796,6 +2796,29 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                 <p className="settings-description">
                                     Advanced settings for power users.
                                 </p>
+                                {/* The cost of this one lands on the person SHARING, which
+                                    is why it is theirs to decline. See `shareSimulcast` in
+                                    settingsStore.ts for the call that produced it. */}
+                                <h3>Screen sharing</h3>
+                                <div className="settings-card">
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Send my screen at several sizes</label>
+                                            <span className="option-hint">
+                                                Viewers on a slow connection get a smaller copy instead of a
+                                                frozen one. Your computer encodes two extra sizes and uploads
+                                                roughly 1.5 Mbps more, so turn this off if sharing makes your
+                                                machine struggle — for instance while playing the game you are
+                                                sharing. Other apps call this simulcast.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            checked={settings.shareSimulcast !== false}
+                                            onChange={(e) => updateSetting('shareSimulcast', e.target.checked)}
+                                        />
+                                    </div>
+                                </div>
                                 {isAndroidApp() && (
                                     <>
                                         <h3>Phone Storage</h3>

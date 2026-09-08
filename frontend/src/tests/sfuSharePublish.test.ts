@@ -23,7 +23,7 @@ import { screenSharePublishOptions } from '../api/rtc/sfuManager';
 
 describe('the screen-share publish contract', () => {
     it('publishes more than one rung', () => {
-        const o = screenSharePublishOptions();
+        const o = screenSharePublishOptions(true);
         expect(o.simulcast, 'one layer means nothing to fall back to').toBe(true);
         expect(o.screenShareSimulcastLayers.length).toBeGreaterThan(0);
     });
@@ -32,7 +32,7 @@ describe('the screen-share publish contract', () => {
         // "the layers need to be ordered from lowest to highest quality"
         // — livekit-client's own TrackPublishOptions docs. Out of order they
         // are not rejected; they are just wrong, which is the worst kind.
-        const layers = screenSharePublishOptions().screenShareSimulcastLayers;
+        const layers = screenSharePublishOptions(true).screenShareSimulcastLayers;
         for (let i = 1; i < layers.length; i++) {
             expect(layers[i].width, `layer ${i} must be wider than ${i - 1}`)
                 .toBeGreaterThan(layers[i - 1].width);
@@ -47,7 +47,7 @@ describe('the screen-share publish contract', () => {
         // so that charge is the correct worst case only while nothing here
         // exceeds it. A rung above the primary would silently over-run the
         // node's egress budget.
-        const o = screenSharePublishOptions();
+        const o = screenSharePublishOptions(true);
         const top = o.videoEncoding.maxBitrate;
         for (const l of o.screenShareSimulcastLayers) {
             expect(l.encoding.maxBitrate, 'no rung may exceed the primary').toBeLessThan(top);
@@ -61,17 +61,43 @@ describe('the screen-share publish contract', () => {
         // encodes in hardware. The same three rungs in VP8 fall to 19 / 7 / 4
         // fps in software. Switching codec here without re-measuring would turn
         // a fix for one viewer into a regression for everybody.
-        expect(screenSharePublishOptions().videoCodec).toBe('h264');
+        expect(screenSharePublishOptions(true).videoCodec).toBe('h264');
     });
 
     it('still protects frame rate over sharpness under congestion', () => {
         // A choppy game stream is worse than a blurry one. Unchanged by the
         // ladder — the rungs decide what a struggling SUBSCRIBER receives, this
         // decides what the encoder gives up when the SENDER is squeezed.
-        expect(screenSharePublishOptions().degradationPreference).toBe('maintain-framerate');
+        expect(screenSharePublishOptions(true).degradationPreference).toBe('maintain-framerate');
     });
 
     it('asks for 60 fps on the primary', () => {
-        expect(screenSharePublishOptions().videoEncoding.maxFramerate).toBe(60);
+        expect(screenSharePublishOptions(true).videoEncoding.maxFramerate).toBe(60);
+    });
+});
+
+describe('turning the ladder off', () => {
+    // The cost of the ladder lands on the person SHARING -- two extra encodes
+    // and about 1.5 Mbps more upload -- so `shareSimulcast` lets them decline
+    // it. Nobody should have to choose between sharing a game and playing it.
+
+    it('publishes a single encoding, with no layers left behind', () => {
+        const o = screenSharePublishOptions(false);
+        expect(o.simulcast).toBe(false);
+        // ABSENT, not present-and-ignored. A publish carrying layers it is not
+        // using is the shape someone later reads as "simulcast is on".
+        expect(o.screenShareSimulcastLayers).toBeUndefined();
+    });
+
+    it('changes nothing else about how a share is sent', () => {
+        // The rungs decide what a struggling SUBSCRIBER can fall back to.
+        // Everything else here is about the sender and must not move with them,
+        // or turning this off would quietly become a second, unrelated setting.
+        const on = screenSharePublishOptions(true);
+        const off = screenSharePublishOptions(false);
+        expect(off.videoCodec).toBe(on.videoCodec);
+        expect(off.degradationPreference).toBe(on.degradationPreference);
+        expect(off.videoEncoding).toEqual(on.videoEncoding);
+        expect(off.source).toBe(on.source);
     });
 });

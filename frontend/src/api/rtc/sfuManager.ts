@@ -29,6 +29,7 @@ import { ensureChannelKey } from '../channelKeys';
 import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
+import { loadSettings } from '../../components/settingsStore';
 import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
 import type { MediaE2eeReason, MediaE2eeStatus, RemoteStreamCallback } from './types';
 
@@ -135,13 +136,26 @@ const SHARE_MID = new VideoPreset(960, 540, 1_200_000, 60);
  * here has a measurement or an incident behind it; the test next door pins the
  * ones that would fail silently.
  */
-export function screenSharePublishOptions() {
-    return {
+export function screenSharePublishOptions(
+    // DEFAULTED FROM THE SETTING rather than passed by the caller: one call
+    // site today, and a second one that forgot to read it would silently
+    // publish the ladder for someone who had turned it off. Tests pass the
+    // value explicitly.
+    simulcast: boolean = loadSettings().shareSimulcast !== false,
+) {
+    const opts: {
+        source: Track.Source;
+        simulcast: boolean;
+        screenShareSimulcastLayers?: VideoPreset[];
+        videoCodec: 'h264';
+        videoEncoding: { maxBitrate: number; maxFramerate: number };
+        degradationPreference: 'maintain-framerate';
+    } = {
         source: Track.Source.ScreenShare,
         // Three rungs, so the server has something to give a viewer who cannot
-        // take the full picture. See SHARE_LOW/SHARE_MID.
-        simulcast: true,
-        screenShareSimulcastLayers: [SHARE_LOW, SHARE_MID],
+        // take the full picture. See SHARE_LOW/SHARE_MID — and `shareSimulcast`
+        // in settingsStore.ts for why the person sharing can decline the cost.
+        simulcast,
         // H.264 is hardware-accelerated on almost every device and produces
         // noticeably smoother output for fast-motion content (games) than VP8,
         // which is CPU-only on most machines — and measurably so for the ladder
@@ -156,6 +170,11 @@ export function screenSharePublishOptions() {
         // A choppy game stream is worse than a blurry one.
         degradationPreference: 'maintain-framerate' as const,
     };
+    // Omitted rather than sent alongside `simulcast: false`: the rungs would
+    // be ignored, and a publish that carries layers it is not using is the
+    // shape someone later reads as "simulcast is on".
+    if (simulcast) opts.screenShareSimulcastLayers = [SHARE_LOW, SHARE_MID];
+    return opts;
 }
 
 /// LiveKit's frame-crypto keyring is 16 slots; epochs map onto it mod-16, so
@@ -528,6 +547,8 @@ export class SfuManager {
             this.sharePubs.push(
                 await this.room.localParticipant.publishTrack(
                     video,
+                    // Read at publish time, so changing it takes effect on the
+                    // next share rather than the next launch.
                     screenSharePublishOptions(),
                 ),
             );

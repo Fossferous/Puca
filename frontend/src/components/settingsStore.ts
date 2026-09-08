@@ -250,6 +250,22 @@ export const defaultSettings = {
      *  the clip hears your mic post-processing at SEND level while the game is
      *  at PLAYBACK level, so this is the one that needs adjusting. */
     clipMicGain: 100,
+    /** Publish a screen share at three sizes instead of one, so the server can
+     *  hand a viewer who cannot carry the full picture a smaller one.
+     *
+     *  ON by default, because the alternative is what a real call produced on
+     *  2026-09-08: a viewer on a weak link receiving 1920x1080 at TWO frames a
+     *  second — 899 packets lost and 394 retransmit requests in five seconds —
+     *  on a machine whose decoder was idle, because a single-layer share gives
+     *  the server nothing smaller to fall back to.
+     *
+     *  It is a setting rather than a constant because the cost lands on the
+     *  person SHARING: two extra encodes and roughly 1.5 Mbps more upload.
+     *  Measured on hardware H.264 the top two rungs both held 56 fps, but a
+     *  weaker machine — or one already busy with the game being shared — may
+     *  not, and nobody should have to choose between sharing and playing.
+     *  Turning it off restores exactly the pre-0.9.803 behaviour. */
+    shareSimulcast: true,
     /** What happens when I join a voice channel that allows clips:
      *  'off' — nothing; 'prompt' — highlight the Arm button for a few seconds;
      *  'auto' — start recording with NO popup (ClipControls.tsx → armNative):
@@ -259,19 +275,6 @@ export const defaultSettings = {
      *  getDisplayMedia can never be made picker-free from JS. One attempt
      *  per room; a failure falls back to the 'prompt' nudge. */
     clipArmOnJoin: 'off' as 'off' | 'prompt' | 'auto',
-    /** Servers where automatic arming has been agreed to, by id.
-     *
-     *  WHY 'auto' IS NOT ENOUGH ON ITS OWN. clipArmOnJoin is one global switch
-     *  and the other half of the decision belongs to a SERVER OWNER: whoever
-     *  turns clips on there. So choosing "arm automatically" once — in a small
-     *  server, among friends — silently consented to a continuous recording of
-     *  the whole screen in every other server the moment its owner enabled
-     *  clips, including servers joined later. Nothing said the preference was
-     *  global, and nothing asked again.
-     *
-     *  A server enters this list the first time the member arms there by hand,
-     *  so the cost is one button press per server and the setting keeps
-     *  meaning what it says everywhere after that. */
     /** @deprecated Superseded by clipArmOnJoin; a stored `true` is read ONCE
      *  by loadSettings and mapped to 'prompt'. Kept so old profiles still type. */
     clipArmPromptOnJoin: false,
