@@ -4,6 +4,35 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.809 — 2026-09-09
+
+Arming a clip right after you open Púca works again.
+
+### Fixed
+- **The clip buffer failed to arm when the app had only just started.** Púca
+  rejoins your voice channel about a second after launching, and the buffer
+  arms a moment after that — while Windows is still bringing the app's window
+  up. Recording a screen is not always possible that early, and when it was
+  not, arming gave up and told you it could not record any of your monitors.
+  The same monitors record perfectly a few seconds later.
+
+  It now tries again, twice more, before saying anything. If your machine is
+  ready straight away nothing changes; if it needs a moment, it gets one. When
+  recording genuinely is not possible, you still get the same nudge on the Arm
+  button as before.
+
+  This is not new, but it was hidden: until 0.9.803 automatic arming was
+  refusing to run for a different reason, so it rarely reached the point where
+  the timing mattered.
+
+### Changed
+- **Screen recording now asks the graphics card that actually drives the
+  monitor**, instead of whichever one Windows happened to hand the app, and no
+  longer falls back to software rendering — which cannot record a screen at
+  all, and only produced a confusing "not supported" message. If recording does
+  fail, the message now names the graphics card, so the reason is in the report
+  rather than in a guess.
+
 ## 0.9.808 — 2026-09-09
 
 Clips now record your primary monitor, every time.
