@@ -86,11 +86,29 @@ export async function sampleOnce(): Promise<void> {
 }
 
 /** How long each tick watches for, to turn counters into a RATE. */
+export const MAX_SAMPLE_WINDOW_MS = 1000;
+
 export function sampleWindowMs(cadenceMs: number): number {
     // Comfortably inside the cadence, because the two transports are sampled
     // concurrently and each holds its window open. Floor so the slowest useful
     // cadence still measures something real rather than a rounding artefact.
-    return Math.max(250, Math.round(cadenceMs * 0.6));
+    //
+    // AND CAPPED, which the first version was not. At the passive 5 s cadence
+    // 60% meant a 3-second window: for three seconds out of every five, both
+    // transports held a full `getStats()` snapshot of every publication open,
+    // waiting to diff it against a second one — on the main thread of a
+    // machine that is, at that moment, encoding a screen share in software.
+    //
+    // The commit this cap amends (79feac04, 2026-09-07) existed to stop the
+    // log printing LIFETIME averages, and a one-second window ends that just
+    // as completely as a three-second one: a rate measured over a second is a
+    // rate, not a mean since the track started. What it does not do is keep
+    // the sampler's held state alive for 60% of the session. That is the one
+    // change whose date sits between the last clean share in the field log
+    // (07 Sept, 118 samples, none under 10 fps) and the first degraded one
+    // (08 Sept), which is not proof it caused the degradation, but is reason
+    // enough not to pay three times the cost for a property one second buys.
+    return Math.min(MAX_SAMPLE_WINDOW_MS, Math.max(250, Math.round(cadenceMs * 0.6)));
 }
 
 async function sampleOnceInner(): Promise<void> {

@@ -21,7 +21,7 @@ vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics: voiceD
 
 import {
     holdStreamDiag, releaseStreamDiag, streamDiagHolders, streamDiagSettled, sampleOnce,
-    setStreamDiagProbe, streamDiagIntervalMs, sampleWindowMs,
+    setStreamDiagProbe, streamDiagIntervalMs, sampleWindowMs, MAX_SAMPLE_WINDOW_MS,
 } from '../api/streamDiag';
 
 function logLines(): string[] {
@@ -221,6 +221,13 @@ describe('the sampler measures a WINDOW, not a lifetime', () => {
         for (const cadence of [1000, 5000]) {
             expect(sampleWindowMs(cadence)).toBeGreaterThan(0);
             expect(sampleWindowMs(cadence)).toBeLessThan(cadence);
+            // AND CAPPED. The window is time spent holding two full getStats
+            // snapshots of every publication open, on the main thread of a
+            // machine encoding a screen share in software. At the passive 5 s
+            // cadence the uncapped 60% meant three seconds out of every five.
+            // A one-second window ends the lifetime-average problem the window
+            // was added for just as completely, at a third of the duty cycle.
+            expect(sampleWindowMs(cadence)).toBeLessThanOrEqual(MAX_SAMPLE_WINDOW_MS);
         }
         // Never degenerate, however small the cadence gets.
         expect(sampleWindowMs(1)).toBeGreaterThanOrEqual(250);

@@ -17,6 +17,16 @@ one-line summary; this file is the full story. Versions follow
   was double or quadruple the work for a picture nobody asked for. The
   resolution is now a real limit, as it always was for the clip recorder. The
   same fix applies to remote-desktop hosting.
+- **The diagnostic sampler stopped holding three seconds of measurement open
+  out of every five.** A change on 7 September made the log record rates over a
+  window rather than lifetime averages, which was right, but it chose a window
+  of 60% of the sampling interval — so for most of every five-second tick the
+  app was holding a full statistics snapshot of every stream open, on the same
+  thread that encodes your screen share. A one-second window records a rate
+  just as truthfully at a third of the cost. This is the only change whose date
+  falls between the last clean recording in the field logs and the first
+  degraded one; that is not proof it caused anything, but it is not worth
+  paying for either.
 - **The log now records why a share's frame rate is falling, not just that it
   is.** The app already measured encode time, the send queue and the gap
   between them for the stream you are sending, then printed only the frame
