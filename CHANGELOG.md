@@ -4,6 +4,36 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.806 — 2026-09-09
+
+Fixes for yesterday's screen-share work, including two that could leave your
+camera on.
+
+### Fixed
+- **Turning your camera off could leave it on.** If the connection had dropped
+  and recovered at any point during the call — a Wi-Fi blip is enough — the app
+  was still holding a stale handle to the old camera, so switching the camera
+  off quietly did nothing and the room kept seeing you. The same fault could
+  leave a second, dead microphone published after a mic device change, and
+  could leave a screen share running after you stopped it. The app now asks the
+  call what is actually being published instead of trusting what it remembered.
+- **"Lower it" did nothing on peer-to-peer calls.** The check that protects the
+  multiple-sizes feature from being disturbed was applied to every call, not
+  just the ones that use it, so on a direct call the button reported that it
+  could not change your running share when there was nothing in the way.
+- **One step down was the only help you got.** If lowering the quality once was
+  not enough — and on a laptop screen the single available step is a small one
+  — nothing offered again for the rest of that share. Taking a step now lets the
+  app speak up once more if your machine is still struggling. Declining still
+  means declining.
+- **Lowering only the frame rate no longer changes your resolution.** Sharing a
+  small window and taking a frame-rate step used to quietly rewrite your saved
+  resolution down to 720p, so every later full-screen share started smaller than
+  you had asked for.
+- **The message after lowering says what actually changed**, and says the size
+  as a limit rather than an exact number — the picture is capped to fit, so on
+  anything but a 16:9 screen the real result is smaller than the figure.
+
 ## 0.9.805 — 2026-09-09
 
 Sharing your screen now tells you when your machine cannot keep up with it, and
