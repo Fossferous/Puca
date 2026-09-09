@@ -8,7 +8,8 @@
  * unattended, no-picker capture (`frontend/src-tauri/src/clip_capture.rs`,
  * `clip_desktop_audio.rs`): DXGI Desktop Duplication + the MFT hardware H.264
  * encoder for video, classic WASAPI loopback for system audio. The target
- * monitor is chosen automatically — whichever monitor a fullscreen
+ * monitor is chosen automatically — the PRIMARY display (the
+ * follow-the-fullscreen-app rule was removed; see clip_capture.rs)
  * app/game is filling, else the primary monitor (`clip_capture.rs::choose_target`).
  *
  * Two different shapes, deliberately:
@@ -38,7 +39,7 @@ export interface NativeCaptureTarget {
     outputIndex: number;
     width: number;
     height: number;
-    reason: 'fullscreen' | 'primary';
+    reason: 'primary';
     /** The bitrate the Rust encoder was ACTUALLY configured with (the preset
      *  bitrate scaled to the captured monitor's real pixel count, clamped
      *  1.5-20 Mbps — clip_capture.rs::scale_bitrate). 0 from pickCaptureTarget,
@@ -124,7 +125,7 @@ export async function startNativeVideo(
         try { await invoke('stop_clip_video_capture'); } catch { /* already stopped */ }
     };
     return {
-        target: { outputIndex: target.output_index, width: target.width, height: target.height, reason: target.reason === 'fullscreen' ? 'fullscreen' : 'primary', bitrate: target.bitrate },
+        target: { outputIndex: target.output_index, width: target.width, height: target.height, reason: 'primary', bitrate: target.bitrate },
         stop,
     };
 }

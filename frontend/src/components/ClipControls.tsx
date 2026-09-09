@@ -190,7 +190,7 @@ export function ClipStatusRow() {
     let cls = '';
     switch (r.phase) {
         case 'arming': text = 'Choosing what to record…'; break;
-        case 'armed': text = `Buffering ${formatClock(r.bufferedMs / 1000)} · ${preset.id} · ~${formatMB(r.ringBytes)}${r.hasSystemAudio ? '' : ' · mic only'}${r.captureReason === 'fullscreen' ? ' · fullscreen app' : r.captureReason === 'primary' ? ' · primary monitor' : ''}`; break;
+        case 'armed': text = `Buffering ${formatClock(r.bufferedMs / 1000)} · ${preset.id} · ~${formatMB(r.ringBytes)}${r.hasSystemAudio ? '' : ' · mic only'}${r.captureReason === 'primary' ? ' · primary monitor' : ''}`; break;
         case 'sealing': text = 'Preparing clip…'; break;
         case 'sealed': text = `Clip ready (${formatClock((r.sealed?.durationMs ?? 0) / 1000)}) · buffer still running`; break;
         case 'uploading': text = r.upload ? `Uploading ${r.upload.done} of ${r.upload.total}` : 'Uploading…'; break;

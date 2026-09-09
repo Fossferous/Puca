@@ -620,8 +620,11 @@ fn set_clip_armed_indicator(
     reason: Option<String>,
 ) {
     state.0.lock().unwrap().clip = if armed {
+        // "fullscreen" is no longer reachable: the capture target is the
+        // primary display, always (clip_capture::choose_target explains why the
+        // follow-the-fullscreen-app rule was removed). The generic arm stays
+        // for a reason string this build does not know.
         Some(match reason.as_deref() {
-            Some("fullscreen") => "Puca — clip buffer armed (recording your fullscreen app)".to_string(),
             Some("primary") => "Puca — clip buffer armed (recording your primary monitor)".to_string(),
             _ => "Puca — clip buffer armed (recording your screen)".to_string(),
         })

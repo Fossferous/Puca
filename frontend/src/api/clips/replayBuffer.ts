@@ -49,10 +49,11 @@ export interface ReplayState {
     hasMic: boolean;
     videoCodec: string | null;
     audioCodec: string | null;
-    /** Native (auto) arm only: which monitor was chosen and why — 'fullscreen'
-     *  (a chromeless app was filling it) or 'primary'. null for a picker arm,
-     *  where the user chose the surface themselves. */
-    captureReason: 'fullscreen' | 'primary' | null;
+    /** Native (auto) arm only: which monitor was chosen. Always 'primary'
+     *  now — the capture target is the primary display and the
+     *  follow-the-fullscreen-app rule is gone (see clip_capture.rs). Kept as a
+     *  field because the shape is persisted and read by the arm UI. */
+    captureReason: 'primary' | null;
     /** Non-fatal user-facing note (e.g. "no system audio"). */
     notice: string | null;
     /** Fatal error text when phase === 'error'. */

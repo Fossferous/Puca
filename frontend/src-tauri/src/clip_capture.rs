@@ -84,21 +84,6 @@ impl Rect {
     fn height(&self) -> i32 {
         self.bottom - self.top
     }
-    fn area(&self) -> i64 {
-        (self.width().max(0) as i64) * (self.height().max(0) as i64)
-    }
-    /// Intersection area with `other`, 0 if disjoint.
-    fn intersection_area(&self, other: &Rect) -> i64 {
-        let l = self.left.max(other.left);
-        let t = self.top.max(other.top);
-        let r = self.right.min(other.right);
-        let b = self.bottom.min(other.bottom);
-        if r <= l || b <= t {
-            0
-        } else {
-            (r - l) as i64 * (b - t) as i64
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,25 +95,10 @@ pub struct MonitorCandidate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetReason {
-    Fullscreen,
     Primary,
     /// No monitor is flagged primary in the list (should not happen on a real
     /// desktop) — falls back to the first entry rather than panicking.
     FirstAvailable,
-}
-
-/// The foreground window's rect, plus whether it still has window CHROME
-/// (a title bar and/or a resize border). A maximized ordinary window keeps
-/// both — and Windows extends its rect slightly PAST the monitor edge to
-/// cover the invisible resize border, so it can score >=100% coverage on
-/// the area test alone. Real fullscreen (exclusive or borderless) removes
-/// both, which is what actually distinguishes "this app IS the screen" from
-/// "this app is merely maximized" — a banking site maximized on a second
-/// monitor must never read as fullscreen.
-#[derive(Debug, Clone, Copy)]
-pub struct ForegroundWindow {
-    pub rect: Rect,
-    pub has_chrome: bool,
 }
 
 /// Pure decision: which monitor to capture with no user interaction.
@@ -142,32 +112,33 @@ pub struct ForegroundWindow {
 /// No Win32 calls — everything the decision needs is passed in, so this is
 /// exercised by ordinary `cargo test` with fabricated tables instead of
 /// needing a live foreground window and a live monitor layout.
-pub fn choose_target(
-    foreground: Option<ForegroundWindow>,
-    monitors: &[MonitorCandidate],
-) -> Option<(MonitorCandidate, TargetReason)> {
-    if monitors.is_empty() {
-        return None;
-    }
-    if let Some(fg) = foreground {
-        if fg.rect.area() > 0 && !fg.has_chrome {
-            // The monitor the window overlaps MOST, then check that overlap
-            // against THAT monitor's own area — a window can span two
-            // monitors (multi-monitor spanning) without filling either.
-            let best = monitors
-                .iter()
-                .max_by_key(|m| fg.rect.intersection_area(&m.rect));
-            if let Some(m) = best {
-                let overlap = fg.rect.intersection_area(&m.rect);
-                if m.rect.area() > 0 && overlap * 100 >= m.rect.area() * 95 {
-                    return Some((*m, TargetReason::Fullscreen));
-                }
-            }
-        }
-    }
+pub fn choose_target(monitors: &[MonitorCandidate]) -> Option<(MonitorCandidate, TargetReason)> {
+    // THE PRIMARY DISPLAY, ALWAYS.
+    //
+    // This used to look at the foreground window first and prefer whichever
+    // monitor a fullscreen app was filling, on the theory that the app you are
+    // playing is the thing you want to clip. It cost more than it bought:
+    //
+    //  * a display that cannot be captured at all looks exactly like one that
+    //    can, right up until DuplicateOutput refuses. A VR link display, a
+    //    phone-as-second-screen driver or a remote-desktop adapter enumerates
+    //    like any other monitor and reports an ordinary resolution — and a
+    //    fullscreen VR app on one of those is precisely the case the heuristic
+    //    reached for. On 2026-09-09 an arm failed with a bare
+    //    `DXGI_ERROR_UNSUPPORTED` while two perfectly capturable monitors sat
+    //    beside the one it picked;
+    //  * and the rule was invisible. Nothing told you which screen it had
+    //    chosen or why, so "it recorded the wrong monitor" was unreportable.
+    //
+    // The primary display is the one the member can point at, and it is the
+    // same one every time. `rank_targets` still falls through to the others if
+    // the primary itself cannot be captured, so this is a preference, not a
+    // single point of failure.
     if let Some(m) = monitors.iter().find(|m| m.primary) {
         return Some((*m, TargetReason::Primary));
     }
+    // No monitor claims to be primary — take the first that exists rather than
+    // refusing to arm.
     monitors.first().map(|m| (*m, TargetReason::FirstAvailable))
 }
 
@@ -182,44 +153,6 @@ pub struct ClipCaptureTarget {
     /// requested bitrate scaled to this monitor's real pixel count (see
     /// `scale_bitrate`). 0 from `pick_target`, which starts no encoder.
     pub bitrate: u32,
-}
-
-/// Real Win32 lookup, feeding the pure `choose_target` above. Windows-only —
-/// off-Windows this whole feature is unreachable (Clips is desktop/Tauri
-/// only, and only ships on Windows today), so a non-Windows build just
-/// refuses rather than growing a second, untestable code path.
-#[cfg(windows)]
-fn foreground_window() -> Option<ForegroundWindow> {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetShellWindow, GetWindowLongW, GetWindowRect, IsIconic,
-        IsWindowVisible, GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
-    };
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() {
-            return None;
-        }
-        // The desktop/shell "window" is always foreground when nothing else
-        // has focus (e.g. everything minimized) — that is "no app", not "the
-        // shell is fullscreen".
-        if hwnd == GetShellWindow() {
-            return None;
-        }
-        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
-            return None;
-        }
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_err() {
-            return None;
-        }
-        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        let has_chrome = (style & (WS_CAPTION.0 | WS_THICKFRAME.0)) != 0;
-        Some(ForegroundWindow {
-            rect: Rect { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
-            has_chrome,
-        })
-    }
 }
 
 #[cfg(windows)]
@@ -246,6 +179,41 @@ fn monitor_candidates() -> Vec<(MonitorCandidate, usize)> {
         .collect()
 }
 
+/// Every candidate monitor in preference order, best first, no repeats.
+///
+/// WHY AN ORDER AND NOT A SINGLE CHOICE. `choose_target` answers "which monitor
+/// does the member most likely mean", which is the right question — but the
+/// answer can be a monitor that cannot be captured at all. A virtual display
+/// (VR headset link, a phone-as-monitor driver, a remote-desktop adapter)
+/// enumerates like any other screen and reports a perfectly ordinary
+/// resolution, and desktop duplication on it fails outright with
+/// `DXGI_ERROR_UNSUPPORTED`. That happened here on 2026-09-09: the arm failed
+/// with a raw HRESULT while two working monitors sat beside the broken one.
+///
+/// Nobody CHOSE that monitor — a heuristic did — so falling through to the next
+/// candidate is what the member meant. `choose_target` stays exactly as it was,
+/// including its tests: this only says what to try next when the best answer
+/// turns out not to be capturable.
+#[cfg(windows)]
+pub fn rank_targets(monitors: &[MonitorCandidate]) -> Vec<(MonitorCandidate, TargetReason)> {
+    let mut ranked: Vec<(MonitorCandidate, TargetReason)> = Vec::new();
+    let push = |m: MonitorCandidate, r: TargetReason, out: &mut Vec<(MonitorCandidate, TargetReason)>| {
+        if !out.iter().any(|(c, _)| c.hmonitor == m.hmonitor) {
+            out.push((m, r));
+        }
+    };
+    if let Some((best, reason)) = choose_target(monitors) {
+        push(best, reason, &mut ranked);
+    }
+    if let Some(m) = monitors.iter().find(|m| m.primary) {
+        push(*m, TargetReason::Primary, &mut ranked);
+    }
+    for m in monitors {
+        push(*m, TargetReason::FirstAvailable, &mut ranked);
+    }
+    ranked
+}
+
 #[cfg(windows)]
 pub fn pick_target() -> Result<ClipCaptureTarget, String> {
     let candidates = monitor_candidates();
@@ -253,24 +221,67 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
         return Err("no capturable monitor found".into());
     }
     let monitors: Vec<MonitorCandidate> = candidates.iter().map(|(m, _)| *m).collect();
-    let fg = foreground_window();
-    let (chosen, reason) =
-        choose_target(fg, &monitors).ok_or_else(|| "no capturable monitor found".to_string())?;
-    let (_, output_index) = candidates
-        .iter()
-        .find(|(m, _)| m.hmonitor == chosen.hmonitor)
-        .ok_or_else(|| "monitor disappeared while picking a target".to_string())?;
-    Ok(ClipCaptureTarget {
-        output_index: *output_index,
-        width: chosen.rect.width().max(0) as u32,
-        height: chosen.rect.height().max(0) as u32,
-        reason: match reason {
-            TargetReason::Fullscreen => "fullscreen",
-            TargetReason::Primary => "primary",
-            TargetReason::FirstAvailable => "primary", // same UI copy — "no primary flag" is not user-meaningful
-        },
-        bitrate: 0,
-    })
+    let ranked = rank_targets(&monitors);
+    if ranked.is_empty() {
+        return Err("no capturable monitor found".into());
+    }
+
+    // PROVE IT CAN BE CAPTURED BEFORE PROMISING IT. Opening the duplication is
+    // the only way to know: a virtual display looks identical to a real one in
+    // both enumerations right up until DuplicateOutput refuses. The probe is
+    // dropped immediately, so the real capture opens it again a moment later.
+    let mut refused: Vec<String> = Vec::new();
+    for (chosen, reason) in &ranked {
+        let Some((_, output_index)) = candidates.iter().find(|(m, _)| m.hmonitor == chosen.hmonitor)
+        else {
+            continue; // the monitor went away between enumerating and now
+        };
+        match ScreenCapture::new(*output_index) {
+            Ok(_probe) => {}
+            // AccessLost is "not right now" — the secure desktop, a sleeping
+            // panel, or another duplication of the same output that will be
+            // released. Skipping a monitor for that would send the clip to the
+            // wrong screen for a reason that resolves itself, so it is allowed
+            // through and the real open deals with it.
+            Err(CaptureError::AccessLost) => {}
+            Err(e) => {
+                log::warn!(
+                    "Clip capture: monitor at output {} ({}x{}) cannot be captured, trying the next: {}",
+                    output_index,
+                    chosen.rect.width().max(0),
+                    chosen.rect.height().max(0),
+                    e
+                );
+                refused.push(format!(
+                    "output {} ({}x{}): {}",
+                    output_index,
+                    chosen.rect.width().max(0),
+                    chosen.rect.height().max(0),
+                    e
+                ));
+                continue;
+            }
+        }
+        return Ok(ClipCaptureTarget {
+            output_index: *output_index,
+            width: chosen.rect.width().max(0) as u32,
+            height: chosen.rect.height().max(0) as u32,
+            reason: match reason {
+                TargetReason::Primary => "primary",
+                TargetReason::FirstAvailable => "primary", // same UI copy — "no primary flag" is not user-meaningful
+            },
+            bitrate: 0,
+        });
+    }
+
+    // Everything was refused. Name what was tried: the bare HRESULT this used
+    // to surface said nothing about WHICH screen, which is most of the work in
+    // understanding it.
+    Err(format!(
+        "no monitor could be captured — tried {}: {}",
+        refused.len(),
+        refused.join("; ")
+    ))
 }
 
 /// What the encoder should actually be asked for, given the preset the member
@@ -754,104 +765,57 @@ mod tests {
     fn m(hmonitor: isize, rect: Rect, primary: bool) -> MonitorCandidate {
         MonitorCandidate { hmonitor, rect, primary }
     }
-    /// A chromeless (real fullscreen — exclusive or borderless) foreground window.
-    fn fg(rect: Rect) -> Option<ForegroundWindow> {
-        Some(ForegroundWindow { rect, has_chrome: false })
-    }
-    /// An ORDINARY window at `rect` — has a caption/resize border, so it can
-    /// never read as fullscreen no matter how much area it covers.
-    fn fg_chrome(rect: Rect) -> Option<ForegroundWindow> {
-        Some(ForegroundWindow { rect, has_chrome: true })
-    }
+    // ---- which monitor gets captured -------------------------------------
+    //
+    // TOMBSTONE. Until 2026-09-09 this picked whichever monitor a CHROMELESS
+    // foreground window covered by >=95%, on the theory that the fullscreen app
+    // is the thing worth clipping, and eleven tests here pinned that rule
+    // (exclusive vs borderless, maximized-but-not-fullscreen, spanning two
+    // monitors, and so on).
+    //
+    // It is gone, deliberately. A display that CANNOT be captured looks
+    // identical to one that can until DuplicateOutput refuses — and a VR link
+    // display or a phone-as-second-screen driver, running a fullscreen app, is
+    // exactly what the heuristic reached for. An arm failed with a bare
+    // DXGI_ERROR_UNSUPPORTED while two capturable monitors sat beside the one
+    // it chose. The rule was also invisible: nothing said which screen it had
+    // picked, so "it recorded the wrong monitor" could not be reported.
+    //
+    // If fullscreen-follows ever comes back it needs BOTH halves: a
+    // capturability probe before committing, and telling the member which
+    // screen it chose.
 
     #[test]
-    fn exclusive_fullscreen_on_the_primary_is_picked_as_fullscreen() {
-        let mons = [m(1, r(0, 0, 1920, 1080), true)];
-        let (chosen, reason) = choose_target(fg(r(0, 0, 1920, 1080)), &mons).unwrap();
-        assert_eq!(chosen.hmonitor, 1);
-        assert_eq!(reason, TargetReason::Fullscreen);
-    }
-
-    #[test]
-    fn borderless_fullscreen_off_by_a_couple_of_pixels_still_counts() {
-        // A borderless window that is 1px short on each edge — common with
-        // DPI rounding — must still read as "fullscreen", not "primary".
-        let mons = [m(1, r(0, 0, 1920, 1080), true)];
-        let (chosen, reason) = choose_target(fg(r(1, 1, 1918, 1078)), &mons).unwrap();
-        assert_eq!(chosen.hmonitor, 1);
-        assert_eq!(reason, TargetReason::Fullscreen);
-    }
-
-    #[test]
-    fn a_normal_windowed_app_is_not_treated_as_fullscreen() {
-        let mons = [m(1, r(0, 0, 1920, 1080), true)];
-        let (_, reason) = choose_target(fg(r(100, 100, 900, 700)), &mons).unwrap();
-        assert_eq!(reason, TargetReason::Primary);
-    }
-
-    #[test]
-    fn a_maximized_window_covering_100_percent_of_a_secondary_monitor_is_still_not_fullscreen() {
-        // A maximized window's rect extends past the monitor edge to cover
-        // its own invisible resize border, so the area test alone would
-        // happily accept it. A banking site maximized on a second monitor
-        // must never become the capture target.
-        let mons = [m(1, r(0, 0, 1920, 1080), true), m(2, r(1920, 0, 3840, 1080), false)];
-        let maximized_on_secondary = r(1920 - 7, -7, 1920 + 14, 1080 + 14); // resize-border overshoot
-        let (chosen, reason) = choose_target(fg_chrome(maximized_on_secondary), &mons).unwrap();
-        assert_eq!(chosen.hmonitor, 1); // falls back to the PRIMARY, not the maximized window's monitor
-        assert_eq!(reason, TargetReason::Primary);
-    }
-
-    #[test]
-    fn a_chromeless_window_still_wins_even_with_the_same_geometry_a_maximized_window_would_have() {
-        // Same rect as the case above, but genuinely chromeless (a real
-        // fullscreen game/app) — this one SHOULD be captured.
-        let mons = [m(1, r(0, 0, 1920, 1080), true), m(2, r(1920, 0, 3840, 1080), false)];
-        let (chosen, reason) = choose_target(fg(r(1920, 0, 3840, 1080)), &mons).unwrap();
-        assert_eq!(chosen.hmonitor, 2);
-        assert_eq!(reason, TargetReason::Fullscreen);
-    }
-
-    #[test]
-    fn fullscreen_on_a_secondary_monitor_is_captured_there_not_the_primary() {
-        let mons = [
-            m(1, r(0, 0, 1920, 1080), true),
-            m(2, r(1920, 0, 2560, 1440), false), // secondary, to the right, higher res
-        ];
-        let fullscreen_on_secondary = r(1920, 0, 1920 + 2560, 1440);
-        let (chosen, reason) = choose_target(fg(fullscreen_on_secondary), &mons).unwrap();
-        assert_eq!(chosen.hmonitor, 2);
-        assert_eq!(reason, TargetReason::Fullscreen);
-    }
-
-    #[test]
-    fn no_foreground_window_falls_back_to_primary() {
+    fn the_primary_display_is_the_target() {
         let mons = [m(1, r(0, 0, 1920, 1080), false), m(2, r(1920, 0, 3840, 1080), true)];
-        let (chosen, reason) = choose_target(None, &mons).unwrap();
-        assert_eq!(chosen.hmonitor, 2);
+        let (chosen, reason) = choose_target(&mons).unwrap();
+        assert_eq!(chosen.hmonitor, 2, "the monitor flagged primary, not the first in the list");
         assert_eq!(reason, TargetReason::Primary);
     }
 
     #[test]
-    fn a_window_spanning_two_monitors_without_filling_either_is_not_fullscreen() {
-        let mons = [m(1, r(0, 0, 1920, 1080), true), m(2, r(1920, 0, 3840, 1080), false)];
-        // Straddles the boundary — half of each monitor, fills neither.
-        let straddling = r(960, 0, 960 + 1920, 1080);
-        let (_, reason) = choose_target(fg(straddling), &mons).unwrap();
-        assert_eq!(reason, TargetReason::Primary);
+    fn the_primary_wins_wherever_it_sits_in_the_list() {
+        // POSITIVE CONTROL for the test above: moving the primary flag moves
+        // the answer, so that assertion is about `primary` and not about
+        // position.
+        let mons = [m(7, r(0, 0, 1920, 1080), true), m(8, r(1920, 0, 3840, 1080), false)];
+        assert_eq!(choose_target(&mons).unwrap().0.hmonitor, 7);
+    }
+
+    #[test]
+    fn with_no_primary_flag_it_takes_the_first_rather_than_refusing() {
+        // Should not happen on a real desktop, but refusing to arm because
+        // Windows did not flag a primary would be a worse answer than picking
+        // one.
+        let mons = [m(4, r(0, 0, 1920, 1080), false), m(5, r(1920, 0, 3840, 1080), false)];
+        let (chosen, reason) = choose_target(&mons).unwrap();
+        assert_eq!(chosen.hmonitor, 4);
+        assert_eq!(reason, TargetReason::FirstAvailable);
     }
 
     #[test]
     fn no_monitors_at_all_returns_none_rather_than_panicking() {
-        assert!(choose_target(fg(r(0, 0, 100, 100)), &[]).is_none());
-    }
-
-    #[test]
-    fn zero_area_foreground_rect_is_ignored_not_treated_as_covering_everything() {
-        // A window mid-animation / minimizing can report a degenerate rect.
-        let mons = [m(1, r(0, 0, 1920, 1080), true)];
-        let (_, reason) = choose_target(fg(r(500, 500, 0, 0)), &mons).unwrap();
-        assert_eq!(reason, TargetReason::Primary);
+        assert!(choose_target(&[]).is_none());
     }
 
     /// The measured case, from a real machine on 2026-09-07: the member had
@@ -1013,4 +977,65 @@ mod tests {
         let (_, pps_out) = find_sps_pps(&primed);
         assert_eq!(pps_out.as_deref(), Some(&pps1[..]));
     }
+    // ---- the fallback order, after a monitor that cannot be captured -------
+
+    #[test]
+    fn ranking_leads_with_the_same_answer_choose_target_gives() {
+        // The fallback must not change WHICH monitor is preferred — only what
+        // happens when that one turns out not to be capturable.
+        for mons in [
+            vec![m(1, r(0, 0, 1920, 1080), true), m(2, r(1920, 0, 3840, 1080), false)],
+            vec![m(1, r(0, 0, 1920, 1080), false), m(2, r(1920, 0, 3840, 1080), true)],
+            vec![m(1, r(0, 0, 1920, 1080), false), m(2, r(1920, 0, 3840, 1080), false)],
+        ] {
+            let best = choose_target(&mons).unwrap();
+            let ranked = rank_targets(&mons);
+            assert_eq!(ranked[0].0.hmonitor, best.0.hmonitor);
+            assert_eq!(ranked[0].1, best.1);
+        }
+    }
+
+    #[test]
+    fn ranking_offers_every_monitor_exactly_once() {
+        // THE CASE THAT HAPPENED: a virtual display enumerates like any other
+        // screen, gets chosen, and then refuses to be duplicated. Two working
+        // monitors sat beside it and the arm failed anyway. Every monitor has
+        // to be reachable, and none may be offered twice — a repeat would mean
+        // probing the broken one again and naming it twice in the error.
+        let mons = [
+            m(1, r(0, 0, 1920, 1080), true),
+            m(2, r(1920, 0, 3840, 1080), false),
+            m(3, r(-1920, 0, 0, 1080), false),
+        ];
+        let ranked = rank_targets(&mons);
+        assert_eq!(ranked.len(), mons.len(), "every monitor must be a candidate");
+        let mut seen: Vec<isize> = ranked.iter().map(|(c, _)| c.hmonitor).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), mons.len(), "no monitor may appear twice");
+    }
+
+    #[test]
+    fn ranking_leads_with_the_primary_and_keeps_the_rest() {
+        // A fullscreen window on the secondary takes first place; the primary
+        // is the next most likely thing the member meant, ahead of the rest.
+        let mons = [
+            m(1, r(0, 0, 1920, 1080), true),
+            m(2, r(1920, 0, 3840, 1080), false),
+            m(3, r(-1920, 0, 0, 1080), false),
+        ];
+        let ranked = rank_targets(&mons);
+        assert!(ranked[0].0.primary, "the primary leads");
+        assert_eq!(ranked.len(), 3, "and the others remain reachable behind it");
+    }
+
+    #[test]
+    fn ranking_is_empty_only_when_there_are_no_monitors() {
+        // POSITIVE CONTROL for pick_target's emptiness check: with any monitor
+        // at all there is always something to try, so an empty ranking means
+        // exactly one thing.
+        assert!(rank_targets(&[]).is_empty());
+        assert!(!rank_targets(&[m(1, r(0, 0, 1920, 1080), true)]).is_empty());
+    }
+
 }
