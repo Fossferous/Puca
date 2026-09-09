@@ -302,6 +302,11 @@ const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
     args: [
+        // FORCE THE SOFTWARE ENCODER, which is what the shipped app actually
+        // gets: every stream-diag line in the field says encoder=OpenH264.
+        // Measuring the ladder against a hardware encoder answers a question
+        // nobody has.
+        ...(process.env.SOFTWARE_ENCODER === '1' ? ['--disable-accelerated-video-encode'] : []),
         '--autoplay-policy=no-user-gesture-required',
         // Loopback ICE only; no host enumeration games.
         '--force-webrtc-ip-handling-policy=default',

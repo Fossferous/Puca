@@ -2806,10 +2806,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             <label>Send my screen at several sizes</label>
                                             <span className="option-hint">
                                                 Viewers on a slow connection get a smaller copy instead of a
-                                                frozen one. Your computer encodes two extra sizes and uploads
-                                                roughly 1.5 Mbps more, so turn this off if sharing makes your
-                                                machine struggle — for instance while playing the game you are
-                                                sharing. Other apps call this simulcast.
+                                                frozen one. Off by default, because your computer has to encode
+                                                every size: on most machines that work is done in software, and
+                                                two extra copies is what turns a smooth share into a stuttering
+                                                game. Turn it on if you have CPU to spare and somebody watching
+                                                you keeps freezing. Other apps call this simulcast.
                                             </span>
                                         </div>
                                         <input

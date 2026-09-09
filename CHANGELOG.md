@@ -4,6 +4,18 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Changed
+- **"Send my screen at several sizes" is now off by default**, one day after it
+  was turned on. It was cleared by a test rig running a hardware video encoder;
+  the shipped app does not get one — every diagnostic line in the field shows
+  the software encoder — so the measurement that justified three encodes was
+  taken against hardware nobody has. On a machine already working hard to
+  encode one copy, two more is what turns a smooth share into a stuttering
+  game. The switch stays in Settings, Advanced for anyone with CPU to spare
+  and a viewer who keeps freezing.
+
 ## 0.9.804 — 2026-09-08
 
 A channel setting you change now reaches everybody, not just your own screen.

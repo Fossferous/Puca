@@ -259,13 +259,25 @@ export const defaultSettings = {
      *  on a machine whose decoder was idle, because a single-layer share gives
      *  the server nothing smaller to fall back to.
      *
-     *  It is a setting rather than a constant because the cost lands on the
-     *  person SHARING: two extra encodes and roughly 1.5 Mbps more upload.
-     *  Measured on hardware H.264 the top two rungs both held 56 fps, but a
-     *  weaker machine — or one already busy with the game being shared — may
-     *  not, and nobody should have to choose between sharing and playing.
-     *  Turning it off restores exactly the pre-0.9.803 behaviour. */
-    shareSimulcast: true,
+     *  OFF BY DEFAULT, reversed within a day of shipping it on. The rig that
+     *  cleared it measured Edge with a HARDWARE H.264 encoder and the top two
+     *  rungs held 56 fps. The shipped app does not get that encoder: every
+     *  `stream-diag` line in the field reads `encoder=OpenH264`, which is
+     *  software. So the measurement that justified three encodes was taken
+     *  against an encoder no user has, and the machines that would suffer for
+     *  it are the ones already struggling to encode ONE layer — exactly the
+     *  people who report that sharing makes their game stutter.
+     *
+     *  It stays as a setting rather than being removed because the benefit is
+     *  real for the viewer it was written for (a weak link receiving 1080p at
+     *  two frames a second, 2026-09-08). Anyone whose machine has the headroom
+     *  can turn it on. Nobody has it imposed on them by a measurement taken on
+     *  somebody else's hardware.
+     *
+     *  Turn it on only with evidence: check `encoder` in the sharer's
+     *  `__pucaVoiceDiag()` — three rungs are affordable in hardware and are not
+     *  in software. */
+    shareSimulcast: false,
     /** What happens when I join a voice channel that allows clips:
      *  'off' — nothing; 'prompt' — highlight the Arm button for a few seconds;
      *  'auto' — start recording with NO popup (ClipControls.tsx → armNative):

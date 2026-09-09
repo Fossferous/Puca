@@ -139,9 +139,13 @@ const SHARE_MID = new VideoPreset(960, 540, 1_200_000, 60);
 export function screenSharePublishOptions(
     // DEFAULTED FROM THE SETTING rather than passed by the caller: one call
     // site today, and a second one that forgot to read it would silently
-    // publish the ladder for someone who had turned it off. Tests pass the
+    // publish the ladder for someone who had NOT turned it on. Tests pass the
     // value explicitly.
-    simulcast: boolean = loadSettings().shareSimulcast !== false,
+    //
+    // `=== true`, not `!== false`: the default is OFF, so an absent or
+    // malformed stored value must read as off. The inverted form was correct
+    // while the default was on and would now quietly opt everyone in.
+    simulcast: boolean = loadSettings().shareSimulcast === true,
 ) {
     const opts: {
         source: Track.Source;
