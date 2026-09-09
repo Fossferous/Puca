@@ -1362,3 +1362,19 @@
         display: none;
     }
 }
+
+/* The diagnostics note, shown in place after "Copy diagnostics".
+ *
+ * IN THE PANEL rather than as a toast: the person pressing it has been asked
+ * to send the result to somebody, so the confirmation has to still be there
+ * when they come back from the paste. Click to dismiss. */
+.voice-diag-note {
+    margin: 6px 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--bg-tertiary, rgba(255, 255, 255, 0.06));
+    color: var(--text-secondary, #b9bbbe);
+    font-size: 12px;
+    line-height: 1.35;
+    cursor: pointer;
+}

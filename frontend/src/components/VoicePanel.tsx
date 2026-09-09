@@ -11,6 +11,9 @@ import { loadSettings, inputGain, outputGain, applyOutputDevice } from './settin
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
+import { useContextMenu } from './contextMenuUtils';
+import { ContextMenu } from './ContextMenu';
+import { copyDiagnostics } from '../api/diagnosticsReport';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
 import { computeNativeWatch } from '../api/hotkeyScope';
@@ -127,6 +130,17 @@ function clipPresence(roomId: string): number[] {
 
 export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy }: VoicePanelProps) {
     const [isInVoice, setIsInVoice] = useState(false);
+    /** RIGHT-CLICK THE PANEL FOR DIAGNOSTICS.
+     *
+     *  Every performance report so far has been diagnosed by asking somebody to
+     *  open a developer console and run a global function they could not have
+     *  known about. Most people will not, and the ones who would will not do it
+     *  at the moment it is happening — which is the only moment the numbers say
+     *  anything. This is the same report, two clicks from the call it describes.
+     *  The Settings > Advanced button does the same thing for anyone who does
+     *  not think to right-click. */
+    const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
+    const [diagNote, setDiagNote] = useState<string>('');
     const [isMuted, setIsMuted] = useState(false);
     const [isDeafened, setIsDeafened] = useState(false);
     /** Why a mute toggle refused — shown as a Toast so a hotkey no-op is
@@ -2988,7 +3002,26 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         <div
             ref={panelRef}
             className={`voice-panel-compact${isPhonePanel && isInVoice && !controlsExpanded ? ' vp-collapsed' : ''}`}
+            onContextMenu={(e) => showContextMenu(e, [{
+                id: 'copy-diagnostics',
+                label: 'Copy diagnostics',
+                icon: 'copy' as const,
+                onClick: async () => {
+                    setDiagNote('Measuring for a few seconds…');
+                    setDiagNote(await copyDiagnostics());
+                },
+            }])}
         >
+            {contextMenu && (
+                <ContextMenu
+                    items={contextMenu.items}
+                    position={contextMenu.position}
+                    onClose={hideContextMenu}
+                />
+            )}
+            {diagNote && (
+                <div className="voice-diag-note" onClick={() => setDiagNote('')}>{diagNote}</div>
+            )}
             {/* Permission Help Modal — per-platform instructions (MicPermissionHelp) */}
             {showPermissionHelp && (
                 <MicPermissionHelp

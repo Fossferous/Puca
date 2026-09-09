@@ -285,6 +285,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const [email, setEmail] = useState('');
     const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [appVersion, setAppVersion] = useState<string>('');
+    /** What the diagnostics button last did. Shown in place rather than as a
+     *  toast: the person pressing it has been asked to send the result, so the
+     *  confirmation needs to still be on screen when they go looking for it. */
+    const [diagNote, setDiagNote] = useState<string>('');
     // The AGPL section 13 offer. GET /source is what the licence obliges this
     // deployment to publish, and it already carried both fields — but nothing
     // in the UI ever showed them, so the offer existed only as a JSON route a
@@ -2818,6 +2822,33 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             checked={settings.shareSimulcast !== false}
                                             onChange={(e) => updateSetting('shareSimulcast', e.target.checked)}
                                         />
+                                    </div>
+                                </div>
+                                <h3>Diagnostics</h3>
+                                <div className="settings-card">
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Copy diagnostics</label>
+                                            <span className="option-hint">
+                                                Copies what the app can measure about your call right now —
+                                                frame rates, the video encoder in use, connection quality — as
+                                                plain text you can paste to whoever is helping. Press it WHILE
+                                                the problem is happening: the numbers describe the moment you
+                                                press, and say nothing about a call that has ended. No
+                                                messages, names or addresses are included.
+                                            </span>
+                                            {diagNote && <span className="option-hint">{diagNote}</span>}
+                                        </div>
+                                        <button
+                                            className="secondary-btn"
+                                            onClick={async () => {
+                                                setDiagNote('Measuring for a few seconds…');
+                                                const { copyDiagnostics } = await import('../api/diagnosticsReport');
+                                                setDiagNote(await copyDiagnostics());
+                                            }}
+                                        >
+                                            Copy
+                                        </button>
                                     </div>
                                 </div>
                                 {isAndroidApp() && (

@@ -6,6 +6,15 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+- **"Copy diagnostics", from a right-click on the voice panel or from Settings,
+  Advanced.** When a call is going badly the only useful evidence is what the
+  app is measuring at that moment, and until now the only way to get it was to
+  open a developer console and run a function nobody could be expected to know
+  about. This copies the same numbers — frame rates, the video encoder in use,
+  connection quality — as plain text to paste to whoever is helping. Press it
+  while the problem is happening. It contains no messages, names or addresses.
+
 ### Changed
 - **"Send my screen at several sizes" is now off by default**, one day after it
   was turned on. It was cleared by a test rig running a hardware video encoder;
