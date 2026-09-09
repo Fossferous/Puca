@@ -73,6 +73,22 @@ describe('the diagnostics report', () => {
         await expect(copyDiagnostics()).resolves.toEqual(expect.any(String));
     });
 
+    it('puts the encoder section IN the report, not just in a function', async () => {
+        // THE GAP THIS CLOSES. Every other case here calls
+        // encodingSupportLines() directly, so the whole section could be
+        // dropped from buildDiagnosticsReport and every test would stay green
+        // — and that section is the entire point of the change that added it:
+        // it is how the machine that is actually struggling answers the
+        // hardware question about itself.
+        const isConfigSupported = vi.fn().mockResolvedValue({ supported: true });
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+        const text = await buildDiagnosticsReport();
+        expect(text).toContain('video encoding this machine can offer');
+        expect(text).toContain('H.264 High');
+        expect(text).toContain('hardware=');
+        expect(isConfigSupported).toHaveBeenCalled();
+    });
+
     it('asks WebCodecs whether a codec can be encoded in hardware, not mediaCapabilities', async () => {
         // THE BUG THIS PINS. The first version of this asked
         // `mediaCapabilities.encodingInfo({type:'webrtc'})`. Measured on an

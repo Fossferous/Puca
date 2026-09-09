@@ -217,16 +217,16 @@ describe('stepping down from what is ACTUALLY captured', () => {
     });
 
     it('steps down from the true size on every monitor', () => {
-        expect(stepDownFromCapture({ width: 3840, height: 2160 }, 60)).toEqual({ resolution: '1440', fps: 60 });
-        expect(stepDownFromCapture({ width: 2560, height: 1440 }, 60)).toEqual({ resolution: '1080', fps: 60 });
-        expect(stepDownFromCapture({ width: 1920, height: 1080 }, 30)).toEqual({ resolution: '720', fps: 30 });
+        expect(stepDownFromCapture({ width: 3840, height: 2160 }, { resolution: 'source', fps: 60 })).toEqual({ resolution: '1440', fps: 60 });
+        expect(stepDownFromCapture({ width: 2560, height: 1440 }, { resolution: '1440', fps: 60 })).toEqual({ resolution: '1080', fps: 60 });
+        expect(stepDownFromCapture({ width: 1920, height: 1080 }, { resolution: '1080', fps: 30 })).toEqual({ resolution: '720', fps: 30 });
     });
 
     it('always offers something strictly smaller than the capture', () => {
         // The property that makes the button honest: whatever is on screen,
         // the size offered must be below it, or applying it is a no-op.
         for (const [w, h] of [[3840, 2160], [2560, 1440], [1920, 1080], [1920, 1200], [2560, 1080]]) {
-            const to = stepDownFromCapture({ width: w, height: h }, 60);
+            const to = stepDownFromCapture({ width: w, height: h }, { resolution: 'source', fps: 60 });
             expect(to, `${w}x${h}`).not.toBeNull();
             const d = shareDimensions(to!.resolution);
             expect(d.width < w || d.height < h, `${w}x${h} -> ${to!.resolution}`).toBe(true);
@@ -234,9 +234,12 @@ describe('stepping down from what is ACTUALLY captured', () => {
     });
 
     it('spends the frame rate once the capture is already small', () => {
-        expect(stepDownFromCapture({ width: 1280, height: 720 }, 60)).toEqual({ resolution: '720', fps: 30 });
-        expect(stepDownFromCapture({ width: 1280, height: 720 }, 30)).toEqual({ resolution: '720', fps: 15 });
-        expect(stepDownFromCapture({ width: 1280, height: 720 }, 15)).toBeNull();
+        expect(stepDownFromCapture({ width: 1280, height: 720 }, { resolution: '720', fps: 60 }))
+            .toEqual({ resolution: '720', fps: 30 });
+        expect(stepDownFromCapture({ width: 1280, height: 720 }, { resolution: '720', fps: 30 }))
+            .toEqual({ resolution: '720', fps: 15 });
+        expect(stepDownFromCapture({ width: 1280, height: 720 }, { resolution: '720', fps: 15 }))
+            .toBeNull();
     });
 
     it('falls back to the labels when there is no capture to read', () => {
@@ -247,5 +250,77 @@ describe('stepping down from what is ACTUALLY captured', () => {
             .toEqual({ resolution: '1440', fps: 60 });
         expect(starvedOffer({ resolution: 'source', fps: 60 }, { width: 0, height: 0 })?.to)
             .toEqual({ resolution: '1440', fps: 60 });
+    });
+});
+
+describe('re-arming after a step that was taken', () => {
+    it('will speak again after an ACCEPTED step, but not after a decline', () => {
+        // The two answers mean opposite things. Declining is an answer;
+        // accepting is a request for help that a single step — 12% on a
+        // 1366x768 panel, 19% on a 1920x1200 one — may not have satisfied.
+        const watch = createShareLoadWatch();
+        for (let i = 0; i < CPU_WINDOW; i++) watch.add(cpu);   // first offer spent
+
+        // Declined: silent forever.
+        for (let i = 0; i < 50; i++) expect(watch.add(cpu)).toBe(false);
+
+        // Accepted: one more offer, and only after FRESH evidence.
+        watch.rearm();
+        for (let i = 0; i < CPU_WINDOW - 1; i++) {
+            expect(watch.add(cpu), 'must not fire on stale evidence').toBe(false);
+        }
+        expect(watch.add(cpu)).toBe(true);
+    });
+
+    it('re-arming does not resurrect the old window', () => {
+        // If rearm kept the samples, the next offer would fire on the very
+        // next tick and the step would never get a chance to work.
+        const watch = createShareLoadWatch();
+        for (let i = 0; i < CPU_WINDOW; i++) watch.add(cpu);
+        watch.rearm();
+        expect(watch.add(ok)).toBe(false);
+        expect(watch.add(ok)).toBe(false);
+    });
+
+    it('does not grow without bound over a long share', () => {
+        // At one sample every 3 s a three-hour share is 3600 readings, held on
+        // a machine that is by definition already short of memory. Only the
+        // last window is ever consulted.
+        const watch = createShareLoadWatch();
+        for (let i = 0; i < 5000; i++) watch.add(ok);
+        // Still answers correctly after all that, and on the same schedule as
+        // a fresh watch: CPU_NEEDED of the last CPU_WINDOW, so with healthy
+        // samples still in the window it fires on the CPU_NEEDED-th bad one —
+        // not on a full window of them.
+        for (let i = 0; i < CPU_NEEDED - 1; i++) expect(watch.add(cpu)).toBe(false);
+        expect(watch.add(cpu)).toBe(true);
+    });
+});
+
+describe('a frame-rate step must not move the resolution', () => {
+    it('keeps the chosen resolution when only the frame rate can go down', () => {
+        // THE DEFECT THIS PINS. The fps branch used to return the smallest rung
+        // ('720') regardless of what the person had chosen. Share one small
+        // window on a big monitor — 1000x600 is under 1280x720 in BOTH axes, so
+        // no rung is smaller and the only step left is the frame rate — and the
+        // stored RESOLUTION was rewritten to 720p anyway. Every later
+        // full-screen share then started at 720p because a step "down" had
+        // moved a control the person never touched.
+        expect(stepDownFromCapture({ width: 1000, height: 600 }, { resolution: 'source', fps: 60 }))
+            .toEqual({ resolution: 'source', fps: 30 });
+        expect(stepDownFromCapture({ width: 1000, height: 600 }, { resolution: '1440', fps: 30 }))
+            .toEqual({ resolution: '1440', fps: 15 });
+    });
+
+    it('still steps the resolution when there IS a smaller one', () => {
+        // POSITIVE CONTROL: the branch above must not swallow real resolution
+        // steps, or "Lower it" would only ever touch the frame rate.
+        expect(stepDownFromCapture({ width: 1920, height: 1080 }, { resolution: 'source', fps: 60 }))
+            .toEqual({ resolution: '720', fps: 60 });
+    });
+
+    it('the offer through starvedOffer carries the same rule', () => {
+        const offer = starvedOffer({ resolution: '1080', fps: 60 }, { width: 1000, height: 600 });
+        expect(offer?.to).toEqual({ resolution: '1080', fps: 30 });
     });
 });

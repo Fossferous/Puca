@@ -181,6 +181,17 @@ is in the foreground, which is why it is set up the moment you join.
 ### Start Sharing
 Desktop and browser only — a phone cannot share its screen.
 
+Púca remembers the **Resolution** and **Frame Rate** you last picked, so if you
+turn them down because your machine struggled, that is where the dialog opens
+next time.
+
+If your computer cannot keep up with the share while it is running, the voice
+panel offers to drop it a step — one click, applied to the share already going
+out, so nobody watching is interrupted. Taking that step is also remembered. It
+asks once, and will only ask again after you have taken a step and it is still
+struggling. Lowering the frame rate saves more than lowering the resolution if
+you need a bigger reduction; both are in the Screen Share dialog.
+
 1. Join a voice channel
 2. Click **Share Screen** in the voice panel. A **Screen Share** dialog asks for **Resolution**, **Frame Rate** and, in the desktop app, **Audio to share**
 3. Click **Select Screen & Go Live →** and pick a window, screen or tab in the picker that opens

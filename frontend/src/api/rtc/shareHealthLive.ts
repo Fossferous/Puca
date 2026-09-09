@@ -10,7 +10,6 @@
 import { sfuManager } from './sfuManager';
 import { webrtcManager } from '../webrtc';
 import { shareDimensions, type EncodeSample, type ShareQuality } from './shareHealth';
-import { loadSettings } from '../../components/settingsStore';
 
 /**
  * Read the local share's encode health from whichever transport is carrying
@@ -39,19 +38,36 @@ export async function sampleShareEncode(): Promise<EncodeSample | null> {
  * caller can tell the difference between "done" and "said done".
  */
 export async function applyShareQuality(q: ShareQuality): Promise<boolean> {
-    // NOT WHILE THE LADDER IS ON. LiveKit fixes each simulcast rung as a RATIO
-    // of the source at publish time (`scaleResolutionDownBy`), so re-capping
-    // the track shrinks every rung with it: a 1080p share whose rungs are
-    // 640x360 / 960x540 / 1920x1080 becomes 426x240 / 640x360 / 1280x720, and
-    // the bottom rung drops back under the 360-line height below which
-    // Chromium will not use a hardware encoder at all — the exact thing
-    // SHARE_LOW was raised to 640x360 to avoid. Re-publishing to fix the
-    // ratios would end the share and drop every viewer, which is the cost
-    // this button exists to avoid. So the setting is saved and takes effect on
-    // the next share, and the caller says so rather than claiming otherwise.
-    if (loadSettings().shareSimulcast === true) return false;
+    // NOT WHILE THIS SHARE HAS A LADDER. LiveKit fixes each simulcast rung as a
+    // RATIO of the source at publish time (`scaleResolutionDownBy`), so
+    // re-capping the track shrinks every rung with it: a 1080p share whose
+    // rungs are 640x360 / 960x540 / 1920x1080 becomes 426x240 / 640x360 /
+    // 1280x720, and the bottom rung drops back under the 360-line height below
+    // which Chromium will not use a hardware encoder at all — the exact thing
+    // SHARE_LOW was raised to 640x360 to avoid. Re-publishing to fix the ratios
+    // would end the share and drop every viewer, which is the cost this button
+    // exists to avoid. So the setting is saved and takes effect on the next
+    // share, and the caller says so rather than claiming otherwise.
+    //
+    // ASKED OF THE PUBLICATION, NOT OF THE SETTING. The first version of this
+    // guard read `loadSettings().shareSimulcast`, which is wrong twice over: it
+    // refused the re-cap on MESH calls, which have no LiveKit ladder to protect
+    // and where the button therefore did nothing for no reason; and it answered
+    // for the next share rather than the running one, so toggling the setting
+    // mid-share changed the answer about a publication that had not changed.
+    if (shareHasLadder()) return false;
     const { width, height } = shareDimensions(q.resolution);
     return webrtcManager.applyShareQuality(width, height, q.fps);
+}
+
+/** Is the running share published with more than one encoding? False on mesh
+ *  (no publications) and false for a single-layer SFU share. */
+function shareHasLadder(): boolean {
+    try {
+        return sfuManager.shareHasLadder();
+    } catch {
+        return false;   // not on an SFU call
+    }
 }
 
 /** The live share's real capture size, for building the step-down offer out of

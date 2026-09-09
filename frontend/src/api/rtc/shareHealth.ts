@@ -72,21 +72,51 @@ export const SAMPLE_MS = 3000;
 /**
  * The accumulating half of the watch, with no timer and no browser in it.
  *
- * `add` returns true EXACTLY ONCE per share — the moment the window first says
- * the encoder is starved. Repeating the offer every three seconds for the rest
- * of a two-hour call would be the same information delivered as harassment,
- * and somebody who has already declined it has answered.
+ * `add` returns true ONCE PER ARM — at most once for the first offer, and once
+ * more after each step the person actually took (see `rearm` below). Repeating
+ * it every three seconds for the rest of a two-hour call would be the same
+ * information delivered as harassment, and somebody who has DECLINED has
+ * answered; somebody who accepted asked for help that may not have been enough.
+ * The ladder is finite, so the repeats are too: `starvedOffer` returns null
+ * once there is nothing left to give up.
  */
 export function createShareLoadWatch() {
-    const samples: EncodeSample[] = [];
+    let samples: EncodeSample[] = [];
     let offered = false;
     return {
         /** Feed one reading (null = nothing to read this tick). True = offer now. */
         add(s: EncodeSample | null): boolean {
             if (s) samples.push(s);
+            // Bounded: only the last window is ever consulted, and a three-hour
+            // share would otherwise accumulate thousands of readings on a
+            // machine that is by definition already short of memory and CPU.
+            if (samples.length > CPU_WINDOW * 2) samples = samples.slice(-CPU_WINDOW);
             if (offered || !cpuStarved(samples)) return false;
             offered = true;
             return true;
+        },
+
+        /**
+         * Allow ONE more offer, after a step that was actually applied.
+         *
+         * WHY THIS EXISTS. Without it, accepting a step and declining one were
+         * the same to this watch: both spent the single offer. But they mean
+         * opposite things. Somebody who declined has answered. Somebody who
+         * ACCEPTED asked for help — and a step is not guaranteed to be enough,
+         * least of all on the machines this is for: on a 1366x768 panel the
+         * only rung below the capture is 720p, worth about 12%, and on a
+         * 1920x1200 panel the first step is worth 19% against the 32-41% the
+         * table above quotes for 16:9. Leaving them with a still-stuttering
+         * game and no further offer is the one-way-latch trap this project has
+         * been bitten by twice.
+         *
+         * The old evidence is dropped with it, so the next offer needs a fresh
+         * window of starvation — the step is given a real chance to work before
+         * anything is said again.
+         */
+        rearm(): void {
+            offered = false;
+            samples = [];
         },
         /** The encoder actually in use, for the log line that accompanies the
          *  offer — 'OpenH264' there is the difference between "this machine is
@@ -219,15 +249,20 @@ export function qualityLabel(q: ShareQuality): string {
  */
 export function stepDownFromCapture(
     capture: { width: number; height: number },
-    currentFps: number,
+    current: ShareQuality,
 ): ShareQuality | null {
     for (const resolution of RES_STEPS) {          // largest first
         const d = shareDimensions(resolution);
-        if (d.width < capture.width || d.height < capture.height) return { resolution, fps: currentFps };
+        if (d.width < capture.width || d.height < capture.height) return { resolution, fps: current.fps };
     }
-    // Already at or below the smallest picture offered; spend the frame rate.
-    const slower = FPS_STEPS.find(f => f < currentFps);
-    return slower === undefined ? null : { resolution: RES_STEPS[RES_STEPS.length - 1], fps: slower };
+    // Already at or below the smallest picture offered; spend the frame rate
+    // and KEEP THE CHOSEN RESOLUTION. Returning '720' here instead would have
+    // rewritten the person's stored setting: share one small window on a big
+    // monitor, take a frame-rate step, and every later full-screen share would
+    // silently start at 720p because the step "down" had quietly moved a
+    // control the person never touched. The resolution is not what changed.
+    const slower = FPS_STEPS.find(f => f < current.fps);
+    return slower === undefined ? null : { resolution: current.resolution, fps: slower };
 }
 
 /**
@@ -244,7 +279,7 @@ export function starvedOffer(
     capture?: { width: number; height: number } | null,
 ): { text: string; to: ShareQuality } | null {
     const to = capture && capture.width > 0 && capture.height > 0
-        ? stepDownFromCapture(capture, current.fps)
+        ? stepDownFromCapture(capture, current)
         : nextStepDown(current);
     if (!to) {
         // Nothing left to give up. Saying "your CPU cannot keep up" and

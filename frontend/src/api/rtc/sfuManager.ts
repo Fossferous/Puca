@@ -228,6 +228,37 @@ const EPOCH_POLL_MS = 30_000;
 /// Cleared early only by real recovery evidence (a new epoch key) or departure.
 const ENCRYPTION_ERROR_HOLD_MS = 90_000;
 
+/** The shape `publicationsHaveLadder` needs: enough of a LocalTrackPublication
+ *  to find the sender's encodings, and nothing else. */
+export interface LadderProbe {
+    kind: unknown;
+    track?: { sender?: { getParameters(): { encodings?: unknown[] } } | null } | null;
+}
+
+/**
+ * Does any of these publications carry more than one encoding?
+ *
+ * Lifted out of the class so the decision can be tested without a live room —
+ * it gates whether a running share may be re-capped, and it FAILS OPEN: every
+ * answer that is not a positive sighting of a ladder is `false`, which permits
+ * the re-cap. That direction is deliberate but only safe because the caller now
+ * reads LIVE publications; when it read a stale snapshot, a reconnect turned
+ * "cannot see a ladder" into "there is no ladder" while three rungs were on the
+ * wire. Keep the two properties together: live input, and a test that a real
+ * ladder is actually seen.
+ */
+export function publicationsHaveLadder(pubs: Iterable<LadderProbe>): boolean {
+    for (const pub of pubs) {
+        if (pub.kind !== Track.Kind.Video) continue;
+        const sender = pub.track?.sender;
+        if (!sender) continue;
+        try {
+            if ((sender.getParameters().encodings ?? []).length > 1) return true;
+        } catch { /* sender detached mid-read */ }
+    }
+    return false;
+}
+
 /** `u<user id>#<per-connection nonce>` → user id (see backend sfu.rs). */
 export function userIdFromIdentity(identity: string): number | null {
     const m = /^u(\d+)#/.exec(identity);
@@ -287,7 +318,44 @@ export class SfuManager {
 
     private micPub: LocalTrackPublication | null = null;
     private cameraPub: LocalTrackPublication | null = null;
-    private sharePubs: LocalTrackPublication[] = [];
+    /**
+     * The screen-share publications THIS CLIENT currently has, read from the
+     * room every time.
+     *
+     * THIS USED TO BE A SNAPSHOT ARRAY (`sharePubs`), pushed to at publish time
+     * and cleared at stop. That is wrong across a LiveKit reconnect: a signal
+     * restart makes the client republish every local track, which unpublishes
+     * the old publication — its last act being `publication.setTrack(undefined)`
+     * — and constructs a NEW LocalTrackPublication the snapshot never learns
+     * about. Nothing here subscribes to `LocalTrackPublished`, and the
+     * `Reconnected` handler only syncs REMOTE subscriptions.
+     *
+     * So after one Wi-Fi blip mid-share, every entry in the snapshot had a
+     * detached track and all three readers silently changed behaviour:
+     * `shareEncodeSample` returned null forever (the CPU-limit watch stopped
+     * sampling and would never speak again), `shareHasLadder` returned false
+     * while a three-rung ladder was live (so the guard protecting SHARE_LOW
+     * from being re-capped under Chromium's 360-line floor failed OPEN), and
+     * `stopScreenShare` unpublished the stale objects and left the real share
+     * running.
+     *
+     * `activeScreenShareCount` above was already doing it this way. This is the
+     * same read, and it cannot go stale because it holds nothing.
+     *
+     * THE MIC AND CAMERA HAD THE IDENTICAL BUG and are fixed the same way — a
+     * held `cameraPub` whose track a reconnect had detached made
+     * `unpublishCamera` skip its `unpublishTrack` guard entirely and then null
+     * the field, so turning the camera OFF left the republished camera
+     * publishing to the room with no handle left to stop it.
+     */
+    private localPubs(...sources: Track.Source[]): LocalTrackPublication[] {
+        return (this.room?.localParticipant.getTrackPublications() ?? [])
+            .filter((p) => sources.includes(p.source)) as LocalTrackPublication[];
+    }
+
+    private localSharePubs(): LocalTrackPublication[] {
+        return this.localPubs(Track.Source.ScreenShare, Track.Source.ScreenShareAudio);
+    }
 
     /** Per-user merged screen-share stream (video + optional share audio). */
     private shareStreams = new Map<number, MediaStream>();
@@ -493,7 +561,6 @@ export class SfuManager {
         this.localUserId = null;
         this.micPub = null;
         this.cameraPub = null;
-        this.sharePubs = [];
         this.shareStreams.clear();
         this.focusedUserId = null;
         this.watchedVideo.clear();
@@ -518,8 +585,13 @@ export class SfuManager {
      */
     async replaceMicTrack(newTrack: MediaStreamTrack): Promise<void> {
         if (!this.room) return;
-        if (this.micPub?.track) {
-            await this.room.localParticipant.unpublishTrack(this.micPub.track.mediaStreamTrack, false);
+        // Live lookup, same reason as unpublishCamera: a stale handle here left
+        // the OLD publication up and added a second one, so the room heard the
+        // dead track.
+        for (const pub of this.localPubs(Track.Source.Microphone)) {
+            if (pub.track) {
+                await this.room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, false);
+            }
         }
         this.micPub = await this.room.localParticipant.publishTrack(newTrack, {
             source: Track.Source.Microphone,
@@ -532,8 +604,10 @@ export class SfuManager {
     /** Swap the published camera track (mid-call camera flip). No-op if no camera. */
     async replaceCameraTrack(newTrack: MediaStreamTrack): Promise<void> {
         if (!this.room || !this.cameraPub) return;
-        if (this.cameraPub.track) {
-            await this.room.localParticipant.unpublishTrack(this.cameraPub.track.mediaStreamTrack, true);
+        for (const pub of this.localPubs(Track.Source.Camera)) {
+            if (pub.track) {
+                await this.room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, true);
+            }
         }
         this.cameraPub = await this.room.localParticipant.publishTrack(newTrack, {
             source: Track.Source.Camera,
@@ -550,8 +624,15 @@ export class SfuManager {
     }
 
     async unpublishCamera(): Promise<void> {
-        if (this.room && this.cameraPub?.track) {
-            await this.room.localParticipant.unpublishTrack(this.cameraPub.track.mediaStreamTrack, true);
+        // EVERY live camera publication, not the one we happen to be holding.
+        // The held handle is detached after a reconnect (see localPubs), and
+        // the old guard `this.cameraPub?.track` then skipped the unpublish and
+        // nulled the field — leaving the camera streaming to the room after the
+        // person had turned it off, with nothing left to stop it.
+        for (const pub of this.localPubs(Track.Source.Camera)) {
+            if (pub.track) {
+                await this.room?.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, true);
+            }
         }
         this.cameraPub = null;
     }
@@ -583,23 +664,19 @@ export class SfuManager {
         }
         const video = stream.getVideoTracks()[0];
         if (video) {
-            this.sharePubs.push(
-                await this.room.localParticipant.publishTrack(
-                    video,
-                    // Read at publish time, so changing it takes effect on the
-                    // next share rather than the next launch.
-                    screenSharePublishOptions(),
-                ),
+            await this.room.localParticipant.publishTrack(
+                video,
+                // Read at publish time, so changing it takes effect on the
+                // next share rather than the next launch.
+                screenSharePublishOptions(),
             );
         }
         const audio = stream.getAudioTracks()[0];
         if (audio) {
-            this.sharePubs.push(
-                await this.room.localParticipant.publishTrack(audio, {
-                    source: Track.Source.ScreenShareAudio,
-                    dtx: true,
-                }),
-            );
+            await this.room.localParticipant.publishTrack(audio, {
+                source: Track.Source.ScreenShareAudio,
+                dtx: true,
+            });
         }
     }
 
@@ -618,7 +695,7 @@ export class SfuManager {
      */
     async shareEncodeSample(): Promise<EncodeSample | null> {
         let sample: EncodeSample | null = null;
-        for (const pub of this.sharePubs) {
+        for (const pub of this.localSharePubs()) {
             if (pub.kind !== Track.Kind.Video) continue;
             const sender = pub.track?.sender;
             if (!sender) continue;
@@ -639,14 +716,30 @@ export class SfuManager {
         return sample;
     }
 
+    /**
+     * Does the RUNNING share actually have a simulcast ladder?
+     *
+     * Read from the sender's own encodings rather than from `shareSimulcast`,
+     * because the setting says what the NEXT share will do and this question is
+     * about the one already on the wire. Somebody who turns the setting on
+     * mid-share has not grown extra rungs on it, and somebody who turns it off
+     * has not lost the ones it was published with.
+     *
+     * It is also the only transport-correct answer: a mesh call has no
+     * publications here at all, so it returns false and a mesh share stays
+     * re-cappable — which the setting alone could not express.
+     */
+    shareHasLadder(): boolean {
+        return publicationsHaveLadder(this.localSharePubs());
+    }
+
     async stopScreenShare(): Promise<void> {
         if (!this.room) return;
-        for (const pub of this.sharePubs) {
+        for (const pub of this.localSharePubs()) {
             if (pub.track) {
                 await this.room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, false);
             }
         }
-        this.sharePubs = [];
     }
 
     // --- subscription / layer policy ---------------------------------------
@@ -963,8 +1056,9 @@ export class SfuManager {
             myEpoch: this.currentEpoch,
             msSinceEpochChange: Date.now() - this.lastEpochChangeAt,
             myEncryptorLive: this.localE2eeActive,
-            myMicPublished: !!this.micPub,
-            myMicMuted: this.micPub?.isMuted ?? null,
+            // Live, so a reconnect cannot make the report disagree with the room.
+            myMicPublished: this.localPubs(Track.Source.Microphone).length > 0,
+            myMicMuted: this.localPubs(Track.Source.Microphone)[0]?.isMuted ?? null,
             peers: room ? [...room.remoteParticipants.values()].map(p => {
                 const verdict = this.participantE2ee(p);
                 const failedAt = this.encryptionErrorAt.get(p.identity);

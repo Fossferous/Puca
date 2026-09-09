@@ -60,9 +60,15 @@ function selected(div: HTMLElement): string | undefined {
 describe('the share dialog and the remembered quality', () => {
     beforeEach(() => {
         Object.defineProperty(window, 'localStorage', { value: realStorage(), configurable: true });
+        // PROVE THE STORE STORES, with a value that is NOT the default.
+        // Asserting '1080' here proved nothing: it is defaultSettings'
+        // shareResolution, so a store that remembers nothing returns it too and
+        // the guard passed against exactly the storeless mock it exists to
+        // catch. '1440' can only come back if something really kept it.
+        saveSettings({ ...loadSettings(), shareResolution: '1440', shareFps: 60 });
+        expect(loadSettings().shareResolution, 'localStorage is not storing').toBe('1440');
+        expect(loadSettings().shareFps).toBe(60);
         saveSettings({ ...loadSettings(), shareResolution: '1080', shareFps: 30 });
-        // The store must actually store, or everything below is vacuous.
-        expect(loadSettings().shareResolution).toBe('1080');
     });
     afterEach(() => {
         document.body.innerHTML = '';

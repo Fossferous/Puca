@@ -15,9 +15,13 @@ remembers the answer.
   network is the limit" and "this machine is the limit" — and the app has only
   ever written it to a log file. So the way people found out was that their
   game got choppy while they were sharing, and nothing connected the two. Now,
-  once a share has been struggling for long enough to be sure (and only once
-  per share, never nagging), it offers to drop a step: one click, applied to
-  the share that is already running, so nobody watching is interrupted.
+  once a share has been struggling for long enough to be sure (and never
+  nagging — it waits for you to take a step before it will say anything again),
+  it offers to drop one: a single click, applied to the share already running
+  so nobody watching is interrupted. If it cannot change the running share —
+  which is the case when you have "send my screen at several sizes" turned on,
+  because the smaller copies are fixed in proportion to the big one — it says
+  so, and your next share starts at the lower setting instead.
 - **The share dialog remembers the resolution and frame rate you chose.** It
   opened at 1080p and 30 fps every single time, so anyone who turned it down
   because their last share hurt was handed 1080p again on their very next
@@ -32,7 +36,8 @@ remembers the answer.
   while the problem is happening. It contains no messages, names or addresses.
 
 ### Fixed
-- **A share's smallest size is now one the graphics card can actually encode.**
+- **A share's smallest size is now one the graphics card can actually encode** (and carries a
+  little more bitrate to suit it).
   When "send my screen at several sizes" is on, the smallest of those sizes was
   270 lines tall — and browsers deliberately refuse to use the graphics card
   for anything under 360 lines, whatever hardware you have. That size was

@@ -146,9 +146,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      *  not think to right-click. */
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const [diagNote, setDiagNote] = useState<string>('');
-    /** Set once per share, when the encoder has been CPU-starved for long
-     *  enough to be sure. Carries the step-down it is offering. */
+    /** Set when the encoder has been CPU-starved for long enough to be sure.
+     *  Carries the step-down it is offering. Cleared when the share ends, and
+     *  re-offered only after a step the person actually took. */
     const [loadOffer, setLoadOffer] = useState<{ text: string; to: ShareQuality } | null>(null);
+    /** The live watch, so accepting an offer can re-arm it — one step is not
+     *  always enough, and a decline and an acceptance must not mean the same
+     *  thing to it. Owned by the effect below. */
+    const shareWatchRef = useRef<ReturnType<typeof createShareLoadWatch> | null>(null);
     const [isMuted, setIsMuted] = useState(false);
     const [isDeafened, setIsDeafened] = useState(false);
     /** Why a mute toggle refused — shown as a Toast so a hotkey no-op is
@@ -608,10 +613,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // the app has only ever written it to a log file. On a machine encoding in
     // software — which, per every field log, is every machine — that answer is
     // the difference between "my game went choppy for no reason" and one click.
-    // See shareHealth.ts; the offer fires once per share, never repeats.
+    // See shareHealth.ts: once, then once more after each step actually
+    // taken, and never after a decline.
     useEffect(() => {
         if (!isScreenSharing) { setLoadOffer(null); return; }
         const watch = createShareLoadWatch();
+        shareWatchRef.current = watch;
         let stopped = false;
         const timer = setInterval(() => {
             void sampleShareEncode().then(sample => {
@@ -627,7 +634,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 console.warn(`[share] encoder CPU-limited (encoder=${watch.encoder() ?? 'unknown'})`);
             });
         }, SAMPLE_MS);
-        return () => { stopped = true; clearInterval(timer); };
+        return () => { stopped = true; clearInterval(timer); shareWatchRef.current = null; };
     }, [isScreenSharing]);
 
     // Stream-audio capture health (events from appAudio.ts/ScreenShareModal):
@@ -3064,6 +3071,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         className="voice-load-offer-btn"
                         onClick={() => {
                             const to = loadOffer.to;
+                            // Read BEFORE the save, so the note can say what
+                            // actually changed rather than restating both axes.
+                            const from = rememberedQuality(loadSettings());
                             // Remembered as well as applied: the next share
                             // starts here instead of at 1080p again, which is
                             // the whole reason the machine ended up starved.
@@ -3082,8 +3092,42 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 // makes a live re-cap unsafe. All three leave
                                 // the running share alone and the SAVED
                                 // setting doing the work, which is what to say.
+                                if (applied) {
+                                    // They asked for help and got a real
+                                    // change; let the watch speak once more if
+                                    // that change was not enough. A DECLINE
+                                    // deliberately does not do this — that was
+                                    // an answer.
+                                    shareWatchRef.current?.rearm();
+                                }
+                                // SAY ONLY WHAT CHANGED.
+                                //
+                                // Not the rung's name alone ("720p"), because a
+                                // rung is a CEILING and an ultrawide capped at
+                                // 1080p is really 1920x810. Not the live
+                                // track's size either — reading getSettings()
+                                // the instant applyConstraints resolves is the
+                                // race media.ts documents. And not both axes
+                                // unconditionally, which was the version before
+                                // this: a frame-rate-only step from "Source"
+                                // announced "capped at 3840x2160" — the
+                                // sentinel this module uses to mean NO cap at
+                                // all — to somebody who had just asked for less.
+                                const cap = shareDimensions(to.resolution);
+                                const changed: string[] = [];
+                                // "OR SMALLER", because the number is a CEILING
+                                // and only an exactly-16:9 surface ever reaches
+                                // it. A portrait 1080x1920 monitor stepped to
+                                // 720p becomes 405x720 — printing a bare
+                                // "1280x720" there states a width three times
+                                // the real one, and on a 1200x800 window it
+                                // states one WIDER than the share was before
+                                // the click. Saying it as a bound is both
+                                // shorter and true everywhere.
+                                if (to.resolution !== from.resolution) changed.push(`${cap.width}x${cap.height} or smaller`);
+                                if (to.fps !== from.fps) changed.push(`${to.fps} fps`);
                                 setDiagNote(applied
-                                    ? `Screen share lowered to ${qualityLabel(to)}.`
+                                    ? `Screen share lowered to ${changed.join(', ') || qualityLabel(to)}.`
                                     : `Couldn't change the share that's already running — your next one will start at ${qualityLabel(to)}.`);
                             });
                         }}

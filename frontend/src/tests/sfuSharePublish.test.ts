@@ -19,7 +19,8 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { screenSharePublishOptions } from '../api/rtc/sfuManager';
+import { screenSharePublishOptions, publicationsHaveLadder } from '../api/rtc/sfuManager';
+import { Track } from 'livekit-client';
 
 describe('the screen-share publish contract', () => {
     it('publishes more than one rung', () => {
@@ -134,4 +135,64 @@ describe('the default, with nothing configured', () => {
         expect(o.screenShareSimulcastLayers).toBeUndefined();
     });
 
+});
+
+describe('deciding whether the RUNNING share has a simulcast ladder', () => {
+    // The guard that decides whether "Lower it" may re-cap the live track.
+    // Re-capping a laddered share shrinks every rung with the source, pushing
+    // the bottom one under Chromium's 360-line hardware-encode floor — which
+    // is the whole reason SHARE_LOW was raised to 640x360.
+    const vid = (encodings: unknown[] | undefined) => ({
+        kind: Track.Kind.Video,
+        track: { sender: { getParameters: () => ({ encodings }) } },
+    });
+
+    it('sees a real ladder', () => {
+        // THE ASSERTION THAT MATTERS. This guard fails OPEN — anything it
+        // cannot read reads as "no ladder" and permits the re-cap — so the one
+        // thing that must never regress is that a genuine ladder IS seen.
+        expect(publicationsHaveLadder([vid([{}, {}, {}])])).toBe(true);
+        expect(publicationsHaveLadder([vid([{}, {}])])).toBe(true);
+    });
+
+    it('does not invent one from a single-encoding share', () => {
+        // POSITIVE CONTROL for the case above: a share published with
+        // simulcast off must stay re-cappable, or "Lower it" does nothing for
+        // the people who turned the ladder off precisely because their machine
+        // could not afford it.
+        expect(publicationsHaveLadder([vid([{}])])).toBe(false);
+        expect(publicationsHaveLadder([vid([])])).toBe(false);
+        expect(publicationsHaveLadder([vid(undefined)])).toBe(false);
+    });
+
+    it('ignores audio publications', () => {
+        // A share carries its system audio alongside the video. Counting an
+        // audio sender's encodings would answer a question about the wrong
+        // track.
+        expect(publicationsHaveLadder([
+            { kind: Track.Kind.Audio, track: { sender: { getParameters: () => ({ encodings: [{}, {}] }) } } },
+        ])).toBe(false);
+    });
+
+    it('is false, not a throw, when there is nothing to read', () => {
+        // A mesh call has no publications at all; a publication mid-teardown
+        // has no track; a detached sender throws. None of those may take down
+        // the click handler.
+        expect(publicationsHaveLadder([])).toBe(false);
+        expect(publicationsHaveLadder([{ kind: Track.Kind.Video, track: null }])).toBe(false);
+        expect(publicationsHaveLadder([{ kind: Track.Kind.Video, track: { sender: null } }])).toBe(false);
+        expect(publicationsHaveLadder([{
+            kind: Track.Kind.Video,
+            track: { sender: { getParameters: () => { throw new Error('detached'); } } },
+        }])).toBe(false);
+    });
+
+    it('finds the ladder even when an unreadable publication comes first', () => {
+        // Order must not decide the answer: a torn-down audio pub ahead of the
+        // live video one would otherwise hide a real ladder.
+        expect(publicationsHaveLadder([
+            { kind: Track.Kind.Video, track: null },
+            vid([{}, {}, {}]),
+        ])).toBe(true);
+    });
 });

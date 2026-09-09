@@ -77,9 +77,14 @@ describe('whether a cap would reduce anything at all', () => {
     });
 
     it('compares frame rate as a whole number', () => {
-        // A 60 fps capture commonly reports 59.94. Without rounding, a cap of
-        // 60 would read as a reduction and claim success for a no-op.
-        expect(capWouldReduce({ width: 1280, height: 720, frameRate: 59.94 }, 1280, 720, 60)).toBe(false);
-        expect(capWouldReduce({ width: 1280, height: 720, frameRate: 59.94 }, 1280, 720, 30)).toBe(true);
+        // THE ROUNDING MUST BE PINNED BY A CASE THAT NEEDS IT. The first
+        // version of this test used 59.94 against a cap of 60 — but 59.94 > 60
+        // is false with OR without Math.round, so it passed either way and
+        // proved nothing. 60.4 is the case that separates them: rounded it is
+        // 60 and not a reduction; unrounded it is above 60 and would claim one.
+        expect(capWouldReduce({ width: 1280, height: 720, frameRate: 60.4 }, 1280, 720, 60)).toBe(false);
+        // And the sibling that must still be a reduction, so the line above is
+        // not passing by refusing everything.
+        expect(capWouldReduce({ width: 1280, height: 720, frameRate: 60.4 }, 1280, 720, 30)).toBe(true);
     });
 });
