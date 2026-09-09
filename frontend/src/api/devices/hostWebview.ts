@@ -140,8 +140,14 @@ async function captureDisplay(): Promise<MediaStream> {
     const picker = navigator.mediaDevices.getDisplayMedia({
         video: {
             frameRate: { ideal: 30, max: 30 },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            // `max`, for the same reason the voice share uses it: an `ideal`
+            // is a preference Chromium routinely ignores for display capture,
+            // handing back the surface at its native size. The frame rate was
+            // capped and the resolution was not, so a 1440p or 4K host was
+            // encoding every pixel of it — in software — while asking for
+            // 1080p.
+            width: { max: 1920 },
+            height: { max: 1080 },
         },
         // No audio: a remote-desktop session must not quietly stream whatever
         // the machine is playing. If that is ever wanted it should be a

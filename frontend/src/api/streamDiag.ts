@@ -130,7 +130,21 @@ async function sampleOnceInner(): Promise<void> {
     }
 
     for (const r of (sfu as { localRtp?: Record<string, unknown>[] }).localRtp ?? []) {
-        if (r.kind === 'video') lines.push(`sfu source=${r.source} ${fmt(r)}`);
+        if (r.kind !== 'video') continue;
+        lines.push(`sfu source=${r.source} ${fmt(r)}`);
+        // THE ROW THIS FILE EXISTS FOR, and the only one that was missing its
+        // delay fields. `voiceDiagnostics` already computes the full summary
+        // for every local video publication and attaches it; this loop then
+        // printed fps/limit/encoder and dropped the rest on the floor, while
+        // the mesh loop above and the remote loop below both print theirs.
+        //
+        // The consequence was a fortnight of reports saying only that the
+        // frame rate decayed, with nothing to say WHY: `enc=` (encode time)
+        // rising is a starved encoder, `send=` (pacer queue) rising is the
+        // network backing up, and `gap=` is frames parked between the two.
+        // Those three separate the causes, and none of them reached a log.
+        const lat = latencyOf(r);
+        if (lat) lines.push(`sfu source=${r.source} ${formatLatencyLine(lat)}`);
     }
     for (const r of (sfu as { remoteRtp?: Record<string, unknown>[] }).remoteRtp ?? []) {
         const lat = latencyOf(r);

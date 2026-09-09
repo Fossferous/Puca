@@ -790,12 +790,20 @@ export class SfuManager {
         // the window; delay fields are then over the window only.
         const before = new Map<string, RTCStatsReport>();
         if (windowMs && windowMs > 0 && room) {
+            // VIDEO ONLY, both passes. The second pass summarises video rows
+            // and nothing else, so a getStats() here for a microphone or a
+            // screen-share audio track buys a report nobody reads — and this
+            // runs on the sharer's main thread every five seconds, on the
+            // machine already struggling to encode. Cheap to skip, and the
+            // first pass had no filter at all where the second one does.
             for (const pub of room.localParticipant.trackPublications.values()) {
+                if (pub.kind !== Track.Kind.Video) continue;
                 const sender = pub.track?.sender;
                 if (sender) { try { before.set(`local:${pub.trackSid}`, await sender.getStats()); } catch { /* detached */ } }
             }
             for (const p of room.remoteParticipants.values()) {
                 for (const pub of p.trackPublications.values()) {
+                    if (pub.kind !== Track.Kind.Video) continue;
                     const receiver = pub.track?.receiver;
                     if (receiver) { try { before.set(`remote:${pub.trackSid}`, await receiver.getStats()); } catch { /* detached */ } }
                 }

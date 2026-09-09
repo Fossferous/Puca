@@ -44,6 +44,34 @@ export function rmsAmplitude(samples: Float32Array): number {
     return Math.sqrt(sum / samples.length);
 }
 
+/**
+ * What a screen share asks the browser for.
+ *
+ * `max`, NOT `ideal`, on all three. An ideal is a preference the browser may
+ * ignore, and for display capture Chromium routinely does: it hands back the
+ * surface at its native size. So somebody on a 1440p monitor who picked
+ * "1080p" was capturing and ENCODING 1440p — 1.8x the pixels they chose — and
+ * on a 4K monitor, four times. The frame rate was already capped here; the
+ * resolution was not, and the clip path has always capped all three
+ * (clips/replayBuffer.ts's displayConstraints).
+ *
+ * It matters more than it looks because the share is encoded in SOFTWARE —
+ * every field log line reads `encoder=OpenH264` — and software H.264 costs
+ * roughly linearly in pixels per second. Silently doubling the pixel count
+ * silently doubles the CPU taken from whatever is being shared, which is
+ * usually a game the person is also trying to play.
+ *
+ * Pure, and exported, so the cap is a testable contract rather than an object
+ * literal three call frames inside a picker.
+ */
+export function shareVideoConstraints(width: number, height: number, fps: number) {
+    return {
+        width: { max: width },
+        height: { max: height },
+        frameRate: { max: fps },
+    };
+}
+
 export class MediaManager {
     private localStream: MediaStream | null = null;
     private screenShareStream: MediaStream | null = null;
@@ -485,11 +513,7 @@ export class MediaManager {
 
         try {
             const displayMediaOptions: DisplayMediaStreamOptions = {
-                video: {
-                    width: { ideal: width },
-                    height: { ideal: height },
-                    frameRate: { ideal: fps, max: fps },
-                } as MediaTrackConstraints,
+                video: shareVideoConstraints(width, height, fps) as MediaTrackConstraints,
             };
 
             if (captureAudio) {

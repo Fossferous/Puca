@@ -6,6 +6,24 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Fixed
+- **Sharing your screen could encode far more pixels than you chose, which is
+  CPU taken from the game you are sharing.** The picker's resolution was sent
+  to the browser as a preference rather than a limit, and for screen capture
+  the browser routinely ignores a preference and hands back the display at its
+  full size. Choosing 1080p on a 1440p monitor encoded 1440p — nearly twice the
+  pixels — and on a 4K monitor, four times. Since the share is encoded in
+  software, and software encoding costs roughly in proportion to pixels, that
+  was double or quadruple the work for a picture nobody asked for. The
+  resolution is now a real limit, as it always was for the clip recorder. The
+  same fix applies to remote-desktop hosting.
+- **The log now records why a share's frame rate is falling, not just that it
+  is.** The app already measured encode time, the send queue and the gap
+  between them for the stream you are sending, then printed only the frame
+  rate. Those three numbers are what separate "this machine cannot encode fast
+  enough" from "the network is backing up", and neither had ever reached a log
+  file.
+
 ### Added
 - **"Copy diagnostics", from a right-click on the voice panel or from Settings,
   Advanced.** When a call is going badly the only useful evidence is what the
