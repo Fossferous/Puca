@@ -158,6 +158,28 @@ export class MediaManager {
     }
 
     /**
+     * Re-cap the LIVE screen capture, without a second trip through the OS
+     * picker. `applyConstraints` renegotiates the existing display track in
+     * place, so the share does not end and no viewer is dropped — the thing
+     * that makes "lower the quality" a one-click answer rather than a restart.
+     *
+     * Returns false if there is nothing captured or the engine refused the
+     * constraints, so a caller never reports success it did not get.
+     */
+    async applyShareQuality(width: number, height: number, fps: number): Promise<boolean> {
+        const track = this.screenShareStream?.getVideoTracks()[0];
+        if (!track) return false;
+        try {
+            await track.applyConstraints(shareVideoConstraints(width, height, fps) as MediaTrackConstraints);
+            console.log(`[WebRTC] Screen share re-capped to ${width}x${height}@${fps}`);
+            return true;
+        } catch (e) {
+            console.warn('[WebRTC] Screen share re-cap refused:', e);
+            return false;
+        }
+    }
+
+    /**
      * Get the current screen share stream
      */
     getScreenShareStreamSync(): MediaStream | null {

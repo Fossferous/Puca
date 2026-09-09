@@ -50,6 +50,56 @@ export function environmentLines(now: string, version: string): string[] {
 }
 
 /**
+ * Which GPU the app is rendering on, and whether any codec can be encoded in
+ * HARDWARE at the sizes a screen share uses.
+ *
+ * THE QUESTION THIS ANSWERS. Every share this project has logs for was encoded
+ * by OpenH264 — software — on machines whose own native agent encodes with an
+ * NVIDIA hardware encoder for other features. Software H.264 at 1080p is the
+ * single largest cost a share imposes, and it is why sharing can make a game
+ * stutter. Whether that is fixable inside the browser, or needs the encode
+ * moved out of it entirely, turns on exactly one fact: does this browser get
+ * offered a hardware encoder at all.
+ *
+ * `powerEfficient` is the standard signal for it, and `encodingInfo` is the
+ * standard way to ask. The WebGL renderer string is here for the other half:
+ * a machine with several adapters — an integrated GPU, a discrete one, a
+ * couple of virtual displays — can leave the browser on one that has no
+ * encoder, and the string names which one it landed on.
+ */
+export async function encodingSupportLines(): Promise<string[]> {
+    const out: string[] = [];
+    try {
+        const gl = document.createElement('canvas').getContext('webgl');
+        const dbg = gl?.getExtension('WEBGL_debug_renderer_info');
+        out.push(`gpu       ${dbg && gl ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '(no webgl)'}`);
+    } catch {
+        out.push('gpu       (unavailable)');
+    }
+    const caps = (navigator as Navigator & {
+        mediaCapabilities?: { encodingInfo(c: unknown): Promise<{ supported: boolean; smooth: boolean; powerEfficient: boolean }> };
+    }).mediaCapabilities;
+    if (!caps?.encodingInfo) {
+        out.push('encoding  (mediaCapabilities.encodingInfo unavailable)');
+        return out;
+    }
+    for (const contentType of ['video/H264', 'video/VP8', 'video/VP9', 'video/AV1']) {
+        for (const [w, h] of [[1920, 1080], [2560, 1440]]) {
+            try {
+                const r = await caps.encodingInfo({
+                    type: 'webrtc',
+                    video: { contentType, width: w, height: h, bitrate: 6_000_000, framerate: 30 },
+                });
+                out.push(`encoding  ${contentType.padEnd(10)} ${w}x${h}  supported=${r.supported} smooth=${r.smooth} hardware=${r.powerEfficient}`);
+            } catch (e) {
+                out.push(`encoding  ${contentType} ${w}x${h}  (asked and refused: ${e instanceof Error ? e.message : String(e)})`);
+            }
+        }
+    }
+    return out;
+}
+
+/**
  * Build the report. Safe to call at any time: outside a call the media
  * sections simply say so, which is itself worth knowing when somebody reports
  * a problem they think is in a call and is not.
@@ -60,6 +110,9 @@ export async function buildDiagnosticsReport(): Promise<string> {
     // version it was compiled with rather than the app it is running inside.
     const version = await attempt('version', () => currentAppVersion());
     const lines = environmentLines(new Date().toISOString(), String(version));
+
+    lines.push('', '--- video encoding this machine can offer ---');
+    lines.push(...await encodingSupportLines());
 
     lines.push('', '--- voice / screen share (SFU) ---');
     const sfu = await attempt('sfu', () => sfuManager.voiceDiagnostics(WINDOW_MS));

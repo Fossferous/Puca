@@ -278,6 +278,23 @@ export const defaultSettings = {
      *  `__pucaVoiceDiag()` — three rungs are affordable in hardware and are not
      *  in software. */
     shareSimulcast: false,
+    /** The size and frame rate the screen-share dialog opens on, remembered
+     *  from last time.
+     *
+     *  WHY THIS IS STORED. The dialog used to open on 1080p30 every single
+     *  time. Somebody whose machine cannot afford that — and the share is
+     *  encoded in SOFTWARE on every machine we have logs from, so "cannot
+     *  afford it" is an ordinary situation, not an exotic one — would turn it
+     *  down to 720p, share, and then be handed 1080p again on their next
+     *  share, and every share after that. The one control that lets a weaker
+     *  machine cope was the one control the app forgot. The app-audio mixer
+     *  next to it has remembered its selection for releases.
+     *
+     *  Validated on read against the options the dialog actually offers, so a
+     *  stored value from an older build (or a hand-edited profile) cannot
+     *  leave the dialog with nothing selected. */
+    shareResolution: '1080',
+    shareFps: 30,
     /** What happens when I join a voice channel that allows clips:
      *  'off' — nothing; 'prompt' — highlight the Arm button for a few seconds;
      *  'auto' — start recording with NO popup (ClipControls.tsx → armNative):

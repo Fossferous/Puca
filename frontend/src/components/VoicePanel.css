@@ -1378,3 +1378,42 @@
     line-height: 1.35;
     cursor: pointer;
 }
+
+/* The CPU-limited offer. Same note surface, but it carries buttons, so it is
+   not itself clickable — a click-anywhere-to-dismiss that also sits under two
+   controls dismisses the thing you were reaching for. Wraps rather than
+   truncating: at 390px the sentence needs two lines and the buttons need to
+   stay reachable under a thumb. */
+.voice-load-offer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    cursor: default;
+}
+
+.voice-load-offer span {
+    flex: 1 1 100%;
+}
+
+.voice-load-offer-btn {
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    min-height: 30px;
+    border: none;
+    border-radius: 5px;
+    background: var(--brand, #5865f2);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.voice-load-offer-btn:hover {
+    filter: brightness(1.1);
+}
+
+.voice-load-offer-btn.ghost {
+    background: var(--bg-modifier-hover, rgba(255, 255, 255, 0.08));
+    color: var(--text-secondary, #b9bbbe);
+}

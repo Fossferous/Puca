@@ -3,6 +3,8 @@ import { isTauri } from '../api/platform';
 import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection } from '../api/appAudio';
 import type { CaptureApp, SelectedApp } from '../api/appAudio';
 import { CloseIcon, InfoIcon, SpeakerIcon } from './Icons';
+import { loadSettings, saveSettings } from './settingsStore';
+import { RES_STEPS, FPS_STEPS, rememberedQuality } from '../api/rtc/shareHealth';
 import './ScreenShareModal.css';
 
 // 'browser' is the WEB build's marker for "the picker's own Share-audio
@@ -41,14 +43,15 @@ interface ScreenShareModalProps {
     onCancelAfterCapture: () => void;
 }
 
-const RESOLUTIONS = [
-    { label: '720p', value: '720' },
-    { label: '1080p', value: '1080' },
-    { label: '1440p', value: '1440' },
-    { label: 'Source', value: 'source' },
-];
+/** Smallest first, which is how they are read. Derived from RES_STEPS (largest
+ *  first, the order a step DOWN walks) so the dialog and the step-down offer in
+ *  shareHealth.ts cannot come to disagree about which sizes exist. */
+const RESOLUTIONS = [...RES_STEPS].reverse().map(value => ({
+    value,
+    label: value === 'source' ? 'Source' : `${value}p`,
+}));
 
-const FPS_OPTIONS = [15, 30, 60];
+const FPS_OPTIONS = [...FPS_STEPS].reverse();
 
 // App resolution itself lives in api/appAudio.ts (resolveAppAudio) so it's
 // unit-testable: window-title match first, then audio-session activity (the
@@ -60,8 +63,22 @@ interface MixerRowState { on: boolean; gainPercent: number }
 
 const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, onCaptureScreen, onGoLive, onCancelAfterCapture }) => {
     const desktop = isTauri();
-    const [selectedRes, setSelectedRes] = useState('1080');
-    const [selectedFps, setSelectedFps] = useState(30);
+    // Read once at mount: this dialog is the only thing that writes them, so
+    // there is no second writer to fall out of step with.
+    const [selectedRes, setSelectedRes] = useState(() => rememberedQuality(loadSettings()).resolution);
+    const [selectedFps, setSelectedFps] = useState(() => rememberedQuality(loadSettings()).fps);
+
+    /** Remember the choice as it is made rather than on go-live: somebody who
+     *  turns the quality down because their last share hurt, then backs out of
+     *  the OS picker, has still told us something. */
+    const chooseRes = (value: string) => {
+        setSelectedRes(value);
+        saveSettings({ ...loadSettings(), shareResolution: value });
+    };
+    const chooseFps = (value: number) => {
+        setSelectedFps(value);
+        saveSettings({ ...loadSettings(), shareFps: value });
+    };
     const [busy, setBusy] = useState(false);
     // Audio is chosen HERE, up front. "Selected apps" adds one mixer step
     // after the OS picker (that's when the running-app list is known).
@@ -244,7 +261,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
                                 <button
                                     key={res.value}
                                     className={`stream-option ${selectedRes === res.value ? 'selected' : ''}`}
-                                    onClick={() => setSelectedRes(res.value)}
+                                    onClick={() => chooseRes(res.value)}
                                 >
                                     {res.label}
                                 </button>
@@ -259,7 +276,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
                                 <button
                                     key={fps}
                                     className={`stream-option ${selectedFps === fps ? 'selected' : ''}`}
-                                    onClick={() => setSelectedFps(fps)}
+                                    onClick={() => chooseFps(fps)}
                                 >
                                     {fps} fps
                                 </button>

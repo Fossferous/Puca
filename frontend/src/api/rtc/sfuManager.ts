@@ -27,6 +27,7 @@ import { apiClient } from '../client';
 import { noiseDiagnostics } from '../noiseFilter';
 import { ensureChannelKey } from '../channelKeys';
 import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
+import type { EncodeSample } from './shareHealth';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
 import { loadSettings } from '../../components/settingsStore';
@@ -114,12 +115,15 @@ const SHARE_BITRATE = 4_500_000;
 /// frame — and nothing had adapted on their behalf. The frames simply never
 /// arrived whole. Two smaller rungs give the server something to fall back to.
 ///
-/// H.264 SPECIFICALLY. Measured with frontend/e2e/share-ramp-2pc.mjs against
-/// the engine the app runs on: h264 sustains all three rungs
-/// (1920x1080@56 / 960x540@56 / 480x270@16) because it encodes in hardware,
-/// while the same ladder in VP8 collapses to 19/7/4 fps in software. The
-/// `videoCodec: 'h264'` below was already chosen for smoothness; it is what
-/// makes this affordable.
+/// WHY IT IS OFF BY DEFAULT ANYWAY. The measurement that justified it
+/// (frontend/e2e/share-ramp-2pc.mjs: h264 sustaining 1920x1080@56 /
+/// 960x540@56 / 480x270@16 where VP8 collapsed to 19/7/4) was taken in
+/// headless Edge, which used a HARDWARE H.264 encoder. The shipped app does
+/// not get one: every `stream-diag` line in the field reads
+/// `encoder=OpenH264`. Three software encodes cost roughly three times one,
+/// and the machines that would pay it are the ones already reporting that
+/// sharing makes their game stutter. So the ladder is offered, not imposed —
+/// see `shareSimulcast` in settingsStore.ts.
 ///
 /// THE TOP RUNG IS SHARE_BITRATE, and a subscriber only ever receives ONE rung,
 /// so the backend's per-subscriber charge (`SHARE_KBPS`, src/sfu.rs) stays the
@@ -160,11 +164,11 @@ export function screenSharePublishOptions(
         // take the full picture. See SHARE_LOW/SHARE_MID — and `shareSimulcast`
         // in settingsStore.ts for why the person sharing can decline the cost.
         simulcast,
-        // H.264 is hardware-accelerated on almost every device and produces
-        // noticeably smoother output for fast-motion content (games) than VP8,
-        // which is CPU-only on most machines — and measurably so for the ladder
-        // above: h264 holds 56 fps on the top two rungs where VP8 collapses to
-        // 19 and 7.
+        // H.264 because it is the cheapest thing this engine will encode for
+        // fast-motion content, NOT because it is hardware-accelerated — in
+        // this app it measurably is not (`encoder=OpenH264` in every field
+        // log). VP8 is software too and markedly worse: 19 fps against h264's
+        // 56 on the same ladder and machine.
         videoCodec: 'h264' as const,
         videoEncoding: {
             maxBitrate: SHARE_BITRATE,
@@ -172,6 +176,16 @@ export function screenSharePublishOptions(
         },
         // Under congestion, drop quality (resolution) not framerate.
         // A choppy game stream is worse than a blurry one.
+        //
+        // WORTH KNOWING WHAT THIS COSTS AT SHARE_BITRATE. Measured with
+        // frontend/e2e/encode-cost.mjs at the 4.5 Mbps cap above: 1080p60 and
+        // 1440p60 CANNOT hold their resolution — this preference spends the
+        // pixels to keep the frames and both settle at 1280x720. So somebody
+        // who picks 1440p60 in the dialog is already receiving 720p, while
+        // still paying to capture and downscale 1440p. At 30 fps the same cap
+        // holds full 1080p. Raising SHARE_BITRATE would change that, and would
+        // also change the backend's per-subscriber admission arithmetic
+        // (SHARE_KBPS, src/sfu.rs) — not a one-sided knob.
         degradationPreference: 'maintain-framerate' as const,
     };
     // Omitted rather than sent alongside `simulcast: false`: the rungs would
@@ -566,6 +580,42 @@ export class SfuManager {
                 }),
             );
         }
+    }
+
+    /**
+     * One reading of the local screen share's encode health, or null when this
+     * transport is not carrying a share.
+     *
+     * Deliberately much lighter than `voiceDiagnostics`: it is polled every few
+     * seconds for the whole life of a share, on a machine that is by
+     * definition already busy, so it reads only the share's own sender and
+     * keeps two fields. See shareHealth.ts for what is done with them.
+     *
+     * WITH A LADDER there is one outbound-rtp entry per rung. Any rung being
+     * CPU-limited counts, because the rungs are encoded by the same machine —
+     * a starved bottom rung is not a smaller problem than a starved top one.
+     */
+    async shareEncodeSample(): Promise<EncodeSample | null> {
+        let sample: EncodeSample | null = null;
+        for (const pub of this.sharePubs) {
+            if (pub.kind !== Track.Kind.Video) continue;
+            const sender = pub.track?.sender;
+            if (!sender) continue;
+            try {
+                const stats = await sender.getStats();
+                stats.forEach((s) => {
+                    if (s.type !== 'outbound-rtp') return;
+                    const r = s as unknown as Record<string, unknown>;
+                    if (r.kind !== 'video') return;
+                    const row: EncodeSample = {
+                        limit: r.qualityLimitationReason as string | undefined,
+                        encoder: r.encoderImplementation as string | undefined,
+                    };
+                    if (!sample || (row.limit === 'cpu' && sample.limit !== 'cpu')) sample = row;
+                });
+            } catch { /* sender detached mid-read */ }
+        }
+        return sample;
     }
 
     async stopScreenShare(): Promise<void> {

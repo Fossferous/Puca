@@ -9,6 +9,7 @@ import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
 import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
+import type { EncodeSample } from './shareHealth';
 import { AnnouncedVideoGate } from './announcedVideo';
 
 export { classifyRemoteVideo } from './announcedVideo';
@@ -681,6 +682,52 @@ export class WebRTCManager {
                 });
             }
         }
+    }
+
+    /**
+     * Mesh twin of sfuManager's `shareEncodeSample`: the local screen share's
+     * encode health, or null when nothing is being shared.
+     *
+     * A mesh encodes the share ONCE PER PEER, so any peer's encoder being
+     * starved is the machine being starved — which is also why the cost of
+     * sharing in a mesh call grows with the room and the SFU's does not.
+     *
+     * Senders are matched by TRACK IDENTITY, never by kind, the same way
+     * stopScreenShare finds them: matching on kind would pick up the camera
+     * and report its encoder as the share's.
+     */
+    async shareEncodeSample(): Promise<EncodeSample | null> {
+        const screen = this.media.getScreenShareStreamSync();
+        if (!screen) return null;
+        const screenTracks = new Set<MediaStreamTrack>(screen.getTracks());
+        let sample: EncodeSample | null = null;
+        for (const [, peer] of this.peers) {
+            for (const sender of peer.connection.getSenders()) {
+                if (!sender.track || sender.track.kind !== 'video' || !screenTracks.has(sender.track)) continue;
+                try {
+                    const stats = await sender.getStats();
+                    stats.forEach((s) => {
+                        if (s.type !== 'outbound-rtp') return;
+                        const r = s as unknown as Record<string, unknown>;
+                        if (r.kind !== 'video') return;
+                        const row: EncodeSample = {
+                            limit: r.qualityLimitationReason as string | undefined,
+                            encoder: r.encoderImplementation as string | undefined,
+                        };
+                        if (!sample || (row.limit === 'cpu' && sample.limit !== 'cpu')) sample = row;
+                    });
+                } catch { /* peer closed mid-read */ }
+            }
+        }
+        return sample;
+    }
+
+    /** Re-cap the live share (see MediaManager.applyShareQuality). The senders
+     *  keep the same track, so nothing renegotiates and no viewer is dropped —
+     *  on the SFU path too, since both transports carry the same captured
+     *  track object. */
+    applyShareQuality(width: number, height: number, fps: number): Promise<boolean> {
+        return this.media.applyShareQuality(width, height, fps);
     }
 
     async addScreenShareToPeers(): Promise<void> {

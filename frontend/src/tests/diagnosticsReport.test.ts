@@ -20,7 +20,7 @@ vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics } }));
 vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics } }));
 vi.mock('../api/appVersion', () => ({ currentAppVersion }));
 
-import { buildDiagnosticsReport, copyDiagnostics, environmentLines } from '../api/diagnosticsReport';
+import { buildDiagnosticsReport, copyDiagnostics, environmentLines, encodingSupportLines } from '../api/diagnosticsReport';
 
 beforeEach(() => {
     voiceDiagnostics.mockReset().mockResolvedValue({ connected: true, remoteRtp: [] });
@@ -71,5 +71,28 @@ describe('the diagnostics report', () => {
         meshDiagnostics.mockRejectedValue(new Error('no manager'));
         writeText.mockRejectedValue(new Error('denied'));
         await expect(copyDiagnostics()).resolves.toEqual(expect.any(String));
+    });
+
+    it('asks whether any codec can be encoded in HARDWARE, and survives a refusal', async () => {
+        // The one fact that decides whether the encode can be fixed inside the
+        // browser or has to move out of it. `powerEfficient` is the standard
+        // signal, and the answer has to come from the AFFECTED machine: a rig
+        // with a fast card says nothing about the laptop that is stuttering.
+        const encodingInfo = vi.fn().mockResolvedValue({ supported: true, smooth: true, powerEfficient: false });
+        Object.defineProperty(navigator, 'mediaCapabilities', { value: { encodingInfo }, configurable: true });
+        const lines = (await encodingSupportLines()).join('\n');
+        expect(lines).toContain('video/H264');
+        expect(lines).toContain('hardware=false');
+        expect(encodingInfo).toHaveBeenCalled();
+
+        // POSITIVE CONTROL: it reports hardware when the machine has it, so
+        // the assertion above is about the machine and not about a probe that
+        // always says no.
+        encodingInfo.mockResolvedValue({ supported: true, smooth: true, powerEfficient: true });
+        expect((await encodingSupportLines()).join('\n')).toContain('hardware=true');
+
+        // And a browser without the API at all says so rather than throwing.
+        Object.defineProperty(navigator, 'mediaCapabilities', { value: undefined, configurable: true });
+        expect((await encodingSupportLines()).join('\n')).toContain('unavailable');
     });
 });

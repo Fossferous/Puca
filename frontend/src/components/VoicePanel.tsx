@@ -7,11 +7,16 @@ import type { MediaE2eeReason } from '../api/rtc/types';
 import { mediaE2eeExplanation, localMediaNotice } from '../api/rtc/e2eeStatus';
 import { isMediaE2eeSupported } from '../api/rtc/mediaCrypto';
 import { isE2EESupported } from 'livekit-client';
-import { loadSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
+import { loadSettings, saveSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
 import { useContextMenu } from './contextMenuUtils';
+import {
+    createShareLoadWatch, starvedOffer, rememberedQuality,
+    shareDimensions, qualityLabel, SAMPLE_MS, type ShareQuality,
+} from '../api/rtc/shareHealth';
+import { sampleShareEncode, applyShareQuality } from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
@@ -141,6 +146,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      *  not think to right-click. */
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const [diagNote, setDiagNote] = useState<string>('');
+    /** Set once per share, when the encoder has been CPU-starved for long
+     *  enough to be sure. Carries the step-down it is offering. */
+    const [loadOffer, setLoadOffer] = useState<{ text: string; to: ShareQuality } | null>(null);
     const [isMuted, setIsMuted] = useState(false);
     const [isDeafened, setIsDeafened] = useState(false);
     /** Why a mute toggle refused — shown as a Toast so a hotkey no-op is
@@ -593,6 +601,29 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (isScreenSharing) { startHidingCaptureBar(); holdStreamBoost('voice-share'); holdStreamDiag('voice-share'); }
         else { stopHidingCaptureBar(); releaseStreamBoost('voice-share'); releaseStreamDiag('voice-share'); }
         return () => { stopHidingCaptureBar(); releaseStreamBoost('voice-share'); releaseStreamDiag('voice-share'); };
+    }, [isScreenSharing]);
+
+    // Is this machine actually keeping up with the share it was asked for?
+    // The browser has always answered that in `qualityLimitationReason` and
+    // the app has only ever written it to a log file. On a machine encoding in
+    // software — which, per every field log, is every machine — that answer is
+    // the difference between "my game went choppy for no reason" and one click.
+    // See shareHealth.ts; the offer fires once per share, never repeats.
+    useEffect(() => {
+        if (!isScreenSharing) { setLoadOffer(null); return; }
+        const watch = createShareLoadWatch();
+        let stopped = false;
+        const timer = setInterval(() => {
+            void sampleShareEncode().then(sample => {
+                if (stopped || !watch.add(sample)) return;
+                const offer = starvedOffer(rememberedQuality(loadSettings()));
+                // Null = already at the smallest setting, so there is nothing
+                // to offer and saying so would be bad news with no action.
+                if (offer) setLoadOffer(offer);
+                console.warn(`[share] encoder CPU-limited (encoder=${watch.encoder() ?? 'unknown'})`);
+            });
+        }, SAMPLE_MS);
+        return () => { stopped = true; clearInterval(timer); };
     }, [isScreenSharing]);
 
     // Stream-audio capture health (events from appAudio.ts/ScreenShareModal):
@@ -3022,6 +3053,36 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             {diagNote && (
                 <div className="voice-diag-note" onClick={() => setDiagNote('')}>{diagNote}</div>
             )}
+            {loadOffer && (
+                <div className="voice-diag-note voice-load-offer">
+                    <span>{loadOffer.text}</span>
+                    <button
+                        className="voice-load-offer-btn"
+                        onClick={() => {
+                            const to = loadOffer.to;
+                            // Remembered as well as applied: the next share
+                            // starts here instead of at 1080p again, which is
+                            // the whole reason the machine ended up starved.
+                            saveSettings({ ...loadSettings(), shareResolution: to.resolution, shareFps: to.fps });
+                            setLoadOffer(null);
+                            void applyShareQuality(to).then(applied => {
+                                // An engine that refuses to re-cap a live
+                                // display track leaves the share exactly as it
+                                // was. Saying nothing there would be a button
+                                // that reports success it did not get — the
+                                // setting IS saved, so the next share is
+                                // genuinely lower, and that is what to say.
+                                setDiagNote(applied
+                                    ? `Screen share lowered to ${qualityLabel(to)}.`
+                                    : `Couldn't change the share that's already running — your next one will start at ${qualityLabel(to)}.`);
+                            });
+                        }}
+                    >
+                        Lower it
+                    </button>
+                    <button className="voice-load-offer-btn ghost" onClick={() => setLoadOffer(null)}>Keep it</button>
+                </div>
+            )}
             {/* Permission Help Modal — per-platform instructions (MicPermissionHelp) */}
             {showPermissionHelp && (
                 <MicPermissionHelp
@@ -3382,10 +3443,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     webrtcManager.stopScreenShare();
                 }}
                 onCaptureScreen={async ({ resolution, fps }) => {
-                    let width = 1920, height = 1080;
-                    if (resolution === '720') { width = 1280; height = 720; }
-                    else if (resolution === '1440') { width = 2560; height = 1440; }
-                    else if (resolution === 'source') { width = 3840; height = 2160; }
+                    // One source of truth with the step-down offer: two copies
+                    // of this ladder is how "lower it" ends up capturing a size
+                    // the dialog never offered.
+                    const { width, height } = shareDimensions(resolution);
 
                     const isDesktop = isTauri();
                     
