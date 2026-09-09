@@ -14,6 +14,7 @@ import { isTauri } from '../api/platform';
 import { loadSettings } from './settingsStore';
 import { registerPress, unregisterPress } from '../api/hotkeys';
 import { arm, armNative, disarm, seal, getReplayState, isClipCaptureSupported, discardSeal, retrySystemAudio, type ReplayState } from '../api/clips/replayBuffer';
+import { autoArmDelayMs } from '../api/clips/autoArmSchedule';
 import { isNativeCaptureSupported } from '../api/clips/nativeCapture';
 import { NO_CLIP_POLICY, useReplayState, type ClipPolicy } from '../api/clips/clipsUiState';
 import { clipUiState, clipReasonCopy } from '../api/clips/clipsGate';
@@ -83,7 +84,11 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
     const autoTriedForRef = useRef<string | null>(null);
     useEffect(() => {
         if (!inVoice) { autoTriedForRef.current = null; setAutoState('idle'); return; }
-        if (armed || replay.phase === 'arming') return;
+        // READ the phase, do not DEPEND on it. This effect owns a retry chain
+        // that outlives several phase changes (arming -> idle is exactly what a
+        // failed attempt produces), and having `replay.phase` in the dependency
+        // list tore the chain down mid-flight on every one of them.
+        if (armed || getReplayState().phase === 'arming') return;
         if (loadSettings().clipArmOnJoin !== 'auto' || !gate.visible || !gate.armEnabled) return;
         // AUTOMATIC MEANS AUTOMATIC, on every server whose owner has clips on
         // — which is what the setting's own text promises, three lines above
@@ -107,15 +112,46 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
         if (!isNativeCaptureSupported()) { setAutoState('failed'); return; } // e.g. non-Windows desktop build
         if (autoTriedForRef.current === roomId) return;
         autoTriedForRef.current = roomId;
-        // A beat after the join so the panel has settled.
-        const t = setTimeout(() => {
-            setAutoState('trying');
-            armNative()
-                .then(() => { setAutoState(getReplayState().phase === 'idle' ? 'failed' : 'idle'); })
-                .catch((e: unknown) => { console.warn('[clips] auto-arm failed:', e); setAutoState('failed'); });
-        }, 800);
-        return () => clearTimeout(t);
-    }, [inVoice, armed, replay.phase, roomId, gate.visible, gate.armEnabled]);
+
+        // RETRIED, NOT ONCE. The first attempt lands about a second after a
+        // cold start — the app rejoins voice that fast — and on a real machine
+        // every arm that landed at +1 s failed to open a DXGI duplication on
+        // EVERY monitor, while the ones that landed at +2 s succeeded on the
+        // same monitors. Windows is still bringing the app's window up at that
+        // point. See AUTO_ARM_BACKOFF_MS for the measurements.
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const attempt = (n: number) => {
+            const delay = autoArmDelayMs(n);
+            if (cancelled || delay === null) {
+                if (!cancelled) setAutoState('failed');
+                return;
+            }
+            timer = setTimeout(() => {
+                if (cancelled) return;
+                setAutoState('trying');
+                armNative()
+                    .then(() => {
+                        if (cancelled) return;
+                        // armNative resolves even when the buffer did not
+                        // start, so the PHASE is what says whether it worked.
+                        if (getReplayState().phase === 'idle') attempt(n + 1);
+                        else setAutoState('idle');
+                    })
+                    .catch((e: unknown) => {
+                        if (cancelled) return;
+                        console.warn(`[clips] auto-arm attempt ${n + 1} failed:`, e);
+                        attempt(n + 1);
+                    });
+            }, delay);
+        };
+        attempt(0);
+        return () => { cancelled = true; clearTimeout(timer); };
+        // replay.phase is deliberately absent from the deps; see the guard at
+        // the top of this effect. eslint does not flag it, so there is no
+        // directive here — a suppression that silences nothing is reported as
+        // an unused directive and has to be deleted.
+    }, [inVoice, armed, roomId, gate.visible, gate.armEnabled]);
 
     // Save-clip hotkey (in-app feed; the native fullscreen feed is wired by
     // VoicePanel's watch list, which dispatches to the same registry id).

@@ -22,6 +22,9 @@ const listeners = new Set<(s: unknown) => void>();
 let replayState: Record<string, unknown> = { phase: 'idle', bufferedMs: 0, ringBytes: 0, hasSystemAudio: true, notice: null, error: null, sealed: null, upload: null };
 const setReplay = (patch: Record<string, unknown>) => { replayState = { ...replayState, ...patch }; for (const l of listeners) l(replayState); };
 
+// NOTE: the retry schedule is NOT mocked. It lives in its own dependency-free
+// module (autoArmSchedule.ts) precisely so these timing assertions run against
+// the real backoff rather than a copy that could drift from it.
 vi.mock('../api/clips/replayBuffer', () => ({
     arm: vi.fn(async () => {}),
     armNative: (...a: unknown[]) => armNativeMock(...(a as [])),
@@ -32,6 +35,8 @@ vi.mock('../api/clips/replayBuffer', () => ({
     getReplayState: () => replayState,
     subscribeReplay: (cb: (s: unknown) => void) => { listeners.add(cb); return () => listeners.delete(cb); },
 }));
+import { AUTO_ARM_BACKOFF_MS } from '../api/clips/autoArmSchedule';
+
 vi.mock('../api/clips/nativeCapture', () => ({
     isNativeCaptureSupported: () => nativeSupported,
 }));
@@ -83,6 +88,16 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => { root.unmount(); }); container.remove(); vi.useRealTimers(); });
 
+/** Advance through every scheduled auto-arm attempt, flushing the promise each
+ *  time, so a test can assert the state AFTER the retries are exhausted. */
+async function runWholeSchedule() {
+    // runAllTimersAsync, not advanceTimersByTime: each retry is scheduled from
+    // inside the PROMISE that the previous attempt resolved, so stepping the
+    // clock by hand stops between the timer and the microtask that queues the
+    // next one.
+    await act(async () => { await vi.runAllTimersAsync(); });
+}
+
 describe('clipArmOnJoin', () => {
     it("'auto' calls armNative() once, a beat after joining — not on every render", async () => {
         setMode('auto');
@@ -99,14 +114,27 @@ describe('clipArmOnJoin', () => {
         expect(r.container.querySelector('.voice-clip-arm')?.getAttribute('aria-pressed')).toBe('true');
     });
 
-    it('a failed attempt (armNative() resolves with the controller still idle) falls back to the nudge and does NOT retry in the same room', async () => {
+    it('a failed attempt RETRIES on a backoff, then falls back to the nudge', async () => {
+        // CHANGED DELIBERATELY. This used to assert exactly one attempt. The
+        // first attempt lands about a second after a cold start, and on a real
+        // machine every arm at +1s failed to open a duplication on EVERY
+        // monitor while every arm at +2s succeeded on the same ones — so one
+        // attempt turned a timing race into a dead end the member could only
+        // escape by clicking. The END STATE is unchanged: when the whole
+        // schedule is spent, the nudge and its title still say so.
         setMode('auto');
         armNativeMock.mockImplementation(async () => { setReplay({ phase: 'arming' }); setReplay({ phase: 'idle' }); });
         const r = mount();
         await act(async () => { vi.advanceTimersByTime(800); });
         expect(armNativeMock).toHaveBeenCalledTimes(1);
-        await act(async () => { vi.advanceTimersByTime(3000); });
-        expect(armNativeMock).toHaveBeenCalledTimes(1);
+        // Not nudging yet — there are attempts left, and telling the member it
+        // failed while still trying is the thing being fixed.
+        expect(r.container.querySelector('.voice-clip-arm')!.className).not.toContain('nudge');
+
+        await act(async () => { await vi.runAllTimersAsync(); });
+        // Every attempt spent, and no more — an endless retry would hold a
+        // capture attempt open against the member's game for ever.
+        expect(armNativeMock).toHaveBeenCalledTimes(AUTO_ARM_BACKOFF_MS.length);
         const btn = r.container.querySelector('.voice-clip-arm')!;
         expect(btn.className).toContain('nudge');
         expect(btn.getAttribute('title')).toMatch(/Auto-arm did not start/);
@@ -116,24 +144,24 @@ describe('clipArmOnJoin', () => {
         setMode('auto');
         armNativeMock.mockImplementation(async () => { throw new Error('Failed to start the video encoder: no supported profile'); });
         const r = mount();
-        await act(async () => { vi.advanceTimersByTime(800); });
-        await act(async () => { await Promise.resolve(); });
+        await runWholeSchedule();
         const btn = r.container.querySelector('.voice-clip-arm')!;
         expect(btn.className).toContain('nudge');
         expect(btn.getAttribute('title')).toMatch(/Auto-arm did not start/);
-        expect(armNativeMock).toHaveBeenCalledTimes(1);
+        // Every attempt was spent before saying so — a throw is no more final
+        // than a silent idle, and both were the timing race in practice.
+        expect(armNativeMock).toHaveBeenCalledTimes(AUTO_ARM_BACKOFF_MS.length);
     });
 
     it("'already armed' (the user beat the timer to the button) is not treated as a failure", async () => {
         setMode('auto');
         armNativeMock.mockImplementation(async () => { throw new Error('already armed'); });
         const r = mount();
-        await act(async () => { vi.advanceTimersByTime(800); });
-        await act(async () => { await Promise.resolve(); });
+        await runWholeSchedule();
         // armNative() rejecting always reads as a failure here (there is no
         // gesture-vs-genuine-error distinction to make anymore, unlike the
-        // old getDisplayMedia path) — the nudge fires, which is harmless
-        // since the user already armed it themselves.
+        // old getDisplayMedia path) — the nudge fires once the schedule is
+        // spent, which is harmless since the user already armed it themselves.
         expect(r.container.querySelector('.voice-clip-arm')!.className).toContain('nudge');
     });
 

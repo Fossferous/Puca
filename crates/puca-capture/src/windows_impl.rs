@@ -15,7 +15,7 @@
 use super::{CaptureError, Frame, OutputInfo, Rotation};
 use windows::core::Interface;
 use windows::Win32::Foundation::E_ACCESSDENIED;
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
@@ -23,7 +23,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
+    IDXGIResource,
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
     DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
@@ -76,36 +77,79 @@ struct CursorState {
     visible: bool,
 }
 
-fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptureError> {
+/// A device on the adapter that OWNS `monitor`, plus a description of it for
+/// the log.
+///
+/// WHY THE ADAPTER IS EXPLICIT. This used to be
+/// `D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, ..)` with a WARP
+/// fallback: "whatever adapter Windows calls default for this process", which
+/// is not a property of the machine at all. A per-app graphics preference, a
+/// hybrid-GPU heuristic or a driver update can move it with no code change,
+/// and `DuplicateOutput` requires a device on the adapter owning the output.
+/// Measured on a six-adapter machine (2026-09-09,
+/// `examples/dxgi-topology.rs`): the owning adapter always succeeds, and every
+/// other adapter fails, so binding to the owner is correct by construction
+/// rather than by luck.
+///
+/// AND NO WARP. A WARP device is a software rasteriser with no display
+/// attached; the same measurement showed it cannot duplicate ANY output.
+/// Falling back to it turned "no hardware device right now" into "no monitor
+/// can be captured", reported as a driver-support error — a fallback that
+/// cannot do the one job the device exists for is worse than no fallback,
+/// because it hides why.
+fn create_device_for(
+    monitor: usize,
+) -> Result<(ID3D11Device, ID3D11DeviceContext, String), CaptureError> {
+    let adapter = unsafe { adapter_of_output(monitor) }.ok_or_else(|| {
+        CaptureError::Failed(format!("no monitor at index {monitor}"))
+    })?;
+    let name = unsafe { adapter.GetDesc1() }
+        .map(|d| String::from_utf16_lossy(&d.Description).trim_end_matches('\0').trim().to_string())
+        .unwrap_or_else(|_| "<unnamed adapter>".to_string());
+
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
+    // D3D_DRIVER_TYPE_UNKNOWN is REQUIRED when an adapter is passed; HARDWARE
+    // with a non-null adapter is E_INVALIDARG.
+    let hr = unsafe {
+        D3D11CreateDevice(
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            None,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    };
+    match (hr.is_ok(), device, context) {
+        (true, Some(d), Some(c)) => Ok((d, c, name)),
+        (_, _, _) => Err(CaptureError::Failed(format!(
+            "could not create a D3D11 device on the adapter that owns monitor {monitor} ({name})"
+        ))),
+    }
+}
 
-    // WARP as a fallback: a headless or RDP session may have no hardware
-    // device, and refusing to capture there would rule out exactly the
-    // unattended machines this is for.
-    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
-        let hr = unsafe {
-            D3D11CreateDevice(
-                None,
-                driver,
-                None,
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if hr.is_ok() {
-            break;
+/// The adapter that owns capture-index `monitor`, in the same walk order
+/// `each_output` uses.
+unsafe fn adapter_of_output(monitor: usize) -> Option<IDXGIAdapter1> {
+    let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+    let mut seen = 0usize;
+    let mut adapter_index = 0u32;
+    while let Ok(adapter) = factory.EnumAdapters1(adapter_index) {
+        let mut output_index = 0u32;
+        while adapter.EnumOutputs(output_index).is_ok() {
+            if seen == monitor {
+                return Some(adapter);
+            }
+            seen += 1;
+            output_index += 1;
         }
+        adapter_index += 1;
     }
-
-    match (device, context) {
-        (Some(d), Some(c)) => Ok((d, c)),
-        _ => Err(CaptureError::Failed("could not create a D3D11 device".into())),
-    }
+    None
 }
 
 /// Visit every output across every adapter, in the ONE order this crate calls
@@ -244,8 +288,18 @@ fn is_transient_display_state(code: windows::core::HRESULT) -> bool {
 impl ScreenCapture {
     /// Start capturing `monitor` (0 = the first enumerated output).
     pub fn new(monitor: usize) -> Result<Self, CaptureError> {
-        let (device, context) = create_device()?;
-        let duplication = duplicate(&device, monitor)?;
+        let (device, context, adapter) = create_device_for(monitor)?;
+        // NAME THE ADAPTER IN THE ERROR. This crate deliberately has no logging
+        // dependency, and when duplication fails the first question is always
+        // which GPU the device landed on — three wrong theories were chased for
+        // want of exactly that. Putting it in the message gets it into the
+        // caller's log AND in front of the person who hit it.
+        let duplication = duplicate(&device, monitor).map_err(|e| match e {
+            CaptureError::Failed(msg) => {
+                CaptureError::Failed(format!("{msg} [monitor {monitor} on adapter '{adapter}']"))
+            }
+            other => other,
+        })?;
         let rotation = rotation_of(monitor);
         Ok(Self {
             device,

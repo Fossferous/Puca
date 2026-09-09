@@ -19,7 +19,9 @@
 #![cfg(windows)]
 
 use windows::core::Interface;
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP,
+};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
@@ -38,6 +40,27 @@ fn device_on(adapter: Option<&IDXGIAdapter>) -> Option<ID3D11Device> {
         D3D11CreateDevice(
             adapter,
             if adapter.is_some() { D3D_DRIVER_TYPE_UNKNOWN } else { D3D_DRIVER_TYPE_HARDWARE },
+            None,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .ok()?;
+    }
+    device
+}
+
+/// A device by DRIVER TYPE with no adapter — exactly what
+/// `windows_impl.rs::create_device` does, including its WARP fallback.
+fn device_by_driver(driver: D3D_DRIVER_TYPE) -> Option<ID3D11Device> {
+    let mut device: Option<ID3D11Device> = None;
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            driver,
             None,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             None,
@@ -89,6 +112,16 @@ fn main() -> windows::core::Result<()> {
         }
 
         let default_device = device_on(None);
+        // THE QUESTION THIS PROBE WAS EXTENDED TO ANSWER. create_device() tries
+        // HARDWARE and falls back to WARP. A WARP device is a software
+        // rasterizer with no display attached — if duplication on it fails, the
+        // fallback silently converts "no hardware device right now" into "no
+        // monitor can be captured", which is exactly what a member sees.
+        let warp_device = device_by_driver(D3D_DRIVER_TYPE_WARP);
+        println!(
+            "WARP device: {}",
+            if warp_device.is_some() { "created" } else { "could not be created" }
+        );
         println!(
             "\ndevice on the DEFAULT adapter for THIS process: {}\n",
             if default_device.is_some() { "created" } else { "FAILED" }
@@ -109,6 +142,7 @@ fn main() -> windows::core::Result<()> {
                     .unwrap_or_else(|| "<no desc>".into());
                 println!("capture index {seen} — owned by adapter {aidx} ({aname}) — {rect}");
                 println!("    with the process default adapter: {}", try_dup(&output, &default_device));
+                println!("    with a WARP (software) device:     {}", try_dup(&output, &warp_device));
 
                 // THE MATRIX: every adapter against this output.
                 for (oa_idx, oa_name, other) in &adapters {
