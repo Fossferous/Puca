@@ -18,10 +18,18 @@
 // a Ryzen 7 7800X3D — several times faster than the laptops this feature
 // exists for. The ratio between the rungs is the transferable part.
 //
+// AND WHAT HARDWARE ENCODE WOULD BE WORTH. `HARDWARE=1` drops the
+// software-forcing flag and runs the same rungs on the GPU encoder, which is
+// the comparison that decides how much effort the "why does the app get
+// OpenH264" question deserves. Each run PROVES which encoder it used and exits
+// non-zero if it got the other one.
+//
 // Usage (from frontend/):
 //   node e2e/encode-cost.mjs
+//   HARDWARE=1 MAX_KBPS=20000 node e2e/encode-cost.mjs
 //   SECONDS=20 CHANNEL=msedge node e2e/encode-cost.mjs
 import { chromium } from '@playwright/test';
+import http from 'node:http';
 
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const SECONDS = Number(process.env.SECONDS || 10);
@@ -50,14 +58,37 @@ const RUNGS = [
     { label: '1440p60', w: 2560, h: 1440, fps: 60 },
 ];
 
+// A REAL ORIGIN AND A REAL CAPTURE, or the encoder cannot be identified.
+// `encoderImplementation` and `powerEfficientEncoder` are withheld from
+// getStats unless the document holds an active getUserMedia/getDisplayMedia
+// capture — Chromium's anti-fingerprinting gate
+// (`ExposeHardwareCapabilityStats` -> `UserMediaClient::IsCapturing`). The
+// first version of this rig sent a canvas track from about:blank and could
+// therefore only ever print `encoder=(absent)`, which is exactly what it did,
+// leaving "software-forced" as an unverified claim about its own run.
+const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><meta charset=utf-8><title>encode-cost</title><body>rig</body>');
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const origin = `http://127.0.0.1:${server.address().port}/`;
+
 const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
-    // Forced software, because that is what the app actually gets.
-    args: ['--autoplay-policy=no-user-gesture-required', '--disable-accelerated-video-encode'],
+    args: [
+        '--autoplay-policy=no-user-gesture-required',
+        // Forced software, because that is what the app actually gets. Proven
+        // per run below rather than assumed from the flag.
+        ...(process.env.HARDWARE ? [] : ['--disable-accelerated-video-encode']),
+        // A fake camera, held open purely to satisfy the capture gate above.
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+    ],
 });
-const page = await browser.newPage();
-await page.goto('about:blank');
+const ctx = await browser.newContext({ permissions: ['camera'] });
+const page = await ctx.newPage();
+await page.goto(origin);
 
 const measure = async ({ w, h, fps }) => page.evaluate(async ({ w, h, fps, SECONDS, CODEC, START_KBPS, MAX_KBPS }) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -85,6 +116,10 @@ const measure = async ({ w, h, fps }) => page.evaluate(async ({ w, h, fps, SECON
     const stream = canvas.captureStream(fps);
     const track = stream.getVideoTracks()[0];
     track.contentHint = 'motion'; // what a game share is
+
+    // Held, not sent: its only job is to make the document "capturing" so the
+    // encoder name is exposed. The canvas above is still what gets encoded.
+    const gate = await navigator.mediaDevices.getUserMedia({ video: { width: 160, height: 120 } });
 
     const pc1 = new RTCPeerConnection();
     const pc2 = new RTCPeerConnection();
@@ -140,7 +175,7 @@ a=fmtp:${pt} x-google-start-bitrate=${START_KBPS}`);
     const a = await read();
     await sleep(SECONDS * 1000);
     const b = await read();
-    clearInterval(timer); pc1.close(); pc2.close();
+    clearInterval(timer); pc1.close(); pc2.close(); gate.getTracks().forEach(t => t.stop());
 
     const frames = (b?.framesEncoded ?? 0) - (a?.framesEncoded ?? 0);
     const encodeMs = ((b?.totalEncodeTime ?? 0) - (a?.totalEncodeTime ?? 0)) * 1000;
@@ -156,7 +191,7 @@ a=fmtp:${pt} x-google-start-bitrate=${START_KBPS}`);
     };
 }, { w, h, fps, SECONDS, CODEC, START_KBPS, MAX_KBPS });
 
-console.log(`channel=${CHANNEL} codec=${CODEC} software-forced cap=${MAX_KBPS}kbps start=${START_KBPS}kbps window=${SECONDS}s\n`);
+console.log(`channel=${CHANNEL} codec=${CODEC} ${process.env.HARDWARE ? 'HARDWARE (HARDWARE=1)' : 'software-forced'} cap=${MAX_KBPS}kbps start=${START_KBPS}kbps window=${SECONDS}s\n`);
 console.log('rung        produced        fps   encode ms/frame   ms/sec of video   limit');
 const rows = [];
 for (const rung of RUNGS) {
@@ -174,6 +209,22 @@ for (const rung of RUNGS) {
 // something else, and printing ratios off it would be worse than printing
 // nothing. This is the check the first run of this rig did not have, which
 // is why its output looked like a result.
+// PROVE the run measured what it claims to have measured. Without this the
+// only evidence for "software" was that a flag had been passed, which the
+// first version of this rig could not check because it never saw an encoder
+// name at all.
+const wantSoftware = !process.env.HARDWARE;
+const misencoded = rows.filter(r => wantSoftware
+    ? !/OpenH264|libvpx|libaom/.test(String(r.encoder))
+    : !/MediaFoundation|NVIDIA|Intel|AMD/.test(String(r.encoder)));
+if (misencoded.length) {
+    console.log(`\nMEASUREMENT INVALID: expected ${wantSoftware ? 'SOFTWARE' : 'HARDWARE'} encoding`);
+    for (const r of misencoded) console.log(`  ${r.label}: encoder=${r.encoder}`);
+    await browser.close();
+    server.close();
+    process.exit(1);
+}
+
 const wrong = rows.filter(r => r.size !== `${r.w}x${r.h}`);
 if (wrong.length) {
     console.log(`\nMEASUREMENT INVALID: ${wrong.length} of ${rows.length} rungs never reached the requested size`);
@@ -183,6 +234,7 @@ if (wrong.length) {
           + ` drops resolution to hold the frame rate. Re-run with MAX_KBPS=20000 to measure encode cost.`
         : 'Raise START_KBPS or SECONDS. No ratios printed.');
     await browser.close();
+    server.close();
     process.exit(1);
 }
 
@@ -198,3 +250,4 @@ for (const [from, to] of [['1440p60', '1080p60'], ['1080p60', '720p60'], ['1080p
 console.log(`\nencoder reported: ${rows[0]?.encoder}`);
 console.log('Read the RATIOS, not the milliseconds — these are one machine.');
 await browser.close();
+server.close();

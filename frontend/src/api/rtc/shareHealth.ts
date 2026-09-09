@@ -127,26 +127,36 @@ export function shareDimensions(resolution: string): { width: number; height: nu
  * RESOLUTION FIRST, THEN FRAME RATE, one notch at a time.
  *
  * MEASURED, so the trade is explicit rather than assumed
- * (frontend/e2e/encode-cost.mjs, software H.264, a Ryzen 7 7800X3D — read the
- * ratios, not the milliseconds, because that CPU is several times faster than
- * the laptops this feature exists for):
+ * (frontend/e2e/encode-cost.mjs, H.264, a Ryzen 7 7800X3D + RTX 4080 SUPER,
+ * each run proving which encoder it actually used — read the RATIOS, not the
+ * milliseconds, because that machine is several times faster than the laptops
+ * this feature exists for). Encode milliseconds per second of video:
  *
- *     720p30    170 ms of encode per second of video
- *     720p60    373
- *     1080p30   309
- *     1080p60   554
- *     1440p60   865        (87% of one core, continuously, on a fast CPU)
+ *                software (OpenH264)   hardware (NVENC)
+ *     720p30            158                  56
+ *     720p60            284                 106
+ *     1080p30           238                 103
+ *     1080p60           484                 195
+ *     1440p60           712                 331
  *
- * So a step of RESOLUTION saves 33–36% and a step of FRAME RATE saves 44–54%.
- * Frame rate is the bigger lever and is deliberately not the first one pulled,
- * for the same reason the publish sets `degradationPreference:
- * 'maintain-framerate'`: a choppy game stream is worse than a blurry one, and
- * this is the same judgement applied to the same trade. Somebody who wants the
- * larger saving can take a second step, or set it directly in the dialog.
+ * Two things fall out. First, in software a 1440p60 share costs 71% of one
+ * core CONTINUOUSLY on a fast CPU — on a laptop several times slower it is not
+ * affordable at all, which is the whole reason this module exists. Second,
+ * hardware encode is worth 54–65%, i.e. MORE than any single step on this
+ * ladder; if the app can be got onto it (see the note in diagnosticsReport.ts)
+ * that beats every option here.
+ *
+ * Within the ladder: a step of RESOLUTION saves 32–41%, a step of FRAME RATE
+ * saves 44–51%. Frame rate is the bigger lever and is deliberately not the
+ * first one pulled, for the same reason the publish sets
+ * `degradationPreference: 'maintain-framerate'`: a choppy game stream is worse
+ * than a blurry one, and this is the same judgement applied to the same trade.
+ * Somebody who wants the larger saving can take a second step, or set it
+ * directly in the dialog.
  *
  * Predictability is the other half. A "make it cheaper" button that raises the
- * frame rate because the arithmetic said so — 720p60 costs 373 against
- * 1080p30's 309, so a pixels-per-second ladder would do exactly that — is a
+ * frame rate because the arithmetic said so — 720p60 costs 284 against
+ * 1080p30's 238, so a pixels-per-second ladder would do exactly that — is a
  * button nobody trusts twice.
  *
  * An unrecognised stored resolution steps to '1080' rather than returning null:

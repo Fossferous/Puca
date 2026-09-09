@@ -1706,6 +1706,11 @@ export class WebRTCManager {
                                 limitDurations: r.qualityLimitationDurations,
                             }),
                             ...(r.encoderImplementation !== undefined && { encoder: r.encoderImplementation }),
+                        // The one field that settles hardware vs software without
+                        // parsing an encoder name. Chrome 112+; omitted entirely
+                        // unless the document holds an active capture, which a
+                        // real share does.
+                        ...(r.powerEfficientEncoder !== undefined && { hwEncoder: r.powerEfficientEncoder }),
                             ...(r.decoderImplementation !== undefined && { decoder: r.decoderImplementation }),
                         });
                     }

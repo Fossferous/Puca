@@ -56,12 +56,28 @@ describe('the screen-share publish contract', () => {
     });
 
     it('stays on H.264, which is the only codec that can carry the ladder', () => {
-        // Measured on the engine the app ships (frontend/e2e/share-ramp-2pc.mjs):
-        // h264 sustains 1920x1080@56 / 960x540@56 / 480x270@16 because it
-        // encodes in hardware. The same three rungs in VP8 fall to 19 / 7 / 4
-        // fps in software. Switching codec here without re-measuring would turn
-        // a fix for one viewer into a regression for everybody.
+        // Measured with frontend/e2e/share-ramp-2pc.mjs: h264 sustains all
+        // three rungs at 56 / 56 / 16 fps where the same ladder in VP8 falls
+        // to 19 / 7 / 4. Switching codec here without re-measuring would turn
+        // a fix for one viewer into a regression for everybody. (That run used
+        // a hardware H.264 encoder the shipped app does not get — which is why
+        // the ladder is off by default, not why h264 is the right codec.)
         expect(screenSharePublishOptions(true).videoCodec).toBe('h264');
+    });
+
+    it('keeps every rung above the height Chromium encodes in software', () => {
+        // MEASURED 2026-09-09, RTX 4080 SUPER, real capture, bitrate pinned:
+        // 640x360 used the NVIDIA MFT, 576x324 and 480x270 both fell to
+        // OpenH264 — and with kForceSoftwareForRtcLowResolutions disabled as a
+        // positive control, all of them used the MFT. A rung below this line
+        // can NEVER be hardware-encoded on any machine, so publishing one
+        // guarantees a software encode on exactly the people the ladder is
+        // meant to spare. The old bottom rung was 480x270.
+        const SOFTWARE_FLOOR_LINES = 360;
+        for (const l of screenSharePublishOptions(true).screenShareSimulcastLayers) {
+            expect(l.height, `${l.width}x${l.height} is below Chromium's hardware floor`)
+                .toBeGreaterThanOrEqual(SOFTWARE_FLOOR_LINES);
+        }
     });
 
     it('still protects frame rate over sharpness under congestion', () => {

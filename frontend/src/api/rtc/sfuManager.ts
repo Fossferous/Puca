@@ -116,19 +116,37 @@ const SHARE_BITRATE = 4_500_000;
 /// arrived whole. Two smaller rungs give the server something to fall back to.
 ///
 /// WHY IT IS OFF BY DEFAULT ANYWAY. The measurement that justified it
-/// (frontend/e2e/share-ramp-2pc.mjs: h264 sustaining 1920x1080@56 /
-/// 960x540@56 / 480x270@16 where VP8 collapsed to 19/7/4) was taken in
-/// headless Edge, which used a HARDWARE H.264 encoder. The shipped app does
-/// not get one: every `stream-diag` line in the field reads
-/// `encoder=OpenH264`. Three software encodes cost roughly three times one,
-/// and the machines that would pay it are the ones already reporting that
-/// sharing makes their game stutter. So the ladder is offered, not imposed —
-/// see `shareSimulcast` in settingsStore.ts.
+/// (frontend/e2e/share-ramp-2pc.mjs: h264 sustaining three rungs at 56/56/16
+/// fps where VP8 collapsed to 19/7/4) was taken in headless Edge, which used a
+/// HARDWARE H.264 encoder. The shipped app does not get one: every
+/// `stream-diag` line in the field reads `encoder=OpenH264`. Three software
+/// encodes cost roughly three times one, and the machines that would pay it
+/// are the ones already reporting that sharing makes their game stutter. So
+/// the ladder is offered, not imposed — see `shareSimulcast` in
+/// settingsStore.ts.
 ///
 /// THE TOP RUNG IS SHARE_BITRATE, and a subscriber only ever receives ONE rung,
 /// so the backend's per-subscriber charge (`SHARE_KBPS`, src/sfu.rs) stays the
 /// correct worst case. A test there reads this file to keep the two in step.
-const SHARE_LOW = new VideoPreset(480, 270, 400_000, 30);
+/// 640x360 AND NOT 480x270, WHICH IS WHAT THIS WAS. Chromium refuses to use a
+/// hardware encoder below 360 lines, on purpose and regardless of the card:
+/// `kForceSoftwareForRtcLowResolutions` in rtc_video_encoder.cc, whose
+/// `force_sw_height` is 360 (270 for AV1). Measured 2026-09-09 on an RTX 4080
+/// SUPER with a real capture, H.264, bitrate pinned so congestion could not be
+/// the explanation:
+///
+///     1280x720  -> NVIDIA H.264 Encoder MFT
+///     640x360   -> NVIDIA H.264 Encoder MFT
+///     576x324   -> OpenH264          (and downscaled again, to 384x216)
+///     480x270   -> OpenH264          (downscaled to 320x180)
+///
+/// and with `--disable-features=ForceSoftwareForRtcLowResolutions` as a
+/// positive control, ALL FIVE moved to the hardware encoder. So the old bottom
+/// rung was software by design on every machine, forever, and one step up
+/// makes it hardware-eligible for nothing. The rule exists because hardware
+/// encoders look bad at tiny sizes — which is an argument for staying above
+/// the line, not below it.
+const SHARE_LOW = new VideoPreset(640, 360, 600_000, 30);
 const SHARE_MID = new VideoPreset(960, 540, 1_200_000, 60);
 
 /**
@@ -895,6 +913,11 @@ export class SfuManager {
                             limitDurations: r.qualityLimitationDurations,
                         }),
                         ...(r.encoderImplementation !== undefined && { encoder: r.encoderImplementation }),
+                        // The one field that settles hardware vs software without
+                        // parsing an encoder name. Chrome 112+; omitted entirely
+                        // unless the document holds an active capture, which a
+                        // real share does.
+                        ...(r.powerEfficientEncoder !== undefined && { hwEncoder: r.powerEfficientEncoder }),
                         ...(r.kind === 'video' && { latency }),
                     });
                 });

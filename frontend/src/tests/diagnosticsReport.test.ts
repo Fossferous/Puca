@@ -73,26 +73,69 @@ describe('the diagnostics report', () => {
         await expect(copyDiagnostics()).resolves.toEqual(expect.any(String));
     });
 
-    it('asks whether any codec can be encoded in HARDWARE, and survives a refusal', async () => {
-        // The one fact that decides whether the encode can be fixed inside the
-        // browser or has to move out of it. `powerEfficient` is the standard
-        // signal, and the answer has to come from the AFFECTED machine: a rig
-        // with a fast card says nothing about the laptop that is stuttering.
+    it('asks WebCodecs whether a codec can be encoded in hardware, not mediaCapabilities', async () => {
+        // THE BUG THIS PINS. The first version of this asked
+        // `mediaCapabilities.encodingInfo({type:'webrtc'})`. Measured on an
+        // RTX 4080 SUPER, that returned powerEfficient=false at the exact
+        // moment outbound-rtp reported the NVIDIA H.264 Encoder MFT with
+        // powerEfficientEncoder=true, in the same renderer. A diagnostic that
+        // is confidently wrong is worse than none, because it ends the
+        // investigation. WebCodecs `isConfigSupported` with
+        // 'prefer-hardware' answered correctly on the same machine.
         const encodingInfo = vi.fn().mockResolvedValue({ supported: true, smooth: true, powerEfficient: false });
         Object.defineProperty(navigator, 'mediaCapabilities', { value: { encodingInfo }, configurable: true });
+        const isConfigSupported = vi.fn().mockResolvedValue({ supported: true });
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+
         const lines = (await encodingSupportLines()).join('\n');
-        expect(lines).toContain('video/H264');
-        expect(lines).toContain('hardware=false');
-        expect(encodingInfo).toHaveBeenCalled();
+        expect(lines).toContain('H.264 High');
+        expect(lines).toContain('hardware=true');
+        expect(isConfigSupported).toHaveBeenCalled();
+        // The whole point: the lying API must not be consulted at all.
+        expect(encodingInfo).not.toHaveBeenCalled();
+    });
 
-        // POSITIVE CONTROL: it reports hardware when the machine has it, so
-        // the assertion above is about the machine and not about a probe that
-        // always says no.
-        encodingInfo.mockResolvedValue({ supported: true, smooth: true, powerEfficient: true });
-        expect((await encodingSupportLines()).join('\n')).toContain('hardware=true');
+    it('asks for hardware specifically, at the sizes a share uses', async () => {
+        // 'prefer-hardware' is the entire question. Without it the answer is
+        // "can this be encoded", which is yes on every machine ever made and
+        // tells nobody anything.
+        const isConfigSupported = vi.fn().mockResolvedValue({ supported: true });
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+        await encodingSupportLines();
+        for (const call of isConfigSupported.mock.calls) {
+            expect(call[0].hardwareAcceleration).toBe('prefer-hardware');
+            expect(call[0].width).toBeGreaterThanOrEqual(1920);
+        }
+    });
 
-        // And a browser without the API at all says so rather than throwing.
-        Object.defineProperty(navigator, 'mediaCapabilities', { value: undefined, configurable: true });
-        expect((await encodingSupportLines()).join('\n')).toContain('unavailable');
+    it('reports a refusal as a refusal, and never as hardware', async () => {
+        // POSITIVE CONTROL for the assertion above: a machine that says no
+        // must read as no, or 'hardware=true' proves nothing.
+        const isConfigSupported = vi.fn().mockResolvedValue({ supported: false });
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+        expect((await encodingSupportLines()).join('\n')).toContain('hardware=false');
+
+        // A throw is not a "no" — it is a question that could not be asked,
+        // and the report says which.
+        isConfigSupported.mockRejectedValue(new Error('bad codec string'));
+        const thrown = (await encodingSupportLines()).join('\n');
+        expect(thrown).toContain('asked and refused');
+        expect(thrown).not.toContain('hardware=false');
+    });
+
+    it('survives a browser with no WebCodecs at all', async () => {
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: undefined, configurable: true });
+        expect((await encodingSupportLines()).join('\n')).toContain('WebCodecs unavailable');
+    });
+
+    it('warns about the floor that makes hardware support irrelevant', async () => {
+        // Chromium encodes anything under 360 lines in SOFTWARE on purpose,
+        // whatever the card can do. Measured: 640x360 hardware, 576x324
+        // software, flag flipped as a positive control. Somebody reading a
+        // report full of hardware=true while their bottom simulcast rung is
+        // 480x270 needs this sentence.
+        const isConfigSupported = vi.fn().mockResolvedValue({ supported: true });
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+        expect((await encodingSupportLines()).join('\n')).toContain('360 lines');
     });
 });

@@ -22,6 +22,7 @@
 //   CHANNEL=msedge CODEC=video/H264 HINT=motion node e2e/encoder-probe.mjs
 //   ARGS="--disable-accelerated-video-encode" node e2e/encoder-probe.mjs
 import { chromium } from '@playwright/test';
+import http from 'node:http';
 
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const CODEC = process.env.CODEC || 'video/H264';
@@ -31,13 +32,32 @@ const EXTRA = (process.env.ARGS || '').split(' ').filter(Boolean);
 const W = Number(process.env.W || 1920);
 const H = Number(process.env.H || 1080);
 
+// A REAL ORIGIN AND A REAL CAPTURE. `encoderImplementation` is withheld from
+// getStats unless the document holds an active capture (Chromium's
+// anti-fingerprinting gate, `ExposeHardwareCapabilityStats` ->
+// `UserMediaClient::IsCapturing`), and about:blank is not a secure context.
+// This probe's FIRST version had neither, so it answered `(absent)` to the one
+// question it exists to ask — and that absence was very nearly read as
+// "this machine has no hardware encoder".
+const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><meta charset=utf-8><title>encoder-probe</title><body>rig</body>');
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const origin = `http://127.0.0.1:${server.address().port}/`;
+
 const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
-    args: ['--autoplay-policy=no-user-gesture-required', ...EXTRA],
+    args: [
+        '--autoplay-policy=no-user-gesture-required',
+        '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+        ...EXTRA,
+    ],
 });
-const page = await browser.newPage();
-await page.goto('about:blank');
+const ctx = await browser.newContext({ permissions: ['camera'] });
+const page = await ctx.newPage();
+await page.goto(origin);
 
 const result = await page.evaluate(async ({ CODEC, HINT, SECONDS, W, H }) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -61,6 +81,8 @@ const result = await page.evaluate(async ({ CODEC, HINT, SECONDS, W, H }) => {
         ctx.fillStyle = '#fff'; ctx.fillRect((frame * 19) % W, 0, 60, H);
     }, 1000 / 60);
 
+    // Held open purely to satisfy the capture gate; the canvas is the source.
+    const gate = await navigator.mediaDevices.getUserMedia({ video: { width: 160, height: 120 } });
     const stream = canvas.captureStream(60);
     const track = stream.getVideoTracks()[0];
     // A screen share sets a content hint; the encoder choice can depend on it.
@@ -97,7 +119,7 @@ const result = await page.evaluate(async ({ CODEC, HINT, SECONDS, W, H }) => {
 
     let out = null;
     (await pc1.getStats()).forEach(r => { if (r.type === 'outbound-rtp' && r.kind === 'video') out = r; });
-    clearInterval(timer); pc1.close(); pc2.close();
+    clearInterval(timer); pc1.close(); pc2.close(); gate.getTracks().forEach(t => t.stop());
 
     return {
         codecsOffered: available,
@@ -123,3 +145,4 @@ if (result.encoder === '(absent)') {
     console.log(`  outbound-rtp keys  : ${result.outboundKeys.join(' ')}`);
 }
 await browser.close();
+server.close();

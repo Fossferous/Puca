@@ -57,15 +57,40 @@ export function environmentLines(now: string, version: string): string[] {
  * by OpenH264 — software — on machines whose own native agent encodes with an
  * NVIDIA hardware encoder for other features. Software H.264 at 1080p is the
  * single largest cost a share imposes, and it is why sharing can make a game
- * stutter. Whether that is fixable inside the browser, or needs the encode
- * moved out of it entirely, turns on exactly one fact: does this browser get
- * offered a hardware encoder at all.
+ * stutter. Whether that is fixable inside the browser turns on one fact: does
+ * this browser get offered a hardware encoder at all.
  *
- * `powerEfficient` is the standard signal for it, and `encodingInfo` is the
- * standard way to ask. The WebGL renderer string is here for the other half:
- * a machine with several adapters — an integrated GPU, a discrete one, a
- * couple of virtual displays — can leave the browser on one that has no
- * encoder, and the string names which one it landed on.
+ * WHY NOT `mediaCapabilities.encodingInfo`, WHICH IS THE OBVIOUS ANSWER. It
+ * lies. This function shipped using it and had to be rewritten within the
+ * hour. Measured 2026-09-09 on an RTX 4080 SUPER, in ONE renderer, at the same
+ * moment:
+ *
+ *   encodingInfo({type:'webrtc', contentType:'video/H264', 1920x1080})
+ *       -> powerEfficient: false
+ *   outbound-rtp, that instant, on a live 1920x1080 H.264 send
+ *       -> encoderImplementation: "MediaFoundationVideoEncodeAccelerator
+ *                                  (NVIDIA H.264 Encoder MFT)"
+ *          powerEfficientEncoder: true
+ *
+ * It is not a cold-start artefact — cold, after getUserMedia, and mid-send all
+ * gave false. It is not hardcoded either: `decodingInfo` on the same build
+ * discriminates correctly. The webrtc ENCODE answer is simply wrong, and the
+ * W3C spec leaves `powerEfficient` "to the user agent", so this is permitted
+ * rather than a bug we can wait out. Shipping it would have written "your
+ * machine has no hardware encoder" into every user's report regardless of
+ * truth — the worst kind of diagnostic, one that is confidently wrong.
+ *
+ * WHAT IS USED INSTEAD. WebCodecs `VideoEncoder.isConfigSupported` with
+ * `hardwareAcceleration: 'prefer-hardware'`, which on that same machine
+ * returned exactly NVENC's real matrix — H.264 High yes, AV1 yes, VP8 and VP9
+ * no (no NVIDIA part has ever encoded either). The in-call truth
+ * (`encoderImplementation`, `powerEfficientEncoder`) is in the SFU/mesh
+ * sections below and is the final word; this section is what can be answered
+ * before a call starts.
+ *
+ * The WebGL renderer string is here for the other half: a machine with several
+ * adapters can leave the browser on one that has no encoder, and the string
+ * names which one it landed on.
  */
 export async function encodingSupportLines(): Promise<string[]> {
     const out: string[] = [];
@@ -76,26 +101,39 @@ export async function encodingSupportLines(): Promise<string[]> {
     } catch {
         out.push('gpu       (unavailable)');
     }
-    const caps = (navigator as Navigator & {
-        mediaCapabilities?: { encodingInfo(c: unknown): Promise<{ supported: boolean; smooth: boolean; powerEfficient: boolean }> };
-    }).mediaCapabilities;
-    if (!caps?.encodingInfo) {
-        out.push('encoding  (mediaCapabilities.encodingInfo unavailable)');
+    const VE = (globalThis as { VideoEncoder?: {
+        isConfigSupported(c: unknown): Promise<{ supported?: boolean }>;
+    } }).VideoEncoder;
+    if (!VE?.isConfigSupported) {
+        // WebCodecs needs a secure context. The desktop shell and the web app
+        // both have one; saying which is missing beats a bare "unavailable".
+        out.push(`encoding  (WebCodecs unavailable${window.isSecureContext ? '' : ' — not a secure context'})`);
         return out;
     }
-    for (const contentType of ['video/H264', 'video/VP8', 'video/VP9', 'video/AV1']) {
+    for (const [label, codec] of [
+        ['H.264 High', 'avc1.640028'],
+        ['H.264 Base', 'avc1.42E01F'],
+        ['VP8', 'vp8'],
+        ['VP9', 'vp09.00.10.08'],
+        ['AV1', 'av01.0.04M.08'],
+    ]) {
         for (const [w, h] of [[1920, 1080], [2560, 1440]]) {
             try {
-                const r = await caps.encodingInfo({
-                    type: 'webrtc',
-                    video: { contentType, width: w, height: h, bitrate: 6_000_000, framerate: 30 },
+                const r = await VE.isConfigSupported({
+                    codec, width: w, height: h, bitrate: 4_500_000, framerate: 30,
+                    hardwareAcceleration: 'prefer-hardware',
                 });
-                out.push(`encoding  ${contentType.padEnd(10)} ${w}x${h}  supported=${r.supported} smooth=${r.smooth} hardware=${r.powerEfficient}`);
+                out.push(`encoding  ${label.padEnd(11)} ${w}x${h}  hardware=${r.supported === true}`);
             } catch (e) {
-                out.push(`encoding  ${contentType} ${w}x${h}  (asked and refused: ${e instanceof Error ? e.message : String(e)})`);
+                out.push(`encoding  ${label} ${w}x${h}  (asked and refused: ${e instanceof Error ? e.message : String(e)})`);
             }
         }
     }
+    // The floor nobody expects. Chromium encodes ANYTHING under 360 lines in
+    // software on purpose (kForceSoftwareForRtcLowResolutions), whatever the
+    // hardware says — measured on the same machine: 640x360 hardware,
+    // 576x324 software, with the flag flipped as a positive control.
+    out.push('encoding  note: Chromium forces SOFTWARE below 360 lines regardless of hardware');
     return out;
 }
 
