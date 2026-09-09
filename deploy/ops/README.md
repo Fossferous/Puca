@@ -573,6 +573,21 @@ the crowd. Three checks, cheapest first:
   Also publishes `SHA256SUMS.txt`, the release notes and the privacy statement
   beside the installers, and refuses to ship a download page that does not
   advertise the release or still names a placeholder domain.
+- `scan-installers.sh` — asks Windows Defender about the two installers BEFORE
+  they ship, and exits non-zero if it objects. 0.9.806 shipped and immediately
+  tripped `Trojan:Win32/Bearfoos.B!ml` on every desktop that auto-updated,
+  despite the served bytes matching the built bytes, every binary inside
+  scanning clean, and 0.9.803/804/805 all passing under the same definitions —
+  a rebuild of the identical commit passed too. An `!ml` verdict is a score over
+  the whole unsigned NSIS bundle, and one build can land the wrong side of the
+  line. This cannot stop that happening; it stops us finding out from a user.
+  Two traps it handles, both of which would otherwise make it a check that
+  cannot fail: MpCmdRun refuses paths containing the fada in "Púca" and reports
+  `was skipped` while exiting 0, so it scans an ASCII copy and treats `skipped`
+  as a FAILURE; and it is verified against the EICAR test file, so an `ok` means
+  the scanner really looked. The durable fix is a certificate —
+  `frontend/scripts/sign-windows.mjs` is already wired into Tauri's
+  `signCommand` and does nothing only because none is configured.
 - `check-versions.sh` — every surface (desktop `latest.json`, `/app-version`,
   the mobile OTA manifest, the download page, the web bundle, the CSP header)
   must agree on one version on every host; `--preflight` says whether the

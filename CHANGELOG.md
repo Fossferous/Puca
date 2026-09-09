@@ -4,6 +4,28 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.807 — 2026-09-09
+
+The same app as 0.9.806, rebuilt. Windows Defender objected to the 0.9.806
+installer and this one it does not.
+
+### Fixed
+- **Windows Defender flagged the 0.9.806 update as a threat, and it was wrong.**
+  If you took that update and saw `Trojan:Win32/Bearfoos.B!ml`, nothing had
+  happened to you: the file you downloaded was exactly the file we built, and
+  every program inside it scans clean on its own. The `!ml` on the end of that
+  name means a machine-learning guess rather than a match against a known
+  threat, and the guess it makes about an installer like ours — not carrying a
+  paid-for signing certificate, and brand new every release, so with no
+  reputation attached — sits close enough to the line that one build can land
+  on the wrong side of it while the release before and after land on the right
+  one. 0.9.803, 0.9.804 and 0.9.805 all pass the same check that 0.9.806 fails,
+  with the same antivirus and the same definitions.
+
+  There is no code change here. This release is 0.9.806 built again, and
+  checked against Defender before it was published — which is now a step we do
+  for every release rather than something we find out from you.
+
 ## 0.9.806 — 2026-09-09
 
 Fixes for yesterday's screen-share work, including two that could leave your
