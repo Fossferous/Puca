@@ -4,6 +4,32 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.808 — 2026-09-09
+
+Clips now record your primary monitor, every time.
+
+### Fixed
+- **Arming the clip buffer could fail outright with a cryptic error.** It
+  picked which screen to record by looking for an app running fullscreen, and
+  a virtual display — a VR headset link, a phone used as a second screen, a
+  remote-desktop adapter — looks exactly like an ordinary monitor until the
+  moment it refuses to be recorded. A fullscreen app on one of those is
+  precisely what that rule reached for, so arming stopped with
+  `DuplicateOutput failed` while two perfectly recordable monitors sat beside
+  the one it had chosen.
+
+### Changed
+- **Clips record the PRIMARY display now, rather than guessing.** It is the
+  screen you can point at, and it is the same one every time. The old rule was
+  also invisible — nothing told you which screen it had picked, so "it recorded
+  the wrong monitor" was impossible to report. If your game runs fullscreen on
+  a second monitor, that is the one change to be aware of: the clip records
+  your primary screen instead.
+- **And if the primary genuinely cannot be recorded, it tries the others**
+  rather than giving up, checking each before committing to it. If none can be
+  recorded, the message now names the monitors it tried and why each refused,
+  instead of a bare error code.
+
 ## 0.9.807 — 2026-09-09
 
 The same app as 0.9.806, rebuilt. Windows Defender objected to the 0.9.806
