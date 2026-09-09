@@ -4,9 +4,48 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.805 — 2026-09-09
+
+Sharing your screen now tells you when your machine cannot keep up with it, and
+remembers the answer.
+
+### Added
+- **The app now says when your CPU cannot keep up with your own screen share.**
+  The browser has always reported this — it is the difference between "the
+  network is the limit" and "this machine is the limit" — and the app has only
+  ever written it to a log file. So the way people found out was that their
+  game got choppy while they were sharing, and nothing connected the two. Now,
+  once a share has been struggling for long enough to be sure (and only once
+  per share, never nagging), it offers to drop a step: one click, applied to
+  the share that is already running, so nobody watching is interrupted.
+- **The share dialog remembers the resolution and frame rate you chose.** It
+  opened at 1080p and 30 fps every single time, so anyone who turned it down
+  because their last share hurt was handed 1080p again on their very next
+  share, and every share after that. The one control a slower machine has was
+  the one control the app forgot.
+- **"Copy diagnostics", from a right-click on the voice panel or from Settings,
+  Advanced.** When a call is going badly the only useful evidence is what the
+  app is measuring at that moment, and until now the only way to get it was to
+  open a developer console and run a function nobody could be expected to know
+  about. This copies the same numbers — frame rates, the video encoder in use,
+  connection quality — as plain text to paste to whoever is helping. Press it
+  while the problem is happening. It contains no messages, names or addresses.
 
 ### Fixed
+- **A share's smallest size is now one the graphics card can actually encode.**
+  When "send my screen at several sizes" is on, the smallest of those sizes was
+  270 lines tall — and browsers deliberately refuse to use the graphics card
+  for anything under 360 lines, whatever hardware you have. That size was
+  therefore encoded on the processor on every machine, forever, which is the
+  opposite of what the setting is for. It is now 360 lines.
+- **The diagnostics report was answering the hardware question wrongly.** The
+  standard way to ask a browser "can this machine encode video in hardware"
+  returns *no* on machines that are demonstrably doing exactly that — measured
+  here on a computer whose report said no while its graphics card was encoding
+  the very thing it was asked about. A report that is confidently wrong is
+  worse than no report, because it ends the investigation. It now asks a
+  question the browser answers truthfully, and includes what the encoder in
+  your live call actually is.
 - **Sharing your screen could encode far more pixels than you chose, which is
   CPU taken from the game you are sharing.** The picker's resolution was sent
   to the browser as a preference rather than a limit, and for screen capture
@@ -33,15 +72,6 @@ one-line summary; this file is the full story. Versions follow
   rate. Those three numbers are what separate "this machine cannot encode fast
   enough" from "the network is backing up", and neither had ever reached a log
   file.
-
-### Added
-- **"Copy diagnostics", from a right-click on the voice panel or from Settings,
-  Advanced.** When a call is going badly the only useful evidence is what the
-  app is measuring at that moment, and until now the only way to get it was to
-  open a developer console and run a function nobody could be expected to know
-  about. This copies the same numbers — frame rates, the video encoder in use,
-  connection quality — as plain text to paste to whoever is helping. Press it
-  while the problem is happening. It contains no messages, names or addresses.
 
 ### Changed
 - **"Send my screen at several sizes" is now off by default**, one day after it
