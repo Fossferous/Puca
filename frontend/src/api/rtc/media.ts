@@ -64,6 +64,31 @@ export function rmsAmplitude(samples: Float32Array): number {
  * Pure, and exported, so the cap is a testable contract rather than an object
  * literal three call frames inside a picker.
  */
+/**
+ * Would this cap actually reduce what is being captured?
+ *
+ * WHY IT HAS TO BE ASKED. These constraints are CEILINGS. Applying a ceiling
+ * at or above the current capture succeeds and changes nothing — so a "lower
+ * the quality" button would report success, spend its one-per-share offer, and
+ * leave the machine exactly as overloaded as it was. It came up immediately:
+ * "Source" on a 1080p monitor captures 1920x1080, and the step down from
+ * Source was 1440p, whose ceiling is 2560x1440.
+ *
+ * Asked BEFORE applying rather than by diffing `getSettings()` afterwards,
+ * because the engine need not have updated them by the time `applyConstraints`
+ * resolves — a diff would report false failures.
+ */
+export function capWouldReduce(
+    now: { width?: number; height?: number; frameRate?: number },
+    width: number,
+    height: number,
+    fps: number,
+): boolean {
+    return (now.width ?? 0) > width
+        || (now.height ?? 0) > height
+        || Math.round(now.frameRate ?? 0) > fps;
+}
+
 export function shareVideoConstraints(width: number, height: number, fps: number) {
     return {
         width: { max: width },
@@ -159,9 +184,10 @@ export class MediaManager {
 
     /**
      * Re-cap the LIVE screen capture, without a second trip through the OS
-     * picker. `applyConstraints` renegotiates the existing display track in
-     * place, so the share does not end and no viewer is dropped — the thing
-     * that makes "lower the quality" a one-click answer rather than a restart.
+     * picker. `applyConstraints` retunes the existing display track in place —
+     * no SDP renegotiation, no new track, so the share does not end and no
+     * viewer is dropped. That is what makes "lower the quality" a one-click
+     * answer rather than a restart.
      *
      * Returns false if there is nothing captured or the engine refused the
      * constraints, so a caller never reports success it did not get.
@@ -169,6 +195,12 @@ export class MediaManager {
     async applyShareQuality(width: number, height: number, fps: number): Promise<boolean> {
         const track = this.screenShareStream?.getVideoTracks()[0];
         if (!track) return false;
+        const now = track.getSettings();
+        if (!capWouldReduce(now, width, height, fps)) {
+            console.warn(`[WebRTC] Screen share re-cap to ${width}x${height}@${fps} would change `
+                + `nothing (already ${now.width}x${now.height}@${Math.round(now.frameRate ?? 0)})`);
+            return false;
+        }
         try {
             await track.applyConstraints(shareVideoConstraints(width, height, fps) as MediaTrackConstraints);
             console.log(`[WebRTC] Screen share re-capped to ${width}x${height}@${fps}`);
@@ -177,6 +209,17 @@ export class MediaManager {
             console.warn('[WebRTC] Screen share re-cap refused:', e);
             return false;
         }
+    }
+
+    /** What the live screen capture is ACTUALLY producing, or null when
+     *  nothing is being shared. The step-down offer is built from this rather
+     *  than from the chosen label, because the label is a ceiling: "Source" on
+     *  a 1080p monitor is 1920x1080, not 3840x2160. */
+    shareCaptureSize(): { width: number; height: number } | null {
+        const t = this.screenShareStream?.getVideoTracks()[0];
+        if (!t) return null;
+        const s = t.getSettings();
+        return { width: s.width ?? 0, height: s.height ?? 0 };
     }
 
     /**

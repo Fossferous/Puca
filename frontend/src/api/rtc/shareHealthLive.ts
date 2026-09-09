@@ -10,6 +10,7 @@
 import { sfuManager } from './sfuManager';
 import { webrtcManager } from '../webrtc';
 import { shareDimensions, type EncodeSample, type ShareQuality } from './shareHealth';
+import { loadSettings } from '../../components/settingsStore';
 
 /**
  * Read the local share's encode health from whichever transport is carrying
@@ -38,6 +39,27 @@ export async function sampleShareEncode(): Promise<EncodeSample | null> {
  * caller can tell the difference between "done" and "said done".
  */
 export async function applyShareQuality(q: ShareQuality): Promise<boolean> {
+    // NOT WHILE THE LADDER IS ON. LiveKit fixes each simulcast rung as a RATIO
+    // of the source at publish time (`scaleResolutionDownBy`), so re-capping
+    // the track shrinks every rung with it: a 1080p share whose rungs are
+    // 640x360 / 960x540 / 1920x1080 becomes 426x240 / 640x360 / 1280x720, and
+    // the bottom rung drops back under the 360-line height below which
+    // Chromium will not use a hardware encoder at all — the exact thing
+    // SHARE_LOW was raised to 640x360 to avoid. Re-publishing to fix the
+    // ratios would end the share and drop every viewer, which is the cost
+    // this button exists to avoid. So the setting is saved and takes effect on
+    // the next share, and the caller says so rather than claiming otherwise.
+    if (loadSettings().shareSimulcast === true) return false;
     const { width, height } = shareDimensions(q.resolution);
     return webrtcManager.applyShareQuality(width, height, q.fps);
+}
+
+/** The live share's real capture size, for building the step-down offer out of
+ *  what is actually being encoded rather than the ceiling somebody picked. */
+export function shareCaptureSize(): { width: number; height: number } | null {
+    try {
+        return webrtcManager.shareCaptureSize();
+    } catch {
+        return null;
+    }
 }

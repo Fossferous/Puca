@@ -1,5 +1,14 @@
 /**
- * The screen-share dialog must remember the quality the person chose.
+ * VALIDATING the remembered screen-share quality.
+ *
+ * SCOPE, because the first version of this docblock overclaimed and that
+ * mattered: every assertion here calls the pure `rememberedQuality` validator
+ * with literal objects. It never renders the dialog and never touches
+ * localStorage, so it would stay green against a dialog that read the stored
+ * value once and then ignored it forever — which is exactly the defect that
+ * shipped in 0.9.805. The dialog's actual reading and writing is covered by
+ * shareQualityRemembered.test.tsx, which installs a real localStorage because
+ * the shared test setup's is a mock that stores nothing.
  *
  * WHY IT MATTERS. The share is encoded in SOFTWARE on every machine this
  * project has logs from (`encoder=OpenH264`), so the resolution and frame rate

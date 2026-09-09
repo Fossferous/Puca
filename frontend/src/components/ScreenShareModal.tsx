@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { isTauri } from '../api/platform';
 import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection } from '../api/appAudio';
 import type { CaptureApp, SelectedApp } from '../api/appAudio';
@@ -63,20 +63,48 @@ interface MixerRowState { on: boolean; gainPercent: number }
 
 const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, onCaptureScreen, onGoLive, onCancelAfterCapture }) => {
     const desktop = isTauri();
-    // Read once at mount: this dialog is the only thing that writes them, so
-    // there is no second writer to fall out of step with.
-    const [selectedRes, setSelectedRes] = useState(() => rememberedQuality(loadSettings()).resolution);
-    const [selectedFps, setSelectedFps] = useState(() => rememberedQuality(loadSettings()).fps);
+    // One object rather than two fields: they are always read and written
+    // together, and it keeps the effect below to a single setState call.
+    const [{ resolution: selectedRes, fps: selectedFps }, setQuality] =
+        useState(() => rememberedQuality(loadSettings()));
+
+    // RE-READ ON EVERY OPEN, not once at mount.
+    //
+    // The initialisers above run once, and this dialog is rendered
+    // unconditionally by VoicePanel (it returns null when closed), so "once"
+    // means once per voice channel joined. An earlier version relied on that
+    // with the note "this dialog is the only thing that writes them" — which
+    // was false in the same release that added it: the CPU-limited offer's
+    // "Lower it" writes shareResolution/shareFps too (VoicePanel). So the
+    // sequence the feature exists for — share, machine struggles, lower it,
+    // share again — reopened the dialog on the OLD resolution and captured it,
+    // which is precisely the thing the setting is meant to stop.
+    useEffect(() => {
+        if (!isOpen) return;
+        const q = rememberedQuality(loadSettings());
+        // ONE call, not two. `set-state-in-effect` reports at the setState call
+        // site and `eslint-disable-next-line` covers exactly one line, so a
+        // directive above the first of two setters silences nothing on the
+        // second and is itself reported as an unused directive — which is what
+        // the first version of this did.
+        // The store is written by another component; the open edge is when
+        // this dialog has to catch up with it. The directive below must be the
+        // LAST line before the call — it applies to the next LINE, so leading
+        // a multi-line comment block with it lands it on another comment and
+        // silences nothing (which is what the version before this did).
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setQuality(q);
+    }, [isOpen]);
 
     /** Remember the choice as it is made rather than on go-live: somebody who
      *  turns the quality down because their last share hurt, then backs out of
      *  the OS picker, has still told us something. */
     const chooseRes = (value: string) => {
-        setSelectedRes(value);
+        setQuality(q => ({ ...q, resolution: value }));
         saveSettings({ ...loadSettings(), shareResolution: value });
     };
     const chooseFps = (value: number) => {
-        setSelectedFps(value);
+        setQuality(q => ({ ...q, fps: value }));
         saveSettings({ ...loadSettings(), shareFps: value });
     };
     const [busy, setBusy] = useState(false);

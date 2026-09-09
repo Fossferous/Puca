@@ -730,6 +730,11 @@ export class WebRTCManager {
         return this.media.applyShareQuality(width, height, fps);
     }
 
+    /** The live share's real capture size (see MediaManager.shareCaptureSize). */
+    shareCaptureSize(): { width: number; height: number } | null {
+        return this.media.shareCaptureSize();
+    }
+
     async addScreenShareToPeers(): Promise<void> {
         const stream = this.media.getScreenShareStreamSync();
         if (!stream) return;

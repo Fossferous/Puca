@@ -16,7 +16,7 @@ import {
     createShareLoadWatch, starvedOffer, rememberedQuality,
     shareDimensions, qualityLabel, SAMPLE_MS, type ShareQuality,
 } from '../api/rtc/shareHealth';
-import { sampleShareEncode, applyShareQuality } from '../api/rtc/shareHealthLive';
+import { sampleShareEncode, applyShareQuality, shareCaptureSize } from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
@@ -616,7 +616,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         const timer = setInterval(() => {
             void sampleShareEncode().then(sample => {
                 if (stopped || !watch.add(sample)) return;
-                const offer = starvedOffer(rememberedQuality(loadSettings()));
+                // Built from the size actually being captured: every quality
+                // here is a CEILING, so "Source" on a 1080p monitor is 1080p,
+                // and a step down chosen from the label alone would have
+                // offered a ceiling above it and changed nothing.
+                const offer = starvedOffer(rememberedQuality(loadSettings()), shareCaptureSize());
                 // Null = already at the smallest setting, so there is nothing
                 // to offer and saying so would be bad news with no action.
                 if (offer) setLoadOffer(offer);
@@ -3072,6 +3076,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 // that reports success it did not get — the
                                 // setting IS saved, so the next share is
                                 // genuinely lower, and that is what to say.
+                                // `applied` false covers three real cases —
+                                // the engine refused, the cap would have
+                                // changed nothing, and the simulcast ladder
+                                // makes a live re-cap unsafe. All three leave
+                                // the running share alone and the SAVED
+                                // setting doing the work, which is what to say.
                                 setDiagNote(applied
                                     ? `Screen share lowered to ${qualityLabel(to)}.`
                                     : `Couldn't change the share that's already running — your next one will start at ${qualityLabel(to)}.`);

@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
     cpuStarved, nextStepDown, starvedOffer, qualityLabel,
-    createShareLoadWatch, shareDimensions,
+    createShareLoadWatch, shareDimensions, stepDownFromCapture,
     CPU_WINDOW, CPU_NEEDED, RES_STEPS, FPS_STEPS,
 } from '../api/rtc/shareHealth';
 
@@ -199,5 +199,53 @@ describe('the pixel size each option asks for', () => {
             last = cost;
             at = nextStepDown(at);
         }
+    });
+});
+
+describe('stepping down from what is ACTUALLY captured', () => {
+    it('offers a real reduction to somebody on Source', () => {
+        // THE DEFECT THIS PINS, shipped in 0.9.805. Every quality here is a
+        // CEILING. "Source" caps at 3840x2160, so on a 1080p monitor the
+        // capture is 1920x1080 — and the label-based step down offered
+        // "1440p", a ceiling of 2560x1440, ABOVE what was already being
+        // captured. Applying it changed nothing, the button said "lowered",
+        // and the one-per-share offer was spent. The person was told their
+        // share had been lowered while their game kept stuttering.
+        const offer = starvedOffer({ resolution: 'source', fps: 60 }, { width: 1920, height: 1080 });
+        expect(offer?.to).toEqual({ resolution: '720', fps: 60 });
+        expect(offer?.text).toContain('720p');
+    });
+
+    it('steps down from the true size on every monitor', () => {
+        expect(stepDownFromCapture({ width: 3840, height: 2160 }, 60)).toEqual({ resolution: '1440', fps: 60 });
+        expect(stepDownFromCapture({ width: 2560, height: 1440 }, 60)).toEqual({ resolution: '1080', fps: 60 });
+        expect(stepDownFromCapture({ width: 1920, height: 1080 }, 30)).toEqual({ resolution: '720', fps: 30 });
+    });
+
+    it('always offers something strictly smaller than the capture', () => {
+        // The property that makes the button honest: whatever is on screen,
+        // the size offered must be below it, or applying it is a no-op.
+        for (const [w, h] of [[3840, 2160], [2560, 1440], [1920, 1080], [1920, 1200], [2560, 1080]]) {
+            const to = stepDownFromCapture({ width: w, height: h }, 60);
+            expect(to, `${w}x${h}`).not.toBeNull();
+            const d = shareDimensions(to!.resolution);
+            expect(d.width < w || d.height < h, `${w}x${h} -> ${to!.resolution}`).toBe(true);
+        }
+    });
+
+    it('spends the frame rate once the capture is already small', () => {
+        expect(stepDownFromCapture({ width: 1280, height: 720 }, 60)).toEqual({ resolution: '720', fps: 30 });
+        expect(stepDownFromCapture({ width: 1280, height: 720 }, 30)).toEqual({ resolution: '720', fps: 15 });
+        expect(stepDownFromCapture({ width: 1280, height: 720 }, 15)).toBeNull();
+    });
+
+    it('falls back to the labels when there is no capture to read', () => {
+        // POSITIVE CONTROL that the capture path is the one being used above:
+        // with no track the old label-based answer still comes out, and it is
+        // a DIFFERENT answer for the same input.
+        expect(starvedOffer({ resolution: 'source', fps: 60 }, null)?.to)
+            .toEqual({ resolution: '1440', fps: 60 });
+        expect(starvedOffer({ resolution: 'source', fps: 60 }, { width: 0, height: 0 })?.to)
+            .toEqual({ resolution: '1440', fps: 60 });
     });
 });

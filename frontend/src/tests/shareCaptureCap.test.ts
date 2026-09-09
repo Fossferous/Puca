@@ -19,7 +19,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { shareVideoConstraints } from '../api/rtc/media';
+import { shareVideoConstraints, capWouldReduce } from '../api/rtc/media';
 
 describe('what a screen share asks the browser for', () => {
     it('caps the resolution rather than preferring it', () => {
@@ -49,5 +49,37 @@ describe('what a screen share asks the browser for', () => {
         expect(shareVideoConstraints(1280, 720, 30)).toEqual({
             width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 30 },
         });
+    });
+});
+
+describe('whether a cap would reduce anything at all', () => {
+    it('refuses a ceiling at or above what is already captured', () => {
+        // The exact case that shipped broken: Source on a 1080p monitor,
+        // "stepped down" to 1440p. Nothing to reduce.
+        expect(capWouldReduce({ width: 1920, height: 1080, frameRate: 60 }, 2560, 1440, 60)).toBe(false);
+        // Equal is not a reduction either.
+        expect(capWouldReduce({ width: 1920, height: 1080, frameRate: 60 }, 1920, 1080, 60)).toBe(false);
+    });
+
+    it('accepts a ceiling that reduces ANY of the three', () => {
+        // POSITIVE CONTROL: the guard must not simply always refuse.
+        expect(capWouldReduce({ width: 1920, height: 1080, frameRate: 60 }, 1280, 720, 60)).toBe(true);
+        expect(capWouldReduce({ width: 1920, height: 1080, frameRate: 60 }, 1920, 1080, 30)).toBe(true);
+        // A wide monitor: the height alone is already inside the cap, so a
+        // width-only reduction has to count or an ultrawide can never lower.
+        expect(capWouldReduce({ width: 2560, height: 1080, frameRate: 60 }, 1920, 1080, 60)).toBe(true);
+    });
+
+    it('treats a track that reports nothing as not worth re-capping', () => {
+        // getSettings() can come back empty before the first frame. Applying
+        // a cap then tells us nothing and risks a false "lowered".
+        expect(capWouldReduce({}, 1280, 720, 30)).toBe(false);
+    });
+
+    it('compares frame rate as a whole number', () => {
+        // A 60 fps capture commonly reports 59.94. Without rounding, a cap of
+        // 60 would read as a reduction and claim success for a no-op.
+        expect(capWouldReduce({ width: 1280, height: 720, frameRate: 59.94 }, 1280, 720, 60)).toBe(false);
+        expect(capWouldReduce({ width: 1280, height: 720, frameRate: 59.94 }, 1280, 720, 30)).toBe(true);
     });
 });

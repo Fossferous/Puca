@@ -72,10 +72,12 @@ export function subscribedQuality(
     participants: number,
 ): VideoQuality {
     if (focused) return VideoQuality.HIGH;
-    // A share's text is unreadable at 320x180, and it is the thing people are
-    // looking at; it already asked for MEDIUM at subscribe time. Keeping that
-    // here stops a focus change silently demoting one, which the old shared
-    // ternary did.
+    // A share is the thing people are actually looking at, and its text is
+    // unreadable at the bottom rung (SHARE_LOW, 640x360 — this sentence used
+    // to say 320x180, which is CAM_LOW and has never been offered for a
+    // share). It already asked for MEDIUM at subscribe time; keeping that here
+    // stops a focus change silently demoting one, which the old shared ternary
+    // did.
     if (source === Track.Source.ScreenShare) return VideoQuality.MEDIUM;
     // A camera's rung follows the size its tile is actually rendered at, which
     // the voice grid derives from the head count (VoiceStage.css: one or two
@@ -128,6 +130,7 @@ const SHARE_BITRATE = 4_500_000;
 /// THE TOP RUNG IS SHARE_BITRATE, and a subscriber only ever receives ONE rung,
 /// so the backend's per-subscriber charge (`SHARE_KBPS`, src/sfu.rs) stays the
 /// correct worst case. A test there reads this file to keep the two in step.
+///
 /// 640x360 AND NOT 480x270, WHICH IS WHAT THIS WAS. Chromium refuses to use a
 /// hardware encoder below 360 lines, on purpose and regardless of the card:
 /// `kForceSoftwareForRtcLowResolutions` in rtc_video_encoder.cc, whose

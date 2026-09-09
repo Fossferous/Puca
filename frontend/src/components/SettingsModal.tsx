@@ -690,7 +690,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             // A capture is a choice — recorded, so the desktop-global feed can
             // tell it from an untouched default even when the combination is
             // the same one we ship.
-            setSettings(prev => { const s = markVoiceBindProvenance({ ...prev, [field]: next }, field, true); saveSettings(s); return s; });
+            commit(current => markVoiceBindProvenance({ ...current, [field]: next }, field, true));
             setCapturingBind(null);
         };
         // MOUSE buttons are bindable too (not for the kill switch — its
@@ -726,7 +726,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
             // A capture is a choice — recorded, so the desktop-global feed can
             // tell it from an untouched default even when the combination is
             // the same one we ship.
-            setSettings(prev => { const s = markVoiceBindProvenance({ ...prev, [field]: next }, field, true); saveSettings(s); return s; });
+            commit(current => markVoiceBindProvenance({ ...current, [field]: next }, field, true));
             setCapturingBind(null);
         };
         window.addEventListener('keydown', onKey, true);
@@ -748,13 +748,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     const resetBind = (field: BindField) => {
         setBindConflict(null);
         setCapturingBind(null);
-        setSettings(prev => {
-            // Reset is recorded as NOT chosen: the bind goes back to in-app
-            // only, unless the "from other apps" switch is on.
-            const s = markVoiceBindProvenance({ ...prev, [field]: defaultSettings[field] }, field, false);
-            saveSettings(s);
-            return s;
-        });
+        // Reset is recorded as NOT chosen: the bind goes back to in-app
+        // only, unless the "from other apps" switch is on.
+        commit(current => markVoiceBindProvenance({ ...current, [field]: defaultSettings[field] }, field, false));
     };
 
     /**
@@ -1217,15 +1213,57 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         }
     }, [settings.inputVolume, settings.manualGain, settings.autoGainControl, settings.outputVolume, settings.outputDeviceId]);
 
+    // SHOW the current settings, not the ones from app launch. Same root
+    // cause as `commit` below: `settings` is read once, and this modal is
+    // mounted unconditionally by Chat, so a modal opened after the share
+    // dialog or "Lower it" changed something would display — and then write
+    // back — stale values.
+    //
+    // ABOVE the early return, deliberately. Placed below it this is a
+    // conditional hook, which is the defect that shipped a full-app crash
+    // screen in v0.7.7; `npm run lint` is the only gate that catches it and it
+    // caught this one.
+    useEffect(() => {
+        if (!isOpen) return;
+        // Reading a store other components also write is exactly what this
+        // effect is for, and it runs on the open edge only. No suppression
+        // needed — eslint does not flag this shape, and a directive that
+        // silences nothing is reported as unused and has to be deleted.
+        setSettings(loadSettings());
+    }, [isOpen]);
+
     // Appearance (theme/compact/animations/scale/contrast) is applied by
     // saveSettings itself and by the main.tsx bootstrap — no effect needed here.
 
     if (!isOpen) return null;
 
+    /**
+     * Write a change into the CURRENT stored settings, never into this
+     * component's snapshot.
+     *
+     * THE BUG THIS FIXES. `settings` is `useState(loadSettings)`, read once —
+     * and this modal is mounted unconditionally by Chat (it renders null when
+     * closed), so "once" means once per app launch. While this file was the
+     * only writer that was harmless. It stopped being the only writer in
+     * 0.9.805, which added three: the share dialog remembering a resolution,
+     * and the CPU-limited offer's "Lower it". So somebody who lowered their
+     * share quality and later toggled ANYTHING here — a theme, a checkbox —
+     * had `{...staleSnapshot, thatOneKey}` written over the top, silently
+     * restoring the resolution their machine could not afford, permanently.
+     *
+     * Merging onto a fresh `loadSettings()` makes a write touch only the keys
+     * it names, which is what every caller already assumed it did.
+     */
+    const commit = (change: Partial<Settings> | ((current: Settings) => Settings)): Settings => {
+        const current = loadSettings();
+        const next = typeof change === 'function' ? change(current) : { ...current, ...change };
+        setSettings(next);
+        saveSettings(next);
+        return next;
+    };
+
     const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
-        const newSettings = { ...settings, [key]: value };
-        setSettings(newSettings);
-        saveSettings(newSettings);
+        commit({ [key]: value } as Partial<Settings>);
     };
 
     const handleSaveProfile = async () => {
@@ -2039,13 +2077,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     // disabled the moment this is off — left ON, the
                                                     // service kept running with no control able to
                                                     // stop it.
-                                                    const next = {
-                                                        ...settings,
+                                                    commit({
                                                         mobileNotifications: false,
                                                         mobileBackgroundDelivery: false,
-                                                    };
-                                                    setSettings(next);
-                                                    saveSettings(next);
+                                                    });
                                                     return;
                                                 }
                                                 // The toggle records INTENT; the OS grant is shown

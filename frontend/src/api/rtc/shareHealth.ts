@@ -97,8 +97,9 @@ export function createShareLoadWatch() {
     };
 }
 
-/** The share sizes the dialog offers, largest first. Values match
- *  ScreenShareModal's RESOLUTIONS and VoicePanel's width/height mapping. */
+/** The share sizes the dialog offers, largest first — the order a step DOWN
+ *  walks. This is now the single source: ScreenShareModal derives its option
+ *  list from it, and the capture size comes from `shareDimensions` below. */
 export const RES_STEPS = ['source', '1440', '1080', '720'] as const;
 /** The frame rates the dialog offers, fastest first. */
 export const FPS_STEPS = [60, 30, 15] as const;
@@ -201,12 +202,50 @@ export function qualityLabel(q: ShareQuality): string {
 }
 
 /**
+ * The next cheaper setting, chosen from WHAT IS ACTUALLY BEING CAPTURED rather
+ * than from the label the person picked.
+ *
+ * THE BUG THIS FIXES. Every one of these settings is a CAP, not a size. Pick
+ * "Source" on a 1080p monitor and you capture 1920x1080; the label-based
+ * step-down then offered "1440p", which caps at 2560x1440 — above what is
+ * already being captured, so applying it changed precisely nothing while the
+ * button reported success and the one-per-share offer was spent. The person
+ * was told their share had been lowered, their game kept stuttering, and
+ * nothing would offer again until they restarted the share.
+ *
+ * Resolution comes from reality; the FRAME RATE still comes from the setting,
+ * because that cap IS honoured and a measured rate is noisy (a 60 fps share
+ * commonly reads 57).
+ */
+export function stepDownFromCapture(
+    capture: { width: number; height: number },
+    currentFps: number,
+): ShareQuality | null {
+    for (const resolution of RES_STEPS) {          // largest first
+        const d = shareDimensions(resolution);
+        if (d.width < capture.width || d.height < capture.height) return { resolution, fps: currentFps };
+    }
+    // Already at or below the smallest picture offered; spend the frame rate.
+    const slower = FPS_STEPS.find(f => f < currentFps);
+    return slower === undefined ? null : { resolution: RES_STEPS[RES_STEPS.length - 1], fps: slower };
+}
+
+/**
  * What to say when the encoder is starved, or null when there is nothing
  * useful to say. Separated from the React that renders it so the wording — the
  * part that is actually read by a person mid-call — is pinned by a test.
+ *
+ * `capture` is the live track's own `getSettings()`. When it is unavailable
+ * (no track yet) the offer falls back to the stored labels, which is the old
+ * behaviour and still better than saying nothing.
  */
-export function starvedOffer(current: ShareQuality): { text: string; to: ShareQuality } | null {
-    const to = nextStepDown(current);
+export function starvedOffer(
+    current: ShareQuality,
+    capture?: { width: number; height: number } | null,
+): { text: string; to: ShareQuality } | null {
+    const to = capture && capture.width > 0 && capture.height > 0
+        ? stepDownFromCapture(capture, current.fps)
+        : nextStepDown(current);
     if (!to) {
         // Nothing left to give up. Saying "your CPU cannot keep up" and
         // offering no action would be a notification whose only content is
