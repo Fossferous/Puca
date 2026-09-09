@@ -9,11 +9,24 @@
 // here (v0.7.7) past typecheck, vitest and build. `npm run lint` catches the
 // rule; this catches the symptom, including the ways lint cannot see.
 //
-// Usage (from frontend/, with vite on 5173 and a backend on 3000):
-//   node e2e/_render-smoke.mjs
+// POINT IT AT AN ORIGIN THAT CANNOT BE THE WRONG TREE. Both checkouts on this
+// machine define a `frontend-dev` launch config on port 5173, so a dev server
+// started from the wrong project root answers on the expected port with a
+// DIFFERENT tree — and nothing says so. This rig reported green exactly that
+// way once, against a checkout containing none of the release under test.
+//
+//   APP=https://app.svrn.lol node e2e/render-smoke.mjs      # the deployed app
+//   node e2e/serve-dist.mjs                                 # prints a URL
+//   APP=http://127.0.0.1:<that port> node e2e/render-smoke.mjs
+//
+// The second form serves frontend/dist by explicit path, so the bundle under
+// test is the one that ships. Note it trips CORS on the production API — the
+// built bundle asks chat.svrn.lol for its ICE config from an origin that host
+// does not allow — which is the harness, not the app. The deployed origin has
+// no such problem, so reach for that one first.
 import { chromium } from '@playwright/test';
 
-const APP = process.env.APP || 'http://localhost:5173';
+const APP = process.env.APP || 'https://app.svrn.lol';
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage();
 
