@@ -38,6 +38,33 @@ fn capture_lock() -> std::sync::MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Open a capture, or `None` when this desktop will not allow one AT ALL.
+///
+/// `AccessLost` here is a statement about the SESSION, not about the code: the
+/// workstation is locked, the screens are asleep, or this is running somewhere
+/// with no interactive desktop. Panicking on it produces a red test that says
+/// "live capture is broken on this machine" when nothing is broken — and that
+/// exact false failure was carried through an entire capture investigation as
+/// an unexplained pre-existing failure, making every comparison against the
+/// baseline ambiguous. A gated test that cannot run must SAY it cannot run.
+///
+/// Every OTHER error still fails the test. `Failed(...)` is the product's
+/// answer to "I cannot duplicate this screen", which is the thing under test.
+fn open_or_skip(monitor: usize, what: &str) -> Option<ScreenCapture> {
+    match ScreenCapture::new(monitor) {
+        Ok(cap) => Some(cap),
+        Err(CaptureError::AccessLost) => {
+            println!(
+                "SKIP {what}: this desktop will not grant a duplication right now \
+                 (locked, asleep, or no interactive session). Not a product failure \
+                 - unlock the screen and re-run to actually exercise it."
+            );
+            None
+        }
+        Err(e) => panic!("could not start capturing monitor {monitor}: {e:?}"),
+    }
+}
+
 #[test]
 #[ignore = "needs a real display; run with --ignored"]
 fn captures_a_real_frame_with_no_gesture_and_no_picker() {
@@ -46,7 +73,9 @@ fn captures_a_real_frame_with_no_gesture_and_no_picker() {
     println!("monitors detected: {count}");
     assert!(count > 0, "no outputs found — cannot prove capture works");
 
-    let mut cap = ScreenCapture::new(0).expect("could not start capturing monitor 0");
+    let Some(mut cap) = open_or_skip(0, "captures_a_real_frame_with_no_gesture_and_no_picker") else {
+        return;
+    };
 
     // Duplication only produces a frame when something CHANGES, so a still
     // desktop legitimately times out. Retry rather than treating the first
@@ -110,7 +139,9 @@ fn survives_repeated_capture_without_leaking_frames() {
     // Every successful AcquireNextFrame must be paired with ReleaseFrame. If one
     // is leaked, acquiring fails FOREVER after — so a loop is the only way to
     // catch it. A single-frame test passes happily with the bug present.
-    let mut cap = ScreenCapture::new(0).expect("could not start capturing");
+    let Some(mut cap) = open_or_skip(0, "survives_repeated_capture_without_leaking_frames") else {
+        return;
+    };
     let mut ok = 0;
     let mut timeouts = 0;
     for _ in 0..60 {

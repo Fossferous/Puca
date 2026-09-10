@@ -265,6 +265,66 @@ pub fn outputs() -> Vec<OutputInfo> {
     out
 }
 
+/// Re-duplicate `monitor` on a device we ALREADY have, creating nothing.
+///
+/// WHY THIS EXISTS, given `open_duplication` does a better job. A rebuild is
+/// not rare: `next_frame` drops the duplication on every ACCESS_LOST, and a
+/// locked screen or a sleeping panel returns ACCESS_LOST on EVERY tick for as
+/// long as it lasts. Clips stay armed for hours precisely while nobody is at
+/// the desk, so "the whole walk, every tick" is the common case, not the edge
+/// one — at 60 fps that is a DXGI factory, a full adapter enumeration and a
+/// fresh `D3D11CreateDevice` sixty times a second, thrown away each time,
+/// where the code this replaced created no device at all.
+///
+/// So: try the device in hand first. The monitor is still matched by HMONITOR
+/// (never by walk position), and a cross-adapter attempt is CHEAP to fail —
+/// DXGI answers immediately without allocating. Only a real adapter change
+/// falls through to the walk.
+fn reduplicate_on(
+    device: &ID3D11Device,
+    monitor: usize,
+) -> Result<IDXGIOutputDuplication, CaptureError> {
+    let target = outputs()
+        .into_iter()
+        .find(|o| o.index == monitor)
+        .map(|o| o.hmonitor)
+        .ok_or_else(|| CaptureError::Failed(format!("no monitor at index {monitor}")))?;
+    unsafe {
+        let found = each_output(|_, output| {
+            let is_target = output
+                .GetDesc()
+                .map(|d| d.Monitor.0 as isize == target)
+                .unwrap_or(false);
+            if !is_target {
+                return None;
+            }
+            Some(output.cast::<IDXGIOutput1>())
+        });
+        match found {
+            Some(Ok(output1)) => output1.DuplicateOutput(device).map_err(|e| {
+                if e.code() == E_ACCESSDENIED || is_transient_display_state(e.code()) {
+                    // The secure desktop, a sleeping panel, or another
+                    // duplication of this output. Nothing about a different
+                    // GPU would help, so this must NOT fall through to the
+                    // walk — that is the allocation storm this avoids.
+                    CaptureError::AccessLost
+                } else {
+                    // Anything else (a cross-adapter DXGI_ERROR_UNSUPPORTED
+                    // after a MUX switch, say) means this device is the wrong
+                    // one for this screen. The caller re-opens properly.
+                    CaptureError::Failed(format!("re-duplicate on held device failed: {e}"))
+                }
+            }),
+            // No IDXGIOutput1, or the monitor is not in this walk any more.
+            // Both are the caller's cue to do the full walk, which decides
+            // between "gone for now" and "gone for good".
+            _ => Err(CaptureError::Failed(format!(
+                "monitor {monitor} not duplicable on the held device"
+            ))),
+        }
+    }
+}
+
 // `duplicate(device, monitor)` LIVED HERE and is deliberately gone. It resolved
 // a monitor by its position in the output walk and duplicated it against a
 // device it was handed, which made it a second, disagreeing answer to "which
@@ -423,17 +483,30 @@ impl ScreenCapture {
             // hardware `open_duplication` was written for. A rebuild happens on
             // every alt-tab into a fullscreen game, so getting this wrong would
             // mean capture that opens fine and dies on first use.
-            let (device, context, dup, _adapter) = open_duplication(self.monitor)?;
-            // Adopt the rebuilt device unconditionally. It is usually the same
-            // adapter, but a texture belongs to the device that created it, so
-            // the staging buffer cannot outlive a swap — it is reallocated on
-            // the next frame. Rebuilds are rare (a lost desktop, not a frame),
-            // so paying for one allocation here is cheaper than a test that
-            // proves the device never changes.
-            self.device = device;
-            self.context = context;
-            self.staging = None;
-            self.duplication = Some(dup);
+            //
+            // COST. The walk creates a D3D11 device per candidate adapter, and
+            // this branch runs on EVERY tick for as long as the desktop stays
+            // unavailable — a locked screen can hold it for hours while clips
+            // sit armed. So the device in hand is tried first, which allocates
+            // nothing; the walk happens only when that device turns out to be
+            // the wrong one for this screen, which is a MUX switch, not a lock.
+            match reduplicate_on(&self.device, self.monitor) {
+                Ok(dup) => self.duplication = Some(dup),
+                // "Not right now" is the lock screen and the sleeping panel.
+                // Re-opening cannot help, and must not be attempted 60 times a
+                // second.
+                Err(CaptureError::AccessLost) => return Err(CaptureError::AccessLost),
+                Err(_) => {
+                    let (device, context, dup, _adapter) = open_duplication(self.monitor)?;
+                    // Adopt the rebuilt device. A texture belongs to the device
+                    // that created it, so the staging buffer cannot outlive a
+                    // swap — it is reallocated on the next frame.
+                    self.device = device;
+                    self.context = context;
+                    self.staging = None;
+                    self.duplication = Some(dup);
+                }
+            }
             // RE-READ THE ROTATION WITH THE NEW DUPLICATION.
             //
             // Reading it once at open was justified by "a display cannot rotate
