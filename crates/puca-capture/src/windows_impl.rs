@@ -551,6 +551,33 @@ impl ScreenCapture {
         // why a naive screen-share shows no mouse at all.
         self.update_cursor(&dup, &info);
 
+        // A FRAME IS NOT NECESSARILY A PICTURE.
+        //
+        // `AcquireNextFrame` succeeds for POINTER news as well as for desktop
+        // news, and `LastPresentTime == 0` is DXGI saying "nothing was
+        // presented; this is a mouse update". The surface handed back with it
+        // holds no new desktop image, and on this machine it comes back
+        // uniform — so copying it out yields a blank frame.
+        //
+        // MEASURED 2026-09-10: with this check absent, the live capture test
+        // failed 5 runs out of 5 with "no frame with any pixel variation after
+        // 40 attempts" on an ordinary desktop. An idle screen with a moving
+        // mouse generates a steady stream of pointer-only updates, so almost
+        // every acquire was one, and the ~1-in-5 run that passed was the one
+        // where a real present happened to land inside the window. Nothing
+        // about the desktop was blank; the code was photographing the mouse.
+        //
+        // Treating it as `Timeout` is exactly right: it is the existing "the
+        // screen did not change, repeat the previous frame" path, and the
+        // cursor news above has already been folded in, so a pointer that
+        // moves over a still screen still moves for the viewer.
+        if info.LastPresentTime == 0 {
+            unsafe {
+                let _ = dup.ReleaseFrame();
+            }
+            return Err(CaptureError::Timeout);
+        }
+
         // From here every exit MUST release the frame, or the next acquire
         // fails forever.
         let result = self.copy_out(resource);
