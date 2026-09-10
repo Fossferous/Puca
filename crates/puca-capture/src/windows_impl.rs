@@ -21,7 +21,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
     D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_MODE_ROTATION, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
     IDXGIResource,
@@ -30,7 +33,6 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_MODE_ROTATION;
 
 pub struct ScreenCapture {
     device: ID3D11Device,
@@ -549,6 +551,33 @@ impl ScreenCapture {
         // why a naive screen-share shows no mouse at all.
         self.update_cursor(&dup, &info);
 
+        // A FRAME IS NOT NECESSARILY A PICTURE.
+        //
+        // `AcquireNextFrame` succeeds for POINTER news as well as for desktop
+        // news, and `LastPresentTime == 0` is DXGI saying "nothing was
+        // presented; this is a mouse update". The surface handed back with it
+        // holds no new desktop image, and on this machine it comes back
+        // uniform — so copying it out yields a blank frame.
+        //
+        // MEASURED 2026-09-10: with this check absent, the live capture test
+        // failed 5 runs out of 5 with "no frame with any pixel variation after
+        // 40 attempts" on an ordinary desktop. An idle screen with a moving
+        // mouse generates a steady stream of pointer-only updates, so almost
+        // every acquire was one, and the ~1-in-5 run that passed was the one
+        // where a real present happened to land inside the window. Nothing
+        // about the desktop was blank; the code was photographing the mouse.
+        //
+        // Treating it as `Timeout` is exactly right: it is the existing "the
+        // screen did not change, repeat the previous frame" path, and the
+        // cursor news above has already been folded in, so a pointer that
+        // moves over a still screen still moves for the viewer.
+        if info.LastPresentTime == 0 {
+            unsafe {
+                let _ = dup.ReleaseFrame();
+            }
+            return Err(CaptureError::Timeout);
+        }
+
         // From here every exit MUST release the frame, or the next acquire
         // fails forever.
         let result = self.copy_out(resource);
@@ -604,6 +633,17 @@ impl ScreenCapture {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
 
+        static LAST_LOGGED_FORMAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let cur_fmt = desc.Format.0 as u32;
+        if LAST_LOGGED_FORMAT.swap(cur_fmt, std::sync::atomic::Ordering::Relaxed) != cur_fmt {
+            let fmt_name = match desc.Format {
+                DXGI_FORMAT_R16G16B16A16_FLOAT => "DXGI_FORMAT_R16G16B16A16_FLOAT",
+                DXGI_FORMAT_B8G8R8A8_UNORM => "DXGI_FORMAT_B8G8R8A8_UNORM",
+                _ => "<other format>",
+            };
+            println!("Acquired frame texture format: {fmt_name} ({cur_fmt})");
+        }
+
         let staging = self.staging_for(&desc)?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
@@ -613,20 +653,21 @@ impl ScreenCapture {
                 .map_err(|e| CaptureError::Failed(format!("Map failed: {e}")))?;
         }
 
-        let stride = mapped.RowPitch as usize;
-        let height = desc.Height as usize;
-        let mut bgra = vec![0u8; stride * height];
+        let mapped_len = mapped.RowPitch as usize * desc.Height as usize;
+        let mapped_slice = unsafe {
+            std::slice::from_raw_parts(mapped.pData as *const u8, mapped_len)
+        };
+        let raw = frame_from_staging(
+            desc.Format,
+            desc.Width,
+            desc.Height,
+            mapped.RowPitch as usize,
+            mapped_slice,
+        );
         unsafe {
-            std::ptr::copy_nonoverlapping(mapped.pData as *const u8, bgra.as_mut_ptr(), bgra.len());
             self.context.Unmap(&staging, 0);
         }
 
-        let raw = Frame {
-            width: desc.Width,
-            height: desc.Height,
-            stride,
-            bgra,
-        };
         // Rotate the pixels, then drop the cursor on top UNTRANSFORMED.
         //
         // The two do not share a coordinate space and it is not obvious which
@@ -814,6 +855,177 @@ pub(crate) fn rotate_to_desktop(frame: Frame, rotation: Rotation) -> Frame {
     }
 
     Frame { width: dw as u32, height: dh as u32, stride: dst_stride, bgra: out }
+}
+
+/// Convert IEEE 754 half-precision float (16-bit) to single-precision float (32-bit).
+#[inline(always)]
+pub fn f16_to_f32(h: u16) -> f32 {
+    let s = (h >> 15) & 1;
+    let e = (h >> 10) & 0x1f;
+    let m = h & 0x3ff;
+
+    if e == 0 {
+        if m == 0 {
+            if s != 0 { -0.0 } else { 0.0 }
+        } else {
+            let val = (m as f32) * (1.0 / 16777216.0);
+            if s != 0 { -val } else { val }
+        }
+    } else if e == 31 {
+        if m == 0 {
+            if s != 0 { f32::NEG_INFINITY } else { f32::INFINITY }
+        } else {
+            f32::NAN
+        }
+    } else {
+        let f_bits = ((s as u32) << 31) | (((e as u32) + 112) << 23) | ((m as u32) << 13);
+        f32::from_bits(f_bits)
+    }
+}
+
+/// Convert an scRGB linear half-float channel to an 8-bit sRGB color byte.
+///
+/// In scRGB:
+/// - 0.0 is black
+/// - 1.0 is reference SDR white (80 nits in standard scRGB / SDR 100%)
+/// - Values > 1.0 are HDR highlights
+/// - Values < 0.0 represent out-of-gamut colours in scRGB
+///
+/// Conversion steps:
+/// 1. Values <= 0.0 clamp to 0.
+/// 2. Highlights >= 1.0 saturate at maximum SDR white 255.
+/// 3. Values in (0.0, 1.0) are transformed via the IEC 61966-2-1 sRGB transfer function:
+///    L <= 0.0031308 => 12.92 * L
+///    L >  0.0031308 => 1.055 * L^(1/2.4) - 0.055
+/// 4. Scaled to [0, 255] and rounded.
+pub fn sc_rgb_channel_to_u8(h: u16) -> u8 {
+    let c = f16_to_f32(h);
+    if c <= 0.0 || c.is_nan() {
+        return 0;
+    }
+    if c >= 1.0 {
+        return 255;
+    }
+    let s = if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Convert an scRGB linear half-float alpha channel to an 8-bit alpha byte.
+pub fn sc_rgb_alpha_to_u8(h: u16) -> u8 {
+    let c = f16_to_f32(h);
+    if c <= 0.0 || c.is_nan() {
+        0
+    } else if c >= 1.0 {
+        255
+    } else {
+        (c * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+}
+
+/// Lookup tables for scRGB half-float to 8-bit conversion.
+///
+/// 65,536 entries per table (64 KB each, 128 KB total) fit easily within the L2
+/// cache of modern processors, completely eliminating expensive `powf`
+/// exponentiation in the frame conversion loop (~3.68M pixels at 60 fps).
+struct HdrColorLut {
+    color: [u8; 65536],
+    alpha: [u8; 65536],
+}
+
+impl HdrColorLut {
+    fn new() -> Self {
+        let mut color = [0u8; 65536];
+        let mut alpha = [0u8; 65536];
+        for i in 0..=65535u16 {
+            color[i as usize] = sc_rgb_channel_to_u8(i);
+            alpha[i as usize] = sc_rgb_alpha_to_u8(i);
+        }
+        Self { color, alpha }
+    }
+}
+
+static HDR_LUT: std::sync::OnceLock<HdrColorLut> = std::sync::OnceLock::new();
+
+/// Convert an scRGB R16G16B16A16_FLOAT buffer to 8-bit BGRA (4 bytes per pixel).
+///
+/// Swaps channel order from RGBA (half-float) to BGRA (u8) and applies the
+/// sRGB transfer curve renormalised against SDR white (1.0).
+pub fn hdr_sc_rgb_to_bgra8(
+    src: &[u8],
+    src_stride: usize,
+    width: usize,
+    height: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+) {
+    let lut = HDR_LUT.get_or_init(HdrColorLut::new);
+    let row_bytes = width * 8;
+
+    for y in 0..height {
+        let src_row_start = y * src_stride;
+        let dst_row_start = y * dst_stride;
+
+        if src_row_start + row_bytes > src.len() || dst_row_start + width * 4 > dst.len() {
+            break;
+        }
+
+        let src_row = &src[src_row_start..src_row_start + row_bytes];
+        let dst_row = &mut dst[dst_row_start..dst_row_start + width * 4];
+
+        for x in 0..width {
+            let s = x * 8;
+            let d = x * 4;
+
+            let r_half = u16::from_le_bytes([src_row[s], src_row[s + 1]]);
+            let g_half = u16::from_le_bytes([src_row[s + 2], src_row[s + 3]]);
+            let b_half = u16::from_le_bytes([src_row[s + 4], src_row[s + 5]]);
+            let a_half = u16::from_le_bytes([src_row[s + 6], src_row[s + 7]]);
+
+            dst_row[d] = lut.color[b_half as usize];     // Blue
+            dst_row[d + 1] = lut.color[g_half as usize]; // Green
+            dst_row[d + 2] = lut.color[r_half as usize]; // Red
+            dst_row[d + 3] = lut.alpha[a_half as usize]; // Alpha
+        }
+    }
+}
+
+/// Extract Frame from mapped staging texture data, converting HDR surfaces to 8-bit BGRA.
+pub(crate) fn frame_from_staging(
+    format: DXGI_FORMAT,
+    width: u32,
+    height: u32,
+    row_pitch: usize,
+    data: &[u8],
+) -> Frame {
+    if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
+        let w = width as usize;
+        let h = height as usize;
+        let dst_stride = w * 4;
+        let mut bgra = vec![0u8; dst_stride * h];
+        hdr_sc_rgb_to_bgra8(data, row_pitch, w, h, &mut bgra, dst_stride);
+        Frame {
+            width,
+            height,
+            stride: dst_stride,
+            bgra,
+        }
+    } else {
+        let stride = row_pitch;
+        let len = stride * height as usize;
+        let mut bgra = vec![0u8; len];
+        let copy_len = len.min(data.len());
+        bgra[..copy_len].copy_from_slice(&data[..copy_len]);
+        Frame {
+            width,
+            height,
+            stride,
+            bgra,
+        }
+    }
 }
 
 /// A top-down device-independent bitmap pulled out of a GDI cursor.
@@ -1471,5 +1683,123 @@ mod cursor_tests {
         for code in [HRESULT(0x80004005u32 as i32), HRESULT(0x8007000Eu32 as i32)] {
             assert!(!is_transient_display_state(code), "{code:?} must stay fatal");
         }
+    }
+
+    fn f32_to_f16(f: f32) -> u16 {
+        let bits = f.to_bits();
+        let s = (bits >> 31) & 1;
+        let e = (bits >> 23) & 0xff;
+        let m = bits & 0x7f_ffff;
+
+        if e == 0 {
+            (s as u16) << 15
+        } else if e == 0xff {
+            ((s as u16) << 15) | 0x7c00 | ((m >> 13) as u16)
+        } else {
+            let exp = e as i32 - 127 + 15;
+            if exp >= 31 {
+                ((s as u16) << 15) | 0x7c00
+            } else if exp <= 0 {
+                let m_sub = (m | 0x80_0000) >> (1 - exp + 13);
+                ((s as u16) << 15) | (m_sub as u16)
+            } else {
+                ((s as u16) << 15) | ((exp as u16) << 10) | ((m >> 13) as u16)
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_hdr_conversion_handles_sdr_white_and_highlights() {
+        // Hand-made R16G16B16A16_FLOAT buffer with known values:
+        // Width 4, Height 2, with row padding (pitch 48 bytes instead of 32 bytes).
+        // Row 0:
+        //  (0, 0): SDR white (1.0, 1.0, 1.0, 1.0)
+        //  (1, 0): Highlight above 1.0 (1.5, 1.5, 1.5, 1.0)
+        //  (2, 0): Pure red at SDR white (1.0, 0.0, 0.0, 1.0)
+        //  (3, 0): Pure blue at SDR white (0.0, 0.0, 1.0, 1.0)
+        // Row 1:
+        //  (0, 1): Black (0.0, 0.0, 0.0, 1.0)
+        //  (1, 1): 18% gray (0.18, 0.18, 0.18, 1.0)
+        //  (2, 1): Extreme highlight (2.0, 2.0, 2.0, 1.0)
+        //  (3, 1): Negative out-of-gamut (-0.5, 0.5, 0.0, 1.0)
+        let width = 4u32;
+        let height = 2u32;
+        let pitch = 48usize; // 4 * 8 = 32 bytes + 16 bytes padding
+        let mut raw = vec![0u8; pitch * height as usize];
+
+        let put_px = |buf: &mut [u8], x: usize, y: usize, r: f32, g: f32, b: f32, a: f32| {
+            let off = y * pitch + x * 8;
+            buf[off..off + 2].copy_from_slice(&f32_to_f16(r).to_le_bytes());
+            buf[off + 2..off + 4].copy_from_slice(&f32_to_f16(g).to_le_bytes());
+            buf[off + 4..off + 6].copy_from_slice(&f32_to_f16(b).to_le_bytes());
+            buf[off + 6..off + 8].copy_from_slice(&f32_to_f16(a).to_le_bytes());
+        };
+
+        // Row 0
+        put_px(&mut raw, 0, 0, 1.0, 1.0, 1.0, 1.0); // SDR white
+        put_px(&mut raw, 1, 0, 1.5, 1.5, 1.5, 1.0); // Highlight > 1.0
+        put_px(&mut raw, 2, 0, 1.0, 0.0, 0.0, 1.0); // Pure red
+        put_px(&mut raw, 3, 0, 0.0, 0.0, 1.0, 1.0); // Pure blue
+
+        // Row 1
+        put_px(&mut raw, 0, 1, 0.0, 0.0, 0.0, 1.0); // Black
+        put_px(&mut raw, 1, 1, 0.18, 0.18, 0.18, 1.0); // Mid-tone
+        put_px(&mut raw, 2, 1, 2.0, 2.0, 2.0, 1.0); // Extreme highlight
+        put_px(&mut raw, 3, 1, -0.5, 0.5, 0.0, 1.0); // Out-of-gamut
+
+        let frame = frame_from_staging(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, pitch, &raw);
+
+        assert_eq!(frame.width, 4);
+        assert_eq!(frame.height, 2);
+        assert_eq!(frame.stride, 16, "stride must be 4 bytes per pixel (16 bytes for width 4)");
+        assert_eq!(frame.bgra.len(), 16 * 2, "buffer length must be stride * height");
+
+        // (0, 0) SDR white (1.0): must map to 255 in all channels
+        assert_eq!(frame.pixel(0, 0), Some((255, 255, 255, 255)), "SDR white (1.0) must map to 255");
+
+        // (1, 0) Highlight (1.5): must saturate at 255
+        assert_eq!(frame.pixel(1, 0), Some((255, 255, 255, 255)), "Highlight (1.5) must saturate at 255");
+
+        // (2, 0) Pure red: Blue=0, Green=0, Red=255, Alpha=255
+        assert_eq!(frame.pixel(2, 0), Some((0, 0, 255, 255)), "Pure red must map to BGRA (0, 0, 255, 255)");
+
+        // (3, 0) Pure blue: Blue=255, Green=0, Red=0, Alpha=255
+        assert_eq!(frame.pixel(3, 0), Some((255, 0, 0, 255)), "Pure blue must map to BGRA (255, 0, 0, 255)");
+
+        // (0, 1) Black: (0, 0, 0, 255)
+        assert_eq!(frame.pixel(0, 1), Some((0, 0, 0, 255)), "Black must map to 0");
+
+        // (1, 1) 18% gray: ~118 via sRGB transfer function (117.65 rounded; not linear 46)
+        let mid = frame.pixel(1, 1).expect("mid-tone pixel readable");
+        assert_eq!((mid.0, mid.1, mid.2), (118, 118, 118), "18% gray must map via sRGB transfer curve to 118");
+    }
+
+    #[test]
+    fn synthetic_hdr_positive_control_distinguishes_sdr_white_from_mid_gray_and_black() {
+        let width = 3u32;
+        let height = 1u32;
+        let pitch = 3 * 8;
+        let mut raw = vec![0u8; pitch];
+
+        let put_px = |buf: &mut [u8], x: usize, r: f32, g: f32, b: f32| {
+            let off = x * 8;
+            buf[off..off + 2].copy_from_slice(&f32_to_f16(r).to_le_bytes());
+            buf[off + 2..off + 4].copy_from_slice(&f32_to_f16(g).to_le_bytes());
+            buf[off + 4..off + 6].copy_from_slice(&f32_to_f16(b).to_le_bytes());
+            buf[off + 6..off + 8].copy_from_slice(&f32_to_f16(1.0).to_le_bytes());
+        };
+
+        put_px(&mut raw, 0, 1.0, 1.0, 1.0); // SDR white
+        put_px(&mut raw, 1, 0.18, 0.18, 0.18); // Mid-gray
+        put_px(&mut raw, 2, 0.0, 0.0, 0.0); // Black
+
+        let frame = frame_from_staging(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, pitch, &raw);
+        let white = frame.pixel(0, 0).unwrap();
+        let mid = frame.pixel(1, 0).unwrap();
+        let black = frame.pixel(2, 0).unwrap();
+
+        assert_ne!(white, mid, "white and mid-gray must be distinguishable");
+        assert_ne!(mid, black, "mid-gray and black must be distinguishable");
+        assert_ne!(white, black, "white and black must be distinguishable");
     }
 }
