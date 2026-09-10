@@ -23,7 +23,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
+    CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
     IDXGIResource,
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
     DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
@@ -77,79 +77,126 @@ struct CursorState {
     visible: bool,
 }
 
-/// A device on the adapter that OWNS `monitor`, plus a description of it for
-/// the log.
+/// Open a duplication for `monitor` on WHICHEVER adapter can actually do it.
 ///
-/// WHY THE ADAPTER IS EXPLICIT. This used to be
-/// `D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, ..)` with a WARP
-/// fallback: "whatever adapter Windows calls default for this process", which
-/// is not a property of the machine at all. A per-app graphics preference, a
-/// hybrid-GPU heuristic or a driver update can move it with no code change,
-/// and `DuplicateOutput` requires a device on the adapter owning the output.
-/// Measured on a six-adapter machine (2026-09-09,
-/// `examples/dxgi-topology.rs`): the owning adapter always succeeds, and every
-/// other adapter fails, so binding to the owner is correct by construction
-/// rather than by luck.
+/// WHY THIS IS NOT SIMPLY "THE ADAPTER THAT OWNS THE OUTPUT". On a machine with
+/// two GPUs, Windows lets a user pin an application to one of them — Settings ->
+/// Display -> Graphics, or `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`,
+/// where `GpuPreference=1` means "power saving", the integrated GPU. That
+/// preference changes what DXGI enumerates INSIDE THAT PROCESS: the preferred
+/// adapter comes first and lists the monitors, even though it is not the GPU
+/// driving them.
 ///
-/// AND NO WARP. A WARP device is a software rasteriser with no display
-/// attached; the same measurement showed it cannot duplicate ANY output.
-/// Falling back to it turned "no hardware device right now" into "no monitor
-/// can be captured", reported as a driver-support error — a fallback that
-/// cannot do the one job the device exists for is worse than no fallback,
-/// because it hides why.
-fn create_device_for(
+/// Desktop duplication only works on the GPU actually driving the display, so
+/// in a pinned process the first adapter to claim a monitor is exactly the one
+/// that cannot duplicate it, and every monitor fails with
+/// `DXGI_ERROR_UNSUPPORTED` (0x887A0004). Measured on the reporter's machine on
+/// 2026-09-09: Puca pinned to "power saving", all three monitors refused, and
+/// the error named `AMD Radeon(TM) Graphics` while the displays are driven by
+/// the discrete card.
+///
+/// So: try every adapter that exposes this monitor, matched by HMONITOR rather
+/// than by index (indices are per-walk and differ between adapters), and take
+/// the first that duplicates. An explicit adapter is always usable regardless
+/// of the preference — the preference only picks the DEFAULT.
+fn open_duplication(
     monitor: usize,
-) -> Result<(ID3D11Device, ID3D11DeviceContext, String), CaptureError> {
-    let adapter = unsafe { adapter_of_output(monitor) }.ok_or_else(|| {
-        CaptureError::Failed(format!("no monitor at index {monitor}"))
-    })?;
-    let name = unsafe { adapter.GetDesc1() }
-        .map(|d| String::from_utf16_lossy(&d.Description).trim_end_matches('\0').trim().to_string())
-        .unwrap_or_else(|_| "<unnamed adapter>".to_string());
+) -> Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutputDuplication, String), CaptureError> {
+    let target = outputs()
+        .into_iter()
+        .find(|o| o.index == monitor)
+        .map(|o| o.hmonitor)
+        .ok_or_else(|| CaptureError::Failed(format!("no monitor at index {monitor}")))?;
 
-    let mut device: Option<ID3D11Device> = None;
-    let mut context: Option<ID3D11DeviceContext> = None;
-    // D3D_DRIVER_TYPE_UNKNOWN is REQUIRED when an adapter is passed; HARDWARE
-    // with a non-null adapter is E_INVALIDARG.
-    let hr = unsafe {
-        D3D11CreateDevice(
-            &adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            None,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
-    };
-    match (hr.is_ok(), device, context) {
-        (true, Some(d), Some(c)) => Ok((d, c, name)),
-        (_, _, _) => Err(CaptureError::Failed(format!(
-            "could not create a D3D11 device on the adapter that owns monitor {monitor} ({name})"
-        ))),
-    }
-}
+    let mut refused: Vec<String> = Vec::new();
+    // Every adapter the walk SAW, refusal or not. Without this the failure
+    // message can only describe adapters that got as far as being asked, and
+    // the most confusing case — nothing exposes this monitor at all — read
+    // "tried 0: " with an empty list.
+    let mut enumerated: Vec<String> = Vec::new();
+    let mut transient = false;
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1()
+            .map_err(|e| CaptureError::Failed(format!("CreateDXGIFactory1 failed: {e}")))?;
+        let mut adapter_index = 0u32;
+        while let Ok(adapter) = factory.EnumAdapters1(adapter_index) {
+            adapter_index += 1;
+            let name = adapter
+                .GetDesc1()
+                .map(|d| String::from_utf16_lossy(&d.Description).trim_end_matches('\0').trim().to_string())
+                .unwrap_or_else(|_| "<unnamed adapter>".to_string());
+            enumerated.push(name.clone());
 
-/// The adapter that owns capture-index `monitor`, in the same walk order
-/// `each_output` uses.
-unsafe fn adapter_of_output(monitor: usize) -> Option<IDXGIAdapter1> {
-    let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
-    let mut seen = 0usize;
-    let mut adapter_index = 0u32;
-    while let Ok(adapter) = factory.EnumAdapters1(adapter_index) {
-        let mut output_index = 0u32;
-        while adapter.EnumOutputs(output_index).is_ok() {
-            if seen == monitor {
-                return Some(adapter);
+            let mut output_index = 0u32;
+            while let Ok(output) = adapter.EnumOutputs(output_index) {
+                output_index += 1;
+                let is_target = output
+                    .GetDesc()
+                    .map(|d| d.Monitor.0 as isize == target)
+                    .unwrap_or(false);
+                if !is_target {
+                    continue;
+                }
+                let Ok(output1) = output.cast::<IDXGIOutput1>() else {
+                    refused.push(format!("{name}: no IDXGIOutput1"));
+                    continue;
+                };
+                // D3D_DRIVER_TYPE_UNKNOWN is REQUIRED with an explicit adapter;
+                // HARDWARE with a non-null adapter is E_INVALIDARG.
+                let mut device: Option<ID3D11Device> = None;
+                let mut context: Option<ID3D11DeviceContext> = None;
+                let hr = D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    None,
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                );
+                let (Some(()), Some(device), Some(context)) = (hr.ok(), device, context) else {
+                    refused.push(format!("{name}: no D3D11 device"));
+                    continue;
+                };
+                match output1.DuplicateOutput(&device) {
+                    Ok(dup) => return Ok((device, context, dup, name)),
+                    Err(e) if e.code() == E_ACCESSDENIED || is_transient_display_state(e.code()) => {
+                        // The secure desktop, a sleeping panel, or another
+                        // duplication of this output. Not this adapter's fault
+                        // and not a reason to try a different GPU — remember it
+                        // so the caller still gets AccessLost rather than a
+                        // hard failure naming every adapter.
+                        transient = true;
+                        refused.push(format!("{name}: {e}"));
+                    }
+                    Err(e) => refused.push(format!("{name}: {e}")),
+                }
             }
-            seen += 1;
-            output_index += 1;
         }
-        adapter_index += 1;
     }
-    None
+    if transient {
+        return Err(CaptureError::AccessLost);
+    }
+    if refused.is_empty() {
+        // NOT ONE adapter exposed this monitor — yet `outputs()` listed it a
+        // moment ago, from this same enumeration. The topology changed between
+        // the two walks: the panel went to sleep, or a link detached. That is
+        // "not right now", so it must surface as AccessLost and let the
+        // caller's retry loop wake it, exactly as a mid-session loss does.
+        //
+        // A monitor that is permanently gone cannot reach here: the lookup at
+        // the top of this function fails first with "no monitor at index N",
+        // which keeps this from becoming a forever-retry.
+        return Err(CaptureError::AccessLost);
+    }
+    Err(CaptureError::Failed(format!(
+        "no adapter could duplicate monitor {monitor} — refused by {}: {} (adapters seen: {})",
+        refused.len(),
+        refused.join("; "),
+        enumerated.join(", ")
+    )))
 }
 
 /// Visit every output across every adapter, in the ONE order this crate calls
@@ -218,42 +265,11 @@ pub fn outputs() -> Vec<OutputInfo> {
     out
 }
 
-/// Duplicate the given monitor's output.
-fn duplicate(device: &ID3D11Device, monitor: usize) -> Result<IDXGIOutputDuplication, CaptureError> {
-    unsafe {
-        let found = each_output(|seen, output| {
-            if seen != monitor {
-                return None;
-            }
-            Some(output.cast::<IDXGIOutput1>().map_err(|e| {
-                CaptureError::Failed(format!("output does not support duplication: {e}"))
-            }))
-        });
-        match found {
-            Some(Ok(output1)) => output1.DuplicateOutput(device).map_err(|e| {
-                if e.code() == E_ACCESSDENIED || is_transient_display_state(e.code()) {
-                    // E_ACCESSDENIED: the secure desktop, or another process
-                    // holding an exclusive duplication. For the secure desktop
-                    // this is a DESKTOP permission answer, not a DXGI limit —
-                    // a SYSTEM process attached to Winlogon via SetThreadDesktop
-                    // duplicates it normally (measured 2026-08-15). So the fix
-                    // for that case is to follow the input desktop, not to
-                    // reach for a different capture API. The transient family:
-                    // a display powering down or detaching (DPMS sleep on
-                    // some panels/links detaches the output entirely). All
-                    // recoverable by re-duplicating later — a session must
-                    // survive its host's screens going to sleep, because the
-                    // controller's own input is what wakes them back up.
-                    CaptureError::AccessLost
-                } else {
-                    CaptureError::Failed(format!("DuplicateOutput failed: {e}"))
-                }
-            }),
-            Some(Err(e)) => Err(e),
-            None => Err(CaptureError::Failed(format!("no monitor at index {monitor}"))),
-        }
-    }
-}
+// `duplicate(device, monitor)` LIVED HERE and is deliberately gone. It resolved
+// a monitor by its position in the output walk and duplicated it against a
+// device it was handed, which made it a second, disagreeing answer to "which
+// screen is N, and which GPU drives it". `open_duplication` is the only answer
+// now; see the rebuild in `next_frame`.
 
 /// Display-state HRESULTs that mean "not right now", not "never": the output
 /// is asleep, detaching, or the session is disconnected. Deliberately NOT
@@ -288,18 +304,10 @@ fn is_transient_display_state(code: windows::core::HRESULT) -> bool {
 impl ScreenCapture {
     /// Start capturing `monitor` (0 = the first enumerated output).
     pub fn new(monitor: usize) -> Result<Self, CaptureError> {
-        let (device, context, adapter) = create_device_for(monitor)?;
-        // NAME THE ADAPTER IN THE ERROR. This crate deliberately has no logging
-        // dependency, and when duplication fails the first question is always
-        // which GPU the device landed on — three wrong theories were chased for
-        // want of exactly that. Putting it in the message gets it into the
-        // caller's log AND in front of the person who hit it.
-        let duplication = duplicate(&device, monitor).map_err(|e| match e {
-            CaptureError::Failed(msg) => {
-                CaptureError::Failed(format!("{msg} [monitor {monitor} on adapter '{adapter}']"))
-            }
-            other => other,
-        })?;
+        // The error this returns names every adapter it tried and why each
+        // refused: this crate deliberately has no logging dependency, and when
+        // duplication fails the first question is always which GPU was asked.
+        let (device, context, duplication, _adapter) = open_duplication(monitor)?;
         let rotation = rotation_of(monitor);
         Ok(Self {
             device,
@@ -390,7 +398,42 @@ impl ScreenCapture {
     /// makes alt-tabbing into a fullscreen game survivable.
     pub fn next_frame(&mut self, timeout_ms: u32) -> Result<Frame, CaptureError> {
         if self.duplication.is_none() {
-            self.duplication = Some(duplicate(&self.device, self.monitor)?);
+            // REBUILD THE WAY THE OPEN DID, ADAPTER AND ALL.
+            //
+            // This used to call a helper that found the output by its position
+            // in the walk and duplicated it against the device already held.
+            // Both halves of that are wrong once two GPUs are in play, which is
+            // the whole reason `open_duplication` exists:
+            //
+            //   - position vs HMONITOR. The open matches the monitor by its
+            //     HMONITOR; a walk index is not the same key, and `outputs()`
+            //     is documented to have gaps. The two can name DIFFERENT
+            //     screens, so a rebuild could silently start capturing another
+            //     one mid-session.
+            //   - the device. The open deliberately lands on whichever adapter
+            //     can actually duplicate this monitor. Handing that device an
+            //     output owned by a different adapter is a cross-adapter call,
+            //     which is DXGI_ERROR_UNSUPPORTED (0x887A0004) and NOT in the
+            //     transient family — so it ends the session outright.
+            //
+            // On a machine whose low-power GPU drives no display, the index and
+            // the HMONITOR happen to agree and this never bites. On a laptop
+            // whose iGPU drives the internal panel while the discrete card
+            // drives an external one, they do not — and that is precisely the
+            // hardware `open_duplication` was written for. A rebuild happens on
+            // every alt-tab into a fullscreen game, so getting this wrong would
+            // mean capture that opens fine and dies on first use.
+            let (device, context, dup, _adapter) = open_duplication(self.monitor)?;
+            // Adopt the rebuilt device unconditionally. It is usually the same
+            // adapter, but a texture belongs to the device that created it, so
+            // the staging buffer cannot outlive a swap — it is reallocated on
+            // the next frame. Rebuilds are rare (a lost desktop, not a frame),
+            // so paying for one allocation here is cheaper than a test that
+            // proves the device never changes.
+            self.device = device;
+            self.context = context;
+            self.staging = None;
+            self.duplication = Some(dup);
             // RE-READ THE ROTATION WITH THE NEW DUPLICATION.
             //
             // Reading it once at open was justified by "a display cannot rotate

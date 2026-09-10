@@ -20,9 +20,28 @@
 
 use puca_capture::{CaptureError, ScreenCapture};
 
+/// ONE LIVE CAPTURE AT A TIME, whatever `--test-threads` says.
+///
+/// Windows allows a single desktop duplication of a given output per process.
+/// Both tests below capture monitor 0, cargo runs them on separate threads by
+/// default, and the loser got `DuplicateOutput` -> E_INVALIDARG (0x80070057).
+/// That failure was read as "live capture is broken on this machine" for days,
+/// including in an investigation of a real capture bug, where it sat in the
+/// results as an unexplained pre-existing failure and made every run ambiguous.
+/// It was the rig all along: run serially and both pass.
+///
+/// A poisoned lock is irrelevant here — it only means the other test already
+/// panicked, and this one still needs its turn.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn capture_lock() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 #[ignore = "needs a real display; run with --ignored"]
 fn captures_a_real_frame_with_no_gesture_and_no_picker() {
+    let _serial = capture_lock();
     let count = ScreenCapture::monitor_count();
     println!("monitors detected: {count}");
     assert!(count > 0, "no outputs found — cannot prove capture works");
@@ -87,6 +106,7 @@ fn captures_a_real_frame_with_no_gesture_and_no_picker() {
 #[test]
 #[ignore = "needs a real display; run with --ignored"]
 fn survives_repeated_capture_without_leaking_frames() {
+    let _serial = capture_lock();
     // Every successful AcquireNextFrame must be paired with ReleaseFrame. If one
     // is leaked, acquiring fails FOREVER after — so a loop is the only way to
     // catch it. A single-frame test passes happily with the bug present.
