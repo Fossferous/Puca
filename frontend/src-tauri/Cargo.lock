@@ -75,6 +75,7 @@ dependencies = [
  "log",
  "opener",
  "puca-capture",
+ "puca-clip-wire",
  "puca-encode",
  "puca-input",
  "puca-service",
@@ -3321,6 +3322,10 @@ dependencies = [
  "windows 0.58.0",
  "x11rb",
 ]
+
+[[package]]
+name = "puca-clip-wire"
+version = "0.1.0"
 
 [[package]]
 name = "puca-encode"

@@ -26,6 +26,7 @@ mod session;
 mod flavour;
 mod control_key;
 mod dll_search;
+mod clip_host;
 mod composite;
 // Cross-platform decision logic for the Windows-only stream module's
 // display-topology self-heal, kept here so every CI leg compiles and tests it.
@@ -206,6 +207,24 @@ fn main() {
         eprintln!("[agent] WARNING: could not restrict the DLL search path");
     }
     privacy::init();
+
+    // CLIP CAPTURE HOST MODE, and nothing else: no token, no pipe, no input
+    // injection, no network. It captures one screen, encodes it, and writes the
+    // result to stdout.
+    //
+    // It lives in THIS binary rather than the app because Windows pins a GPU
+    // preference by executable PATH, and the app is deliberately pinned to the
+    // integrated GPU by its owner. Desktop duplication only works on the GPU
+    // driving the display, and inside a pinned process the discrete card does
+    // not offer the monitors at all. See clip_host.rs for the measurements.
+    //
+    // Checked BEFORE the token requirement below, because this mode drives
+    // nothing and authorising it would only mean handing a secret to a process
+    // that has no use for one.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(host) = clip_host::args_from(&argv) {
+        std::process::exit(clip_host::run(host));
+    }
     // The token is REQUIRED. Defaulting to something would mean any local
     // process that knows the pipe name could drive OS input on this machine.
     //

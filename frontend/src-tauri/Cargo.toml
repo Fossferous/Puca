@@ -92,6 +92,7 @@ puca-input = { path = "../../crates/puca-input" }
 # capture — reused here for a LOCAL sink instead of a WebRTC peer.
 puca-capture = { path = "../../crates/puca-capture" }
 puca-encode = { path = "../../crates/puca-encode" }
+puca-clip-wire = { path = "../../crates/puca-clip-wire" }
 
 # The unattended-access gate. Host side only: it VERIFIES a controller's
 # signature and never derives anything from a passphrase, so no Argon2id here.

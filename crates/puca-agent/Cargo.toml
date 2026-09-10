@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 puca-capture = { path = "../puca-capture" }
 puca-encode = { path = "../puca-encode" }
+puca-clip-wire = { path = "../puca-clip-wire" }
 # `caret` is off by default in puca-input because frontend/src-tauri
 # depends on that crate too and has no use for a caret — only this agent reports
 # one. Turned on HERE so the desktop app does not pay the Accessibility/COM

@@ -145,7 +145,14 @@ pub fn choose_target(monitors: &[MonitorCandidate]) -> Option<(MonitorCandidate,
 #[derive(Debug, Clone, Serialize)]
 pub struct ClipCaptureTarget {
     /// Index into `puca_capture::outputs()` — what `ScreenCapture::new` takes.
+    ///
+    /// ONLY MEANINGFUL IN THIS PROCESS. Capture runs in the agent now, and a
+    /// DXGI walk is per-process: under a GPU pin the app and the host do not
+    /// even see the same adapters. `hmonitor` is what crosses the boundary.
     pub output_index: usize,
+    /// Win32 `HMONITOR` — stable across processes in a session, so it is the
+    /// only handle the app and the capture host can both resolve.
+    pub hmonitor: isize,
     pub width: u32,
     pub height: u32,
     pub reason: &'static str,
@@ -226,44 +233,28 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
         return Err("no capturable monitor found".into());
     }
 
-    // PROVE IT CAN BE CAPTURED BEFORE PROMISING IT. Opening the duplication is
-    // the only way to know: a virtual display looks identical to a real one in
-    // both enumerations right up until DuplicateOutput refuses. The probe is
-    // dropped immediately, so the real capture opens it again a moment later.
+    // THE PROBE THAT LIVED HERE IS GONE, and it had to.
+    //
+    // It opened a duplication to prove the screen could be captured before
+    // promising it — a virtual display looks identical to a real one in both
+    // enumerations right up until DuplicateOutput refuses. But capture now runs
+    // in the agent, because this process may be pinned to a GPU that drives no
+    // display, and in that case EVERY probe here fails. Keeping it would have
+    // turned "clips work again" into "clips refuse to arm before they even
+    // start". The host reports what it finds instead, and its message names
+    // every adapter it tried.
     let mut refused: Vec<String> = Vec::new();
     for (chosen, reason) in &ranked {
         let Some((_, output_index)) = candidates.iter().find(|(m, _)| m.hmonitor == chosen.hmonitor)
         else {
-            continue; // the monitor went away between enumerating and now
+            // The monitor went away between enumerating and now.
+            refused.push(format!("{}x{}: vanished while choosing",
+                chosen.rect.width().max(0), chosen.rect.height().max(0)));
+            continue;
         };
-        match ScreenCapture::new(*output_index) {
-            Ok(_probe) => {}
-            // AccessLost is "not right now" — the secure desktop, a sleeping
-            // panel, or another duplication of the same output that will be
-            // released. Skipping a monitor for that would send the clip to the
-            // wrong screen for a reason that resolves itself, so it is allowed
-            // through and the real open deals with it.
-            Err(CaptureError::AccessLost) => {}
-            Err(e) => {
-                log::warn!(
-                    "Clip capture: monitor at output {} ({}x{}) cannot be captured, trying the next: {}",
-                    output_index,
-                    chosen.rect.width().max(0),
-                    chosen.rect.height().max(0),
-                    e
-                );
-                refused.push(format!(
-                    "output {} ({}x{}): {}",
-                    output_index,
-                    chosen.rect.width().max(0),
-                    chosen.rect.height().max(0),
-                    e
-                ));
-                continue;
-            }
-        }
         return Ok(ClipCaptureTarget {
             output_index: *output_index,
+            hmonitor: chosen.hmonitor,
             width: chosen.rect.width().max(0) as u32,
             height: chosen.rect.height().max(0) as u32,
             reason: match reason {
@@ -525,7 +516,7 @@ pub fn start_video_capture(
     let emit_handle = app.clone();
     let t = target.clone();
     std::thread::spawn(move || {
-        let result = video_capture_loop(app, state_clone.clone(), t, fps, gop_ms, ready_tx);
+        let result = capture_loop(app, state_clone.clone(), t, fps, gop_ms, ready_tx);
         state_clone.is_capturing.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             log::error!("Clip video capture error: {}", e);
@@ -559,7 +550,261 @@ pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
 }
 
 #[cfg(windows)]
-fn video_capture_loop(
+/// Where the agent sidecar is, if this build has one.
+///
+/// Mirrors `agent_ipc::agent_path`. Kept separate deliberately: that one is
+/// about the remote-control agent's lifecycle, and a clip capture must not be
+/// able to disturb, restart, or be restarted by an attended session.
+fn clip_host_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join("puca-agent.exe");
+    candidate.exists().then_some(candidate)
+}
+
+#[cfg(windows)]
+/// Capture out of process when we can, in process when there is no sidecar.
+///
+/// WHY OUT OF PROCESS AT ALL: Windows pins a GPU preference per EXECUTABLE
+/// PATH, and this app is deliberately pinned to the integrated GPU by the
+/// owner of the machine it was written for — it is what stops their stream
+/// looking choppy while a game holds the discrete card at 100%. Desktop
+/// duplication only works on the GPU driving the display, and inside a pinned
+/// process the discrete card does not offer the monitors at all: measured
+/// 2026-09-10, all three were exposed by the integrated adapter and by nothing
+/// else, so every one refused with 0x887A0004 and there was no other adapter to
+/// fall back to. The agent is a different executable, so it gets its own
+/// (absent, therefore default) preference.
+///
+/// The in-process path stays for builds with no sidecar — a dev run — and is
+/// the same code that has always run. It is not a workaround for a failing
+/// host: if the host cannot capture, that is the answer, and it says why.
+fn capture_loop(
+    app: AppHandle,
+    state: Arc<ClipCaptureState>,
+    target: ClipCaptureTarget,
+    fps: u32,
+    gop_ms: u32,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<(), String> {
+    match clip_host_path() {
+        Some(path) => sidecar_capture_loop(path, app, state, target, fps, gop_ms, ready),
+        None => {
+            log::info!("Clip video capture: no agent sidecar beside the app, capturing in process");
+            in_process_capture_loop(app, state, target, fps, gop_ms, ready)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn sidecar_capture_loop(
+    path: std::path::PathBuf,
+    app: AppHandle,
+    state: Arc<ClipCaptureState>,
+    target: ClipCaptureTarget,
+    fps: u32,
+    gop_ms: u32,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<(), String> {
+    use std::io::Read;
+
+    // CREATE_NO_WINDOW. The agent is a CONSOLE binary and this is a GUI app, so
+    // spawning it plainly pops a black console window on the member's desktop —
+    // every time the buffer arms, which is on every voice join. The existing
+    // agent launch in agent_ipc.rs sets this for the same reason. Giving it
+    // piped stdio is unaffected: the pipes are handed over explicitly, so the
+    // absent console costs nothing.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use std::os::windows::process::CommandExt;
+    let mut child = match std::process::Command::new(&path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "--clip-capture",
+            "--hmonitor", &target.hmonitor.to_string(),
+            "--width", &target.width.to_string(),
+            "--height", &target.height.to_string(),
+            "--fps", &fps.to_string(),
+            "--bitrate", &target.bitrate.to_string(),
+            "--gop-ms", &gop_ms.to_string(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("Could not start the capture helper: {e}");
+            let _ = ready.send(Err(msg.clone()));
+            return Err(msg);
+        }
+    };
+
+    let mut out = child.stdout.take().expect("piped");
+    let mut err_pipe = child.stderr.take().expect("piped");
+    // Drain stderr on its own thread. The host writes one line and exits when
+    // it fails, and a full pipe would otherwise wedge it before it could.
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = err_pipe.read_to_string(&mut buf);
+        let _ = err_tx.send(buf);
+    });
+
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    // A read on the pipe blocks, so `stop` has to arrive from outside: this
+    // watcher kills the host, which closes the pipe, which ends the loop.
+    let done = Arc::new(AtomicBool::new(false));
+    {
+        let (state, child, done) = (state.clone(), child.clone(), done.clone());
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                if state.stop_signal.load(Ordering::SeqCst) {
+                    if let Ok(mut c) = child.lock() {
+                        let _ = c.kill();
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+    }
+    // Whatever happens below, stop the watcher and the host with it.
+    struct StopGuard(Arc<AtomicBool>, std::sync::Arc<std::sync::Mutex<std::process::Child>>);
+    impl Drop for StopGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+            if let Ok(mut c) = self.1.lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+    let _guard = StopGuard(done, child.clone());
+
+    // The magic is the host's READY signal: it is written only once capture and
+    // the encoder have both opened. No magic means it never started, and the
+    // reason is on stderr.
+    let mut magic = [0u8; 8];
+    if out.read_exact(&mut magic).is_err() || &magic != puca_clip_wire::MAGIC {
+        let reason = err_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap_or_default();
+        let reason = reason.trim();
+        let msg = if reason.is_empty() {
+            "The capture helper stopped before it produced anything.".to_string()
+        } else {
+            reason.trim_start_matches("clip-host: ").to_string()
+        };
+        let _ = ready.send(Err(msg.clone()));
+        return Err(msg);
+    }
+    let _ = ready.send(Ok(()));
+    log::info!(
+        "Clip video capture started in the agent: monitor {:#x} ({}x{} @ {} fps, {} kbps)",
+        target.hmonitor, target.width, target.height, fps, target.bitrate / 1000
+    );
+
+    let start = std::time::Instant::now();
+    let mut params = ParamSetCache::default();
+    let mut consecutive_sps_failures = 0u32;
+    let mut frames_encoded: u64 = 0;
+    let mut bytes_emitted: u64 = 0;
+    let mut last_beat = std::time::Instant::now();
+    const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    loop {
+        let mut head = [0u8; puca_clip_wire::HEADER_LEN];
+        if out.read_exact(&mut head).is_err() {
+            break; // the host exited; why is decided below
+        }
+        let head = puca_clip_wire::Header::from_bytes(&head);
+        let (keyframe, ts_us, dur_us) = (head.keyframe, head.ts_us, head.dur_us);
+        // A length is the one field a desynced stream could turn into a
+        // multi-gigabyte allocation, because it is trusted BEFORE the bytes
+        // behind it have been seen.
+        if !puca_clip_wire::payload_len_is_sane(head.len) {
+            return Err("The capture helper sent a frame that cannot be right.".to_string());
+        }
+        let mut data = vec![0u8; head.len as usize];
+        if out.read_exact(&mut data).is_err() {
+            break;
+        }
+        if keyframe {
+            data = params.prime_keyframe(data);
+        }
+
+        // The codec string rides on EVERY keyframe — see the note at the old
+        // compute site: chunks emitted before the JS ring exists are dropped,
+        // and a one-shot made that race permanent.
+        let codec = if keyframe {
+            match sps_codec_string(&data) {
+                Some(c) => { consecutive_sps_failures = 0; Some(c) }
+                None => {
+                    consecutive_sps_failures += 1;
+                    // "fails after 5 keyframes" — docs/CLIPS.md holds this number.
+                    if consecutive_sps_failures >= 5 {
+                        return Err("the encoder never produced a usable H.264 sequence header".to_string());
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let emitted_bytes = data.len() as u64;
+        let event = ClipVideoChunkEvent {
+            data: base64_encode(&data),
+            keyframe,
+            ts_us,
+            dur_us,
+            codec,
+            width: target.width,
+            height: target.height,
+        };
+        if app.emit("clip-video-chunk", event).is_err() {
+            break; // the window is gone — nothing left to stream to
+        }
+        frames_encoded += 1;
+        bytes_emitted += emitted_bytes;
+        if last_beat.elapsed() >= HEARTBEAT {
+            let secs = start.elapsed().as_secs_f64().max(0.001);
+            log::info!(
+                "Clip video capture: still armed — {:.0}s, {} frames ({:.1} fps), {:.1} Mbit/s, agent host",
+                secs, frames_encoded, frames_encoded as f64 / secs,
+                (bytes_emitted as f64 * 8.0) / secs / 1_000_000.0,
+            );
+            last_beat = std::time::Instant::now();
+        }
+    }
+
+    let stopped_on_purpose = state.stop_signal.load(Ordering::SeqCst);
+    let secs = start.elapsed().as_secs_f64().max(0.001);
+    log::info!(
+        "Clip video capture stopped: {:.0}s, {} frames ({:.1} fps), {:.1} Mbit/s, agent host",
+        secs, frames_encoded, frames_encoded as f64 / secs,
+        (bytes_emitted as f64 * 8.0) / secs / 1_000_000.0,
+    );
+    if stopped_on_purpose {
+        return Ok(());
+    }
+    // The host died on its own. Its last words are the useful part — they name
+    // the screen and every adapter tried — so they must reach the member rather
+    // than becoming "capture ended".
+    let reason = err_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap_or_default();
+    let reason = reason.trim().trim_start_matches("clip-host: ").to_string();
+    if reason.is_empty() {
+        Err("The capture helper stopped unexpectedly.".to_string())
+    } else {
+        Err(reason)
+    }
+}
+
+#[cfg(windows)]
+fn in_process_capture_loop(
     app: AppHandle,
     state: Arc<ClipCaptureState>,
     target: ClipCaptureTarget,

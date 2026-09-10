@@ -641,14 +641,18 @@ impl ScreenCapture {
                 DXGI_FORMAT_B8G8R8A8_UNORM => "DXGI_FORMAT_B8G8R8A8_UNORM",
                 _ => "<other format>",
             };
-            // NOT println!. Release builds are windows_subsystem = "windows",
-            // so there is no console and a failed stdout write PANICS — on the
-            // capture thread, which would take clips down for a diagnostic
-            // line. Ignore the result: if nobody is listening, nobody is
-            // listening.
+            // STDERR, and never stdout. Two reasons, both learned the hard
+            // way. Release builds are windows_subsystem = "windows", so there
+            // is no console and a failed write PANICS — on the capture thread,
+            // which would take clips down for a diagnostic line; hence the
+            // ignored result. And the clip capture host streams ENCODED FRAMES
+            // on its stdout, so a line printed there is not a log message, it
+            // is corruption in the middle of an H.264 bitstream. Measured:
+            // this line landed 8 bytes into the stream and the parent could
+            // not parse a single frame.
             use std::io::Write as _;
             let _ = writeln!(
-                std::io::stdout(),
+                std::io::stderr(),
                 "Acquired frame texture format: {fmt_name} ({cur_fmt})"
             );
         }
