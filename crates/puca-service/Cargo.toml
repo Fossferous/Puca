@@ -11,15 +11,15 @@ publish = false
 # The machine identity: its own device keypair, kept where no other account
 # can read it. Versions match the root Cargo.toml so two implementations of one
 # wire format cannot drift.
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-ed25519-dalek = "2"
-sha2 = "0.10"
-base64 = "0.22"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+ed25519-dalek = "3"
+sha2 = "0.11"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Launch tokens come from the OS RNG: two agents started in the same millisecond
 # (a fast-user-switch) must not share a secret.
-getrandom = "0.2"
+getrandom = "0.4"
 # The unattended-access record: the machine-scope copy the agent is armed from.
 puca-ua = { path = "../puca-ua" }
 
@@ -32,11 +32,11 @@ puca-ua = { path = "../puca-ua" }
 #
 # `current_thread`: one socket, one timer, one rare datagram.
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "io-util", "sync"] }
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Shares the TLS stack with tokio-tungstenite's native-tls rather than pulling
 # in a second one.
-reqwest = { version = "0.11", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 
 [lib]
 name = "puca_service"
@@ -61,8 +61,8 @@ tauri-winres = "0.3"
 # state machine, SESSION_CHANGE plumbing) is fiddly and cannot be unit-tested
 # without installing — so it is delegated to the established windows-service
 # crate rather than hand-rolled in raw windows-rs.
-windows-service = "0.7"
-windows = { version = "0.58", features = [
+windows-service = "0.8"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Pipes",

@@ -18,7 +18,7 @@ puca-capture = { path = "../puca-capture" }
 # software MFT has a fixed CLSID and the hardware ones must be enumerated and
 # driven asynchronously. See the header of src/windows_impl.rs.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
