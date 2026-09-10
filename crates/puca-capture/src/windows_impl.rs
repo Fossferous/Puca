@@ -641,7 +641,16 @@ impl ScreenCapture {
                 DXGI_FORMAT_B8G8R8A8_UNORM => "DXGI_FORMAT_B8G8R8A8_UNORM",
                 _ => "<other format>",
             };
-            println!("Acquired frame texture format: {fmt_name} ({cur_fmt})");
+            // NOT println!. Release builds are windows_subsystem = "windows",
+            // so there is no console and a failed stdout write PANICS — on the
+            // capture thread, which would take clips down for a diagnostic
+            // line. Ignore the result: if nobody is listening, nobody is
+            // listening.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stdout(),
+                "Acquired frame texture format: {fmt_name} ({cur_fmt})"
+            );
         }
 
         let staging = self.staging_for(&desc)?;
