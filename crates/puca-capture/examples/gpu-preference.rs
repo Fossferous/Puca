@@ -20,19 +20,23 @@
 //! on the machine.
 //!
 //! Run:  cargo run -p puca-capture --example gpu-preference
-#![cfg(windows)]
 
+#[cfg(windows)]
 use windows::core::Interface;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory6, IDXGIOutput1,
     DXGI_GPU_PREFERENCE, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_GPU_PREFERENCE_MINIMUM_POWER,
     DXGI_GPU_PREFERENCE_UNSPECIFIED,
 };
 
+#[cfg(windows)]
 fn name_of(a: &IDXGIAdapter1) -> String {
     unsafe { a.GetDesc1() }
         .ok()
@@ -42,6 +46,7 @@ fn name_of(a: &IDXGIAdapter1) -> String {
 
 /// Walk the adapters in the order this GPU preference implies, and for every
 /// output each one exposes, say whether it can be duplicated from that adapter.
+#[cfg(windows)]
 unsafe fn report(factory: &IDXGIFactory6, pref: DXGI_GPU_PREFERENCE, label: &str) {
     println!("\n=== preference: {label} ===");
     let mut i = 0u32;
@@ -108,6 +113,7 @@ unsafe fn report(factory: &IDXGIFactory6, pref: DXGI_GPU_PREFERENCE, label: &str
     );
 }
 
+#[cfg(windows)]
 fn main() -> windows::core::Result<()> {
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
@@ -122,4 +128,13 @@ fn main() -> windows::core::Result<()> {
          pinned case. If only the low-power adapter lists them, it cannot."
     );
     Ok(())
+}
+
+// OFF WINDOWS THIS MUST STILL COMPILE. `cargo test` builds every example,
+// and a file-wide `#![cfg(windows)]` removes `main` along with everything
+// else — which is E0601 on Linux, not a skipped probe. Same shape as
+// cursor_probe.rs beside it.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("gpu-preference asks DXGI what each GPU preference exposes; run it on Windows.");
 }

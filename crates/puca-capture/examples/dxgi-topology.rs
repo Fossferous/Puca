@@ -16,15 +16,18 @@
 //! adapters can duplicate a given output AT ALL.
 //!
 //! Run:  cargo run -p puca-capture --example dxgi-topology
-#![cfg(windows)]
 
+#[cfg(windows)]
 use windows::core::Interface;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
 };
@@ -34,6 +37,7 @@ use windows::Win32::Graphics::Dxgi::{
 /// NOTE the driver type: passing an explicit adapter REQUIRES
 /// `D3D_DRIVER_TYPE_UNKNOWN`. `HARDWARE` with a non-null adapter is
 /// E_INVALIDARG — the mistake that usually follows this diagnosis.
+#[cfg(windows)]
 fn device_on(adapter: Option<&IDXGIAdapter>) -> Option<ID3D11Device> {
     let mut device: Option<ID3D11Device> = None;
     unsafe {
@@ -55,6 +59,7 @@ fn device_on(adapter: Option<&IDXGIAdapter>) -> Option<ID3D11Device> {
 
 /// A device by DRIVER TYPE with no adapter — exactly what
 /// `windows_impl.rs::create_device` does, including its WARP fallback.
+#[cfg(windows)]
 fn device_by_driver(driver: D3D_DRIVER_TYPE) -> Option<ID3D11Device> {
     let mut device: Option<ID3D11Device> = None;
     unsafe {
@@ -74,6 +79,7 @@ fn device_by_driver(driver: D3D_DRIVER_TYPE) -> Option<ID3D11Device> {
     device
 }
 
+#[cfg(windows)]
 fn adapter_name(a: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> String {
     unsafe { a.GetDesc1() }
         .ok()
@@ -81,6 +87,7 @@ fn adapter_name(a: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> String {
         .unwrap_or_else(|| "<unnamed>".into())
 }
 
+#[cfg(windows)]
 fn try_dup(output: &IDXGIOutput, device: &Option<ID3D11Device>) -> String {
     let out1 = match output.cast::<IDXGIOutput1>() {
         Ok(o) => o,
@@ -95,6 +102,7 @@ fn try_dup(output: &IDXGIOutput, device: &Option<ID3D11Device>) -> String {
     }
 }
 
+#[cfg(windows)]
 fn main() -> windows::core::Result<()> {
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
@@ -169,4 +177,13 @@ fn main() -> windows::core::Result<()> {
         );
     }
     Ok(())
+}
+
+// OFF WINDOWS THIS MUST STILL COMPILE. `cargo test` builds every example,
+// and a file-wide `#![cfg(windows)]` removes `main` along with everything
+// else — which is E0601 on Linux, not a skipped probe. Same shape as
+// cursor_probe.rs beside it.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("dxgi-topology enumerates DXGI adapters and desktop duplication; run it on Windows.");
 }

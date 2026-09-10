@@ -281,3 +281,13 @@ frontend/e2e-artifacts/
 
 # Written by the release step for GET /source (build.rs embeds it); never committed.
 SOURCE_COMMIT
+
+# Release artifacts are BUILT, not committed. They ship to download.svrn.lol via
+# deploy/ops/dual-ship.sh and are attached to the GitHub release; a copy in git
+# is 90 MB per release of the same bytes, kept forever. Added after `git add -A`
+# during the 0.9.810 ship swept them in.
+/*.apk
+/dist-*.zip
+/webapp-*.tar.gz
+/*-ota-key.txt
+/*-ota-sum.txt
