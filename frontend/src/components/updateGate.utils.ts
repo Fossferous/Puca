@@ -74,14 +74,16 @@ export function isTrustedBundleUrl(url: string, apiBase: string): boolean {
         const host = norm(u.hostname);
         const api = norm(apiHost);
         if (host === api) return true;
-        // The API host's PARENT, not "the last two labels": chat.example.com
-        // trusts *.example.com, chat.puca.co.uk trusts *.puca.co.uk. The old
-        // rule made co.uk (and com.au, and every such suffix) the shared
-        // "site", so every host under it passed. An API host at an apex has no
-        // parent worth trusting, so it is exact-host only. Not a public-suffix
-        // list: chat.github.io still trusts *.github.io, which only an operator
-        // who runs their API there can change (an explicit bundle host would
-        // be the complete fix). Found by the 2026-09-16 adversarial campaign.
+        // The API host's PARENT, not "the last two labels": an API at
+        // chat.<site> trusts everything under <site>, and an API at
+        // chat.puca.co.uk trusts everything under puca.co.uk. The old rule
+        // made co.uk (and com.au, and every such suffix) the shared "site",
+        // so every host under it passed. An API host at an apex has no parent
+        // worth trusting, so it is exact-host only. Not a public-suffix list:
+        // an API hosted under a shared-hosting suffix trusts that whole
+        // suffix, which only the operator who put it there can change (an
+        // explicit bundle host would be the complete fix). Found by the
+        // 2026-09-16 adversarial campaign.
         const parent = api.split('.').slice(1).join('.');
         if (!parent.includes('.')) return false;
         return host === parent || host.endsWith('.' + parent);
