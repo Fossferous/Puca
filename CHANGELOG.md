@@ -49,8 +49,8 @@ one-line summary; this file is the full story. Versions follow
 
   The share health log now records the negotiated profile next to the
   encoder, and "Copy diagnostics" lists which H.264 profiles this machine can
-  send and which of them are hardware-eligible, so this is visible in a report
-  rather than a two-week investigation.
+  send and whether a hardware encoder is behind them, so this is visible in a
+  report rather than a two-week investigation.
 - **A full install with its capture helper missing now says so.** Clips record
   the screen through a small helper program installed beside Púca. If that
   helper is missing from a full install, the buffer used to fall back to
