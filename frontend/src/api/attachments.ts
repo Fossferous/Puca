@@ -92,19 +92,46 @@ export function videoMimeFor(name: string, mime: string): string | null {
     return VIDEO_EXT_MIME[ext] ?? null;
 }
 
+/**
+ * `decodeURIComponent` that cannot throw. `URLSearchParams` has ALREADY
+ * percent-decoded the value, so the second pass below only ever mattered for a
+ * hypothetical double-encoded legacy ref — but it THREW on a lone '%', which
+ * `m=%25` produces, and this parser runs in a render body. Falling back to the
+ * raw value keeps a hostile ref renderable; `safeBlobType` reduces anything
+ * unrecognised to application/octet-stream downstream.
+ */
+function safeDecode(v: string): string {
+    try {
+        return decodeURIComponent(v);
+    } catch {
+        return v;
+    }
+}
+
+/**
+ * Parse a sovereign-enc href. TOTAL: null on anything malformed, NEVER a throw
+ * — `MessageContent` calls this while rendering a message body that any sender
+ * chooses, and the app's only error boundary is the root one, so a throw here
+ * replaced the entire app with the crash screen for every viewer, on every
+ * platform, on every load (0.9.810 audit, C-06). Mirrors `decodeClipRef`.
+ */
 export function parseEncAttachment(href: string): { id: string; key: string; mime: string; cap?: string } | null {
     if (!encPrefixMatch(href)) return null;
-    const [id, query = ''] = href.slice(PREFIX.length).split('?');
-    const params = new URLSearchParams(query);
-    const key = params.get('k');
-    if (!id || !key) return null;
-    const cap = params.get('c');
-    return {
-        id,
-        key,
-        mime: params.get('m') ? decodeURIComponent(params.get('m')!) : 'application/octet-stream',
-        ...(cap ? { cap } : {}),
-    };
+    try {
+        const [id, query = ''] = href.slice(PREFIX.length).split('?');
+        const params = new URLSearchParams(query);
+        const key = params.get('k');
+        if (!id || !key) return null;
+        const cap = params.get('c');
+        return {
+            id,
+            key,
+            mime: params.get('m') ? safeDecode(params.get('m')!) : 'application/octet-stream',
+            ...(cap ? { cap } : {}),
+        };
+    } catch {
+        return null;
+    }
 }
 
 /**

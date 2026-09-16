@@ -107,6 +107,7 @@ import { fileTransferManager, p2pTransfersEnabled } from '../api/fileTransferMan
 import { FileTransfers } from './FileTransfers';
 import { prepareSink } from '../api/transferSinks';
 import { MessageContent } from './MessageContent';
+import { MessageErrorBoundary } from './MessageErrorBoundary';
 import { messageMentionsUser } from '../utils/messageMentions';
 import { FriendsPanel } from './FriendsPanel';
 import { MessageReactions } from './MessageReactions';
@@ -5221,7 +5222,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                         <span className="message-time">{formatTime(ts)}</span>
                                                     </div>
                                                 )}
-                                                <div className="message-content"><MessageContent content={msg.content} members={allMembers} channels={channels} onChannelClick={handleChannelClick} /><NotEncryptedBadge encState={msg.encState} /></div>
+                                                <div className="message-content"><MessageErrorBoundary resetKey={msg.content}><MessageContent content={msg.content} members={allMembers} channels={channels} onChannelClick={handleChannelClick} /></MessageErrorBoundary><NotEncryptedBadge encState={msg.encState} /></div>
                                                 {/* Reactions work on DM messages too (no serverId — custom
                                                     server emojis don't apply in DMs). Skip optimistic local_
                                                     bubbles: their ids don't exist server-side yet. */}
@@ -5495,7 +5496,9 @@ export function Chat({ onLogout }: ChatProps) {
                                                     );
                                                 })()}
                                                 <div className={`message-content ${msg.is_task && msg.is_completed ? 'task-completed' : ''}`}>
-                                                    <MessageContent content={msg.content} members={allMembers} channels={channels} onChannelClick={handleChannelClick} clipConsent={msg.clip_consent} />
+                                                    <MessageErrorBoundary resetKey={msg.content}>
+                                                        <MessageContent content={msg.content} members={allMembers} channels={channels} onChannelClick={handleChannelClick} clipConsent={msg.clip_consent} />
+                                                    </MessageErrorBoundary>
                                                     {(msg.edited || !!msg.edited_at) && <span className="edited-tag" title="Edited">(edited)</span>}
                                                     <NotEncryptedBadge encState={msg.encState} />
                                                 </div>

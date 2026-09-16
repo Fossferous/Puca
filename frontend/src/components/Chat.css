@@ -2572,6 +2572,19 @@ body.voice-drag-active {
     vertical-align: baseline;
 }
 
+/* One message whose CONTENT could not be rendered (MessageErrorBoundary).
+   Deliberately quiet and inline: the row around it still works, so the message
+   can be deleted or reported. Themed tokens, no emoji — the icon is from
+   Icons.tsx per docs/ICON_LANGUAGE.md. */
+.message-render-failed {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8125rem;
+    font-style: italic;
+    color: var(--text-faint, #8a8f98);
+}
+
 /* "Not encrypted" badge: shown on a message the server delivered as plaintext
    (encState 'legacy'). Everything else in the app is E2EE, so this warns that
    THIS message was not — audit H-1. Uses the theme's warning/danger token so it
