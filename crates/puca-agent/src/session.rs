@@ -2853,6 +2853,39 @@ mod tests {
         let _ = rx;
     }
 
+    /// The viewer's stage is bounded BEFORE the stream lookup, and a valid one
+    /// reaches the stream thread as the command the pump reads. Delete the
+    /// bound and the first assertion fails; break the dispatch and the third.
+    #[cfg(windows)]
+    #[test]
+    fn set_view_size_is_bounded_and_then_reaches_the_stream() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(|| ());
+        let stream = crate::stream::Stream::create_for_test("s1".into(), 1, 0, handle, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx);
+        a.streams.insert("s1".into(), stream);
+
+        let too_wide = crate::protocol::MAX_VIEW_EDGE + 1;
+        let refused = a.handle(Request::SetViewSize { session_id: "s1".into(), width: too_wide, height: 1080 });
+        let shown = format!("{refused:?}");
+        assert!(shown.contains("implausible"), "an absurd stage must be refused, got {shown}");
+        assert!(rx.try_recv().is_err(), "nothing reaches the stream for a refused size");
+
+        let ok = a.handle(Request::SetViewSize { session_id: "s1".into(), width: 2400, height: 1080 });
+        assert!(matches!(ok, Response::Ok), "expected Ok, got {ok:?}");
+        match rx.try_recv() {
+            Ok(crate::stream::StreamCommand::SetViewSize { width, height }) => {
+                assert_eq!((width, height), (2400, 1080));
+            }
+            Ok(_) => panic!("the stream received the wrong command"),
+            Err(e) => panic!("the stream must receive the size: {e}"),
+        }
+
+        let none = a.handle(Request::SetViewSize { session_id: "nope".into(), width: 1, height: 1 });
+        assert!(format!("{none:?}").contains("no live stream"), "no stream, no command: {none:?}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_explicit_stop_followed_by_late_terminal_event_is_harmless() {
