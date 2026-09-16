@@ -1011,7 +1011,10 @@ mod tests {
 
     /// The plaintext credential files beside the secret directories are the
     /// same class and are refused the same way; an ordinary file beside them
-    /// is not (the positive control).
+    /// is not (the positive control). Windows-shaped paths, so Windows-only:
+    /// on Linux a backslash is not a separator and the whole string is one
+    /// component.
+    #[cfg(windows)]
     #[test]
     fn plaintext_credential_files_beside_the_secret_directories_are_denied() {
         for f in [".git-credentials", ".netrc", "_netrc", ".npmrc", ".pypirc"] {

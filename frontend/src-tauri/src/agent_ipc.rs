@@ -324,7 +324,11 @@ fn describe_open_error(e: &std::io::Error) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn connect(socket_path: &str, token: &str, attempts: u32) -> Result<Connection, String> {
+/// `_expected_pid` is accepted for signature parity with the Windows dial and
+/// ignored: a Unix-socket connection is identified by the kernel (the socket
+/// lives in an owner-only directory and every connection's uid is checked),
+/// so there is no squattable global name to verify against.
+fn connect(socket_path: &str, token: &str, attempts: u32, _expected_pid: Option<u32>) -> Result<Connection, String> {
     let mut last = String::new();
     for _ in 0..attempts {
         match UnixStream::connect(socket_path) {
@@ -371,7 +375,7 @@ fn describe_connect_error(e: &std::io::Error) -> String {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn connect(_pipe_name: &str, _token: &str, _attempts: u32) -> Result<Connection, String> {
+fn connect(_pipe_name: &str, _token: &str, _attempts: u32, _expected_pid: Option<u32>) -> Result<Connection, String> {
     Err("the host agent has no transport on this platform (Windows: named pipe; Linux: Unix socket)".to_string())
 }
 
