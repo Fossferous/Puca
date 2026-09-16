@@ -14,8 +14,13 @@
 
 use crate::control::{check, ControlRequest, ControlResponse, CONTROL_PIPE, CONTROL_PIPE_SDDL};
 use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
+use windows::Win32::System::IO::CancelSynchronousIo;
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -46,7 +51,7 @@ pub struct ServiceView {
     /// How to reach the running SYSTEM agent — the secret `AgentHandle`
     /// returns. `None` when no agent is running, which is also why the identity
     /// check happens BEFORE this is consulted.
-    pub agent_handle: Option<(String, String)>,
+    pub agent_handle: Option<(String, String, u32)>,
 }
 
 /// A relay the pipe accepted and the service should carry out.
@@ -101,7 +106,7 @@ impl Write for PipeIo {
     }
 }
 
-fn create_pipe() -> Result<PipeHandle, String> {
+fn create_pipe(name: &str) -> Result<PipeHandle, String> {
     let mut sd = PSECURITY_DESCRIPTOR::default();
     unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -117,7 +122,7 @@ fn create_pipe() -> Result<PipeHandle, String> {
         lpSecurityDescriptor: sd.0,
         bInheritHandle: false.into(),
     };
-    let wide: Vec<u16> = CONTROL_PIPE.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR(wide.as_ptr()),
@@ -246,8 +251,8 @@ pub fn handle_line(line: &str, view: &ServiceView) -> (ControlResponse, Option<A
             None,
         ),
         ControlRequest::AgentHandle => match &view.agent_handle {
-            Some((pipe, token)) => (
-                ControlResponse::AgentHandle { pipe: pipe.clone(), token: token.clone() },
+            Some((pipe, token, pid)) => (
+                ControlResponse::AgentHandle { pipe: pipe.clone(), token: token.clone(), pid: *pid },
                 None,
             ),
             // `check` already required a live agent, so this is the race where
@@ -372,6 +377,32 @@ pub fn handle_line(line: &str, view: &ServiceView) -> (ControlResponse, Option<A
 /// decision inside a module whose whole design is that its refusals can be
 /// exercised without a pipe.
 pub fn serve(
+    view: impl FnMut(crate::control::CallerTrust) -> ServiceView,
+    on_accepted: impl FnMut(Accepted),
+    should_stop: impl Fn() -> bool,
+    log: impl FnMut(&str),
+) {
+    serve_on(CONTROL_PIPE, UNCLASSIFIED_DEADLINE, view, on_accepted, should_stop, log)
+}
+
+/// How long a connected client may stay silent before it is dropped.
+///
+/// ONE instance, PIPE_WAIT, and a blocking first read meant any interactive
+/// logon — a second local account, an RDP session — could open the pipe, send
+/// nothing, and hold the SYSTEM service's control channel for ever: arm,
+/// disarm, the unattended toggle and the SAS path all answered "busy" (which
+/// the UI reported as "the service is not installed"), and nothing was logged,
+/// because no request was ever parsed for the policy to refuse. Every real
+/// client writes immediately after opening, so five seconds is generous. Found
+/// by the 2026-09-16 adversarial campaign; pinned by
+/// `a_client_that_never_speaks_is_dropped_so_the_next_one_can_connect`.
+const UNCLASSIFIED_DEADLINE: Duration = Duration::from_secs(5);
+
+/// `serve` on a given pipe name with a given silence deadline, so the loop can
+/// be exercised on a private name in a test.
+pub(crate) fn serve_on(
+    name: &str,
+    unclassified_deadline: Duration,
     mut view: impl FnMut(crate::control::CallerTrust) -> ServiceView,
     mut on_accepted: impl FnMut(Accepted),
     should_stop: impl Fn() -> bool,
@@ -389,7 +420,7 @@ pub fn serve(
     //
     // Holding one handle for the life of the service closes the gap entirely:
     // the name is ours from first creation to shutdown.
-    let pipe = match create_pipe() {
+    let pipe = match create_pipe(name) {
         Ok(p) => p,
         Err(e) => {
             log(&format!("control pipe: {e} (control channel unavailable this run)"));
@@ -398,6 +429,23 @@ pub fn serve(
     };
 
     let mut first = true;
+    // Which connection a silence watchdog belongs to, so one armed for a client
+    // that hung up early can never drop the client that followed it.
+    let connection = Arc::new(AtomicU64::new(0));
+    // A REAL handle to this thread, for the watchdog to cancel a pending read
+    // with. GetCurrentThread's pseudo-handle means "the calling thread" and is
+    // useless from another one. Cancelling the read is the only lever that
+    // works: on a synchronous pipe handle, DisconnectNamedPipe from another
+    // thread BLOCKS behind the pending ReadFile — measured, not assumed — so a
+    // watchdog that disconnected would itself hang until the silent client
+    // spoke, which is never.
+    let serving_thread: isize = unsafe {
+        let mut h = HANDLE::default();
+        match DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &mut h, 0, false, DUPLICATE_SAME_ACCESS) {
+            Ok(()) => h.0 as isize,
+            Err(_) => 0,
+        }
+    };
     while !should_stop() {
         if !first {
             // Release the previous client and reuse the same instance rather
@@ -415,6 +463,29 @@ pub fn serve(
         }
         if should_stop() {
             return;
+        }
+
+        // A READ DEADLINE FOR A CLIENT THAT HAS NOT YET SAID WHO IT IS. See
+        // UNCLASSIFIED_DEADLINE. The watchdog disconnects the instance, which
+        // fails the pending read below and sends the loop back to
+        // ConnectNamedPipe; a client that has spoken is never touched.
+        let this_connection = connection.fetch_add(1, Ordering::SeqCst) + 1;
+        let spoke = Arc::new(AtomicBool::new(false));
+        if serving_thread != 0 {
+            let spoke = spoke.clone();
+            let connection = connection.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(unclassified_deadline);
+                if !spoke.load(Ordering::SeqCst)
+                    && connection.load(Ordering::SeqCst) == this_connection
+                {
+                    // Fails the pending ReadFile with ERROR_OPERATION_ABORTED;
+                    // the loop below then disconnects and re-listens.
+                    unsafe {
+                        let _ = CancelSynchronousIo(HANDLE(serving_thread as *mut _));
+                    }
+                }
+            });
         }
 
         let mut reader = BufReader::new(PipeIo(pipe.0));
@@ -443,7 +514,7 @@ pub fn serve(
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => break, // client hung up
-                Ok(_) => {}
+                Ok(_) => spoke.store(true, Ordering::SeqCst),
                 Err(_) => break,
             }
             // `console_session` is read at classification time rather than
@@ -470,6 +541,12 @@ pub fn serve(
             }
             let _ = out.flush();
         }
+        if !spoke.load(Ordering::SeqCst) {
+            log(&format!(
+                "control pipe: a client connected and sent nothing for {}s; dropped it so the channel stays usable",
+                unclassified_deadline.as_secs_f32()
+            ));
+        }
     }
 }
 
@@ -485,9 +562,48 @@ mod tests {
             running_session: Some(2),
             flavour: Some("user".into()),
             agent_alive: true,
-            agent_handle: Some((r"\.\pipe\sovereign-agent-2".into(), "tok".into())),
+            agent_handle: Some((r"\\.\pipe\sovereign-agent-2".into(), "tok".into(), 4242)),
             caller: crate::control::CallerTrust::ConsoleAdministrator,
         }
+    }
+
+    /// ONE instance + PIPE_WAIT + a blocking first read: a client that connects
+    /// and says nothing used to hold the SYSTEM service's control channel for
+    /// ever, without a request the policy could refuse. The deadline drops it;
+    /// the next caller gets in. The positive control is the 231 (PIPE_BUSY)
+    /// while the silent client is held — the rig can see the wedge.
+    #[test]
+    fn a_client_that_never_speaks_is_dropped_so_the_next_one_can_connect() {
+        let name = format!(r"\\.\pipe\sovereign-service-deadline-{}", std::process::id());
+        let served = name.clone();
+        std::thread::spawn(move || {
+            serve_on(&served, Duration::from_millis(300), |_| idle(), |_| {}, || false, |_| {});
+        });
+        let open = |n: &str| std::fs::OpenOptions::new().read(true).write(true).open(n);
+        let mut silent = None;
+        for _ in 0..300 {
+            if let Ok(f) = open(&name) {
+                silent = Some(f);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _silent = silent.expect("the first client connects");
+        assert_eq!(
+            open(&name).err().and_then(|e| e.raw_os_error()),
+            Some(231),
+            "busy while the silent client is held (positive control)"
+        );
+        let started = std::time::Instant::now();
+        let mut next = None;
+        while started.elapsed() < Duration::from_secs(3) {
+            if let Ok(f) = open(&name) {
+                next = Some(f);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(next.is_some(), "the silent client wedged the pipe past its deadline");
     }
 
     fn idle() -> ServiceView {
@@ -710,9 +826,10 @@ mod tests {
         // notice.
         let (resp, accepted) = handle_line(r#"{"t":"agent_handle"}"#, &running());
         match resp {
-            ControlResponse::AgentHandle { pipe, token } => {
+            ControlResponse::AgentHandle { pipe, token, pid } => {
                 assert!(pipe.contains("sovereign-agent"), "{pipe}");
                 assert_eq!(token, "tok");
+                assert_eq!(pid, 4242, "the pid rides with the handle so the app can check the server");
             }
             other => panic!("expected the handle, got {other:?}"),
         }

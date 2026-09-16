@@ -73,8 +73,26 @@ impl AgentClient {
     /// pipe server gets to IMPERSONATE whoever connects, and whoever connects
     /// here is LocalSystem. The desktop app sets the same flag for a far less
     /// dangerous caller.
-    pub fn connect(pipe_name: &str, token: &str, attempts: u32) -> Result<Self, String> {
+    ///
+    /// `expected_pid`: the process the caller launched on that name. Checked
+    /// BEFORE the hello carries the token: the pipe namespace is machine-global
+    /// and creating a name needs no privilege, so a local process that took
+    /// `\\.\pipe\sovereign-agent-<session>` first (the real agent then loses
+    /// FIRST_PIPE_INSTANCE and exits) would otherwise be handed a SYSTEM-held
+    /// launch token by the next dial. SECURITY_IDENTIFICATION stops it
+    /// impersonating us; this stops it being talked to at all. None skips the
+    /// check, for a caller that genuinely does not know the pid. Found by the
+    /// 2026-09-16 adversarial campaign.
+    pub fn connect(
+        pipe_name: &str,
+        token: &str,
+        attempts: u32,
+        expected_pid: Option<u32>,
+    ) -> Result<Self, String> {
         use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
         const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
         const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 
@@ -87,6 +105,16 @@ impl AgentClient {
                 .open(pipe_name)
             {
                 Ok(handle) => {
+                    if let Some(want) = expected_pid {
+                        let mut got = 0u32;
+                        unsafe { GetNamedPipeServerProcessId(HANDLE(handle.as_raw_handle() as _), &mut got) }
+                            .map_err(|e| format!("could not identify the pipe server: {e}"))?;
+                        if got != want {
+                            return Err(format!(
+                                "{pipe_name} is served by pid {got}, not the agent that was launched ({want}); refusing to hand it the token"
+                            ));
+                        }
+                    }
                     let writer = handle
                         .try_clone()
                         .map_err(|e| format!("could not clone the pipe handle: {e}"))?;

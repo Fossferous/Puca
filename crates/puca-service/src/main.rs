@@ -624,7 +624,7 @@ mod windows_impl {
         // Fourth slot: how to reach the running agent. Published alongside the
         // rest so the control pipe answers from one consistent snapshot rather
         // than reading the supervisor from another thread.
-        type SharedView = (Option<u32>, Option<String>, bool, Option<(String, String)>);
+        type SharedView = (Option<u32>, Option<String>, bool, Option<(String, String, u32)>);
         let shared: std::sync::Arc<std::sync::Mutex<SharedView>> =
             std::sync::Arc::new(std::sync::Mutex::new((None, None, false, None)));
         {
@@ -668,7 +668,7 @@ mod windows_impl {
                 .map(|(sess, _)| sess)
                 .and_then(|sess| agents.get(&sess))
                 .filter(|a| a.is_alive())
-                .map(|a| (a.pipe.clone(), a.token.clone()));
+                .map(|a| (a.pipe.clone(), a.token.clone(), a.pid));
             // The LINK gets the same handle from the same computation. Two
             // separate derivations of "which agent is live" would eventually
             // disagree, and the link would dial a pipe the control view had

@@ -167,8 +167,26 @@ fn getrandom(buf: &mut [u8]) {
     }
 }
 
+/// `expected_pid`: the process we launched on that name, when we launched it.
+/// Checked BEFORE the hello carries the token: the pipe namespace is
+/// machine-global and creating a name needs no privilege, so a same-user
+/// process that created `\\.\pipe\sovereign-agent-<pid>` before our agent did
+/// (the agent then loses FIRST_PIPE_INSTANCE and exits, and nothing here
+/// noticed) would otherwise be handed the launch token, the TURN credentials
+/// and the input subkey, and become the endpoint a remote controller acts on.
+/// Refused, not warned: there is no legitimate machine in that state. None
+/// skips the check, for the service-borrowed agent whose pid an older service
+/// does not report. Found by the 2026-09-16 adversarial campaign.
 #[cfg(windows)]
-fn connect(pipe_name: &str, token: &str, attempts: u32) -> Result<Connection, String> {
+fn connect(
+    pipe_name: &str,
+    token: &str,
+    attempts: u32,
+    expected_pid: Option<u32>,
+) -> Result<Connection, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
     // The pipe may not exist for a moment after spawn. Retry briefly rather
     // than failing on a race the user would see as "the agent doesn't work".
     let mut last = String::new();
@@ -184,6 +202,16 @@ fn connect(pipe_name: &str, token: &str, attempts: u32) -> Result<Connection, St
             .open(pipe_name)
         {
             Ok(handle) => {
+                if let Some(want) = expected_pid {
+                    let mut got = 0u32;
+                    unsafe { GetNamedPipeServerProcessId(HANDLE(handle.as_raw_handle() as _), &mut got) }
+                        .map_err(|e| format!("could not identify the pipe server: {e}"))?;
+                    if got != want {
+                        return Err(format!(
+                            "{pipe_name} is served by pid {got}, not the agent we started ({want}); refusing to hand it the token"
+                        ));
+                    }
+                }
                 let writer = handle
                     .try_clone()
                     .map_err(|e| format!("could not clone the pipe handle: {e}"))?;
@@ -609,7 +637,7 @@ fn ensure_started(connect_attempts: u32) -> Result<(), String> {
         // and will stop it. Recording one here would make `agent_stop` kill
         // something it does not own — and on unlock the service would relaunch
         // it, leaving two.
-        match connect(&borrowed.pipe, &borrowed.token, connect_attempts) {
+        match connect(&borrowed.pipe, &borrowed.token, connect_attempts, borrowed.pid) {
             Ok(conn) => {
                 eprintln!("[agent] using the system service's agent (it can see the lock screen)");
                 *guard = Some(conn);
@@ -674,21 +702,28 @@ fn ensure_started(connect_attempts: u32) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start the host agent: {e}"))?;
+    let pid = child.id();
 
-    match connect(&pipe_name, &token, connect_attempts) {
+    match connect(&pipe_name, &token, connect_attempts, Some(pid)) {
         Ok(mut conn) => {
             conn.child = Some(child);
             *guard = Some(conn);
             Ok(())
         }
         Err(e) => {
+            // Say whether the agent is still there: an agent that lost its
+            // pipe name to another process exits at once, and that used to be
+            // indistinguishable from a slow start.
+            let gone = match child.try_wait() {
+                Ok(Some(status)) => format!(" (the agent already exited: {status})"),
+                _ => String::new(),
+            };
             // Do not leave an orphan holding a screen capture.
-            let mut child = child;
             let _ = child.kill();
-            Err(e)
+            Err(format!("{e}{gone}"))
         }
     }
 }

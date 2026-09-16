@@ -18,11 +18,15 @@
 //! machine. That mistake is not worth making twice, and the service log still
 //! lives there precisely because a log is not a secret.
 //!
-//! WHY DPAPI IS NOT THE CONTROL. Machine-scope DPAPI binds ciphertext to the
-//! machine, not to an account — so any local process that can READ the file can
-//! also unprotect it. Against a local attacker the ACL is the entire control;
-//! DPAPI adds value only for a disk removed from the machine. It is applied on
-//! top for that case, and its absence would not be the thing that saves you.
+//! WHY DPAPI IS NOT USED HERE AT ALL. Machine-scope DPAPI binds ciphertext to
+//! the machine, not to an account — so any local process that can READ the
+//! file can also unprotect it. Against a local attacker the ACL is the entire
+//! control; DPAPI would add value only for a disk removed from the machine,
+//! and nothing in this crate calls CryptProtectData. This header used to say
+//! it was "applied on top for that case"; it was not, and a comment that
+//! claims a control which does not exist is worse than none. Found by the
+//! 2026-09-16 adversarial campaign. If the removed-disk case ever matters,
+//! implement it and say so here — do not re-add the claim.
 
 #![cfg(windows)]
 

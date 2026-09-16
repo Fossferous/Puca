@@ -397,11 +397,11 @@ pub type AgentConn = Arc<std::sync::Mutex<crate::agent_client::AgentClient>>;
 
 /// Open the connection this session will keep.
 async fn open_agent_conn(handle: &AgentHandle) -> Result<AgentConn, String> {
-    let Some((pipe, token)) = handle.lock().ok().and_then(|g| g.clone()) else {
+    let Some((pipe, token, pid)) = handle.lock().ok().and_then(|g| g.clone()) else {
         return Err("no agent is running on the sign-in screen".into());
     };
     tokio::task::spawn_blocking(move || {
-        crate::agent_client::AgentClient::connect(&pipe, &token, 3)
+        crate::agent_client::AgentClient::connect(&pipe, &token, 3, Some(pid))
             .map(|c| Arc::new(std::sync::Mutex::new(c)))
     })
     .await
@@ -1116,7 +1116,7 @@ fn read_seed(name: &str) -> Result<[u8; 32], String> {
 /// A Mutex rather than an atomic because it is a pair of strings replaced
 /// wholesale on every relaunch, and a half-updated pair would dial the old pipe
 /// with the new token.
-pub type AgentHandle = Arc<std::sync::Mutex<Option<(String, String)>>>;
+pub type AgentHandle = Arc<std::sync::Mutex<Option<(String, String, u32)>>>;
 
 pub fn run_thread(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: AgentHandle) {
     std::thread::spawn(move || {

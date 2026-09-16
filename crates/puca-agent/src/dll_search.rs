@@ -11,10 +11,14 @@
 //! five lines would be the larger change. The one line that matters is the flag
 //! below; it must stay `SYSTEM32`-only, and widening it is the whole regression.
 //!
-//! The agent needs this more than the service does: the service loads almost
-//! nothing after start, while the agent lazily pulls in Media Foundation, D3D11,
-//! DXGI and the encoder's codec DLLs on the first capture — all of them by bare
-//! name, all of them after `main`.
+//! This covers what is loaded AFTER `main` — the encoder's codec DLLs and
+//! anything a dependency pulls in lazily. It used to be described as covering
+//! Media Foundation, D3D11 and DXGI too; it does not, because those are STATIC
+//! imports resolved by the loader before `main`, and four of them (d3d11,
+//! dxgi, mfplat, winmm, plus bcrypt) are not KnownDLLs. That window is closed
+//! by `/DEPENDENTLOADFLAG:0x800` in build.rs, pinned by
+//! tests/dependent_load_flags.rs. Both layers are needed; neither is the
+//! whole story.
 
 /// Returns false if the OS refused, which is reportable but not fatal.
 #[cfg(windows)]

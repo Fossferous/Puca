@@ -177,7 +177,15 @@ pub enum ControlRequest {
 pub enum ControlResponse {
     /// How to reach the SYSTEM agent. Only ever sent to a caller that passed
     /// the identity gate.
-    AgentHandle { pipe: String, token: String },
+    AgentHandle {
+        pipe: String,
+        token: String,
+        /// The agent's process id, so the caller can check that whoever answers
+        /// on that pipe is the process the service launched before handing it
+        /// the token. Absent from a service older than this; the app then
+        /// dials without the check, as it always did.
+        pid: u32,
+    },
     /// Both halves, because they fail differently and the UI must say which:
     /// armed-but-not-enrolled is unreachable, enrolled-but-not-armed refuses
     /// every session.
