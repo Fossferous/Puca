@@ -61,6 +61,11 @@ pub const ALLOWED_FPS: [u32; 3] = [15, 30, 60];
 pub const ALLOWED_BITRATE_BPS: [u32; 5] =
     [1_000_000, 3_000_000, 6_000_000, 10_000_000, 15_000_000];
 
+/// The largest stage edge, in device pixels, a viewer may report. Generous —
+/// no display is close — and load-bearing: the value arrives from the PEER via
+/// the app, and it is bounded here, before it reaches the stream thread.
+pub const MAX_VIEW_EDGE: u32 = 16_384;
+
 /// One STUN or TURN server, in the shape `RTCIceServer` uses.
 ///
 /// `urls` is deliberately tolerant: the WebRTC dictionary allows either a
@@ -170,6 +175,15 @@ pub enum Request {
         /// wins over anything a caller offers (session.rs).
         #[serde(default)]
         input_auth: Option<crate::input_wire::InputAuth>,
+        /// The size the viewer will DISPLAY this stream at, in its own device
+        /// pixels; 0 on either axis (and absent, for an older app) keeps the
+        /// picture native. The live version is `SetViewSize`; this one exists
+        /// so a media restart carries the fit forward the way `fps` and
+        /// `bitrate` are carried, rather than silently resetting it.
+        #[serde(default)]
+        view_width: u32,
+        #[serde(default)]
+        view_height: u32,
     },
     /// One ICE candidate trickled by the controller.
     ///
@@ -234,6 +248,22 @@ pub enum Request {
     /// behaviour. Every mixed-version pair therefore lands on exactly one
     /// cursor.
     SetDrawCursor { session_id: String, enabled: bool },
+
+    /// The size the viewer is now DISPLAYING this stream at, in its own device
+    /// pixels — a rotated phone, a resized window, a pinch zoom. The stream
+    /// steps its picture down to what that can show (`composite::fit_step`),
+    /// and 0 on either axis returns it to native.
+    ///
+    /// WHY. A phone decoded a 1440x2560 monitor at full size to display it at
+    /// 607x1080: 15.8 ms of decode a frame, half the budget at 30 fps, for
+    /// pixels the screen could not show. The host is the only end that can
+    /// send fewer.
+    ///
+    /// ADDITIVE — do NOT bump PROTOCOL_VERSION for it, exactly as for
+    /// RequestKeyframe. An older agent answers "bad request", hostAgent.ts
+    /// swallows it, and that host streams at native size, which is precisely
+    /// today's behaviour.
+    SetViewSize { session_id: String, width: u32, height: u32 },
 
     /// Is a Windows secure desktop (a UAC prompt, the lock screen, or the
     /// sign-in screen) currently blocking this session's capture, on an agent
@@ -517,6 +547,42 @@ mod tests {
     /// caller turns any failure into "no secure desktop" so a 1Hz error storm
     /// cannot kill a session — so a broken name would present as a machine that
     /// simply never shows a UAC prompt, forever, with nothing logged.
+    /// The literal `hostAgent.ts` writes (its test asserts the same bytes).
+    /// A renamed field here would leave every host streaming at native size
+    /// with nothing logged — the swallow that keeps an OLD agent harmless
+    /// makes a MISMATCHED new one silent too.
+    #[test]
+    fn set_view_size_parses_from_the_frame_the_app_writes() {
+        let line = r#"{"cmd":"set_view_size","session_id":"s1","width":2400,"height":1080}"#;
+        match serde_json::from_str::<Request>(line).expect("the app's frame must parse") {
+            Request::SetViewSize { session_id, width, height } => {
+                assert_eq!((session_id.as_str(), width, height), ("s1", 2400, 1080));
+            }
+            other => panic!("the app's set_view_size frame reached the wrong arm: {other:?}"),
+        }
+    }
+
+    /// An app older than the fit sends no view size, and a media restart from
+    /// a newer one carries it. Both must parse, and the old one must read as
+    /// native rather than as an error.
+    #[test]
+    fn start_stream_carries_the_view_size_and_defaults_it_to_native() {
+        let old = r#"{"cmd":"start_stream","session_id":"s1","offer_sdp":"v=0"}"#;
+        match serde_json::from_str::<Request>(old).expect("an older app's frame must parse") {
+            Request::StartStream { view_width, view_height, .. } => {
+                assert_eq!((view_width, view_height), (0, 0), "absent means native");
+            }
+            other => panic!("wrong arm: {other:?}"),
+        }
+        let new = r#"{"cmd":"start_stream","session_id":"s1","offer_sdp":"v=0","view_width":2400,"view_height":1080}"#;
+        match serde_json::from_str::<Request>(new).expect("the restart frame must parse") {
+            Request::StartStream { view_width, view_height, .. } => {
+                assert_eq!((view_width, view_height), (2400, 1080));
+            }
+            other => panic!("wrong arm: {other:?}"),
+        }
+    }
+
     #[test]
     fn session_status_parses_from_the_frame_the_app_writes() {
         let line = r#"{"cmd":"session_status","session_id":"s1"}"#;

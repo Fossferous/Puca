@@ -714,6 +714,8 @@ impl Agent {
                 .map(|x| x.ice_servers.clone())
                 .unwrap_or_default();
             let started = self.handle(Request::StartStream {
+                view_width: 0,
+                view_height: 0,
                 session_id: session_id.to_string(),
                 monitor: None,
                 offer_sdp: sdp,
@@ -1023,6 +1025,7 @@ impl Agent {
             #[cfg(windows)]
             Request::StartStream {
                 session_id, monitor, offer_sdp, fps, bitrate, ice_servers, data_only, input_auth,
+                view_width, view_height,
             } => {
                 if let Some(r) = self.gate(crate::flavour::Capability::Capture) {
                     return r;
@@ -1101,11 +1104,21 @@ impl Agent {
                     input_auth.as_ref(),
                     flavour_allows_input,
                 );
+                // Bounded HERE, where the value enters from the app: an absurd
+                // stage reads as native rather than becoming an absurd step.
+                let view = if view_width > crate::protocol::MAX_VIEW_EDGE
+                    || view_height > crate::protocol::MAX_VIEW_EDGE
+                {
+                    (0, 0)
+                } else {
+                    (view_width, view_height)
+                };
                 match crate::stream::start(
                     &offer_sdp,
                     target_monitor,
                     fps.unwrap_or(30),
                     bitrate.unwrap_or(6_000_000),
+                    view,
                     if data_only {
                         crate::stream::StreamMode::DataOnly
                     } else {
@@ -1288,6 +1301,24 @@ impl Agent {
             },
 
             #[cfg(windows)]
+            Request::SetViewSize { session_id, width, height } => {
+                // The STREAM map, like SetDrawCursor: this changes the encoded
+                // picture, so it only means anything while something streams.
+                // Bounded before it reaches the stream thread — the value comes
+                // from the peer via the app.
+                if width > crate::protocol::MAX_VIEW_EDGE || height > crate::protocol::MAX_VIEW_EDGE {
+                    return Response::error("implausible view size");
+                }
+                match self.streams.get(&session_id) {
+                    Some(stream) => {
+                        stream.set_view_size(width, height);
+                        Response::Ok
+                    }
+                    None => Response::error("no live stream for that session"),
+                }
+            }
+
+            #[cfg(windows)]
             Request::SetDrawCursor { session_id, enabled } => {
                 // The STREAM map, not `sessions`: this changes encoded pixels,
                 // so it only means anything while something is streaming. A
@@ -1345,6 +1376,7 @@ impl Agent {
             | Request::QueryStreamQuality { .. }
             | Request::RequestKeyframe { .. }
             | Request::SetDrawCursor { .. }
+            | Request::SetViewSize { .. }
             | Request::DisplayTopologyChanged
             | Request::AddRemoteCandidate { .. } => {
                 Response::error("streaming is only implemented on Windows")
@@ -2857,6 +2889,8 @@ mod tests {
 
         // Pre-reservation check blocks start if monitor in use
         let resp = a.handle(Request::StartStream {
+            view_width: 0,
+            view_height: 0,
             session_id: "s1".into(),
             monitor: Some(0),
             offer_sdp: "invalid".into(),
@@ -2890,6 +2924,8 @@ mod tests {
         a.monitor_reservations.insert(0, held.clone());
 
         let start = |session: &str, data_only: bool| Request::StartStream {
+            view_width: 0,
+            view_height: 0,
             session_id: session.into(),
             monitor: Some(0),
             // Invalid on purpose: this test is about which check is reached, not

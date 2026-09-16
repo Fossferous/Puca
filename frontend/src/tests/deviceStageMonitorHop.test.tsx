@@ -30,6 +30,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../api/devices/session', () => ({
+    // The stage reports its size to the host on mount; the fit is not
+    // under test here, and a mock without it is an effect that throws.
+    sendViewSize: () => { /* noop */ },
     ALL_DISPLAYS: 255,
     subscribeSessions: (l: (s: Snapshot[]) => void) => {
         h.listeners.add(l);

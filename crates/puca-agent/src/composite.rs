@@ -56,6 +56,78 @@ pub(crate) fn composite_geometry(union_w: u32, union_h: u32) -> (u32, u32, u32) 
     (step, out_w.max(2), out_h.max(2))
 }
 
+/// The shortest edge a viewer fit may leave.
+///
+/// A stage that is momentarily tiny (a layout mid-transition reports a few
+/// pixels) must not collapse the stream to a thumbnail, and below this a
+/// picture of a desktop carries nothing legible whatever the viewer asked for.
+const MIN_FIT_EDGE: u32 = 320;
+
+/// How far to step a picture down so it is no larger than the VIEWER can show.
+///
+/// `view_w`/`view_h` are the viewer's stage in ITS device pixels; 0 on either
+/// axis means "no fit" and the picture stays native. The viewer letterboxes
+/// (`object-fit: contain`), so it shows the source at
+/// `min(view_w / src_w, view_h / src_h)` of its size; source pixels per shown
+/// pixel is therefore the LARGER of the two axis ratios, and its integer part
+/// is the step. Integer because the downscale is `paste_tile`'s box average —
+/// a plain stride, no resampler — and integer division is exactly the floor
+/// the maths wants.
+///
+/// WHY. A phone controlling a 1440x2560 portrait monitor decoded every one of
+/// those pixels — 15.8 ms a frame on the owner's handset, half the 33 ms
+/// budget at 30 fps — to show them at 607x1080. Step 2 sends a quarter of the
+/// pixels and the phone displays the same picture. Turn the phone upright and
+/// the stage is 1080x2400: the ratio drops under 2 and the picture goes back
+/// to native, which is what a viewer who just made room for it wants.
+pub(crate) fn fit_step(src_w: u32, src_h: u32, view_w: u32, view_h: u32) -> u32 {
+    if src_w == 0 || src_h == 0 || view_w == 0 || view_h == 0 {
+        return 1;
+    }
+    let mut step = (src_w / view_w).max(src_h / view_h).max(1);
+    while step > 1 && (src_w / step < MIN_FIT_EDGE || src_h / step < MIN_FIT_EDGE) {
+        step -= 1;
+    }
+    step
+}
+
+/// Step one whole picture down by `step` into `out`, which is reused across
+/// frames (grown once, then written in place). Returns the output
+/// `(width, height, stride)`. Dimensions are forced even for the same reason
+/// `composite_geometry` forces them: the encoder rounds down to even, and a
+/// picture that reports a size the encoder does not use shears the NV12
+/// conversion.
+pub(crate) fn downscale_into(
+    out: &mut Vec<u8>,
+    step: u32,
+    width: u32,
+    height: u32,
+    stride: usize,
+    bgra: &[u8],
+) -> (u32, u32, usize) {
+    let step = step.max(1);
+    let out_w = ((width / step) & !1).max(2);
+    let out_h = ((height / step) & !1).max(2);
+    let len = out_w as usize * out_h as usize * 4;
+    if out.len() != len {
+        out.clear();
+        out.resize(len, 0);
+    }
+    paste_tile_raw(
+        out,
+        out_w as usize,
+        out_h as usize,
+        step as usize,
+        0,
+        0,
+        width as usize,
+        height as usize,
+        stride,
+        bgra,
+    );
+    (out_w, out_h, out_w as usize * 4)
+}
+
 /// Paste one tile's frame onto the canvas at `(dst_l, dst_t)` canvas pixels,
 /// stepping the source down by `step`. Free and pure so the pixel bookkeeping
 /// is testable without DXGI.
@@ -80,9 +152,37 @@ fn paste_tile(
     dst_t: usize,
     frame: &Frame,
 ) {
+    paste_tile_raw(
+        canvas,
+        canvas_w,
+        canvas_h,
+        step,
+        dst_l,
+        dst_t,
+        frame.width as usize,
+        frame.height as usize,
+        frame.stride,
+        &frame.bgra,
+    );
+}
+
+/// `paste_tile` over a bare picture: `(fw, fh, fstride, fbytes)` rather than
+/// a `Frame`, so the composite's retained canvas — which is not a Frame — can
+/// be stepped down by the viewer fit without a copy into one.
+#[allow(clippy::too_many_arguments)]
+fn paste_tile_raw(
+    canvas: &mut [u8],
+    canvas_w: usize,
+    canvas_h: usize,
+    step: usize,
+    dst_l: usize,
+    dst_t: usize,
+    fw: usize,
+    fh: usize,
+    fstride: usize,
+    fbytes: &[u8],
+) {
     let stride = canvas_w * 4;
-    let fw = frame.width as usize;
-    let fh = frame.height as usize;
     if step == 0 {
         return;
     }
@@ -92,7 +192,7 @@ fn paste_tile(
     // columns — in range by these two facts alone. This loop runs at FULL
     // source resolution per dirty tile (that is what any downscaling filter
     // costs), so the inner accumulate must stay branch-free.
-    if frame.stride < fw * 4 || frame.bgra.len() < frame.stride * fh {
+    if fstride < fw * 4 || fbytes.len() < fstride * fh {
         return;
     }
     let n = (step * step) as u32;
@@ -104,11 +204,11 @@ fn paste_tile(
         let dst_row = dst_y * stride + dst_l * 4;
 
         if step == 1 {
-            let src_row = row * frame.stride;
+            let src_row = row * fstride;
             let cols = fw.min(canvas_w.saturating_sub(dst_l));
             let src_end = src_row + cols * 4;
-            if cols > 0 && src_end <= frame.bgra.len() && dst_row + cols * 4 <= canvas.len() {
-                canvas[dst_row..dst_row + cols * 4].copy_from_slice(&frame.bgra[src_row..src_end]);
+            if cols > 0 && src_end <= fbytes.len() && dst_row + cols * 4 <= canvas.len() {
+                canvas[dst_row..dst_row + cols * 4].copy_from_slice(&fbytes[src_row..src_end]);
             }
             continue;
         }
@@ -125,12 +225,12 @@ fn paste_tile(
             let x0 = col * step * 4;
             let (mut b, mut g, mut r) = (0u32, 0u32, 0u32);
             for yy in 0..step {
-                let src_row = (row * step + yy) * frame.stride + x0;
+                let src_row = (row * step + yy) * fstride + x0;
                 for xx in 0..step {
                     let at = src_row + xx * 4;
-                    b += frame.bgra[at] as u32;
-                    g += frame.bgra[at + 1] as u32;
-                    r += frame.bgra[at + 2] as u32;
+                    b += fbytes[at] as u32;
+                    g += fbytes[at + 1] as u32;
+                    r += fbytes[at + 2] as u32;
                 }
             }
             canvas[dst] = (b / n) as u8;
@@ -652,6 +752,111 @@ mod tests {
         assert_eq!(block_target(3, 2), Some(2));
         assert_eq!(block_target(3, 3), Some(0), "the cursor wraps");
         assert_eq!(block_target(1, usize::MAX), Some(0));
+    }
+
+    // ---- the viewer fit -------------------------------------------------
+
+    /// The owner's case, measured 2026-09-16: a 1440x2560 portrait monitor
+    /// on a phone held sideways (2400x1080 device px). Every source pixel was
+    /// decoded (15.8 ms a frame) to be shown at 607x1080. Step 2 sends a
+    /// quarter of them; the phone shows the same picture.
+    #[test]
+    fn the_owners_phone_in_landscape_halves_a_portrait_monitor() {
+        assert_eq!(fit_step(1440, 2560, 2400, 1080), 2);
+    }
+
+    /// Turn the phone upright and the stage is 1080x2400: the ratio is 1.33,
+    /// under 2, so the picture goes back to native — the viewer just made
+    /// room for it.
+    #[test]
+    fn the_same_phone_upright_gets_the_picture_back_native() {
+        assert_eq!(fit_step(1440, 2560, 1080, 2400), 1);
+    }
+
+    #[test]
+    fn a_4k_desktop_on_a_1080p_stage_steps_by_two() {
+        assert_eq!(fit_step(3840, 2160, 1920, 1080), 2);
+    }
+
+    /// Integer steps only: a 2560x1440 desktop on a 1920x1080 stage is 1.33
+    /// source pixels per shown pixel, and the box average has no half step.
+    #[test]
+    fn a_fraction_short_of_two_stays_native() {
+        assert_eq!(fit_step(2560, 1440, 1920, 1080), 1);
+    }
+
+    #[test]
+    fn a_stage_larger_than_the_source_never_upscales() {
+        assert_eq!(fit_step(1920, 1080, 3840, 2160), 1);
+    }
+
+    /// 0 on either axis is the wire's "no fit" — an older app, or the user
+    /// choosing full resolution — and must never divide by it.
+    #[test]
+    fn no_stage_means_native() {
+        assert_eq!(fit_step(1920, 1080, 0, 0), 1);
+        assert_eq!(fit_step(1920, 1080, 0, 1080), 1);
+        assert_eq!(fit_step(1920, 1080, 1920, 0), 1);
+        assert_eq!(fit_step(0, 0, 1920, 1080), 1);
+    }
+
+    /// A layout mid-transition can report a stage of a few pixels. The fit is
+    /// clamped so the shorter edge never drops under MIN_FIT_EDGE, rather than
+    /// collapsing the stream to a thumbnail for a frame.
+    #[test]
+    fn a_momentarily_tiny_stage_cannot_collapse_the_picture() {
+        // 1080 / 3 = 360 fits; 1080 / 4 = 270 would not.
+        assert_eq!(fit_step(1920, 1080, 100, 100), 3);
+        assert_eq!(fit_step(1920, 1080, 1, 1), 3);
+    }
+
+    /// A pinch zoom reports a LARGER stage (the picture is shown at 2x), so
+    /// the step drops and the viewer gets the pixels they zoomed in for.
+    #[test]
+    fn a_zoomed_viewer_gets_its_pixels_back() {
+        assert_eq!(fit_step(1440, 2560, 2400, 1080), 2, "fitted");
+        assert_eq!(fit_step(1440, 2560, 4800, 2160), 1, "zoomed 2x");
+    }
+
+    /// The downscale is the same BOX AVERAGE as the composite's tiles: the
+    /// checkerboard below has two 0x00 and two 0xFF in every 2x2 block, so
+    /// every output pixel is mid-grey. Nearest sampling would give a corner.
+    #[test]
+    fn a_fitted_frame_is_box_averaged_to_even_dimensions() {
+        let mut bgra = vec![0u8; 4 * 4 * 4];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let v = if (x + y) % 2 == 0 { 0x00 } else { 0xFF };
+                let at = (y * 4 + x) * 4;
+                bgra[at..at + 3].fill(v);
+                bgra[at + 3] = 255;
+            }
+        }
+        let mut out = Vec::new();
+        let (w, h, stride) = downscale_into(&mut out, 2, 4, 4, 16, &bgra);
+        assert_eq!((w, h, stride), (2, 2, 8));
+        assert_eq!(out.len(), 2 * 2 * 4);
+        for px in out.chunks(4) {
+            assert_eq!(&px[..3], &[127, 127, 127], "box average, not a corner");
+            assert_eq!(px[3], 255, "opaque");
+        }
+        // Odd results round DOWN to even: 6 / 2 = 3 -> 2 rows.
+        let bgra6 = vec![9u8; 8 * 6 * 4];
+        let (w, h, _) = downscale_into(&mut out, 2, 8, 6, 32, &bgra6);
+        assert_eq!((w, h), (4, 2));
+    }
+
+    /// The buffer is reused frame to frame: a second call at the same size
+    /// must not reallocate (the pump runs thirty times a second).
+    #[test]
+    fn the_fitted_buffer_is_reused_at_a_stable_size() {
+        let bgra = vec![1u8; 8 * 8 * 4];
+        let mut out = Vec::new();
+        downscale_into(&mut out, 2, 8, 8, 32, &bgra);
+        let ptr = out.as_ptr();
+        let cap = out.capacity();
+        downscale_into(&mut out, 2, 8, 8, 32, &bgra);
+        assert_eq!((out.as_ptr(), out.capacity()), (ptr, cap));
     }
 
     #[test]

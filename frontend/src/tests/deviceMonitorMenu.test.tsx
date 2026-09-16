@@ -56,11 +56,17 @@ function session(over: Partial<DeviceControlSession> = {}): DeviceControlSession
     } as DeviceControlSession;
 }
 
-async function mount(s: DeviceControlSession) {
+const setFitResolution = vi.fn();
+
+async function mount(s: DeviceControlSession, fit: 'fit' | 'full' = 'fit') {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
-    await act(async () => { root!.render(<MonitorMenu session={s} onClose={() => {}} />); });
+    await act(async () => {
+        root!.render(
+            <MonitorMenu session={s} onClose={() => {}} fitResolution={fit} setFitResolution={setFitResolution} />,
+        );
+    });
 }
 
 function tabs(): HTMLButtonElement[] {
@@ -140,5 +146,40 @@ describe('quality radios', () => {
         await mount(session());
         const radios = [...host!.querySelectorAll<HTMLInputElement>('input[type=radio]')];
         expect(radios.every(r => r.disabled)).toBe(true);
+    });
+});
+
+/**
+ * The fit switch is the phone's half of the Resolution control: on by default
+ * because the default was what was slow (viewSize.ts), and OWNED BY THE STAGE
+ * — the menu reports the choice and shows what it was given, so one preference
+ * serves the desktop select and this sheet with a single writer.
+ */
+describe('the fit switch', () => {
+    function fitBox(): HTMLInputElement {
+        const box = host!.querySelector<HTMLInputElement>('input[type=checkbox]');
+        if (!box) throw new Error('the fit switch is not in the menu');
+        return box;
+    }
+
+    it('is on when the stage says fit, and hands "full" back when unticked', async () => {
+        await mount(session(), 'fit');
+        expect(fitBox().checked).toBe(true);
+        expect(fitBox().closest('label')?.textContent).toContain('Scale the picture to this screen');
+        await act(async () => { fitBox().click(); });
+        expect(setFitResolution).toHaveBeenCalledWith('full');
+    });
+
+    it('is off when the stage says full, and hands "fit" back when ticked', async () => {
+        await mount(session(), 'full');
+        expect(fitBox().checked).toBe(false);
+        await act(async () => { fitBox().click(); });
+        expect(setFitResolution).toHaveBeenCalledWith('fit');
+    });
+
+    it('is not a host-confirmed control: a quality change in flight does not disable it', async () => {
+        useStreamStore.setState({ qualities: {}, pendingQualities: { 'ds-1': { fps: 60, bitrate: 10000 } } });
+        await mount(session(), 'fit');
+        expect(fitBox().disabled).toBe(false);
     });
 });

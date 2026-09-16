@@ -172,9 +172,13 @@ export async function agentAnswerOffer(
          *  release before this one did. Built in session.ts, because that is
          *  where the grant and the passphrase gate are known. */
         inputAuth?: { key: string; granted: boolean; ua_ok: boolean };
+        /** The controller's stage in its device pixels, carried into a media
+         *  RESTART so the fit survives it the way fps and bitrate do. Absent
+         *  (a fresh session) means native until the controller reports. */
+        viewSize?: { w: number; h: number };
     },
 ): Promise<string> {
-    const { fps, bitrateKbps, dataOnly, inputAuth } = opts ?? {};
+    const { fps, bitrateKbps, dataOnly, inputAuth, viewSize } = opts ?? {};
     // THE AGENT CANNOT FETCH THESE ITSELF — it holds no account token and never
     // speaks to the Púca server, which is the property that makes it safe
     // to run headless. So the app has to hand them over, and until 0.8.6 it did
@@ -208,6 +212,9 @@ export async function agentAnswerOffer(
         // agent's field is `Option<InputAuth>` with `#[serde(default)]`, and an
         // older agent ignores it entirely.
         ...(inputAuth ? { input_auth: inputAuth } : {}),
+        // Omitted when unknown: the agent's fields default to 0 (native), and
+        // an older agent ignores them entirely.
+        ...(viewSize ? { view_width: viewSize.w, view_height: viewSize.h } : {}),
     });
     const answer = reply.answer_sdp;
     if (!answer) throw new Error('the agent started a stream but returned no answer');
@@ -342,6 +349,18 @@ export function agentHostBackend(): HostBackend {
         async updateStream(sessionId: string, fps?: number, bitrateKbps?: number): Promise<void> {
             const bitrate = kbpsToBps(bitrateKbps);
             await request({ cmd: 'update_stream', session_id: sessionId, fps, bitrate });
+        },
+
+        async setViewSize(sessionId: string, width: number, height: number): Promise<void> {
+            // Swallowed like requestKeyframe's: an agent older than the
+            // command answers "bad request" and streams at native size, which
+            // is what every release before this one did. The controller's
+            // evidence either way is the frame size in its own diagnostics.
+            try {
+                await request({ cmd: 'set_view_size', session_id: sessionId, width, height });
+            } catch {
+                /* pre-fit agent: native size */
+            }
         },
 
         async setPrivacyMode(sessionId: string, enabled: boolean): Promise<void> {

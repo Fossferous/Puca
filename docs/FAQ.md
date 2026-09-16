@@ -121,6 +121,33 @@ has no Linux counterpart at all.
 macOS has no capture or injection backend at all. That is genuinely unwritten,
 not merely unwired.
 
+## Remote control is laggy or soft on my phone. What can I do?
+
+First, copy the diagnostics (the session menu has a **Copy diagnostics**
+button) and look at three lines: `path`, `frameSize` and `decoder`.
+
+**`path: RELAY (via TURN)` on your own network** means the two ends could not
+reach each other directly and are bouncing off the server. Since 0.9.812 the
+host advertises the address that actually reaches the viewer even when a VPN
+holds its default route, so on a current host this should read direct. If it
+still relays, the usual cause is a VPN on the *phone* or a guest Wi-Fi that
+isolates clients; turning it off for the session is the quickest test.
+
+**`frameSize`** is what the host is sending. Since the release after 0.9.812
+the viewer tells the host how large it is showing the picture, and the host
+scales the picture down to fit before encoding — a 1440x2560 monitor viewed on
+a phone held sideways arrives as 720x1280, a quarter of the pixels to decode
+and to send, and the same picture on screen. Pinch to zoom and the detail comes
+back. If you would rather always have the native picture, the **Resolution**
+control on the desktop stage (**Fit to this screen** / **Full resolution**), or
+the **Scale the picture to this screen** switch in the phone's quality menu,
+turns the fit off.
+
+**`decoder`** names what your phone is decoding with, and `hardwareDecode`
+whether that is the hardware decoder. A software decoder on a large picture is
+the slow case the fit exists for; if you see one on a *small* picture, that is
+worth reporting with the diagnostics attached.
+
 ## I use Linux. Should I expect a desktop app?
 
 Not yet, and the honest state is: the desktop app **compiles** for Linux and CI

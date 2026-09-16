@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { type DeviceControlSession, requestMonitor, setPrivacyMode, sendStreamQuality, sendClipboard, sendInput, sendPowerAction, ALL_DISPLAYS } from '../api/devices/session';
 import { STREAM_QUALITY_PRESETS, MOBILE_PRESET_LABELS, presetValue } from '../api/devices/streamQualityPresets';
+import type { FitResolution } from '../api/devices/viewSize';
 import { sendChord } from '../api/devices/chords';
 import { useStreamStore } from '../stores/streamStore';
 import {
@@ -250,7 +251,14 @@ function shortLabel(label: string): string {
     return label.replace(/\s*\(\d+\s*[x×]\s*\d+\)\s*$/i, '');
 }
 
-export function MonitorMenu({ session, onClose }: { session: DeviceControlSession, onClose: () => void }) {
+export function MonitorMenu({ session, onClose, fitResolution, setFitResolution }: {
+    session: DeviceControlSession,
+    onClose: () => void,
+    /** Owned by DeviceStage, like the MouseMenu's toggles, so one preference
+     *  serves both surfaces and there is one writer. */
+    fitResolution: FitResolution,
+    setFitResolution: (next: FitResolution) => void,
+}) {
     // SELECTION COMES FROM THE HOST, never from the click.
     //
     // This kept its own `tab` state and set it optimistically, so a switch the
@@ -343,6 +351,23 @@ export function MonitorMenu({ session, onClose }: { session: DeviceControlSessio
                         );
                     })}
                 </div>
+
+                {/* THE FIT. On by default because the default was what was slow:
+                    the host encoded its monitor at native size and this phone
+                    decoded every pixel to show a quarter of them (viewSize.ts
+                    has the numbers). Off asks for the native picture. Local to
+                    this viewer, so unlike the presets above there is nothing
+                    for the host to confirm. */}
+                <label style={{ display: 'flex', alignItems: 'center', marginBottom: '16px' }}>
+                    <input
+                        type="checkbox"
+                        className="device-stage-mobile-menu-checkbox"
+                        style={{ marginRight: '12px', marginLeft: 0 }}
+                        checked={fitResolution === 'fit'}
+                        onChange={(e) => setFitResolution(e.target.checked ? 'fit' : 'full')}
+                    />
+                    Scale the picture to this screen (less lag)
+                </label>
 
                 {/* The codec radios (VP8/VP9/AV1/H264/H265) lived here and set
                     nothing but their own highlight — the agent encodes H.264

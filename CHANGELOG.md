@@ -6,6 +6,23 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Changed
+- **Remote control sends only as many pixels as your screen can show.** The
+  host used to encode its monitor at full size and your phone decoded every
+  one of those pixels to display a fraction of them: a 1440x2560 monitor,
+  viewed on a phone held sideways, was decoded in full (about 16 ms a frame,
+  half the time budget at 30 fps) to be shown at 607x1080. Now the viewer
+  tells the host how large it is showing the picture, and the host scales
+  the picture down to fit before encoding. A quarter of the pixels to decode
+  and to send, the same picture on screen; pinch to zoom and the detail
+  comes back. Turn it off with the new Resolution control (**Fit to this
+  screen** / **Full resolution**, and the matching switch in the phone's
+  quality menu) if you would rather always have the native picture.
+
+  The diagnostics you can copy from a session now also name the decoder the
+  phone is using and whether it is hardware, so a slow decode can be told
+  apart from a large picture.
+
 ### Fixed
 - **The Wake button stopped working roughly a month after setting it up.** The
   LAN waker — the small helper that sends the magic packet to wake a sleeping

@@ -189,6 +189,11 @@ pub enum StreamCommand {
     /// cursor state, and running twice is idempotent. The ack the controller
     /// waits on is produced a layer up, once this command has been accepted.
     SetDrawCursor(bool),
+    /// The viewer's stage, in its device pixels, or 0x0 for native. Fire-and-
+    /// forget like SetDrawCursor: late costs one frame at the old size, twice
+    /// is idempotent, and the step is re-derived per frame from the picture
+    /// the capture actually produced (a monitor switch changes it).
+    SetViewSize { width: u32, height: u32 },
 }
 
 #[allow(dead_code)]
@@ -341,6 +346,12 @@ impl Stream {
     /// stream died has nothing useful to report anyway.
     pub fn request_keyframe(&self) {
         let _ = self.command_tx.send(StreamCommand::RequestKeyframe);
+    }
+
+    /// Tell the stream how large the viewer is showing it (device pixels;
+    /// 0x0 = native). Fire-and-forget for the reasons on the command.
+    pub fn set_view_size(&self, width: u32, height: u32) {
+        let _ = self.command_tx.send(StreamCommand::SetViewSize { width, height });
     }
 
     /// Hand the cursor to the controller (or take it back).
@@ -614,6 +625,9 @@ pub fn start(
     monitor: usize,
     fps: u32,
     bitrate: u32,
+    // The viewer's stage in its device pixels, or (0, 0) for native. See
+    // protocol::StartStream — carried so a media restart keeps the fit.
+    view: (u32, u32),
     mode: StreamMode,
     ice_servers: &[crate::protocol::IceServer],
     stream_events_tx: std::sync::mpsc::Sender<StreamEvent>,
@@ -754,7 +768,7 @@ pub fn start(
                 stream_events_tx: stream_events_tx_clone,
                 reason: Arc::clone(&reason_cell),
             };
-            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel) {
+            if let Err(e) = run(sender, socket, advertised, relay, relayed_addr, remote_thread, monitor, fps, bitrate, view, mode, stop_thread, command_rx, self_tx, generation, file_scope_thread, audit, stream_events_run, session_id_run, input_channel) {
                 eprintln!("[stream] ended: {e}");
                 if let Ok(mut r) = reason_cell.lock() {
                     *r = e;
@@ -1010,6 +1024,7 @@ fn run(
     initial_monitor: usize,
     initial_fps: u32,
     initial_bitrate: u32,
+    initial_view: (u32, u32),
     mode: StreamMode,
     stop: Arc<AtomicBool>,
     command_rx: std::sync::mpsc::Receiver<StreamCommand>,
@@ -1063,6 +1078,17 @@ fn run(
     let mut current_monitor = initial_monitor;
     let mut current_fps = initial_fps;
     let mut current_bitrate = initial_bitrate;
+    // The viewer's stage in its device pixels, or None for native. Seeded from
+    // StartStream (a media restart carries it forward), moved by SetViewSize.
+    let mut view_size: Option<(u32, u32)> = match initial_view {
+        (0, _) | (_, 0) => None,
+        v => Some(v),
+    };
+    // The step the last pumped frame was fitted by, so a change is logged
+    // once and not thirty times a second.
+    let mut fit_step_now: u32 = 1;
+    // The fitted picture, reused frame to frame.
+    let mut fitted: Vec<u8> = Vec::new();
     // Displays wake before the capture opens and stay awake for the session.
     // A panel in DPMS-off presents nothing to DXGI — creation "succeeds" and
     // then no frame ever arrives (the black-stage-forever field report), and
@@ -1555,6 +1581,16 @@ fn run(
                             let _ = reply_tx.send(Err(e));
                         }
                     }
+                }
+                StreamCommand::SetViewSize { width, height } => {
+                    let next = if width == 0 || height == 0 { None } else { Some((width, height)) };
+                    if next != view_size {
+                        match next {
+                            Some((w, h)) => eprintln!("[stream] viewer stage -> {w}x{h} device px"),
+                            None => eprintln!("[stream] viewer stage -> native (no fit)"),
+                        }
+                    }
+                    view_size = next;
                 }
                 StreamCommand::SetDrawCursor(on) => {
                     eprintln!("[stream] host cursor compositing -> {}", if on { "on" } else { "off (controller owns it)" });
@@ -2081,7 +2117,7 @@ fn run(
             if now > next_frame + frame_interval {
                 next_frame = now;
             }
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0) {
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, view_size, &mut fitted, &mut fit_step_now) {
                 Ok(sent) => {
                     frames_sent += u64::from(sent);
                     flushed_frame = sent;
@@ -2430,6 +2466,10 @@ enum PumpError {
 struct PumpStats {
     samples: u32,
     capture: SpanStats,
+    /// The viewer fit (composite::downscale_into); zero when the picture is
+    /// native. Reported so the cost of sending fewer pixels is visible next to
+    /// what it saves.
+    fit: SpanStats,
     encode: SpanStats,
     send: SpanStats,
     /// Frames the encoder swallowed without emitting, since the last report.
@@ -2472,9 +2512,10 @@ impl PumpStats {
     fn report_and_reset(&mut self, elapsed: Duration) -> String {
         let n = self.samples;
         let line = format!(
-            "[stream] +{:.1}s timing over {n} frame(s): capture {} encode {} send {} (encoder held {})",
+            "[stream] +{:.1}s timing over {n} frame(s): capture {} fit {} encode {} send {} (encoder held {})",
             elapsed.as_secs_f64(),
             self.capture.report(n),
+            self.fit.report(n),
             self.encode.report(n),
             self.send.report(n),
             self.filling,
@@ -2773,6 +2814,11 @@ fn pump_frame(
     stats: &mut PumpStats,
     last_frame: &mut Option<puca_capture::Frame>,
     session_cold: bool,
+    // The viewer's stage (device px) or None; the reusable fitted buffer; and
+    // the step the previous frame used, for change logging.
+    view: Option<(u32, u32)>,
+    fitted: &mut Vec<u8>,
+    fit_step_now: &mut u32,
 ) -> Result<bool, PumpError> {
     let t_capture = Instant::now();
     // BORROWED, not owned. The composite path used to hand back a cloned
@@ -2849,6 +2895,32 @@ fn pump_frame(
 
     let capture_took = t_capture.elapsed();
 
+    // FIT TO THE VIEWER. Applied to BOTH arms — a single screen and the
+    // composite canvas alike — after the picture is in hand, so one rule
+    // covers every capture and a monitor switch re-derives it from the new
+    // size on the next frame. Input, the caret and the cursor are all
+    // normalised over the captured rectangle, so a smaller picture changes
+    // nothing they compute. See composite::fit_step for the numbers.
+    let t_fit = Instant::now();
+    let (src_w, src_h) = (fw, fh);
+    let step = view.map(|(vw, vh)| crate::composite::fit_step(fw, fh, vw, vh)).unwrap_or(1);
+    let (fw, fh, fstride, fbytes): (u32, u32, usize, &[u8]) = if step > 1 {
+        let (w, h, s) = crate::composite::downscale_into(fitted, step, fw, fh, fstride, fbytes);
+        (w, h, s, &fitted[..])
+    } else {
+        (fw, fh, fstride, fbytes)
+    };
+    if step != *fit_step_now {
+        match view {
+            Some((vw, vh)) => eprintln!(
+                "[stream] fit: {src_w}x{src_h} for a {vw}x{vh} stage -> step {step}, encoding {fw}x{fh}"
+            ),
+            None => eprintln!("[stream] fit: {src_w}x{src_h} native (no stage)"),
+        }
+        *fit_step_now = step;
+    }
+    let fit_took = t_fit.elapsed();
+
     let (w, h) = (fw & !1, fh & !1);
     // The capture under a LIVE encoder can change size — a monitor switch, a
     // display-mode change under a blocked-capture rebuild, a grown caret
@@ -2908,6 +2980,7 @@ fn pump_frame(
                 .map_err(|e| PumpError::Fatal(format!("send: {e}")))?;
             stats.samples += 1;
             stats.capture.add(capture_took);
+            stats.fit.add(fit_took);
             stats.encode.add(encode_took);
             stats.send.add(t_send.elapsed());
             Ok(sent)
@@ -3501,7 +3574,7 @@ mod tests {
     #[test]
     fn a_malformed_offer_does_not_start_a_thread() {
         let (tx, _rx) = std::sync::mpsc::channel();
-        assert!(start("not an sdp", 0, 30, 2_000_000, StreamMode::Video, &[], tx, "s".into(), 1, None).is_err());
+        assert!(start("not an sdp", 0, 30, 2_000_000, (0, 0), StreamMode::Video, &[], tx, "s".into(), 1, None).is_err());
     }
 
     struct DropTrackedResource {

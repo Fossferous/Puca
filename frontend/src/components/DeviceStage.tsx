@@ -27,6 +27,7 @@ import {
     sendInput,
     sendPowerAction,
     sendStreamQuality,
+    sendViewSize,
     subscribeCaret,
     subscribeSessions,
     type CaretReport,
@@ -38,6 +39,7 @@ import {
 import { isEditableTarget, matchesRegisteredHotkey } from '../api/hotkeys';
 import { useStreamStore } from '../stores/streamStore';
 import { STREAM_QUALITY_PRESETS, parsePresetValue, presetValue } from '../api/devices/streamQualityPresets';
+import { readFitResolutionPreference, viewSizeFor, FIT_RESOLUTION_KEY, type FitResolution } from '../api/devices/viewSize';
 import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
 import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
@@ -403,6 +405,9 @@ export function DeviceStage() {
 
     // Pinch and zoom state
     const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
+    // Fit the host's picture to this stage (default) or ask for it native.
+    // Remembered like the other stage preferences; see viewSize.ts.
+    const [fitResolution, setFitResolution] = useState<FitResolution>(() => readFitResolutionPreference());
     /** Mirrored so the pointer callbacks can read the live zoom without being
      *  re-created on every pinch frame. */
     const transformRef = useRef(transform);
@@ -881,6 +886,16 @@ export function DeviceStage() {
         }
     }, []);
 
+    /** And for the picture fit. */
+    const setFitResolutionRemembered = useCallback((next: FitResolution) => {
+        setFitResolution(next);
+        try {
+            localStorage.setItem(FIT_RESOLUTION_KEY, next);
+        } catch {
+            // Storage unavailable; the choice still applies for this session.
+        }
+    }, []);
+
     // THE DRAWN PICTURE'S GEOMETRY, tracked rather than read during render.
     //
     // Zoom-follows-monitor needs to know when the intrinsic size changes —
@@ -944,6 +959,28 @@ export function DeviceStage() {
     // Null before the first frame: there is no picture to point at yet, and
     // percentages of the ELEMENT put the mark hundreds of pixels off on a
     // phone in portrait, because `object-fit: contain` letterboxes.
+    // REPORT THE STAGE TO THE HOST. The host encodes for the size this stage
+    // shows the picture at (viewSize.ts says why): it needs the CSS box, the
+    // device pixel ratio and the pinch zoom, and it needs to hear again when
+    // any of them changes. sendViewSize debounces and deduplicates, so this
+    // simply fires on each. Dimensions are read out as numbers so a fresh
+    // videoBox object with the same values does not re-run it.
+    const fitSessionId = session?.id ?? null;
+    const fitBoxW = videoBox?.w ?? 0;
+    const fitBoxH = videoBox?.h ?? 0;
+    const fitScale = transform.scale;
+    useEffect(() => {
+        if (!fitSessionId) return;
+        const dpr = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+        const size = viewSizeFor(
+            fitBoxW > 0 && fitBoxH > 0 ? { w: fitBoxW, h: fitBoxH } : null,
+            dpr,
+            fitScale,
+            fitResolution,
+        );
+        if (size) sendViewSize(fitSessionId, size.w, size.h);
+    }, [fitSessionId, fitBoxW, fitBoxH, fitScale, fitResolution]);
+
     const cursorBox = videoBox
         ? pictureBox(videoBox.vw, videoBox.vh, videoBox.w, videoBox.h)
         : null;
@@ -2559,6 +2596,23 @@ export function DeviceStage() {
                             ))}
                         </select>
                     </label>
+                    <label className="device-stage-monitor">
+                        <span className="device-stage-monitor-label">Resolution</span>
+                        {/* "Fit" asks the host for no more pixels than this
+                            stage can show — the default, because the default
+                            was what was slow (viewSize.ts). "Full" is for the
+                            reader who zooms constantly and would rather pay
+                            the decode than watch the step change under a
+                            pinch. Local to this viewer: nothing to confirm. */}
+                        <select
+                            value={fitResolution}
+                            aria-label="Stream resolution"
+                            onChange={e => setFitResolutionRemembered(e.target.value === 'full' ? 'full' : 'fit')}
+                        >
+                            <option value="fit">Fit to this screen</option>
+                            <option value="full">Full resolution</option>
+                        </select>
+                    </label>
                     {session.error && <span className="device-stage-error">{session.error}</span>}
                     {qualityError && <span className="device-stage-error">{qualityError}</span>}
                     <button
@@ -3048,6 +3102,8 @@ export function DeviceStage() {
                 <MonitorMenu 
                     session={session} 
                     onClose={() => setActiveMobileMenu(null)} 
+                    fitResolution={fitResolution}
+                    setFitResolution={setFitResolutionRemembered}
                 />
             )}
             

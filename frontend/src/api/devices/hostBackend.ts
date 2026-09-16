@@ -107,6 +107,13 @@ export interface HostBackend {
      *
      *  Only supported by the agent backend. */
     updateStream(sessionId: string, fps?: number, bitrateKbps?: number): Promise<void>;
+    /** The size the CONTROLLER is displaying this stream at, in its own
+     *  device pixels (0x0 = native). The agent steps the picture down to what
+     *  that can show — a phone was decoding a 1440x2560 monitor to show it at
+     *  607x1080. Optional and agent-only: a webview host's browser encoder has
+     *  no such lever and a phone does not stream, so `undefined` means
+     *  "no-op", never "error". */
+    setViewSize?(sessionId: string, width: number, height: number): Promise<void>;
     /** Retrieve the current encoder settings for this session.
      *
      *  Only supported by the agent backend. */

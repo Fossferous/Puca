@@ -39,6 +39,7 @@ import { setControlKeepAlive } from '../mobileApp';
 import { minimiseJitterBuffer } from '../rtc/receiverLatency';
 import { MediaLiveness, INPUT_RECENT_MS } from './mediaLiveness';
 import { debounce } from 'lodash-es';
+import { isViewDim } from './viewSize';
 import {
     deriveDeviceControlKey,
     deriveDeviceInputKey,
@@ -357,6 +358,10 @@ export interface DeviceControlSession {
 }
 
 interface Internal extends DeviceControlSession {
+    /** HOST: the controller's stage in its device pixels, as last reported
+     *  by a `view-size` signal. Carried into a media restart (answerOffer)
+     *  so the fit survives it the way fps and bitrate do. */
+    viewSize?: { w: number; h: number };
     /** Cross-user session state (a device share), or null for same-account.
      *  Set only after the ENTIRE verification chain passed on this side —
      *  pinned account signing key, verified device record, and (host side)
@@ -1027,6 +1032,7 @@ async function answerOffer(
             fps: quality?.fps,
             bitrateKbps: quality?.bitrate_kbps,
             inputAuth: attendedInputAuth(s),
+            viewSize: s.viewSize,
         };
         let answerSdp: string;
         try {
@@ -1421,6 +1427,7 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     s.error = deliberate ? null : (s.error ?? reason);
     if (owns) {
         clearStreamQualityTimeout(s.id);
+        lastViewSize.delete(s.id);
         import('../../stores/streamStore').then(({ useStreamStore }) => {
             useStreamStore.getState().clearPendingQuality(s.id);
         }).catch(() => undefined);
@@ -1998,6 +2005,31 @@ export function clearStreamQualityTimeout(sessionId: string) {
         pendingTimeouts.delete(sessionId);
     }
 }
+
+/** The last stage size sent per session, so a layout that lands on the same
+ *  numbers (a rotation and back) costs nothing. Cleared with the session. */
+const lastViewSize = new Map<string, string>();
+
+/**
+ * Tell the host how large this stage is showing its picture, in device pixels
+ * (0x0 = "send it native"). See viewSize.ts for why the host needs this.
+ *
+ * Debounced: a pinch reports on every frame and a rotation reports several
+ * intermediate layouts. Fire-and-forget, deliberately — the proof is the frame
+ * size in the diagnostics, and a host older than the signal ignores the kind
+ * entirely, which leaves it streaming at native size exactly as it did.
+ */
+export const sendViewSize = debounce((sessionId: string, w: number, h: number) => {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller') return;
+    const key = `${w}x${h}`;
+    if (lastViewSize.get(sessionId) === key) return;
+    lastViewSize.set(sessionId, key);
+    void sendSignal(s, { kind: 'view-size', w, h }).catch(() => {
+        // Not sent: forget it, so the next measurement tries again.
+        lastViewSize.delete(sessionId);
+    });
+}, 300);
 
 export const sendStreamQuality = debounce(
     (sessionId: string, fps: number, bitrateKbps: number) => {
@@ -2654,7 +2686,16 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
                 row.framesPerSecond = r.framesPerSecond ?? null;
                 row.freezeCount = r.freezeCount ?? null;
                 row.frameSize = r.frameWidth ? `${r.frameWidth}x${r.frameHeight}` : null;
+                // WHICH decoder. 15.8 ms a frame can be a large picture or a
+                // software decoder, and the two have different fixes; the
+                // frame size above answers the first, these answer the second.
+                // Chromium reports both; anything else reads null.
+                row.decoder = typeof r.decoderImplementation === 'string' ? r.decoderImplementation : null;
+                row.hardwareDecode = typeof r.powerEfficientDecoder === 'boolean' ? r.powerEfficientDecoder : null;
             });
+            // What THIS stage last asked the host to fit, so a frame size that
+            // did not change can be read against what was requested.
+            row.viewSize = lastViewSize.get(s.id) ?? null;
         } catch {
             row.stats = 'unavailable';
         }
@@ -4644,6 +4685,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         /** cursor-clipped: a ClipCursor region on the host is holding the
          *  pointer entirely off the streamed monitor (true), or released it
          *  (false). Validated with typeof at the handler, like `up`. */
+        /** `view-size`: the controller's stage in its device pixels (0x0 = native). */
+        w?: number;
+        h?: number;
         clipped?: boolean;
     } | null;
     if (!data) return;
@@ -4913,6 +4957,34 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                             ? 'unsupported'
                             : 'apply_failed',
                     }).catch(() => undefined);
+                }
+            })();
+            return;
+        }
+        if (data.kind === 'view-size') {
+            // Only a HOST acts on this — it changes THIS machine's encoder.
+            if (s.role !== 'host') return;
+            // Same gate as input and privacy: an armed host does nothing for
+            // a controller that never proved the passphrase.
+            if (s.uaRequired && !s.uaVerified) return;
+            const { w, h } = data;
+            // Validated HERE: the value arrives from the peer, and the agent
+            // bounds it again on its own side.
+            if (!isViewDim(w) || !isViewDim(h)) return;
+            // Remembered for a media restart, which rebuilds the stream from
+            // answerOffer and would otherwise reset the fit to native — the
+            // way it once reset fps and bitrate.
+            s.viewSize = { w, h };
+            void (async () => {
+                try {
+                    const backend = await getHostBackend();
+                    // Optional by design: a webview host has no encoder lever.
+                    await backend.setViewSize?.(s.id, w, h);
+                } catch (e) {
+                    // No error signal back: the controller's evidence is the
+                    // frame size in its diagnostics, and an old host is
+                    // indistinguishable from one that cannot do it.
+                    console.warn('[device-session] view size not applied', e);
                 }
             })();
             return;
