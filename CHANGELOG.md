@@ -4,6 +4,34 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.812 — 2026-09-16
+
+Remote control goes back to being direct when your phone and your PC are on the
+same network, instead of routing every frame through a relay on the internet.
+
+### Fixed
+- **Controlling your own PC was laggy whenever a VPN was running on it.** The
+  host picks the network address it advertises by asking Windows which address
+  reaches the internet. With a VPN active that answer is the VPN's own tunnel
+  address, which nothing else on your network can reach — so your phone, sitting
+  a few feet away on the same Wi-Fi, had no direct route to offer and the
+  session fell back to relaying every frame through the server. Measured on the
+  affected machine: 99 ms round trip with 3% packet loss through the relay,
+  against 2-7 ms straight across the network, plus the stall-and-recover cycle
+  the loss caused.
+
+  The host now also asks which address reaches *your phone*, and offers that. A
+  session between two devices on the same network takes the direct path again.
+  Nothing changes when you are genuinely away from home: the internet-facing
+  address is still offered, and the relay is still there as the last resort.
+
+  If it ever happens again, the host's log now names the addresses it offered
+  rather than only counting them — which is what hid this for as long as it did.
+
+### Security
+- Updated a TLS library in the desktop app past a published advisory
+  (RUSTSEC-2026-0285). No behaviour change.
+
 ## 0.9.811 — 2026-09-16
 
 Security fixes from an outside review: a message that could crash everyone who
