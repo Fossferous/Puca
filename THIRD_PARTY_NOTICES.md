@@ -10,18 +10,18 @@ release, never edit by hand.
 - **DeepFilterNet (DFN3) wasm** — `frontend/src/wasm/df/`, licence and origin in
   `frontend/src/wasm/df/NOTICE.md`.
 
-## npm packages in the web/desktop/mobile bundle (138)
+## npm packages in the web/desktop/mobile bundle (145)
 
 | package | licence | origin |
 |---|---|---|
 | @bufbuild/protobuf@1.10.1 | (Apache-2.0 AND BSD-3-Clause) | https://github.com/bufbuild/protobuf-es |
-| @capacitor/android@8.0.0 | MIT | https://github.com/ionic-team/capacitor |
-| @capacitor/cli@8.4.1 | MIT | https://github.com/ionic-team/capacitor |
-| @capacitor/core@8.0.0 | MIT | https://github.com/ionic-team/capacitor |
-| @capacitor/filesystem@8.1.2 | MIT | https://github.com/ionic-team/capacitor-filesystem |
-| @capacitor/ios@8.0.0 | MIT | https://github.com/ionic-team/capacitor |
+| @capacitor/android@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
+| @capacitor/cli@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
+| @capacitor/core@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
+| @capacitor/filesystem@8.1.3 | MIT | https://github.com/ionic-team/capacitor-filesystem |
+| @capacitor/ios@8.5.1 | MIT | https://github.com/ionic-team/capacitor |
 | @capacitor/synapse@1.0.4 | ISC |  |
-| @capgo/capacitor-updater@8.3.0 | MPL-2.0 | https://github.com/Cap-go/capacitor-updater |
+| @capgo/capacitor-updater@8.51.15 | MPL-2.0 | https://github.com/Cap-go/capacitor-updater |
 | @ionic/cli-framework-output@2.2.8 | MIT | https://github.com/ionic-team/ionic-cli |
 | @ionic/utils-array@2.1.6 | MIT | https://github.com/ionic-team/ionic-cli |
 | @ionic/utils-fs@3.1.7 | MIT | https://github.com/ionic-team/ionic-cli |
@@ -36,24 +36,24 @@ release, never edit by hand.
 | @noble/curves@1.9.7 | MIT | https://github.com/paulmillr/noble-curves |
 | @noble/hashes@1.8.0 | MIT | https://github.com/paulmillr/noble-hashes |
 | @noble/hashes@2.0.1 | MIT | https://github.com/paulmillr/noble-hashes |
-| @sapphi-red/web-noise-suppressor@0.3.5 | MIT | https://github.com/sapphi-red/web-noise-suppressor |
+| @sapphi-red/web-noise-suppressor@0.4.0 | MIT | https://github.com/sapphi-red/web-noise-suppressor |
 | @scure/base@1.2.6 | MIT | https://github.com/paulmillr/scure-base |
 | @scure/bip39@1.6.0 | MIT | https://github.com/paulmillr/scure-bip39 |
-| @tanstack/query-core@5.90.12 | MIT | https://github.com/TanStack/query |
-| @tanstack/react-query@5.90.12 | MIT | https://github.com/TanStack/query |
+| @tanstack/query-core@5.102.8 | MIT | https://github.com/TanStack/query |
+| @tanstack/react-query@5.102.8 | MIT | https://github.com/TanStack/query |
 | @tauri-apps/api@2.11.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| @tauri-apps/cli-win32-x64-msvc@2.9.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| @tauri-apps/cli@2.9.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| @tauri-apps/cli-win32-x64-msvc@2.11.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| @tauri-apps/cli@2.11.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | @tauri-apps/plugin-dialog@2.7.3 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
-| @tauri-apps/plugin-notification@2.3.3 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
+| @tauri-apps/plugin-notification@2.4.0 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @tauri-apps/plugin-process@2.3.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
-| @tauri-apps/plugin-updater@2.10.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
+| @tauri-apps/plugin-updater@2.11.0 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | @types/dom-mediacapture-record@1.0.22 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/dom-mediacapture-transform@0.1.12 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/dom-webcodecs@0.1.13 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/fs-extra@8.1.5 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/node@24.10.1 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/react@19.2.7 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/react@19.2.18 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/slice-ansi@4.0.0 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @xmldom/xmldom@0.9.10 | MIT | git://github.com/xmldom/xmldom |
 | ansi-regex@5.0.1 | MIT | chalk/ansi-regex |
@@ -63,6 +63,8 @@ release, never edit by hand.
 | balanced-match@4.0.4 | MIT | git://github.com/juliangruber/balanced-match |
 | base64-js@1.5.1 | MIT | git://github.com/beatgammit/base64-js |
 | big-integer@1.6.52 | Unlicense | git@github.com:peterolson/BigInteger.js |
+| bplist-creator@0.1.0 | MIT | https://github.com/nearinfinity/node-bplist-creator |
+| bplist-parser@0.3.1 | MIT | https://github.com/nearinfinity/node-bplist-parser |
 | bplist-parser@0.3.2 | MIT | https://github.com/nearinfinity/node-bplist-parser |
 | brace-expansion@5.0.7 | MIT | https://github.com/juliangruber/brace-expansion |
 | buffer-crc32@0.2.13 | MIT | git://github.com/brianloveswords/buffer-crc32 |
@@ -94,11 +96,12 @@ release, never edit by hand.
 | jsonfile@6.2.0 | MIT | git@github.com:jprichardson/node-jsonfile |
 | kleur@3.0.3 | MIT | lukeed/kleur |
 | kleur@4.1.5 | MIT | lukeed/kleur |
-| livekit-client@2.21.0 | Apache-2.0 | git@github.com:livekit/client-sdk-js |
+| livekit-client@2.22.3 | Apache-2.0 | git@github.com:livekit/client-sdk-js |
 | lodash-es@4.18.1 | MIT | lodash/lodash |
 | loglevel@1.9.2 | MIT | git://github.com/pimterry/loglevel |
 | lru-cache@11.2.4 | BlueOak-1.0.0 | git://github.com/isaacs/node-lru-cache |
-| mediabunny@1.55.1 | MPL-2.0 | https://github.com/Vanilagy/mediabunny |
+| machina@7.0.1 | MIT | git://github.com/ifandelse/machina.js |
+| mediabunny@1.55.7 | MPL-2.0 | https://github.com/Vanilagy/mediabunny |
 | minimatch@10.2.5 | BlueOak-1.0.0 | git@github.com:isaacs/minimatch |
 | minipass@7.1.2 | ISC | https://github.com/isaacs/minipass |
 | minizlib@3.1.0 | MIT | https://github.com/isaacs/minizlib |
@@ -111,10 +114,10 @@ release, never edit by hand.
 | pend@1.2.0 | MIT | git://github.com/andrewrk/node-pend |
 | plist@3.1.1 | MIT | git://github.com/TooTallNate/node-plist |
 | prompts@2.4.2 | MIT | terkelg/prompts |
-| react-dom@19.2.1 | MIT | https://github.com/facebook/react |
-| react-router-dom@7.18.1 | MIT | https://github.com/remix-run/react-router |
-| react-router@7.18.1 | MIT | https://github.com/remix-run/react-router |
-| react@19.2.1 | MIT | https://github.com/facebook/react |
+| react-dom@19.2.8 | MIT | https://github.com/react/react |
+| react-router-dom@7.18.3 | MIT | https://github.com/remix-run/react-router |
+| react-router@7.18.3 | MIT | https://github.com/remix-run/react-router |
+| react@19.2.8 | MIT | https://github.com/react/react |
 | readable-stream@3.6.2 | MIT | git://github.com/nodejs/readable-stream |
 | rimraf@6.1.2 | BlueOak-1.0.0 | git@github.com:isaacs/rimraf |
 | rxjs@7.8.2 | Apache-2.0 | https://github.com/reactivex/rxjs |
@@ -128,9 +131,11 @@ release, never edit by hand.
 | shebang-command@2.0.0 | MIT | kevva/shebang-command |
 | shebang-regex@3.0.0 | MIT | sindresorhus/shebang-regex |
 | signal-exit@3.0.7 | ISC | https://github.com/tapjs/signal-exit |
+| simple-plist@1.3.1 | MIT | https://github.com/wollardj/simple-plist |
 | sisteransi@1.0.5 | MIT | https://github.com/terkelg/sisteransi |
 | slice-ansi@4.0.0 | MIT | chalk/slice-ansi |
 | split2@4.2.0 | ISC | https://github.com/mcollina/split2 |
+| stream-buffers@2.2.0 | Unlicense | https://github.com/samcday/node-stream-buffer |
 | string_decoder@1.3.0 | MIT | git://github.com/nodejs/string_decoder |
 | string-width@4.2.3 | MIT | sindresorhus/string-width |
 | strip-ansi@6.0.1 | MIT | chalk/strip-ansi |
@@ -143,17 +148,19 @@ release, never edit by hand.
 | universalify@2.0.1 | MIT | https://github.com/RyanZim/universalify |
 | untildify@4.0.0 | MIT | sindresorhus/untildify |
 | util-deprecate@1.0.2 | MIT | git://github.com/TooTallNate/util-deprecate |
+| uuid@7.0.3 | MIT | https://github.com/uuidjs/uuid |
 | webrtc-adapter@9.0.6 | BSD-3-Clause | https://github.com/webrtchacks/adapter |
 | which@2.0.2 | ISC | git://github.com/isaacs/node-which |
 | wrap-ansi@7.0.0 | MIT | chalk/wrap-ansi |
+| xcode@3.0.1 | Apache-2.0 | github:apache/cordova-node-xcode |
 | xml2js@0.6.2 | MIT | https://github.com/Leonidas-from-XIV/node-xml2js |
 | xmlbuilder@11.0.1 | MIT | git://github.com/oozcitak/xmlbuilder-js |
 | xmlbuilder@15.1.1 | MIT | git://github.com/oozcitak/xmlbuilder-js |
 | yallist@5.0.0 | BlueOak-1.0.0 | https://github.com/isaacs/yallist |
 | yauzl@2.10.0 | MIT | https://github.com/thejoshwolfe/yauzl |
-| zustand@5.0.14 | MIT | https://github.com/pmndrs/zustand |
+| zustand@5.0.15 | MIT | https://github.com/pmndrs/zustand |
 
-## Rust crates in the server, desktop shell, native helpers and the wasm (854)
+## Rust crates in the server, desktop shell, native helpers and the wasm (857)
 
 | crate | licence | used by | origin |
 |---|---|---|---|
@@ -453,7 +460,7 @@ release, never edit by hand.
 | infer@0.19.0 | MIT | desktop | https://github.com/bojand/infer |
 | inout@0.1.4 | MIT OR Apache-2.0 | backend, puca-agent, puca-rtc, puca-spike-fswap | https://github.com/RustCrypto/utils |
 | ipnet@2.12.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/krisprice/ipnet |
-| is@0.10.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
+| is@0.11.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
 | itertools@0.10.5 | MIT/Apache-2.0 | wasm | https://github.com/rust-itertools/itertools |
 | itertools@0.14.0 | MIT OR Apache-2.0 | wasm | https://github.com/rust-itertools/itertools |
 | itoa@1.0.18 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-input, puca-service, puca-spike-s5, puca-ua, puca-waker | https://github.com/dtolnay/itoa |
@@ -738,9 +745,9 @@ release, never edit by hand.
 | srp@0.6.0 | MIT OR Apache-2.0 | backend | https://github.com/RustCrypto/PAKEs |
 | stable_deref_trait@1.2.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/storyyeller/stable_deref_trait |
 | static_assertions@1.1.0 | MIT OR Apache-2.0 | wasm | https://github.com/nvzqz/static-assertions-rs |
-| str0m-aws-lc-rs@0.5.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
-| str0m-proto@0.6.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
-| str0m@0.21.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
+| str0m-aws-lc-rs@0.6.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
+| str0m-proto@0.7.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
+| str0m@0.23.1 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/algesten/str0m |
 | strength_reduce@0.2.4 | MIT OR Apache-2.0 | wasm | http://github.com/ejmahler/strength_reduce |
 | string_cache_codegen@0.6.1 | MIT OR Apache-2.0 | desktop | https://github.com/servo/string-cache |
 | string_cache@0.9.0 | MIT OR Apache-2.0 | desktop | https://github.com/servo/string-cache |
@@ -758,7 +765,9 @@ release, never edit by hand.
 | synstructure@0.13.2 | MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/mystor/synstructure |
 | sysinfo@0.32.1 | MIT | desktop, puca-agent, puca-input, puca-spike-s5 | https://github.com/GuillaumeGomez/sysinfo |
 | system-configuration-sys@0.5.0 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/mullvad/system-configuration-rs |
+| system-configuration-sys@0.6.0 | MIT OR Apache-2.0 | desktop | https://github.com/mullvad/system-configuration-rs |
 | system-configuration@0.5.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/mullvad/system-configuration-rs |
+| system-configuration@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/mullvad/system-configuration-rs |
 | system-deps@6.2.2 | MIT OR Apache-2.0 | desktop | https://github.com/gdesmott/system-deps |
 | tao-macros@0.1.4 | MIT OR Apache-2.0 | desktop | https://github.com/tauri-apps/tao |
 | tao@0.35.3 | Apache-2.0 | desktop | https://github.com/tauri-apps/tao |
@@ -771,10 +780,10 @@ release, never edit by hand.
 | tauri-plugin-dialog@2.7.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-fs@2.5.2 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-log@2.9.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
-| tauri-plugin-notification@2.3.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
+| tauri-plugin-notification@2.4.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-process@2.3.1 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-single-instance@2.4.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
-| tauri-plugin-updater@2.10.1 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
+| tauri-plugin-updater@2.11.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-window-state@2.4.1 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin@2.6.3 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/tauri |
 | tauri-runtime-wry@2.11.4 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/tauri |
@@ -947,6 +956,7 @@ release, never edit by hand.
 | windows-link@0.2.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/microsoft/windows-rs |
 | windows-numerics@0.2.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-numerics@0.3.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
+| windows-registry@0.6.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-result@0.1.2 | MIT OR Apache-2.0 | desktop, puca-agent, puca-input, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows-result@0.2.0 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows-result@0.3.4 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
