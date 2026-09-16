@@ -632,7 +632,11 @@ pub fn start(
 
     let mut sender = VideoSender::new();
     let mut count = 0;
-    let interfaces = local_interfaces(local_addr.port());
+    // The peer's own candidates decide which local addresses are worth
+    // advertising — see local_interfaces. The offer is already in hand here
+    // (this side always answers), so no extra round trip is needed.
+    let peer_addrs = remote_candidate_addrs(offer_sdp);
+    let interfaces = local_interfaces(local_addr.port(), &peer_addrs);
     for addr in &interfaces {
         if sender.add_local_candidate(*addr).is_ok() {
             count += 1;
@@ -642,10 +646,12 @@ pub fn start(
         return Err("no usable local network interface to advertise".to_string());
     }
 
-    let base = interfaces
-        .iter()
-        .find(|a| !a.ip().is_loopback())
-        .copied()
+    // The base for reflexive/relayed candidates is the address those packets
+    // really leave from — the DEFAULT route — not whichever host candidate
+    // happens to lead the list now that a peer-routed LAN address can.
+    let base = default_route_addr()
+        .map(|ip| SocketAddr::new(ip, local_addr.port()))
+        .or_else(|| interfaces.iter().find(|a| !a.ip().is_loopback()).copied())
         .unwrap_or(local_addr);
     let gathered = crate::ice::gather(&socket, ice_servers, base, Duration::from_millis(1_500));
     let mut srflx_count = 0;
@@ -673,8 +679,16 @@ pub fn start(
         }
     }
 
+    // NAME the host candidates. "2 host" hid the whole defect above for weeks:
+    // the count was right and both addresses were useless to the peer.
     eprintln!(
-        "[stream] ice: {count} host, {srflx_count} reflexive - {}",
+        "[stream] ice: {count} host [{}], {srflx_count} reflexive (base {}) - {}",
+        interfaces
+            .iter()
+            .map(|a| a.ip().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        base.ip(),
         ice_summary
     );
 
@@ -787,17 +801,95 @@ impl Drop for TerminatedGuard {
     }
 }
 
-fn local_interfaces(port: u16) -> Vec<SocketAddr> {
-    let mut out = Vec::new();
-    if let Ok(probe) = UdpSocket::bind("0.0.0.0:0") {
-        if probe.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = probe.local_addr() {
-                out.push(SocketAddr::new(addr.ip(), port));
+/// The local address the OS would send from to reach `dest`, if any.
+///
+/// A connected UDP socket performs no I/O — `connect` on a datagram socket only
+/// fixes the peer and runs the routing table — so this is a pure route lookup
+/// with no packet and no dependency.
+fn source_addr_for(dest: SocketAddr) -> Option<std::net::IpAddr> {
+    if !dest.is_ipv4() {
+        // The stream socket is bound to 0.0.0.0, so a v6 candidate could never
+        // be sent from it; advertising one would only waste connectivity checks.
+        return None;
+    }
+    let probe = UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect(dest).ok()?;
+    let ip = probe.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
+/// Every local address worth advertising as an ICE host candidate, given the
+/// addresses the PEER offered.
+///
+/// `peers` is what makes this correct on a multi-homed machine. This used to be
+/// one probe — the route to 8.8.8.8 — plus loopback, which silently assumed the
+/// default route leaves by the same interface the peer is on. **A VPN breaks
+/// that assumption completely.** With a tunnel holding the default route the
+/// probe returns the tunnel's own address (measured on the developer's machine:
+/// 10.169.229.126 while the phone on the same LAN was reachable only via
+/// 192.168.0.22), so the agent advertised a host candidate no peer on Earth
+/// could reach, plus loopback. The LAN pair — the highest-priority pair there
+/// is, and a 2 ms round trip — could then never form, and the session fell back
+/// to the peer's TURN relay: every frame of a remote-control session between two
+/// devices in the same room went out to the relay and back, measured at 99 ms
+/// RTT with 3% loss against 2-7 ms direct.
+///
+/// Asking the routing table "what would I send from, to reach THIS peer" answers
+/// it exactly, for a VPN, a second NIC, a virtual adapter or a plain LAN, without
+/// enumerating interfaces (which needs a platform API per target) and without
+/// guessing at private ranges. The socket is bound to 0.0.0.0, so every address
+/// returned here really can send: the OS picks the source per destination.
+fn local_interfaces(port: u16, peers: &[SocketAddr]) -> Vec<SocketAddr> {
+    collect_candidates(port, peers, source_addr_for, default_route_addr)
+}
+
+/// The candidate list itself, with the routing table injected.
+///
+/// Split from `local_interfaces` so the defect above is testable: the real
+/// probe answers whatever THIS machine's routes say, so a test written against
+/// it asserts nothing (the first attempt passed just as happily with the peer
+/// probe deleted, because loopback is appended unconditionally). With `route`
+/// supplied, the VPN case is reproducible anywhere.
+fn collect_candidates(
+    port: u16,
+    peers: &[SocketAddr],
+    route: impl Fn(SocketAddr) -> Option<std::net::IpAddr>,
+    default_route: impl Fn() -> Option<std::net::IpAddr>,
+) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::new();
+    let mut push = |ip: std::net::IpAddr, out: &mut Vec<SocketAddr>| {
+        let addr = SocketAddr::new(ip, port);
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    };
+
+    // The route to each address the peer offered. First, so a LAN address leads
+    // the candidate list when the peer is local.
+    for peer in peers {
+        if let Some(ip) = route(*peer) {
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                push(ip, &mut out);
             }
         }
     }
-    out.push(SocketAddr::from(([127, 0, 0, 1], port)));
+    // The default route as well: the peer may be somewhere none of its offered
+    // candidates reach directly, and this is the address a relay or a reflexive
+    // candidate is based on.
+    if let Some(ip) = default_route() {
+        if !ip.is_unspecified() {
+            push(ip, &mut out);
+        }
+    }
+    push(std::net::IpAddr::from([127, 0, 0, 1]), &mut out);
     out
+}
+
+/// The address the OS uses for the general internet. This is the base a
+/// server-reflexive or relayed candidate is really sent from, so it stays the
+/// base even when a peer-routed LAN address leads the host-candidate list.
+fn default_route_addr() -> Option<std::net::IpAddr> {
+    source_addr_for(SocketAddr::from(([8, 8, 8, 8], 80)))
 }
 
 fn remote_candidate_addrs(offer_sdp: &str) -> Vec<SocketAddr> {
@@ -3126,12 +3218,142 @@ mod tests {
 
     #[test]
     fn local_interfaces_always_offers_something() {
-        let addrs = local_interfaces(45678);
+        let addrs = local_interfaces(45678, &[]);
         assert!(!addrs.is_empty());
         assert!(addrs.iter().all(|a| a.port() == 45678), "every candidate uses the bound port");
         assert!(
             addrs.iter().any(|a| a.ip().is_loopback()),
             "loopback must be offered so a same-machine peer works with no network"
+        );
+    }
+
+    /// The routing table measured on the machine that produced the bug report:
+    /// Mullvad holds the default route, so the internet leaves by the tunnel,
+    /// while the phone on the same LAN is reached from the Ethernet address.
+    fn vpn_routes(dest: SocketAddr) -> Option<std::net::IpAddr> {
+        match dest.ip().to_string().as_str() {
+            // The phone, and anything else on the LAN.
+            ip if ip.starts_with("192.168.0.") => Some([192, 168, 0, 22].into()),
+            // Everything else goes down the tunnel.
+            _ => Some([10, 169, 229, 126].into()),
+        }
+    }
+    fn vpn_default_route() -> Option<std::net::IpAddr> {
+        Some([10, 169, 229, 126].into())
+    }
+
+    /// THE DEFECT, reproduced. The host candidates must include the address
+    /// that reaches the PEER, not only the one that reaches the internet. With
+    /// a VPN holding the default route those differ, and advertising only the
+    /// latter left a phone on the same LAN no direct pair to use: the session
+    /// fell back to the phone's TURN relay at 99 ms RTT and 3% loss, against
+    /// 2-7 ms on the LAN.
+    #[test]
+    fn the_lan_address_is_advertised_even_when_a_vpn_holds_the_default_route() {
+        let phone: SocketAddr = "192.168.0.155:42767".parse().unwrap();
+        let addrs = collect_candidates(45678, &[phone], vpn_routes, vpn_default_route);
+        assert!(
+            addrs.iter().any(|a| a.ip() == std::net::IpAddr::from([192, 168, 0, 22])),
+            "the LAN address that reaches the phone must be advertised, got {addrs:?}"
+        );
+        // And the tunnel address stays: a peer that is genuinely remote is
+        // reached through it, and it is the base for reflexive/relayed candidates.
+        assert!(
+            addrs.iter().any(|a| a.ip() == std::net::IpAddr::from([10, 169, 229, 126])),
+            "the default route is still offered, got {addrs:?}"
+        );
+        assert!(addrs.iter().all(|a| a.port() == 45678));
+    }
+
+    /// The LAN address must come FIRST, so it leads the candidate list rather
+    /// than trailing the tunnel address it exists to beat.
+    #[test]
+    fn the_peer_routed_address_leads_the_list() {
+        let phone: SocketAddr = "192.168.0.155:42767".parse().unwrap();
+        let addrs = collect_candidates(45678, &[phone], vpn_routes, vpn_default_route);
+        assert_eq!(addrs.first().map(|a| a.ip()), Some([192, 168, 0, 22].into()));
+    }
+
+    /// A peer this machine cannot route to must add nothing, and must not stop
+    /// the ordinary candidates being offered.
+    #[test]
+    fn an_unroutable_peer_adds_nothing_and_breaks_nothing() {
+        let addrs = collect_candidates(
+            45678,
+            &["203.0.113.9:9".parse().unwrap()],
+            |_| None,
+            vpn_default_route,
+        );
+        assert!(!addrs.is_empty(), "the default route and loopback still stand");
+        assert!(addrs.iter().any(|a| a.ip().is_loopback()));
+        assert!(addrs.iter().all(|a| !a.ip().is_unspecified()));
+    }
+
+    /// A route that answers with the wildcard is not an address.
+    #[test]
+    fn an_unspecified_route_is_never_advertised() {
+        let addrs = collect_candidates(
+            45678,
+            &["192.168.0.155:9".parse().unwrap()],
+            |_| Some([0, 0, 0, 0].into()),
+            || Some([0, 0, 0, 0].into()),
+        );
+        assert!(
+            addrs.iter().all(|a| !a.ip().is_unspecified()),
+            "got {addrs:?}"
+        );
+        assert!(addrs.iter().any(|a| a.ip().is_loopback()), "loopback still offered");
+    }
+
+    /// Loopback is appended unconditionally, so a loopback ROUTE must not add a
+    /// second copy — and must not be what makes the peer probe look wired up.
+    #[test]
+    fn a_loopback_route_does_not_duplicate_the_loopback_candidate() {
+        let addrs = collect_candidates(
+            45678,
+            &["127.0.0.1:9".parse().unwrap()],
+            |_| Some([127, 0, 0, 1].into()),
+            || None,
+        );
+        assert_eq!(
+            addrs.iter().filter(|a| a.ip().is_loopback()).count(),
+            1,
+            "one loopback candidate, got {addrs:?}"
+        );
+    }
+
+    /// Several peer candidates usually share one route; the same address twice
+    /// is two pointless streams of connectivity checks.
+    #[test]
+    fn the_same_route_is_advertised_once() {
+        let peers: Vec<SocketAddr> = vec![
+            "192.168.0.155:42767".parse().unwrap(),
+            "192.168.0.155:53312".parse().unwrap(),
+        ];
+        let addrs = collect_candidates(45678, &peers, vpn_routes, vpn_default_route);
+        assert_eq!(
+            addrs.iter().filter(|a| a.ip() == std::net::IpAddr::from([192, 168, 0, 22])).count(),
+            1,
+            "one LAN candidate, got {addrs:?}"
+        );
+    }
+
+    /// A v6 peer cannot be answered from the v4 socket this stream binds, so it
+    /// must not produce a candidate that could only ever fail its checks. This
+    /// one exercises the REAL probe, which is where that rule lives.
+    #[test]
+    fn a_v6_peer_is_not_advertised_from_the_v4_socket() {
+        assert_eq!(source_addr_for("[::1]:9".parse().unwrap()), None);
+    }
+
+    /// The real probe, against the one destination whose route every machine
+    /// has: it must answer with loopback, proving the probe is wired to the OS
+    /// at all (the injected tests above cannot show that).
+    #[test]
+    fn the_real_probe_resolves_a_route() {
+        assert_eq!(
+            source_addr_for("127.0.0.1:9".parse().unwrap()),
+            Some(std::net::IpAddr::from([127, 0, 0, 1]))
         );
     }
 
