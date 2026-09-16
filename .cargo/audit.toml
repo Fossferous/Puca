@@ -40,4 +40,22 @@ ignore = [
     # bundled into a documentation pass. Re-evaluate the moment the backend
     # gains any outbound request to a host a user can influence.
     "RUSTSEC-2026-0258",
+
+    # RUSTSEC-2026-0217 - integer overflow in tract-nnef's NNEF tensor parser,
+    # out-of-bounds read on MODEL LOAD; tract-nnef 0.19.16, fixed in 0.21.16+.
+    # Present ONLY in frontend/df-wasm/Cargo.lock (the noise-suppression wasm),
+    # which CI scans since 2026-09-16 - this was found on the first scan.
+    #
+    # Reachability: the parser runs once, at init, over the DFN3 model that is
+    # EMBEDDED in the wasm itself (`deep_filter`'s `default-model` feature); no
+    # model ever arrives from a user, a peer or the network, so there is no
+    # input for the overflow to be reached through. And it runs inside the
+    # browser's WebAssembly sandbox, where an out-of-bounds read is a trap or a
+    # read of the module's own linear memory - not a disclosure across it.
+    #
+    # NOT fixable here: tract's version is pinned by upstream DeepFilterNet
+    # (git tag v0.5.6), not by this crate. Re-evaluate when df-wasm is rebuilt
+    # against a newer DeepFilterNet (the fix comes for free), or if the model
+    # is ever loaded from anywhere but the bundle.
+    "RUSTSEC-2026-0217",
 ]

@@ -55,12 +55,16 @@ jobs:
       # on purpose), which actions/checkout already provides.
       - name: Docs links resolve
         run: node ../scripts/check-docs-links.mjs
-      # NON-BLOCKING on purpose: the registry's answer changes daily, so gating
-      # merges on it makes CI fail for reasons no commit caused. The triage
-      # lives in docs/NPM_ADVISORIES.md; this step is what makes drift from it
-      # visible. If the log and that file disagree, the file is out of date.
-      - name: npm audit (advisory drift — never blocks)
-        run: npm audit --audit-level=high || true
+      # BLOCKING, against the written triage. This was `npm audit || true`,
+      # non-blocking so the registry's daily churn could not fail a merge, with
+      # the log meant to make drift from docs/NPM_ADVISORIES.md visible. It did
+      # not: a step that cannot fail is a step nobody reads, and the log had
+      # drifted from the file for two weeks. The gate fails ONLY on a
+      # high/critical package with no row in that file; drift within a triaged
+      # package and stale rows are printed as warnings, and a registry that
+      # cannot be reached warns rather than fails.
+      - name: npm advisories (untriaged high/critical blocks)
+        run: node scripts/check-npm-advisories.mjs
 
   # The deploy scripts run once, as root, on a box that has already been paid
   # for, and their failures are silent: a backup that restores nothing, a config
@@ -108,6 +112,14 @@ jobs:
         run: cargo audit -f Cargo.lock
       - name: Desktop shell (excluded from the workspace, so its own lock)
         run: cargo audit -f frontend/src-tauri/Cargo.lock
+      # The noise-suppression wasm (DeepFilterNet via tract) has its own lock
+      # too, and it was never scanned: its prebuilt 14 MB artifact is COMMITTED
+      # (frontend/src/wasm/df/), so what its lock resolves is what every user
+      # runs, and this is the only thing that says when a rebuild is due. Found
+      # on the first scan: RUSTSEC-2026-0217 in tract-nnef, triaged in
+      # .cargo/audit.toml.
+      - name: Noise-suppression wasm (its own lock, its output is committed)
+        run: cargo audit -f frontend/df-wasm/Cargo.lock
 
   # THE LINUX REMOTE-CONTROL BACKENDS, which nothing has ever RUN.
   #
