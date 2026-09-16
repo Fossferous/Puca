@@ -4,6 +4,21 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **The Wake button stopped working roughly a month after setting it up.** The
+  LAN waker — the small helper that sends the magic packet to wake a sleeping
+  PC — kept its access by renewing its credential, and renewing needs a
+  credential that is still valid. The server stops renewing 30 days after the
+  original sign-in, so on day 30 renewal quietly stopped, a day later the
+  credential expired, and the waker was locked out for good. Nothing said so
+  except a line in its log; the button simply did nothing.
+
+  It now mints a fresh credential from the identity it was enrolled with,
+  which is the same proof it already gives every time it connects. It recovers
+  on its own within a minute, with no re-pairing, and the 30-day cliff is gone.
+
 ## 0.9.812 — 2026-09-16
 
 Remote control goes back to being direct when your phone and your PC are on the

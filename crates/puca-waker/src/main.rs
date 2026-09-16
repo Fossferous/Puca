@@ -304,6 +304,22 @@ fn run(cfg_path: Option<PathBuf>) -> i32 {
                             }
                         }
                         Ok(None) => {}
+                        // A REJECTED bearer is not a transport failure, and it
+                        // is the one case renewal can never recover from: the
+                        // server only renews a token that is still valid, and
+                        // stops renewing entirely 30 days after the original
+                        // sign-in. Re-mint from the device identity instead of
+                        // waiting for a human to re-pair (see net::remint).
+                        Err(net::RefreshError::Rejected) => {
+                            eprintln!("[waker] the token was rejected — re-minting from this device's identity");
+                            match net::remint(&refresh_cfg).await {
+                                Ok(fresh) => match config::write_token(&refresh_cfg.token_path, &fresh) {
+                                    Ok(()) => eprintln!("[waker] minted a fresh token"),
+                                    Err(e) => eprintln!("[waker] could not persist the minted token: {e}"),
+                                },
+                                Err(e) => eprintln!("[waker] could not mint a token: {e}"),
+                            }
+                        }
                         // NOT fatal, and deliberately so: the overwhelmingly
                         // common cause is the API being briefly unreachable,
                         // and a waker that exits on that is a waker that is
@@ -330,11 +346,30 @@ fn run(cfg_path: Option<PathBuf>) -> i32 {
                 }
             };
 
+            let mut token = token;
             if net::should_redial_for_expiry(config::seconds_until_expiry(&token, now_unix())) {
-                // Nothing to do here but say so: the refresher task is the only
-                // thing that can produce a newer one, and it runs on its own
-                // clock. Dialling anyway is correct — the server is the judge.
-                eprintln!("[waker] the stored token is near or past expiry");
+                // Mint one HERE rather than dialling a token we can already see
+                // is spent and waiting on the refresher's own clock. The
+                // refresher cannot help once the token is past renewal:
+                // `GET /devices` needs a live bearer, and the server stops
+                // renewing 30 days after sign-in regardless. This is the path
+                // that gets a locked-out waker back on its feet within a minute
+                // of starting, with no human involved.
+                eprintln!("[waker] the stored token is near or past expiry — minting a fresh one");
+                match net::remint(&cfg).await {
+                    Ok(fresh) => {
+                        if let Err(e) = config::write_token(&cfg.token_path, &fresh) {
+                            eprintln!("[waker] could not persist the minted token: {e}");
+                        } else {
+                            eprintln!("[waker] minted a fresh token");
+                        }
+                        token = fresh;
+                    }
+                    // Dial anyway on failure: the server is the judge, and a
+                    // mint that failed for a transport reason must not stop a
+                    // token that may still have minutes left from being used.
+                    Err(e) => eprintln!("[waker] could not mint a token: {e}"),
+                }
             }
 
             let dialled = std::time::Instant::now();

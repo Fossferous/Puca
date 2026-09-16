@@ -302,6 +302,120 @@ pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), DialError> {
     Ok(())
 }
 
+/// Why a refresh failed.
+///
+/// A TYPE, not a string prefix. The caller re-mints on `Rejected` and only on
+/// `Rejected` — a transport failure must never trigger one — and matching that
+/// distinction on message text is precisely the coupling that fails silently
+/// the day someone rewords the message.
+#[derive(Debug)]
+pub enum RefreshError {
+    /// The server turned the bearer away (401). Renewal can never recover from
+    /// this: it needs a live token, and the server stops renewing 30 days after
+    /// the original sign-in whatever the client does. See `remint`.
+    Rejected,
+    /// Anything else: unreachable API, malformed body, an absurd device list.
+    Other(String),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefreshError::Rejected => write!(f, "the token was rejected"),
+            RefreshError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Mint a brand-new token from this waker's DEVICE IDENTITY, presenting no
+/// bearer at all.
+///
+/// THE 30-DAY CLIFF THIS EXISTS TO REMOVE. `refresh` below renews by carrying a
+/// LIVE token to `GET /devices` and adopting `x-renewed-token`, and the server
+/// stops issuing that header once `MAX_SESSION_DAYS` (30) have passed since the
+/// original sign-in — `sst` is carried forward by every renewal and cannot be
+/// reset (src/auth.rs, `renew_if_stale`). So on day 30 renewal silently stops,
+/// 24 hours later the token expires, and the only path back was a human
+/// re-running `puca-waker pair`. Measured on the live box 2026-09-16: attested
+/// and healthy at 13:15, `401 Invalid token` from 15:30 onward, `refresh
+/// failed: the token was rejected — this waker needs pairing again` every
+/// minute after that, and the server logging `ExpiredSignature`. The Wake
+/// button was dead and nothing said why. Left alone it recurs every 30 days,
+/// on every waker, forever.
+///
+/// `POST /devices/token` authenticates by SIGNATURE, not by bearer: the device
+/// signs a server-issued nonce with the same key and the same transcript the
+/// socket attestation already uses (`verify_device_attestation`, shared by
+/// both). It has no session ceiling — it is bounded by device revocation and
+/// account liveness, which is the correct bound for an enrolled device — so it
+/// works with a token that is expired, and with no token at all.
+///
+/// This is not a new privilege. The waker already holds `sign_seed` and already
+/// proves possession of it on every single connection; all that changes is that
+/// it may now do so to obtain a token instead of only to use one.
+pub async fn remint(cfg: &Config) -> Result<String, String> {
+    let seed = cfg.seed()?;
+    let ident = crate::identity::Identity {
+        device_id: cfg.device_id.clone(),
+        device_pub: cfg.device_pub.clone(),
+        sign_pub: cfg.sign_pub.clone(),
+        sign_seed: seed,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let resp = client
+        .post(format!("{}/devices/token/challenge", cfg.api_base))
+        .json(&serde_json::json!({ "device_id": cfg.device_id }))
+        .send()
+        .await
+        .map_err(|e| format!("challenge request failed: {e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("challenge response was not JSON ({status}): {e}"))?;
+    let nonce = body
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("no nonce in the challenge response ({status})"))?
+        .to_string();
+
+    let sig = ident.attest(&nonce, cfg.user_id);
+    let resp = client
+        .post(format!("{}/devices/token", cfg.api_base))
+        .json(&serde_json::json!({
+            "device_id": cfg.device_id,
+            "nonce": nonce,
+            "sig": sig,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("token request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        // A refusal here is terminal in a way a network error is not: the
+        // device row is revoked, or the account is gone. Say which, because the
+        // cure differs (re-enrol vs nothing to do).
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "the server refused to mint a token ({status}): {} — this waker's device row is \
+             revoked or its account is gone; re-enrol it",
+            body.trim()
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("token response was not JSON: {e}"))?;
+    body.get("token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "no token in the mint response".to_string())
+}
+
 /// Ask the API for the device list, and adopt a renewed token if one comes back.
 ///
 /// `GET /devices` rather than a dedicated endpoint because it does double duty:
@@ -309,20 +423,22 @@ pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), DialError> {
 /// waker's own self-check — a missing row means this device was revoked, and
 /// `online: false` on its own row while it believes it is attested means the
 /// attestation silently failed.
-pub async fn refresh(cfg: &Config, token: &str) -> Result<Option<String>, String> {
+pub async fn refresh(cfg: &Config, token: &str) -> Result<Option<String>, RefreshError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| RefreshError::Other(format!("http client: {e}")))?;
     let resp = client
         .get(format!("{}/devices", cfg.api_base))
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| format!("GET /devices failed: {e}"))?;
+        .map_err(|e| RefreshError::Other(format!("GET /devices failed: {e}")))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("the token was rejected — this waker needs pairing again".into());
+        // The caller re-mints from the device identity rather than asking for a
+        // human — see `remint`. The wording stays a rejection, not advice.
+        return Err(RefreshError::Rejected);
     }
     let renewed = resp
         .headers()
@@ -336,14 +452,14 @@ pub async fn refresh(cfg: &Config, token: &str) -> Result<Option<String>, String
     // A real device list is a few KB; 2 MB is presence-of-mind headroom.
     const MAX_BODY: u64 = 2_000_000;
     if resp.content_length().is_some_and(|l| l > MAX_BODY) {
-        return Err("device list response is implausibly large — refusing to buffer it".into());
+        return Err(RefreshError::Other("device list response is implausibly large — refusing to buffer it".into()));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("bad device list: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| RefreshError::Other(format!("bad device list: {e}")))?;
     if bytes.len() as u64 > MAX_BODY {
-        return Err("device list response is implausibly large — refusing to parse it".into());
+        return Err(RefreshError::Other("device list response is implausibly large — refusing to parse it".into()));
     }
     let body: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("bad device list: {e}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| RefreshError::Other(format!("bad device list: {e}")))?;
     let mine = body
         .get("devices")
         .and_then(|d| d.as_array())
@@ -352,7 +468,13 @@ pub async fn refresh(cfg: &Config, token: &str) -> Result<Option<String>, String
                 .find(|d| d.get("id").and_then(|i| i.as_str()) == Some(cfg.device_id.as_str()))
         });
     match mine {
-        None => return Err("this device is no longer on the account — it was revoked".into()),
+        None => {
+            // NOT `Rejected`: re-minting cannot help a device that is no longer
+            // on the account, and `POST /devices/token` would refuse it too.
+            return Err(RefreshError::Other(
+                "this device is no longer on the account — it was revoked".into(),
+            ));
+        }
         Some(row) => {
             if row.get("online").and_then(|o| o.as_bool()) != Some(true) {
                 // Not fatal: a refresh can land in the gap between a socket
@@ -538,5 +660,176 @@ mod tests {
             guess_broadcast("192.168.0.30".parse().unwrap()),
             "192.168.0.255".parse::<Ipv4Addr>().unwrap()
         );
+    }
+
+    /// A config pointing at a throwaway local server, with a REAL key pair so
+    /// the signature this test verifies is the one the server would verify.
+    fn minting_config(port: u16) -> (Config, ed25519_dalek::VerifyingKey) {
+        let seed = [9u8; 32];
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let vk = sk.verifying_key();
+        let cfg = Config {
+            api_base: format!("http://127.0.0.1:{port}"),
+            user_id: 4242,
+            device_id: "D".repeat(21),
+            device_pub: "x25519:AAAA".into(),
+            sign_pub: format!(
+                "ed25519:{}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, vk.as_bytes())
+            ),
+            sign_seed: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                seed,
+            ),
+            bind_ip: "192.168.0.30".parse().unwrap(),
+            broadcast: "192.168.0.255".parse().unwrap(),
+            token_path: std::path::PathBuf::from("/tmp/unused-token"),
+        };
+        (cfg, vk)
+    }
+
+    /// Read one HTTP request off the socket and return (path, body).
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, String) {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some(hdr_end) = text.find("\r\n\r\n") {
+                let headers = &text[..hdr_end];
+                let len = headers
+                    .lines()
+                    .find_map(|l| {
+                        let l = l.to_ascii_lowercase();
+                        l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if text.len() >= hdr_end + 4 + len {
+                    let path = headers
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("")
+                        .to_string();
+                    return (path, text[hdr_end + 4..].to_string());
+                }
+            }
+        }
+        (String::new(), String::new())
+    }
+
+    async fn write_json(stream: &mut tokio::net::TcpStream, body: &str) {
+        use tokio::io::AsyncWriteExt;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes()).await.expect("write");
+        let _ = stream.flush().await;
+    }
+
+    /// THE FIX, end to end against a real socket.
+    ///
+    /// This is the path that rescues a waker whose token has passed the
+    /// server's 30-day renewal ceiling — the state measured in production on
+    /// 2026-09-16, where the only cure was a human re-running `pair`. It pins
+    /// the two endpoint PATHS, the JSON field names in both directions, and
+    /// that the signature is over the same transcript the server verifies
+    /// (`sovereign-device-attest-v1|<nonce>|<user_id>`). Any of those drifting
+    /// is a silent 401 in the field, which is exactly how this went unnoticed.
+    #[tokio::test]
+    async fn remint_signs_the_servers_nonce_and_returns_the_minted_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cfg, vk) = minting_config(port);
+        let user_id = cfg.user_id;
+
+        let server = tokio::spawn(async move {
+            // 1. the challenge
+            let (mut s, _) = listener.accept().await.expect("accept challenge");
+            let (path, body) = read_request(&mut s).await;
+            assert_eq!(path, "/devices/token/challenge", "challenge path");
+            let v: serde_json::Value = serde_json::from_str(&body).expect("challenge json");
+            assert_eq!(v["device_id"].as_str().unwrap().len(), 21, "device id is sent");
+            write_json(&mut s, r#"{"nonce":"NONCE-abc123"}"#).await;
+            drop(s);
+
+            // 2. the redemption
+            let (mut s, _) = listener.accept().await.expect("accept token");
+            let (path, body) = read_request(&mut s).await;
+            assert_eq!(path, "/devices/token", "token path");
+            let v: serde_json::Value = serde_json::from_str(&body).expect("token json");
+            assert_eq!(v["nonce"], "NONCE-abc123", "the server's nonce is echoed");
+
+            // THE SIGNATURE, verified exactly as src/ws.rs does.
+            use ed25519_dalek::Verifier;
+            let sig_b64 = v["sig"].as_str().expect("sig present");
+            let sig_bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                sig_b64,
+            )
+            .expect("sig is base64");
+            let sig_arr: [u8; 64] = sig_bytes.try_into().expect("64-byte signature");
+            let msg = crate::identity::attestation_message("NONCE-abc123", user_id);
+            vk.verify(msg.as_bytes(), &ed25519_dalek::Signature::from_bytes(&sig_arr))
+                .expect("the signature must verify over the SERVER's transcript");
+
+            write_json(&mut s, r#"{"token":"header.payload.signature","expires_in":86400}"#).await;
+        });
+
+        let got = remint(&cfg).await.expect("remint should succeed");
+        assert_eq!(got, "header.payload.signature");
+        server.await.expect("server task");
+    }
+
+    /// A refusal must be reported, not silently treated as success — and it
+    /// must say what the operator has to do, because re-minting is the last
+    /// automatic recovery there is.
+    #[tokio::test]
+    async fn a_refused_mint_is_an_error_that_names_the_cure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cfg, _) = minting_config(port);
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.expect("accept challenge");
+            let _ = read_request(&mut s).await;
+            write_json(&mut s, r#"{"nonce":"N"}"#).await;
+            drop(s);
+            let (mut s, _) = listener.accept().await.expect("accept token");
+            let _ = read_request(&mut s).await;
+            use tokio::io::AsyncWriteExt;
+            let body = "that device is not enrolled";
+            let resp = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).await.expect("write");
+        });
+
+        let err = remint(&cfg).await.expect_err("a 401 must not look like success");
+        assert!(err.contains("401"), "the status is reported: {err}");
+        assert!(err.contains("re-enrol"), "the cure is named: {err}");
+        server.await.expect("server task");
+    }
+
+    /// `Rejected` is a VARIANT, not a message prefix: the caller re-mints on it
+    /// and only on it, and a reworded string must not silently stop that.
+    #[test]
+    fn a_rejected_refresh_is_distinguishable_from_any_other_failure() {
+        assert!(matches!(RefreshError::Rejected, RefreshError::Rejected));
+        assert!(!matches!(
+            RefreshError::Other("GET /devices failed: connection refused".into()),
+            RefreshError::Rejected
+        ));
+        // It still reads correctly in the journal.
+        assert_eq!(RefreshError::Rejected.to_string(), "the token was rejected");
     }
 }
