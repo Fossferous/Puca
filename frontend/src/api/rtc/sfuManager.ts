@@ -11,6 +11,7 @@
 import {
     BaseKeyProvider,
     ConnectionState,
+    ParticipantEvent,
     Room,
     RoomEvent,
     Track,
@@ -22,6 +23,7 @@ import {
     type RemoteTrackPublication,
     type LocalTrackPublication,
 } from 'livekit-client';
+import { negotiatedH264Profile, preferHardwareH264ForSender } from './h264Profiles';
 import E2EEWorker from 'livekit-client/e2ee-worker?worker';
 import { apiClient } from '../client';
 import { noiseDiagnostics } from '../noiseFilter';
@@ -120,12 +122,16 @@ const SHARE_BITRATE = 4_500_000;
 /// WHY IT IS OFF BY DEFAULT ANYWAY. The measurement that justified it
 /// (frontend/e2e/share-ramp-2pc.mjs: h264 sustaining three rungs at 56/56/16
 /// fps where VP8 collapsed to 19/7/4) was taken in headless Edge, which used a
-/// HARDWARE H.264 encoder. The shipped app does not get one: every
-/// `stream-diag` line in the field reads `encoder=OpenH264`. Three software
-/// encodes cost roughly three times one, and the machines that would pay it
-/// are the ones already reporting that sharing makes their game stutter. So
-/// the ladder is offered, not imposed — see `shareSimulcast` in
-/// settingsStore.ts.
+/// HARDWARE H.264 encoder. Until 2026-09-16 the shipped app never got one:
+/// every `stream-diag` line in the field read `encoder=OpenH264`, because the
+/// negotiation landed on Constrained Baseline, the one profile Chromium's
+/// hardware factory does not claim (h264Profiles.ts has the measurement and
+/// the fix). Machines with a hardware encoder now get it; machines without
+/// one still pay three software encodes for the ladder, and those are the
+/// ones already reporting that sharing makes their game stutter. So the
+/// ladder stays offered, not imposed — see `shareSimulcast` in
+/// settingsStore.ts — and flipping the default is a separate decision that
+/// needs field `encoder=` lines from more than one machine.
 ///
 /// THE TOP RUNG IS SHARE_BITRATE, and a subscriber only ever receives ONE rung,
 /// so the backend's per-subscriber charge (`SHARE_KBPS`, src/sfu.rs) stays the
@@ -186,10 +192,14 @@ export function screenSharePublishOptions(
         // in settingsStore.ts for why the person sharing can decline the cost.
         simulcast,
         // H.264 because it is the cheapest thing this engine will encode for
-        // fast-motion content, NOT because it is hardware-accelerated — in
-        // this app it measurably is not (`encoder=OpenH264` in every field
-        // log). VP8 is software too and markedly worse: 19 fps against h264's
-        // 56 on the same ladder and machine.
+        // fast-motion content, and — since 2026-09-16 — because it is the one
+        // codec here that CAN be hardware-accelerated: with the High profile
+        // leading the offer (preferHardwareH264, h264Profiles.ts) a machine
+        // with an NVENC/AMF/QuickSync encoder uses it. Before that every field
+        // log read `encoder=OpenH264`, a profile-negotiation accident, not a
+        // property of the app. VP8 is software on every Windows machine and
+        // markedly worse: 19 fps against h264's 56 on the same ladder and
+        // machine.
         videoCodec: 'h264' as const,
         videoEncoding: {
             maxBitrate: SHARE_BITRATE,
@@ -1030,6 +1040,7 @@ export class SfuManager {
                 stats.forEach((s) => {
                     if (s.type !== 'outbound-rtp') return;
                     const r = s as unknown as Record<string, unknown>;
+                    const profile = negotiatedH264Profile(stats, r.codecId);
                     localRtp.push({
                         source: String(pub.source), kind: r.kind,
                         // Simulcast (camera) yields one entry per layer.
@@ -1047,6 +1058,10 @@ export class SfuManager {
                         // unless the document holds an active capture, which a
                         // real share does.
                         ...(r.powerEfficientEncoder !== undefined && { hwEncoder: r.powerEfficientEncoder }),
+                        // The NEGOTIATED H.264 profile. `encoder=OpenH264` on
+                        // its own cannot say why; `profile=42e01f` next to it
+                        // can (h264Profiles.ts). Absent for other codecs.
+                        ...(profile !== null && { profile }),
                         ...(r.kind === 'video' && { latency }),
                     });
                 });
@@ -1192,7 +1207,37 @@ export class SfuManager {
         }
     }
 
+    /**
+     * Put the H.264 profiles a hardware encoder can take at the FRONT of the
+     * publisher's offer, before its first negotiation. See h264Profiles.ts for
+     * the measurement: the server answers with the first profile both sides
+     * share, Chromium's default order makes that Constrained Baseline, and
+     * Constrained Baseline is the one profile Chromium's MediaFoundation
+     * factory never claims — so every share ever logged encoded in software
+     * on machines with an idle NVENC.
+     *
+     * Hooked on LocalSenderCreated, which livekit-client emits after the
+     * transceiver exists and before it negotiates (LocalParticipant.publishTrack:
+     * createSender -> emit -> engine.negotiate). It is marked @internal there;
+     * a test pins the event name so an upgrade that renames it fails loudly
+     * instead of silently reverting every share to OpenH264. Fails OPEN: any
+     * missing piece leaves the browser's own order in place, which is today's
+     * behaviour, never a broken publish.
+     */
+    private preferHardwareH264(room: Room, sender: RTCRtpSender, track: Track): void {
+        try {
+            const outcome = preferHardwareH264ForSender(room, sender, track as { kind: string; codec?: string });
+            if (outcome === 'not-h264') return; // a VP8 camera: nothing to reorder, nothing to say
+            console.info(`[sfu] H.264 codec preference: ${outcome}`);
+        } catch (e) {
+            console.warn('[sfu] could not set the H.264 codec preference:', e);
+        }
+    }
+
     private wireRoomEvents(room: Room): void {
+        room.localParticipant.on(ParticipantEvent.LocalSenderCreated, (sender, track) =>
+            this.preferHardwareH264(room, sender, track),
+        );
         room
             .on(RoomEvent.TrackSubscribed, (track, pub, participant) =>
                 this.handleTrackSubscribed(track, pub, participant),

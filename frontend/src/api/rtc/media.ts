@@ -55,11 +55,12 @@ export function rmsAmplitude(samples: Float32Array): number {
  * resolution was not, and the clip path has always capped all three
  * (clips/replayBuffer.ts's displayConstraints).
  *
- * It matters more than it looks because the share is encoded in SOFTWARE —
- * every field log line reads `encoder=OpenH264` — and software H.264 costs
- * roughly linearly in pixels per second. Silently doubling the pixel count
- * silently doubles the CPU taken from whatever is being shared, which is
- * usually a game the person is also trying to play.
+ * It matters more than it looks because the share was encoded in SOFTWARE on
+ * every machine with a log line (`encoder=OpenH264`, until the profile fix in
+ * h264Profiles.ts) and still is on any machine without a hardware encoder —
+ * and software H.264 costs roughly linearly in pixels per second. Silently
+ * doubling the pixel count silently doubles the CPU taken from whatever is
+ * being shared, which is usually a game the person is also trying to play.
  *
  * Pure, and exported, so the cap is a testable contract rather than an object
  * literal three call frames inside a picker.

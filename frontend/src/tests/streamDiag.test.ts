@@ -67,6 +67,19 @@ describe('streamDiag sampler', () => {
         expect(logLines()[0]).toContain('sfu source=screen_share');
     });
 
+    it('prints the negotiated H.264 profile next to the encoder', async () => {
+        // `encoder=OpenH264` on its own hid the cause for two weeks: the
+        // machine had an NVENC, the negotiation had picked the one profile
+        // Chromium will not accelerate. `profile=` is the field that says
+        // which of the two it is (h264Profiles.ts).
+        voiceDiagMock.mockResolvedValue({
+            localRtp: [{ source: 'screen_share', kind: 'video', fps: 30, limit: 'none', encoder: 'OpenH264', profile: '42e01f' }],
+        });
+        await sampleOnce();
+        await streamDiagSettled();
+        expect(logLines()[0]).toContain('encoder=OpenH264 profile=42e01f');
+    });
+
     it('ignores non-video / non-outbound entries', async () => {
         meshDiagMock.mockResolvedValue([
             { userId: 1, rtp: [

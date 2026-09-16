@@ -63,6 +63,10 @@ function fmt(entry: Record<string, unknown>): string {
     const parts = [`fps=${entry.fps ?? '?'}`];
     if (entry.limit !== undefined) parts.push(`limit=${entry.limit}`);
     if (entry.encoder !== undefined) parts.push(`encoder=${entry.encoder}`);
+    // The negotiated H.264 profile-level-id — `encoder=OpenH264` alone cannot
+    // say whether the machine lacks a hardware encoder or was handed the one
+    // profile it will not accelerate (h264Profiles.ts). Absent for VP8 etc.
+    if (entry.profile !== undefined) parts.push(`profile=${entry.profile}`);
     if (entry.rid) parts.push(`rid=${entry.rid}`);
     return parts.join(' ');
 }

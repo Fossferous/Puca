@@ -89,6 +89,30 @@ describe('the diagnostics report', () => {
         expect(isConfigSupported).toHaveBeenCalled();
     });
 
+    it('names the H.264 profiles WebRTC can send, and which of them a hardware encoder takes', async () => {
+        // WHY THIS LINE EXISTS. The WebCodecs rows above answer "is there a
+        // hardware encoder"; they cannot say whether WebRTC will USE it, which
+        // turned on the negotiated PROFILE for two weeks of field logs
+        // (h264Profiles.ts). A `64....` entry in the sender capabilities is
+        // the hardware factory; its absence is a software-only machine.
+        const getCapabilities = vi.fn().mockReturnValue({ codecs: [
+            { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+            { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032' },
+            { mimeType: 'video/VP8', clockRate: 90000 },
+        ] });
+        Object.defineProperty(globalThis, 'RTCRtpSender', { value: { getCapabilities }, configurable: true });
+        try {
+            const lines = (await encodingSupportLines()).join('\n');
+            expect(lines).toContain('h264 send 42e01f/1 640032/1  hardware-eligible: 640032/1');
+            expect(getCapabilities).toHaveBeenCalledWith('video');
+        } finally {
+            delete (globalThis as { RTCRtpSender?: unknown }).RTCRtpSender;
+        }
+        // And where the API is missing (jsdom, an old WebView) the line says
+        // so instead of the section throwing and taking the rest with it.
+        expect((await encodingSupportLines()).join('\n')).toContain('h264 send (no RTCRtpSender.getCapabilities)');
+    });
+
     it('asks WebCodecs whether a codec can be encoded in hardware, not mediaCapabilities', async () => {
         // THE BUG THIS PINS. The first version of this asked
         // `mediaCapabilities.encodingInfo({type:'webrtc'})`. Measured on an

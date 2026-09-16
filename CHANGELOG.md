@@ -18,6 +18,22 @@ one-line summary; this file is the full story. Versions follow
   It now mints a fresh credential from the identity it was enrolled with,
   which is the same proof it already gives every time it connects. It recovers
   on its own within a minute, with no re-pairing, and the 30-day cliff is gone.
+- **Sharing your screen was always encoded in software, even on a PC with a
+  hardware H.264 encoder.** Every share this project has diagnostics from ran on
+  the CPU encoder, on machines whose own clip recorder was using the NVIDIA
+  encoder the same day. The cause was the H.264 *profile* the call settled on:
+  the server offers two, Constrained Baseline and High, the browser lists
+  Constrained Baseline first, and Constrained Baseline is the one profile the
+  browser will not hand to a hardware encoder. The app now asks for High first.
+  Measured on an RTX 4080 SUPER inside the same WebView2 the app ships with:
+  the old order used OpenH264, the new order uses the NVIDIA H.264 Encoder MFT
+  at 1920x1080. A machine with no hardware encoder is unchanged — it never
+  offered High, so it still negotiates what it did before.
+
+  The share health log now records the negotiated profile next to the
+  encoder, and "Copy diagnostics" lists which H.264 profiles this machine can
+  send and which of them are hardware-eligible, so this is visible in a report
+  rather than a two-week investigation.
 
 ## 0.9.812 — 2026-09-16
 

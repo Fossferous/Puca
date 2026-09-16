@@ -10,11 +10,13 @@
  * in: their game gets choppy while they are sharing, and they have no idea the
  * two are connected.
  *
- * It matters more here than in most apps because the share is encoded in
- * SOFTWARE on every machine this project has logs from (`encoder=OpenH264`).
- * The encode is competing with the game for the same cores. The resolution and
- * frame rate are the only controls the person has over how much it takes, and
- * before this nothing told them the controls were the answer.
+ * It matters more here than in most apps because the share was encoded in
+ * SOFTWARE on every machine this project had logs from (`encoder=OpenH264`) —
+ * a profile-negotiation accident fixed 2026-09-16 (h264Profiles.ts), but a
+ * machine with no hardware encoder still lands here. The encode is competing
+ * with the game for the same cores. The resolution and frame rate are the only
+ * controls the person has over how much it takes, and before this nothing told
+ * them the controls were the answer.
  *
  * NOTHING IS IMPORTED HERE, deliberately. The share DIALOG needs the ladder
  * and the validation, and a dialog that transitively pulls in LiveKit, the

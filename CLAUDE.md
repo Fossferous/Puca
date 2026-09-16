@@ -297,7 +297,22 @@ node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
+cd frontend && node e2e/h264-profile-real-browser.mjs   # real encoder choice per H.264 profile; no server needed
 ```
+
+**`h264-profile-real-browser.mjs` exists because the share encoded in SOFTWARE
+for two weeks of field logs on machines with an idle NVENC, and no gate could
+see it.** The LiveKit server registers only Constrained Baseline (`42e01f`)
+and High (`640032`) for H.264 and keeps the offer's relative order; Chromium's
+default order lists `42e01f` first; and `42e01f` is the one profile Chromium's
+MediaFoundation factory never claims. `frontend/src/api/rtc/h264Profiles.ts`
+puts High first on the publisher transceiver (LiveKit's LocalSenderCreated
+hook). The script negotiates a loopback pair against a LiveKit-shaped answerer
+both ways and reads the encoder each actually used, with the software case as
+the negative control; on a machine without a hardware encoder the hardware
+assertions report SKIP rather than passing vacuously. `[stream-diag]` lines
+now carry `profile=` next to `encoder=` so the field can tell "no hardware
+encoder" from "handed the wrong profile".
 
 **`ice-url-real-browser.mjs` is REQUIRED and exists because every other gate is
 blind to it.** Nothing else in this repo ever constructs a real

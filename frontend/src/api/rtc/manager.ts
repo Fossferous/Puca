@@ -9,6 +9,7 @@ import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
 import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
+import { negotiatedH264Profile } from './h264Profiles';
 import type { EncodeSample } from './shareHealth';
 import { AnnouncedVideoGate } from './announcedVideo';
 
@@ -1699,6 +1700,7 @@ export class WebRTCManager {
                 stats.forEach((s) => {
                     if (s.type === 'outbound-rtp' || s.type === 'inbound-rtp') {
                         const r = s as unknown as Record<string, unknown>;
+                        const profile = negotiatedH264Profile(stats, r.codecId);
                         rtp.push({
                             dir: s.type, kind: r.kind,
                             bytes: r.bytesSent ?? r.bytesReceived,
@@ -1716,6 +1718,10 @@ export class WebRTCManager {
                         // unless the document holds an active capture, which a
                         // real share does.
                         ...(r.powerEfficientEncoder !== undefined && { hwEncoder: r.powerEfficientEncoder }),
+                            // The negotiated H.264 profile, when it is H.264 —
+                            // the field that explains an `encoder=OpenH264`
+                            // (h264Profiles.ts). Same key as the SFU rows.
+                            ...(profile !== null && { profile }),
                             ...(r.decoderImplementation !== undefined && { decoder: r.decoderImplementation }),
                         });
                     }

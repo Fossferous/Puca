@@ -123,10 +123,14 @@ describe('the default, with nothing configured', () => {
     it('does NOT impose extra encodes on a machine nobody has measured', () => {
         // THE REVERSAL, one day after shipping it on. The rig that cleared the
         // ladder measured a HARDWARE H.264 encoder; every stream-diag line in
-        // the field reads `encoder=OpenH264`, which is software. So the
+        // the field read `encoder=OpenH264`, which is software. So the
         // measurement justifying three encodes was taken against an encoder no
-        // user has, on a machine far faster than the ones that report their
-        // game stuttering while they share.
+        // user had, on a machine far faster than the ones that report their
+        // game stuttering while they share. (The software encode was a
+        // profile-negotiation accident, fixed 2026-09-16 — h264Profiles.ts —
+        // but machines without a hardware encoder still exist and are still
+        // the ones complaining, so the default stays off until field lines
+        // from several of them say otherwise.)
         //
         // Called with NO argument on purpose: this is the path the app takes,
         // and the parameter's default is where the setting is read.

@@ -20,6 +20,7 @@
 import { sfuManager } from './rtc/sfuManager';
 import { webrtcManager } from './webrtc';
 import { currentAppVersion } from './appVersion';
+import { h264SendProfilesLine } from './rtc/h264Profiles';
 
 /** Milliseconds of measurement. Rates and delays are meaningless as
  *  point-in-time counters, so the diagnostics take two samples this far apart —
@@ -101,6 +102,18 @@ export async function encodingSupportLines(): Promise<string[]> {
     } catch {
         out.push('gpu       (unavailable)');
     }
+    // What WebRTC will actually be offered, and which of it a hardware
+    // encoder claims. Chromium's MediaFoundation factory adds High/Main/
+    // Baseline (packetization-mode 1) and never Constrained Baseline, so a
+    // list with a `64....` entry is a machine with a hardware H.264 encoder
+    // and one without is not — measured 2026-09-16 (h264Profiles.ts).
+    try {
+        const caps = typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
+            ? RTCRtpSender.getCapabilities('video') : null;
+        out.push(`webrtc    ${h264SendProfilesLine(caps)}`);
+    } catch {
+        out.push('webrtc    h264 send (unavailable)');
+    }
     const VE = (globalThis as { VideoEncoder?: {
         isConfigSupported(c: unknown): Promise<{ supported?: boolean }>;
     } }).VideoEncoder;
@@ -110,6 +123,11 @@ export async function encodingSupportLines(): Promise<string[]> {
         out.push(`encoding  (WebCodecs unavailable${window.isSecureContext ? '' : ' — not a secure context'})`);
         return out;
     }
+    // `42E01F` is CONSTRAINED Baseline, which no MediaFoundation encoder
+    // factory here claims, so its `hardware=false` is expected on every
+    // Windows machine and says nothing about the card — the High row is the
+    // one that answers "is there a hardware H.264 encoder". Kept because a
+    // High=false/Base=false pair is what "no encoder at all" looks like.
     for (const [label, codec] of [
         ['H.264 High', 'avc1.640028'],
         ['H.264 Base', 'avc1.42E01F'],

@@ -261,12 +261,18 @@ export const defaultSettings = {
      *
      *  OFF BY DEFAULT, reversed within a day of shipping it on. The rig that
      *  cleared it measured Edge with a HARDWARE H.264 encoder and the top two
-     *  rungs held 56 fps. The shipped app does not get that encoder: every
-     *  `stream-diag` line in the field reads `encoder=OpenH264`, which is
+     *  rungs held 56 fps. At the time the shipped app never got that encoder:
+     *  every `stream-diag` line in the field read `encoder=OpenH264`, which is
      *  software. So the measurement that justified three encodes was taken
-     *  against an encoder no user has, and the machines that would suffer for
+     *  against an encoder no user had, and the machines that would suffer for
      *  it are the ones already struggling to encode ONE layer — exactly the
      *  people who report that sharing makes their game stutter.
+     *
+     *  2026-09-16: the software encode turned out to be a profile-negotiation
+     *  accident (h264Profiles.ts), so a machine WITH a hardware encoder now
+     *  uses it. That narrows the population this default protects to machines
+     *  without one, which is still the population that reports the stutter.
+     *  Flip it only on field `encoder=` lines from several machines, not one.
      *
      *  It stays as a setting rather than being removed because the benefit is
      *  real for the viewer it was written for (a weak link receiving 1080p at
