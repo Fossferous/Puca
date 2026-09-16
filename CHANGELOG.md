@@ -4,6 +4,20 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Pinning Púca to a GPU now covers the screen share.** Windows keys a GPU pin
+  to one executable path, and the share is captured and encoded by the WebView2
+  runtime, not by `Puca.exe` — a separate program whose path changes with every
+  automatic runtime update. A pin on the runtime went stale each time and had
+  to be re-created by hand, found only after a choppy share. Now, when
+  `Puca.exe` is pinned, the app writes the same preference for the runtime it
+  is about to start — on every start, before the runtime is up — and removes
+  entries for runtime versions that are no longer installed. On a machine where
+  Púca is not pinned nothing happens. See "I pinned Púca to my integrated GPU"
+  in `docs/FAQ.md` for what the pin reaches.
+
 ## 0.9.813 — 2026-09-16
 
 Remote control sends only the pixels your screen can show, screen sharing uses

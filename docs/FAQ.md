@@ -148,6 +148,70 @@ whether that is the hardware decoder. A software decoder on a large picture is
 the slow case the fit exists for; if you see one on a *small* picture, that is
 worth reporting with the diagnostics attached.
 
+## I pinned Púca to my integrated GPU. Does that cover screen sharing?
+
+It does now. It did not before, and the reason is worth knowing.
+
+Windows lets you pin an app to a GPU (**Settings > System > Display >
+Graphics**). Some people pin Púca to the *power saving* GPU on purpose: with a
+game using all of the discrete card, moving the app off it is what stops the
+share looking choppy to viewers. The catch is that Windows keys the pin to one
+executable path, and the share is not captured or encoded by `Puca.exe`. That
+work happens in the WebView2 runtime the app is built on — a separate program,
+`msedgewebview2.exe`, whose path includes the runtime version:
+
+```
+C:\Program Files (x86)\Microsoft\EdgeWebView\Application\<version>\msedgewebview2.exe
+```
+
+WebView2 updates itself about once a month, the path changes, and a pin on the
+old path quietly matches nothing.
+
+So on every start the desktop app checks whether `Puca.exe` itself is pinned
+and, if it is, writes the same preference for the runtime it is about to
+start — before the runtime is up, so the current session is covered, not just
+the next one. Entries for runtime versions that are no longer installed are
+removed at the same time. It touches only your own user's settings, so there is
+no administrator prompt, and only that one key.
+
+- **If you have not pinned Púca, nothing happens.** No entry is created and the
+  key is not touched. Pinning in Settings is the switch.
+- **The runtime follows whatever you chose.** Pin Púca to *high performance*
+  and the runtime gets that instead. Set Púca back to *Let Windows decide* and
+  the runtime's entry follows at the next start.
+- **WebView2 is shared.** Outlook, Teams, the Windows widgets and many other
+  apps run the same `msedgewebview2.exe`, and Windows applies a pin to every
+  process with that path — so pinning it for Púca pins it for them too. That
+  is how the pin works, and it is exactly what pinning the runtime by hand
+  does; there is no way to pin only Púca's copy.
+- **To undo it,** set Púca back to *Let Windows decide* (or unpin it) and
+  remove the `msedgewebview2.exe` entry from the same Settings page if it is
+  still there. The app never removes an entry for a runtime that is still
+  installed.
+- The app's log (`%LOCALAPPDATA%\com.sovereign.chat\logs\puca.log`) records
+  what was done in a line starting `[gpu-pin]`.
+
+Clips are a separate story: the replay buffer records through the capture
+helper precisely because a pinned process cannot duplicate the screen — see
+[`docs/CLIPS.md`](CLIPS.md).
+
+**Why the registry and not a browser flag?** (For self-hosters and the
+curious.) Chromium accepts `--use-adapter-luid=<high>,<low>` to start its GPU
+process on a particular adapter, and WebView2 appends the
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable to an app's
+arguments, so Púca could pass that at startup instead of writing a pin. The
+flag does work: measured on 2026-09-16 in headless Edge 153 — the same
+Chromium build as that day's runtime — on a machine with an RTX 4080 SUPER and
+an AMD integrated GPU, the flag moved the GPU process from the NVIDIA card to
+the AMD one (`GL_RENDERER` went from `ANGLE (NVIDIA, ...)` to `ANGLE (AMD,
+...)`). It was still not adopted: an adapter's LUID is assigned afresh at every
+boot, so the value would have to be computed at every start anyway; the flag
+steers only the GPU process's rendering device, while the Windows pin covers
+every process of the runtime, including the browser process that captures the
+display; and the Windows pin is the mechanism people have actually measured a
+smooth stream with, so the flag would be a different configuration from the one
+known to work. The app applies the OS feature to the right file, nothing more.
+
 ## I use Linux. Should I expect a desktop app?
 
 Not yet, and the honest state is: the desktop app **compiles** for Linux and CI

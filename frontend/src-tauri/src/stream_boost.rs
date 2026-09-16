@@ -152,6 +152,14 @@ static STATE: std::sync::LazyLock<Mutex<BoostState>> = std::sync::LazyLock::new(
     })
 });
 
+/// A (pid, ppid, image name) snapshot of every process on the machine, for
+/// callers that need to find this app's WebView2 children — webview_gpu_pin.rs
+/// checks the runtime it pinned against the one actually running.
+#[cfg(windows)]
+pub(crate) fn process_snapshot() -> Vec<ProcRow> {
+    imp::snapshot()
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{Boosted, ProcRow, STATE};
@@ -176,7 +184,7 @@ mod imp {
     /// the boost never waits ~10 s for the thread to notice.
     const TICK_MS: u64 = 500;
 
-    fn snapshot() -> Vec<ProcRow> {
+    pub(super) fn snapshot() -> Vec<ProcRow> {
         let mut rows = Vec::new();
         // SAFETY: standard Toolhelp iteration; the snapshot handle is closed
         // on every path and PROCESSENTRY32W is stack-owned.
