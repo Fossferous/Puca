@@ -63,6 +63,12 @@ mod service_cmd;
 mod service_link;
 #[cfg(feature = "remote-control")]
 mod wol;
+// Keeps the owner's per-app GPU pin on the WebView2 runtime that does the
+// share capture and encode — the pin is keyed by exe path and the runtime's
+// path changes with every auto-update. Registry + loader + process APIs, so
+// Windows-only; no-op on a machine where the app is not pinned.
+#[cfg(windows)]
+mod webview_gpu_pin;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -1167,6 +1173,15 @@ pub fn run() {
     // Check for scheduled permission reset BEFORE WebView2 initializes
     check_and_clear_permissions_on_startup();
 
+    // Mirror the owner's per-app GPU pin onto the WebView2 runtime BEFORE the
+    // webview exists: the GPU process reads the pin as it starts, and Tauri
+    // creates the config window ahead of `setup`, so `setup` is already too
+    // late for this launch. No-op on a machine where this exe is not pinned.
+    // The one log line about it is written from `setup`, once the logger is
+    // attached — see the module header.
+    #[cfg(windows)]
+    webview_gpu_pin::apply_before_webview();
+
     tauri::Builder::default()
         // FIRST, before every other plugin — that is this plugin's documented
         // requirement, and the failure mode without it is silent (see the
@@ -1384,6 +1399,15 @@ pub fn run() {
                         }))
                 };
                 app.handle().plugin(builder.build())?;
+            }
+
+            // Now that log lines have somewhere to go: what the GPU-pin mirror
+            // did before the webview came up, and whether the runtime actually
+            // running is the one it pinned (off-thread; silent when it is).
+            #[cfg(windows)]
+            {
+                webview_gpu_pin::log_outcome();
+                webview_gpu_pin::confirm_running_webview();
             }
             Ok(())
         })
