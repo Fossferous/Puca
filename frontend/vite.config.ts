@@ -86,6 +86,25 @@ const RC_MODULE_PATTERNS: RegExp[] = [
  * fails if it did not". It reports EVERY offending module and who pulled it
  * in, because the fix is always at the importer, not the imported file.
  */
+/**
+ * Emit `dist/version.json` = `{ "version": "<tauri.conf.json version>" }`.
+ *
+ * The mobile OTA manifest's version is a hand-typed argument to dual-ship.sh
+ * with no tie to the bytes it points at, and the installed app used to record
+ * that label as "what I am running" — one slip locked every phone that took it
+ * out of OTA until an APK reinstall (0.9.810 audit, C-04). This file is the
+ * bundle's own word: encrypt-bundle.mjs copies it into a `<bundle>.version`
+ * sidecar and dual-ship.sh refuses a manifest that disagrees with it.
+ */
+function emitVersionJson(): Plugin {
+  return {
+    name: 'puca-version-json',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ version: APP_VERSION }) + '\n' })
+    },
+  }
+}
+
 function rcExclusionGuard(): Plugin {
   const seen = new Set<string>()
   return {
@@ -146,7 +165,7 @@ export default defineConfig({
       { find: /^(\.\/controlDc|(\.\.\/)+api\/rtc\/controlDc)$/, replacement: src('api/rtc/controlDc.lite.ts') },
     ],
   },
-  plugins: [react(), ...(RC_ENABLED ? [] : [rcExclusionGuard()])],
+  plugins: [react(), emitVersionJson(), ...(RC_ENABLED ? [] : [rcExclusionGuard()])],
   build: {
     // Split large third-party libraries into their own cached chunks so the
     // main app bundle stays small and vendor code isn't re-downloaded on every

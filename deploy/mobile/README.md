@@ -13,12 +13,34 @@ bundle.**
 ## Residual risks (accepted)
 
 - **Rollback / replay.** The signature covers the bundle *bytes*, not the
-  advertised version. A host that serves the manifest can point it at an OLD,
-  still-validly-signed bundle. The client enforces **monotonic versions**
-  (won't apply a version ≤ current), which blocks a downgrade to a lower
-  number — but a manifest can still claim a fake-higher version over old bytes.
-  Bound in practice by: the attacker needs to compromise the (self-hosted)
-  host, and can only replay *past legitimate* releases, not inject new code.
+  advertised version. A host that serves the manifest can point a HIGHER
+  version number at an OLD, still-validly-signed bundle, and the client will
+  install it. Bound in practice by: the attacker needs to compromise the
+  (self-hosted) host, and can only replay *past legitimate* releases, not
+  inject new code. What the client does about it, honestly stated:
+  - It compares every manifest against the version **compiled into the
+    running bundle** (`__APP_VERSION__`), not against the label the manifest
+    gave that bundle. Before 0.9.811 it recorded the label as "what I am
+    running", so ONE mislabelled manifest — attack or a mistyped
+    `dual-ship.sh mobile ... <version>` — made every genuine later release
+    read as "already have it" and locked that phone out of OTA until an APK
+    reinstall. A phone locked that way by the OLD code cannot be rescued by a
+    new bundle: the old gate refuses it before the new code can run. Only a
+    fresh APK recovers it.
+  - It cannot stop the **first** replay: nothing in JavaScript can learn a
+    bundle's true version before running it, and a replayed bundle from before
+    this change runs its own, older gate, which still trusts the label. So a
+    replay still lands and the "lock" above still happens for pre-0.9.811
+    bundles. Do not describe the client check as prevention.
+  - The check that actually prevents the accident is **publish-side**:
+    `encrypt-bundle.mjs` writes the bundle's own version beside it
+    (`<bundle>.version`, from the `version.json` every web build now emits)
+    and `dual-ship.sh mobile` / `mobile-lite` REFUSE a manifest whose version
+    differs from it. That runs on the operator's machine, where no OTA can
+    replace it. Durable anti-replay against a hostile host would need the
+    floor to live where the bundle swap cannot reach it — a native check in
+    the APK before the WebView loads — which is future work, not something a
+    web bundle can provide.
 - **Key rotation is a flag day.** One embedded key, one global manifest, no
   key-id field: rotating the signing key (e.g. after a suspected compromise)
   strands whichever cohort's embedded key doesn't match until every client
@@ -83,7 +105,13 @@ rm -rf ota-src && cp -r dist ota-src && node scripts/cap-index-csp.mjs --index o
 rm -rf ota-src                                       # disposable staging dir (also gitignored)
 node deploy/mobile/encrypt-bundle.mjs \
     puca-web-<ver>.zip ~/.puca/mobile-updater-rsa.key \
-    puca-web-<ver>.enc.zip                            # prints {ivSessionKey, checksum}
+    puca-web-<ver>.enc.zip frontend/dist/version.json # prints {ivSessionKey, checksum}; the 4th
+                                                     # argument writes puca-web-<ver>.enc.zip.version,
+                                                     # which dual-ship.sh checks the manifest version
+                                                     # against and REFUSES on a mismatch. Pass it —
+                                                     # without the sidecar the manifest version is
+                                                     # unverified against the bytes (see "Residual
+                                                     # risks" for what a mismatch costs).
 ```
 
 Upload the **`.enc.zip`** as the bundle, and write `mobile-update.json`:

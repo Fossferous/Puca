@@ -141,3 +141,24 @@ described one that did not exist.)
    version (`sovereign_update_auto_attempted` in localStorage) so a failed
    install can never loop; every phase is bounded so the gate may delay the
    app but never hold it. Nothing installs mid-session, ever.
+
+### Downgrade and replay (desktop)
+
+The minisign signature covers the installer **bytes**, not the version printed
+in `latest.json`. A host that serves that file can therefore point a higher
+version number at an older, genuinely signed installer, and nothing in the
+NSIS installer stops it landing: `installMode: "passive"` passes `/P`, never
+`/S`, so the installer's own downgrade refusal (gated on NSIS's `${Silent}`)
+cannot fire, and the updater also passes `/UPDATE`, which skips the reinstall
+page — and its version comparison — entirely. `bundle.windows.allowDowngrades:
+false` is therefore **not** a fix for this path: it only changes what the
+interactive installer offers when a user double-clicks an older setup by hand,
+and it turns that into an uninstall-first, which runs the full uninstaller
+hooks. It is deliberately not set.
+
+What bounds it: the attacker needs the download host, can only replay past
+signed releases, and the one-automatic-attempt latch above means a replayed
+version is tried once, not looped. After a replay the app reports the version
+it was actually built as, and the next honest `latest.json` applies normally.
+The manual download page has the same property — `SHA256SUMS.txt` lives on
+the same host as the installer, so it proves integrity, not provenance.

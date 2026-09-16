@@ -1,5 +1,47 @@
 import { describe, it, expect } from 'vitest';
-import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches } from '../components/updateGate.utils';
+import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, shouldApplyOtaVersion, sameVersion, bundleLabelDisagrees } from '../components/updateGate.utils';
+
+describe('OTA anti-rollback compares against the running BYTES (0.9.810 audit, C-04)', () => {
+    // The plugin's bundle.version is whatever the manifest SAID. Recording it
+    // as "what I am running" meant one mislabelled manifest (replay or typo)
+    // locked the phone out of every genuine later release.
+    it('on an OTA bundle, applies only a version strictly newer than the build', () => {
+        expect(shouldApplyOtaVersion('0.9.812', '0.9.811', false)).toBe(true);
+        expect(shouldApplyOtaVersion('0.9.811', '0.9.811', false)).toBe(false); // equal
+        expect(shouldApplyOtaVersion('0.9.500', '0.9.811', false)).toBe(false); // the replay
+    });
+    it('the label the manifest gave the running bundle plays no part', () => {
+        // Bytes built as 0.9.811, labelled 9.9.9 by a replayed manifest. The
+        // old gate compared against 9.9.9 and refused 0.9.812 forever.
+        expect(shouldApplyOtaVersion('0.9.812', '0.9.811', false)).toBe(true);
+    });
+    it('on the APK builtin bundle, accepts the SAME version (a fresh install pulls the published bundle)', () => {
+        expect(shouldApplyOtaVersion('0.9.811', '0.9.811', true)).toBe(true);
+        expect(shouldApplyOtaVersion('0.9.812', '0.9.811', true)).toBe(true);
+    });
+    it('on the APK builtin bundle, REFUSES anything older than the builtin bytes', () => {
+        // The old 'builtin' placeholder parsed as the oldest version of all, so
+        // a fresh install had NO anti-rollback: any signed bundle applied.
+        expect(shouldApplyOtaVersion('0.9.500', '0.9.811', true)).toBe(false);
+        expect(shouldApplyOtaVersion('0.0.1', '0.9.811', true)).toBe(false);
+    });
+    it('sameVersion compares parsed tuples, not strings', () => {
+        expect(sameVersion('0.9.811', '0.9.811')).toBe(true);
+        expect(sameVersion('v0.9.811', '0.9.811')).toBe(false); // parseVersion rejects the prefix: unequal, not a crash
+        expect(sameVersion('0.9.811 ', '0.9.811')).toBe(true);
+        expect(sameVersion('0.9.811.1', '0.9.811')).toBe(true);
+        expect(sameVersion('builtin', 'builtin')).toBe(false); // unparseable is never equal
+    });
+    it('bundleLabelDisagrees flags a label that names another version, and nothing else', () => {
+        expect(bundleLabelDisagrees('9.9.9', '0.9.811')).toBe(true);   // the replay / typo
+        expect(bundleLabelDisagrees('0.9.811', '0.9.811')).toBe(false); // honest
+        expect(bundleLabelDisagrees('0.9.811.1', '0.9.811')).toBe(false); // a build suffix is not a lie
+        expect(bundleLabelDisagrees('builtin', '0.9.811')).toBe(false); // not a label
+        expect(bundleLabelDisagrees('', '0.9.811')).toBe(false);
+        expect(bundleLabelDisagrees(undefined, '0.9.811')).toBe(false);
+        expect(bundleLabelDisagrees('garbage', '0.9.811')).toBe(false); // unknown, not a lie
+    });
+});
 
 describe('OTA anti-rollback (isNewerVersion)', () => {
     it('applies a strictly newer version', () => {

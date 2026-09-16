@@ -22,14 +22,31 @@
 import { createCipheriv, privateEncrypt, randomBytes, createHash, constants } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const [, , zipPath, keyPath, outPath] = process.argv;
+const [, , zipPath, keyPath, outPath, versionJsonPath] = process.argv;
 if (!zipPath || !keyPath || !outPath) {
-    console.error('usage: encrypt-bundle.mjs <plaintext.zip> <privateKey.pem> <out.enc.zip>');
+    console.error('usage: encrypt-bundle.mjs <plaintext.zip> <privateKey.pem> <out.enc.zip> [<staging>/version.json]');
     process.exit(2);
 }
 
 const plaintext = readFileSync(zipPath);
 const privateKey = readFileSync(keyPath, 'utf8');
+
+// The bundle's OWN version, from the version.json vite emits into every web
+// build (frontend/vite.config.ts). Written beside the output as
+// `<out.enc.zip>.version` so dual-ship.sh can refuse a manifest whose hand-typed
+// version does not match the bytes it points at. The client records the
+// manifest's label as "what I am running", so one mismatch used to lock every
+// phone that took it out of OTA until an APK reinstall (0.9.810 audit, C-04).
+// Read BEFORE any output is written, so a bad sidecar leaves nothing behind.
+let builtVersion = null;
+if (versionJsonPath) {
+    const parsed = JSON.parse(readFileSync(versionJsonPath, 'utf8'));
+    builtVersion = typeof parsed?.version === 'string' ? parsed.version.trim() : '';
+    if (!/^\d+\.\d+\.\d+/.test(builtVersion)) {
+        console.error(`${versionJsonPath} carries no usable version: ${JSON.stringify(parsed?.version)}`);
+        process.exit(2);
+    }
+}
 
 // AES-128-CBC (Capgo convention): random key + IV.
 const aesKey = randomBytes(16);
@@ -37,6 +54,7 @@ const iv = randomBytes(16);
 const cipher = createCipheriv('aes-128-cbc', aesKey, iv); // PKCS7 == Java PKCS5Padding
 const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
 writeFileSync(outPath, encrypted);
+if (builtVersion !== null) writeFileSync(`${outPath}.version`, `${builtVersion}\n`);
 
 // RSA private-encrypt the AES key (client public-decrypts it).
 const encAesKey = privateEncrypt({ key: privateKey, padding: constants.RSA_PKCS1_PADDING }, aesKey);

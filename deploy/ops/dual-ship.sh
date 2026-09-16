@@ -384,12 +384,37 @@ cmd_webapp() {
 	done
 }
 
+# The manifest's version is a hand-typed argument with no tie to the bytes it
+# points at, and the installed app records that label as "what I am now
+# running": one slip — or a compromised host attaching a higher number to an
+# old signed bundle — read every genuine later release as "already have it"
+# and locked the phone out of OTA until an APK reinstall (0.9.810 audit,
+# C-04). encrypt-bundle.mjs writes the bundle's OWN version beside it
+# (`<bundle>.version`, from the version.json vite emits); this is the one
+# place the two can be compared that no OTA can replace, so refuse here.
+refuse_mislabelled_bundle() {
+	local bundle="$1" version="$2" built
+	if [ -f "$bundle.version" ]; then
+		built="$(tr -d '[:space:]' < "$bundle.version")"
+		[ "$built" = "$version" ] || {
+			echo "REFUSING: the manifest says $version but $bundle was built as $built (per $bundle.version)."
+			echo "Pass the version the bundle was built with, or rebuild the bundle."
+			exit 1
+		}
+	else
+		echo "INFO: no $bundle.version sidecar — the bundle predates encrypt-bundle.mjs writing one, so"
+		echo "      the manifest version $version is NOT verified against the bytes. Rebuild through"
+		echo "      encrypt-bundle.mjs with its 4th argument to get the check."
+	fi
+}
+
 cmd_mobile() {
 	local bundle="${1:?enc bundle}" version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
 	# Same lengths verify.sh and the original ship enforce — a manifest with
 	# either wrong silently ships an unusable OTA every installed app rejects.
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
+	refuse_mislabelled_bundle "$bundle" "$version"
 	ensure_download_dirs
 	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
@@ -442,6 +467,7 @@ cmd_mobile_lite() {
 	local bundle="${1:?enc bundle}" version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
+	refuse_mislabelled_bundle "$bundle" "$version"
 	ensure_download_dirs
 	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do

@@ -20,7 +20,7 @@
 
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { isTauri, RC_ENABLED } from '../api/platform';
-import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, shouldAutoInstallOnLaunch, AUTO_ATTEMPT_KEY } from './updateGate.utils';
+import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, shouldAutoInstallOnLaunch, shouldApplyOtaVersion, bundleLabelDisagrees, AUTO_ATTEMPT_KEY } from './updateGate.utils';
 import { updateCheckBases } from '../api/updateCheckBases';
 import { checkForNewVersion, currentAppVersion, installUpdateInPlace, UpdateAbandonedError } from '../api/appVersion';
 import { loadSettings } from './settingsStore';
@@ -295,6 +295,8 @@ export function UpdateGate({ children }: UpdateGateProps) {
             variant?: string;
         };
         let currentVersion: string;
+        /** Running the bundle baked into the APK (no OTA has applied). */
+        let runningBuiltin = true;
         /** The update-check base that actually answered — the only base the
          *  bundle URL may be trusted against. '' until one answers. */
         let answeringBase = '';
@@ -304,8 +306,25 @@ export function UpdateGate({ children }: UpdateGateProps) {
             // this component). Idempotent, kept for the retry path.
             await CapacitorUpdater.notifyAppReady();
             const currentBundle = await CapacitorUpdater.current();
-            currentVersion = currentBundle?.bundle?.version || 'builtin';
-            console.log('[UpdateGate] Current bundle version:', currentVersion);
+            const bundleLabel = currentBundle?.bundle?.version || '';
+            runningBuiltin = !bundleLabel || bundleLabel === 'builtin' || currentBundle?.bundle?.id === 'builtin';
+            // The version the running BYTES were built as — never the label the
+            // manifest gave them. The plugin's `bundle.version` is whatever the
+            // manifest said, and the manifest is unsigned: recording it as "what
+            // I am running" meant one mislabelled manifest (a replayed old bundle
+            // under a higher number, or a typo in dual-ship.sh) made every genuine
+            // later release read as "<= current" until an APK reinstall
+            // (0.9.810 audit, C-04). See shouldApplyOtaVersion for what this
+            // does and does not buy.
+            currentVersion = __APP_VERSION__;
+            if (bundleLabelDisagrees(bundleLabel, __APP_VERSION__)) {
+                console.error(
+                    `[UpdateGate] MISLABELLED OTA: the running bundle was labelled ${bundleLabel} by its manifest `
+                    + `but was built as ${__APP_VERSION__}. A replayed or mistyped manifest; comparing future `
+                    + 'updates against the bytes, not the label.',
+                );
+            }
+            console.log('[UpdateGate] Running', currentVersion, runningBuiltin ? '(APK builtin bundle)' : `(OTA bundle labelled ${bundleLabel})`);
 
             // Configured base first, then the hardcoded production fallback: a
             // bundle built without .env.production points at localhost and
@@ -396,13 +415,14 @@ export function UpdateGate({ children }: UpdateGateProps) {
             return;
         }
 
-        // Anti-rollback: only apply a STRICTLY NEWER version. The Capgo signature
-        // authenticates the bundle bytes but NOT the advertised version, so a
-        // string-equality gate would let a manifest replay an older (still
-        // validly signed) bundle — reintroducing fixed bugs. Monotonic ordering
-        // blocks a downgrade to any lower version number.
-        if (!isNewerVersion(updateInfo.version, currentVersion)) {
-            console.log('[UpdateGate] Manifest version', updateInfo.version, '<= current', currentVersion, '- not applying');
+        // Anti-rollback against the RUNNING BYTES' own version: strictly newer,
+        // or the same version when we are still on the APK's builtin bundle.
+        // The Capgo signature authenticates the bundle bytes but NOT the
+        // advertised version, so a lower-numbered manifest must never apply;
+        // and the previous 'builtin' placeholder parsed as the oldest version
+        // of all, so a fresh install accepted ANY signed bundle, however old.
+        if (!shouldApplyOtaVersion(updateInfo.version, currentVersion, runningBuiltin)) {
+            console.log('[UpdateGate] Manifest version', updateInfo.version, 'is not newer than the running build', currentVersion, '- not applying');
             setState(s => ({ ...s, status: 'upToDate' }));
             return;
         }

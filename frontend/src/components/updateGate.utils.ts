@@ -98,3 +98,57 @@ export function bundleVariantMatches(
 ): boolean {
     return (manifestVariant ?? 'full') === (rcEnabled ? 'full' : 'lite');
 }
+
+/** Parsed-tuple equality — never string equality, so 'v0.9.811', a trailing
+ *  space or a 4-part label compare by what they mean. Unparseable is unequal. */
+export function sameVersion(a: string, b: string): boolean {
+    const x = parseVersion(a), y = parseVersion(b);
+    return x[0] >= 0 && y[0] >= 0 && x.every((v, i) => v === y[i]);
+}
+
+/**
+ * Should a manifest advertising `manifestVersion` be applied when the RUNNING
+ * BYTES were built as `bytesVersion`?
+ *
+ * The comparison is against the version compiled into the running bundle
+ * (`__APP_VERSION__`), never against the label the manifest gave it
+ * (`bundle.version` from the plugin). That label is UNSIGNED: the OTA
+ * signature covers bundle bytes only, so a manifest can attach any number to
+ * any legitimately signed bundle — and once a client had recorded that number
+ * as "what I am running", every genuine later release read as "<= current"
+ * until an APK reinstall. A hand-typed version in dual-ship.sh does the same
+ * by accident (0.9.810 audit, C-04).
+ *
+ * What this does and does not buy: a bundle carrying THIS code compares
+ * against its own true version, so a mislabelled bundle cannot lock it out of
+ * future releases. It cannot stop the first replay — the running code cannot
+ * learn a bundle's true version before running it — and a replayed bundle
+ * from BEFORE this change runs its own, older gate. Refusing to publish a
+ * mislabelled manifest in the first place is dual-ship.sh's job (the
+ * `<bundle>.version` sidecar check).
+ *
+ * A device running the APK's BUILTIN bundle accepts a manifest at the SAME
+ * version, not only a newer one: a fresh install has always pulled the
+ * same-numbered published bundle, which also self-corrects an APK whose
+ * embedded assets drifted from the published web build. Anything OLDER than
+ * the builtin bytes is refused — the previous `'builtin'` placeholder parsed
+ * as the oldest possible version, so a fresh install had no anti-rollback.
+ */
+export function shouldApplyOtaVersion(
+    manifestVersion: string,
+    bytesVersion: string,
+    runningBuiltin: boolean,
+): boolean {
+    if (isNewerVersion(manifestVersion, bytesVersion)) return true;
+    return runningBuiltin && sameVersion(manifestVersion, bytesVersion);
+}
+
+/** True when the plugin's recorded label for the running OTA bundle names a
+ *  different version than the bytes were built as — a mislabelled manifest,
+ *  replayed or mistyped. An unparseable label on either side is "unknown",
+ *  never a lie, and the builtin placeholder is not a label at all. */
+export function bundleLabelDisagrees(label: string | null | undefined, bytesVersion: string): boolean {
+    if (!label || label === 'builtin') return false;
+    if (parseVersion(label)[0] < 0 || parseVersion(bytesVersion)[0] < 0) return false;
+    return !sameVersion(label, bytesVersion);
+}
