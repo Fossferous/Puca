@@ -291,6 +291,9 @@ export class SfuManager {
     // every share" (count >= 0 is always true).
     private maxScreenShares = Number.POSITIVE_INFINITY;
     private currentEpoch: number | null = null;
+    /** Our sender is parked on a throwaway key because ensureChannelKey
+     *  refused the current epoch (see refreshEpochKey). */
+    private senderMutedByKeyRefusal = false;
     /** When the media key last changed — used to measure the undecryptable window. */
     private lastEpochChangeAt = Date.now();
     private epochTimer: ReturnType<typeof setInterval> | null = null;
@@ -431,6 +434,7 @@ export class SfuManager {
         // disconnect above and would otherwise inherit a stale "our encryptor
         // is live" flag from a dead session.
         this.localE2eeActive = false;
+        this.senderMutedByKeyRefusal = false;
         this.cryptorEnabled.clear();
         this.encryptionErrorAt.clear();
 
@@ -530,7 +534,35 @@ export class SfuManager {
         if (!this.channelId) return;
         try {
             const ck = await ensureChannelKey(this.channelId);
+            if (!ck) {
+                // null now means "the current epoch must NOT be encrypted under"
+                // — the server rolled the channel back, or membership changed
+                // and the rotation could not be minted (audit C-01). Keeping
+                // the cryptor on the old key would publish the rest of the call
+                // under exactly the key rotation exists to retire. FAIL CLOSED
+                // ON SEND ONLY: move our sender onto a throwaway key at the NEXT
+                // ring slot, so nothing we publish can be opened by anyone,
+                // while the real key stays in its own slot and peers' frames
+                // (which name their slot) still decrypt. The next poll that
+                // yields a real key restores the sender, even at the same epoch.
+                if (this.currentEpoch !== null && !this.senderMutedByKeyRefusal) {
+                    console.warn('[sfu-e2ee] channel key refused (rolled back or rotation blocked) — ' +
+                        'publishing under a throwaway key until the next poll yields a real one');
+                    await keyProvider.setEpochKey(crypto.getRandomValues(new Uint8Array(32)), this.currentEpoch + 1);
+                    this.senderMutedByKeyRefusal = true;
+                }
+                return;
+            }
+            if (this.senderMutedByKeyRefusal && ck.epoch === this.currentEpoch) {
+                // Same epoch as before the refusal: put the sender back on the
+                // real key (the slot still holds it; this re-selects it).
+                await keyProvider.setEpochKey(deriveSfuMediaKey(ck.key, this.channelId, ck.epoch), ck.epoch);
+                this.senderMutedByKeyRefusal = false;
+                console.info('[sfu-e2ee] channel key available again — sender restored');
+                return;
+            }
             if (ck && ck.epoch !== this.currentEpoch) {
+                this.senderMutedByKeyRefusal = false;
                 // Timestamped: the gap between a peer joining and this line is
                 // exactly the window where their audio cannot be decrypted, and
                 // it is the number to look at for "their mic took a minute".
@@ -558,6 +590,7 @@ export class SfuManager {
         this.room = null;
         this.channelId = null;
         this.currentEpoch = null;
+        this.senderMutedByKeyRefusal = false;
         this.localUserId = null;
         this.micPub = null;
         this.cameraPub = null;

@@ -101,6 +101,33 @@ function rememberWrapper(channelId: number, userId: number, key: string): void {
 // De-duplicate concurrent loads for the same channel.
 const inflight = new Map<number, Promise<ChannelKeyState>>();
 
+/**
+ * Key material THIS session generated, per channel and epoch.
+ *
+ * A served row whose key is byte-equal to one of these is fresh material no
+ * ejected member can hold, whatever its epoch NUMBER — so it may be treated
+ * as current even below the floor, and the 409 branch may adopt it back. That
+ * is what lets a genuine restore converge in one rotation instead of climbing
+ * the floor gap one epoch per send. Deliberately in memory only: persisting it
+ * would be "re-base the floor" in another coat, and the floor itself never
+ * drops. The cost of not persisting is one extra rotation per app session
+ * after a restore.
+ */
+const selfMinted = new Map<number, Map<number, Uint8Array>>();
+
+function rememberSelfMinted(channelId: number, epoch: number, key: Uint8Array): void {
+    let m = selfMinted.get(channelId);
+    if (!m) { m = new Map(); selfMinted.set(channelId, m); }
+    m.set(epoch, key);
+}
+
+function isSelfMinted(channelId: number, epoch: number, key: Uint8Array | undefined): boolean {
+    const k = selfMinted.get(channelId)?.get(epoch);
+    if (!k || !key || k.length !== key.length) return false;
+    for (let i = 0; i < k.length; i++) if (k[i] !== key[i]) return false;
+    return true;
+}
+
 /** Why we do - or do not - trust the identity that wrapped a channel-key row.
  *  Only 'trusted' may ever be ENCRYPTED under; 'unverifiable' is still READ. */
 type WrapperTrust = 'trusted' | 'unverifiable' | 'conflict';
@@ -245,11 +272,13 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         // of historical rows a busy channel accumulates. Older rows are read on
         // the strength of the conflict check above.
         //
-        // "Could become current" is not just `resp.current_epoch`: when the
-        // server names an epoch BELOW this device's floor, the floor logic below
-        // looks for the highest epoch we hold AND trust, so attribution has to
-        // have run down to the floor too (audit C-01).
-        if (row.epoch >= Math.min(resp.current_epoch, epochFloor(channelId))) {
+        // This range also covers the rollback case below: when the server
+        // names an epoch under this device's floor, every held epoch at or
+        // above the floor is above the server's number too, so "rows at or
+        // above current_epoch" already includes every candidate. Widening it to
+        // the floor was tried and bought nothing except attributing the whole
+        // history whenever the floor was 0 (audit C-01 review).
+        if (row.epoch >= resp.current_epoch) {
             const trust = await attributeWrapper(channelId, row, identity, memberKeys);
             if (trust === 'conflict') {
                 console.warn(
@@ -326,7 +355,10 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         // device all the way back (audit C-01).
         const bestHeld = Math.max(0, ...[...keys.keys()].filter((e) => trustedEpochs.has(e)));
         if (bestHeld > currentEpoch) currentEpoch = bestHeld;
-        if (currentEpoch < floor) {
+        // Material this session minted itself is acceptable below the floor:
+        // it is fresh by construction (see selfMinted). Byte-equality, not the
+        // epoch number, is what makes it so.
+        if (currentEpoch < floor && !isSelfMinted(channelId, currentEpoch, keys.get(currentEpoch))) {
             // We cannot reach the floor with key material we trust. The old
             // code took the server's word here and encrypted under the lower
             // epoch, which is precisely the key an ejected member still holds:
@@ -362,7 +394,8 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         } else {
             console.warn(
                 `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch} but this device ` +
-                `already holds ${currentEpoch} — staying on ${currentEpoch} (rotation must not go backwards)`,
+                `already holds ${currentEpoch} — staying on ${currentEpoch} (rotation must not go backwards` +
+                `${currentEpoch < floor ? '; below the floor, but minted by this session' : ''})`,
             );
         }
     } else if (resp.current_epoch > floor) {
@@ -430,6 +463,7 @@ async function mintEpoch(
                 sender_public_key: w.senderPublicKey,
             })),
         });
+        rememberSelfMinted(channelId, epoch, channelKey);
         return channelKey;
     } catch (e) {
         // 409 = another member established this epoch at the same instant. Adopt
@@ -455,6 +489,21 @@ async function mintEpoch(
                 console.warn(
                     `[e2ee] mintEpoch(${channelId}) epoch=${epoch}: refusing to adopt the winner's key — ` +
                     `its wrapper could not be attributed to a published member`,
+                );
+                return null;
+            }
+            // And never a key BELOW this device's floor unless it is material
+            // this session minted: the rotation target comes from the server's
+            // max_epoch, so a server that under-reports it steers the mint onto
+            // an epoch that already exists, answers 409, and would hand back the
+            // genuine, attributable, SUPERSEDED key at that number — the one an
+            // ejected member still holds (audit C-01 review). A purge-shaped
+            // answer reaches the same place through the bootstrap's epoch 1.
+            // Refusing costs one send; the next attempt rotates again.
+            if (adopted && epoch < epochFloor(channelId) && !isSelfMinted(channelId, epoch, adopted)) {
+                console.warn(
+                    `[e2ee] mintEpoch(${channelId}) epoch=${epoch}: refusing to adopt the winner's key — ` +
+                    `it sits below the ${epochFloor(channelId)} this device has seen`,
                 );
                 return null;
             }
@@ -710,4 +759,5 @@ export function clearChannelKeyCache(): void {
     cache.clear();
     inflight.clear();
     confirmedWrappers.clear();
+    selfMinted.clear();
 }

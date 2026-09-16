@@ -575,15 +575,21 @@ describe('channelKeys manager', () => {
         expect(Buffer.from(after!.key)).toEqual(Buffer.from(second!.key));
     });
 
-    it('accepts a lower epoch rather than bricking the channel when the key is gone', async () => {
+    it('a purge does not brick the channel: it MINTS fresh material even though the number is below the floor', async () => {
         // POSITIVE CONTROL for the test above. Same rollback, but the client
-        // holds no key for the floor — the state a server-side purge or a
-        // restore from an older backup produces. Clamping here returned null
-        // from ensureChannelKey forever, which is a self-inflicted denial of
-        // service and exactly what a hostile server would want.
+        // holds no key at all — the state a server-side purge or a restore
+        // from an older backup produces. Clamping here returned null from
+        // ensureChannelKey forever, which is a self-inflicted denial of
+        // service and exactly what a hostile server would want. The answer is
+        // neither "accept the server's number" nor "refuse": mint. The epoch
+        // NUMBER is below the floor (the server only accepts max_epoch + 1),
+        // the MATERIAL is fresh, and the floor is untouched.
+        // See channelKeysRollback.test.ts for the hostile variants.
         localStorage.setItem('e2ee_epoch_floor_42', '9');
         const res = await ensureChannelKey(42);
         expect(res).not.toBeNull();
-        expect(res!.epoch).toBeLessThan(9);
+        expect(res!.epoch).toBe(1);
+        expect(fake.published).toHaveLength(1); // we published it — nothing was accepted from the server
+        expect(localStorage.getItem('e2ee_epoch_floor_42')).toBe('9');
     });
 });

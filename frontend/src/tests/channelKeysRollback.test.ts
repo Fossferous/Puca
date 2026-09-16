@@ -36,6 +36,14 @@ const fake = {
     members: [] as { user_id: number; public_key: string | null }[],
     /** Publishes answer 409, modelling another member owning that epoch. */
     conflictOnPublish: false,
+    /** How many publishes were attempted / answered 409. */
+    posts: 0,
+    conflicts: 0,
+    /** Rows the server only reveals on the reload AFTER a 409 — the shape of
+     *  a server that withholds an epoch, steers a rotation onto its number,
+     *  refuses the publish, then serves the genuine old row at that number. */
+    revealAfterConflict: [] as { epoch: number; wrapped_key: string; sender_public_key: string; member_generation: number; sender_user_id?: number | null }[],
+    currentAfterConflict: undefined as number | undefined,
     reset() {
         this.currentEpoch = 0;
         this.maxEpoch = undefined;
@@ -44,6 +52,10 @@ const fake = {
         this.published = [];
         this.members = [];
         this.conflictOnPublish = false;
+        this.posts = 0;
+        this.conflicts = 0;
+        this.revealAfterConflict = [];
+        this.currentAfterConflict = undefined;
     },
 };
 
@@ -62,12 +74,13 @@ vi.mock('../api/client', async (orig) => {
     apiClient: {
         get: vi.fn(async (url: string) => {
             if (url.endsWith('/keys')) {
+                const revealed = fake.conflicts > 0;
                 return {
-                    current_epoch: fake.currentEpoch,
+                    current_epoch: revealed && fake.currentAfterConflict !== undefined ? fake.currentAfterConflict : fake.currentEpoch,
                     max_epoch: fake.maxEpoch ?? fake.currentEpoch,
                     current_generation: fake.currentGeneration,
                     epoch_generation: fake.epochGeneration,
-                    keys: fake.published,
+                    keys: revealed ? [...fake.published, ...fake.revealAfterConflict] : fake.published,
                 };
             }
             if (url.endsWith('/member-keys')) return fake.members;
@@ -79,7 +92,8 @@ vi.mock('../api/client', async (orig) => {
             keys: Array<{ recipient_id: number; wrapped_key: string; sender_public_key: string }>;
         }) => {
             if (!url.endsWith('/keys')) throw new Error('unexpected POST ' + url);
-            if (fake.conflictOnPublish) throw new ApiError('epoch already established', 409);
+            fake.posts++;
+            if (fake.conflictOnPublish) { fake.conflicts++; throw new ApiError('epoch already established', 409); }
             fake.currentEpoch = body.epoch;
             fake.maxEpoch = Math.max(fake.maxEpoch ?? 0, body.epoch);
             fake.epochGeneration = body.member_generation;
@@ -228,6 +242,100 @@ describe('a rolled-back epoch is never encrypted under', () => {
         expect(b64(res!.key)).toBe(b64(ejectedKey));
     });
 
+    it('a 409 steered onto an epoch below the floor does not adopt the superseded key there', async () => {
+        // THE REVIEW'S SEQUENCE. Floor 9; the server serves genuine rows 1..6
+        // and names 6 (member M was ejected at 7 and holds K7). The device
+        // must rotate; the target is max(6, max_epoch 6) + 1 = 7 — the server
+        // chose that number. It answers the publish with 409 and, on the
+        // reload, reveals the genuine, attributable epoch-7 row. Adopting it
+        // is exactly the rollback the floor exists to stop.
+        localStorage.setItem(`e2ee_epoch_floor_${CH}`, '9');
+        const keysBelow: Uint8Array[] = [];
+        for (let e = 1; e <= 6; e++) { const k = generateChannelKey(); keysBelow.push(k); await serveGenuineRow(e, k); }
+        const ejectedK7 = generateChannelKey();
+        const w7 = await wrapChannelKeyForMembers(me, ejectedK7, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: CH, epoch: 7 });
+        fake.revealAfterConflict = [{ epoch: 7, wrapped_key: w7[0].wrappedKey, sender_public_key: w7[0].senderPublicKey, member_generation: 0, sender_user_id: 1 }];
+        fake.currentAfterConflict = 7;
+        fake.currentEpoch = 6;
+        fake.maxEpoch = 6;
+        fake.conflictOnPublish = true;
+
+        const res = await ensureChannelKey(CH);
+        // Fail closed: no key at all this round — never K7, never any of 1..6.
+        expect(res).toBeNull();
+        expect(fake.conflicts).toBe(1);
+        expect(floorOf()).toBe(9);
+    });
+
+    it('POSITIVE CONTROL: with no floor, that steered 409 DOES adopt the revealed key', async () => {
+        for (let e = 1; e <= 6; e++) await serveGenuineRow(e, generateChannelKey());
+        const k7 = generateChannelKey();
+        const w7 = await wrapChannelKeyForMembers(me, k7, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: CH, epoch: 7 });
+        fake.revealAfterConflict = [{ epoch: 7, wrapped_key: w7[0].wrappedKey, sender_public_key: w7[0].senderPublicKey, member_generation: 1, sender_user_id: 1 }];
+        fake.currentAfterConflict = 7;
+        fake.currentEpoch = 6;
+        fake.maxEpoch = 6;
+        fake.currentGeneration = 1; // membership changed -> must rotate -> 409 -> adopt
+        fake.conflictOnPublish = true;
+
+        const res = await ensureChannelKey(CH);
+        expect(res).not.toBeNull();
+        expect(res!.epoch).toBe(7);
+        expect(b64(res!.key)).toBe(b64(k7));
+    });
+
+    it('a purge-shaped answer whose epoch-1 publish 409s does not adopt the oldest key', async () => {
+        // Floor 9; the server says the channel is EMPTY. The bootstrap mints
+        // epoch 1, the publish 409s (epoch 1 genuinely exists), and the reload
+        // reveals the channel's oldest key — the one every ex-member holds.
+        localStorage.setItem(`e2ee_epoch_floor_${CH}`, '9');
+        const oldestK1 = generateChannelKey();
+        const w1 = await wrapChannelKeyForMembers(me, oldestK1, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: CH, epoch: 1 });
+        fake.revealAfterConflict = [{ epoch: 1, wrapped_key: w1[0].wrappedKey, sender_public_key: w1[0].senderPublicKey, member_generation: 0, sender_user_id: 1 }];
+        fake.currentAfterConflict = 1;
+        fake.currentEpoch = 0;
+        fake.maxEpoch = 0;
+        fake.conflictOnPublish = true;
+
+        const res = await ensureChannelKey(CH);
+        expect(res).toBeNull();
+        expect(floorOf()).toBe(9);
+    });
+
+    it('POSITIVE CONTROL: with no floor, the same purge-shaped 409 adopts epoch 1', async () => {
+        const k1 = generateChannelKey();
+        const w1 = await wrapChannelKeyForMembers(me, k1, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: CH, epoch: 1 });
+        fake.revealAfterConflict = [{ epoch: 1, wrapped_key: w1[0].wrappedKey, sender_public_key: w1[0].senderPublicKey, member_generation: 0, sender_user_id: 1 }];
+        fake.currentAfterConflict = 1;
+        fake.conflictOnPublish = true;
+
+        const res = await ensureChannelKey(CH);
+        expect(res).not.toBeNull();
+        expect(b64(res!.key)).toBe(b64(k1));
+    });
+
+    it('an honest restore converges in ONE rotation: the fresh key is accepted below the floor', async () => {
+        localStorage.setItem(`e2ee_epoch_floor_${CH}`, '9');
+        for (let e = 1; e <= 6; e++) await serveGenuineRow(e, generateChannelKey());
+        fake.currentEpoch = 6;
+        fake.maxEpoch = 6;
+
+        const first = await ensureChannelKey(CH);
+        expect(first).not.toBeNull();
+        expect(first!.epoch).toBe(7);          // rotated to fresh material
+        expect(fake.posts).toBe(1);
+
+        // The server now serves our own row 7 and names it. Below the floor by
+        // number, but byte-equal to what THIS session minted: accepted, no
+        // second rotation. (No clearChannelKeyCache here: that is logout, and it
+        // forgets the session's mints on purpose.)
+        const second = await ensureChannelKey(CH);
+        expect(second!.epoch).toBe(7);
+        expect(b64(second!.key)).toBe(b64(first!.key));
+        expect(fake.posts).toBe(1);            // nothing minted
+        expect(floorOf()).toBe(9);             // and the floor never dropped
+    });
+
     it('a genuine restore still converges instead of bricking', async () => {
         // The scenario the fail-open existed to protect: the server is restored
         // from a backup older than anything this device holds. It must keep
@@ -324,7 +432,8 @@ describe('a 409 only adopts a key it can attribute', () => {
         clearChannelKeyCache();
 
         const res = await ensureChannelKey(CH);
-        if (res !== null) expect(b64(res.key)).not.toBe(b64(squatted));
+        // Fail closed this round: nothing to send under, never the squatter's key.
+        expect(res).toBeNull();
     });
 
     it('POSITIVE CONTROL: an attributable winner at the same epoch IS adopted', async () => {
