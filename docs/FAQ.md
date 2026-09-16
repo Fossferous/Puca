@@ -22,8 +22,11 @@ over. Identity keys are trust-on-first-use, so a server that is malicious *the
 first time* you meet someone can substitute a key. And forward secrecy is
 partial: since 0.9.3, direct messages are sealed under keys your password cannot
 unlock — a copy of the database plus a cracked password reads none of them —
-but messages from before that, and anything a stolen device was sent during its
-session, are not covered, and there is no per-message ratchet.
+but messages from before that, and anything a stolen device was sent while it was
+signed in — and, if your server is dishonest, afterwards too, because revoking a
+session is something the server enforces rather than the maths — are not covered,
+and there is no per-message ratchet. A computer someone else has copied cannot be
+un-trusted by revoking it; treat that as the account itself being compromised.
 [`docs/SECURITY_MODEL.md`](SECURITY_MODEL.md) is the honest version, written for
 a reader who does not trust the project.
 

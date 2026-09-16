@@ -1442,9 +1442,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <p className="settings-hint">
                                             <strong>Not set up on this account.</strong> Direct messages are sealed under
                                             keys derived from your password. Generate a new recovery code below to turn
-                                            this on: from then on, each message is sealed under a key held only by your
-                                            devices and your recovery code — a cracked password no longer reads your
-                                            history. People you message need it on too; until then, that conversation
+                                            this on: from then on, each message is sealed under keys held only by your
+                                            signed-in devices and your recovery code — a cracked password no longer
+                                            reads your history (a device someone else has copied still does). People you message need it on too; until then, that conversation
                                             stays as it is.
                                         </p>
                                     ) : fsAccount === 'on' ? (
@@ -1540,7 +1540,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         Signing out normally only signs out this device. If you think a
                                         session token has been stolen — a shared or lost computer, a
                                         browser you did not close — sign out everywhere. Every device is
-                                        signed out immediately, including this one.
+                                        signed out immediately, including this one. A computer someone
+                                        else has kept a copy of is a bigger problem than a stolen token:
+                                        signing out stops it connecting, but it cannot take back what that
+                                        machine already held.
                                         <br /><br />
                                         This also un-enrols your computers and phones from My Devices, so
                                         remote access and any device shares you granted stop working. Each

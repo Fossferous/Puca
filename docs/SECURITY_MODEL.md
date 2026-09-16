@@ -182,6 +182,20 @@ see ciphertext they have no key for. The LiveKit SFU is opt-in per channel (`sfu
 defaults `false`) and is fail-closed when used — no Insertable Streams support means no
 call, never a plaintext one ([`sfuManager.ts:192`](../frontend/src/api/rtc/sfuManager.ts#L192)).
 
+The mesh sealer leaves a few leading bytes of each frame in the clear so the RTP
+packetizer can still see the codec header — 10 on a keyframe, 3 on a delta, 1 on audio,
+bound into the AEAD so they cannot be altered undetected. Those numbers are the **VP8**
+payload descriptor and the **Opus** TOC byte; they are not correct for H.264 or VP9.
+Every shipped client is Chromium-family (WebView2 on desktop, the Android WebView, Chrome
+and Edge on the web) and offers VP8 and Opus first, so that is what a mesh call negotiates
+today. If a peer ever negotiated H.264 the failure is availability, not confidentiality:
+Chromium's H.264 packetizer finds no NAL units in ciphertext and emits nothing, so the
+call shows no video rather than plaintext video, and the handful of clear bytes would be
+a start code plus the SPS profile and level — no resolution, no picture. The SFU path is
+unaffected: LiveKit's frame cryptor is codec-aware and walks H.264 NAL units. Pinning the
+mesh codec preference and refusing frames of any other codec is tracked as hardening;
+it is not needed to keep the guarantee on the supported matrix.
+
 ### The gap
 
 **Enforcement is ON by default** since 0.8.130 — `requireMediaE2ee = true`
@@ -426,8 +440,8 @@ direct message is sealed under a fresh random key, and that key is wrapped only 
 
 - the **session keys** of each side's signed-in devices — an X25519 key a client mints
   for its session, keeps private on that device, and publishes against its server
-  session (`token_sessions.dm_pubkey`); a new sign-in mints a new one, revoking the
-  session retires it;
+  session (`token_sessions.dm_pubkey`); a new sign-in mints a new one, and revoking the
+  session retires it *on a server that honours the revocation* — see below;
 - each account's **history key** — its private half wrapped under the 12-word recovery
   code and under nothing else (`users.history_wrapped_rc`).
 
@@ -455,7 +469,24 @@ each session's key are write-once on the server for a bare bearer token, so a st
 token cannot replace them; a session that has just proved the password may replace the
 signing key, which is how an owner recovers from a first write that was not theirs. What a server CAN still do is hold a conversation on v3 — the rollout gate below
 is its word — or keep listing a session the owner revoked (revocation is the server's to
-honour); it cannot add a reader.
+honour); it cannot add a reader **that no device of that account ever signed**.
+
+**Session revocation is the server's to enforce; it is not something the maths does for
+you.** The record a client signs to publish a session key names the key's role and its
+value and nothing else (`dmKeys.ts`, `dmKeyRecord`) — no session id, no issue time, no
+sequence — so it never goes stale, and a dishonest server can keep serving a revoked
+session's key to your contacts, who will keep wrapping new messages to it. Read what that
+actually buys an attacker before rating it: the only place that session's private half has
+ever existed is the device's own storage, which also holds the identity seed
+(`e2ee_seed_v2`), and the seed derives the account signing key. Whoever copied one copied
+the other, and a seed holder can sign a *fresh* session key of their own and attest a
+new signing key to your contacts (`e2ee.ts`, the pairwise attestation is keyed by the seed) —
+replaying the old one gains them nothing they did not already have. So a signed session
+roster or an expiry on the record would not protect anyone this does not already fail. The
+honest statement is: **a device someone else has kept a copy of cannot be un-trusted by
+revoking its session.** Treat it as the account itself being compromised. The intended
+"soft expiry" that keeps the identity usable on a revoked session (`App.tsx`) is part of
+why: revocation ends the *session*, deliberately not the device's copy of the keys.
 
 None of those derive from the password. **A database copy plus a cracked password reads no
 v4 message.** What it does read: v2/v3 history (already stored, cannot be re-sealed
@@ -667,8 +698,9 @@ fail or take other people's history with it. Concretely
 **Cleared on your row.** Username becomes `deleted#<id>`; display name, avatar,
 join/leave sounds, email, public key, both wrapped identity seeds, both KDF
 salts, the DM history key (its public half, its recovery-code wrap and its signature)
-and the account signing key are nulled; every session row is revoked, which retires
-its DM session key; the SRP salt and verifier are replaced with fresh RANDOM bytes
+and the account signing key are nulled; every session row is revoked and its published
+DM session key and signature are nulled, so an honest server stops serving them and a
+database copy taken afterwards holds nothing to replay; the SRP salt and verifier are replaced with fresh RANDOM bytes
 (not zeroes — a zero verifier is forgeable); `deleted_at` is set and
 `token_version` is bumped, which revokes every outstanding JWT. Every live
 socket for the account is hung up after the commit.

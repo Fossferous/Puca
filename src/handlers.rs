@@ -2151,8 +2151,13 @@ const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
     // Sessions carry the DM session keys (migration 060): a tombstone must not
     // keep advertising keys nobody will ever open, and the token_version bump
-    // above already made every token dead.
-    "UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+    // above already made every token dead. The published key and its signature
+    // are NULLed on EVERY session row, revoked or not — an honest server stops
+    // serving a revoked session's key anyway (get_user_dm_keys filters
+    // revoked_at), but the signed record is timeless, and a database copy taken
+    // after deletion should hold nothing that could ever be replayed
+    // (0.9.810 audit, C-02; SECURITY_MODEL.md §11 says the material is gone).
+    "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
 ];
 
 /// DELETE /account — tombstone the account.
@@ -2594,7 +2599,7 @@ mod account_deletion_residue_tests {
             "DELETE FROM device_share_invites WHERE owner_user = $1 OR grantee_user = $1",
             "DELETE FROM channel_keys WHERE recipient_id = $1",
             "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
-            "UPDATE token_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+            "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
         ];
         assert_eq!(
             ACCOUNT_DELETE_CLEANUP, expected,

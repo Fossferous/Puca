@@ -11,8 +11,14 @@
  *  - SESSION KEYS. Each signed-in client mints an X25519 keypair for its
  *    session, keeps the private half in this device's storage, and publishes
  *    the public half against its server session. A new sign-in mints a new
- *    one; revoking the session retires it. A message wrapped to a session key
- *    is readable live on that device and nowhere else.
+ *    one; revoking the session retires it — on a server that honours it. The
+ *    published record names only the key's role and value, so nothing in it
+ *    goes stale and a dishonest server can keep serving a revoked session's
+ *    key; that helps only someone who also copied this device's storage,
+ *    which holds the identity seed and can therefore sign whatever key it
+ *    likes. Revocation is not a defence against a copied device
+ *    (docs/SECURITY_MODEL.md, the v4 section). A message wrapped to a session
+ *    key is readable live on that device and nowhere else.
  *  - THE HISTORY KEY. One per account. Its public half is published; its
  *    private half is wrapped under the 12-word recovery code and under nothing
  *    else. A device that has been given the code holds it until sign-out, and
