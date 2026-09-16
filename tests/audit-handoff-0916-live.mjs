@@ -138,6 +138,23 @@ async function timeoutHierarchy() {
     r = await L.api('DELETE', `/servers/${S.id}/timeout/${M1.id + WRAP}`);
     check('an alias target on remove_timeout is refused', refused(r) && timedOut(M1), r.status + ' ' + r.text);
 
+    // REVIEW FINDING: the shared hierarchy rule short-circuited on ADMINISTRATOR
+    // before any self check, so an admin the owner had timed out could lift
+    // their own timeout. The self refusal now comes first for everyone.
+    const ADM = mkUser('thadm');
+    await joinViaInvite(S, ADM);
+    const ADMIN = mkRole(S, 'Admin', BITS.ADMINISTRATOR, 8);
+    giveRole(S, ADM, ADMIN);
+    r = await O.api('POST', `/servers/${S.id}/timeout/${ADM.id}`, body);
+    check('fixture: the owner times out an administrator -> 200', r.status === 200 && timedOut(ADM), r.status + ' ' + r.text);
+    r = await ADM.api('DELETE', `/servers/${S.id}/timeout/${ADM.id}`);
+    check('an ADMINISTRATOR lifting their OWN timeout -> 403', r.status === 403, r.status + ' ' + r.text);
+    check('...and the administrator is still timed out', timedOut(ADM));
+    r = await ADM.api('DELETE', `/servers/${S.id}/timeout/${M1.id}`);
+    check('control: the administrator may still lift SOMEONE ELSE\'s timeout -> 200', r.status === 200 && !timedOut(M1), r.status + ' ' + r.text);
+    r = await O.api('POST', `/servers/${S.id}/timeout/${M1.id}`, body); // restore the fixture for the controls below
+    check('fixture: M1 timed out again -> 200', r.status === 200 && timedOut(M1), r.status + ' ' + r.text);
+
     // Controls: downward and owner lifts work, and lifting really restores sending.
     r = await O.api('DELETE', `/servers/${S.id}/timeout/${M1.id}`);
     check("control: the owner lifts M1's timeout -> 200", r.status === 200 && !timedOut(M1), r.status + ' ' + r.text);
@@ -170,6 +187,19 @@ async function customSoundsHierarchy() {
     check('control: the owner silences M1 -> 200', r.status === 200 && disabled(M1), r.status + ' ' + r.text);
     r = await O.api('PUT', `/servers/${S.id}/custom-sounds/${M1.id + WRAP}`, { disabled: false });
     check('control: an alias target writes nothing (refused) - the 0.9.x wide-bind fix holds', refused(r) && disabled(M1), r.status + ' ' + r.text);
+
+    // REVIEW FINDING (same shortcut as the timeout case): an administrator whose
+    // sounds the owner suppressed could re-enable them on themself.
+    const ADM = mkUser('csadm');
+    await joinViaInvite(S, ADM);
+    const ADMIN = mkRole(S, 'Admin', BITS.ADMINISTRATOR, 8);
+    giveRole(S, ADM, ADMIN);
+    r = await O.api('PUT', `/servers/${S.id}/custom-sounds/${ADM.id}`, { disabled: true });
+    check('fixture: the owner silences an administrator -> 200', r.status === 200 && disabled(ADM), r.status + ' ' + r.text);
+    r = await ADM.api('PUT', `/servers/${S.id}/custom-sounds/${ADM.id}`, { disabled: false });
+    check('an ADMINISTRATOR re-enabling their OWN sounds -> 403', r.status === 403 && disabled(ADM), r.status + ' ' + r.text);
+    r = await ADM.api('PUT', `/servers/${S.id}/custom-sounds/${L.id}`, { disabled: false });
+    check('control: the administrator may still change SOMEONE ELSE\'s -> 200', r.status === 200 && !disabled(L), r.status + ' ' + r.text);
 }
 
 await roleAlias();

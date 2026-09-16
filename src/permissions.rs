@@ -161,34 +161,48 @@ mod tests {
     fn moderation_owner_is_untouchable_by_anyone() {
         // target is the owner: refused even for an admin and even for another
         // "owner"-flagged actor (there is only one, but prove the ordering).
-        assert!(!moderation_allowed(false, true, 100, /*target_owner*/ true, 0));
-        assert!(!moderation_allowed(true, true, 100, true, 0));
+        assert!(!moderation_allowed(/*is_self*/ false, false, true, 100, /*target_owner*/ true, 0));
+        assert!(!moderation_allowed(/*is_self*/ false, true, true, 100, true, 0));
     }
 
     #[test]
     fn moderation_low_mod_cannot_reach_higher_or_equal_rank() {
         // A KICK holder at position 50 (not owner, not admin) vs an admin-ranked
         // target at 90 — this is the exact bug: 50 > 90 is false → refused.
-        assert!(!moderation_allowed(false, false, 50, false, 90));
+        assert!(!moderation_allowed(/*is_self*/ false, false, false, 50, false, 90));
         // ...and cannot touch an equal-ranked peer (50 vs 50).
-        assert!(!moderation_allowed(false, false, 50, false, 50));
-        // ...and cannot touch itself (same rank).
-        assert!(!moderation_allowed(false, false, 50, false, 50));
+        assert!(!moderation_allowed(/*is_self*/ false, false, false, 50, false, 50));
+        // ...and cannot touch itself: an explicit self flag, not merely the
+        // equal-rank effect (which never applied to an administrator).
+        assert!(!moderation_allowed(/*is_self*/ true, false, false, 50, false, 50));
     }
 
     #[test]
     fn moderation_allows_acting_strictly_downward() {
         // The legitimate case must still work, or the fix would break moderation.
-        assert!(moderation_allowed(false, false, 50, false, 0));
-        assert!(moderation_allowed(false, false, 50, false, 49));
+        assert!(moderation_allowed(/*is_self*/ false, false, false, 50, false, 0));
+        assert!(moderation_allowed(/*is_self*/ false, false, false, 50, false, 49));
     }
 
     #[test]
     fn moderation_owner_and_admin_actors_bypass_position() {
         // Owner acts on anyone below (a high-ranked non-owner target).
-        assert!(moderation_allowed(true, false, 0, false, 100));
+        assert!(moderation_allowed(/*is_self*/ false, true, false, 0, false, 100));
         // Admin (exempt, matching the role-edit hierarchy) likewise.
-        assert!(moderation_allowed(false, true, 10, false, 100));
+        assert!(moderation_allowed(/*is_self*/ false, false, true, 10, false, 100));
+    }
+
+    #[test]
+    fn moderation_nobody_acts_on_themself_not_even_an_administrator() {
+        // 0.9.811 review: the admin shortcut ran BEFORE any self check, so an
+        // administrator the owner had timed out could lift their own timeout
+        // (remove_timeout) and re-enable their own suppressed sounds.
+        assert!(!moderation_allowed(/*is_self*/ true, false, /*actor_admin*/ true, 10, false, 10));
+        assert!(!moderation_allowed(/*is_self*/ true, false, true, 100, false, 100));
+        // A non-admin self case at any rank is refused too.
+        assert!(!moderation_allowed(/*is_self*/ true, false, false, 90, false, 90));
+        // ...while the same administrator acting on someone ELSE is still exempt.
+        assert!(moderation_allowed(/*is_self*/ false, false, true, 10, false, 100));
     }
 
     #[test]
@@ -481,10 +495,11 @@ pub async fn member_rank(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> 
 /// `target` in `server_id`, BY ROLE HIERARCHY only — the caller still checks the
 /// permission bit (KICK_MEMBERS / BAN_MEMBERS) separately. Rules, matching the
 /// role-editing hierarchy: the owner may act on anyone; NO ONE may act on the
-/// owner; otherwise the actor must outrank the target (strictly higher top role
-/// position). Equal rank (incl. acting on yourself, or two peers) is refused, so
-/// a KICK_MEMBERS holder can no longer time out / kick / ban the owner, an
-/// administrator, or an equal-ranked moderator.
+/// owner; NOBODY may act on themself (administrators included); otherwise the
+/// actor must outrank the target (strictly higher top role position). Equal
+/// rank between two peers is refused, so a KICK_MEMBERS holder can no longer
+/// time out / kick / ban the owner, an administrator, or an equal-ranked
+/// moderator, and an administrator cannot lift their own timeout.
 pub async fn can_moderate(pool: &sqlx::PgPool, server_id: &str, actor: i64, target: i64) -> bool {
     let (target_owner, target_pos) = member_rank(pool, server_id, target).await;
     let (actor_owner, actor_pos) = member_rank(pool, server_id, actor).await;
@@ -495,6 +510,7 @@ pub async fn can_moderate(pool: &sqlx::PgPool, server_id: &str, actor: i64, targ
         .await
         .is_admin();
     moderation_allowed(
+        actor == target,
         actor_owner,
         actor_admin,
         actor_pos,
@@ -514,6 +530,7 @@ pub async fn can_moderate(pool: &sqlx::PgPool, server_id: &str, actor: i64, targ
 ///   bare KICK_MEMBERS / BAN_MEMBERS holder can never reach the owner, an
 ///   administrator (higher position), or an equal-ranked peer.
 fn moderation_allowed(
+    is_self: bool,
     actor_owner: bool,
     actor_admin: bool,
     actor_pos: i32,
@@ -521,6 +538,16 @@ fn moderation_allowed(
     target_pos: i32,
 ) -> bool {
     if target_owner {
+        return false;
+    }
+    // Nobody moderates themself — checked BEFORE the owner/administrator
+    // shortcut. Self-refusal used to be only an emergent effect of the
+    // strict-rank rule below, so it never applied to an administrator: one the
+    // owner had timed out could lift their own timeout, and re-enable their
+    // own suppressed sounds (0.9.810 audit review of C-05/C-07). Every caller
+    // that wants a self action goes through a route that never reaches here
+    // (the owner's own role changes are exempted before can_moderate is called).
+    if is_self {
         return false;
     }
     if actor_owner || actor_admin {

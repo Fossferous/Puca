@@ -465,8 +465,9 @@ pub async fn timeout_member(
 
     // Role hierarchy (this handler had NONE — not even an owner check, so a bare
     // KICK_MEMBERS holder could time out, and thereby silence, the server owner
-    // or any administrator). can_moderate refuses acting on the owner, on a
-    // higher-or-equal-ranked member, and on yourself.
+    // or any administrator). can_moderate refuses acting on the owner, on
+    // yourself (administrators included), and on a member ranked at or above a
+    // non-administrator actor.
     if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, user_id).await {
         return (
             StatusCode::FORBIDDEN,
@@ -550,8 +551,9 @@ pub async fn set_member_custom_sounds(
     // Full moderation hierarchy, not just "not the owner": a MUTE_MEMBERS
     // holder could silence the custom sounds of any non-owner ranked above
     // them, or of an equal-ranked moderator (0.9.810 audit, C-07).
-    // can_moderate refuses the owner as a target (the previous guard), anyone
-    // ranked at or above the actor, and the actor themself.
+    // can_moderate refuses the owner as a target (the previous guard), the
+    // actor themself (administrators included), and anyone ranked at or above
+    // a non-administrator actor.
     if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
         return (StatusCode::FORBIDDEN, "Cannot moderate a member ranked at or above you").into_response();
     }
@@ -606,8 +608,10 @@ pub async fn remove_timeout(
     // KICK_MEMBERS holder could lift a timeout the owner or an administrator
     // had imposed on a higher-ranked member — or on THEMSELVES, because a
     // timeout blocks sending, not API calls (0.9.810 audit, C-05). Same rule
-    // as timeout_member: can_moderate refuses the owner as a target, anyone
-    // ranked at or above the actor, and the actor themself.
+    // as timeout_member: can_moderate refuses the owner as a target, the actor
+    // themself (for administrators too — the review found the admin shortcut
+    // used to run before the self check), and anyone ranked at or above a
+    // non-administrator actor.
     if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
         return (
             StatusCode::FORBIDDEN,

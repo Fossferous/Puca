@@ -2554,17 +2554,7 @@ mod path_user_id_tests {
 mod account_deletion_residue_tests {
     use super::ACCOUNT_DELETE_CLEANUP;
 
-    /// THIS TEST IS THE SPECIFICATION for what a deletion removes. It holds the
-    /// array the handler iterates — not a copy of it — so removing a statement,
-    /// or widening one, goes red here and has to be argued for rather than
-    /// happening quietly.
-    ///
-    /// The three additions in this release (L8-DATA-1) are the last three:
-    /// cross-user device shares in both directions, the user's own wrapped
-    /// channel keys, and the personal fields left on the revoked device rows.
-    /// 0.9.1: uploads are STAMPED for the grace purge by UPLOAD_GRACE_STAMP_SQL
-    /// (a separate statement, because it binds the operator's grace period),
-    /// and purged by the retention sweep in main.rs once it passes.
+    /// The DM-key validators accept exactly the client's published shape.
     #[test]
     fn dm_key_validators_accept_the_client_shape_and_nothing_looser() {
         use base64::Engine;
@@ -2582,6 +2572,18 @@ mod account_deletion_residue_tests {
         assert!(super::validate_history_key_pair(&Some("x25519:abcdefgh".into()), &Some("w".repeat(20)), &Some(b64(64))).is_ok());
     }
 
+    /// THIS TEST IS THE SPECIFICATION for what a deletion removes. It mirrors
+    /// ACCOUNT_DELETE_CLEANUP statement for statement, so removing a statement,
+    /// or widening one, goes red here and has to be argued for rather than
+    /// happening quietly (0.9.811 widened the token_sessions statement to NULL
+    /// the DM session keys, and had to update this in the same commit).
+    ///
+    /// The three additions in L8-DATA-1 are the last three before that:
+    /// cross-user device shares in both directions, the user's own wrapped
+    /// channel keys, and the personal fields left on the revoked device rows.
+    /// 0.9.1: uploads are STAMPED for the grace purge by UPLOAD_GRACE_STAMP_SQL
+    /// (a separate statement, because it binds the operator's grace period),
+    /// and purged by the retention sweep in main.rs once it passes.
     #[test]
     fn the_cleanup_list_is_exactly_what_we_decided() {
         let expected: &[&str] = &[
