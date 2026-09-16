@@ -4,20 +4,6 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
-
-### Fixed
-- **Pinning Púca to a GPU now covers the screen share.** Windows keys a GPU pin
-  to one executable path, and the share is captured and encoded by the WebView2
-  runtime, not by `Puca.exe` — a separate program whose path changes with every
-  automatic runtime update. A pin on the runtime went stale each time and had
-  to be re-created by hand, found only after a choppy share. Now, when
-  `Puca.exe` is pinned, the app writes the same preference for the runtime it
-  is about to start — on every start, before the runtime is up — and removes
-  entries for runtime versions that are no longer installed. On a machine where
-  Púca is not pinned nothing happens. See "I pinned Púca to my integrated GPU"
-  in `docs/FAQ.md` for what the pin reaches.
-
 ## 0.9.813 — 2026-09-16
 
 Remote control sends only the pixels your screen can show, screen sharing uses
@@ -76,6 +62,36 @@ after it is set up.
   graphics error. It still tries the built-in path — on most machines it works
   — but a failure now names the real cause and tells you to reinstall Púca.
   Púca Lite has no helper by design and is unchanged.
+- **Pinning Púca to a GPU now covers the screen share.** Windows keys a GPU pin
+  to one executable path, and the share is captured and encoded by the WebView2
+  runtime, not by `Puca.exe` — a separate program whose path changes with every
+  automatic runtime update. A pin on the runtime went stale each time and had
+  to be re-created by hand, found only after a choppy share. Now, when
+  `Puca.exe` is pinned, the app writes the same preference for the runtime it
+  is about to start — on every start, before the runtime is up — and removes
+  entries for runtime versions that are no longer installed. On a machine where
+  Púca is not pinned nothing happens. See "I pinned Púca to my integrated GPU"
+  in `docs/FAQ.md` for what the pin reaches.
+
+### Security
+- **Hardening of the Windows remote-control helpers, from an adversarial
+  review of the native code.** None of these was reachable from the internet;
+  all of them needed a foothold on the PC already, and each is closed with a
+  test that failed against the shipped code. The helper that serves remote
+  control now keeps its named pipe for its whole life instead of re-creating
+  it between clients, so another local process can no longer take the name
+  while it is briefly free. Every program that connects to a helper's pipe
+  now checks that the process answering is the one it started before it says
+  anything secret, and opens the system service's pipe with identification
+  only, the way the other clients already did. The system service's control
+  channel can no longer be held open indefinitely by a local account that
+  connects and says nothing. Remote file access on an armed host now refuses
+  the plaintext credential files that sit beside the directories it already
+  refused (`.git-credentials`, `.netrc`, `.npmrc` and their kin). Both helpers
+  are now linked so that the system libraries they load at startup are taken
+  from Windows itself and never from a file placed beside them. And the
+  mobile update check no longer treats "co.uk"-style suffixes as a trusted
+  site.
 
 ## 0.9.812 — 2026-09-16
 
