@@ -379,6 +379,24 @@ check "a page whose tokens are all known is NOT refused"    "$([ "$(has "$out" '
 check "and nothing __LIKE_THIS__ survives into it"          "$([ -f "$TMP/uploaded/index.html" ] && ! grep -qE '__[A-Z_]+__' "$TMP/uploaded/index.html" && echo 1 || echo 0)" "$(cat "$TMP/uploaded/index.html" 2>/dev/null | head -5)"
 
 echo
+echo "--- dual-ship.sh mobile: the manifest version must match the bundle's own .version sidecar ---"
+# encrypt-bundle.mjs writes <bundle>.version from the build's version.json; a
+# manifest that disagrees with it is the one-slip lockout 0.9.811 closes.
+SK="$(head -c 369 /dev/zero | tr '\0' 'A')"; CK="$(head -c 512 /dev/zero | tr '\0' 'b')"
+printf 'enc\n' > "$TMP/bundle.enc.zip"
+rm -f "$TMP/bundle.enc.zip.version"
+out="$(ship mobile "$TMP/bundle.enc.zip" 1.2.3 "$SK" "$CK")"
+check "no sidecar at all REFUSES" "$(has "$out" "REFUSING: no $TMP/bundle.enc.zip.version sidecar")" "$out"
+printf '1.2.4\n' > "$TMP/bundle.enc.zip.version"
+out="$(ship mobile "$TMP/bundle.enc.zip" 1.2.3 "$SK" "$CK")"
+check "a sidecar that disagrees REFUSES and names both versions" "$(has "$out" "REFUSING: the manifest says 1.2.3 but $TMP/bundle.enc.zip was built as 1.2.4")" "$out"
+printf '1.2.3\n' > "$TMP/bundle.enc.zip.version"
+out="$(ship mobile "$TMP/bundle.enc.zip" 1.2.3 "$SK" "$CK")"
+check "a matching sidecar does NOT fire the refusal (positive control)" "$([ "$(has "$out" "REFUSING: the manifest says")" = 0 ] && [ "$(has "$out" "sidecar")" = 0 ] && echo 1 || echo 0)" "$out"
+rm -f "$TMP/bundle.enc.zip.version"
+out="$(PUCA_ALLOW_UNVERIFIED_BUNDLE=1 ship mobile "$TMP/bundle.enc.zip" 1.2.3 "$SK" "$CK")"
+check "PUCA_ALLOW_UNVERIFIED_BUNDLE=1 downgrades a missing sidecar to a WARNING" "$([ "$(has "$out" "WARNING: shipping")" = 1 ] && [ "$(has "$out" "REFUSING: no")" = 0 ] && echo 1 || echo 0)" "$out"
+
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

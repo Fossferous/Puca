@@ -307,7 +307,14 @@ export function UpdateGate({ children }: UpdateGateProps) {
             await CapacitorUpdater.notifyAppReady();
             const currentBundle = await CapacitorUpdater.current();
             const bundleLabel = currentBundle?.bundle?.version || '';
-            runningBuiltin = !bundleLabel || bundleLabel === 'builtin' || currentBundle?.bundle?.id === 'builtin';
+            // The builtin bundle is identified by its ID, never by the version
+            // label: the plugin also reports the literal "builtin" as the
+            // version of any bundle whose stored version is null (BundleInfo's
+            // getVersionName fallback), so keying on the label would treat an
+            // OTA bundle with lost metadata as the APK's own. An unexpected
+            // shape (no id) therefore reads as NOT builtin, which fails closed:
+            // only a strictly newer manifest applies.
+            runningBuiltin = currentBundle?.bundle?.id === 'builtin';
             // The version the running BYTES were built as — never the label the
             // manifest gave them. The plugin's `bundle.version` is whatever the
             // manifest said, and the manifest is unsigned: recording it as "what

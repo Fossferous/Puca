@@ -401,10 +401,16 @@ refuse_mislabelled_bundle() {
 			echo "Pass the version the bundle was built with, or rebuild the bundle."
 			exit 1
 		}
+	elif [ "${PUCA_ALLOW_UNVERIFIED_BUNDLE:-0}" = "1" ]; then
+		echo "WARNING: shipping $bundle with NO .version sidecar — the manifest version $version is"
+		echo "         not verified against the bytes (PUCA_ALLOW_UNVERIFIED_BUNDLE=1)."
 	else
-		echo "INFO: no $bundle.version sidecar — the bundle predates encrypt-bundle.mjs writing one, so"
-		echo "      the manifest version $version is NOT verified against the bytes. Rebuild through"
-		echo "      encrypt-bundle.mjs with its 4th argument to get the check."
+		# Fail closed, like the two length checks above: an optional check is one
+		# that is not running on the day it matters.
+		echo "REFUSING: no $bundle.version sidecar, so the manifest version $version is not tied to"
+		echo "the bytes. Rebuild through encrypt-bundle.mjs (its 4th argument is the build's"
+		echo "version.json), or re-run with PUCA_ALLOW_UNVERIFIED_BUNDLE=1 to accept an unverified label."
+		exit 1
 	fi
 }
 

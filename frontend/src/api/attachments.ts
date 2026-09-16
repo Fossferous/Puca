@@ -109,11 +109,18 @@ function safeDecode(v: string): string {
 }
 
 /**
- * Parse a sovereign-enc href. TOTAL: null on anything malformed, NEVER a throw
- * — `MessageContent` calls this while rendering a message body that any sender
- * chooses, and the app's only error boundary is the root one, so a throw here
- * replaced the entire app with the crash screen for every viewer, on every
- * platform, on every load (0.9.810 audit, C-06). Mirrors `decodeClipRef`.
+ * Parse a sovereign-enc href. TOTAL: null on anything malformed, NEVER a throw.
+ *
+ * `MessageContent` calls this while rendering a message body that any sender
+ * chooses, and when this was written the app's only error boundary was the
+ * root one, so a throw here replaced the entire app with the crash screen for
+ * every viewer, on every platform, on every load (0.9.810 audit, C-06).
+ * `MessageErrorBoundary` now contains a render throw to one row, but this
+ * parser stays total regardless: it is also called from the composer's upload
+ * settle callback (Chat.tsx), where a throw is an unhandled rejection that no
+ * React boundary catches. The outer catch is a deliberate backstop that no
+ * current input reaches — safeDecode handles the one live throw source.
+ * Mirrors `decodeClipRef`.
  */
 export function parseEncAttachment(href: string): { id: string; key: string; mime: string; cap?: string } | null {
     if (!encPrefixMatch(href)) return null;

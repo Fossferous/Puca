@@ -23,8 +23,11 @@ import { createCipheriv, privateEncrypt, randomBytes, createHash, constants } fr
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const [, , zipPath, keyPath, outPath, versionJsonPath] = process.argv;
-if (!zipPath || !keyPath || !outPath) {
-    console.error('usage: encrypt-bundle.mjs <plaintext.zip> <privateKey.pem> <out.enc.zip> [<staging>/version.json]');
+if (!zipPath || !keyPath || !outPath || !versionJsonPath) {
+    // The version.json is REQUIRED: without the sidecar it produces, dual-ship.sh
+    // cannot tie the manifest's version to the bytes, and an optional argument
+    // is one nobody passes on the day it matters.
+    console.error('usage: encrypt-bundle.mjs <plaintext.zip> <privateKey.pem> <out.enc.zip> <staging>/version.json');
     process.exit(2);
 }
 
@@ -38,14 +41,11 @@ const privateKey = readFileSync(keyPath, 'utf8');
 // manifest's label as "what I am running", so one mismatch used to lock every
 // phone that took it out of OTA until an APK reinstall (0.9.810 audit, C-04).
 // Read BEFORE any output is written, so a bad sidecar leaves nothing behind.
-let builtVersion = null;
-if (versionJsonPath) {
-    const parsed = JSON.parse(readFileSync(versionJsonPath, 'utf8'));
-    builtVersion = typeof parsed?.version === 'string' ? parsed.version.trim() : '';
-    if (!/^\d+\.\d+\.\d+/.test(builtVersion)) {
-        console.error(`${versionJsonPath} carries no usable version: ${JSON.stringify(parsed?.version)}`);
-        process.exit(2);
-    }
+const parsedVersion = JSON.parse(readFileSync(versionJsonPath, 'utf8'));
+const builtVersion = typeof parsedVersion?.version === 'string' ? parsedVersion.version.trim() : '';
+if (!/^\d+\.\d+\.\d+/.test(builtVersion)) {
+    console.error(`${versionJsonPath} carries no usable version: ${JSON.stringify(parsedVersion?.version)}`);
+    process.exit(2);
 }
 
 // AES-128-CBC (Capgo convention): random key + IV.
@@ -54,7 +54,7 @@ const iv = randomBytes(16);
 const cipher = createCipheriv('aes-128-cbc', aesKey, iv); // PKCS7 == Java PKCS5Padding
 const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
 writeFileSync(outPath, encrypted);
-if (builtVersion !== null) writeFileSync(`${outPath}.version`, `${builtVersion}\n`);
+writeFileSync(`${outPath}.version`, `${builtVersion}\n`);
 
 // RSA private-encrypt the AES key (client public-decrypts it).
 const encAesKey = privateEncrypt({ key: privateKey, padding: constants.RSA_PKCS1_PADDING }, aesKey);

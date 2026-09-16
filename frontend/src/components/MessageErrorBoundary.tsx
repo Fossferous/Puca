@@ -2,7 +2,10 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { SadFaceIcon } from './Icons';
 
 interface Props {
-    /** Remount key: when the message text changes, re-arm and try again. */
+    /** Re-arm key: an ordinary prop (not React's `key`) compared in
+     *  getDerivedStateFromProps — when the message text changes the boundary
+     *  clears its error and renders the new children in place; the boundary
+     *  itself is never remounted. */
     resetKey: string;
     children: ReactNode;
 }

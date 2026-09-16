@@ -105,13 +105,13 @@ rm -rf ota-src && cp -r dist ota-src && node scripts/cap-index-csp.mjs --index o
 rm -rf ota-src                                       # disposable staging dir (also gitignored)
 node deploy/mobile/encrypt-bundle.mjs \
     puca-web-<ver>.zip ~/.puca/mobile-updater-rsa.key \
-    puca-web-<ver>.enc.zip frontend/dist/version.json # prints {ivSessionKey, checksum}; the 4th
-                                                     # argument writes puca-web-<ver>.enc.zip.version,
-                                                     # which dual-ship.sh checks the manifest version
-                                                     # against and REFUSES on a mismatch. Pass it —
-                                                     # without the sidecar the manifest version is
-                                                     # unverified against the bytes (see "Residual
-                                                     # risks" for what a mismatch costs).
+    puca-web-<ver>.enc.zip ota-src/version.json       # prints {ivSessionKey, checksum}. The 4th
+                                                     # argument is REQUIRED: it writes
+                                                     # puca-web-<ver>.enc.zip.version, which
+                                                     # dual-ship.sh checks the manifest version
+                                                     # against and REFUSES on a mismatch, or when
+                                                     # the sidecar is missing (see "Residual risks"
+                                                     # for what a mismatch costs).
 ```
 
 Upload the **`.enc.zip`** as the bundle, and write `mobile-update.json`:
