@@ -885,6 +885,25 @@ fn collect_candidates(
     out
 }
 
+/// The host candidate a newly-arrived PEER address argues for, if any.
+///
+/// `None` when the peer is unroutable, when the route is loopback or the
+/// wildcard, or when that address is already advertised. Pure so the trickle
+/// path is testable: the run loop it lives in needs a live session.
+fn peer_routed_candidate(
+    peer: SocketAddr,
+    advertised: &[SocketAddr],
+    port: u16,
+    route: impl Fn(SocketAddr) -> Option<std::net::IpAddr>,
+) -> Option<SocketAddr> {
+    let ip = route(peer)?;
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    let local = SocketAddr::new(ip, port);
+    (!advertised.contains(&local)).then_some(local)
+}
+
 /// The address the OS uses for the general internet. This is the base a
 /// server-reflexive or relayed candidate is really sent from, so it stays the
 /// base even when a peer-routed LAN address leads the host-candidate list.
@@ -982,7 +1001,9 @@ impl Drop for StreamTimingGuard {
 fn run(
     mut sender: VideoSender,
     socket: UdpSocket,
-    advertised: Vec<SocketAddr>,
+    // Grows during the session: a host candidate is added for each peer address
+    // that turns out to be reachable from an interface not already offered.
+    mut advertised: Vec<SocketAddr>,
     mut relay: Option<crate::turn::Allocation>,
     relayed_addr: Option<SocketAddr>,
     remote_candidates: Arc<Mutex<Vec<String>>>,
@@ -1047,6 +1068,10 @@ fn run(
     // then no frame ever arrives (the black-stage-forever field report), and
     // on some topologies the output detaches and creation fails outright.
     // The hold is per-thread RAII: released when this thread exits, which IS
+    // The port every host candidate carries: one wildcard-bound socket serves
+    // them all, so a candidate added mid-session reuses it.
+    let bound_port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
+
     // session end. DataOnly sessions skip both — a file browse should not
     // light anyone's screen.
     #[cfg(windows)]
@@ -1569,8 +1594,43 @@ fn run(
             match sender.add_remote_candidate(&cand) {
                 Ok(()) => {
                     eprintln!("[stream] remote candidate: {cand}");
-                    if let (Some(alloc), Some(_)) = (relay.as_mut(), relayed_addr) {
-                        if let Some(addr) = candidate_addr(&cand) {
+                    if let Some(addr) = candidate_addr(&cand) {
+                        // THE PEER-ROUTED HOST CANDIDATE, on the trickle path.
+                        //
+                        // The controller sends its offer the instant
+                        // setLocalDescription resolves and trickles every
+                        // candidate afterwards, so at gather time the offer
+                        // usually names NOBODY — which is why doing this only
+                        // at startup fixed nothing in the field. Each arriving
+                        // peer address is asked the one question that matters:
+                        // what would this machine send FROM to reach it? On a
+                        // VPN'd host that is the LAN address, which the default
+                        // route never yields, and without it the highest-priority
+                        // pair there is — host to host, across the room — cannot
+                        // exist and the session settles on the peer's relay.
+                        //
+                        // str0m accepts a local candidate at any point, and the
+                        // socket is wildcard-bound, so a candidate added now is
+                        // immediately usable. Adding one re-pairs it against
+                        // every remote candidate already known.
+                        if let Some(local) =
+                            peer_routed_candidate(addr, &advertised, bound_port, source_addr_for)
+                        {
+                            match sender.add_local_candidate(local) {
+                                Ok(()) => {
+                                    advertised.push(local);
+                                    eprintln!(
+                                        "[stream] host candidate {} added — it is what reaches {}",
+                                        local.ip(),
+                                        addr.ip()
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("[stream] host candidate {} refused: {e}", local.ip())
+                                }
+                            }
+                        }
+                        if let (Some(alloc), Some(_)) = (relay.as_mut(), relayed_addr) {
                             if alloc.needs_permission(addr) {
                                 alloc.request_permission(&socket, addr);
                             }
@@ -3335,6 +3395,60 @@ mod tests {
             addrs.iter().filter(|a| a.ip() == std::net::IpAddr::from([192, 168, 0, 22])).count(),
             1,
             "one LAN candidate, got {addrs:?}"
+        );
+    }
+
+    /// THE TRICKLE PATH, which is the one that actually fires in the field.
+    ///
+    /// The controller sends its offer the moment setLocalDescription resolves
+    /// and trickles candidates afterwards, so at gather time the offer names
+    /// nobody: fixing only the startup probe fixed nothing. When the phone's
+    /// address finally arrives, the LAN route it implies must be advertised.
+    #[test]
+    fn a_trickled_peer_address_adds_the_host_candidate_that_reaches_it() {
+        let phone: SocketAddr = "192.168.0.155:42767".parse().unwrap();
+        // What the VPN'd host offered at gather time: tunnel + loopback only.
+        let advertised: Vec<SocketAddr> =
+            vec!["10.169.229.126:45678".parse().unwrap(), "127.0.0.1:45678".parse().unwrap()];
+        assert_eq!(
+            peer_routed_candidate(phone, &advertised, 45678, vpn_routes),
+            Some("192.168.0.22:45678".parse().unwrap()),
+            "the LAN address must be added when the peer's candidate arrives"
+        );
+    }
+
+    /// The peer's SECOND candidate shares the route, and re-adding an address
+    /// str0m already holds would re-pair it against every remote candidate for
+    /// nothing.
+    #[test]
+    fn a_route_already_advertised_is_not_added_twice() {
+        let phone: SocketAddr = "192.168.0.155:53312".parse().unwrap();
+        let advertised: Vec<SocketAddr> = vec!["192.168.0.22:45678".parse().unwrap()];
+        assert_eq!(peer_routed_candidate(phone, &advertised, 45678, vpn_routes), None);
+    }
+
+    /// A peer reached over the default route adds nothing: that address was
+    /// offered at gather time, so a genuinely remote controller costs no
+    /// extra candidate and no extra connectivity checks.
+    #[test]
+    fn a_remote_peer_over_the_default_route_adds_nothing() {
+        let far: SocketAddr = "203.0.113.7:3478".parse().unwrap();
+        let advertised: Vec<SocketAddr> = vec!["10.169.229.126:45678".parse().unwrap()];
+        assert_eq!(peer_routed_candidate(far, &advertised, 45678, vpn_routes), None);
+    }
+
+    /// An unroutable or loopback-routed peer must never become a candidate.
+    #[test]
+    fn an_unroutable_or_loopback_peer_adds_no_candidate() {
+        let p: SocketAddr = "192.168.0.155:1".parse().unwrap();
+        assert_eq!(peer_routed_candidate(p, &[], 45678, |_| None), None);
+        assert_eq!(
+            peer_routed_candidate(p, &[], 45678, |_| Some([127, 0, 0, 1].into())),
+            None
+        );
+        assert_eq!(
+            peer_routed_candidate(p, &[], 45678, |_| Some([0, 0, 0, 0].into())),
+            None
         );
     }
 
