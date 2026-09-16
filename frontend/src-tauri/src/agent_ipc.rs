@@ -60,10 +60,9 @@ fn linux_socket_path() -> String {
 }
 
 fn agent_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let candidate = dir.join(if cfg!(windows) { "puca-agent.exe" } else { "puca-agent" });
-    candidate.exists().then_some(candidate)
+    // One lookup, shared with service_cmd and clip_capture (sidecar.rs). The
+    // agent's LIFETIME stays here.
+    crate::sidecar::agent_exe_path()
 }
 
 struct Connection {

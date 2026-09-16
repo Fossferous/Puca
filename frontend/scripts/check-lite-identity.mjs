@@ -148,6 +148,19 @@ if (!Array.isArray(liteBins) || liteBins.length !== 0) {
     ok.push('lite externalBin: [] (no agent/service sidecars)');
 }
 
+// The MIRROR of the lite check: the full build must actually list the agent.
+// Tauri hard-fails a build only for a LISTED binary that is not staged; a
+// binary dropped from the list builds fine and ships an installer whose clip
+// capture silently runs in process — which cannot see the monitors under a
+// GPU preference pin (clip_capture.rs). Nothing else asserts presence.
+const fullBins = base.bundle?.externalBin ?? [];
+if (!Array.isArray(fullBins) || !fullBins.includes('binaries/puca-agent')) {
+    fail(`full externalBin must list binaries/puca-agent (got ${JSON.stringify(fullBins)}) — the clip capture `
+        + 'sidecar, and the remote-desktop host agent');
+} else {
+    ok.push('full externalBin: ships binaries/puca-agent (clip capture runs in the sidecar)');
+}
+
 if (lite.build?.beforeBuildCommand !== '') {
     fail('lite build.beforeBuildCommand must be "" — inheriting it re-runs the full pipeline AFTER '
         + 'the lite bundle is built, rebuilding the sidecars and overwriting dist');

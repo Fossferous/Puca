@@ -126,10 +126,8 @@ fn elevation_source(
 }
 
 fn agent_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let candidate = dir.join("puca-agent.exe");
-    candidate.exists().then_some(candidate)
+    // One lookup, shared with agent_ipc and clip_capture (sidecar.rs).
+    crate::sidecar::agent_exe_path()
 }
 
 /// Run `puca-service.exe <args>` ELEVATED and wait for it to finish.

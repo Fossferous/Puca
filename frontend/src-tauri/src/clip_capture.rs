@@ -556,10 +556,16 @@ pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
 /// about the remote-control agent's lifecycle, and a clip capture must not be
 /// able to disturb, restart, or be restarted by an attended session.
 fn clip_host_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let candidate = dir.join("puca-agent.exe");
-    candidate.exists().then_some(candidate)
+    // The LOOKUP is shared (sidecar.rs); the lifetime is not.
+    crate::sidecar::agent_exe_path()
+}
+
+#[cfg(windows)]
+/// Relabel an in-process capture failure when this build was supposed to
+/// capture in the agent and the agent is not there. Identity on Lite and dev
+/// builds (see sidecar.rs). A plain `fn` so it can be handed to the loop.
+fn relabel_missing_agent(error: String) -> String {
+    crate::sidecar::explain_missing_agent(error, crate::sidecar::agent_expected_in_this_build())
 }
 
 #[cfg(windows)]
@@ -590,8 +596,28 @@ fn capture_loop(
     match clip_host_path() {
         Some(path) => sidecar_capture_loop(path, app, state, target, fps, gop_ms, ready),
         None => {
-            log::info!("Clip video capture: no agent sidecar beside the app, capturing in process");
-            in_process_capture_loop(app, state, target, fps, gop_ms, ready)
+            // SAY WHICH CASE THIS IS. A Lite build and a dev run have no
+            // sidecar by design and this line is routine. A Full RELEASE build
+            // ships one, so its absence is a broken install — and until
+            // 2026-09-16 that was logged at INFO, nothing reached the UI, and
+            // the in-process capture then failed under the owner's GPU pin
+            // with "Screen capture ended: DXGI_ERROR_UNSUPPORTED", which says
+            // nothing about a reinstall. In-process still runs either way: a
+            // non-pinned user with a damaged install keeps their clips.
+            if crate::sidecar::agent_expected_in_this_build() {
+                log::error!(
+                    "Clip video capture: {} This build ships the agent; without it the capture \
+                     runs in process, which cannot see the monitors under a GPU preference pin.",
+                    crate::sidecar::MISSING_AGENT
+                );
+            } else {
+                log::info!("Clip video capture: no agent sidecar beside the app, capturing in process");
+            }
+            // The init failure reaches start_video_capture through `ready`
+            // (relabelled inside the loop) and the runtime failure through
+            // this Result (relabelled here) — the UI listens on both.
+            in_process_capture_loop(app, state, target, fps, gop_ms, ready, relabel_missing_agent)
+                .map_err(relabel_missing_agent)
         }
     }
 }
@@ -811,13 +837,17 @@ fn in_process_capture_loop(
     fps: u32,
     gop_ms: u32,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    // Applied to an INIT failure before it goes down `ready` — that is the
+    // path start_video_capture answers the UI from. The returned Err is left
+    // as-is; the caller relabels that one, so nothing is relabelled twice.
+    relabel: fn(String) -> String,
 ) -> Result<(), String> {
     macro_rules! init_step {
         ($e:expr) => {
             match $e {
                 Ok(v) => v,
                 Err(msg) => {
-                    let _ = ready.send(Err(msg.clone()));
+                    let _ = ready.send(Err(relabel(msg.clone())));
                     return Err(msg);
                 }
             }

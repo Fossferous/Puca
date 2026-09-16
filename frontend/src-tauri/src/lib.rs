@@ -32,6 +32,11 @@ mod power;
 #[cfg(feature = "remote-control")]
 mod remote_control;
 mod session_events;
+// NOT gated: the one lookup for the agent sidecar beside the app, plus whether
+// THIS build is supposed to ship one. Lite (no sidecar by design) and dev runs
+// answer "not expected"; a Full release build answers "expected", which is
+// what turns a missing sidecar from an INFO line into an actionable error.
+mod sidecar;
 // NOT gated: VoicePanel raises the capture/encode processes' priority whenever
 // a VOICE screen share is live (holdStreamBoost('voice-share')), which is a
 // preserved feature. Gating it made the share collapse under a fullscreen game

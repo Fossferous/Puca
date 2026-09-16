@@ -424,4 +424,23 @@ const r = spawnSync('npx', ['tauri', 'build', ...args], {
 if (mergedDir) {
     try { rmSync(mergedDir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
+
+// PACKAGING GATE for the Full build: the sidecars must be beside the app in
+// the output the installer is packed from. Tauri hard-fails a build only for a
+// binary that is LISTED in externalBin and not staged; nothing checks that the
+// finished output actually carries them, and a Full build without the agent
+// ships a clip capture that silently runs in process (clip_capture.rs) — which
+// cannot see the monitors under a GPU preference pin. Lite is left alone: it
+// has no sidecars by design, and a previous Full build may have left copies
+// in the same target directory, so their presence there proves nothing.
+if ((r.status ?? 1) === 0 && !isLite && process.platform === 'win32') {
+    const outDir = join(tauriDir, 'target', 'release');
+    const missing = ['puca-agent.exe', 'puca-service.exe'].filter(f => !existsSync(join(outDir, f)));
+    if (missing.length) {
+        console.error(`[tauri-build] FULL build finished without ${missing.join(' and ')} in ${outDir} — `
+            + 'the installer would ship no capture agent. Check bundle.externalBin and scripts/build-agent.mjs.');
+        process.exit(1);
+    }
+    console.log(`[tauri-build] sidecars present beside the app in ${outDir}: puca-agent.exe puca-service.exe`);
+}
 process.exit(r.status ?? 1);
