@@ -263,6 +263,10 @@ document is actually trying to make.
   media instead.
 - 📺 **Screen sharing** — including giving a trusted friend control of your
   shared screen, with an explicit per-request consent prompt.
+- 🗒️ **Púca Keep** — a Google-Keep-style notes app at `/keep/` on the web
+  app, over the same end-to-end encrypted task lists and checklist channels:
+  a grid of notes, search, reminders, colours and labels, with Púca's own
+  task tree inside every note. See [docs/KEEP.md](docs/KEEP.md).
 - 🖥️ **My Devices** — remote-desktop access to machines you own, gated by a
   device-key trust chain the server cannot forge into. (Full build only —
   the Lite build compiles all of this out; see "Getting the app" above.)

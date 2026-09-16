@@ -119,6 +119,7 @@ frontend/shots/
 frontend/shots2/
 frontend/shots3/
 frontend/e2e/shots-clips/
+frontend/e2e/shots-keep/
 
 # Deploy/build artifacts and debugging scratch from the 0.8.17/0.8.18 work.
 # ~55 MB of this sat untracked and un-ignored; one `git add .` away from

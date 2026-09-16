@@ -4,7 +4,31 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## 0.9.811 — 2026-09-16
+## Unreleased
+
+### Added
+- **Púca Keep** — a notes app in the style of Google Keep, at `/keep/` on the
+  web app (the Tasks view links to it). Your personal lists and every
+  checklist channel from your servers appear as notes: a grid you can search,
+  pin, colour, label and archive, a Reminders view of everything with a due
+  time, and Púca's own task tree inside each note, so items, subtasks,
+  drag-to-nest, due times and attachments work exactly as they do in Tasks.
+  Archive and delete can be undone for a few seconds; notes export as Markdown
+  or JSON. Colours, labels and the archive stay on the device (the server
+  learns nothing new); pins and note order are the Tasks view's own, so they
+  follow your account. Web only — the phone apps do not carry it and the
+  desktop app never opens it. Keep never opens a live connection, so it
+  neither counts as "online" nor interferes with file transfers in the chat
+  app.
+
+### Fixed
+- **Two tabs, one account.** Signing out, or signing in as someone else, in
+  one browser tab of the web app now takes effect in the other tabs on the
+  same origin — before, the other tab kept the previous account's keys in
+  memory until it was reloaded.
+- **Plaintext list titles are flagged.** Keep shows a "Not encrypted" mark on
+  a note whose title the server holds in the clear, the way a checklist item
+  is already flagged.
 
 Security fixes from an outside review: a message that could crash everyone who
 saw it, and four ways a moderator could reach past their rank.

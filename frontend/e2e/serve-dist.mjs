@@ -30,7 +30,11 @@ const server = http.createServer(async (req, res) => {
     // dist/, and this server exists only to be pointed at by a test.
     const rel = normalize(decodeURIComponent(url)).replace(/^([/\\])+/, '');
     if (rel.includes('..')) { res.writeHead(403); return res.end('no'); }
-    for (const candidate of [join(ROOT, rel), join(ROOT, 'index.html')]) {
+    // A directory request (`/keep/`) serves that directory's own index — Púca
+    // Keep is a second page in dist/. Without this candidate the SPA fallback
+    // answered /keep/ with the MAIN app's index, and a Keep walk against the
+    // built bundle would have passed against the wrong page.
+    for (const candidate of [join(ROOT, rel), join(ROOT, rel, 'index.html'), join(ROOT, 'index.html')]) {
         try {
             const body = await readFile(candidate);
             res.writeHead(200, { 'content-type': TYPES[extname(candidate)] || 'application/octet-stream' });

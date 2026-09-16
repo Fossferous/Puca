@@ -63,7 +63,11 @@ chat.example.com {
 app.example.com {
 	root * /opt/puca/webapp
 	encode gzip
-	try_files {path} /index.html
+	# `{path}/` serves a directory's own index — Púca Keep lives at /keep/
+	# (deploy/webapp/README.md). Without it a bare /keep falls through to the
+	# main app's index; deep links inside Keep are hash routes and never reach
+	# the server.
+	try_files {path} {path}/ /index.html
 	file_server
 
 	header {

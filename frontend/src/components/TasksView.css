@@ -291,3 +291,12 @@
     .tasks-add input,
     .tasks-title-input { font-size: 16px; }
 }
+
+/* "Open in Púca Keep" (web only; see keepUrl in TasksView.tsx). A link that
+   dresses as the tab-bar icon button beside New list. */
+.tasks-tab-keep {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+.tasks-tab-keep:hover { text-decoration: none; }

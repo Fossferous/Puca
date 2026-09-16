@@ -16,6 +16,7 @@ import { mobileBatteryStatus, requestIgnoreBatteryOptimizations, setNotifyKeepAl
 import { setPlacesAuthed } from './api/taskPlaces';
 import { resetReconnectCatchup } from './api/reconnectCatchup';
 import { initPushRegistration, teardownPushRegistration } from './api/pushRegistration';
+import { installSessionSync } from './api/sessionSync';
 
 // Module-level: the battery ask spans an async gap, and StrictMode runs the
 // effect twice — a ref would be per-mount, and two mounts must still yield
@@ -113,6 +114,29 @@ function App() {
     // login screen just lands on another login screen.
     navigate('/login', { state: { expired: true }, replace: true });
   }, [navigate]);
+
+  // Another document on this origin (a second Púca tab, or Púca Keep at
+  // /keep/) signed out, soft-expired, or switched accounts. The shared caches
+  // are cleared inside sessionSync; this decides where the user lands. A
+  // sign-out elsewhere follows the soft-expire path — the storage that a full
+  // logout() clears is already gone, and re-running logout() here would try
+  // to revoke this browser's device row with no token (and then scrub its key
+  // as though it had succeeded, which strands the row). A different account
+  // signing in means nothing this document holds is theirs: reload.
+  useEffect(() => installSessionSync({
+    onSignedOut: (reason) => {
+      if (reason === 'logout') {
+        // What handleLogout clears beyond the shared caches: the authed-media
+        // object URLs, the blocked-user set and the reconnect baselines are
+        // all keyed to the account that just signed out elsewhere.
+        clearBlockedUsers();
+        clearFileCache();
+        resetReconnectCatchup();
+      }
+      expireSession();
+    },
+    onAccountChanged: () => window.location.reload(),
+  }), [expireSession]);
 
   // The API client dispatches 'auth-expired' ONCE when an authenticated
   // request 401s. Callers that detect expiry themselves call expireSession

@@ -1,0 +1,182 @@
+/**
+ * Everything the TWO Vite builds share — the main app (vite.config.ts) and
+ * Púca Keep (vite.keep.config.ts).
+ *
+ * WHY KEEP IS A SEPARATE BUILD AND NOT A SECOND `rollupOptions.input`. A
+ * second HTML entry in the main build changes the main bundle in two ways
+ * that break the release path: Rollup names entry chunks after the input
+ * KEY (so `assets/index-*.js`, which deploy/ops/dual-ship.sh and
+ * deploy/ops/check-versions.sh grep for literally, is renamed), and any
+ * module both pages import — api/platform.ts, which carries the baked
+ * VITE_API_URL — is hoisted into a shared chunk, so the entry chunk no
+ * longer names the production API and dual-ship's bundle preflight refuses
+ * to ship. Building Keep on its own, into dist/keep/, leaves the main bundle
+ * byte-for-byte what it was.
+ */
+import { type Plugin } from 'vite'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+// The version lives in tauri.conf.json and NOWHERE else (see CLAUDE.md), so read
+// it from there rather than duplicating it. Injected as a define so the web and
+// mobile builds can report a version without asking Tauri, which does not exist
+// on either.
+export const APP_VERSION: string = JSON.parse(
+  readFileSync(new URL('./src-tauri/tauri.conf.json', import.meta.url), 'utf8'),
+).version
+
+// ---------------------------------------------------------------------------
+// Remote control: present, or physically absent
+//
+// A "lite" build (VITE_ENABLE_RC=false) must not merely hide remote control —
+// the code must not be in the artifact. Gating renders and deferring imports
+// was tried and is NOT sufficient: a chunk that is never fetched is still a
+// chunk that ships, and a single static import from preserved code keeps the
+// whole graph alive regardless of any runtime flag.
+//
+// Three things make it real, and all three are needed:
+//   1. __RC_ENABLED__ is a raw boolean literal, so a gate compiles to
+//      `if (false)` IN THE CONSUMING MODULE and Rollup drops the branch and
+//      the dynamic import edge inside it. Reading a const from another module
+//      folds too, but only after cross-module analysis — this does not rely on
+//      that inference.
+//   2. Two aliases swap the always-mounted RC surface for real stand-ins
+//      (RcGlobals.lite, remoteControl.lite), so the originals never enter the
+//      module graph at all.
+//   3. rcExclusionGuard() FAILS THE BUILD if any RC module got in anyway.
+//      Without it, a future static import would quietly restore the code and
+//      the build would still look green.
+// ---------------------------------------------------------------------------
+export const RC_ENABLED = process.env.VITE_ENABLE_RC !== 'false'
+
+export const src = (p: string) => fileURLToPath(new URL('./src/' + p, import.meta.url))
+
+/**
+ * Module ids that must never appear in a lite bundle.
+ *
+ * Directory-level for api/devices (everything shared has been moved out of it:
+ * pagePainting, thisDevice, deviceIdentity/*, androidStorage, logoutHooks,
+ * rmoveScale) plus the RC-only components and the real remoteControl module.
+ *
+ * Matched against resolved ids, so it catches a module reached by any path —
+ * a re-export, a dynamic import, or an alias someone adds later.
+ */
+export const RC_MODULE_PATTERNS: RegExp[] = [
+  /[\\/]src[\\/]api[\\/]devices[\\/]/,
+  /[\\/]src[\\/]api[\\/]remoteControl\.ts$/,
+  // The P2P input lanes (remote-control frames over the call's own data
+  // channels). Inert without remote control, but inert is not excluded.
+  /[\\/]src[\\/]api[\\/]rtc[\\/]controlDc\.ts$/,
+  /[\\/]src[\\/]components[\\/]RcGlobals\.tsx$/,
+  // Device* components. DELIBERATELY a prefix match on DeviceStage rather than
+  // an enumeration: the first version listed `Stage|StageMobile\w*|…` and so
+  // missed DeviceStageVirtualMouse.tsx — the phone's virtual mouse pad, which
+  // is remote-control code. It happened not to ship (DeviceStage imports it and
+  // that is excluded), so the gap was invisible; the backstop would have missed
+  // it the moment anything preserved imported it. RcGlobals.lite.tsx is
+  // excluded from this by the `s` in the alternation never matching it.
+  /[\\/]src[\\/]components[\\/]DeviceStage\w*\.tsx$/,
+  /[\\/]src[\\/]components[\\/]Device(sView|FileBrowser|FileManager|Downloads|ShareModal)\.tsx$/,
+  /[\\/]src[\\/]components[\\/](RemoteControlOverlay|HostConsentPrompt|HostFilesIndicator|FileAccessPrompt|UnattendedPassphrasePrompt|ServiceUpdateBanner)\.tsx$/,
+  /[\\/]src[\\/]components[\\/]device(AutoKeyboard|StageStall)\.ts$/,
+]
+
+// SHARED DESPITE THE NAME — do not add these to the list above.
+//
+// deviceStageResume.ts and deviceZoomFollow.ts are named for the remote-control
+// stage they were written for, but both are pure leaf modules (zero imports)
+// holding generic logic that preserved features depend on:
+//   - deviceStageResume: re-plays a <video> that the OS paused when the app was
+//     backgrounded. VoiceStage, StreamStage, StreamPip and StreamDocPipWindow
+//     all use it for ORDINARY voice screen shares.
+//   - deviceZoomFollow: zoom/pan geometry, reused by ImageLightbox and
+//     imageZoom for pinch-zooming a picture in chat.
+// Excluding them broke the lite build here, which is how they were found.
+
+/**
+ * Fail the lite build if remote-control code entered the module graph.
+ *
+ * This is the backstop that turns "we believe it tree-shook" into "the build
+ * fails if it did not". It reports EVERY offending module and who pulled it
+ * in, because the fix is always at the importer, not the imported file.
+ */
+export function rcExclusionGuard(): Plugin {
+  const seen = new Set<string>()
+  return {
+    name: 'rc-exclusion-guard',
+    apply: 'build',
+    moduleParsed(info) {
+      if (RC_MODULE_PATTERNS.some(re => re.test(info.id))) seen.add(info.id)
+    },
+    generateBundle() {
+      // Importers are resolved late, so they are read HERE rather than in
+      // moduleParsed — where the list is still empty and every offender looks
+      // like a graph entry point, which hides the one thing needed to fix it.
+      const offenders = new Map<string, string[]>()
+      for (const id of seen) {
+        const info = this.getModuleInfo(id)
+        offenders.set(id, [
+          ...(info?.importers ?? []),
+          ...(info?.dynamicImporters ?? []).map(i => i + '  (dynamic)'),
+        ])
+      }
+      if (offenders.size === 0) return
+      const lines = [...offenders.entries()].map(([id, who]) => {
+        const importers = who.filter(Boolean)
+        return `  ${id}\n` + (importers.length
+          ? importers.map(i => `      imported by ${i}`).join('\n')
+          : '      (entry / no recorded importer)')
+      })
+      this.error(
+        'rc-exclusion-guard: this is a lite build (VITE_ENABLE_RC=false) but '
+        + `${offenders.size} remote-control module(s) are still in the graph, so they `
+        + 'would ship in the bundle:\n' + lines.join('\n')
+        + '\n\nFix the IMPORTER: gate it behind __RC_ENABLED__, move the shared '
+        + 'helper it needs out of api/devices/, or add an alias in vite.shared.ts.',
+      )
+    },
+  }
+}
+
+/** The lite build's stand-in aliases; empty when remote control is in. */
+export const liteAliases = RC_ENABLED ? [] : [
+  // Swap the always-mounted RC surface for stand-ins that render nothing
+  // and offer no control. Both are REAL modules with the same exported
+  // shape, never empty stubs: an empty module makes the component
+  // undefined and React throws at render.
+  { find: /^\.\/components\/RcGlobals$/, replacement: src('components/RcGlobals.lite.tsx') },
+  { find: /^(\.\.?\/)+api\/remoteControl$/, replacement: src('api/remoteControl.lite.ts') },
+  // The voice managers import the control-lane registry statically; its
+  // callers are gated behind __RC_ENABLED__, and this keeps the real
+  // module out of the graph regardless of what Rollup decides about its
+  // module-level state.
+  { find: /^(\.\/controlDc|(\.\.\/)+api\/rtc\/controlDc)$/, replacement: src('api/rtc/controlDc.lite.ts') },
+]
+
+/** The two compile-time literals every build injects. */
+export const defineFlags = {
+  __APP_VERSION__: JSON.stringify(APP_VERSION),
+  // A literal, so every `if (__RC_ENABLED__)` folds in place. See above.
+  __RC_ENABLED__: JSON.stringify(RC_ENABLED),
+}
+
+/**
+ * Split large third-party libraries into their own cached chunks so the
+ * main app bundle stays small and vendor code isn't re-downloaded on every
+ * app change. Function form so sub-path imports (e.g. @noble/hashes/pbkdf2)
+ * are matched too — the object form only matches bare package entry points.
+ */
+export function vendorChunks(id: string): string | undefined {
+  if (!id.includes('node_modules')) return
+  if (id.includes('@noble')) return 'crypto-vendor'
+  if (id.includes('@tanstack')) return 'query-vendor'
+  // NOT the e2ee worker chunk — Vite emits that separately via the
+  // `?worker` import; this only splits the main-thread SDK.
+  if (id.includes('livekit-client')) return 'livekit-vendor'
+  if (
+    id.includes('/react-router') ||
+    id.includes('/react-dom/') ||
+    id.includes('/react/') ||
+    id.includes('/scheduler/')
+  ) return 'react-vendor'
+}

@@ -489,6 +489,25 @@ export const GridIcon = makeIcon('GridIcon', <>
     <rect x="13.25" y="13.25" width="7.5" height="7.5" rx="1.5" />
 </>);
 
+/** The single-column counterpart of GridIcon — Keep's grid/list layout
+ *  toggle. Two full-width rows on the same keyline as the grid's tiles.
+ *  Deliberately NOT ChannelsIcon (dots + lines): that one means "the channel
+ *  list", and this toggle is about layout, not channels. No LEGACY_GLYPHS
+ *  entry: a brand-new icon has no classic form. */
+export const ListLayoutIcon = makeIcon('ListLayoutIcon', <>
+    <rect x="3.25" y="3.25" width="17.5" height="7.5" rx="1.5" />
+    <rect x="3.25" y="13.25" width="17.5" height="7.5" rx="1.5" />
+</>);
+
+/** Open the navigation drawer (Keep on a phone). Three full-width lines —
+ *  the rail's own rows, not ChannelsIcon's dotted channel list. No legacy
+ *  glyph: nothing shipped this control before. */
+export const MenuIcon = makeIcon('MenuIcon', <>
+    <path d="M3.75 6.5h16.5" />
+    <path d="M3.75 12h16.5" />
+    <path d="M3.75 17.5h16.5" />
+</>);
+
 export const FlipCameraIcon = makeIcon('FlipCameraIcon', <>
     <path d="M10.75 19.25H4.75a1.75 1.75 0 0 1-1.75-1.75v-11A1.75 1.75 0 0 1 4.75 4.75h4.5" />
     <path d="M13.25 4.75h6a1.75 1.75 0 0 1 1.75 1.75v11a1.75 1.75 0 0 1-1.75 1.75h-4.5" />
@@ -801,6 +820,16 @@ export const InboxIcon = makeIcon('InboxIcon', <>
     <path d="M12 3.75v9.5" />
     <path d="m8.25 9.5 3.75 3.75 3.75-3.75" />
     <path d="M3.5 14.25h4.25l1.25 2.5h6l1.25-2.5h4.25v4.25a1.75 1.75 0 0 1-1.75 1.75H5.25a1.75 1.75 0 0 1-1.75-1.75Z" />
+</>);
+
+/** Archive / unarchive a Keep note: a lidded box on the landscape keyline
+ *  (InboxIcon is a tray with an incoming arrow — a different meaning). One
+ *  icon for both directions; the control's label says which. No legacy
+ *  glyph: the control is new. */
+export const ArchiveIcon = makeIcon('ArchiveIcon', <>
+    <rect x="3.25" y="4" width="17.5" height="4.5" rx="1.25" />
+    <path d="M5 8.5v10a1.75 1.75 0 0 0 1.75 1.75h10.5A1.75 1.75 0 0 0 19 18.5v-10" />
+    <path d="M10 13h4" />
 </>);
 
 export const OutboxIcon = makeIcon('OutboxIcon', <>
@@ -1131,6 +1160,7 @@ export const ICONS = {
     'screen-share': ScreenShareIcon,
     monitor: MonitorIcon,
     screen: ScreenIcon,
+    'pop-out': PopOutIcon,
     laptop: LaptopIcon,
     phone: PhoneIcon,
     terminal: TerminalIcon,
@@ -1194,6 +1224,7 @@ export const ICONS = {
     outbox: OutboxIcon,
     mail: MailIcon,
     'mail-open': MailOpenIcon,
+    archive: ArchiveIcon,
 
     // status
     check: CheckIcon,
@@ -1227,6 +1258,8 @@ export const ICONS = {
     more: MoreIcon,
     'more-vertical': MoreVerticalIcon,
     grip: GripIcon,
+    'list-layout': ListLayoutIcon,
+    menu: MenuIcon,
 
     // settings sections, templates, emoji-picker categories
     palette: PaletteIcon,

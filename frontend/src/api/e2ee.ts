@@ -1528,6 +1528,28 @@ export function liveEncState(wire: string, decrypted: string, conversationEncryp
 const SEED_STORAGE_KEY = 'e2ee_seed_v2';
 
 let currentIdentity: Identity | null = null;
+/** The stored seed the memo was built from — what a re-validation compares. */
+let currentSeedB64: string | null = null;
+/**
+ * Set when ANOTHER document on this origin wrote or removed the stored seed
+ * (the `storage` event fires only for changes made elsewhere — never for this
+ * document's own writes, which go through set/clear below and keep the memo
+ * in step). The memo is re-read from storage on the next getActiveIdentity().
+ *
+ * WHY. Púca Keep (/keep/) is a second document on the web app's origin, so a
+ * sign-out or an account switch in the Púca tab used to leave an OPEN Keep tab
+ * holding the previous identity in this module variable — and sealing new
+ * notes under it, with the new account's token. A personal list has no edit
+ * history, so a note sealed to the wrong identity is unreadable for good.
+ * getToken() re-reads storage on every call; this makes the identity do the
+ * same, but only once something outside this document has changed it.
+ */
+let seedMaybeStale = false;
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('storage', e => {
+        if (e.key === null || e.key === SEED_STORAGE_KEY) seedMaybeStale = true;
+    });
+}
 
 function identityFromSeed(seed: Uint8Array): Identity {
     const publicKey = x25519.getPublicKey(seed);
@@ -1537,8 +1559,10 @@ function identityFromSeed(seed: Uint8Array): Identity {
 /** Set the active identity and persist its seed for this device. */
 export function setActiveIdentity(identity: Identity): void {
     currentIdentity = identity;
+    currentSeedB64 = toBase64(identity.privateKey);
+    seedMaybeStale = false;
     try {
-        localStorage.setItem(SEED_STORAGE_KEY, toBase64(identity.privateKey));
+        localStorage.setItem(SEED_STORAGE_KEY, currentSeedB64);
     } catch {
         // storage may be unavailable (private mode); keep in-memory only
     }
@@ -1548,13 +1572,23 @@ export function setActiveIdentity(identity: Identity): void {
  * Return the active identity, reconstructing it from the persisted seed if this
  * is a fresh page load. Returns null if the user has no stored identity (e.g.
  * logged in before E2EE existed, or on a device that never derived keys).
+ *
+ * After another document changed the stored seed (see seedMaybeStale) the memo
+ * is checked against storage first: a seed that vanished means a sign-out
+ * elsewhere (null from here on), a different seed means another account signed
+ * in (that identity from here on).
  */
 export function getActiveIdentity(): Identity | null {
-    if (currentIdentity) return currentIdentity;
+    if (currentIdentity && !seedMaybeStale) return currentIdentity;
     try {
         const stored = localStorage.getItem(SEED_STORAGE_KEY);
+        seedMaybeStale = false;
+        if (currentIdentity && stored === currentSeedB64) return currentIdentity;
+        currentIdentity = null;
+        currentSeedB64 = null;
         if (!stored) return null;
         currentIdentity = identityFromSeed(fromBase64(stored));
+        currentSeedB64 = stored;
         return currentIdentity;
     } catch {
         return null;
@@ -1661,6 +1695,8 @@ export async function openDeviceLan(identity: Identity, blob: string): Promise<s
 /** Clear identity material (on logout). */
 export function clearActiveIdentity(): void {
     currentIdentity = null;
+    currentSeedB64 = null;
+    seedMaybeStale = false;
     try {
         localStorage.removeItem(SEED_STORAGE_KEY);
     } catch {
