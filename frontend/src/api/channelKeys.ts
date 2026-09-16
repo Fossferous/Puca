@@ -45,6 +45,16 @@ interface ChannelKeyState {
      *  Distinct from "no current row for us", which stays a can't-send-yet
      *  (returns null). */
     currentRefusedUnverifiable?: boolean;
+    /** The server named an epoch BELOW this device's floor and we hold no
+     *  trusted key that reaches the floor. Readable, never encrypted under:
+     *  ensureChannelKey rotates to a fresh epoch instead, so a replayed
+     *  superseded epoch cannot put us back on a key an ejected member holds
+     *  (audit C-01). */
+    rolledBack?: boolean;
+    /** Epochs whose wrapper attributed as `trusted` on THIS load. Used to pick
+     *  the highest epoch we may treat as current when the server rolls back,
+     *  and to refuse adopting an unattributed key after a 409. */
+    trustedEpochs?: Set<number>;
 }
 
 interface ServerKeysResponse {
@@ -183,6 +193,7 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
 
     const resp: ServerKeysResponse = await apiClient.get(`/channels/${channelId}/keys`);
     let currentRefusedUnverifiable = false;
+    const trustedEpochs = new Set<number>();
 
     // Member keys, fetched at most ONCE per load and only if some row actually
     // needs first-contact attribution (step 5 above). A failure leaves the map
@@ -229,11 +240,16 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
             continue;
         }
 
-        // Only the CURRENT epoch can be encrypted under, so only it needs the
-        // wrapper attributed - which keeps the member-keys lookup off the path
-        // for the long tail of historical rows a busy channel accumulates.
-        // Older rows are read on the strength of the conflict check above.
-        if (row.epoch >= resp.current_epoch) {
+        // Only an epoch that could BECOME current needs its wrapper attributed
+        // - which keeps the member-keys lookup off the path for the long tail
+        // of historical rows a busy channel accumulates. Older rows are read on
+        // the strength of the conflict check above.
+        //
+        // "Could become current" is not just `resp.current_epoch`: when the
+        // server names an epoch BELOW this device's floor, the floor logic below
+        // looks for the highest epoch we hold AND trust, so attribution has to
+        // have run down to the floor too (audit C-01).
+        if (row.epoch >= Math.min(resp.current_epoch, epochFloor(channelId))) {
             const trust = await attributeWrapper(channelId, row, identity, memberKeys);
             if (trust === 'conflict') {
                 console.warn(
@@ -242,6 +258,7 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
                 );
                 continue;
             }
+            if (trust === 'trusted') trustedEpochs.add(row.epoch);
             if (trust === 'unverifiable') {
                 if (row.epoch === resp.current_epoch) currentRefusedUnverifiable = true;
                 console.warn(
@@ -300,18 +317,52 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
     // still encrypt under it, otherwise take the server's word and say so.
     const floor = epochFloor(channelId);
     let currentEpoch = resp.current_epoch;
+    let rolledBack = false;
     if (resp.current_epoch < floor) {
-        if (keys.has(floor)) {
-            currentEpoch = floor;
+        // The highest epoch we HOLD and have ATTRIBUTED, not `keys.has(floor)`.
+        // Testing the exact floor value was too narrow: a server that withheld
+        // only the floor row - while serving every epoch beneath it - failed
+        // that test and fell into the "accepting" branch below, rolling the
+        // device all the way back (audit C-01).
+        const bestHeld = Math.max(0, ...[...keys.keys()].filter((e) => trustedEpochs.has(e)));
+        if (bestHeld > currentEpoch) currentEpoch = bestHeld;
+        if (currentEpoch < floor) {
+            // We cannot reach the floor with key material we trust. The old
+            // code took the server's word here and encrypted under the lower
+            // epoch, which is precisely the key an ejected member still holds:
+            // rotation is the ONE mechanism that removes their future read
+            // access, and letting the party being defended against choose the
+            // epoch number undoes it.
+            //
+            // Clamping instead is what a first cut did, and it BRICKED the
+            // channel: with currentEpoch above anything in `keys`,
+            // ensureChannelKey matched no branch and returned null forever,
+            // which a purge or a restore from an older backup reaches
+            // legitimately - and a permanent refusal to send is exactly the
+            // denial of service a hostile server wants.
+            //
+            // So: neither accept nor clamp. ROTATE. ensureChannelKey mints a
+            // fresh epoch and sends under key material nobody else can hold.
+            // The floor stays strictly monotonic (never re-based downwards):
+            // lowering it to a freshly minted epoch would put every epoch above
+            // it back in "acceptable" range, and a genuine older row replayed
+            // at one of those epochs would then be adopted - the same rollback
+            // in two rounds instead of one.
+            //
+            // A genuine restore converges: each send mints floor-gap+1 at most
+            // one epoch higher, so the channel climbs back to the floor in a
+            // bounded number of rotations and then stops.
+            rolledBack = true;
             console.warn(
-                `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch} but this device ` +
-                `already holds ${floor} — staying on ${floor} (rotation must not go backwards)`,
+                `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch}, below the ${floor} ` +
+                `this device has seen, and no trusted key at or above ${floor} is held — rotating to a fresh ` +
+                `epoch rather than encrypting under it. Expected after a server-side key purge or restore; ` +
+                `suspicious otherwise.`,
             );
         } else {
             console.warn(
-                `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch}, below the ${floor} ` +
-                `this device has seen, and no key for ${floor} is held — accepting ${resp.current_epoch}. ` +
-                `Expected after a server-side key purge or restore; suspicious otherwise.`,
+                `[e2ee] channel ${channelId}: server offered epoch ${resp.current_epoch} but this device ` +
+                `already holds ${currentEpoch} — staying on ${currentEpoch} (rotation must not go backwards)`,
             );
         }
     } else if (resp.current_epoch > floor) {
@@ -324,6 +375,8 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         epochGeneration: resp.epoch_generation ?? 0,
         keys,
         currentRefusedUnverifiable,
+        rolledBack,
+        trustedEpochs,
     };
 }
 
@@ -387,7 +440,25 @@ async function mintEpoch(
         if (statusOf(e) === 409) {
             console.debug(`[e2ee] mintEpoch(${channelId}) epoch=${epoch}: lost the race, adopting winner's key`);
             const fresh = await getState(channelId, true);
-            return fresh.keys.get(epoch) ?? null;
+            const adopted = fresh.keys.get(epoch);
+            // ATTRIBUTE the winner before adopting. `keys` deliberately holds
+            // rows that are readable but unattributed, and this branch used to
+            // return whichever one sat at the target epoch - bypassing the
+            // rotate-away-from-an-unverifiable-key rule entirely, because that
+            // decision had been made on the PRE-mint state. Worse, the rotation
+            // target is derived from the server's own `max_epoch`, so a server
+            // that under-reports it steers us onto an epoch that already
+            // exists, answers 409, and hands back a replayed old key (audit
+            // C-01). Refusing here just means "can't send this round"; the next
+            // ensureChannelKey retries.
+            if (adopted && !fresh.trustedEpochs?.has(epoch)) {
+                console.warn(
+                    `[e2ee] mintEpoch(${channelId}) epoch=${epoch}: refusing to adopt the winner's key — ` +
+                    `its wrapper could not be attributed to a published member`,
+                );
+                return null;
+            }
+            return adopted ?? null;
         }
         throw e;
     }
@@ -480,14 +551,22 @@ export async function ensureChannelKey(
 
     const held = state.keys.get(state.currentEpoch);
 
-    // The current epoch's key is UNVERIFIABLE (null wrapper — see loadKeys). We
-    // now hold it for READING, so this check MUST come before the held-key fast
-    // path below, or we would encrypt under a key we cannot attribute. Rotate to
-    // a fresh epoch we minted instead: that unblocks a genuine pre-037 legacy
-    // channel and moves an attacked one off a forged key, without ever sending
-    // under it. Convergent — the new epoch carries our own id, so the next load
-    // pins it and stops rotating. Historical epochs stay readable throughout.
-    if (state.currentRefusedUnverifiable) {
+    // The current epoch cannot be SENT under, for either of two reasons, and
+    // both are handled the same way: rotate to a fresh epoch we mint ourselves.
+    //
+    //  - UNVERIFIABLE: its wrapper could not be attributed (a null-wrapper
+    //    legacy row, or an identity we have no pin for that the server does not
+    //    publish as a member). We hold it for READING.
+    //  - ROLLED BACK: the server named an epoch below this device's floor and we
+    //    hold no trusted key that reaches the floor, so sending under it would
+    //    put us back on key material an ejected member may still hold (C-01).
+    //
+    // This MUST come before the held-key fast path below, or we would encrypt
+    // under exactly the key we just refused. Rotating unblocks a genuine legacy
+    // or restored channel and moves an attacked one off the suspect key without
+    // ever sending under it. Convergent — the new epoch carries our own id, so
+    // the next load pins it and stops rotating. Historical epochs stay readable.
+    if (state.currentRefusedUnverifiable || state.rolledBack) {
         const newEpoch = nextEpoch(state);
         const key = await mintEpoch(channelId, newEpoch, state.currentGeneration);
         if (!key) return null; // e.g. no member keys yet — can't send this round
@@ -515,8 +594,20 @@ export async function ensureChannelKey(
         const newEpoch = nextEpoch(state);
         const key = await mintEpoch(channelId, newEpoch, state.currentGeneration);
         if (!key) {
-            // Couldn't rotate (e.g. no members with keys); keep using current.
-            return { epoch: state.currentEpoch, key: held };
+            // FAIL CLOSED. This used to keep using the current key, which is the
+            // very key the departed member holds — and the failure is
+            // server-triggerable: mintEpoch returns null when /member-keys comes
+            // back empty, or when every served member key is dropped for
+            // differing from its pinned value. A server that suppressed that one
+            // response silently disabled rotation for good while continuing to
+            // report "membership changed" (audit C-01). Refusing costs one
+            // send, which the caller surfaces as "try again in a moment"; the
+            // next attempt retries the rotation.
+            console.warn(
+                `[e2ee] channel ${channelId}: membership changed but the rotation could not be minted — ` +
+                `refusing to send under the superseded epoch ${state.currentEpoch}`,
+            );
+            return null;
         }
         const newKeys = new Map(state.keys);
         newKeys.set(newEpoch, key);
