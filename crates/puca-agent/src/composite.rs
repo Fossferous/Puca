@@ -122,19 +122,52 @@ pub(crate) fn downscale_into(
         out.clear();
         out.resize(len, 0);
     }
-    paste_tile_raw(
-        out,
-        out_w as usize,
-        out_h as usize,
-        step as usize,
-        0,
-        0,
-        width as usize,
-        height as usize,
-        stride,
-        bgra,
-    );
+    if step == 2 {
+        downscale_2x(out, out_w as usize, out_h as usize, stride, bgra);
+    } else {
+        paste_tile_raw(
+            out,
+            out_w as usize,
+            out_h as usize,
+            step as usize,
+            0,
+            0,
+            width as usize,
+            height as usize,
+            stride,
+            bgra,
+        );
+    }
     Some((out_w, out_h, out_w as usize * 4))
+}
+
+/// The step-2 box average, which is nearly every fit there is (a phone held
+/// sideways against a 1440p or 4K monitor), written so the inner loop has no
+/// bounds checks: each source row pair and each output row are sliced once,
+/// and `chunks_exact` lets the compiler vectorise the sums. Measured on the
+/// owner's desktop against `paste_tile_raw`'s general loop at 1440x2560:
+/// 5.6 ms a frame before, see `bench_fit_step2_1440x2560` for after. Byte-
+/// identical to the general path (pinned by a test), so it is a speed-up and
+/// not a second definition of the average.
+///
+/// The caller has checked that `stride >= width * 4` and that `bgra` holds
+/// `stride * height` bytes, and `out_w * 2 <= width`, `out_h * 2 <= height`
+/// by construction, so every slice below is in range.
+fn downscale_2x(out: &mut [u8], out_w: usize, out_h: usize, stride: usize, bgra: &[u8]) {
+    let src_row_bytes = out_w * 8;
+    for row in 0..out_h {
+        let top = row * 2 * stride;
+        let a = &bgra[top..top + src_row_bytes];
+        let b = &bgra[top + stride..top + stride + src_row_bytes];
+        let dst = &mut out[row * out_w * 4..(row + 1) * out_w * 4];
+        for ((d, p), q) in dst.chunks_exact_mut(4).zip(a.chunks_exact(8)).zip(b.chunks_exact(8)) {
+            d[0] = ((p[0] as u16 + p[4] as u16 + q[0] as u16 + q[4] as u16) / 4) as u8;
+            d[1] = ((p[1] as u16 + p[5] as u16 + q[1] as u16 + q[5] as u16) / 4) as u8;
+            d[2] = ((p[2] as u16 + p[6] as u16 + q[2] as u16 + q[6] as u16) / 4) as u8;
+            // Opaque: the picture never carries meaningful alpha.
+            d[3] = 255;
+        }
+    }
 }
 
 /// How long a different step must hold before it is applied.
@@ -1184,6 +1217,31 @@ mod tests {
             fast.note_cost(ms(7), 60);
         }
         assert!(fast.is_disabled());
+    }
+
+    /// The step-2 fast path is a SPEED-UP of the general loop, not a second
+    /// definition of the average: on a picture with every channel varying
+    /// per pixel, and with padding in the stride, both must agree byte for
+    /// byte. (The general path is called directly with the tile pasting
+    /// machinery, exactly as downscale_into did before the fast path.)
+    #[test]
+    fn the_step_two_fast_path_matches_the_general_box_average_byte_for_byte() {
+        let (w, h, stride) = (646usize, 330usize, 646 * 4 + 32);
+        let mut bgra = vec![0u8; stride * h];
+        let mut x: u32 = 0x2545_F491;
+        for byte in bgra.iter_mut() {
+            // xorshift32: deterministic, every channel different.
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *byte = (x >> 24) as u8;
+        }
+        let mut fast = Vec::new();
+        let (ow, oh, ostride) = downscale_into(&mut fast, 2, w as u32, h as u32, stride, &bgra).expect("fits");
+        let mut general = vec![0u8; ow as usize * oh as usize * 4];
+        paste_tile_raw(&mut general, ow as usize, oh as usize, 2, 0, 0, w, h, stride, &bgra);
+        assert_eq!((ow, oh, ostride), (322, 164, 322 * 4));
+        assert_eq!(fast, general, "the fast path drifted from the general average");
     }
 
     /// Not a test — a measurement, so the cost guard's budget is set against a
