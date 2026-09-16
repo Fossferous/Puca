@@ -133,8 +133,8 @@ holds its default route, so on a current host this should read direct. If it
 still relays, the usual cause is a VPN on the *phone* or a guest Wi-Fi that
 isolates clients; turning it off for the session is the quickest test.
 
-**`frameSize`** is what the host is sending. Since the release after 0.9.812
-the viewer tells the host how large it is showing the picture, and the host
+**`frameSize`** is what the host is sending. Since 0.9.813 the viewer
+tells the host how large it is showing the picture, and the host
 scales the picture down to fit before encoding — a 1440x2560 monitor viewed on
 a phone held sideways arrives as 720x1280, a quarter of the pixels to decode
 and to send, and the same picture on screen. Pinch to zoom and the detail comes

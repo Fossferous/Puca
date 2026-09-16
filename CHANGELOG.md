@@ -4,7 +4,11 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.813 — 2026-09-16
+
+Remote control sends only the pixels your screen can show, screen sharing uses
+the hardware encoder it always had, and the Wake button no longer dies a month
+after it is set up.
 
 ### Changed
 - **Remote control sends only as many pixels as your screen can show.** The
