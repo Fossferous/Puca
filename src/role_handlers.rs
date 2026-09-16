@@ -519,6 +519,16 @@ pub async fn assign_role(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_ROLES permission").into_response();
     }
 
+    // Canonicalize the path id BEFORE the self-target comparison below.
+    // Path<i64> accepts 2^32 + N, and `user_id as i32` at the INSERT wrapped
+    // that back onto row N: the guard compared the WIDE value (unequal to
+    // claims.sub), the write landed on the caller's own row, and "Cannot change
+    // your own roles" was a formality (0.9.810 audit, C-03). path_user_id
+    // refuses anything outside INT4 exactly like an unallocated id.
+    let Some(target_user) = crate::handlers::path_user_id(user_id) else {
+        return (StatusCode::NOT_FOUND, "User not found").into_response();
+    };
+
     // C2(a): the role MUST belong to THIS server. Without this check a member of
     // server B could insert member_roles(server=B, role=<A's admin role>) and, via
     // the permission query, inherit server A's admin bits (cross-server priv-esc).
@@ -546,8 +556,27 @@ pub async fn assign_role(
     // holder who could hand THEMSELVES such a role would open a channel the
     // owner hid from them; the same applies to stripping their own deny role
     // (remove_role). Assigning to other members keeps the usual semantics.
-    if user_id == claims.sub && !authority.is_privileged() {
+    if i64::from(target_user) == claims.sub && !authority.is_privileged() {
         return (StatusCode::FORBIDDEN, "Cannot change your own roles").into_response();
+    }
+    // The TARGET MEMBER's rank, not just the role's position. Both guards below
+    // reason about the ROLE being granted; neither looks at who receives it, so
+    // a position-5 MANAGE_ROLES holder could hand a position-2 role to a
+    // position-9 member or to the owner. With a role that carries a per-channel
+    // deny overwrite that is "blind a senior moderator", and it is the same
+    // authority gap kick/ban/timeout close with can_moderate (0.9.810 audit,
+    // sweep finding beyond C-03). Owner/administrator stay exempt exactly as
+    // they are for the role-position guard below — including the owner's own
+    // self-assign, which can_moderate would otherwise refuse as "target is the
+    // owner".
+    if !authority.is_privileged()
+        && !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "Cannot change the roles of a member ranked at or above you",
+        )
+            .into_response();
     }
     if !authority.is_privileged() {
         if target_position >= authority.highest_position {
@@ -570,7 +599,7 @@ pub async fn assign_role(
         "INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
     )
     .bind(&server_id)
-    .bind(user_id as i32)
+    .bind(target_user)
     .bind(role_id)
     .execute(&state.pool)
     .await;
@@ -599,6 +628,12 @@ pub async fn remove_role(
         return (StatusCode::FORBIDDEN, "Missing MANAGE_ROLES permission").into_response();
     }
 
+    // Same canonicalization as assign_role, for the same alias (C-03): the
+    // self-target guard below must see the id the DELETE will actually hit.
+    let Some(target_user) = crate::handlers::path_user_id(user_id) else {
+        return (StatusCode::NOT_FOUND, "User not found").into_response();
+    };
+
     // Hierarchy guard, mirroring assign_role (H1/M11). GRANTING was gated but
     // REMOVING was not, so a plain MANAGE_ROLES holder could strip a role that
     // outranks their own — demoting co-administrators, or the Owner role. The
@@ -617,8 +652,19 @@ pub async fn remove_role(
     let authority = get_role_authority(&state.pool, &server_id, claims.sub).await;
     // See assign_role: removing your OWN role can drop a deny overwrite and
     // restore VIEW on a channel hidden from you. Owner/administrator only.
-    if user_id == claims.sub && !authority.is_privileged() {
+    if i64::from(target_user) == claims.sub && !authority.is_privileged() {
         return (StatusCode::FORBIDDEN, "Cannot change your own roles").into_response();
+    }
+    // Target-member rank, mirroring assign_role: STRIPPING a role from someone
+    // who outranks you is the same authority gap as granting one to them.
+    if !authority.is_privileged()
+        && !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "Cannot change the roles of a member ranked at or above you",
+        )
+            .into_response();
     }
     if !authority.is_privileged() && target_position >= authority.highest_position {
         return (
@@ -632,7 +678,7 @@ pub async fn remove_role(
         "DELETE FROM member_roles WHERE server_id = $1 AND user_id = $2 AND role_id = $3",
     )
     .bind(&server_id)
-    .bind(user_id as i32)
+    .bind(target_user)
     .bind(role_id)
     .execute(&state.pool)
     .await;

@@ -541,26 +541,26 @@ pub async fn set_member_custom_sounds(
     {
         return (StatusCode::FORBIDDEN, "Missing moderation permission").into_response();
     }
-    // The owner is not moderatable, mirroring kick/ban.
-    let owner: Option<(i32,)> = sqlx::query_as("SELECT owner_id FROM servers WHERE id = $1")
-        .bind(&server_id)
-        .fetch_optional(&state.pool)
-        .await
-        .unwrap_or(None);
-    if owner.map(|(o,)| o as i64) == Some(user_id) {
-        return (StatusCode::FORBIDDEN, "Cannot moderate the server owner").into_response();
+    // Range first (handlers::path_user_id). This handler used to bind the raw
+    // i64 so that `owner_id + 2^32` matched nothing; canonicalizing up front
+    // keeps that property AND gives the hierarchy check below a real id.
+    let Some(target_user) = crate::handlers::path_user_id(user_id) else {
+        return (StatusCode::NOT_FOUND, "Not a member of this server").into_response();
+    };
+    // Full moderation hierarchy, not just "not the owner": a MUTE_MEMBERS
+    // holder could silence the custom sounds of any non-owner ranked above
+    // them, or of an equal-ranked moderator (0.9.810 audit, C-07).
+    // can_moderate refuses the owner as a target (the previous guard), anyone
+    // ranked at or above the actor, and the actor themself.
+    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
+        return (StatusCode::FORBIDDEN, "Cannot moderate a member ranked at or above you").into_response();
     }
     let result = sqlx::query(
         "UPDATE server_members SET custom_sounds_disabled = $1 WHERE server_id = $2 AND user_id = $3"
     )
     .bind(payload.disabled)
     .bind(&server_id)
-    // Bind as i64, NOT `as i32`. Truncation made the owner guard above
-    // bypassable: `owner_id + 2^32` compares unequal to owner_id as an i64,
-    // so the guard passed, but the cast wrapped it back to the owner's id and
-    // the UPDATE hit their row. kick_member/ban_member bind i64 for exactly
-    // this reason — an out-of-range id then matches nothing (404).
-    .bind(user_id)
+    .bind(target_user)
     .execute(&state.pool)
     .await;
     match result {
@@ -595,9 +595,30 @@ pub async fn remove_timeout(
         return (StatusCode::FORBIDDEN, "Missing moderation permission").into_response();
     }
 
+    // Range first, like every other handler that binds a caller-supplied id
+    // (handlers::path_user_id): an INT4 alias must not reach the rank lookup.
+    let Some(target_user) = crate::handlers::path_user_id(user_id) else {
+        return (StatusCode::NOT_FOUND, "Not a member of this server").into_response();
+    };
+
+    // Lifting a timeout is a moderation action on the target exactly like
+    // imposing one, and this handler had NO hierarchy check at all: any
+    // KICK_MEMBERS holder could lift a timeout the owner or an administrator
+    // had imposed on a higher-ranked member — or on THEMSELVES, because a
+    // timeout blocks sending, not API calls (0.9.810 audit, C-05). Same rule
+    // as timeout_member: can_moderate refuses the owner as a target, anyone
+    // ranked at or above the actor, and the actor themself.
+    if !crate::permissions::can_moderate(&state.pool, &server_id, claims.sub, i64::from(target_user)).await {
+        return (
+            StatusCode::FORBIDDEN,
+            "Cannot lift the timeout of a member ranked at or above you",
+        )
+            .into_response();
+    }
+
     let result = sqlx::query("DELETE FROM member_timeouts WHERE server_id = $1 AND user_id = $2")
         .bind(&server_id)
-        .bind(user_id)
+        .bind(target_user)
         .execute(&state.pool)
         .await;
 
