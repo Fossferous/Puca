@@ -406,6 +406,22 @@ if (signingConfig(process.env)) {
 // The cargo flags go LAST, after `--`, once all --config args are in place.
 if (cargoPassthrough.length) args.push('--', ...cargoPassthrough);
 
+// Clear the previous build's sidecar copies FIRST, so the presence check after
+// the build proves THIS build staged them. tauri-build copies only the binaries
+// still listed in externalBin (remove_file + copy per listed entry) and never
+// touches a copy whose entry was dropped from the list, and nothing else in
+// this repo cleans target/release — so on the release machine, which has
+// built Full before, a stale puca-agent.exe would satisfy an existence check
+// forever. That is the exact failure the check exists for. Lite is left alone
+// here too: it does not list them, so their absence afterwards means nothing.
+const SIDECARS = ['puca-agent.exe', 'puca-service.exe'];
+const sidecarOutDir = join(tauriDir, 'target', 'release');
+if (!isLite && process.platform === 'win32') {
+    for (const f of SIDECARS) {
+        try { rmSync(join(sidecarOutDir, f), { force: true }); } catch { /* absent, or locked: the check below decides */ }
+    }
+}
+
 console.log(`[tauri-build] tauri build ${args.join(' ')}`);
 const r = spawnSync('npx', ['tauri', 'build', ...args], {
     stdio: 'inherit',
@@ -434,13 +450,14 @@ if (mergedDir) {
 // has no sidecars by design, and a previous Full build may have left copies
 // in the same target directory, so their presence there proves nothing.
 if ((r.status ?? 1) === 0 && !isLite && process.platform === 'win32') {
-    const outDir = join(tauriDir, 'target', 'release');
-    const missing = ['puca-agent.exe', 'puca-service.exe'].filter(f => !existsSync(join(outDir, f)));
+    // Meaningful only because the copies were removed before the build above.
+    const missing = SIDECARS.filter(f => !existsSync(join(sidecarOutDir, f)));
     if (missing.length) {
-        console.error(`[tauri-build] FULL build finished without ${missing.join(' and ')} in ${outDir} — `
-            + 'the installer would ship no capture agent. Check bundle.externalBin and scripts/build-agent.mjs.');
+        console.error(`[tauri-build] FULL build finished without ${missing.join(' and ')} in ${sidecarOutDir} — `
+            + 'the installer would ship no capture agent. Check bundle.externalBin (tauri.windows.conf.json '
+            + 'replaces the base list on Windows) and scripts/build-agent.mjs.');
         process.exit(1);
     }
-    console.log(`[tauri-build] sidecars present beside the app in ${outDir}: puca-agent.exe puca-service.exe`);
+    console.log(`[tauri-build] this build staged the sidecars beside the app in ${sidecarOutDir}: ${SIDECARS.join(' ')}`);
 }
 process.exit(r.status ?? 1);

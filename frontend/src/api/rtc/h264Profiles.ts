@@ -41,13 +41,23 @@
  * THE FIX is the one thing the client controls: the ORDER of the offer. Put
  * the profiles a hardware encoder can take first — High, then Main, then
  * Baseline, mode 1 — and the server's answer leads with High. Nothing is
- * removed: 42e01f and everything else follow in their original order, so a
- * machine with no hardware encoder (whose sender capabilities never contain a
- * High entry — OpenH264 encodes only Baseline, Constrained Baseline and Main)
- * negotiates exactly what it does today. Retransmission and FEC entries
- * (rtx/red/ulpfec/flexfec) ride along untouched; dropping them from a
- * preference list silently disables NACK-based recovery, which is the kind of
- * regression no test here would notice.
+ * removed: 42e01f and everything else follow in their original order.
+ * Retransmission and FEC entries (rtx/red/ulpfec/flexfec) ride along
+ * untouched; dropping them from a preference list silently disables
+ * NACK-based recovery, which is the kind of regression no test here would
+ * notice.
+ *
+ * TWO QUESTIONS, KEPT APART. "Which entries should lead the offer" is the
+ * ranking above, and Baseline and Main are in it because a hardware factory
+ * claims them. "Does THIS machine have a hardware encoder" is a different
+ * question, and Baseline/Main cannot answer it: OpenH264 advertises
+ * 42001f and 4d001f too. The one entry software never advertises is High
+ * (OpenH264 encodes only Baseline, Constrained Baseline and Main), so a High
+ * entry in the SENDER capabilities is the presence test — `hasHardwareH264`.
+ * The reorder is applied only when it passes; a software-only machine's offer
+ * is left exactly as the browser built it, and the diagnostics say "no". (The
+ * first cut conflated the two, so every machine read as hardware-eligible and
+ * the "leave it alone" branch could never run; the review caught it.)
  *
  * Every viewer decodes High: Chromium's D3D11 decoder, Android MediaCodec and
  * every hardware decoder since 2008 do, and the server forwards the
@@ -107,8 +117,22 @@ export function hardwareH264Rank(codec: CodecLike): number | null {
     return null;
 }
 
+/** Ranked for the ORDER of the offer. Not a statement about this machine:
+ *  OpenH264 advertises Baseline and Main too — see `hasHardwareH264`. */
 export function isHardwareEligibleH264(codec: CodecLike): boolean {
     return hardwareH264Rank(codec) !== null;
+}
+
+/**
+ * Does this SENDER list come from a machine with a hardware H.264 encoder?
+ * Decided by a High entry (`64` with profile_iop `00`, mode 1): the one
+ * entry the MediaFoundation factory adds that Chromium's software encoder
+ * never advertises. Measured 2026-09-16 — the only difference between the
+ * sender lists with and without `--disable-accelerated-video-encode` was
+ * `640032` — and pinned by the test fixtures next door.
+ */
+export function hasHardwareH264(codecs: readonly CodecLike[]): boolean {
+    return codecs.some((c) => hardwareH264Rank(c) === 0);
 }
 
 /**
@@ -134,10 +158,11 @@ export interface TransceiverLike {
 }
 
 export type HardwareH264Outcome =
-    /** The preference was set: a hardware-eligible entry now leads the offer. */
+    /** The preference was set: High now leads the offer. */
     | 'applied'
-    /** This sender advertises no hardware-eligible H.264 at all (software-only
-     *  machine, or no H.264): the browser's own order is left alone. */
+    /** This sender advertises no High entry, so there is no hardware encoder
+     *  to reach (software-only machine, or no H.264 at all): the browser's own
+     *  order is left alone, and the offer is byte-for-byte what it was. */
     | 'none-available'
     /** No getCapabilities / setCodecPreferences here: nothing to do. */
     | 'unsupported';
@@ -159,9 +184,10 @@ export function applyHardwareH264Preference(
             : null,
 ): HardwareH264Outcome {
     if (!capabilities || typeof transceiver.setCodecPreferences !== 'function') return 'unsupported';
-    const ordered = preferHardwareH264(capabilities.codecs);
-    if (!ordered.some(isHardwareEligibleH264)) return 'none-available';
-    transceiver.setCodecPreferences(ordered);
+    // Presence, not rank: Baseline/Main are in the ranking but OpenH264 has
+    // them too, so only a High entry says a hardware encoder is here to reach.
+    if (!hasHardwareH264(capabilities.codecs)) return 'none-available';
+    transceiver.setCodecPreferences(preferHardwareH264(capabilities.codecs));
     return 'applied';
 }
 
@@ -224,7 +250,12 @@ export function h264SendProfilesLine(capabilities: { codecs: CodecLike[] } | nul
     if (h264.length === 0) return 'h264 send none';
     const label = (c: CodecLike) =>
         `${h264ProfileLevelId(c.sdpFmtpLine) ?? '??????'}/${fmtpParam(c.sdpFmtpLine, 'packetization-mode') ?? '0'}`;
-    // In preference order, so the first one named is the one the offer leads with.
-    const eligible = preferHardwareH264(h264).filter(isHardwareEligibleH264).map(label);
-    return `h264 send ${h264.map(label).join(' ')}  hardware-eligible: ${eligible.length ? eligible.join(' ') : 'none'}`;
+    // The presence test, not the ranking: Baseline/Main are ranked for the
+    // order but software advertises them too, so naming them here would call
+    // every machine hardware-capable (the first cut did exactly that).
+    const high = h264.filter((c) => hardwareH264Rank(c) === 0).map(label);
+    const verdict = high.length
+        ? `yes (High ${high.join(' ')} leads the offer)`
+        : 'no (no High entry: software H.264 only, offer left as the browser built it)';
+    return `h264 send ${h264.map(label).join(' ')}  hardware encoder: ${verdict}`;
 }

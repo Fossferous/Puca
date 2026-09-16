@@ -15,11 +15,14 @@
 //! `remote-control` feature) deliberately ships none — Lite's identity is
 //! having no remote control, and the agent contains input injection and the
 //! pipe server, so it is not a "capture-only helper" that could ride along.
-//! A dev run (`tauri dev`) has nothing staged beside the debug binary either.
-//! So "no agent here" is normal for Lite and for dev, and a real fault only in
-//! a Full RELEASE build — where, until now, it was logged at INFO and the user
-//! saw the in-process capture's DXGI error with no hint that a reinstall
-//! would fix it.
+//! A debug binary is a different case: tauri-build's build script does stage
+//! the listed sidecars into target/debug on a `tauri dev`, but a debug binary
+//! also runs from places that have none beside it — `cargo test`'s deps
+//! directory, a copied executable — and nagging a developer to "reinstall"
+//! there would be noise. So "no agent here" is normal for Lite and for a
+//! debug build, and a real fault only in a Full RELEASE build — where, until
+//! now, it was logged at INFO and the user saw the in-process capture's DXGI
+//! error with no hint that a reinstall would fix it.
 
 use std::path::PathBuf;
 
@@ -37,10 +40,12 @@ pub fn agent_exe_path() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-/// Does this BUILD ship the agent? True only for a Full build compiled for
-/// release: `remote-control` is the default feature, Lite builds with it off,
-/// and `debug_assertions` marks a dev run (`tauri dev`, `cargo test`), which
-/// never has a sidecar staged and must not be flagged.
+/// Does this BUILD ship the agent, such that its absence is a broken install?
+/// True only for a Full build compiled for release: `remote-control` is the
+/// default feature, Lite builds with it off, and `debug_assertions` marks a
+/// debug build — which may well have the sidecar staged (`tauri dev` does),
+/// but is also what runs from `cargo test`'s deps directory or a copied exe
+/// with nothing beside it, and must not tell a developer to reinstall.
 #[cfg_attr(not(windows), allow(dead_code))] // read by the Windows-only clip capture
 pub const fn agent_expected_in_this_build() -> bool {
     cfg!(feature = "remote-control") && !cfg!(debug_assertions)
@@ -91,16 +96,15 @@ mod tests {
     }
 
     #[test]
-    fn a_test_build_is_a_dev_build_and_is_never_flagged() {
+    fn a_test_build_is_a_debug_build_and_is_never_flagged() {
         // debug_assertions is on under `cargo test`; if this ever reads true
-        // here, dev runs would start telling developers to reinstall.
+        // here, debug runs would start telling developers to reinstall.
         assert!(!agent_expected_in_this_build());
     }
 
-    #[test]
-    fn the_wording_matches_the_remote_control_diagnostic() {
-        // agent_ipc::agent_diagnose opens with the same two sentences; a user
-        // who has seen one should recognise the other.
-        assert!(MISSING_AGENT.starts_with("No capture agent is installed next to the app."));
-    }
+    // No wording-parity test: the first cut asserted MISSING_AGENT against a
+    // literal copy of its own first sentence, which could not fail and did
+    // not read agent_ipc at all (the review caught it). Parity is now by
+    // construction — agent_ipc::agent_diagnose builds its message FROM
+    // MISSING_AGENT — so there is nothing left to pin here.
 }

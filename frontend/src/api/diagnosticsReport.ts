@@ -102,11 +102,11 @@ export async function encodingSupportLines(): Promise<string[]> {
     } catch {
         out.push('gpu       (unavailable)');
     }
-    // What WebRTC will actually be offered, and which of it a hardware
-    // encoder claims. Chromium's MediaFoundation factory adds High/Main/
-    // Baseline (packetization-mode 1) and never Constrained Baseline, so a
-    // list with a `64....` entry is a machine with a hardware H.264 encoder
-    // and one without is not — measured 2026-09-16 (h264Profiles.ts).
+    // What WebRTC will actually be offered, and whether a hardware encoder is
+    // behind it. Chromium's MediaFoundation factory adds High/Main/Baseline
+    // (packetization-mode 1) and never Constrained Baseline; software has
+    // Baseline/Main too, so the High entry is the one that decides, and the
+    // line says yes/no on that alone — measured 2026-09-16 (h264Profiles.ts).
     try {
         const caps = typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
             ? RTCRtpSender.getCapabilities('video') : null;

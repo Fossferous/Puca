@@ -18,6 +18,7 @@ import {
     h264ProfileLevelId,
     h264SendProfilesLine,
     hardwareH264Rank,
+    hasHardwareH264,
     isHardwareEligibleH264,
     negotiatedH264Profile,
     preferHardwareH264,
@@ -146,10 +147,11 @@ describe('reordering the offer', () => {
 
     it('a software-only machine negotiates exactly what it does today', () => {
         // No High entry in its sender capabilities (OpenH264 never claims
-        // one), so the reorder only moves Main/Baseline mode 1 forward —
-        // which this server does not register — and the answer is still
-        // 42e01f. Nothing is lost; nothing is gained; nothing breaks.
-        expect(SENDER_SW.some((c) => c.sdpFmtpLine?.includes('640032'))).toBe(false);
+        // one), so applyHardwareH264Preference does not touch the offer at
+        // all — and even the pure reorder, were it applied, would only move
+        // Main/Baseline mode 1 forward, which this server does not register.
+        // Either way the answer is still 42e01f. Nothing lost, nothing broken.
+        expect(hasHardwareH264(SENDER_SW)).toBe(false);
         expect(livekitAnswerLeadsWith(preferHardwareH264(SENDER_SW))).toBe('42e01f/1');
         expect(livekitAnswerLeadsWith(SENDER_SW)).toBe('42e01f/1');
     });
@@ -173,10 +175,26 @@ describe('applying it to a transceiver', () => {
         expect(t.calls[0]).toHaveLength(SENDER_HW.length);
     });
 
-    it('leaves the browser order alone when nothing is hardware-eligible', () => {
+    it('leaves the browser order alone on a machine with no hardware encoder', () => {
+        // THE REVIEW FINDING. The first cut gated on "any ranked entry", and
+        // Baseline/Main are ranked — but OpenH264 advertises those too, so
+        // every real Chromium read as hardware-capable, the offer was
+        // reordered on machines with nothing to reach, and this branch could
+        // never run. Presence is decided by High alone (hasHardwareH264).
         const t = fakeTransceiver();
+        expect(applyHardwareH264Preference(t, { codecs: SENDER_SW })).toBe('none-available');
         expect(applyHardwareH264Preference(t, { codecs: [plain('video/VP8'), plain('video/rtx')] })).toBe('none-available');
-        expect(t.calls).toHaveLength(0);
+        expect(t.calls, 'the software-only offer must stay byte-for-byte the browser\'s').toHaveLength(0);
+    });
+
+    it('decides hardware presence by the High entry and nothing else', () => {
+        expect(hasHardwareH264(SENDER_HW)).toBe(true);
+        expect(hasHardwareH264(SENDER_SW)).toBe(false);
+        // Constrained High (640c) is not what the factory adds, and a
+        // mode-0 High is software: neither counts.
+        expect(hasHardwareH264([h264(1, '640c1f'), h264(1, '42001f'), h264(1, '4d001f')])).toBe(false);
+        expect(hasHardwareH264([h264(0, '640032')])).toBe(false);
+        expect(hasHardwareH264([h264(1, '64001f')])).toBe(true);
     });
 
     it('does nothing where the APIs are missing (jsdom, an old WebView)', () => {
@@ -252,9 +270,18 @@ describe('reading the negotiated profile out of a stats report', () => {
 });
 
 describe('the diagnostics line', () => {
-    it('lists what can be sent and which of it is hardware-eligible', () => {
+    it('lists what can be sent and answers the hardware question from the High entry', () => {
         const line = h264SendProfilesLine({ codecs: SENDER_HW });
-        expect(line).toBe('h264 send 42001f/1 42001f/0 42e01f/1 42e01f/0 4d001f/1 4d001f/0 640032/1  hardware-eligible: 640032/1 4d001f/1 42001f/1');
+        expect(line).toBe('h264 send 42001f/1 42001f/0 42e01f/1 42e01f/0 4d001f/1 4d001f/0 640032/1  hardware encoder: yes (High 640032/1 leads the offer)');
+    });
+
+    it('says NO on a software-only machine, whose Baseline/Main entries prove nothing', () => {
+        // The review finding: the first cut printed "hardware-eligible:
+        // 4d001f/1 42001f/1" here — the exact machine the line exists to
+        // identify, called hardware-capable.
+        const line = h264SendProfilesLine({ codecs: SENDER_SW });
+        expect(line).toContain('hardware encoder: no');
+        expect(line).not.toContain('yes');
     });
 
     it('says so when the browser offers nothing usable', () => {

@@ -732,10 +732,12 @@ pub async fn agent_probe() -> bool {
 #[tauri::command]
 pub async fn agent_diagnose() -> String {
     let Some(path) = agent_path() else {
-        return "No capture agent is installed next to the app. Reinstall Puca \
-                and restart it — screen sharing will fall back to asking you to pick \
-                a window until it is present."
-            .to_string();
+        // Built FROM the shared sentence, so a failed clip and this diagnostic
+        // say the same thing by construction (sidecar.rs).
+        return format!(
+            "{} Screen sharing will fall back to asking you to pick a window until it is present.",
+            crate::sidecar::MISSING_AGENT
+        );
     };
     let started = tauri::async_runtime::spawn_blocking(|| ensure_started(CONNECT_ATTEMPTS_PROBE))
         .await

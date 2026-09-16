@@ -153,12 +153,27 @@ if (!Array.isArray(liteBins) || liteBins.length !== 0) {
 // binary dropped from the list builds fine and ships an installer whose clip
 // capture silently runs in process — which cannot see the monitors under a
 // GPU preference pin (clip_capture.rs). Nothing else asserts presence.
-const fullBins = base.bundle?.externalBin ?? [];
-if (!Array.isArray(fullBins) || !fullBins.includes('binaries/puca-agent')) {
-    fail(`full externalBin must list binaries/puca-agent (got ${JSON.stringify(fullBins)}) — the clip capture `
-        + 'sidecar, and the remote-desktop host agent');
-} else {
-    ok.push('full externalBin: ships binaries/puca-agent (clip capture runs in the sidecar)');
+// The EFFECTIVE Windows list, not the base one: Tauri merges
+// tauri.windows.conf.json over tauri.conf.json (RFC 7386, arrays replaced
+// wholesale), and Windows is the only platform that ships the agent — so the
+// file that decides the Full Windows bundle is the platform overlay, and a
+// check that read only the base list would stay green with the agent removed
+// from the one place it counts (the review caught the first cut doing that).
+const winOverlay = join(tauriDir, 'tauri.windows.conf.json');
+const baseBins = base.bundle?.externalBin ?? [];
+const winBins = existsSync(winOverlay) ? (readJson(winOverlay).bundle?.externalBin ?? baseBins) : baseBins;
+for (const [label, bins] of [['base', baseBins], ['windows (effective)', winBins]]) {
+    if (!Array.isArray(bins) || !bins.includes('binaries/puca-agent')) {
+        fail(`full ${label} externalBin must list binaries/puca-agent (got ${JSON.stringify(bins)}) — the clip capture `
+            + 'sidecar, and the remote-desktop host agent');
+    }
+}
+if (Array.isArray(winBins) && !winBins.includes('binaries/puca-service')) {
+    fail(`full windows externalBin must list binaries/puca-service (got ${JSON.stringify(winBins)}) — the elevated helper `
+        + 'that installs the agent as a service; tauri-build.mjs asserts both are staged after a Full build');
+}
+if (failures.every(f => !f.startsWith('full '))) {
+    ok.push(`full externalBin (effective on Windows): ${winBins.join(', ')}`);
 }
 
 if (lite.build?.beforeBuildCommand !== '') {

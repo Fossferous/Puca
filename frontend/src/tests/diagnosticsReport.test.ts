@@ -103,7 +103,7 @@ describe('the diagnostics report', () => {
         Object.defineProperty(globalThis, 'RTCRtpSender', { value: { getCapabilities }, configurable: true });
         try {
             const lines = (await encodingSupportLines()).join('\n');
-            expect(lines).toContain('h264 send 42e01f/1 640032/1  hardware-eligible: 640032/1');
+            expect(lines).toContain('h264 send 42e01f/1 640032/1  hardware encoder: yes (High 640032/1 leads the offer)');
             expect(getCapabilities).toHaveBeenCalledWith('video');
         } finally {
             delete (globalThis as { RTCRtpSender?: unknown }).RTCRtpSender;

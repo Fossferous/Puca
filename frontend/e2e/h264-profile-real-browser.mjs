@@ -97,7 +97,11 @@ const result = await page.evaluate(async ({ SECONDS, preferSrc }) => {
 
     // The LiveKit v1.13.4 server, on the answering side: it registers 42e01f
     // (both modes) and 640032/1 for H.264, and prefers the requested MIME
-    // type in the OFFER's relative order (configureReceiverCodecs).
+    // type in the OFFER's relative order (configureReceiverCodecs). The
+    // answerer here is a Chromium RECEIVER, whose capability list spells High
+    // as 64001f (level 3.1) — pion matches H.264 on profile, not level, when
+    // level-asymmetry-allowed is set, so 64001f is how the server's 640032
+    // entry has to be expressed on this side. It is not a fourth variant.
     const serverKnows = (c) => !isH264(c) || ['42e01f/0', '42e01f/1', '640032/1', '64001f/1'].includes(`${profileOf(c)}/${pmOf(c)}`);
 
     async function negotiate(senderOrder) {
@@ -142,15 +146,26 @@ const result = await page.evaluate(async ({ SECONDS, preferSrc }) => {
     const a = await negotiate(null);
     const b = await negotiate(preferred);
     track.stop();
+    // Named so a SKIP on a machine that HAS an encoder is readable: a
+    // headless GPU process that failed to start reports SwiftShader here and
+    // advertises no High entry, which is a rig problem, not a finding.
+    const gl = document.createElement('canvas').getContext('webgl');
+    const dbg = gl?.getExtension('WEBGL_debug_renderer_info');
     return {
+        gpu: dbg && gl ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '(no webgl)',
         ua: navigator.userAgent,
         senderH264: send.filter(isH264).map((c) => `${profileOf(c)}/${pmOf(c)}`),
-        hasHigh: send.some((c) => isH264(c) && profileOf(c)?.startsWith('64') && pmOf(c) === '1'),
+        // profile_iop 00 as well as idc 64: Constrained High (640c) is not
+        // what the factory adds, and the TypeScript's hasHardwareH264 says no
+        // to it — the two must agree or this gate takes the hardware branch
+        // on a machine the shipped code treats as software-only.
+        hasHigh: send.some((c) => isH264(c) && profileOf(c)?.startsWith('6400') && pmOf(c) === '1'),
         a, b,
     };
 }, { SECONDS, preferSrc: preferHardwareH264.toString() });
 
 console.log(`channel=${CHANNEL} ua=${result.ua}`);
+console.log(`gpu: ${result.gpu}`);
 console.log(`sender H.264: ${result.senderH264.join(' ')}  (High present: ${result.hasHigh})`);
 console.log(`A browser order      -> profile=${result.a.profile} encoder=${result.a.encoder} frames=${result.a.frames}`);
 console.log(`B preferHardwareH264 -> profile=${result.b.profile} encoder=${result.b.encoder} frames=${result.b.frames}`);
