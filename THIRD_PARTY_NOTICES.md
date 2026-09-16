@@ -681,7 +681,7 @@ release, never edit by hand.
 | rustls-platform-verifier-android@0.1.1 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-platform-verifier@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki@0.103.14 | ISC | desktop | https://github.com/rustls/webpki |
-| rustls@0.23.43 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls |
+| rustls@0.23.45 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls |
 | rustversion@1.0.23 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker, wasm | https://github.com/dtolnay/rustversion |
 | ryu@1.0.23 | Apache-2.0 OR BSL-1.0 | backend, desktop, puca-service, puca-waker | https://github.com/dtolnay/ryu |
 | same-file@1.0.6 | Unlicense/MIT | desktop, wasm | https://github.com/BurntSushi/same-file |
