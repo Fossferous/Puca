@@ -123,6 +123,28 @@ Keep's entry chunk for the API host the same way it checks the main one.
 In development the main dev server serves it: `npm run dev`, then open
 `/keep/` on the dev server's origin. The main app's account remembers you.
 
+### The Android app
+
+`frontend/keep-app/` is a second Capacitor project that wraps the same page as
+its own Android app, **Púca Keep** (`com.sovereign.keep`), installed beside the
+Púca app with its own storage and its own sign-in (the same Púca account).
+None of Púca's native plugins are in it — notifications, background delivery,
+location reminders and the OTA updater stay Púca's — so due-time reminders show
+in the Reminders view but do not notify from this app, and it updates by
+installing a new APK.
+
+```bash
+cd frontend && npm run keep:android            # debug APK, sideloadable
+cd frontend && npm run keep:android:release    # needs a keystore under keep-app/android
+```
+
+`scripts/build-keep-app.mjs` builds the page in native mode
+(`KEEP_TARGET=native`, base `/`, output `dist-keep-app/`), injects the Android
+CSP meta (`scripts/cap-index-csp.mjs --index`), runs `cap sync android` inside
+`keep-app/`, and calls gradle. The API host comes from `frontend/.env.production`
+like every other build. Output:
+`frontend/keep-app/android/app/build/outputs/apk/debug/app-debug.apk`.
+
 ## Not built (and why)
 
 - **Free-text notes.** Every note is a checklist: the schema's only text is a

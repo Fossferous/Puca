@@ -6,7 +6,11 @@
 import { useState } from 'react';
 import { loadSettings, saveSettings } from '../../components/settingsStore';
 import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon } from '../../components/Icons';
+import { isMobile } from '../../api/platform';
 import { type KeepSortMode } from '../model/keepPrefs';
+
+/** The Keep Android shell: no Púca page at `/` to open. */
+const NATIVE = isMobile();
 
 const THEMES = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'] as const;
 
@@ -65,7 +69,7 @@ export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExport
             <button type="button" className="keep-menu-item" onClick={onExportMarkdown}><DownloadIcon /> Export notes as Markdown</button>
             <button type="button" className="keep-menu-item" onClick={onExportJson}><DownloadIcon /> Export notes as JSON</button>
             <button type="button" className="keep-menu-item" onClick={onHelp}><HelpIcon /> Keyboard shortcuts</button>
-            <a className="keep-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>
+            {!NATIVE && <a className="keep-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
             <div className="keep-menu-sep" />
             <button type="button" className="keep-menu-item" onClick={onSignOut}><LogoutIcon /> Sign out</button>
             <button type="button" className="keep-menu-item danger" onClick={onSignOutEverywhere}><LogoutIcon /> Sign out of every device</button>

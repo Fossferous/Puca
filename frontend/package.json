@@ -8,6 +8,8 @@
     "dev": "vite",
     "build": "node scripts/check-api-url.mjs && npm run build:agent && tsc -b && vite build && vite build --config vite.keep.config.ts && node scripts/check-dist-entries.mjs",
     "build:keep": "vite build --config vite.keep.config.ts",
+    "keep:android": "node scripts/build-keep-app.mjs",
+    "keep:android:release": "node scripts/build-keep-app.mjs --release",
     "check:dist": "node scripts/check-dist-entries.mjs",
     "typecheck": "tsc -b",
     "lint": "eslint . && node scripts/check-no-ui-emoji.mjs && node scripts/check-source-hygiene.mjs && node ../scripts/check-docs-links.mjs && node ../scripts/check-docs-consistency.mjs && node ../scripts/check-api-docs.mjs",

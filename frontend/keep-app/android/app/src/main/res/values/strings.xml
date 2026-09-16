@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Púca Keep</string>
+    <string name="title_activity_main">Púca Keep</string>
+    <string name="package_name">com.sovereign.keep</string>
+    <string name="custom_url_scheme">com.sovereign.keep</string>
+</resources>

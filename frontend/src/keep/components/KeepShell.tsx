@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
+import { isMobile } from '../../api/platform';
 import { notificationPermission } from '../../api/desktopNotify';
 import { startTaskReminders } from '../../api/taskReminders';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
@@ -202,7 +203,9 @@ export function KeepShell({ onSignOut }: KeepShellProps) {
     };
 
     // --- Card menu -----------------------------------------------------------------------------
-    const pucaHref = `${window.location.origin}/`;
+    // In the Keep Android shell `/` is this very page, so there is nothing to
+    // open; on the web it is Púca, one origin over.
+    const pucaHref = isMobile() ? null : `${window.location.origin}/`;
     const copyAsText = async (card: NoteCard) => {
         try {
             await navigator.clipboard.writeText(noteToMarkdown(card));
@@ -251,8 +254,10 @@ export function KeepShell({ onSignOut }: KeepShellProps) {
         items.push(
             { id: 'copy-text', label: 'Copy as text', icon: 'copy', onClick: () => { void copyAsText(card); } },
             { id: 'duplicate', label: 'Make a copy', icon: 'file-text', onClick: () => { void duplicate(card); } },
-            { id: 'puca', label: 'Open in Púca', icon: 'pop-out', onClick: () => window.open(pucaHref, '_blank', 'noopener') },
         );
+        if (pucaHref) {
+            items.push({ id: 'puca', label: 'Open in Púca', icon: 'pop-out', onClick: () => window.open(pucaHref, '_blank', 'noopener') });
+        }
         if (card.ref.kind === 'list') {
             items.push(
                 { id: 'sep3', label: '', separator: true },

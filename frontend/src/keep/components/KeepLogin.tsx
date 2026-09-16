@@ -14,7 +14,11 @@ import { useState, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
 import { login, RetiredKeyFormatError } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
+import { isMobile } from '../../api/platform';
 import '../../components/Login.css';
+
+/** In the Keep Android shell, "Púca" is the separate Púca app, not a link. */
+const NATIVE = isMobile();
 
 interface KeepLoginProps {
     onSuccess: () => void;
@@ -95,7 +99,7 @@ export function KeepLogin({ onSuccess }: KeepLoginProps) {
                 </form>
                 <p className="keep-login-note">
                     Keep uses your Púca sign-in. Need an account, forgot your password, or have a recovery
-                    code? Do that in <a href="/">Púca</a>, then come back here.
+                    code? Do that in {NATIVE ? 'the Púca app' : <a href="/">Púca</a>}, then come back here.
                 </p>
             </div>
         </div>

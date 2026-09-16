@@ -4,7 +4,12 @@
  * phones (keep.css); the owner passes `open` and the scrim closes it.
  */
 import { ArchiveIcon, BellIcon, NoteIcon, PopOutIcon, TagIcon } from '../../components/Icons';
+import { isMobile } from '../../api/platform';
 import { type NoteFilter } from '../model/keepModel';
+
+/** Inside the Keep Android shell there is no Púca page to open — `/` IS
+ *  this page — and the Púca app is a separate install. */
+const NATIVE = isMobile();
 
 interface KeepRailProps {
     filter: NoteFilter | { kind: 'reminders' };
@@ -48,9 +53,11 @@ export function KeepRail({ filter, labels, reminderBadge, counts, open, onClose,
                     <ArchiveIcon /><span className="keep-rail-label">Archive</span>
                     <span className="keep-rail-count">{counts.archived}</span>
                 </button>
-                <a className="keep-rail-item" href="/" target="_blank" rel="noopener">
-                    <PopOutIcon /><span className="keep-rail-label">Open Púca</span>
-                </a>
+                {!NATIVE && (
+                    <a className="keep-rail-item" href="/" target="_blank" rel="noopener">
+                        <PopOutIcon /><span className="keep-rail-label">Open Púca</span>
+                    </a>
+                )}
                 <div className="keep-rail-spacer" />
                 <div className="keep-rail-foot">Púca Keep {version}</div>
             </nav>
