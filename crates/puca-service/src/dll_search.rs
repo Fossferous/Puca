@@ -16,10 +16,13 @@
 //!
 //! `LOAD_LIBRARY_SEARCH_SYSTEM32` narrows the default path for every subsequent
 //! `LoadLibrary` to System32 only. It cannot affect the statically-linked
-//! imports resolved before `main` — those come from KnownDLLs and are not
-//! redirectable — so the target is the lazily loaded set, which is where the
-//! interesting names are: Media Foundation, D3D11, DXGI and the codec DLLs the
-//! encoder pulls in on first use. Every one of those loads after this runs.
+//! imports resolved before `main`. That sentence used to continue "those come
+//! from KnownDLLs and are not redirectable", which is false for this binary:
+//! six of its twelve static imports (bcrypt, bcryptprimitives, crypt32,
+//! secur32, iphlpapi, wtsapi32) are not KnownDLLs. That window is closed by
+//! `/DEPENDENTLOADFLAG:0x800` in build.rs, which applies the same System32-only
+//! rule to the loader's resolution of the import table, pinned by
+//! tests/dependent_load_flags.rs. This call covers everything loaded after it.
 //!
 //! Call it as the FIRST statement of `main`. Anything above it gets the old
 //! search order, and "first" is the only version of that rule which survives

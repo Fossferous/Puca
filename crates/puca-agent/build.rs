@@ -33,6 +33,19 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=PUCA_VERSION");
 
+    // The loader resolves this binary's STATIC imports before main() runs,
+    // where SetDefaultDllDirectories (dll_search.rs) cannot reach; several of
+    // them are not KnownDLLs (d3d11, dxgi, mfplat, bcrypt, winmm for the agent;
+    // bcrypt, crypt32, secur32, iphlpapi, wtsapi32 for the service), so a DLL
+    // of that name beside the exe would load first. DEPENDENTLOADFLAG applies
+    // LOAD_LIBRARY_SEARCH_SYSTEM32 to that resolution too. Every such import
+    // lives in System32 and the release build is crt-static, so nothing
+    // legitimate is lost; Windows before 10 1607 ignores the field. Found by
+    // the 2026-09-16 adversarial campaign; pinned by tests/dependent_load_flags.rs.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
+
     #[cfg(windows)]
     stamp();
 }

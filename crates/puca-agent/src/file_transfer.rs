@@ -426,7 +426,30 @@ fn real_path(p: &Path) -> Result<Option<PathBuf>, String> {
 /// that had their whole `AppData` readable, because their home simply had not
 /// existed when the list was built. Matching the NAME cannot go stale, and it
 /// covers profiles on other drives and redirected homes for free.
-const DENIED_COMPONENTS: [&str; 6] = ["appdata", ".ssh", ".gnupg", ".aws", ".azure", ".kube"];
+///
+/// The fixed-name plaintext credential FILES that sit beside those directories
+/// in every home are in the same class, for the same reason: `.git-credentials`
+/// and `.netrc` are username:password in the clear, the rest carry registry or
+/// bearer tokens. The loop below compares every component including the final
+/// file name, so a bare file name is enough. Found missing by the 2026-09-16
+/// adversarial campaign: a share peer on an armed host, without the passphrase,
+/// could read a user's git credentials because only the directories were named.
+const DENIED_COMPONENTS: [&str; 14] = [
+    "appdata",
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".git-credentials",
+    ".netrc",
+    "_netrc",
+    ".npmrc",
+    ".pypirc",
+    ".docker",
+    ".m2",
+    ".gradle",
+];
 
 /// OS furniture and raw memory images, refused directly below a drive root.
 ///
@@ -985,6 +1008,23 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plaintext credential files beside the secret directories are the
+    /// same class and are refused the same way; an ordinary file beside them
+    /// is not (the positive control).
+    #[test]
+    fn plaintext_credential_files_beside_the_secret_directories_are_denied() {
+        for f in [".git-credentials", ".netrc", "_netrc", ".npmrc", ".pypirc"] {
+            let p = std::path::PathBuf::from(format!(r"C:\Users\someone\{f}"));
+            assert!(denied_by_shape(&p).is_some(), "{f} must be denied");
+        }
+        for d in [".docker", ".m2", ".gradle"] {
+            let p = std::path::PathBuf::from(format!(r"C:\Users\someone\{d}\config.json"));
+            assert!(denied_by_shape(&p).is_some(), "{d} must be denied");
+        }
+        let ok = std::path::PathBuf::from(r"C:\Users\someone\notes.txt");
+        assert!(denied_by_shape(&ok).is_none(), "an ordinary file stays browsable");
+    }
 
     fn root() -> PathBuf {
         // Gate 2 is skipped when nothing on the path exists, so the lexical

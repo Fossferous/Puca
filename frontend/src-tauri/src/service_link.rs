@@ -32,6 +32,9 @@ use std::time::Duration;
 pub struct BorrowedAgent {
     pub pipe: String,
     pub token: String,
+    /// The agent's process id, when the service is new enough to say. The
+    /// dial checks the pipe's server against it before the token is written.
+    pub pid: Option<u32>,
 }
 
 /// The service's control pipe, imported rather than written out again.
@@ -96,16 +99,42 @@ fn parse_handle(v: &serde_json::Value) -> Option<BorrowedAgent> {
     if v.get("t")?.as_str()? != "agent_handle" {
         return None;
     }
+    let pipe = v.get("pipe")?.as_str()?;
+    // agent_ipc::connect hands this string straight to OpenOptions::open. A
+    // UNC name there makes Windows authenticate to a remote SMB server as this
+    // user; a file name gets the hello line written over that file's first
+    // bytes — both before the token is ever checked. The only value the
+    // service can legitimately send is puca_service::launch_id::pipe_name's,
+    // `\\.\pipe\sovereign-agent-<u32>`, so demand exactly that. The digit
+    // check is not decoration: `\\.\pipe\` IS subject to Win32 path
+    // normalisation (unlike `\\?\`), so a bare prefix check still admits
+    // `\\.\pipe\..\..\C:\...`. Found by the 2026-09-16 adversarial campaign.
+    let session = pipe.strip_prefix(r"\\.\pipe\sovereign-agent-")?;
+    if session.is_empty() || !session.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     Some(BorrowedAgent {
-        pipe: v.get("pipe")?.as_str()?.to_string(),
+        pipe: pipe.to_string(),
         token: v.get("token")?.as_str()?.to_string(),
+        pid: v.get("pid").and_then(|p| p.as_u64()).and_then(|p| u32::try_from(p).ok()),
     })
 }
 
 fn ask() -> Option<BorrowedAgent> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // SECURITY_IDENTIFICATION, like every other pipe client in the product:
+    // the default with no SQOS is impersonation, and on the machines where
+    // the service is absent — most of them — this name is unowned, so any
+    // local process could create it and, with SeImpersonatePrivilege (service
+    // accounts) or from a lower-integrity process of this same user, act as
+    // the signed-in user. Identification lets the real service see who we
+    // are and nothing more. Found by the 2026-09-16 adversarial campaign.
+    const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+    const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)
         .open(CONTROL_PIPE)
         .ok()?;
 
@@ -161,15 +190,39 @@ mod tests {
         // while the parse is broken — which is exactly what the first version
         // of this test did.
         let real = puca_service::control::ControlResponse::AgentHandle {
-            pipe: r"\.\pipe\sovereign-agent-1".into(),
+            pipe: r"\\.\pipe\sovereign-agent-1".into(),
             token: "tok".into(),
+            pid: 4242,
         };
         let wire = serde_json::to_string(&real).expect("serialise");
         let v: serde_json::Value = serde_json::from_str(&wire).expect("parse");
 
         let got = parse_handle(&v).expect("the handle must be readable");
-        assert_eq!(got.pipe, r"\.\pipe\sovereign-agent-1");
+        assert_eq!(got.pipe, r"\\.\pipe\sovereign-agent-1");
         assert_eq!(got.token, "tok");
+    }
+
+    /// Only the service's own pipe name is accepted: anything else would be
+    /// opened read+write and written to before the token is checked.
+    #[test]
+    fn a_handle_naming_anything_but_the_agents_pipe_is_refused() {
+        for bad in [
+            r"\\.\pipe\..\..\C:\Users\x\y",
+            r"\\evil\share\pipe",
+            r"C:\Windows\Temp\x",
+            r"\\.\pipe\sovereign-agent-",
+            r"\\.\pipe\sovereign-agent-1x",
+            r"\\.\pipe\other-1",
+            r"\.\pipe\sovereign-agent-1",
+        ] {
+            let v = serde_json::json!({"t": "agent_handle", "pipe": bad, "token": "tok"});
+            assert!(parse_handle(&v).is_none(), "{bad} must be refused");
+        }
+        let v = serde_json::json!({"t": "agent_handle", "pipe": r"\\.\pipe\sovereign-agent-7", "token": "tok", "pid": 4242});
+        let got = parse_handle(&v).expect("the real shape parses");
+        assert_eq!(got.pid, Some(4242));
+        let old = serde_json::json!({"t": "agent_handle", "pipe": r"\\.\pipe\sovereign-agent-7", "token": "tok"});
+        assert_eq!(parse_handle(&old).expect("an older service").pid, None, "an older service sends no pid");
     }
 
     #[test]

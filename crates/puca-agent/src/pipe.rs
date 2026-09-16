@@ -106,7 +106,15 @@ impl std::io::Write for PipeIo {
     }
 }
 
+/// Every name `create_pipe` was asked for, so a test can prove `serve` holds
+/// ONE instance for its whole life rather than re-creating one per client.
+/// By name, because other tests create pipes in parallel.
+#[cfg(test)]
+static CREATED_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 fn create_pipe(name: &str, allow_sid: Option<&str>) -> Result<PipeHandle, String> {
+    #[cfg(test)]
+    CREATED_NAMES.lock().unwrap_or_else(|e| e.into_inner()).push(name.to_string());
     let mut sd = PSECURITY_DESCRIPTOR::default();
     unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -176,7 +184,37 @@ pub fn serve(
     allow_sid: Option<&str>,
     ua_record: Option<&str>,
 ) -> Result<(), String> {
+    // Created ONCE, outside the loop, and recycled per client.
+    //
+    // It used to be created per connection, which left the name unowned from
+    // one client's disconnect until the next iteration's create — after
+    // `Agent::new` and a file read, so not a single instruction.
+    // FILE_FLAG_FIRST_PIPE_INSTANCE refuses a creation only while somebody
+    // HOLDS the name; it does not reserve it, and creating a pipe under
+    // `\\.\pipe\` needs no privilege. The name is predictable
+    // (launch_id::pipe_name), so any local process could take it in that
+    // window: the agent's own next create then failed, `serve` returned Err,
+    // the agent exited, and the restart policy gave up after five tries —
+    // unattended access dead until the squatter's process ended. A squatter
+    // that won the race was also handed the launch token and the session's
+    // static_shared by the next client to dial. puca-service's control_pipe.rs
+    // closed exactly this gap for the service's control channel and said so;
+    // this half of the pair had not been fixed. Found by the 2026-09-16
+    // adversarial campaign; pinned by
+    // `serve_creates_its_pipe_once_for_the_life_of_the_process`.
+    let pipe = create_pipe(name, allow_sid)?;
+    let mut first = true;
     loop {
+        if !first {
+            // Release the previous client and reuse the same instance rather
+            // than making a new one: the name stays ours throughout.
+            unsafe {
+                let _ = FlushFileBuffers(pipe.0);
+                let _ = DisconnectNamedPipe(pipe.0);
+            }
+        }
+        first = false;
+
         // A FRESH Agent per client, not one reused across connections.
         //
         // The old code built it once outside this loop, so `authenticated`
@@ -201,7 +239,6 @@ pub fn serve(
         if let Some(path) = ua_record {
             agent.arm_from_record_file(path);
         }
-        let pipe = create_pipe(name, allow_sid)?;
         unsafe {
             // ERROR_PIPE_CONNECTED means a client raced in before we called
             // this — which is a successful connection, not a failure.
@@ -273,6 +310,43 @@ mod tests {
     /// held — that is the squatting protection added in 0.8.2. Asserting it here
     /// so the flag cannot be quietly dropped, and so its cost is visible: an
     /// orphaned agent holding the name will stop a new one starting.
+    /// `serve` holds ONE pipe instance for its whole life and recycles it per
+    /// client. It used to create the pipe inside its accept loop, which left
+    /// the name unowned between clients (see the comment on serve). Three
+    /// clients, one creation.
+    #[test]
+    fn serve_creates_its_pipe_once_for_the_life_of_the_process() {
+        let name = format!("{}sovereign-agent-once-{}", PIPE_PREFIX, std::process::id());
+        let served = name.clone();
+        std::thread::spawn(move || {
+            let _ = serve(&served, "tok".into(), crate::flavour::Flavour::User, None, None);
+        });
+        for _ in 0..3 {
+            let mut client = None;
+            for _ in 0..300 {
+                match std::fs::OpenOptions::new().read(true).write(true).open(&name) {
+                    Ok(f) => {
+                        client = Some(f);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+            let client = client.expect("a client can connect to the served pipe");
+            // Say nothing and hang up: serve's read returns 0 and it goes round.
+            drop(client);
+        }
+        // Let serve cycle back to ConnectNamedPipe after the last hang-up.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let creates = CREATED_NAMES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|c| **c == name)
+            .count();
+        assert_eq!(creates, 1, "serve re-created its pipe: {creates} creation(s) for three clients");
+    }
+
     #[test]
     fn refuses_a_second_instance_of_the_same_name() {
         let name = format!("{}sovereign-agent-dup-{}", PIPE_PREFIX, std::process::id());

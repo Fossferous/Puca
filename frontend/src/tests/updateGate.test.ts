@@ -75,6 +75,18 @@ describe('OTA bundle-URL trust (isTrustedBundleUrl)', () => {
         // is an IANA-reserved test TLD, guaranteed unrelated.
         expect(isTrustedBundleUrl('https://evil.attacker.test/x.enc.zip', 'https://chat.example.com')).toBe(false);
     });
+    it('trusts the API host\'s parent domain, not the last two labels', () => {
+        // co.uk is not a site. The old rule accepted anything under it.
+        expect(isTrustedBundleUrl('https://download.puca.co.uk/x.enc.zip', 'https://chat.puca.co.uk')).toBe(true);
+        expect(isTrustedBundleUrl('https://evil.co.uk/x.enc.zip', 'https://chat.puca.co.uk')).toBe(false);
+        expect(isTrustedBundleUrl('https://attacker.com.au/x.enc.zip', 'https://chat.puca.com.au')).toBe(false);
+        // The exact API host always passes; an apex API host trusts only itself.
+        expect(isTrustedBundleUrl('https://chat.example.com/x.enc.zip', 'https://chat.example.com')).toBe(true);
+        expect(isTrustedBundleUrl('https://example.com/x.enc.zip', 'https://example.com')).toBe(true);
+        expect(isTrustedBundleUrl('https://other.com/x.enc.zip', 'https://example.com')).toBe(false);
+        // A trailing dot or upper case does not slip past.
+        expect(isTrustedBundleUrl('https://DOWNLOAD.Example.com./x.enc.zip', 'https://chat.example.com')).toBe(true);
+    });
     it('rejects a malformed URL', () => {
         expect(isTrustedBundleUrl('not a url', 'https://chat.example.com')).toBe(false);
         expect(isTrustedBundleUrl('', 'https://chat.example.com')).toBe(false);

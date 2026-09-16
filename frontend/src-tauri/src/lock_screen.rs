@@ -38,9 +38,14 @@ use std::io::{BufRead, BufReader, Write};
 /// request/response with no session state, and holding one open would mean a
 /// UI toggle pinning a handle to a service that may restart under it.
 fn ask(req: &ControlRequest) -> Result<serde_json::Value, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // SECURITY_IDENTIFICATION, for the reason service_link::ask gives.
+    const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+    const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)
         .open(CONTROL_PIPE)
         .map_err(|_| "the Puca service is not installed on this computer".to_string())?;
 
