@@ -1084,11 +1084,9 @@ fn run(
         (0, _) | (_, 0) => None,
         v => Some(v),
     };
-    // The step the last pumped frame was fitted by, so a change is logged
-    // once and not thirty times a second.
-    let mut fit_step_now: u32 = 1;
-    // The fitted picture, reused frame to frame.
-    let mut fitted: Vec<u8> = Vec::new();
+    // The fit across frames: the step in force, its hysteresis, the reused
+    // buffer and the cost guard. See composite::FitState.
+    let mut fit = crate::composite::FitState::new();
     // Displays wake before the capture opens and stay awake for the session.
     // A panel in DPMS-off presents nothing to DXGI — creation "succeeds" and
     // then no frame ever arrives (the black-stage-forever field report), and
@@ -2117,7 +2115,7 @@ fn run(
             if now > next_frame + frame_interval {
                 next_frame = now;
             }
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, view_size, &mut fitted, &mut fit_step_now) {
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, view_size, &mut fit) {
                 Ok(sent) => {
                     frames_sent += u64::from(sent);
                     flushed_frame = sent;
@@ -2814,11 +2812,10 @@ fn pump_frame(
     stats: &mut PumpStats,
     last_frame: &mut Option<puca_capture::Frame>,
     session_cold: bool,
-    // The viewer's stage (device px) or None; the reusable fitted buffer; and
-    // the step the previous frame used, for change logging.
+    // The viewer's stage (device px) or None, and the fit's state across
+    // frames (composite::FitState).
     view: Option<(u32, u32)>,
-    fitted: &mut Vec<u8>,
-    fit_step_now: &mut u32,
+    fit: &mut crate::composite::FitState,
 ) -> Result<bool, PumpError> {
     let t_capture = Instant::now();
     // BORROWED, not owned. The composite path used to hand back a cloned
@@ -2900,25 +2897,13 @@ fn pump_frame(
     // covers every capture and a monitor switch re-derives it from the new
     // size on the next frame. Input, the caret and the cursor are all
     // normalised over the captured rectangle, so a smaller picture changes
-    // nothing they compute. See composite::fit_step for the numbers.
+    // nothing they compute (bar the trailing partial block, see paste_tile).
+    // The decision, its hysteresis and its cost guard live in FitState so
+    // they are tested without a capture.
     let t_fit = Instant::now();
-    let (src_w, src_h) = (fw, fh);
-    let step = view.map(|(vw, vh)| crate::composite::fit_step(fw, fh, vw, vh)).unwrap_or(1);
-    let (fw, fh, fstride, fbytes): (u32, u32, usize, &[u8]) = if step > 1 {
-        let (w, h, s) = crate::composite::downscale_into(fitted, step, fw, fh, fstride, fbytes);
-        (w, h, s, &fitted[..])
-    } else {
-        (fw, fh, fstride, fbytes)
-    };
-    if step != *fit_step_now {
-        match view {
-            Some((vw, vh)) => eprintln!(
-                "[stream] fit: {src_w}x{src_h} for a {vw}x{vh} stage -> step {step}, encoding {fw}x{fh}"
-            ),
-            None => eprintln!("[stream] fit: {src_w}x{src_h} native (no stage)"),
-        }
-        *fit_step_now = step;
-    }
+    let fitted_now = fit.apply(view, fw, fh, fstride, fbytes, now);
+    let (fw, fh, fstride) = (fitted_now.w, fitted_now.h, fitted_now.stride);
+    let fbytes: &[u8] = if fitted_now.from_buffer { &fit.buf[..] } else { fbytes };
     let fit_took = t_fit.elapsed();
 
     let (w, h) = (fw & !1, fh & !1);
@@ -2981,6 +2966,9 @@ fn pump_frame(
             stats.samples += 1;
             stats.capture.add(capture_took);
             stats.fit.add(fit_took);
+            if fitted_now.step > 1 {
+                fit.note_cost(fit_took, fps);
+            }
             stats.encode.add(encode_took);
             stats.send.add(t_send.elapsed());
             Ok(sent)

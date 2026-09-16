@@ -97,6 +97,12 @@ pub(crate) fn fit_step(src_w: u32, src_h: u32, view_w: u32, view_h: u32) -> u32 
 /// `composite_geometry` forces them: the encoder rounds down to even, and a
 /// picture that reports a size the encoder does not use shears the NV12
 /// conversion.
+/// Returns None — and writes nothing — for a picture whose stride and length
+/// do not describe it. `paste_tile_raw` refuses such a picture silently (that
+/// is right for a tile: the canvas keeps its last content), but here a silent
+/// refusal would encode a black or a STALE buffer as the live picture, which
+/// the viewer cannot tell from a frozen stream. The caller sends the native
+/// picture instead and says so once.
 pub(crate) fn downscale_into(
     out: &mut Vec<u8>,
     step: u32,
@@ -104,8 +110,11 @@ pub(crate) fn downscale_into(
     height: u32,
     stride: usize,
     bgra: &[u8],
-) -> (u32, u32, usize) {
+) -> Option<(u32, u32, usize)> {
     let step = step.max(1);
+    if stride < width as usize * 4 || bgra.len() < stride * height as usize {
+        return None;
+    }
     let out_w = ((width / step) & !1).max(2);
     let out_h = ((height / step) & !1).max(2);
     let len = out_w as usize * out_h as usize * 4;
@@ -125,7 +134,184 @@ pub(crate) fn downscale_into(
         stride,
         bgra,
     );
-    (out_w, out_h, out_w as usize * 4)
+    Some((out_w, out_h, out_w as usize * 4))
+}
+
+/// How long a different step must hold before it is applied.
+///
+/// `fit_step` is a hard integer boundary, and a stage that oscillates across
+/// it — an animating layout, a pinch settling, a keyboard bar opening — would
+/// otherwise flip the encoded size on every frame, and each flip is an
+/// encoder reconfigure plus a forced keyframe (or a full rebuild when the
+/// transform refuses the live change). Nothing else a peer sends has that
+/// amplification: a keyframe request costs one IDR. Half a second is long
+/// enough for a rotation or a pinch to settle first, and short enough that a
+/// deliberate change is not felt as a delay.
+pub(crate) const FIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Fitted frames the cost guard averages over before it decides.
+const FIT_COST_WINDOW: u32 = 60;
+
+/// The share of the frame interval the fit may cost, averaged over the
+/// window, before it is turned off for the rest of the stream. The pump runs
+/// capture, fit and encode in sequence, so a fit costing more than this on
+/// top of a capture and an encode pushes the frame past its interval — and a
+/// host that got slower after an update is worse than a phone that decodes
+/// more. Measured on the owner's desktop the fit is far under this (see
+/// `bench_fit_step2_1440x2560`); the guard exists for the host this was not
+/// measured on.
+const FIT_COST_BUDGET: f64 = 0.35;
+
+/// One frame after the fit: the dimensions to encode, and whether the bytes
+/// are in `FitState::buf` (fitted) or still the caller's (native).
+pub(crate) struct Fitted {
+    pub step: u32,
+    pub w: u32,
+    pub h: u32,
+    pub stride: usize,
+    pub from_buffer: bool,
+}
+
+/// The viewer fit's state across frames: the step in force, a change waiting
+/// to settle, the reused buffer, and the cost guard. Kept out of the pump so
+/// every decision here is tested without a capture.
+pub(crate) struct FitState {
+    /// The step in force, or None before the first frame.
+    applied: Option<u32>,
+    /// A different step the viewer has been asking for, and since when.
+    pending: Option<(u32, std::time::Instant)>,
+    /// The fitted picture, reused frame to frame.
+    pub(crate) buf: Vec<u8>,
+    /// Set once the guard has found the fit too expensive on this host.
+    disabled: bool,
+    /// The misdescribed-picture fallback is said once, not thirty times a second.
+    degraded_logged: bool,
+    cost_us: u64,
+    cost_n: u32,
+}
+
+impl FitState {
+    pub(crate) fn new() -> Self {
+        Self {
+            applied: None,
+            pending: None,
+            buf: Vec::new(),
+            disabled: false,
+            degraded_logged: false,
+            cost_us: 0,
+            cost_n: 0,
+        }
+    }
+
+    /// The step to use for this frame, given the one the viewer's stage wants.
+    ///
+    /// The FIRST frame takes it at once: a media restart carries a known fit,
+    /// and paying a native encoder build and then a reconfigure would be the
+    /// freeze this exists to avoid. After that, a change must hold for
+    /// `FIT_SETTLE` before it is applied, and a request that changes its mind
+    /// in the meantime starts the clock again.
+    pub(crate) fn decide(&mut self, wanted: u32, now: std::time::Instant) -> u32 {
+        let wanted = if self.disabled { 1 } else { wanted.max(1) };
+        let Some(applied) = self.applied else {
+            self.applied = Some(wanted);
+            return wanted;
+        };
+        if wanted == applied {
+            self.pending = None;
+            return applied;
+        }
+        match self.pending {
+            Some((p, since)) if p == wanted => {
+                if now.duration_since(since) >= FIT_SETTLE {
+                    self.applied = Some(wanted);
+                    self.pending = None;
+                    return wanted;
+                }
+            }
+            _ => self.pending = Some((wanted, now)),
+        }
+        applied
+    }
+
+    /// Fit one picture for the viewer. When the result says `from_buffer`,
+    /// the bytes to encode are in `self.buf`; otherwise they are the caller's.
+    pub(crate) fn apply(
+        &mut self,
+        view: Option<(u32, u32)>,
+        width: u32,
+        height: u32,
+        stride: usize,
+        bgra: &[u8],
+        now: std::time::Instant,
+    ) -> Fitted {
+        let wanted = view.map(|(vw, vh)| fit_step(width, height, vw, vh)).unwrap_or(1);
+        let before = self.applied;
+        let step = self.decide(wanted, now);
+        let native = Fitted { step: 1, w: width, h: height, stride, from_buffer: false };
+        if step <= 1 {
+            if before != Some(1) {
+                eprintln!(
+                    "[stream] fit: {width}x{height} native{}",
+                    if self.disabled { " (fit off on this host)" } else { "" }
+                );
+            }
+            return native;
+        }
+        match downscale_into(&mut self.buf, step, width, height, stride, bgra) {
+            Some((w, h, s)) => {
+                if before != Some(step) {
+                    let (vw, vh) = view.unwrap_or((0, 0));
+                    eprintln!(
+                        "[stream] fit: {width}x{height} for a {vw}x{vh} stage -> step {step}, encoding {w}x{h}"
+                    );
+                }
+                Fitted { step, w, h, stride: s, from_buffer: true }
+            }
+            None => {
+                if !self.degraded_logged {
+                    eprintln!(
+                        "[stream] fit: the capture handed a picture its stride and length do not describe ({width}x{height}, stride {stride}, {} bytes) - sending it native",
+                        bgra.len()
+                    );
+                    self.degraded_logged = true;
+                }
+                native
+            }
+        }
+    }
+
+    /// Account one FITTED frame's cost. After `FIT_COST_WINDOW` of them, if
+    /// the average exceeds `FIT_COST_BUDGET` of the frame interval, the fit is
+    /// turned off for the rest of this stream, at once, and the log says so.
+    pub(crate) fn note_cost(&mut self, took: std::time::Duration, fps: u32) {
+        if self.disabled {
+            return;
+        }
+        self.cost_us += took.as_micros() as u64;
+        self.cost_n += 1;
+        if self.cost_n < FIT_COST_WINDOW {
+            return;
+        }
+        let avg_us = self.cost_us as f64 / self.cost_n as f64;
+        let interval_us = 1_000_000.0 / fps.max(1) as f64;
+        self.cost_us = 0;
+        self.cost_n = 0;
+        if avg_us > interval_us * FIT_COST_BUDGET {
+            self.disabled = true;
+            self.applied = Some(1);
+            self.pending = None;
+            eprintln!(
+                "[stream] fit: costs {:.1} ms a frame against a {:.1} ms frame interval on this host - sending native for the rest of this stream",
+                avg_us / 1000.0,
+                interval_us / 1000.0
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn is_disabled(&self) -> bool {
+        self.disabled
+    }
 }
 
 /// Paste one tile's frame onto the canvas at `(dst_l, dst_t)` canvas pixels,
@@ -141,8 +327,12 @@ pub(crate) fn downscale_into(
 /// sampling threw away three of every four pixels at step 2, which aliased
 /// small text on the all-displays view into unreadable speckle — the exact
 /// "can the composite ever be legible?" complaint. Averaging is the cheapest
-/// filter that keeps every source pixel's contribution; the last block on
-/// each axis may be partial and averages only what exists.
+/// filter that keeps every source pixel's contribution. Only FULL blocks are
+/// emitted: a trailing partial block (fewer than `step` source pixels on an
+/// axis) is dropped, so up to `step - 1` columns and rows at the far edge are
+/// not in the output. For the composite that edge is desktop the viewer never
+/// aims at; for the viewer fit it is at most a few pixels at the right and
+/// bottom of the screen (see `fit_step`).
 fn paste_tile(
     canvas: &mut [u8],
     canvas_w: usize,
@@ -833,7 +1023,7 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        let (w, h, stride) = downscale_into(&mut out, 2, 4, 4, 16, &bgra);
+        let (w, h, stride) = downscale_into(&mut out, 2, 4, 4, 16, &bgra).expect("a well-formed picture fits");
         assert_eq!((w, h, stride), (2, 2, 8));
         assert_eq!(out.len(), 2 * 2 * 4);
         for px in out.chunks(4) {
@@ -842,7 +1032,7 @@ mod tests {
         }
         // Odd results round DOWN to even: 6 / 2 = 3 -> 2 rows.
         let bgra6 = vec![9u8; 8 * 6 * 4];
-        let (w, h, _) = downscale_into(&mut out, 2, 8, 6, 32, &bgra6);
+        let (w, h, _) = downscale_into(&mut out, 2, 8, 6, 32, &bgra6).expect("fits");
         assert_eq!((w, h), (4, 2));
     }
 
@@ -852,11 +1042,165 @@ mod tests {
     fn the_fitted_buffer_is_reused_at_a_stable_size() {
         let bgra = vec![1u8; 8 * 8 * 4];
         let mut out = Vec::new();
-        downscale_into(&mut out, 2, 8, 8, 32, &bgra);
+        downscale_into(&mut out, 2, 8, 8, 32, &bgra).expect("fits");
         let ptr = out.as_ptr();
         let cap = out.capacity();
-        downscale_into(&mut out, 2, 8, 8, 32, &bgra);
+        downscale_into(&mut out, 2, 8, 8, 32, &bgra).expect("fits");
         assert_eq!((out.as_ptr(), out.capacity()), (ptr, cap));
+    }
+
+    /// A picture whose stride or length does not describe it is REFUSED, not
+    /// half-written: the alternative was encoding a black or a stale buffer
+    /// as the live picture, indistinguishable from a frozen stream.
+    #[test]
+    fn a_misdescribed_picture_is_refused_and_nothing_is_written() {
+        let mut out = Vec::new();
+        assert!(downscale_into(&mut out, 2, 8, 8, 32, &vec![0u8; 100]).is_none(), "too short");
+        assert!(downscale_into(&mut out, 2, 8, 8, 16, &vec![0u8; 8 * 8 * 4]).is_none(), "stride under the width");
+        assert!(out.is_empty(), "nothing was written for a refused picture");
+    }
+
+    // ---- the fit across frames: FitState -------------------------------
+
+    fn ms(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    fn checkerboard(w: usize, h: usize) -> Vec<u8> {
+        let mut bgra = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 0x00 } else { 0xFF };
+                let at = (y * w + x) * 4;
+                bgra[at..at + 3].fill(v);
+                bgra[at + 3] = 255;
+            }
+        }
+        bgra
+    }
+
+    /// A media restart carries a known fit. Building the encoder native and
+    /// reconfiguring it half a second later would be the freeze this avoids.
+    #[test]
+    fn the_first_frame_takes_the_fit_at_once() {
+        let mut f = FitState::new();
+        assert_eq!(f.decide(2, std::time::Instant::now()), 2);
+    }
+
+    #[test]
+    fn a_changed_step_waits_until_it_has_held() {
+        let mut f = FitState::new();
+        let t = std::time::Instant::now();
+        assert_eq!(f.decide(2, t), 2);
+        assert_eq!(f.decide(1, t + ms(100)), 2, "not yet");
+        assert_eq!(f.decide(1, t + ms(400)), 2, "still not");
+        assert_eq!(f.decide(1, t + ms(700)), 1, "held for FIT_SETTLE");
+    }
+
+    /// THE AMPLIFICATION THIS GUARDS. Each applied change is an encoder
+    /// reconfigure and a forced keyframe; a stage flapping across the step
+    /// boundary — or a peer spamming SetViewSize — must not be able to buy
+    /// one per frame.
+    #[test]
+    fn a_flapping_stage_never_moves_the_step() {
+        let mut f = FitState::new();
+        let t = std::time::Instant::now();
+        assert_eq!(f.decide(2, t), 2);
+        let mut changes = 0;
+        let mut last = 2;
+        for i in 1..=30u64 {
+            let wanted = if i % 2 == 0 { 2 } else { 1 };
+            let got = f.decide(wanted, t + ms(100 * i));
+            if got != last {
+                changes += 1;
+                last = got;
+            }
+        }
+        assert_eq!(changes, 0, "flapping every 100 ms for 3 s changed the step {changes} time(s)");
+    }
+
+    #[test]
+    fn a_settled_change_and_a_settled_return_cost_one_change_each() {
+        let mut f = FitState::new();
+        let t = std::time::Instant::now();
+        assert_eq!(f.decide(2, t), 2);
+        assert_eq!(f.decide(1, t + ms(100)), 2);
+        assert_eq!(f.decide(1, t + ms(700)), 1);
+        assert_eq!(f.decide(2, t + ms(800)), 1);
+        assert_eq!(f.decide(2, t + ms(1400)), 2);
+    }
+
+    #[test]
+    fn apply_fits_into_its_buffer_and_reports_the_encoded_size() {
+        let (w, h) = (640u32, 640u32);
+        let bgra = checkerboard(640, 640);
+        let mut f = FitState::new();
+        let t = std::time::Instant::now();
+        let out = f.apply(Some((320, 320)), w, h, 640 * 4, &bgra, t);
+        assert_eq!((out.step, out.w, out.h, out.stride, out.from_buffer), (2, 320, 320, 1280, true));
+        assert_eq!(f.buf.len(), 320 * 320 * 4);
+        assert!(f.buf.chunks(4).all(|px| px[0] == 127 && px[1] == 127 && px[2] == 127 && px[3] == 255));
+        // The stage goes away: the fit HOLDS through the settle time, then
+        // the caller's bytes are used again, at the native size.
+        let out = f.apply(None, w, h, 640 * 4, &bgra, t + ms(100));
+        assert!(out.from_buffer, "a change waits");
+        let out = f.apply(None, w, h, 640 * 4, &bgra, t + ms(700));
+        assert_eq!((out.step, out.w, out.h, out.from_buffer), (1, 640, 640, false));
+    }
+
+    #[test]
+    fn a_picture_the_capture_misdescribes_is_sent_native_not_stale() {
+        let mut f = FitState::new();
+        let out = f.apply(Some((320, 320)), 640, 640, 640 * 4, &vec![0u8; 100], std::time::Instant::now());
+        assert_eq!((out.step, out.w, out.h, out.from_buffer), (1, 640, 640, false));
+    }
+
+    #[test]
+    fn the_cost_guard_turns_the_fit_off_on_a_slow_host_and_not_on_a_fast_one() {
+        let t = std::time::Instant::now();
+        let mut slow = FitState::new();
+        slow.decide(2, t);
+        // 20 ms a frame against a 33 ms interval at 30 fps.
+        for _ in 0..FIT_COST_WINDOW {
+            slow.note_cost(ms(20), 30);
+        }
+        assert!(slow.is_disabled());
+        assert_eq!(slow.decide(2, t), 1, "off means native at once, not after a settle");
+
+        let mut fast = FitState::new();
+        fast.decide(2, t);
+        for _ in 0..FIT_COST_WINDOW {
+            fast.note_cost(ms(4), 30);
+        }
+        assert!(!fast.is_disabled());
+        assert_eq!(fast.decide(2, t), 2);
+        // 4 ms is 24% of the 16.7 ms interval at 60 fps: still on.
+        for _ in 0..FIT_COST_WINDOW {
+            fast.note_cost(ms(4), 60);
+        }
+        assert!(!fast.is_disabled());
+        // 7 ms is 42% of it: off.
+        for _ in 0..FIT_COST_WINDOW {
+            fast.note_cost(ms(7), 60);
+        }
+        assert!(fast.is_disabled());
+    }
+
+    /// Not a test — a measurement, so the cost guard's budget is set against a
+    /// number rather than a guess:
+    /// `cargo test --release -p puca-agent bench_fit -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_fit_step2_1440x2560() {
+        let (w, h) = (1440u32, 2560u32);
+        let bgra = vec![0x7fu8; (w * h * 4) as usize];
+        let mut out = Vec::new();
+        downscale_into(&mut out, 2, w, h, (w * 4) as usize, &bgra).expect("fits");
+        let t = std::time::Instant::now();
+        for _ in 0..60 {
+            downscale_into(&mut out, 2, w, h, (w * 4) as usize, &bgra).expect("fits");
+        }
+        eprintln!("fit 1440x2560 step 2: {:.2} ms/frame", t.elapsed().as_secs_f64() * 1000.0 / 60.0);
     }
 
     #[test]
