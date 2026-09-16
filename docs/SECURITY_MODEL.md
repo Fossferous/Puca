@@ -186,9 +186,15 @@ The mesh sealer leaves a few leading bytes of each frame in the clear so the RTP
 packetizer can still see the codec header — 10 on a keyframe, 3 on a delta, 1 on audio,
 bound into the AEAD so they cannot be altered undetected. Those numbers are the **VP8**
 payload descriptor and the **Opus** TOC byte; they are not correct for H.264 or VP9.
-Every shipped client is Chromium-family (WebView2 on desktop, the Android WebView, Chrome
-and Edge on the web) and offers VP8 and Opus first, so that is what a mesh call negotiates
-today. If a peer ever negotiated H.264 the failure is availability, not confidentiality:
+The sealer only ever runs where the WebRTC Encoded Transform API exists — the sender and
+receiver wiring in `manager.ts` return early without it, and `mediaCrypto.enabled` only
+goes true once both ends have advertised support — so every link these constants are
+applied to is Chromium-family at both ends (WebView2 on Windows, the Android WebView,
+Chrome and Edge on the web), which offers VP8 and Opus first and is what such a call
+negotiates today. Firefox, Safari, iOS and the WebKit desktop shells also ship as call
+clients but never run this code: they lack the API and stay on transport-only
+encryption, which the badge shows (see "The gap" below). If a sealer-capable peer ever
+negotiated H.264 the failure is availability, not confidentiality:
 Chromium's H.264 packetizer finds no NAL units in ciphertext and emits nothing, so the
 call shows no video rather than plaintext video, and the handful of clear bytes would be
 a start code plus the SPS profile and level — no resolution, no picture. The SFU path is
