@@ -2022,6 +2022,13 @@ const lastViewSize = new Map<string, string>();
 export const sendViewSize = debounce((sessionId: string, w: number, h: number) => {
     const s = sessions.get(sessionId);
     if (!s || s.role !== 'controller') return;
+    // No session key yet means sendSignal drops the frame silently AND
+    // resolved, so recording it as sent would be a one-way latch: the stage
+    // measures itself on mount and the key needs a relay round trip. Not
+    // recorded, so the stage's next report (it reports again when the first
+    // frame gives the video an intrinsic size, which is after the key and the
+    // negotiation by construction) goes out.
+    if (!s.key) return;
     const key = `${w}x${h}`;
     if (lastViewSize.get(sessionId) === key) return;
     lastViewSize.set(sessionId, key);
@@ -4964,17 +4971,27 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         if (data.kind === 'view-size') {
             // Only a HOST acts on this — it changes THIS machine's encoder.
             if (s.role !== 'host') return;
-            // Same gate as input and privacy: an armed host does nothing for
-            // a controller that never proved the passphrase.
-            if (s.uaRequired && !s.uaVerified) return;
             const { w, h } = data;
             // Validated HERE: the value arrives from the peer, and the agent
             // bounds it again on its own side.
             if (!isViewDim(w) || !isViewDim(h)) return;
-            // Remembered for a media restart, which rebuilds the stream from
-            // answerOffer and would otherwise reset the fit to native — the
-            // way it once reset fps and bitrate.
+            // Remembered BEFORE the passphrase gate, deliberately. An armed
+            // host hears this while a human is still typing the passphrase —
+            // the stage measures itself on mount, seconds before the proof —
+            // and the controller deduplicates, so it will not say it again.
+            // Dropping it here left every unattended session at native size
+            // for its whole life, with nothing logged on either end: the same
+            // shape as pendingFileRequest and pendingOffer, both once dropped
+            // at this gate and never replayed. A size is inert data, bounded
+            // above, and the only thing it can change is the picture that
+            // controller will see; the stream is negotiated only after
+            // verification, and answerOffer carries this into it. It is also
+            // what a media restart reads back.
             s.viewSize = { w, h };
+            // Same gate as input and privacy for the LIVE change: an armed
+            // host changes nothing for a controller that never proved the
+            // passphrase.
+            if (s.uaRequired && !s.uaVerified) return;
             void (async () => {
                 try {
                     const backend = await getHostBackend();

@@ -968,7 +968,25 @@ export function DeviceStage() {
     const fitSessionId = session?.id ?? null;
     const fitBoxW = videoBox?.w ?? 0;
     const fitBoxH = videoBox?.h ?? 0;
+    // The stream's INTRINSIC size is not an input to the arithmetic; it is a
+    // re-trigger. It changes when the first frame arrives — after the session
+    // key and the negotiation, so a report sendViewSize could not send yet
+    // (no key) is made again — and when the host applies a fit.
+    const fitVw = videoBox?.vw ?? 0;
+    const fitVh = videoBox?.vh ?? 0;
     const fitScale = transform.scale;
+    // A DPI change with no CSS-box change — the window dragged between a 1x
+    // and a 2x monitor — is invisible to the ResizeObserver and to React.
+    // matchMedia on the CURRENT ratio fires once when it stops being true;
+    // the effect then re-subscribes at the new one.
+    const [dprTick, setDprTick] = useState(0);
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+        const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+        const bump = () => setDprTick(t => t + 1);
+        mq.addEventListener('change', bump);
+        return () => mq.removeEventListener('change', bump);
+    }, [dprTick]);
     useEffect(() => {
         if (!fitSessionId) return;
         const dpr = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
@@ -979,7 +997,9 @@ export function DeviceStage() {
             fitResolution,
         );
         if (size) sendViewSize(fitSessionId, size.w, size.h);
-    }, [fitSessionId, fitBoxW, fitBoxH, fitScale, fitResolution]);
+        // Re-triggers only (see above); sendViewSize deduplicates the value.
+        void [fitVw, fitVh, dprTick];
+    }, [fitSessionId, fitBoxW, fitBoxH, fitVw, fitVh, fitScale, fitResolution, dprTick]);
 
     const cursorBox = videoBox
         ? pictureBox(videoBox.vw, videoBox.vh, videoBox.w, videoBox.h)

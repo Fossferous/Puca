@@ -28,6 +28,7 @@ import {
     MAX_VIEW_EDGE,
     MIN_STAGE_CSS_PX,
     readFitResolutionPreference,
+    FIT_RESOLUTION_KEY,
 } from '../api/devices/viewSize';
 
 describe('what the stage reports (viewSizeFor)', () => {
@@ -59,11 +60,24 @@ describe('what the stage reports (viewSizeFor)', () => {
         expect(viewSizeFor({ w: 10_000, h: 10_000 }, 4, 8, 'fit')).toEqual({ w: MAX_VIEW_EDGE, h: MAX_VIEW_EDGE });
     });
 
-    test('the preference defaults to fit', () => {
-        // The default is the whole point: the default settings were the slow
-        // ones. (Stored values are exercised through the stage's own setter;
-        // this pins that an absent or unreadable store lands on fit.)
+    test('the preference defaults to fit, honours a stored full, and survives a bad store', () => {
+        // The test environment's localStorage is a vi.fn() mock that stores
+        // nothing, so the round trip is driven through getItem directly. An
+        // implementation that ignored storage would pass the default case and
+        // fail the stored one — which is the case that matters: the user's
+        // "Full resolution" choice has to survive a reload.
+        const getItem = vi.mocked(localStorage.getItem);
+        getItem.mockReturnValueOnce(null);
         expect(readFitResolutionPreference()).toBe('fit');
+        getItem.mockReturnValueOnce('full');
+        expect(readFitResolutionPreference()).toBe('full');
+        getItem.mockReturnValueOnce('fit');
+        expect(readFitResolutionPreference()).toBe('fit');
+        getItem.mockReturnValueOnce('sideways');
+        expect(readFitResolutionPreference()).toBe('fit');
+        getItem.mockImplementationOnce(() => { throw new Error('private mode'); });
+        expect(readFitResolutionPreference()).toBe('fit');
+        expect(getItem).toHaveBeenCalledWith(FIT_RESOLUTION_KEY);
     });
 });
 
