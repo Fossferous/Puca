@@ -145,3 +145,28 @@ describe('installSessionSync', () => {
         expect(cleared.appearance).toHaveBeenCalledTimes(1);   // uninstalled
     });
 });
+
+describe('the seed owner stamp', () => {
+    it('landing (or leaving) is reported as a seed change — a same-account sign-in rewrites an identical seed, which fires no event of its own', () => {
+        backing.set('auth_token', jwt(1));
+        backing.set('e2ee_seed_v2', 'seed');
+        const h = { onSignedOut: vi.fn(), onAccountChanged: vi.fn(), onSeedChanged: vi.fn() };
+        const off = installSessionSync(h);
+        fire('e2ee_seed_owner_v1', '1');
+        expect(h.onSeedChanged).toHaveBeenLastCalledWith(true);
+        backing.delete('e2ee_seed_v2');
+        fire('e2ee_seed_owner_v1', null);
+        expect(h.onSeedChanged).toHaveBeenLastCalledWith(false);
+        expect(h.onSignedOut).not.toHaveBeenCalled();
+        off();
+    });
+
+    it('a sessionStorage event with the same key is not a session change', () => {
+        backing.set('auth_token', jwt(1));
+        const h = { onSignedOut: vi.fn(), onAccountChanged: vi.fn(), onSeedChanged: vi.fn() };
+        const off = installSessionSync(h);
+        window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: null, storageArea: window.sessionStorage }));
+        expect(h.onSignedOut).not.toHaveBeenCalled();
+        off();
+    });
+});

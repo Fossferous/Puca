@@ -1526,10 +1526,93 @@ export function liveEncState(wire: string, decrypted: string, conversationEncryp
 // token — device compromise is out of this app's threat model.
 
 const SEED_STORAGE_KEY = 'e2ee_seed_v2';
+/**
+ * WHOSE seed that is: the `sub` of the token that was stored when the seed was
+ * written. The seed key alone cannot say, and two flows leave one account's
+ * seed beside another account's token:
+ *
+ *  - a soft expiry keeps the seed ON PURPOSE (auth.ts softExpireSession) and
+ *    removes only the token, so the next sign-in on that browser — possibly a
+ *    different person — finds the previous account's seed already in place;
+ *  - login() stores the token FIRST and the seed only after the /keys/wrap
+ *    round trip, so for that whole window the stored pair disagrees.
+ *
+ * In both, getActiveIdentity() used to hand out the old identity under the new
+ * token, and Púca Notes — a second document that enters its shell on the token
+ * event — would seal a new note to it. A personal list has no edit history:
+ * that note is unreadable for good. With the stamp, a seed that belongs to a
+ * different account than the stored token is NOT an identity (null, the same
+ * answer as "no seed yet"), and the caller waits for the real one.
+ *
+ * An unstamped seed (written before this existed, or by registration, which
+ * runs before any token) is accepted and stamped for the current account on
+ * first use — refusing it would lock every existing user out of their own
+ * history on upgrade.
+ */
+const SEED_OWNER_KEY = 'e2ee_seed_owner_v1';
+/** Same slot api/auth.ts writes. Read here, not imported: auth.ts imports this
+ *  module, and the identity must not depend on a caller remembering to inject
+ *  a reader (a test that mocks one of the two would silently lose the check). */
+const TOKEN_STORAGE_KEY = 'auth_token';
 
 let currentIdentity: Identity | null = null;
 /** The stored seed the memo was built from — what a re-validation compares. */
 let currentSeedB64: string | null = null;
+/** The account the memo's seed is stamped for; null = unstamped. */
+let currentOwnerSub: number | null = null;
+
+let subCacheToken: string | null = null;
+let subCacheValue: number | null = null;
+/** The stored token's `sub`, unverified (the server verifies tokens; this only
+ *  decides whose seed is whose). Memoised on the token string: every seal and
+ *  every open passes through here. */
+function storedTokenSub(): number | null {
+    let token: string | null;
+    try {
+        token = localStorage.getItem(TOKEN_STORAGE_KEY);
+    } catch {
+        return null;
+    }
+    if (!token) return null;
+    if (token === subCacheToken) return subCacheValue;
+    let sub: number | null = null;
+    try {
+        const part = token.split('.')[1] ?? '';
+        const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+        const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), c => c.charCodeAt(0))));
+        if (typeof payload?.sub === 'number') sub = payload.sub;
+    } catch {
+        sub = null;
+    }
+    subCacheToken = token;
+    subCacheValue = sub;
+    return sub;
+}
+
+function storedSeedOwner(): number | null {
+    const raw = localStorage.getItem(SEED_OWNER_KEY);
+    if (!raw) return null;   // also a test stub's `undefined`
+    const n = Number(raw);
+    return Number.isSafeInteger(n) ? n : null;
+}
+
+function stampSeedOwner(sub: number | null): void {
+    currentOwnerSub = sub;
+    try {
+        if (sub === null) localStorage.removeItem(SEED_OWNER_KEY);
+        else localStorage.setItem(SEED_OWNER_KEY, String(sub));
+    } catch {
+        // storage unavailable: the in-memory stamp still guards this document
+    }
+}
+
+/** A stamped seed under a DIFFERENT account's token. Either side unknown is
+ *  not a mismatch: no token means nothing can be sealed to the wrong account
+ *  anyway, and an unstamped seed is the legacy case described above. */
+function ownerMismatch(owner: number | null, sub: number | null): boolean {
+    return owner !== null && sub !== null && owner !== sub;
+}
 /**
  * Set when ANOTHER document on this origin wrote or removed the stored seed
  * (the `storage` event fires only for changes made elsewhere — never for this
@@ -1547,7 +1630,7 @@ let currentSeedB64: string | null = null;
 let seedMaybeStale = false;
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     window.addEventListener('storage', e => {
-        if (e.key === null || e.key === SEED_STORAGE_KEY) seedMaybeStale = true;
+        if (e.key === null || e.key === SEED_STORAGE_KEY || e.key === SEED_OWNER_KEY) seedMaybeStale = true;
     });
 }
 
@@ -1566,6 +1649,11 @@ export function setActiveIdentity(identity: Identity): void {
     } catch {
         // storage may be unavailable (private mode); keep in-memory only
     }
+    // Seed FIRST, stamp second. Between the two writes another document sees
+    // the new seed under the previous stamp — a mismatch, so it waits. The
+    // other order would show it the OLD seed under the NEW stamp: a match.
+    // No token yet (registration): unstamped, adopted at first use.
+    stampSeedOwner(storedTokenSub());
 }
 
 /**
@@ -1579,19 +1667,48 @@ export function setActiveIdentity(identity: Identity): void {
  * in (that identity from here on).
  */
 export function getActiveIdentity(): Identity | null {
-    if (currentIdentity && !seedMaybeStale) return currentIdentity;
+    const sub = storedTokenSub();
+    if (currentIdentity && !seedMaybeStale) {
+        // The memo is checked too: a sign-in in THIS document stores the new
+        // token before the new seed, and fires no storage event here.
+        if (ownerMismatch(currentOwnerSub, sub)) return null;
+        if (currentOwnerSub === null && sub !== null) stampSeedOwner(sub);
+        return currentIdentity;
+    }
     try {
         const stored = localStorage.getItem(SEED_STORAGE_KEY);
+        const owner = storedSeedOwner();
         seedMaybeStale = false;
-        if (currentIdentity && stored === currentSeedB64) return currentIdentity;
-        currentIdentity = null;
-        currentSeedB64 = null;
-        if (!stored) return null;
-        currentIdentity = identityFromSeed(fromBase64(stored));
-        currentSeedB64 = stored;
+        if (!(currentIdentity && stored === currentSeedB64)) {
+            currentIdentity = null;
+            currentSeedB64 = null;
+            if (stored) {
+                currentIdentity = identityFromSeed(fromBase64(stored));
+                currentSeedB64 = stored;
+            }
+        }
+        currentOwnerSub = owner;
+        if (!currentIdentity) return null;
+        if (ownerMismatch(owner, sub)) return null;
+        if (owner === null && sub !== null) stampSeedOwner(sub);
         return currentIdentity;
     } catch {
         return null;
+    }
+}
+
+/**
+ * Whether the STORED seed is one the stored token's account may use — what a
+ * second document asks before entering its signed-in state on a token event
+ * (Púca Notes). "A seed is present" is not the question: after a soft expiry
+ * the previous account's seed is present the whole time.
+ */
+export function seedMatchesCurrentAccount(): boolean {
+    try {
+        if (!localStorage.getItem(SEED_STORAGE_KEY)) return false;
+        return !ownerMismatch(storedSeedOwner(), storedTokenSub());
+    } catch {
+        return false;
     }
 }
 
@@ -1696,9 +1813,11 @@ export async function openDeviceLan(identity: Identity, blob: string): Promise<s
 export function clearActiveIdentity(): void {
     currentIdentity = null;
     currentSeedB64 = null;
+    currentOwnerSub = null;
     seedMaybeStale = false;
     try {
         localStorage.removeItem(SEED_STORAGE_KEY);
+        localStorage.removeItem(SEED_OWNER_KEY);
     } catch {
         // ignore
     }

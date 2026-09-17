@@ -12,10 +12,11 @@ import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-d
 import { useQueryClient } from '@tanstack/react-query';
 import { getToken, isAuthenticated, isTokenExpired, logout, softExpireSession } from '../api/auth';
 import { resetAuthExpiredFlag } from '../api/client';
-import { clearSharedSessionCaches, installSessionSync, seedPresent } from '../api/sessionSync';
+import { clearSharedSessionCaches, installSessionSync } from '../api/sessionSync';
+import { seedMatchesCurrentAccount } from '../api/e2ee';
 import { NotesLogin } from './components/NotesLogin';
 import { NotesShell } from './components/NotesShell';
-import { invalidateKeepPrefs } from './model/notesPrefs';
+import { invalidateNotesPrefs } from './model/notesPrefs';
 import { notesKeys } from './model/notesQueries';
 
 export function NotesApp() {
@@ -63,8 +64,11 @@ function SessionGate() {
     // E2EE seed only after that tab's /keys/wrap round trip. Entering the
     // shell on the token alone would fetch every note with no identity and
     // cache "locked" markers for 30 s. So: enter on the token only if the
-    // seed is already there, otherwise wait for it; and when a seed lands
-    // while the shell is up, re-read everything.
+    // seed is already there AND is this account's, otherwise wait for it; and
+    // when a seed lands while the shell is up, re-read everything. "Is this
+    // account's" matters because a soft expiry keeps the PREVIOUS account's
+    // seed in storage: entering on "a seed is present" sealed the new
+    // account's notes to the old identity (api/e2ee.ts SEED_OWNER_KEY).
     const signedInRef = useRef(signedIn);
     useEffect(() => { signedInRef.current = signedIn; }, [signedIn]);
     const awaitingSeed = useRef(false);
@@ -72,14 +76,14 @@ function SessionGate() {
         onSignedOut: () => {
             awaitingSeed.current = false;
             qc.clear();
-            invalidateKeepPrefs();
+            invalidateNotesPrefs();
             setSignedIn(false);
             navigate('/login', { state: { expired: false }, replace: true });
         },
         onAccountChanged: () => window.location.reload(),
         onSignedIn: () => {
-            invalidateKeepPrefs();
-            if (!seedPresent()) { awaitingSeed.current = true; return; }
+            invalidateNotesPrefs();
+            if (!seedMatchesCurrentAccount()) { awaitingSeed.current = true; return; }
             qc.clear();
             setSignedIn(true);
             navigate('/', { replace: true });
@@ -87,6 +91,9 @@ function SessionGate() {
         onSeedChanged: (present) => {
             if (!present) return;
             if (awaitingSeed.current) {
+                // login() writes the seed and THEN its owner stamp; between the
+                // two this still says no, and the stamp's own event follows.
+                if (!seedMatchesCurrentAccount()) return;
                 awaitingSeed.current = false;
                 qc.clear();
                 setSignedIn(true);
@@ -107,14 +114,14 @@ function SessionGate() {
         logout();
         clearSharedSessionCaches();
         qc.clear();
-        invalidateKeepPrefs();
+        invalidateNotesPrefs();
         setSignedIn(false);
         navigate('/login', { replace: true });
     }, [navigate, qc]);
 
     const onLoginSuccess = useCallback(() => {
         resetAuthExpiredFlag();   // a later expiry must signal again
-        invalidateKeepPrefs();    // the account may differ from the last one
+        invalidateNotesPrefs();    // the account may differ from the last one
         setSignedIn(true);
         navigate('/', { replace: true });
     }, [navigate]);

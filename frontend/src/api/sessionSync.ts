@@ -43,6 +43,8 @@ import { applyAppearance, loadSettings } from '../components/settingsStore';
 
 const TOKEN_KEY = 'auth_token';
 const SEED_KEY = 'e2ee_seed_v2';
+/** Whose seed that is (api/e2ee.ts). login() writes it right AFTER the seed. */
+const SEED_OWNER_KEY = 'e2ee_seed_owner_v1';
 const SETTINGS_KEY = 'sovereign_settings';
 
 export type SignedOutReason = 'logout' | 'expired';
@@ -117,6 +119,10 @@ export function installSessionSync(handlers: SessionSyncHandlers): () => void {
     if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {};
     let knownSub = subOf(readToken());
     const onStorage = (e: StorageEvent) => {
+        // sessionStorage fires the same event with the same keys; only
+        // localStorage carries the session. (A synthetic event in a test has
+        // no storageArea, hence the presence check.)
+        if (e.storageArea && e.storageArea !== window.localStorage) return;
         // localStorage.clear() elsewhere reports key === null: treat it as the
         // token going away (it did).
         if (e.key === null || e.key === TOKEN_KEY) {
@@ -144,6 +150,13 @@ export function installSessionSync(handlers: SessionSyncHandlers): () => void {
         }
         if (e.key === SEED_KEY) {
             handlers.onSeedChanged?.(e.newValue !== null);
+            return;
+        }
+        if (e.key === SEED_OWNER_KEY) {
+            // A sign-in as the SAME account over a kept seed rewrites the seed
+            // to the identical value, which fires no event at all — the stamp
+            // is then the only signal a waiting document gets.
+            handlers.onSeedChanged?.(seedPresent());
             return;
         }
         if (e.key === SETTINGS_KEY) applyAppearance(loadSettings());
