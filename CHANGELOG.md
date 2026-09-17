@@ -4,7 +4,10 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.814 — 2026-09-17
+
+Púca Notes: a notes app in the style of Google Keep, in the browser and as its
+own Android app, over the lists and checklists you already have in Púca.
 
 ### Added
 - **Púca Notes** — a notes app in the style of Google Keep, at `/notes/` on the
@@ -26,6 +29,12 @@ one-line summary; this file is the full story. Versions follow
   one browser tab of the web app now takes effect in the other tabs on the
   same origin — before, the other tab kept the previous account's keys in
   memory until it was reloaded.
+- **Someone else signing in on the same browser.** When a session expires, the
+  account's keys stay in the browser on purpose, so the same person can sign
+  back in without losing anything. If a different account signed in instead,
+  there was a short window in which the app could still reach for the previous
+  account's keys. Stored keys are now tied to the account they belong to and
+  are never offered to another one.
 - **Plaintext list titles are flagged.** Notes shows a "Not encrypted" mark on
   a note whose title the server holds in the clear, the way a checklist item
   is already flagged.
