@@ -14,7 +14,7 @@
  * propagation (its other three editors do), so a window-level close would
  * swallow that cancel. isEditableTarget is the guard.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
@@ -67,7 +67,12 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
     const titleUnreadable = isUndecryptable(card.title);
 
-    useEffect(() => {
+    // useLayoutEffect, not useEffect: the listener must exist the moment the
+    // dialog is in the DOM. A keyboard user who opened the note with Enter can
+    // press Escape within the same frame, and a listener registered after
+    // paint missed it — the editor stayed open, which the walk caught under
+    // load. Registering at commit closes the window; nothing else changes.
+    useLayoutEffect(() => {
         if (escapeBlocked) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape' || e.defaultPrevented) return;
