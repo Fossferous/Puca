@@ -3832,6 +3832,59 @@ mod tests {
         ));
     }
 
+    /// The fs worker under test, shut down and JOINED when it drops — also
+    /// while a failed assertion unwinds.
+    ///
+    /// Dropping a `JoinHandle` detaches the thread; it does not join it. A
+    /// detached worker can still be inside a `List` request, holding the jail
+    /// root open WITHOUT FILE_SHARE_DELETE (that is the point of that handle),
+    /// at the moment the fixture tries to remove itself — and the fixture only
+    /// prints when the thread is already panicking, so the folder stayed behind
+    /// in the profile. Drop order cannot help: it orders locals on THIS thread,
+    /// and the handle lives on the other one. The rig owns the sender because
+    /// the join only returns once the channel is closed. Declare it AFTER the
+    /// fixture, so it goes first.
+    struct FsWorkerRig {
+        tx: Option<std::sync::mpsc::Sender<(u32, crate::file_transfer::FsRequest, Option<u64>)>>,
+        done: std::sync::mpsc::Receiver<(u32, Option<Vec<u8>>)>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FsWorkerRig {
+        fn start(scope: &Arc<Mutex<Option<crate::file_transfer::FileScope>>>) -> Self {
+            let (tx, req_rx) = std::sync::mpsc::channel();
+            let (done_tx, done) = std::sync::mpsc::channel::<(u32, Option<Vec<u8>>)>();
+            let scope = Arc::clone(scope);
+            let worker = std::thread::spawn(move || run_fs_worker(req_rx, scope, None, done_tx));
+            FsWorkerRig { tx: Some(tx), done, worker: Some(worker) }
+        }
+
+        fn send(&self, cid: u32, req: crate::file_transfer::FsRequest, id: Option<u64>) {
+            self.tx.as_ref().expect("the worker is up").send((cid, req, id)).unwrap();
+        }
+
+        fn reply(&self) -> (u32, Option<Vec<u8>>) {
+            self.done.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+        }
+
+        /// The happy path's ending: close the channel, join, and let a panic
+        /// inside the worker fail the test.
+        fn finish(mut self) {
+            self.tx.take();
+            self.worker.take().expect("joined once").join().unwrap();
+        }
+    }
+
+    impl Drop for FsWorkerRig {
+        fn drop(&mut self) {
+            // Channel first, or the join waits forever on a worker parked in recv().
+            self.tx.take();
+            if let Some(w) = self.worker.take() {
+                let _ = w.join();
+            }
+        }
+    }
+
     #[test]
     fn the_fs_worker_answers_in_request_order_with_ids_echoed() {
         // Order IS the protocol for id-less clients, so the worker being a
@@ -3846,12 +3899,7 @@ mod tests {
         let scope = Arc::new(Mutex::new(Some(crate::file_transfer::FileScope::Jailed(
             dir.to_path_buf(),
         ))));
-        let (req_tx, req_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<(u32, Option<Vec<u8>>)>();
-        let worker = std::thread::spawn({
-            let scope = Arc::clone(&scope);
-            move || run_fs_worker(req_rx, scope, None, done_tx)
-        });
+        let rig = FsWorkerRig::start(&scope);
 
         for (i, req) in [
             crate::file_transfer::FsRequest::ListRoots,
@@ -3861,11 +3909,11 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            req_tx.send((7u32, req, Some(100 + i as u64))).unwrap();
+            rig.send(7, req, Some(100 + i as u64));
         }
         let mut got = Vec::new();
         for _ in 0..3 {
-            let (cid, bytes) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            let (cid, bytes) = rig.reply();
             assert_eq!(cid, 7);
             let v: serde_json::Value =
                 serde_json::from_slice(&bytes.expect("every reply must encode")).unwrap();
@@ -3874,8 +3922,7 @@ mod tests {
         }
         assert_eq!(got, vec![100, 101, 102], "completions must keep request order");
 
-        drop(req_tx);
-        worker.join().unwrap();
+        rig.finish();
     }
 
     #[test]
@@ -3884,23 +3931,18 @@ mod tests {
         let scope = Arc::new(Mutex::new(Some(crate::file_transfer::FileScope::Jailed(
             dir.to_path_buf(),
         ))));
-        let (req_tx, req_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<(u32, Option<Vec<u8>>)>();
-        let worker = std::thread::spawn({
-            let scope = Arc::clone(&scope);
-            move || run_fs_worker(req_rx, scope, None, done_tx)
-        });
+        let rig = FsWorkerRig::start(&scope);
 
         // POSITIVE CONTROL first: with the grant in place the request works.
-        req_tx.send((1u32, crate::file_transfer::FsRequest::ListRoots, None)).unwrap();
-        let (_, bytes) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        rig.send(1, crate::file_transfer::FsRequest::ListRoots, None);
+        let (_, bytes) = rig.reply();
         let v: serde_json::Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
         assert_ne!(v["ok"], "error", "the rig must be able to see a grant work: {v}");
 
         // Revoke — the NEXT request must refuse, no reconnect needed.
         *scope.lock().unwrap() = None;
-        req_tx.send((1u32, crate::file_transfer::FsRequest::ListRoots, None)).unwrap();
-        let (_, bytes) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        rig.send(1, crate::file_transfer::FsRequest::ListRoots, None);
+        let (_, bytes) = rig.reply();
         let v: serde_json::Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
         assert_eq!(v["ok"], "error");
         assert!(
@@ -3908,8 +3950,7 @@ mod tests {
             "the refusal must be the grant refusal: {v}"
         );
 
-        drop(req_tx);
-        worker.join().unwrap();
+        rig.finish();
     }
 
     #[test]
