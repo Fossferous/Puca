@@ -1007,6 +1007,7 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
 
 #[cfg(test)]
 mod tests {
+    use super::test_fixture::tempdir;
     use super::*;
 
     /// The plaintext credential files beside the secret directories are the
@@ -1041,47 +1042,6 @@ mod tests {
 
     fn jailed() -> FileScope {
         FileScope::Jailed(root())
-    }
-
-    fn stamp() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    }
-
-    /// A real directory that exists AND that both scopes allow.
-    ///
-    /// NOT `std::env::temp_dir()`, which this used to be: on Windows that is
-    /// `%USERPROFILE%\AppData\Local\Temp`, and AppData is on the denylist —
-    /// which since L8-NATIVE-2 applies to `Jailed` as well as `Policy`. A test
-    /// rooted there is refused because of WHERE IT STARTS, which would make an
-    /// "allowed" test fail and — far worse — make a "denied" test pass without
-    /// ever exercising the thing it claims to check. The junction tests below
-    /// are exactly that trap: built under temp_dir they would be refused for
-    /// their base rather than for the junction, and would have looked green.
-    fn tempdir(tag: &str) -> PathBuf {
-        let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .expect("a home directory to test under");
-        let p = PathBuf::from(home).join(format!("puca-ft-{tag}-{}", stamp()));
-        fs::create_dir_all(&p).unwrap();
-        let c = p.canonicalize().unwrap();
-        // Guard the guard, for BOTH scopes: if this location is itself denied,
-        // every test using it is meaningless, so say so instead of reporting a
-        // pass.
-        assert!(
-            resolve(&FileScope::Policy, &c.to_string_lossy()).is_ok(),
-            "the test fixture directory {} must itself be allowed by Policy, \
-             or the tests built on it prove nothing",
-            c.display()
-        );
-        assert!(
-            resolve(&FileScope::Jailed(c.clone()), &c.to_string_lossy()).is_ok(),
-            "the test fixture directory {} must itself be allowed as a jail root, \
-             or the tests built on it prove nothing",
-            c.display()
-        );
-        c
     }
 
     /// `resolve` returns the CANONICAL path, which on Windows is the verbatim
@@ -1288,8 +1248,6 @@ mod tests {
 
         let got = resolve(&FileScope::Policy, &f.to_string_lossy());
         assert!(got.is_ok(), "{:?}", got.err());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1345,7 +1303,6 @@ mod tests {
             resolve(&FileScope::Policy, &ordinary.to_string_lossy()).is_ok(),
             "a Recovery folder that is not at a drive root must be browsable"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1370,7 +1327,6 @@ mod tests {
             matches!(FileScope::jailed(&dir.to_string_lossy()), Ok(FileScope::Jailed(_))),
             "an ordinary folder must still be grantable"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1396,7 +1352,6 @@ mod tests {
         let dir = tempdir("policy-newfile");
         let target = dir.join("does-not-exist-yet.txt");
         assert!(resolve(&FileScope::Policy, &target.to_string_lossy()).is_ok());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1422,7 +1377,7 @@ mod tests {
         // (`C:\Users\<real name>\…`) and their folder layout, to a peer who was
         // granted FILE ACCESS and nothing else. The peer gets an opaque token.
         let dir = tempdir("roots-opaque");
-        let scope = FileScope::Jailed(dir.clone());
+        let scope = FileScope::Jailed(dir.to_path_buf());
         match handle_request(FsRequest::ListRoots, &scope, None) {
             FsResponse::Roots { roots } => {
                 assert_eq!(roots, vec![JAILED_ROOT.to_string()]);
@@ -1454,8 +1409,6 @@ mod tests {
             }
             other => panic!("expected a list, got {other:?}"),
         }
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ---- L8-NATIVE-2: the denials apply to a JAIL too ----------------------
@@ -1469,7 +1422,7 @@ mod tests {
         // unattended signing seed) and ~/.ssh, because the denylist lived
         // inside resolve()'s Policy arm where Jailed could not reach it.
         let home = tempdir("jail-denied");
-        let scope = FileScope::Jailed(home.clone());
+        let scope = FileScope::Jailed(home.to_path_buf());
         for attempt in [
             home.join("AppData").join("Local").join("com.sovereign.chat")
                 .join("device").join("unattended.json"),
@@ -1492,8 +1445,6 @@ mod tests {
             resolve(&scope, &ordinary.to_string_lossy()).is_ok(),
             "an ordinary file under the same grant must still resolve"
         );
-
-        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -1526,7 +1477,7 @@ mod tests {
         for i in 0..(MAX_LIST_ENTRIES + 3) {
             fs::write(dir.join(format!("f{i:05}.txt")), b"").unwrap();
         }
-        let scope = FileScope::Jailed(dir.clone());
+        let scope = FileScope::Jailed(dir.to_path_buf());
         match handle_request(
             FsRequest::List { path: dir.to_string_lossy().to_string() },
             &scope,
@@ -1538,7 +1489,6 @@ mod tests {
             }
             other => panic!("expected a list, got {other:?}"),
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1550,7 +1500,7 @@ mod tests {
         for i in 0..5 {
             fs::write(dir.join(format!("f{i}.txt")), b"").unwrap();
         }
-        let scope = FileScope::Jailed(dir.clone());
+        let scope = FileScope::Jailed(dir.to_path_buf());
         match handle_request(
             FsRequest::List { path: dir.to_string_lossy().to_string() },
             &scope,
@@ -1562,7 +1512,6 @@ mod tests {
             }
             other => panic!("expected a list, got {other:?}"),
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1685,8 +1634,6 @@ mod tests {
         let link = inside.join("escape");
         if !make_junction(&link, &outside) {
             panic!("could not create a test junction; gate 2 is UNVERIFIED on this machine");
-            let _ = fs::remove_dir_all(&base);
-            return;
         }
 
         let scope = FileScope::Jailed(inside.clone());
@@ -1697,8 +1644,6 @@ mod tests {
             got.is_err(),
             "a junction out of the jail must be refused, got {got:?}"
         );
-
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1716,8 +1661,6 @@ mod tests {
         let link = inside.join("shortcut");
         if !make_junction(&link, &real) {
             panic!("could not create a test junction; gate 2 is UNVERIFIED on this machine");
-            let _ = fs::remove_dir_all(&base);
-            return;
         }
 
         let scope = FileScope::Jailed(inside.clone());
@@ -1727,8 +1670,6 @@ mod tests {
             got.is_ok(),
             "a junction INSIDE the jail must still resolve, got {got:?}"
         );
-
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1747,8 +1688,6 @@ mod tests {
 
         if !make_junction(&link, Path::new(&sysroot)) {
             panic!("could not create a test junction; gate 2 is UNVERIFIED on this machine");
-            let _ = fs::remove_dir_all(&base);
-            return;
         }
 
         let attempt = link.join("System32").join("config").join("SAM");
@@ -1757,8 +1696,6 @@ mod tests {
             got.is_err(),
             "a junction into the system root must be refused, got {got:?}"
         );
-
-        let _ = fs::remove_dir_all(&base);
     }
 
     // ---- INFO-4: the grant canonicalises, or it is not a grant -------------
@@ -1804,8 +1741,6 @@ mod tests {
             "a grant made through FileScope::jailed must be usable"
         );
         assert!(resolve(&scope, "/notes.txt").is_ok());
-
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1813,14 +1748,17 @@ mod tests {
         // Failing CLOSED: a root we cannot resolve is a jail we cannot enforce,
         // so it must not become a grant that silently checks against a path the
         // filesystem disagrees with.
-        let missing = tempdir("grant-missing").join("no-such-folder");
+        // Bound, not a temporary: the parent must exist so that only the leaf
+        // is missing. (It used to be a temporary PathBuf that nothing removed,
+        // and every run left a `puca-ft-grant-missing-*` folder behind.)
+        let base = tempdir("grant-missing");
+        let missing = base.join("no-such-folder");
         let got = FileScope::jailed(&missing.to_string_lossy());
         assert!(got.is_err(), "an unresolvable root must not be granted");
 
         // Positive control: the constructor is not simply always-Err.
         let real = tempdir("grant-real");
         assert!(FileScope::jailed(&real.to_string_lossy()).is_ok());
-        let _ = fs::remove_dir_all(&real);
     }
 
     // ---- L8-NATIVE-1 / gate 3: the handle, not the path --------------------
@@ -1852,8 +1790,6 @@ mod tests {
             real.display(),
             dir.display()
         );
-        drop(file);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1898,7 +1834,30 @@ mod tests {
             got.map(|(_, p)| p)
         );
 
-        let _ = fs::remove_dir_all(&base);
+        // `dir_ok` holds the jail root open WITHOUT FILE_SHARE_DELETE, which is
+        // the point of it, and Windows will not delete a directory in that state.
+        // Both handles close here, before `base` drops and removes the fixture.
+        drop((ok, dir_ok));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_fixture_still_held_open_is_reported_rather_than_left_behind() {
+        // POSITIVE CONTROL for the cleanup check every test in this file relies
+        // on: a `remove` that returned Ok whatever the disk said would make that
+        // check decoration. The handle is the one that caused the leak — a jail
+        // root opened `OpenAs::Dir`, so no FILE_SHARE_DELETE.
+        let dir = tempdir("cleanup-control");
+        let scope = FileScope::Jailed(dir.to_path_buf());
+        let (handle, _) = open_verified(&scope, &dir, OpenAs::Dir).expect("the fixture opens");
+
+        let held = dir.remove();
+        assert!(held.is_err(), "a directory held open must be reported as surviving");
+        assert!(dir.exists(), "and it must really still be there: {held:?}");
+
+        drop(handle);
+        assert_eq!(dir.remove(), Ok(()), "once the handle closes, the fixture must go");
+        assert!(!dir.exists());
     }
 
     #[test]
@@ -1924,6 +1883,116 @@ mod tests {
             got.is_err(),
             "PROGRA~1 expands into Program Files, which is denied; got {got:?}"
         );
+    }
+}
+
+/// The on-disk fixture directory for the tests above and in `stream.rs`.
+#[cfg(test)]
+pub(crate) mod test_fixture {
+    use super::{resolve, FileScope};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn stamp() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+
+    /// A real directory that exists AND that both scopes allow.
+    ///
+    /// NOT `std::env::temp_dir()`, which this used to be: on Windows that is
+    /// `%USERPROFILE%\AppData\Local\Temp`, and AppData is on the denylist —
+    /// which since L8-NATIVE-2 applies to `Jailed` as well as `Policy`. A test
+    /// rooted there is refused because of WHERE IT STARTS, which would make an
+    /// "allowed" test fail and — far worse — make a "denied" test pass without
+    /// ever exercising the thing it claims to check. The junction tests above
+    /// are exactly that trap: built under temp_dir they would be refused for
+    /// their base rather than for the junction, and would have looked green.
+    ///
+    /// Because it lives in the user's profile, it is a [`FixtureDir`]: bind it
+    /// to a local declared BEFORE anything that opens a handle inside it.
+    pub(crate) fn tempdir(tag: &str) -> FixtureDir {
+        let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .expect("a home directory to test under");
+        let p = PathBuf::from(home).join(format!("puca-ft-{tag}-{}", stamp()));
+        fs::create_dir_all(&p).unwrap();
+        // Owned from the moment it exists, so a failed check below removes it.
+        let mut dir = FixtureDir(p);
+        dir.0 = dir.0.canonicalize().unwrap();
+        let c = &dir.0;
+        // Guard the guard, for BOTH scopes: if this location is itself denied,
+        // every test using it is meaningless, so say so instead of reporting a
+        // pass.
+        assert!(
+            resolve(&FileScope::Policy, &c.to_string_lossy()).is_ok(),
+            "the test fixture directory {} must itself be allowed by Policy, \
+             or the tests built on it prove nothing",
+            c.display()
+        );
+        assert!(
+            resolve(&FileScope::Jailed(c.clone()), &c.to_string_lossy()).is_ok(),
+            "the test fixture directory {} must itself be allowed as a jail root, \
+             or the tests built on it prove nothing",
+            c.display()
+        );
+        dir
+    }
+
+    /// A fixture directory that is deleted when it drops — including while a
+    /// failed assertion unwinds — and that fails the test if it is still on
+    /// disk afterwards.
+    ///
+    /// It replaces `let _ = fs::remove_dir_all(&dir);` as each test's last
+    /// line, which never ran when an assertion above it failed and discarded
+    /// its error when it did. `the_open_is_validated_by_the_handle_not_by_the_path`
+    /// was still holding the jail root through `OpenAs::Dir`, which is opened
+    /// without FILE_SHARE_DELETE on purpose, so on Windows every run failed to
+    /// delete it (os error 32) and said nothing: 75 `puca-ft-handle-gate-*`
+    /// folders built up in one profile. Locals drop in reverse order, so a
+    /// handle declared after the fixture closes before the fixture is removed.
+    pub(crate) struct FixtureDir(PathBuf);
+
+    impl FixtureDir {
+        /// Remove the directory, then check that it is really gone.
+        pub(crate) fn remove(&self) -> Result<(), String> {
+            let removed = fs::remove_dir_all(&self.0);
+            match fs::symlink_metadata(&self.0) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Ok(_) => Err(format!(
+                    "test fixture {} is still on disk after cleanup ({removed:?}); \
+                     is a handle into it still open?",
+                    self.0.display()
+                )),
+                Err(e) => Err(format!(
+                    "test fixture {} could not be checked after cleanup: {e}",
+                    self.0.display()
+                )),
+            }
+        }
+    }
+
+    impl std::ops::Deref for FixtureDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for FixtureDir {
+        fn drop(&mut self) {
+            if let Err(e) = self.remove() {
+                // Already unwinding from a failed assertion: a second panic
+                // would abort the whole test binary and bury that failure.
+                if std::thread::panicking() {
+                    eprintln!("{e}");
+                } else {
+                    panic!("{e}");
+                }
+            }
+        }
     }
 }
 
