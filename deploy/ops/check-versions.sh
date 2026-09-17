@@ -326,6 +326,36 @@ for entry in "${HOSTS[@]}"; do
 		fi
 	fi
 
+	# --- Púca Notes' Android app -------------------------------------------
+	# A third APK, no OTA: it can only stay current by shipping with every
+	# release, so the page must link one and the link must serve. Same
+	# reported-not-asserted rule for its version as the other APKs (an
+	# OTA-only release legitimately leaves it trailing). An older hosts.conf
+	# without APK_PREFIX_NOTES warns rather than dying on set -u.
+	if [ -n "${APK_PREFIX_NOTES:-}" ]; then
+		notes_apk_href="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE "$APK_PREFIX_NOTES-[0-9.]+\.apk" | head -1 || true)"
+		if [ -z "$notes_apk_href" ]; then
+			printf 'FAIL  %-22s no Púca Notes Android link on the download page\n' "download-page notesAPK"
+			FAILED+=("$label/notes-apk-link")
+		else
+			notes_apk_code="$(ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$notes_apk_href' --max-time 25" 2>/dev/null || true)"
+			notes_apk_ver="$(printf '%s' "$notes_apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+			if [ "$notes_apk_code" = "200" ]; then
+				if [ "$notes_apk_ver" = "$EXPECTED" ]; then
+					printf 'PASS  %-22s %s (current)\n' "download-page notesAPK" "$notes_apk_ver"
+				else
+					printf 'INFO  %-22s %s (trails %s — same OTA-only rule as the other APKs)\n' \
+						"download-page notesAPK" "$notes_apk_ver" "$EXPECTED"
+				fi
+			else
+				printf 'FAIL  %-22s %s linked but serves HTTP %s\n' "download-page notesAPK" "$notes_apk_href" "${notes_apk_code:-<none>}"
+				FAILED+=("$label/notes-apk-file")
+			fi
+		fi
+	else
+		printf 'WARN  %-22s APK_PREFIX_NOTES not set in hosts.conf — Púca Notes APK link unchecked (see hosts.conf.example)\n' "download-page notesAPK"
+	fi
+
 	# The webapp carries no version string, so compare the ENTRY BUNDLE the
 	# host serves against the one in the local dist/ — a hash match is the
 	# only honest way to say "this host is serving the build I just made".

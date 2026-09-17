@@ -57,6 +57,8 @@
   .steps b { color: #e8e6f0; }
   code { background: rgba(255,255,255,0.07); padding: 2px 7px; border-radius: 6px; font-size: 13px; }
   a.link { color: #7fb8ff; }
+  .notes-app { margin: 1.25rem 0 0; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,.12); }
+  .notes-app .downloads { margin-top: .6rem; }
   [data-variant-panel] { display: none; }
   [data-variant-panel].shown { display: block; }
 </style>
@@ -130,6 +132,19 @@
         <a class="btn secondary" href="/mobile/Puca-Lite-0.9.813.apk" download>Download for Android (.apk)</a>
       </div>
       <div class="meta">v0.9.813 &middot; Windows 10/11 (64-bit) &middot; Android 7+</div>
+    </div>
+
+    <div class="notes-app">
+      <b>Púca Notes</b> &mdash; your task lists as notes, Google-Keep style, on the same account.
+      In the browser it is part of the web app; on Android it is its own small app that installs
+      beside Púca and updates with each release.
+      <div class="downloads">
+        <!-- This filename must match APK_PREFIX_NOTES in deploy/ops/hosts.conf:
+             what dual-ship.sh's `apk-notes` subcommand uploads. Same
+             refuse-until-linked rule as the other APKs. -->
+        <a class="btn secondary" href="/mobile/Puca-Notes-0.9.813.apk" download>Púca Notes for Android (.apk)</a>
+        <a class="btn secondary" href="https://__APP_HOST__/notes/">Open Púca Notes in your browser</a>
+      </div>
     </div>
 
     <div class="steps">

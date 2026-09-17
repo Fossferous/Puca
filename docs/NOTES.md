@@ -135,7 +135,7 @@ installing a new APK.
 
 ```bash
 cd frontend && npm run notes:android            # debug APK, sideloadable
-cd frontend && npm run notes:android:release    # needs a keystore under notes-app/android
+cd frontend && npm run notes:android:release    # signed with Púca's own keystore (~/.android/puca-keystore.properties)
 ```
 
 `scripts/build-notes-app.mjs` builds the page in native mode
@@ -144,6 +144,14 @@ CSP meta (`scripts/cap-index-csp.mjs --index`), runs `cap sync android` inside
 `notes-app/`, and calls gradle. The API host comes from `frontend/.env.production`
 like every other build. Output:
 `frontend/notes-app/android/app/build/outputs/apk/debug/app-debug.apk`.
+
+**It ships with every release.** The app has no updater of its own, so a Púca
+Notes that trails the task API it talks to would break quietly; it is therefore
+a release surface like the others: built from the same version
+(`tauri.conf.json`, checked by `scripts/check-lite-identity.mjs`), release-signed
+with the same keystore as Púca, uploaded by `deploy/ops/dual-ship.sh apk-notes`
+under `APK_PREFIX_NOTES` from `hosts.conf`, linked from the download page (the
+ship refuses until it is), and asserted by `check-versions.sh`.
 
 ## Not built (and why)
 

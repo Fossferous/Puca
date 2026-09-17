@@ -152,7 +152,7 @@ REFUSED. **Change that crate and the version check fails until you run
 `ship-waker.sh`.**
 
 **Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|installer|
-installer-lite|backend|apk|apk-lite} ...`, never a manual `scp`/`ssh` to one
+installer-lite|backend|apk|apk-lite|apk-notes} ...`, never a manual `scp`/`ssh` to one
 box.** A single-host deploy leaves the others silently stale, which looks
 identical to a successful release. dual-ship.sh refuses to report success
 unless it verified EVERY host individually, over that host's own loopback — if
@@ -165,7 +165,10 @@ My Devices, Wake-on-LAN, remote file transfer, in-call screen-share control —
 excluded at compile time, not just hidden). Lite is a separate artifact under
 a separate name (`INSTALLER_NAME_LITE`, `MOBILE_BUNDLE_PREFIX_LITE`,
 `APK_PREFIX_LITE` in `hosts.conf`), uploaded **alongside**, never over, the
-full one — both variants ship the same version number. `apk-lite` refuses to
+full one — both variants ship the same version number. `apk-notes` ships
+Púca Notes' own Android app (a third APK, not a variant: its own id, no OTA,
+so it can only stay current by riding every release) under `APK_PREFIX_NOTES`,
+with the same page-must-link-it gate. `apk-lite` refuses to
 publish until `deploy/download-site/index.html` actually links the exact lite
 APK filename, the same page-and-APK-ship-together gate `apk` has. The
 installer links carry no version in their filenames, so neither installer

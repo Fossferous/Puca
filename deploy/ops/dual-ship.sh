@@ -23,6 +23,7 @@
 #   dual-ship.sh backend       <src-tarball.tar.gz>
 #   dual-ship.sh apk           <Puca-x.y.z.apk> <version>
 #   dual-ship.sh apk-lite      <Puca-Lite-x.y.z.apk> <version>
+#   dual-ship.sh apk-notes     <Puca-Notes-x.y.z.apk> <version>
 #
 # The *-lite subcommands ship the build with NO remote control (see
 # CLAUDE.md's "Lite variant" section) ALONGSIDE the corresponding full one —
@@ -1003,6 +1004,51 @@ cmd_apk_lite() {
 	done
 }
 
+# Púca Notes' Android app: a THIRD APK, not a variant of Púca — its own
+# applicationId, installed beside Púca, and no OTA (every update is a new
+# APK), which is exactly why it ships with every release under the same
+# version: a notes app that trails the task API it talks to is a notes app
+# that breaks quietly. Same refuse-until-linked rule against APK_PREFIX_NOTES,
+# and the same independence from the other APK gates as apk-lite explains.
+cmd_apk_notes() {
+	local apk="${1:?usage: dual-ship.sh apk-notes <APK> <version>}" version="${2:?version}"
+	: "${APK_PREFIX_NOTES:?APK_PREFIX_NOTES is not set in hosts.conf (see hosts.conf.example)}"
+	render_download_page; local page="$PAGE"
+	require_no_unsubstituted_token "$page"
+	require_no_placeholder_domain "$page"
+	if ! grep -qF "$APK_PREFIX_NOTES-$version.apk" "$page"; then
+		echo "REFUSING: $PAGE_SOURCE does not link $APK_PREFIX_NOTES-$version.apk."
+		echo "Update the Púca Notes Android href there first — the page and the APK ship together."
+		exit 1
+	fi
+	ensure_download_dirs
+	local local_sha; local_sha="$(sha256sum "$apk" | cut -d' ' -f1)"
+	for entry in "${HOSTS[@]}"; do
+		local label; label="$(label_of "$entry")"
+		echo "=== apk (notes) $version -> $label ==="
+		scp_to "$entry" "$apk" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$APK_PREFIX_NOTES-$version.apk"
+		ssh_to "$entry" "chmod 644 $INSTALL_DIR/downloads/mobile/$APK_PREFIX_NOTES-$version.apk"
+		ship_download_page "$entry" "$page" "$version" "$label" "apk-notes"
+		local served_sha
+		served_sha="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/mobile/$APK_PREFIX_NOTES-$version.apk' --max-time 120 | sha256sum | cut -d' ' -f1")"
+		if [ "$served_sha" = "$local_sha" ]; then
+			echo "PASS  $label notes apk hash matches"
+		else
+			echo "FAIL  $label notes apk hash mismatch"
+			FAILED+=("$label:apk-notes")
+		fi
+		record_sha256 "$entry" "$label" "$local_sha" "mobile/$APK_PREFIX_NOTES-$version.apk"
+		local page_links
+		page_links="$(remote_body "$entry" "$DOWNLOAD_HOST" / | grep -c "$APK_PREFIX_NOTES-$version.apk" || true)"
+		if [ "${page_links:-0}" -gt 0 ]; then
+			echo "PASS  $label download page links the new notes APK"
+		else
+			echo "FAIL  $label download page does not link $APK_PREFIX_NOTES-$version.apk"
+			FAILED+=("$label:apk-notes-page")
+		fi
+	done
+}
+
 main() {
 	local sub="${1:-}"; shift || true
 	case "$sub" in
@@ -1014,7 +1060,8 @@ main() {
 		backend)        cmd_backend "$@" ;;
 		apk)            cmd_apk "$@" ;;
 		apk-lite)       cmd_apk_lite "$@" ;;
-		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|installer|installer-lite|backend|apk|apk-lite} ..." >&2; exit 2 ;;
+		apk-notes)      cmd_apk_notes "$@" ;;
+		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|installer|installer-lite|backend|apk|apk-lite|apk-notes} ..." >&2; exit 2 ;;
 	esac
 
 	# Independent of what was shipped: confirm each host identifies as itself,

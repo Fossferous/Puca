@@ -53,6 +53,7 @@ APK_PREFIX="Puca"
 INSTALLER_NAME_LITE="Puca-Lite-Setup.exe"
 MOBILE_BUNDLE_PREFIX_LITE="puca-web-lite"
 APK_PREFIX_LITE="Puca-Lite"
+APK_PREFIX_NOTES="Puca-Notes"
 SSH_OPTS=()
 CONF
 
@@ -64,6 +65,7 @@ page_with() { # <version>  [installer-name...]
 		for name in "$@"; do echo "<a href=\"/$name\">Download</a>"; done
 		echo "<a href=\"/mobile/Puca-$v.apk\">Android</a>"
 		echo "<a href=\"/mobile/Puca-Lite-$v.apk\">Android lite</a>"
+		echo "<a href=\"/mobile/Puca-Notes-$v.apk\">Android notes</a>"
 		echo "<div class=\"meta\">v$v &middot; Windows</div>"
 		echo '</body></html>'
 	} > "$TMP/deploy/download-site/index.html"
@@ -154,6 +156,16 @@ out="$(ship apk "$TMP/app.apk" 9.9.9)"
 check "does NOT refuse when the page links it" "$([ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
 
 echo
+echo "--- the Púca Notes APK gate: same rule, its own link ---"
+page_with 0.8.136 Puca-Setup.exe Puca-Lite-Setup.exe
+out="$(ship apk-notes "$TMP/app.apk" 9.9.9)"; rc=$?
+check "REFUSES a notes APK the page does not link" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING')" = 1 ] && echo 1 || echo 0)" "$out"
+check "and names the file"                          "$(has "$out" 'does not link Puca-Notes-9.9.9.apk')"
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+out="$(ship apk-notes "$TMP/app.apk" 9.9.9)"
+check "does NOT refuse when the page links it"      "$([ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
 echo "--- check-versions.sh: the download page's version label ---"
 # check-versions.sh reads the local tauri.conf.json for the expected version and
 # talks to the host through `body()`, i.e. ssh. The stub below answers per path,
@@ -175,6 +187,7 @@ case "\$cmd" in
 	*http_code*) echo 200 ;;
 	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
 	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
+	              echo '<a href="/mobile/Puca-Notes-9.9.9.apk">c</a>'
 	              echo '<div class="meta">v$1 &middot; Windows</div>'
 	              ${2:+echo '<p>what is new since v$2</p>'} ;;
 esac
@@ -223,6 +236,7 @@ case "\$cmd" in
 	*http_code*) echo 200 ;;
 	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
 	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
+	              echo '<a href="/mobile/Puca-Notes-9.9.9.apk">c</a>'
 	              echo '<div class="meta">v9.9.9 &middot; Windows</div>' ;;
 esac
 exit 0

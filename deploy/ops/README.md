@@ -569,7 +569,7 @@ the crowd. Three checks, cheapest first:
 
 - `dual-ship.sh` — pushes one artifact to **every** host in `hosts.conf` and
   verifies it on each over that host's own loopback:
-  `webapp | mobile | mobile-lite | installer | installer-lite | backend | apk | apk-lite`.
+  `webapp | mobile | mobile-lite | installer | installer-lite | backend | apk | apk-lite | apk-notes`.
   Also publishes `SHA256SUMS.txt`, the release notes and the privacy statement
   beside the installers, and refuses to ship a download page that does not
   advertise the release or still names a placeholder domain.

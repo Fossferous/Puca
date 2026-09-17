@@ -74,6 +74,9 @@ APK_PREFIX="Puca"                   # Android build: <prefix>-<version>.apk
 INSTALLER_NAME_LITE="Puca-Lite-Setup.exe"
 MOBILE_BUNDLE_PREFIX_LITE="puca-web-lite"
 APK_PREFIX_LITE="Puca-Lite"
+# Púca Notes' Android app (a separate app installed beside Púca, no OTA), shipped
+# with every release by `dual-ship.sh apk-notes`: <prefix>-<version>.apk.
+APK_PREFIX_NOTES="Puca-Notes"
 
 # ------------------------------------------------------------- loopback TLS --
 #

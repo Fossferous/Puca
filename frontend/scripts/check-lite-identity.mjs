@@ -66,6 +66,29 @@ if (lite.identifier !== undefined && lite.identifier !== base.identifier) {
 }
 
 // --- each installer removes the other ---------------------------------------
+// Púca Notes' Android app is a THIRD identity: its own applicationId (so it
+// installs beside Púca, never over it) and a version read from tauri.conf.json
+// rather than authored again. Both are what makes "it ships with every release
+// under the same number" true rather than hoped; a drift here is an APK that
+// either replaces Púca or lies about its version.
+const notesGradle = join(here, '..', 'notes-app', 'android', 'app', 'build.gradle');
+if (existsSync(notesGradle)) {
+    const g = readFileSync(notesGradle, 'utf8');
+    if (!/applicationId\s+"com\.sovereign\.notes"/.test(g)) {
+        fail('notes-app applicationId is not com.sovereign.notes — it must install BESIDE Púca, never replace it');
+    }
+    if (g.includes(`applicationId "${base.identifier}"`)) {
+        fail(`notes-app applicationId equals the main app's (${base.identifier})`);
+    }
+    if (!/src-tauri\/tauri\.conf\.json/.test(g) || !/versionName\s+notesVersionName/.test(g)) {
+        fail('notes-app build.gradle no longer derives versionName from src-tauri/tauri.conf.json');
+    }
+    if (!/signingConfig signingConfigs\.release/.test(g)) {
+        fail('notes-app release build is not wired to the release signing config');
+    }
+    if (failures.length === 0) ok.push('Púca Notes: own applicationId, version from tauri.conf.json, release-signed');
+}
+
 const migrateFile = join(tauriDir, 'installer-migrate.nsh');
 if (!existsSync(migrateFile)) {
     fail('installer-migrate.nsh is missing — both hook files include it for MigrateRenamedInstall');

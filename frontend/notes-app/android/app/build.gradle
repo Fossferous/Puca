@@ -1,5 +1,31 @@
 apply plugin: 'com.android.application'
 
+// Release signing: the SAME keystore as the Púca app (frontend/android/app/
+// build.gradle has the full story), so both apps carry one publisher key.
+// Without it a release build must not happen — an unsigned APK cannot
+// upgrade an installed one and looks like a successful release until every
+// user fails to update. Debug builds are unaffected.
+def keystorePropsFile = [
+    new File(System.getProperty('user.home'), '.android/puca-keystore.properties'),
+    new File(System.getProperty('user.home'), '.android/sovereign-keystore.properties'),
+].find { it.exists() }
+def keystoreProps = new Properties()
+if (keystorePropsFile != null) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+gradle.taskGraph.whenReady { graph ->
+    def buildingRelease = graph.allTasks.any { t ->
+        t.name.toLowerCase().contains('release') &&
+            (t.name.startsWith('assemble') || t.name.startsWith('bundle') || t.name.startsWith('package'))
+    }
+    if (buildingRelease && keystorePropsFile == null && !project.hasProperty('allowUnsignedRelease')) {
+        throw new GradleException(
+            "No release keystore found for Púca Notes. Looked for ~/.android/puca-keystore.properties " +
+            "and ~/.android/sovereign-keystore.properties. An unsigned release APK cannot upgrade an " +
+            "installed app. Provide the keystore, or pass -PallowUnsignedRelease deliberately.")
+    }
+}
+
 // The version lives in frontend/src-tauri/tauri.conf.json and nowhere else
 // (CLAUDE.md); read it so the Notes app always carries the release it was
 // built from. versionCode = major*1_000_000 + minor*10_000 + patch (the main
@@ -33,10 +59,23 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (keystorePropsFile != null) {
+                storeFile new File(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (keystorePropsFile != null) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }

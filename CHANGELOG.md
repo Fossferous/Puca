@@ -79,6 +79,10 @@ saw it, and four ways a moderator could reach past their rank.
   signing out a device stops it connecting but cannot take back what that
   device already held; a copied device is an account compromise, not a lost
   token.
+- **Púca Notes ships with every release.** The Android app has no updater of
+  its own, so it is now a release surface like the others: built from the same
+  version, signed with the same key as Púca, and linked from the download page
+  alongside the Púca and Púca Lite builds.
 
 ## 0.9.813 — 2026-09-16
 
