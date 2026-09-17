@@ -51,16 +51,31 @@ import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
+import { isMobile, isTauri } from '../api/platform';
 import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { ChecklistIcon, FileTextIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import './TasksView.css';
 import './AllChecklistsView.css';
 import './ServerTasksBoard.css';
+
+/**
+ * Where Púca Keep lives, or null where the link would be wrong. WEB ONLY:
+ * Keep is a second page on the web app's origin (`/keep/`, always with the
+ * trailing slash — Caddy's SPA fallback answers bare `/keep` with THIS app),
+ * and it is signed in there because the two pages share the origin's
+ * storage. The desktop shell runs at tauri://localhost and the phone at
+ * https://localhost, where nothing is shared: a link from either would open
+ * a signed-out, default-themed page in the system browser, so they get none.
+ */
+function keepUrl(): string | null {
+    if (typeof window === 'undefined' || isTauri() || isMobile()) return null;
+    return `${window.location.origin}/keep/`;
+}
 
 // Decode the JWT for the caller's user id (same lightweight client-side decode
 // as Chat.tsx) — creator-only task actions compare against it.
@@ -103,6 +118,7 @@ export function TasksView() {
     // Right-click / long-press menu on the tabs and board cards.
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const currentUserId = tokenUserId();
+    const keepHref = keepUrl();
     // Read at async completion time (the reparent refetch guard) — the load
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
@@ -598,10 +614,23 @@ export function TasksView() {
                     <button
                         className="tasks-tab tasks-tab-icon"
                         title="New list"
+                        aria-label="New list"
                         onClick={() => { setAddingList(true); }}
                     >
                         <PlusIcon />
                     </button>
+                    {keepHref && (
+                        <a
+                            className="tasks-tab tasks-tab-icon tasks-tab-keep"
+                            href={keepHref}
+                            target="_blank"
+                            rel="noopener"
+                            title="Open in Púca Keep — these lists as notes"
+                            aria-label="Open in Púca Keep"
+                        >
+                            <NoteIcon />
+                        </a>
+                    )}
                 </div>
             </div>
 

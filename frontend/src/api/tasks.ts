@@ -68,7 +68,17 @@ export interface TaskList {
     created_at: string;
     total_tasks: number;
     completed_tasks: number;
+    /** E2EE state of `title` as the server stores it, set by listTaskLists:
+     *  `legacy` = held as plaintext. Púca Keep shows a "Not encrypted" flag on
+     *  the card headline for that, the way TaskTree flags a plaintext item
+     *  (audit H-1) — a list title is the most visible string Keep renders.
+     *  Absent for the server-created "Notes to self" label, which is plain by
+     *  design (see getSelfChecklist). */
+    titleEncState?: MessageEncState;
 }
+
+/** The one list title the server writes itself, as a plain label. */
+const SELF_LIST_DEFAULT_TITLE = 'Notes to self';
 
 // Markers substituted by openChannel/openSelf when a stored value can't be
 // decrypted (absent/rotated key, locked identity). Exposed via
@@ -300,7 +310,15 @@ export async function getSelfChecklist(): Promise<TaskList> {
 
 export async function listTaskLists(): Promise<TaskList[]> {
     const lists: TaskList[] = await apiClient.get('/task-lists');
-    return Promise.all(lists.map(async l => ({ ...l, title: await openSelf(l.title) })));
+    return Promise.all(lists.map(async l => {
+        const wire = l.title;
+        const title = await openSelf(wire);
+        return {
+            ...l,
+            title,
+            titleEncState: wire === SELF_LIST_DEFAULT_TITLE ? undefined : messageEncState(wire, title),
+        };
+    }));
 }
 
 export async function createTaskList(title: string): Promise<TaskList> {

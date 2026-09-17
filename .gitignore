@@ -119,6 +119,10 @@ frontend/shots/
 frontend/shots2/
 frontend/shots3/
 frontend/e2e/shots-clips/
+frontend/e2e/shots-keep/
+# The Púca Keep Android shell's web bundle (KEEP_TARGET=native build; see
+# frontend/scripts/build-keep-app.mjs) — a build output like dist/.
+frontend/dist-keep-app/
 
 # Deploy/build artifacts and debugging scratch from the 0.8.17/0.8.18 work.
 # ~55 MB of this sat untracked and un-ignored; one `git add .` away from

@@ -10,7 +10,9 @@ export default defineConfig([
   // only real source. `android`/`ios` (Capacitor) and `src-tauri` (Rust + its
   // `target/` build dir and `gen/` bindings) hold generated files that would
   // otherwise bury the handful of genuine issues under hundreds of parse errors.
-  globalIgnores(['dist', 'src/wasm/df', 'df-wasm', 'android', 'ios', 'src-tauri']),
+  // keep-app/android is the Púca Keep shell's generated Capacitor project
+  // (same reason as android/); dist-keep-app is its build output.
+  globalIgnores(['dist', 'dist-keep-app', 'src/wasm/df', 'df-wasm', 'android', 'ios', 'src-tauri', 'keep-app/android']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

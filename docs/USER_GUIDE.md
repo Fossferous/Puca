@@ -262,6 +262,30 @@ confirmation first.
 
 ---
 
+## Púca Keep (notes)
+
+Púca Keep shows your task lists as notes, Google-Keep style, in the browser at
+`/keep/` on your server's web address. Open it with **Open in Púca Keep**
+(the note button beside **New list** in the Tasks view of the web app); it
+uses the account you are already signed in to.
+
+- **Take a note…** starts a new list — type a title and items (Enter adds the
+  next). On a phone, the **New note** button at the bottom right does the same.
+- Click a note to open it. Inside, items work exactly as in Tasks: tick,
+  edit, add subtasks, drag by the grip to reorder or nest, set a due time
+  from the clock, attach pictures from the paperclip.
+- **Pin** keeps a note at the top (it is the same favourite as the Tasks tab
+  bar). **Colour**, **Labels** and **Archive** are Keep's own, and stay on the
+  device you set them on. **Search** looks through titles and items.
+- **Reminders** in the left column lists every item with a due time.
+- Archiving or deleting a note offers **Undo** for a few seconds.
+- Shortcuts: `/` search, `c` new note, `r` refresh, `?` help.
+
+Every checklist channel from your servers appears as a shared note with the
+server's name on it, following the permissions you have in that channel.
+
+---
+
 ## Friends
 
 ### Open the Friends panel
