@@ -93,7 +93,8 @@ export function fileStamp(now: number): string {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-/** Hand the browser a file to save. Web only — Notes never runs in a shell. */
+/** Hand the browser a file to save. BROWSER only: the Android app's WebView
+ *  ignores the download attribute, so its account menu hides the callers. */
 export function downloadTextFile(name: string, text: string, mime: string): void {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);

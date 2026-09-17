@@ -11,8 +11,8 @@ vi.mock('../api/auth', () => ({
 }));
 
 const {
-    parseKeepPrefs, dedupeLabels, getKeepPrefs, subscribeKeepPrefs, invalidateKeepPrefs,
-    setNoteColor, setNoteLabels, setNoteArchived, setKeepView, renameLabel, pruneKeepPrefs,
+    parseNotesPrefs, dedupeLabels, getNotesPrefs, subscribeNotesPrefs, invalidateNotesPrefs,
+    setNoteColor, setNoteLabels, setNoteArchived, setNotesView, renameLabel, pruneNotesPrefs,
     EMPTY_KEEP_PREFS,
 } = await import('../notes/model/notesPrefs');
 
@@ -24,16 +24,16 @@ beforeEach(() => {
     (localStorage.getItem as Mock).mockImplementation((k: string) => backing.get(k) ?? null);
     (localStorage.setItem as Mock).mockImplementation((k: string, v: string) => { backing.set(k, v); });
     (localStorage.removeItem as Mock).mockImplementation((k: string) => { backing.delete(k); });
-    invalidateKeepPrefs();
+    invalidateNotesPrefs();
 });
 
-describe('parseKeepPrefs', () => {
+describe('parseNotesPrefs', () => {
     it('degrades every malformed shape to the empty prefs', () => {
-        expect(parseKeepPrefs(null)).toBe(EMPTY_KEEP_PREFS);
-        expect(parseKeepPrefs('')).toBe(EMPTY_KEEP_PREFS);
-        expect(parseKeepPrefs('nope {')).toBe(EMPTY_KEEP_PREFS);
-        expect(parseKeepPrefs('[]')).toBe(EMPTY_KEEP_PREFS);
-        expect(parseKeepPrefs('"str"')).toBe(EMPTY_KEEP_PREFS);
+        expect(parseNotesPrefs(null)).toBe(EMPTY_KEEP_PREFS);
+        expect(parseNotesPrefs('')).toBe(EMPTY_KEEP_PREFS);
+        expect(parseNotesPrefs('nope {')).toBe(EMPTY_KEEP_PREFS);
+        expect(parseNotesPrefs('[]')).toBe(EMPTY_KEEP_PREFS);
+        expect(parseNotesPrefs('"str"')).toBe(EMPTY_KEEP_PREFS);
     });
 
     it('keeps only well-formed entries', () => {
@@ -44,7 +44,7 @@ describe('parseKeepPrefs', () => {
             view: 'list',
             extra: 'ignored',
         });
-        expect(parseKeepPrefs(raw)).toEqual({
+        expect(parseNotesPrefs(raw)).toEqual({
             colors: { 'list:1': 'mint', 'channel:4': 'coral' },
             labels: { 'list:1': ['Home', 'Work'] },
             archived: { 'list:1': true, 'channel:5': true },
@@ -54,8 +54,8 @@ describe('parseKeepPrefs', () => {
     });
 
     it('defaults an unknown view to grid and an unknown sort to puca', () => {
-        expect(parseKeepPrefs('{"view":"carousel","sort":"random"}')).toMatchObject({ view: 'grid', sort: 'puca' });
-        expect(parseKeepPrefs('{"sort":"created"}').sort).toBe('created');
+        expect(parseNotesPrefs('{"view":"carousel","sort":"random"}')).toMatchObject({ view: 'grid', sort: 'puca' });
+        expect(parseNotesPrefs('{"sort":"created"}').sort).toBe('created');
     });
 });
 
@@ -70,19 +70,19 @@ describe('the live store', () => {
     it('writes under a per-account key and reads back a stable snapshot', () => {
         setNoteColor('list:1', 'sage');
         expect([...backing.keys()]).toEqual(['pucaNotesPrefs:42']);
-        const a = getKeepPrefs();
-        const b = getKeepPrefs();
+        const a = getNotesPrefs();
+        const b = getNotesPrefs();
         expect(a).toBe(b);
         expect(a.colors).toEqual({ 'list:1': 'sage' });
         // Re-read from storage (as a fresh page would) sees the same thing.
-        invalidateKeepPrefs();
-        expect(getKeepPrefs().colors).toEqual({ 'list:1': 'sage' });
+        invalidateNotesPrefs();
+        expect(getNotesPrefs().colors).toEqual({ 'list:1': 'sage' });
     });
 
     it('a different account sees nothing of the first', () => {
         setNoteLabels('list:1', ['Secret']);
         uid = 7;
-        expect(getKeepPrefs().labels).toEqual({});
+        expect(getNotesPrefs().labels).toEqual({});
         setNoteArchived('list:1', true);
         expect(backing.get('pucaNotesPrefs:7')).toContain('archived');
         expect(JSON.parse(backing.get('pucaNotesPrefs:42')!).archived).toEqual({});
@@ -92,7 +92,7 @@ describe('the live store', () => {
         uid = null;
         setNoteColor('list:1', 'mint');
         expect(backing.size).toBe(0);
-        expect(getKeepPrefs()).toBe(EMPTY_KEEP_PREFS);
+        expect(getNotesPrefs()).toBe(EMPTY_KEEP_PREFS);
     });
 
     it('default colour and empty labels REMOVE the entry rather than storing it', () => {
@@ -107,18 +107,18 @@ describe('the live store', () => {
 
     it('notifies subscribers on every write and on invalidation, not on reads', () => {
         const cb = vi.fn();
-        const off = subscribeKeepPrefs(cb);
-        getKeepPrefs();
+        const off = subscribeNotesPrefs(cb);
+        getNotesPrefs();
         expect(cb).not.toHaveBeenCalled();
-        setKeepView('list');
+        setNotesView('list');
         expect(cb).toHaveBeenCalledTimes(1);
-        setKeepView('list');   // unchanged → still a write call, still notifies (cheap, idempotent)
-        invalidateKeepPrefs();
+        setNotesView('list');   // unchanged → still a write call, still notifies (cheap, idempotent)
+        invalidateNotesPrefs();
         expect(cb).toHaveBeenCalledTimes(3);
         off();
-        setKeepView('grid');
+        setNotesView('grid');
         expect(cb).toHaveBeenCalledTimes(3);
-        expect(getKeepPrefs().view).toBe('grid');
+        expect(getNotesPrefs().view).toBe('grid');
     });
 
     it('renameLabel rewrites every use, merges duplicates, and an empty name deletes', () => {
@@ -126,19 +126,19 @@ describe('the live store', () => {
         setNoteLabels('list:2', ['home']);
         setNoteLabels('list:3', ['Work', 'House']);
         renameLabel('home', 'House');
-        expect(getKeepPrefs().labels).toEqual({ 'list:1': ['House', 'Work'], 'list:2': ['House'], 'list:3': ['Work', 'House'] });
+        expect(getNotesPrefs().labels).toEqual({ 'list:1': ['House', 'Work'], 'list:2': ['House'], 'list:3': ['Work', 'House'] });
         renameLabel('work', '');
-        expect(getKeepPrefs().labels).toEqual({ 'list:1': ['House'], 'list:2': ['House'], 'list:3': ['House'] });
+        expect(getNotesPrefs().labels).toEqual({ 'list:1': ['House'], 'list:2': ['House'], 'list:3': ['House'] });
     });
 
-    it('pruneKeepPrefs forgets notes that are gone and is a no-op otherwise', () => {
+    it('pruneNotesPrefs forgets notes that are gone and is a no-op otherwise', () => {
         setNoteColor('list:1', 'mint');
         setNoteLabels('list:2', ['x']);
         setNoteArchived('channel:3', true);
-        const before = getKeepPrefs();
-        pruneKeepPrefs(new Set(['list:1', 'list:2', 'channel:3']));
-        expect(getKeepPrefs()).toBe(before);   // untouched: no write, same object
-        pruneKeepPrefs(new Set(['list:2']));
-        expect(getKeepPrefs()).toEqual({ colors: {}, labels: { 'list:2': ['x'] }, archived: {}, view: 'grid', sort: 'puca' });
+        const before = getNotesPrefs();
+        pruneNotesPrefs(new Set(['list:1', 'list:2', 'channel:3']));
+        expect(getNotesPrefs()).toBe(before);   // untouched: no write, same object
+        pruneNotesPrefs(new Set(['list:2']));
+        expect(getNotesPrefs()).toEqual({ colors: {}, labels: { 'list:2': ['x'] }, archived: {}, view: 'grid', sort: 'puca' });
     });
 });

@@ -66,8 +66,11 @@ export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExport
                 </select>
             </div>
             <div className="notes-menu-sep" />
-            <button type="button" className="notes-menu-item" onClick={onExportMarkdown}><DownloadIcon /> Export notes as Markdown</button>
-            <button type="button" className="notes-menu-item" onClick={onExportJson}><DownloadIcon /> Export notes as JSON</button>
+            {/* Browser only: an Android WebView ignores the download attribute, so
+                in the app these two did nothing at all. "Copy as text" on a note
+                is the app's way out; a share-sheet export is not built. */}
+            {!NATIVE && <button type="button" className="notes-menu-item" onClick={onExportMarkdown}><DownloadIcon /> Export notes as Markdown</button>}
+            {!NATIVE && <button type="button" className="notes-menu-item" onClick={onExportJson}><DownloadIcon /> Export notes as JSON</button>}
             <button type="button" className="notes-menu-item" onClick={onHelp}><HelpIcon /> Keyboard shortcuts</button>
             {!NATIVE && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
             <div className="notes-menu-sep" />

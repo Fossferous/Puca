@@ -2,7 +2,7 @@
  * TasksView — the Tasks dashboard.
  *
  * One Google-Tasks-style tab bar holds EVERY checklist the user can see:
- * their personal lists (Notes style, encrypt-to-self) and every checklist
+ * their personal lists (Google-Keep style, encrypt-to-self) and every checklist
  * channel across their servers (E2EE under each channel's group key). Tabs
  * drag to reorder (mouse: drag; touch: long-press then drag) and any tab can
  * be favourited from its context menu — favouriting pulls it to the front.
@@ -118,7 +118,7 @@ export function TasksView() {
     // Right-click / long-press menu on the tabs and board cards.
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const currentUserId = tokenUserId();
-    const keepHref = notesUrl();
+    const notesHref = notesUrl();
     // Read at async completion time (the reparent refetch guard) — the load
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
@@ -619,10 +619,10 @@ export function TasksView() {
                     >
                         <PlusIcon />
                     </button>
-                    {keepHref && (
+                    {notesHref && (
                         <a
                             className="tasks-tab tasks-tab-icon tasks-tab-notes"
-                            href={keepHref}
+                            href={notesHref}
                             target="_blank"
                             rel="noopener"
                             title="Open in Púca Notes — these lists as notes"

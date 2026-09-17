@@ -106,7 +106,6 @@ rm -rf ota-src && cp -r dist ota-src && rm -rf ota-src/notes && node scripts/cap
 ( cd ota-src && zip -r ../puca-web-<ver>.zip . )     # plaintext bundle, WITH the Android CSP: the OTA
                                                      # replaces the APK's index.html, so a bundle zipped
                                                      # straight from dist/ would remove the policy
-rm -rf ota-src                                       # disposable staging dir (also gitignored)
 node deploy/mobile/encrypt-bundle.mjs \
     puca-web-<ver>.zip ~/.puca/mobile-updater-rsa.key \
     puca-web-<ver>.enc.zip ota-src/version.json       # prints {ivSessionKey, checksum}. The 4th
@@ -116,6 +115,9 @@ node deploy/mobile/encrypt-bundle.mjs \
                                                      # against and REFUSES on a mismatch, or when
                                                      # the sidecar is missing (see "Residual risks"
                                                      # for what a mismatch costs).
+rm -rf ota-src                                       # disposable staging dir (also gitignored) — AFTER the
+                                                     # signer has read ota-src/version.json from it. The signer
+                                                     # also REFUSES a bundle that still carries notes/.
 ```
 
 Upload the **`.enc.zip`** as the bundle, and write `mobile-update.json`:

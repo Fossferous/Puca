@@ -28,7 +28,7 @@
     "tauri:build:lite": "node scripts/check-api-url.mjs && node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs && node scripts/tauri-build.mjs --no-default-features --config src-tauri/tauri.lite.conf.json",
     "cap:build:android:lite": "node scripts/check-api-url.mjs && node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync android",
     "cap:build:ios:lite": "node scripts/check-api-url.mjs && node scripts/check-lite-identity.mjs && node scripts/build-lite.mjs --sync ios",
-    "cap:sync": "npx cap sync",
+    "cap:sync": "npx cap sync && node scripts/strip-notes-from-native.mjs --platform android && node scripts/strip-notes-from-native.mjs --platform ios",
     "cap:ios": "npm run build && npx cap sync ios && node scripts/strip-notes-from-native.mjs --platform ios && npx cap open ios",
     "cap:android": "npm run build && npx cap sync android && node scripts/strip-notes-from-native.mjs --platform android && npx cap open android",
     "cap:build:ios": "npm run build && npx cap sync ios && node scripts/strip-notes-from-native.mjs --platform ios",

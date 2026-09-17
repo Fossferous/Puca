@@ -1,6 +1,6 @@
 // Register a throwaway account through the built web app and give it two
 // notes via Notes, so the APK under test has "current notes" to show.
-// Usage: node seed-apk-user.mjs <baseURL> <username> <password>
+// Usage: node e2e/notes-seed-user.mjs <baseURL> <username> <password>   (from frontend/)
 import { chromium } from '@playwright/test';
 const [, , baseURL, username, password] = process.argv;
 const b = await chromium.launch();

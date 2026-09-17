@@ -15,7 +15,7 @@
  * Studio's bundled JDK when unset, which is what the main app's builds use.
  *
  *   node scripts/build-notes-app.mjs            # debug APK (sideload / test)
- *   node scripts/build-notes-app.mjs --release  # needs a keystore in notes-app/android
+ *   node scripts/build-notes-app.mjs --release  # signed with Púca's keystore (~/.android/puca-keystore.properties)
  *
  * Output: notes-app/android/app/build/outputs/apk/<debug|release>/app-*.apk
  */
@@ -31,6 +31,18 @@ const android = join(notesApp, 'android');
 const release = process.argv.includes('--release');
 
 const env = { ...process.env, NOTES_TARGET: 'native' };
+// NOTES_ALLOW_HTTP_API=1 is TEST-ONLY: it moves the WebView to an http origin
+// and enables app-wide cleartext traffic so an emulator can reach a throwaway
+// backend. It was read from the environment by capacitor.config.ts and by
+// Gradle with nothing between it and `--release`, so a shell that still had it
+// exported would have produced a signed, shippable APK with cleartext enabled.
+// Refused here and again in build.gradle (a release built from Android Studio
+// never passes through this script).
+if (release && env.NOTES_ALLOW_HTTP_API === '1') {
+    console.error('[notes-app] NOTES_ALLOW_HTTP_API=1 is TEST-ONLY (http WebView origin + cleartext traffic).');
+    console.error('[notes-app] Refusing to build a RELEASE APK with it set. Unset it, or build a debug APK.');
+    process.exit(2);
+}
 if (!env.JAVA_HOME) {
     const jbr = 'C:\\Program Files\\Android\\Android Studio\\jbr';
     if (existsSync(jbr)) env.JAVA_HOME = jbr;

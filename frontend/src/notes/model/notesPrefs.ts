@@ -62,7 +62,7 @@ const NOTE_KEY = /^(list|channel):\d+$/;
  * throwing — a corrupt entry must not take the whole grid down. Exported for
  * tests (same discipline as parseStoredPlaces).
  */
-export function parseKeepPrefs(raw: string | null): NotesPrefs {
+export function parseNotesPrefs(raw: string | null): NotesPrefs {
     if (!raw) return EMPTY_KEEP_PREFS;
     let parsed: unknown;
     try {
@@ -127,7 +127,7 @@ const listeners = new Set<() => void>();
 function readFromStorage(uid: string | null): NotesPrefs {
     if (uid === null) return EMPTY_KEEP_PREFS;
     try {
-        return parseKeepPrefs(localStorage.getItem(storageKey(uid)));
+        return parseNotesPrefs(localStorage.getItem(storageKey(uid)));
     } catch {
         return EMPTY_KEEP_PREFS;
     }
@@ -138,7 +138,7 @@ function readFromStorage(uid: string | null): NotesPrefs {
  * cross-tab storage event) replaces it, which is what lets React subscribe
  * to it with useSyncExternalStore.
  */
-export function getKeepPrefs(): NotesPrefs {
+export function getNotesPrefs(): NotesPrefs {
     const uid = currentUid();
     if (cachedUid === undefined || cachedUid !== uid) {
         cachedUid = uid;
@@ -147,7 +147,7 @@ export function getKeepPrefs(): NotesPrefs {
     return cached;
 }
 
-export function subscribeKeepPrefs(cb: () => void): () => void {
+export function subscribeNotesPrefs(cb: () => void): () => void {
     listeners.add(cb);
     return () => { listeners.delete(cb); };
 }
@@ -159,7 +159,7 @@ function notify(): void {
 /** Drop the cached snapshot so the next read hits storage. Called on the
  *  cross-tab `storage` event and on sign-out (the uid changes anyway, but a
  *  sign-in as the SAME user in another tab must also re-read). */
-export function invalidateKeepPrefs(): void {
+export function invalidateNotesPrefs(): void {
     cachedUid = undefined;
     notify();
 }
@@ -179,7 +179,7 @@ function write(next: NotesPrefs): void {
 }
 
 function update(fn: (p: NotesPrefs) => NotesPrefs): void {
-    write(fn(getKeepPrefs()));
+    write(fn(getNotesPrefs()));
 }
 
 // --- Mutations ---------------------------------------------------------------
@@ -212,11 +212,11 @@ export function setNoteArchived(key: string, archived: boolean): void {
     });
 }
 
-export function setKeepView(view: NotesViewMode): void {
+export function setNotesView(view: NotesViewMode): void {
     update(p => (p.view === view ? p : { ...p, view }));
 }
 
-export function setKeepSort(sort: NotesSortMode): void {
+export function setNotesSort(sort: NotesSortMode): void {
     update(p => (p.sort === sort ? p : { ...p, sort }));
 }
 
@@ -241,8 +241,8 @@ export function renameLabel(from: string, to: string): void {
  * temporarily missing because one server's channel query failed is NOT
  * pruned — the caller only passes a complete set.
  */
-export function pruneKeepPrefs(liveKeys: ReadonlySet<string>): void {
-    const p = getKeepPrefs();
+export function pruneNotesPrefs(liveKeys: ReadonlySet<string>): void {
+    const p = getNotesPrefs();
     const keep = (o: Record<string, unknown>) => Object.keys(o).some(k => !liveKeys.has(k));
     if (!keep(p.colors) && !keep(p.labels) && !keep(p.archived)) return;
     const filter = <T,>(o: Record<string, T>): Record<string, T> =>
@@ -254,6 +254,6 @@ export function pruneKeepPrefs(liveKeys: ReadonlySet<string>): void {
 // next render reflects it. Guarded for non-DOM test environments.
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     window.addEventListener('storage', e => {
-        if (e.key === null || e.key.startsWith(STORAGE_PREFIX)) invalidateKeepPrefs();
+        if (e.key === null || e.key.startsWith(STORAGE_PREFIX)) invalidateNotesPrefs();
     });
 }

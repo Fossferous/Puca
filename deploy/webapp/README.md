@@ -23,7 +23,9 @@ The same `dist/` also carries **Púca Notes**, a notes front door onto the task
 system, at `https://app.example.com/notes/` — see `docs/NOTES.md`. It is built
 by `vite.notes.config.ts` into `dist/notes/` as part of `npm run build`, so the
 tarball in step 1 ships it with no extra step. It is a browser surface only:
-the desktop and mobile shells strip it out (`scripts/strip-notes-from-native.mjs`).
+the phone shells strip it out (`scripts/strip-notes-from-native.mjs`) and the OTA signer
+refuses a bundle that still carries it; the desktop installer carries the folder unused
+(the shell only ever loads `index.html`).
 Two things the operator must know:
 
 - The vhost needs `{path}/` in its `try_files` line (the block below has it)

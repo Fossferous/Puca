@@ -41,11 +41,11 @@ import {
     type NoteCard, type NoteRef, type NoteSource,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
 } from './notesModel';
-import { getKeepPrefs, subscribeKeepPrefs, pruneKeepPrefs, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
+import { getNotesPrefs, subscribeNotesPrefs, pruneNotesPrefs, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
  *  unlike Púca's shared client which has a socket for that. */
-export function makeKeepQueryClient(): QueryClient {
+export function makeNotesQueryClient(): QueryClient {
     return new QueryClient({
         defaultOptions: {
             queries: {
@@ -242,7 +242,7 @@ export function useAllNoteTasks(sources: NoteSource[]): { byKey: Map<string, Tas
 }
 
 export function useNotesPrefs() {
-    return useSyncExternalStore(subscribeKeepPrefs, getKeepPrefs, getKeepPrefs);
+    return useSyncExternalStore(subscribeNotesPrefs, getNotesPrefs, getNotesPrefs);
 }
 
 /** The assembled cards, in display order, plus the load state the shell
@@ -277,7 +277,7 @@ export function useNoteCards(): {
         // is still in flight (it comes back on rollback; a pruned label does
         // not). The rollback changes `sources`, so this re-runs then.
         if (!complete || listMutationsInFlight > 0) return;
-        pruneKeepPrefs(new Set(sources.map(s => noteKey(s.ref))));
+        pruneNotesPrefs(new Set(sources.map(s => noteKey(s.ref))));
     }, [complete, sources]);
     return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending };
 }

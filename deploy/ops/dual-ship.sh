@@ -354,10 +354,18 @@ cmd_webapp() {
 	# Púca Notes is a SECOND page in the same tarball (dist/notes/, its own
 	# build — vite.notes.config.ts), with its own entry chunk that the check
 	# above never looks at. Same failure shape, same refusal: a Notes page built
-	# against localhost would sign nobody in. Only when the page is present, so
-	# a pre-Notes tarball still ships. Its asset paths are /notes/assets/...
+	# against localhost would sign nobody in. The page is REQUIRED: the ship
+	# below empties webapp/ before it extracts, so a tarball without notes/
+	# would DELETE the live page the download page links, the Tasks view opens
+	# and docs/NOTES.md points people at. Its asset paths are /notes/assets/...
 	local notes_entry notes_matches
 	notes_entry="$(tar xzOf "$tarball" ./notes/index.html 2>/dev/null | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1 || true)"
+	if [ -z "$notes_entry" ]; then
+		echo "REFUSING to ship: the tarball carries no Notes page (./notes/index.html naming an entry chunk)."
+		echo "This ship empties webapp/ first, so it would delete the live /notes/ page. Build with"
+		echo "'npm run build' (it runs vite.notes.config.ts too) and tar dist/ again."
+		exit 1
+	fi
 	if [ -n "$notes_entry" ]; then
 		notes_matches="$(tar xzOf "$tarball" "./notes/$notes_entry" 2>/dev/null | grep -c "$API_HOST" || true)"
 		if [ "${notes_matches:-0}" -eq 0 ]; then
@@ -365,7 +373,7 @@ cmd_webapp() {
 			echo "Was the Notes build (vite.notes.config.ts) run without frontend/.env.production?"
 			exit 1
 		fi
-		echo "PASS  bundle preflight: Notes entry keep/$notes_entry bakes the production API base ($notes_matches occurrences)"
+		echo "PASS  bundle preflight: Notes entry notes/$notes_entry bakes the production API base ($notes_matches occurrences)"
 	fi
 	local local_sha
 	local_sha="$(sha256sum "$tarball" | cut -d' ' -f1)"

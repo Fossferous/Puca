@@ -18,6 +18,13 @@ gradle.taskGraph.whenReady { graph ->
         t.name.toLowerCase().contains('release') &&
             (t.name.startsWith('assemble') || t.name.startsWith('bundle') || t.name.startsWith('package'))
     }
+    // The test-only cleartext switch must never reach a release (see
+    // scripts/build-notes-app.mjs, which refuses it too).
+    if (buildingRelease && System.getenv('NOTES_ALLOW_HTTP_API') == '1') {
+        throw new GradleException(
+            "NOTES_ALLOW_HTTP_API=1 is TEST-ONLY (http WebView origin, cleartext traffic). " +
+            "Refusing to build a release APK with it set.")
+    }
     if (buildingRelease && keystorePropsFile == null && !project.hasProperty('allowUnsignedRelease')) {
         throw new GradleException(
             "No release keystore found for Púca Notes. Looked for ~/.android/puca-keystore.properties " +

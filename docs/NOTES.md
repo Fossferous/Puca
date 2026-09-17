@@ -36,7 +36,7 @@ Púca's reminders. Anything you do in one is what you see in the other.
   server only when it expires.
 - **Copy as text / Make a copy / Export** — a note as a Markdown checklist to
   the clipboard, a copy as a fresh note, or every note as Markdown or JSON from
-  the account menu.
+  the account menu (in the browser; the Android app has no file export yet).
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable** — a web app manifest lets a browser add Notes to the home
   screen or desktop. Deliberately no service worker: the main app's OTA and

@@ -31,9 +31,9 @@ import './notes.css'
 import '../mobile.css'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { NotesApp } from './NotesApp'
-import { makeKeepQueryClient } from './model/notesQueries'
+import { makeNotesQueryClient } from './model/notesQueries'
 
-const queryClient = makeKeepQueryClient()
+const queryClient = makeNotesQueryClient()
 
 createRoot(document.getElementById('root')!).render(
     <StrictMode>

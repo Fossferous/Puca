@@ -72,15 +72,19 @@ if (lite.identifier !== undefined && lite.identifier !== base.identifier) {
 // under the same number" true rather than hoped; a drift here is an APK that
 // either replaces Púca or lies about its version.
 const notesGradle = join(here, '..', 'notes-app', 'android', 'app', 'build.gradle');
-if (existsSync(notesGradle)) {
-    const g = readFileSync(notesGradle, 'utf8');
+if (!existsSync(notesGradle)) {
+    fail('frontend/notes-app/android/app/build.gradle is missing — Púca Notes is a release surface and its identity cannot be checked');
+} else {
+    // Comments stripped first: the file's own header MENTIONS tauri.conf.json,
+    // and a gate a comment can satisfy is not a gate.
+    const g = readFileSync(notesGradle, 'utf8').split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
     if (!/applicationId\s+"com\.sovereign\.notes"/.test(g)) {
         fail('notes-app applicationId is not com.sovereign.notes — it must install BESIDE Púca, never replace it');
     }
     if (g.includes(`applicationId "${base.identifier}"`)) {
         fail(`notes-app applicationId equals the main app's (${base.identifier})`);
     }
-    if (!/src-tauri\/tauri\.conf\.json/.test(g) || !/versionName\s+notesVersionName/.test(g)) {
+    if (!/JsonSlurper\(\)\.parse\(file\('[^']*src-tauri\/tauri\.conf\.json'\)\)/.test(g) || !/versionName\s+notesVersionName/.test(g)) {
         fail('notes-app build.gradle no longer derives versionName from src-tauri/tauri.conf.json');
     }
     if (!/signingConfig signingConfigs\.release/.test(g)) {

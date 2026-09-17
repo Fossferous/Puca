@@ -327,11 +327,13 @@ for entry in "${HOSTS[@]}"; do
 	fi
 
 	# --- Púca Notes' Android app -------------------------------------------
-	# A third APK, no OTA: it can only stay current by shipping with every
-	# release, so the page must link one and the link must serve. Same
-	# reported-not-asserted rule for its version as the other APKs (an
-	# OTA-only release legitimately leaves it trailing). An older hosts.conf
-	# without APK_PREFIX_NOTES warns rather than dying on set -u.
+	# A third APK, and the one with NO OTA: it can only stay current by
+	# shipping with every release, so the page must link one, the link must
+	# serve, AND its version must be the release's. The other two APKs may
+	# trail after an OTA-only release because their web layer updates itself;
+	# this one has no such path, so trailing here means users are stuck on it.
+	# An older hosts.conf without APK_PREFIX_NOTES warns rather than dying on
+	# set -u.
 	if [ -n "${APK_PREFIX_NOTES:-}" ]; then
 		notes_apk_href="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE "$APK_PREFIX_NOTES-[0-9.]+\.apk" | head -1 || true)"
 		if [ -z "$notes_apk_href" ]; then
@@ -344,8 +346,9 @@ for entry in "${HOSTS[@]}"; do
 				if [ "$notes_apk_ver" = "$EXPECTED" ]; then
 					printf 'PASS  %-22s %s (current)\n' "download-page notesAPK" "$notes_apk_ver"
 				else
-					printf 'INFO  %-22s %s (trails %s — same OTA-only rule as the other APKs)\n' \
+					printf 'FAIL  %-22s %s (trails %s — Notes has NO OTA, so a trailing APK never catches up: ship dual-ship.sh apk-notes)\n' \
 						"download-page notesAPK" "$notes_apk_ver" "$EXPECTED"
+					FAILED+=("$label/notes-apk-trails")
 				fi
 			else
 				printf 'FAIL  %-22s %s linked but serves HTTP %s\n' "download-page notesAPK" "$notes_apk_href" "${notes_apk_code:-<none>}"

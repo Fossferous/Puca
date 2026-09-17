@@ -48,6 +48,40 @@ if (!/^\d+\.\d+\.\d+/.test(builtVersion)) {
     process.exit(2);
 }
 
+// The bundle must carry no second HTML document: dist/notes/ is a browser-only
+// page with no CSP meta of its own, and the OTA serves every file in the zip
+// from the WebView's single https://localhost origin, where a meta policy does
+// not reach a sibling document. The native shells strip it
+// (frontend/scripts/strip-notes-from-native.mjs); the OTA staging recipe does it
+// by hand (deploy/mobile/README.md), and a hand step is not a gate. Checked on
+// the BYTES BEING SIGNED, before any output is written.
+function zipEntryNames(buf) {
+    // Walk the central directory from the End Of Central Directory record —
+    // scanning for PK\x01\x02 anywhere would also hit compressed payload bytes.
+    for (let i = buf.length - 22; i >= 0; i--) {
+        if (buf.readUInt32LE(i) !== 0x06054b50) continue;
+        const count = buf.readUInt16LE(i + 10);
+        let at = buf.readUInt32LE(i + 16);
+        const names = [];
+        for (let n = 0; n < count; n++) {
+            if (buf.readUInt32LE(at) !== 0x02014b50) throw new Error('malformed zip central directory');
+            const nameLen = buf.readUInt16LE(at + 28);
+            names.push(buf.toString('utf8', at + 46, at + 46 + nameLen));
+            at += 46 + nameLen + buf.readUInt16LE(at + 30) + buf.readUInt16LE(at + 32);
+        }
+        return names;
+    }
+    throw new Error('not a zip file (no end-of-central-directory record)');
+}
+const strayNotes = zipEntryNames(plaintext).filter((n) => /^(\.\/)?notes\//.test(n));
+if (strayNotes.length) {
+    console.error(`${zipPath} contains ${strayNotes.length} notes/ entr${strayNotes.length === 1 ? 'y' : 'ies'} (e.g. ${strayNotes[0]}).`);
+    console.error('Púca Notes has no CSP meta of its own and must not ride an OTA bundle into the WebView origin:');
+    console.error('re-stage with `rm -rf ota-src/notes` (deploy/mobile/README.md), the same removal');
+    console.error('frontend/scripts/strip-notes-from-native.mjs performs for the APK.');
+    process.exit(2);
+}
+
 // AES-128-CBC (Capgo convention): random key + IV.
 const aesKey = randomBytes(16);
 const iv = randomBytes(16);

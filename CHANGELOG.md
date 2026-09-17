@@ -16,10 +16,10 @@ one-line summary; this file is the full story. Versions follow
   Archive and delete can be undone for a few seconds; notes export as Markdown
   or JSON. Colours, labels and the archive stay on the device (the server
   learns nothing new); pins and note order are the Tasks view's own, so they
-  follow your account. Web only — the phone apps do not carry it and the
-  desktop app never opens it. Notes never opens a live connection, so it
-  neither counts as "online" nor interferes with file transfers in the chat
-  app.
+  follow your account. It runs in the browser and as its own Android app; the
+  Púca phone apps do not carry it and the desktop app never opens it. Notes
+  never opens a live connection, so it neither counts as "online" nor
+  interferes with file transfers in the chat app.
 
 ### Fixed
 - **Two tabs, one account.** Signing out, or signing in as someone else, in
@@ -30,55 +30,7 @@ one-line summary; this file is the full story. Versions follow
   a note whose title the server holds in the clear, the way a checklist item
   is already flagged.
 
-Security fixes from an outside review: a message that could crash everyone who
-saw it, and four ways a moderator could reach past their rank.
-
-### Fixed
-- **A single malformed attachment link crashed the app for everyone who could
-  see it.** A message containing a specially formed encrypted-attachment link —
-  no file needed, no upload permission needed — made every viewer's app show
-  the "Something went wrong" screen, on every platform, every time it opened,
-  because Púca opens your first channel on launch. Deleting it was hard for the
-  same reason. The link parser now never throws, and one message that fails to
-  display shows a small placeholder in its own row instead of taking the app
-  down, so it can still be deleted.
-- **Changing your own roles through a disguised user id.** A moderator with
-  Manage Roles could not give themselves a role directly, but could by writing
-  their user id in a form the server did not recognise as their own. The server
-  now checks the id it is actually going to use.
-- **Role changes now respect the other person's rank.** Someone with Manage
-  Roles could add or remove a role (below their own) on a member ranked above
-  them, or on the owner. As with kicks and timeouts, you can only change the
-  roles of members ranked below you; the owner and administrators are exempt.
-- **Lifting a timeout now needs the same standing as imposing one.** Anyone
-  with Kick Members could remove a timeout an administrator had set on a
-  higher-ranked member — including their own, since a timeout only stops
-  sending, not the rest of the app.
-- **Silencing a member's custom join/leave sounds now respects rank** the same
-  way, instead of only protecting the owner.
-- **Encrypted channels no longer go back to an old key on a server's say-so.**
-  A dishonest server could tell a client to encrypt under an earlier key — one
-  a removed member might still hold — in three different ways. The client now
-  rotates to a fresh key instead of ever going backwards, refuses to send under
-  the old key when a rotation cannot be completed, and only adopts another
-  member's key after confirming who published it. A server restored from an
-  older backup still works; it just rotates a few times to catch up.
-- **Mobile updates now compare against the version the app was actually built
-  as,** not the number the update server put on it. Before, a mislabelled
-  update — a mistyped version when publishing, or an old build served under a
-  higher number — could leave a phone refusing every real update until the app
-  was reinstalled. The publishing script now also refuses to publish a manifest
-  whose version does not match the bundle it points at. This cannot undo the
-  first mislabelled update on phones running older versions; see
-  `deploy/mobile/README.md` for exactly what it does and does not cover.
-
 ### Changed
-- Deleting your account now also clears your published direct-message keys,
-  not only marks your sessions as revoked.
-- The security model, FAQ and the Sessions settings text now say plainly that
-  signing out a device stops it connecting but cannot take back what that
-  device already held; a copied device is an account compromise, not a lost
-  token.
 - **Púca Notes ships with every release.** The Android app has no updater of
   its own, so it is now a release surface like the others: built from the same
   version, signed with the same key as Púca, and linked from the download page

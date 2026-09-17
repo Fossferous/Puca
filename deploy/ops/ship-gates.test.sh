@@ -187,7 +187,7 @@ case "\$cmd" in
 	*http_code*) echo 200 ;;
 	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
 	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
-	              echo '<a href="/mobile/Puca-Notes-9.9.9.apk">c</a>'
+	              echo '<a href="/mobile/Puca-Notes-${NOTES_APK_VER:-9.9.9}.apk">c</a>'
 	              echo '<div class="meta">v$1 &middot; Windows</div>'
 	              ${2:+echo '<p>what is new since v$2</p>'} ;;
 esac
@@ -206,6 +206,18 @@ check "and says what it expected"                      "$(has "$out" 'expected 9
 serve_page_version 9.9.9
 out="$(versions)"
 check "PASSES once the label is bumped" "$(has "$out" 'PASS  download-page version')" "$out"
+
+# Púca Notes' Android app has NO OTA. The other two APKs may trail after an
+# OTA-only release because their web layer updates itself; a trailing Notes APK
+# never catches up, so it is a disagreement, and it must reach the verdict line
+# (a FAIL that is printed but not counted still ends in "ALL SURFACES AGREE").
+NOTES_APK_VER=9.9.8 serve_page_version 9.9.9
+out="$(versions)"
+check "FAILS on a Notes APK that trails the release" "$(has "$out" 'FAIL  download-page notesAPK 9.9.8 (trails 9.9.9')" "$out"
+check "and counts it in the verdict"                 "$([ "$(has "$out" 'sandbox/notes-apk-trails')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+serve_page_version 9.9.9
+out="$(versions)"
+check "PASSES a current Notes APK (positive control)" "$([ "$(has "$out" 'PASS  download-page notesAPK 9.9.9 (current)')" = 1 ] && [ "$(has "$out" 'notes-apk-trails')" = 0 ] && echo 1 || echo 0)" "$out"
 
 # A page that names the release AND mentions an older one in prose is correct,
 # not stale. Failing on that would be crying wolf, and an operator who learns to
@@ -410,6 +422,65 @@ check "a matching sidecar does NOT fire the refusal (positive control)" "$([ "$(
 rm -f "$TMP/bundle.enc.zip.version"
 out="$(PUCA_ALLOW_UNVERIFIED_BUNDLE=1 ship mobile "$TMP/bundle.enc.zip" 1.2.3 "$SK" "$CK")"
 check "PUCA_ALLOW_UNVERIFIED_BUNDLE=1 downgrades a missing sidecar to a WARNING" "$([ "$(has "$out" "WARNING: shipping")" = 1 ] && [ "$(has "$out" "REFUSING: no")" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
+echo "--- dual-ship.sh webapp: the tarball must carry the Notes page, built against production ---"
+mkweb() { # <dir> <with-notes 0|1> <api host baked into the Notes entry>
+	local d="$1"; rm -rf "$d" "$d.tgz"; mkdir -p "$d/assets"
+	echo '<script type="module" src="/assets/index-abc123.js"></script>' > "$d/index.html"
+	echo 'const api="https://api.invalid";' > "$d/assets/index-abc123.js"
+	if [ "$2" = 1 ]; then
+		mkdir -p "$d/notes/assets"
+		echo '<script type="module" src="/notes/assets/index-n0tes1.js"></script>' > "$d/notes/index.html"
+		echo "const api=\"https://$3\";" > "$d/notes/assets/index-n0tes1.js"
+	fi
+	tar czf "$d.tgz" -C "$d" .
+}
+mkweb "$TMP/web-nonotes" 0 ""
+out="$(ship webapp "$TMP/web-nonotes.tgz")"; rc=$?
+check "REFUSES a web tarball with no Notes page" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship: the tarball carries no Notes page')" = 1 ] && echo 1 || echo 0)" "$out"
+check "and refuses BEFORE touching a host" "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+mkweb "$TMP/web-localnotes" 1 "localhost:3000"
+out="$(ship webapp "$TMP/web-localnotes.tgz")"; rc=$?
+check "REFUSES a Notes page built against localhost" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING to ship: Notes entry 'notes/assets/index-n0tes1.js'")" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+mkweb "$TMP/web-good" 1 "api.invalid"
+out="$(ship webapp "$TMP/web-good.tgz")"
+check "a tarball with a production Notes page passes the preflight (positive control)" "$([ "$(has "$out" 'PASS  bundle preflight: Notes entry notes/assets/index-n0tes1.js')" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
+echo "--- encrypt-bundle.mjs: a bundle that still carries notes/ is never signed ---"
+# The OTA serves every file in the zip from the WebView's one origin, and the
+# Notes page has no CSP meta of its own. The staging recipe removes it by hand;
+# the signer is the gate. Fixture zips come from python's zipfile (Git Bash has
+# no zip); `python` first, because on Windows `python3` can be the Store stub.
+PY=""
+for c in python python3; do if "$c" -c 'import zipfile' >/dev/null 2>&1; then PY="$c"; break; fi; done
+if [ -z "$PY" ]; then
+	check "python (zipfile) is available to build the fixture bundles" 0 "neither python nor python3 runs"
+else
+	EB="$REPO/deploy/mobile/encrypt-bundle.mjs"
+	node -e "const{generateKeyPairSync}=require('crypto');const{privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});require('fs').writeFileSync(process.argv[1],privateKey.export({type:'pkcs1',format:'pem'}))" "$TMP/ota-fixture.key"
+	echo '{"version":"1.2.3"}' > "$TMP/ota-version.json"
+	"$PY" - "$TMP" <<'PYEOF'
+import sys, zipfile
+t = sys.argv[1]
+def mk(name, entries):
+    with zipfile.ZipFile(t + '/' + name, 'w', zipfile.ZIP_DEFLATED) as z:
+        for e in entries:
+            z.writestr(e, 'x' * 64)
+# Names that merely CONTAIN "notes" must not trip the gate (over-match control).
+mk('ota-clean.zip', ['index.html', 'assets/notes-helper.js', 'release-notes/readme.txt', 'version.json'])
+mk('ota-dirty.zip', ['index.html', 'notes/index.html', 'notes/assets/index-n0tes1.js'])
+mk('ota-dirty-dot.zip', ['index.html', './notes/assets/a.js'])
+PYEOF
+	out="$(node "$EB" "$TMP/ota-dirty.zip" "$TMP/ota-fixture.key" "$TMP/ota-dirty.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
+	check "REFUSES (exit 2) a bundle with notes/ entries and names one" "$([ $rc -eq 2 ] && [ "$(has "$out" 'contains 2 notes/ entries (e.g. notes/index.html)')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
+	check "and writes NOTHING: no encrypted bundle, no .version sidecar" "$([ ! -e "$TMP/ota-dirty.enc.zip" ] && [ ! -e "$TMP/ota-dirty.enc.zip.version" ] && echo 1 || echo 0)" "$(ls "$TMP" | grep ota-dirty)"
+	out="$(node "$EB" "$TMP/ota-dirty-dot.zip" "$TMP/ota-fixture.key" "$TMP/ota-dirty-dot.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
+	check "a ./notes/ spelling is refused too" "$([ $rc -eq 2 ] && [ ! -e "$TMP/ota-dirty-dot.enc.zip" ] && echo 1 || echo 0)" "rc=$rc $out"
+	out="$(node "$EB" "$TMP/ota-clean.zip" "$TMP/ota-fixture.key" "$TMP/ota-clean.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
+	check "a clean bundle is signed, 'notes' inside another name notwithstanding (positive control)" "$([ $rc -eq 0 ] && [ -s "$TMP/ota-clean.enc.zip" ] && [ "$(cat "$TMP/ota-clean.enc.zip.version" 2>/dev/null | tr -d '\r\n')" = "1.2.3" ] && [ "$(has "$out" 'ivSessionKey')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
+fi
 
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"

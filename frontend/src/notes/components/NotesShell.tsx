@@ -21,7 +21,7 @@ import {
     type NoteCard, type NoteFilter, type NoteRef,
     allLabels, filterNotes, groupReminders, moveNoteInOrder, reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
-import { setKeepSort, setKeepView, type NotesSortMode } from '../model/notesPrefs';
+import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { downloadTextFile, fileStamp, noteToMarkdown, notesToJson, notesToMarkdown, openItemsOf } from '../model/noteText';
 import { AccountMenu } from './AccountMenu';
@@ -326,7 +326,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                 onQueryChange={setQuery}
                 onClearQuery={() => setQuery('')}
                 view={local.view}
-                onToggleView={() => setKeepView(local.view === 'grid' ? 'list' : 'grid')}
+                onToggleView={() => setNotesView(local.view === 'grid' ? 'list' : 'grid')}
                 refreshing={tasksPending && cards.length > 0}
                 onRefresh={() => { void actions.refreshAll(); }}
                 onMenu={() => setDrawer(d => !d)}
@@ -435,7 +435,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                     <AccountMenu
                         username={username}
                         sort={local.sort}
-                        onSort={s => setKeepSort(s)}
+                        onSort={s => setNotesSort(s)}
                         onExportMarkdown={() => { setPopup(null); exportMd(); }}
                         onExportJson={() => { setPopup(null); exportJson(); }}
                         onHelp={() => { setPopup(null); setHelp(true); }}
