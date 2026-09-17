@@ -1161,14 +1161,14 @@ export function logout(): void {
         try { localStorage.removeItem(k); } catch { /* private mode */ }
     }
     // Task places are stored per-user (`<key>: <uid>`), so remove those too.
-    // Púca Keep's device-local note state (labels — user-authored text —
-    // plus colours and the archive flag; src/keep/model/keepPrefs.ts) is
-    // namespaced the same way and goes with them. HERE, not in a Keep-side
+    // Púca Notes's device-local note state (labels — user-authored text —
+    // plus colours and the archive flag; src/notes/model/notesPrefs.ts) is
+    // namespaced the same way and goes with them. HERE, not in a Notes-side
     // logout hook: hooks are registered per document, and a sign-out from the
-    // Púca tab must scrub what the Keep tab wrote.
+    // Púca tab must scrub what the Notes tab wrote.
     try {
         for (const k of Object.keys(localStorage)) {
-            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign') || k.startsWith('pucaKeepPrefs')) {
+            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign') || k.startsWith('pucaNotesPrefs')) {
                 localStorage.removeItem(k);
             }
         }

@@ -1536,8 +1536,8 @@ let currentSeedB64: string | null = null;
  * document's own writes, which go through set/clear below and keep the memo
  * in step). The memo is re-read from storage on the next getActiveIdentity().
  *
- * WHY. Púca Keep (/keep/) is a second document on the web app's origin, so a
- * sign-out or an account switch in the Púca tab used to leave an OPEN Keep tab
+ * WHY. Púca Notes (/notes/) is a second document on the web app's origin, so a
+ * sign-out or an account switch in the Púca tab used to leave an OPEN Notes tab
  * holding the previous identity in this module variable — and sealing new
  * notes under it, with the new account's token. A personal list has no edit
  * history, so a note sealed to the wrong identity is unreadable for good.

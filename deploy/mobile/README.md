@@ -93,16 +93,16 @@ paths produce different names for the same release.
 
 ```bash
 cd frontend && npm run build
-rm -rf ota-src && cp -r dist ota-src && rm -rf ota-src/keep && node scripts/cap-index-csp.mjs --index ota-src/index.html
+rm -rf ota-src && cp -r dist ota-src && rm -rf ota-src/notes && node scripts/cap-index-csp.mjs --index ota-src/index.html
                                                      # the rm is load-bearing: `cp -r` into an EXISTING
                                                      # ota-src nests dist/ inside it and leaves the
                                                      # previous release's index.html at the root, which
                                                      # the CSP step reports as "already present" (exit 0)
                                                      # and the zip below then ships under the new version.
-                                                     # `rm -rf ota-src/keep` too: Púca Keep (dist/keep/)
+                                                     # `rm -rf ota-src/notes` too: Púca Notes (dist/notes/)
                                                      # is a browser-only second page with no CSP meta of
                                                      # its own — the APK build strips it the same way
-                                                     # (scripts/strip-keep-from-native.mjs)
+                                                     # (scripts/strip-notes-from-native.mjs)
 ( cd ota-src && zip -r ../puca-web-<ver>.zip . )     # plaintext bundle, WITH the Android CSP: the OTA
                                                      # replaces the APK's index.html, so a bundle zipped
                                                      # straight from dist/ would remove the policy

@@ -1,7 +1,7 @@
 // Cross-document session sync (api/sessionSync.ts): what a `storage` event
 // from ANOTHER tab means — sign-out (hard or soft), account switch, sign-in
 // — and that the shared per-account caches are cleared on the hard cases.
-// Púca Keep is the second document these exist for; two Púca tabs are the
+// Púca Notes is the second document these exist for; two Púca tabs are the
 // pre-existing case that had the same hole.
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 
@@ -138,7 +138,7 @@ describe('installSessionSync', () => {
         const off = installSessionSync(h);
         fire('sovereign_settings', '{}');
         expect(cleared.appearance).toHaveBeenCalledTimes(1);
-        fire('pucaKeepPrefs:1', '{}');
+        fire('pucaNotesPrefs:1', '{}');
         expect(h.onSignedOut).not.toHaveBeenCalled();
         off();
         fire('sovereign_settings', '{}');

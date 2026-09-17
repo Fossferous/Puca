@@ -2,7 +2,7 @@
  * Cross-document session sync.
  *
  * The web app's origin can hold more than one document of this codebase at
- * once: Púca in one tab and Púca Keep (/keep/) in another, or two Púca tabs.
+ * once: Púca in one tab and Púca Notes (/notes/) in another, or two Púca tabs.
  * They share localStorage — the auth token, the E2EE seed, the settings — but
  * NOT the module-level state each document builds from it: getToken()
  * re-reads storage on every call, while the unwrapped channel keys, the DM
@@ -29,7 +29,7 @@
  *     The user signed in from another tab while this one sat on its login
  *     screen.
  *   - the settings changed           → applyAppearance()
- *     A theme picked in the Púca tab lands in the open Keep tab.
+ *     A theme picked in the Púca tab lands in the open Notes tab.
  *
  * Renewals (the sliding token) rewrite the key with the SAME sub and are
  * ignored. Same-document changes never fire `storage` at all — those go

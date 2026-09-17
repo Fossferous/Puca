@@ -1,8 +1,8 @@
 /**
  * Everything the TWO Vite builds share — the main app (vite.config.ts) and
- * Púca Keep (vite.keep.config.ts).
+ * Púca Notes (vite.notes.config.ts).
  *
- * WHY KEEP IS A SEPARATE BUILD AND NOT A SECOND `rollupOptions.input`. A
+ * WHY NOTES IS A SEPARATE BUILD AND NOT A SECOND `rollupOptions.input`. A
  * second HTML entry in the main build changes the main bundle in two ways
  * that break the release path: Rollup names entry chunks after the input
  * KEY (so `assets/index-*.js`, which deploy/ops/dual-ship.sh and
@@ -10,7 +10,7 @@
  * module both pages import — api/platform.ts, which carries the baked
  * VITE_API_URL — is hoisted into a shared chunk, so the entry chunk no
  * longer names the production API and dual-ship's bundle preflight refuses
- * to ship. Building Keep on its own, into dist/keep/, leaves the main bundle
+ * to ship. Building Notes on its own, into dist/notes/, leaves the main bundle
  * byte-for-byte what it was.
  */
 import { type Plugin } from 'vite'

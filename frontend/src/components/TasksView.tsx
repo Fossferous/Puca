@@ -2,7 +2,7 @@
  * TasksView — the Tasks dashboard.
  *
  * One Google-Tasks-style tab bar holds EVERY checklist the user can see:
- * their personal lists (Keep style, encrypt-to-self) and every checklist
+ * their personal lists (Notes style, encrypt-to-self) and every checklist
  * channel across their servers (E2EE under each channel's group key). Tabs
  * drag to reorder (mouse: drag; touch: long-press then drag) and any tab can
  * be favourited from its context menu — favouriting pulls it to the front.
@@ -64,17 +64,17 @@ import './AllChecklistsView.css';
 import './ServerTasksBoard.css';
 
 /**
- * Where Púca Keep lives, or null where the link would be wrong. WEB ONLY:
- * Keep is a second page on the web app's origin (`/keep/`, always with the
- * trailing slash — Caddy's SPA fallback answers bare `/keep` with THIS app),
+ * Where Púca Notes lives, or null where the link would be wrong. WEB ONLY:
+ * Notes is a second page on the web app's origin (`/notes/`, always with the
+ * trailing slash — Caddy's SPA fallback answers bare `/notes` with THIS app),
  * and it is signed in there because the two pages share the origin's
  * storage. The desktop shell runs at tauri://localhost and the phone at
  * https://localhost, where nothing is shared: a link from either would open
  * a signed-out, default-themed page in the system browser, so they get none.
  */
-function keepUrl(): string | null {
+function notesUrl(): string | null {
     if (typeof window === 'undefined' || isTauri() || isMobile()) return null;
-    return `${window.location.origin}/keep/`;
+    return `${window.location.origin}/notes/`;
 }
 
 // Decode the JWT for the caller's user id (same lightweight client-side decode
@@ -118,7 +118,7 @@ export function TasksView() {
     // Right-click / long-press menu on the tabs and board cards.
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const currentUserId = tokenUserId();
-    const keepHref = keepUrl();
+    const keepHref = notesUrl();
     // Read at async completion time (the reparent refetch guard) — the load
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
@@ -621,12 +621,12 @@ export function TasksView() {
                     </button>
                     {keepHref && (
                         <a
-                            className="tasks-tab tasks-tab-icon tasks-tab-keep"
+                            className="tasks-tab tasks-tab-icon tasks-tab-notes"
                             href={keepHref}
                             target="_blank"
                             rel="noopener"
-                            title="Open in Púca Keep — these lists as notes"
-                            aria-label="Open in Púca Keep"
+                            title="Open in Púca Notes — these lists as notes"
+                            aria-label="Open in Púca Notes"
                         >
                             <NoteIcon />
                         </a>

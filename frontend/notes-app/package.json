@@ -1,0 +1,10 @@
+{
+  "name": "puca-notes-app",
+  "private": true,
+  "version": "0.0.0",
+  "description": "The native shell for Púca Notes (Capacitor). No dependencies of its own: every package resolves from ../node_modules, which is why this manifest lists the Capacitor packages the shell uses without versions being installed here — `cap sync` reads this list to know which native plugins to wire.",
+  "dependencies": {
+    "@capacitor/android": "*",
+    "@capacitor/core": "*"
+  }
+}

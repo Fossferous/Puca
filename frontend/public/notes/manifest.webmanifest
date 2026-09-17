@@ -1,0 +1,14 @@
+{
+  "name": "Púca Notes",
+  "short_name": "Notes",
+  "description": "Notes and checklists from your Púca account, end-to-end encrypted.",
+  "start_url": "/notes/",
+  "scope": "/notes/",
+  "display": "standalone",
+  "background_color": "#18191c",
+  "theme_color": "#18191c",
+  "icons": [
+    { "src": "/notes/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/notes/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

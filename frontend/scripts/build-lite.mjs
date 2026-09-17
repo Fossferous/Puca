@@ -30,9 +30,9 @@ function run(cmd, args) {
 
 run('npx', ['tsc', '-b']);
 run('npx', ['vite', 'build']);
-// Púca Keep is its own build into dist/keep/ (vite.keep.config.ts). Built
+// Púca Notes is its own build into dist/notes/ (vite.notes.config.ts). Built
 // under the same env so rc-exclusion-guard checks its graph too.
-run('npx', ['vite', 'build', '--config', 'vite.keep.config.ts']);
+run('npx', ['vite', 'build', '--config', 'vite.notes.config.ts']);
 
 // `cap sync` must run under the SAME env: it writes appId from
 // capacitor.config.ts into the native project, and Gradle reads PUCA_LITE
@@ -47,9 +47,9 @@ if (syncIdx !== -1) {
     }
     console.log(`[build-lite] syncing the LITE bundle into ${platform} (shared appId com.sovereign.app, appName "Púca Lite")`);
     run('npx', ['cap', 'sync', platform]);
-    // Keep is a browser surface: it leaves the shell's assets before the CSP
+    // Notes is a browser surface: it leaves the shell's assets before the CSP
     // step, or it would ship as a second, unpolicied document.
-    run('node', ['scripts/strip-keep-from-native.mjs', '--platform', platform]);
+    run('node', ['scripts/strip-notes-from-native.mjs', '--platform', platform]);
     // The Android WebView gets its Content-Security-Policy from a <meta> in
     // the SYNCED index.html (the web dist keeps none; its policy is the server
     // header). Must run after the sync, which overwrites that file. Same step

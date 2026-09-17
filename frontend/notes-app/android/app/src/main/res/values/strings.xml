@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Púca Notes</string>
+    <string name="title_activity_main">Púca Notes</string>
+    <string name="package_name">com.sovereign.notes</string>
+    <string name="custom_url_scheme">com.sovereign.notes</string>
+</resources>

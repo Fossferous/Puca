@@ -7,7 +7,7 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
-- **Púca Keep** — a notes app in the style of Google Keep, at `/keep/` on the
+- **Púca Notes** — a notes app in the style of Google Keep, at `/notes/` on the
   web app (the Tasks view links to it). Your personal lists and every
   checklist channel from your servers appear as notes: a grid you can search,
   pin, colour, label and archive, a Reminders view of everything with a due
@@ -17,7 +17,7 @@ one-line summary; this file is the full story. Versions follow
   or JSON. Colours, labels and the archive stay on the device (the server
   learns nothing new); pins and note order are the Tasks view's own, so they
   follow your account. Web only — the phone apps do not carry it and the
-  desktop app never opens it. Keep never opens a live connection, so it
+  desktop app never opens it. Notes never opens a live connection, so it
   neither counts as "online" nor interferes with file transfers in the chat
   app.
 
@@ -26,7 +26,7 @@ one-line summary; this file is the full story. Versions follow
   one browser tab of the web app now takes effect in the other tabs on the
   same origin — before, the other tab kept the previous account's keys in
   memory until it was reloaded.
-- **Plaintext list titles are flagged.** Keep shows a "Not encrypted" mark on
+- **Plaintext list titles are flagged.** Notes shows a "Not encrypted" mark on
   a note whose title the server holds in the clear, the way a checklist item
   is already flagged.
 

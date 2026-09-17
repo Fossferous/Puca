@@ -115,8 +115,8 @@ function App() {
     navigate('/login', { state: { expired: true }, replace: true });
   }, [navigate]);
 
-  // Another document on this origin (a second Púca tab, or Púca Keep at
-  // /keep/) signed out, soft-expired, or switched accounts. The shared caches
+  // Another document on this origin (a second Púca tab, or Púca Notes at
+  // /notes/) signed out, soft-expired, or switched accounts. The shared caches
   // are cleared inside sessionSync; this decides where the user lands. A
   // sign-out elsewhere follows the soft-expire path — the storage that a full
   // logout() clears is already gone, and re-running logout() here would try

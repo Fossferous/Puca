@@ -2,10 +2,10 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { APP_VERSION, RC_ENABLED, defineFlags, liteAliases, rcExclusionGuard, vendorChunks } from './vite.shared'
 
-// The main app. Everything shared with the Púca Keep build (vite.keep.config.ts)
+// The main app. Everything shared with the Púca Notes build (vite.notes.config.ts)
 // — the version define, the lite build's remote-control exclusion, the vendor
 // chunking — lives in vite.shared.ts; this file is only what is specific to
-// THIS bundle. Keep is a separate build on purpose: see vite.shared.ts's
+// THIS bundle. Notes is a separate build on purpose: see vite.shared.ts's
 // header for the two ways a second entry here would break the release path.
 
 /**

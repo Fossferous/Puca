@@ -350,21 +350,21 @@ cmd_webapp() {
 		exit 1
 	fi
 	echo "PASS  bundle preflight: entry $entry_rel bakes the production API base ($matches occurrences)"
-	# Púca Keep is a SECOND page in the same tarball (dist/keep/, its own
-	# build — vite.keep.config.ts), with its own entry chunk that the check
-	# above never looks at. Same failure shape, same refusal: a Keep page built
+	# Púca Notes is a SECOND page in the same tarball (dist/notes/, its own
+	# build — vite.notes.config.ts), with its own entry chunk that the check
+	# above never looks at. Same failure shape, same refusal: a Notes page built
 	# against localhost would sign nobody in. Only when the page is present, so
-	# a pre-Keep tarball still ships. Its asset paths are /keep/assets/...
-	local keep_entry keep_matches
-	keep_entry="$(tar xzOf "$tarball" ./keep/index.html 2>/dev/null | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1 || true)"
-	if [ -n "$keep_entry" ]; then
-		keep_matches="$(tar xzOf "$tarball" "./keep/$keep_entry" 2>/dev/null | grep -c "$API_HOST" || true)"
-		if [ "${keep_matches:-0}" -eq 0 ]; then
-			echo "REFUSING to ship: Keep entry 'keep/$keep_entry' does not contain $API_HOST."
-			echo "Was the Keep build (vite.keep.config.ts) run without frontend/.env.production?"
+	# a pre-Notes tarball still ships. Its asset paths are /notes/assets/...
+	local notes_entry notes_matches
+	notes_entry="$(tar xzOf "$tarball" ./notes/index.html 2>/dev/null | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' | head -1 || true)"
+	if [ -n "$notes_entry" ]; then
+		notes_matches="$(tar xzOf "$tarball" "./notes/$notes_entry" 2>/dev/null | grep -c "$API_HOST" || true)"
+		if [ "${notes_matches:-0}" -eq 0 ]; then
+			echo "REFUSING to ship: Notes entry 'notes/$notes_entry' does not contain $API_HOST."
+			echo "Was the Notes build (vite.notes.config.ts) run without frontend/.env.production?"
 			exit 1
 		fi
-		echo "PASS  bundle preflight: Keep entry keep/$keep_entry bakes the production API base ($keep_matches occurrences)"
+		echo "PASS  bundle preflight: Notes entry keep/$notes_entry bakes the production API base ($notes_matches occurrences)"
 	fi
 	local local_sha
 	local_sha="$(sha256sum "$tarball" | cut -d' ' -f1)"

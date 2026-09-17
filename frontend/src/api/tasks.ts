@@ -69,9 +69,9 @@ export interface TaskList {
     total_tasks: number;
     completed_tasks: number;
     /** E2EE state of `title` as the server stores it, set by listTaskLists:
-     *  `legacy` = held as plaintext. Púca Keep shows a "Not encrypted" flag on
+     *  `legacy` = held as plaintext. Púca Notes shows a "Not encrypted" flag on
      *  the card headline for that, the way TaskTree flags a plaintext item
-     *  (audit H-1) — a list title is the most visible string Keep renders.
+     *  (audit H-1) — a list title is the most visible string Notes renders.
      *  Absent for the server-created "Notes to self" label, which is plain by
      *  design (see getSelfChecklist). */
     titleEncState?: MessageEncState;
@@ -789,7 +789,7 @@ export function toggleFavoritePrefs(
 }
 
 /**
- * Apply a completion toggle locally, mirroring the server's Keep-style
+ * Apply a completion toggle locally, mirroring the server's Notes-style
  * cascade at any depth: completing a task completes its whole subtree;
  * re-activating a task re-activates every ancestor above it.
  */

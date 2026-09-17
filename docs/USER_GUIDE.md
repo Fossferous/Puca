@@ -262,10 +262,10 @@ confirmation first.
 
 ---
 
-## Púca Keep (notes)
+## Púca Notes (notes)
 
-Púca Keep shows your task lists as notes, Google-Keep style, in the browser at
-`/keep/` on your server's web address. Open it with **Open in Púca Keep**
+Púca Notes shows your task lists as notes, Google-Keep style, in the browser at
+`/notes/` on your server's web address. Open it with **Open in Púca Notes**
 (the note button beside **New list** in the Tasks view of the web app); it
 uses the account you are already signed in to.
 
@@ -275,7 +275,7 @@ uses the account you are already signed in to.
   edit, add subtasks, drag by the grip to reorder or nest, set a due time
   from the clock, attach pictures from the paperclip.
 - **Pin** keeps a note at the top (it is the same favourite as the Tasks tab
-  bar). **Colour**, **Labels** and **Archive** are Keep's own, and stay on the
+  bar). **Colour**, **Labels** and **Archive** are Notes' own, and stay on the
   device you set them on. **Search** looks through titles and items.
 - **Reminders** in the left column lists every item with a due time.
 - Archiving or deleting a note offers **Undo** for a few seconds.

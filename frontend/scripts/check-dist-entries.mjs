@@ -37,7 +37,7 @@ const DIST = path.join(FRONTEND, 'dist');
  *  paths under, which is how a chunk path in the HTML maps back to disk. */
 const PAGES = [
     { html: 'index.html', base: '/' },
-    { html: path.join('keep', 'index.html'), base: '/keep/' },
+    { html: path.join('notes', 'index.html'), base: '/notes/' },
 ];
 
 const ENTRY = /assets\/index-[A-Za-z0-9_-]+\.js/;

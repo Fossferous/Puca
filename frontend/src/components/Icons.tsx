@@ -489,7 +489,7 @@ export const GridIcon = makeIcon('GridIcon', <>
     <rect x="13.25" y="13.25" width="7.5" height="7.5" rx="1.5" />
 </>);
 
-/** The single-column counterpart of GridIcon — Keep's grid/list layout
+/** The single-column counterpart of GridIcon — Notes' grid/list layout
  *  toggle. Two full-width rows on the same keyline as the grid's tiles.
  *  Deliberately NOT ChannelsIcon (dots + lines): that one means "the channel
  *  list", and this toggle is about layout, not channels. No LEGACY_GLYPHS
@@ -499,7 +499,7 @@ export const ListLayoutIcon = makeIcon('ListLayoutIcon', <>
     <rect x="3.25" y="13.25" width="17.5" height="7.5" rx="1.5" />
 </>);
 
-/** Open the navigation drawer (Keep on a phone). Three full-width lines —
+/** Open the navigation drawer (Notes on a phone). Three full-width lines —
  *  the rail's own rows, not ChannelsIcon's dotted channel list. No legacy
  *  glyph: nothing shipped this control before. */
 export const MenuIcon = makeIcon('MenuIcon', <>
@@ -822,7 +822,7 @@ export const InboxIcon = makeIcon('InboxIcon', <>
     <path d="M3.5 14.25h4.25l1.25 2.5h6l1.25-2.5h4.25v4.25a1.75 1.75 0 0 1-1.75 1.75H5.25a1.75 1.75 0 0 1-1.75-1.75Z" />
 </>);
 
-/** Archive / unarchive a Keep note: a lidded box on the landscape keyline
+/** Archive / unarchive a Notes note: a lidded box on the landscape keyline
  *  (InboxIcon is a tray with an incoming arrow — a different meaning). One
  *  icon for both directions; the control's label says which. No legacy
  *  glyph: the control is new. */

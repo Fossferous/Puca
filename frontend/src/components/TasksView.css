@@ -176,7 +176,7 @@
     min-height: 0;
 }
 
-/* Keep-style centered column so hover actions sit near the item text. */
+/* Notes-style centered column so hover actions sit near the item text. */
 .tasks-editor-header,
 .tasks-add,
 .tasks-editor .task-tree {
@@ -292,11 +292,11 @@
     .tasks-title-input { font-size: 16px; }
 }
 
-/* "Open in Púca Keep" (web only; see keepUrl in TasksView.tsx). A link that
+/* "Open in Púca Notes" (web only; see notesUrl in TasksView.tsx). A link that
    dresses as the tab-bar icon button beside New list. */
-.tasks-tab-keep {
+.tasks-tab-notes {
     text-decoration: none;
     display: inline-flex;
     align-items: center;
 }
-.tasks-tab-keep:hover { text-decoration: none; }
+.tasks-tab-notes:hover { text-decoration: none; }

@@ -1,6 +1,6 @@
 // The identity memo must follow storage once ANOTHER document changed it
 // (api/e2ee.ts getActiveIdentity): a sign-out in the Púca tab must not leave
-// the Keep tab sealing under the old seed, and an account switch must swap
+// the Notes tab sealing under the old seed, and an account switch must swap
 // the identity. Same-document reads without a storage event keep the memo —
 // that is the fast path every seal takes.
 import { describe, it, expect, beforeEach, type Mock } from 'vitest';

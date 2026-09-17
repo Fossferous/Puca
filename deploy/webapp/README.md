@@ -17,21 +17,21 @@ shells, served directly to a browser. No separate build — it's the production
 Everything else works: SRP login, E2EE messaging/DMs/channels, voice, screen
 share (`getDisplayMedia`), attachments, reactions, tasks.
 
-## Púca Keep (`/keep/`)
+## Púca Notes (`/notes/`)
 
-The same `dist/` also carries **Púca Keep**, a notes front door onto the task
-system, at `https://app.example.com/keep/` — see `docs/KEEP.md`. It is built
-by `vite.keep.config.ts` into `dist/keep/` as part of `npm run build`, so the
+The same `dist/` also carries **Púca Notes**, a notes front door onto the task
+system, at `https://app.example.com/notes/` — see `docs/NOTES.md`. It is built
+by `vite.notes.config.ts` into `dist/notes/` as part of `npm run build`, so the
 tarball in step 1 ships it with no extra step. It is a browser surface only:
-the desktop and mobile shells strip it out (`scripts/strip-keep-from-native.mjs`).
+the desktop and mobile shells strip it out (`scripts/strip-notes-from-native.mjs`).
 Two things the operator must know:
 
 - The vhost needs `{path}/` in its `try_files` line (the block below has it)
-  so `/keep/` serves `keep/index.html`. Until an existing Caddyfile is
-  updated, a bare `/keep` falls through to the main app; `/keep/` with the
-  trailing slash works either way. Keep's own routes are hash routes and never
+  so `/notes/` serves `notes/index.html`. Until an existing Caddyfile is
+  updated, a bare `/notes` falls through to the main app; `/notes/` with the
+  trailing slash works either way. Notes' own routes are hash routes and never
   reach the server.
-- Keep ships a web app manifest (`/keep/manifest.webmanifest`) so a browser
+- Notes ships a web app manifest (`/notes/manifest.webmanifest`) so a browser
   can install it to the home screen or desktop. There is deliberately no
   service worker: the main app's OTA and updater model must not be shadowed
   by a cache.
@@ -50,7 +50,7 @@ Two things the operator must know:
    app.example.com {
        root * /opt/puca/webapp
        encode gzip
-       try_files {path} {path}/ /index.html   # SPA routing; {path}/ serves /keep/
+       try_files {path} {path}/ /index.html   # SPA routing; {path}/ serves /notes/
        file_server
        header {
            Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -86,8 +86,8 @@ Re-run steps 1–2 (rebuild + re-extract; `dual-ship.sh webapp`). No
 Caddy/CORS/DNS change needed unless a new release adds a `connect-src`
 requirement — run `check-versions.sh` after every push. This is decoupled from
 the desktop/mobile version line: it always serves whatever `dist` was last
-deployed here. The one-off exception is the release that introduced Púca Keep:
-re-apply the `try_files` line above once, or `/keep` without a trailing slash
+deployed here. The one-off exception is the release that introduced Púca Notes:
+re-apply the `try_files` line above once, or `/notes` without a trailing slash
 keeps serving the main app.
 
 ## Follow-ups (not done)

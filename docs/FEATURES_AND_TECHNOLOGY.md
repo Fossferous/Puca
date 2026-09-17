@@ -135,7 +135,7 @@ A small module (`frontend/src/api/platform.ts`) detects which shell it's in and 
 
 **How it works.** `task_handlers.rs` with tables that scope each task to *either* a channel *or* a personal list (enforced by a database check). Personal lists are **encrypted to yourself** (only your identity key can read them); channel checklists are encrypted under the **channel key** just like messages (see §15). The UI (`ChecklistPanel`, `TasksView`, `TaskTree`) mirrors the server's cascade optimistically for snappy interaction.
 
-**Púca Keep.** The same lists and checklists as a Google‑Keep‑style notes app at `/keep/` on the web app — a grid of notes with live checkboxes, search over the decrypted text on your device, a reminders view, colours, labels and archive, and Púca's own `TaskTree` inside every open note. Nothing new on the server: a note *is* a personal list, a shared note *is* a checklist channel, pinning *is* the Tasks view's favourite. It is its own Vite build (`frontend/vite.keep.config.ts`) shipped inside the web bundle, deliberately without a WebSocket. `docs/KEEP.md` has the mapping and what stays on the device.
+**Púca Notes.** The same lists and checklists as a Google‑Keep‑style notes app at `/notes/` on the web app — a grid of notes with live checkboxes, search over the decrypted text on your device, a reminders view, colours, labels and archive, and Púca's own `TaskTree` inside every open note. Nothing new on the server: a note *is* a personal list, a shared note *is* a checklist channel, pinning *is* the Tasks view's favourite. It is its own Vite build (`frontend/vite.notes.config.ts`) shipped inside the web bundle, deliberately without a WebSocket. `docs/NOTES.md` has the mapping and what stays on the device.
 
 ---
 
