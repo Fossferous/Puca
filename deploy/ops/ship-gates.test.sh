@@ -472,12 +472,28 @@ def mk(name, entries):
 mk('ota-clean.zip', ['index.html', 'assets/notes-helper.js', 'release-notes/readme.txt', 'version.json'])
 mk('ota-dirty.zip', ['index.html', 'notes/index.html', 'notes/assets/index-n0tes1.js'])
 mk('ota-dirty-dot.zip', ['index.html', './notes/assets/a.js'])
+# An archive comment carrying a fake, all-zero end-of-central-directory record.
+# A backward scan meets it first; trusted, it says "0 entries" and the notes/
+# filter passes a dirty bundle.
+with zipfile.ZipFile(t + '/ota-dirty-comment.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr('index.html', 'x' * 64); z.writestr('notes/index.html', 'x' * 64)
+    z.comment = b'PK\x05\x06' + b'\x00' * 40
+with zipfile.ZipFile(t + '/ota-clean-comment.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr('index.html', 'x' * 64)
+    z.comment = b'PK\x05\x06' + b'\x00' * 40
+open(t + '/ota-notazip.zip', 'wb').write(b'this is not a zip archive at all, only some bytes ' * 4)
 PYEOF
 	out="$(node "$EB" "$TMP/ota-dirty.zip" "$TMP/ota-fixture.key" "$TMP/ota-dirty.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
 	check "REFUSES (exit 2) a bundle with notes/ entries and names one" "$([ $rc -eq 2 ] && [ "$(has "$out" 'contains 2 notes/ entries (e.g. notes/index.html)')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
 	check "and writes NOTHING: no encrypted bundle, no .version sidecar" "$([ ! -e "$TMP/ota-dirty.enc.zip" ] && [ ! -e "$TMP/ota-dirty.enc.zip.version" ] && echo 1 || echo 0)" "$(ls "$TMP" | grep ota-dirty)"
 	out="$(node "$EB" "$TMP/ota-dirty-dot.zip" "$TMP/ota-fixture.key" "$TMP/ota-dirty-dot.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
 	check "a ./notes/ spelling is refused too" "$([ $rc -eq 2 ] && [ ! -e "$TMP/ota-dirty-dot.enc.zip" ] && echo 1 || echo 0)" "rc=$rc $out"
+	out="$(node "$EB" "$TMP/ota-dirty-comment.zip" "$TMP/ota-fixture.key" "$TMP/ota-dirty-comment.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
+	check "a fake end record in the archive comment does not hide notes/" "$([ $rc -eq 2 ] && [ "$(has "$out" 'contains 1 notes/ entry (e.g. notes/index.html)')" = 1 ] && [ ! -e "$TMP/ota-dirty-comment.enc.zip" ] && echo 1 || echo 0)" "rc=$rc $out"
+	out="$(node "$EB" "$TMP/ota-clean-comment.zip" "$TMP/ota-fixture.key" "$TMP/ota-clean-comment.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
+	check "and the same comment on a clean bundle still signs (the check is not 'any comment')" "$([ $rc -eq 0 ] && [ -s "$TMP/ota-clean-comment.enc.zip" ] && echo 1 || echo 0)" "rc=$rc $out"
+	out="$(node "$EB" "$TMP/ota-notazip.zip" "$TMP/ota-fixture.key" "$TMP/ota-notazip.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
+	check "a file whose entry list cannot be read is refused, not signed" "$([ $rc -eq 2 ] && [ "$(has "$out" 'Refusing to sign what cannot be checked')" = 1 ] && [ ! -e "$TMP/ota-notazip.enc.zip" ] && echo 1 || echo 0)" "rc=$rc $out"
 	out="$(node "$EB" "$TMP/ota-clean.zip" "$TMP/ota-fixture.key" "$TMP/ota-clean.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
 	check "a clean bundle is signed, 'notes' inside another name notwithstanding (positive control)" "$([ $rc -eq 0 ] && [ -s "$TMP/ota-clean.enc.zip" ] && [ "$(cat "$TMP/ota-clean.enc.zip.version" 2>/dev/null | tr -d '\r\n')" = "1.2.3" ] && [ "$(has "$out" 'ivSessionKey')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
 fi

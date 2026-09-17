@@ -25,6 +25,30 @@ gradle.taskGraph.whenReady { graph ->
             "NOTES_ALLOW_HTTP_API=1 is TEST-ONLY (http WebView origin, cleartext traffic). " +
             "Refusing to build a release APK with it set.")
     }
+    // The variable has a SECOND reader with a longer life: capacitor.config.ts
+    // reads it at `cap sync` and writes the answer into the generated
+    // src/main/assets/capacitor.config.json, which Gradle packages verbatim and
+    // Capacitor reads at runtime for the WebView origin. A release built from
+    // Android Studio re-runs no sync, so a stale test sync would ship an
+    // http://localhost app: a different storage partition from every earlier
+    // install (session and keys gone on upgrade) and an origin no server's
+    // CORS_ORIGINS lists. The env check above stays: it alone covers the
+    // manifest's cleartext placeholder below.
+    if (buildingRelease) {
+        def synced = file('src/main/assets/capacitor.config.json')
+        if (!synced.exists()) {
+            throw new GradleException(
+                "notes-app: src/main/assets/capacitor.config.json is missing. Run " +
+                "scripts/build-notes-app.mjs (it syncs), or `npx cap sync android` here.")
+        }
+        def scheme = new groovy.json.JsonSlurper().parse(synced)?.server?.androidScheme ?: 'https'
+        if (scheme != 'https') {
+            throw new GradleException(
+                "notes-app: the synced capacitor.config.json says androidScheme=${scheme}, left by a " +
+                "NOTES_ALLOW_HTTP_API=1 test sync. A release WebView must be https://localhost. " +
+                "Re-run scripts/build-notes-app.mjs --release without that variable.")
+        }
+    }
     if (buildingRelease && keystorePropsFile == null && !project.hasProperty('allowUnsignedRelease')) {
         throw new GradleException(
             "No release keystore found for Púca Notes. Looked for ~/.android/puca-keystore.properties " +

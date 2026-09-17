@@ -60,8 +60,18 @@ function zipEntryNames(buf) {
     // scanning for PK\x01\x02 anywhere would also hit compressed payload bytes.
     for (let i = buf.length - 22; i >= 0; i--) {
         if (buf.readUInt32LE(i) !== 0x06054b50) continue;
+        // The four signature bytes alone are not an EOCD: an archive COMMENT may
+        // contain them, and a backward scan meets the comment first. A fake
+        // record of zeros there read as "0 entries", the filter below found no
+        // notes/ among none, and the dirty bundle was signed. The real record
+        // is the one whose comment length accounts for every byte after it.
+        if (buf.readUInt16LE(i + 20) !== buf.length - i - 22) continue;
         const count = buf.readUInt16LE(i + 10);
         let at = buf.readUInt32LE(i + 16);
+        // Fail CLOSED on what this reader cannot see into, rather than report
+        // a partial list as the whole truth.
+        if (count === 0xffff || at === 0xffffffff) throw new Error('zip64 archive: the entry list is not readable here');
+        if (count === 0) throw new Error('the archive lists no entries');
         const names = [];
         for (let n = 0; n < count; n++) {
             if (buf.readUInt32LE(at) !== 0x02014b50) throw new Error('malformed zip central directory');
@@ -73,7 +83,14 @@ function zipEntryNames(buf) {
     }
     throw new Error('not a zip file (no end-of-central-directory record)');
 }
-const strayNotes = zipEntryNames(plaintext).filter((n) => /^(\.\/)?notes\//.test(n));
+let bundleNames;
+try {
+    bundleNames = zipEntryNames(plaintext);
+} catch (e) {
+    console.error(`${zipPath}: cannot read the bundle's entry list (${e.message}). Refusing to sign what cannot be checked.`);
+    process.exit(2);
+}
+const strayNotes = bundleNames.filter((n) => /^(\.\/)?notes\//.test(n));
 if (strayNotes.length) {
     console.error(`${zipPath} contains ${strayNotes.length} notes/ entr${strayNotes.length === 1 ? 'y' : 'ies'} (e.g. ${strayNotes[0]}).`);
     console.error('Púca Notes has no CSP meta of its own and must not ride an OTA bundle into the WebView origin:');
