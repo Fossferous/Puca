@@ -30,9 +30,12 @@ Two things the operator must know:
 
 - The vhost needs `{path}/` in its `try_files` line (the block below has it)
   so `/notes/` serves `notes/index.html`. Until an existing Caddyfile is
-  updated, a bare `/notes` falls through to the main app; `/notes/` with the
-  trailing slash works either way. Notes' own routes are hash routes and never
-  reach the server.
+  updated, BOTH `/notes` and `/notes/` fall through to the main app (an earlier
+  version of this file said the trailing slash worked either way; on a live
+  Caddy 2.11 with `try_files {path} /index.html` it does not). The file itself,
+  `/notes/index.html`, is served by every configuration, which is why the
+  Tasks view, the download page and the web app manifest all link to that.
+  Notes' own routes are hash routes and never reach the server.
 - Notes ships a web app manifest (`/notes/manifest.webmanifest`) so a browser
   can install it to the home screen or desktop. There is deliberately no
   service worker: the main app's OTA and updater model must not be shadowed
@@ -89,8 +92,8 @@ Caddy/CORS/DNS change needed unless a new release adds a `connect-src`
 requirement — run `check-versions.sh` after every push. This is decoupled from
 the desktop/mobile version line: it always serves whatever `dist` was last
 deployed here. The one-off exception is the release that introduced Púca Notes:
-re-apply the `try_files` line above once, or `/notes` without a trailing slash
-keeps serving the main app.
+re-apply the `try_files` line above once, or `/notes` and `/notes/` keep
+serving the main app (`/notes/index.html` works regardless).
 
 ## Follow-ups (not done)
 - PWA manifest + service worker for installability/offline.

@@ -111,7 +111,8 @@ the release scripts grep for and hoist the baked API host out of it
 (`vite.shared.ts` has the story).
 
 The web tarball ships it (`deploy/webapp/README.md`); the operator's Caddy
-`try_files` needs `{path}/` once so `/notes/` serves the directory index. The
+`try_files` needs `{path}/` once so `/notes/` serves the directory index
+(until then only `/notes/index.html` works, which is what every link uses). The
 phone shells strip `dist/notes/` (`scripts/strip-notes-from-native.mjs` after
 every `cap sync`, and `rm -rf ota-src/notes` in the OTA recipe) — a browser-only
 page with no CSP meta has no business inside a WebView. The desktop installer
