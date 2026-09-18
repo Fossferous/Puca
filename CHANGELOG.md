@@ -9,8 +9,8 @@ one-line summary; this file is the full story. Versions follow
 ### Fixed
 - **Remote control survives unlocking the computer.** A session started
   while the computer was locked (typing your PIN at its lock screen) ran on
-  the lock-screen helper, which Windows stops the moment the computer is
-  unlocked. The picture froze, nothing you did reached the computer, and about
+  the lock-screen helper, which Púca's service stops the moment the computer
+  is unlocked. The picture froze, nothing you did reached the computer, and about
   15 seconds later the session ended and needed a manual reconnect. The app
   now notices within a second that the helper under the session has gone and
   restarts the picture on its own helper, in the same session, keeping the
