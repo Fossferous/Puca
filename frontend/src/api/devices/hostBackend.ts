@@ -138,10 +138,17 @@ export interface HostBackend {
      *  game) is holding the pointer entirely off the streamed monitor, so
      *  injected clicks get clamped somewhere the viewer cannot see. Optional
      *  for the same skew reason — an implementation predating it reads as
-     *  "not clipped". */
+     *  "not clipped".
+     *
+     *  `streamLive` says whether the agent ANSWERING holds a live stream for
+     *  this session: `false` means it does not (the connection was replaced —
+     *  a borrowed lock-screen agent lost at unlock, a respawned agent — or the
+     *  agent reaped the stream itself), `undefined` means "cannot tell" and
+     *  must never be acted on. `streamEnd` is why it ended, when the host must
+     *  stay silent about it ('no_frame'). */
     sessionStatus?(
         sessionId: string,
-    ): Promise<{ secureDesktop: boolean; cursorClipped?: boolean }>;
+    ): Promise<{ secureDesktop: boolean; cursorClipped?: boolean; streamLive?: boolean; streamEnd?: string }>;
     /** Blank this machine's screen behind an overlay while it is controlled.
      *
      *  Only the agent can do this; the webview has no way to cover the desktop.
