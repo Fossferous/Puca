@@ -243,3 +243,78 @@ describe('busy', () => {
         expect(r.g.busy()).toBe(false);
     });
 });
+
+describe('a stranded contact (a pointerup that never arrived)', () => {
+    /** The field shape: a pinch, the app backgrounded before the second
+     *  finger's up reached us, then an ordinary one-finger drag. Finger 2's
+     *  entry is the one left behind. */
+    function strandFinger2() {
+        r.g.down(P(1, 100, 100));
+        r.g.down(P(2, 300, 100));  // pinch
+        r.g.up(P(1, 100, 100));    // finger 2's up is LOST
+        r.calls.length = 0;
+    }
+    /** A clearly-a-drag stroke of a NEW finger, far past the tap slop. */
+    function dragFinger3() {
+        r.g.down(P(3, 100, 100));
+        r.g.move(P(3, 140, 100));
+        r.g.move(P(3, 180, 100));
+        r.g.up(P(3, 180, 100));
+    }
+
+    it('POSITIVE CONTROL: left alone, the machine wedges in pinch and sends no move at all', () => {
+        // This is the defect, and the rig must be able to see it — otherwise
+        // the recovery tests below would pass on a machine that never wedged.
+        strandFinger2();
+        r.g.down(P(3, 100, 100));
+        r.g.move(P(3, 140, 100));
+        // Mid-drag, with ONE real finger down: what "Copy diagnostics" shows.
+        expect(r.g.diag()).toEqual({ phase: 'pinch', contacts: 2, surface: true });
+        r.g.move(P(3, 180, 100));
+        r.g.up(P(3, 180, 100));
+        expect(r.moves()).toEqual([]);
+    });
+
+    it('prune() forgets a finger the owner no longer holds, and the next drag moves the pointer', () => {
+        strandFinger2();
+        // What the stage does on the next pointerdown: keep only what it still
+        // believes is on the glass (nothing, plus the new finger itself).
+        expect(r.g.prune(id => id === 3)).toBe(1);
+        expect(r.g.diag()).toEqual({ phase: 'idle', contacts: 0, surface: true });
+        dragFinger3();
+        expect(r.moves().length).toBeGreaterThan(0);
+        // Pruning is not a tap, and the drag is not one either.
+        expect(r.buttons()).toEqual([]);
+    });
+
+    it('prune() keeps live contacts: a real pinch is still a pinch', () => {
+        r.g.down(P(1, 100, 100));
+        r.g.down(P(2, 300, 100));
+        r.calls.length = 0;
+        expect(r.g.prune(() => true)).toBe(0);
+        r.g.move(P(1, 140, 100));
+        expect(r.moves()).toEqual([]);
+        expect(r.g.diag().phase).toBe('pinch');
+    });
+
+    it('prune() of a finger that was dragging releases the button it pressed, exactly once', () => {
+        r.g.down(P(1, 100, 100));
+        r.g.up(P(1, 100, 100));             // tap
+        r.advance(100);
+        r.g.down(P(1, 100, 100));           // second tap, held: drag
+        expect(r.buttons().filter(b => b.down)).toHaveLength(2); // click + drag press
+        r.calls.length = 0;
+        expect(r.g.prune(() => false)).toBe(1);
+        expect(r.buttons()).toEqual([{ k: 'button', button: 0, down: false }]);
+        r.g.prune(() => false);
+        expect(r.buttons()).toHaveLength(1);
+    });
+
+    it('cancel() (the stage blur path) also recovers a wedged pad', () => {
+        strandFinger2();
+        r.g.cancel();
+        dragFinger3();
+        expect(r.moves().length).toBeGreaterThan(0);
+        expect(r.buttons()).toEqual([]);
+    });
+});

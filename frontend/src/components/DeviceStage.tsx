@@ -656,6 +656,15 @@ export function DeviceStage() {
         if (document.pointerLockElement) document.exitPointerLock();
     }, []);
 
+    // THE TRACKPAD.
+    //
+    // ONE machine for the life of the stage: it owns three timers and the
+    // pointer position, so rebuilding it would drop a gesture mid-drag. It is
+    // created empty and WIRED UP in an effect, so nothing it needs is read
+    // during a render. Declared ABOVE the release-everything effect below,
+    // which has to reach it.
+    const [gestures] = useState(() => new TouchGestures());
+
     // Release everything we are holding on the host when input can no longer
     // reach us (alt-tab mid-press would otherwise leave the host's button or
     // key held). Keyed on the session id ALONE, through sendRef: with `send`
@@ -670,6 +679,13 @@ export function DeviceStage() {
             padPressedRef.current.clear();
             for (const code of heldKeysRef.current) sendRef.current({ t: 'key', code, down: false });
             heldKeysRef.current.clear();
+            // THE TRACKPAD MACHINE TOO. A gesture interrupted by the app going
+            // away never gets its pointerup, and the machine keeps its own map
+            // of fingers: one left behind mid-pinch meant every later
+            // one-finger drag counted as a second finger, so the machine sat
+            // in 'pinch' and dropped every move until the mode was toggled.
+            // Cancelling releases a drag's button only if one was pressed.
+            gestures.cancel();
             // A gesture interrupted by the app going away never gets its
             // pointerup; the chrome margins it froze must not stay frozen.
             setChromeFrozen(null);
@@ -682,7 +698,7 @@ export function DeviceStage() {
             document.removeEventListener('visibilitychange', onVisibility);
             releaseAll(); // ending the session must not strand a held button
         };
-    }, [sessionActiveId]);
+    }, [sessionActiveId, gestures]);
 
     const adjustFpsSens = (delta: number) => {
         setFpsSens(s => {
@@ -692,13 +708,6 @@ export function DeviceStage() {
         });
     };
 
-    // THE TRACKPAD.
-    //
-    // ONE machine for the life of the stage: it owns three timers and the
-    // pointer position, so rebuilding it would drop a gesture mid-drag. It is
-    // created empty and WIRED UP in an effect, so nothing it needs is read
-    // during a render.
-    const [gestures] = useState(() => new TouchGestures());
 
     // FOLLOW THE CURSOR while zoomed in (trackpad mode): solve, on EVERY move,
     // for the pan that puts the pointer at the centre of the viewport — the
@@ -2366,6 +2375,15 @@ export function DeviceStage() {
                     touchDownSent.current.delete(id);
                 }
             }
+        }
+        // AND THE MACHINE'S MAP, which the guard above never reached: the
+        // trackpad keeps its own record of fingers, so a contact pruned here
+        // stayed in it and wedged the pad in 'pinch' (see TouchGestures.prune).
+        // Measured against the map just pruned, so the machine can never
+        // believe in a finger the stage has already let go of.
+        if (isMobile && isMouseMode) {
+            const pruned = gestures.prune(id => id === e.pointerId || activePointers.current.has(id));
+            if (pruned) console.warn(`[touch] pruned ${pruned} stale trackpad contact(s)`);
         }
         activePointers.current.set(e.pointerId, e);
         el.setPointerCapture?.(e.pointerId);

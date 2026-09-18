@@ -368,6 +368,40 @@ export class TouchGestures {
         else this.phase = 'pressed';
     }
 
+    /**
+     * Forget every contact the owner no longer believes is on the glass.
+     *
+     * THE MACHINE KEEPS ITS OWN MAP, and a lost `pointerup`/`pointercancel`
+     * (the app backgrounded mid-pinch, capture lost on a remount) strands a
+     * contact in it. Two entries is a pinch, and a pinch swallows every move —
+     * so one stranded finger left the trackpad silently dead: every later
+     * one-finger drag arrived as the SECOND contact, the phase went straight
+     * back to 'pinch', and `move` returned with nothing sent and nothing
+     * logged until the mode was toggled. The keyboard kept working, which made
+     * it read as "the mouse is broken on that machine".
+     *
+     * Each stale contact is treated exactly as if the browser had cancelled
+     * it (see `cancel`), which is what it was: a button a drag pressed is
+     * released, and nothing on the way out reads as a tap. Returns how many
+     * were pruned, so the caller can log the rare case it fires.
+     */
+    prune(isLive: (id: number) => boolean): number {
+        let pruned = 0;
+        for (const c of [...this.pointers.values()]) {
+            if (isLive(c.id)) continue;
+            this.cancel(c);
+            pruned++;
+        }
+        return pruned;
+    }
+
+    /** What the machine believes right now, for "Copy diagnostics". A phase
+     *  of 'pinch' with no finger on the glass is the wedge `prune` exists
+     *  for; seeing it in a field capture settles the question at once. */
+    diag(): { phase: string; contacts: number; surface: boolean } {
+        return { phase: this.phase, contacts: this.pointers.size, surface: this.surface !== null };
+    }
+
     /** Release any timer that could still fire after teardown. */
     dispose(): void {
         this.cancelLongPress();
