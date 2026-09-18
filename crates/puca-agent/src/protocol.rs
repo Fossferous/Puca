@@ -511,9 +511,40 @@ pub enum Response {
     /// safe: an old app never reads it, and an old agent never writes it —
     /// the app's `=== true` check reads absence as false (pinned on the TS
     /// side, secureDesktopStatus.test.ts).
+    ///
+    /// `stream_live` answers "does THIS agent hold a live stream for this
+    /// session?" — `Some(true)` yes, `Some(false)` no, `None` when the agent
+    /// does not stream at all (Linux) and so has nothing to say. It exists
+    /// because the app's connection to an agent can be REPLACED under a live
+    /// session without anyone noticing: the pipe server builds a fresh Agent
+    /// per client (pipe.rs), so a lock-screen agent the app borrowed and then
+    /// lost at unlock, a re-borrow after an idle release, or a crashed and
+    /// respawned sidecar all answer this poll from an empty stream map. Before
+    /// this field those answered exactly like a healthy session. It is also
+    /// `Some(false)` after this agent REAPED the stream itself — an encoder or
+    /// capture fault, an ICE loss or a dead TURN relay ends the stream thread
+    /// — so a host acting on it restarts those too, where before only an
+    /// inject hitting "no such capture session" (or the viewer's 15 s pc
+    /// watchdog) ever noticed.
+    ///
+    /// `stream_end` names WHY this agent's stream for the session ended, when
+    /// it ended for a reason a restart cannot fix and the host must stay
+    /// silent about. The only value today is `"no_frame"`: the display never
+    /// produced a first frame (a sleeping panel), and the viewer's own media
+    /// deadline already says exactly that — a restart would replace its
+    /// "screens may be asleep" message with a generic one. Absent for every
+    /// other cause, and whenever a stream is live.
+    ///
+    /// Both ADDITIVE and skew safe, like `cursor_clipped`: an old app never
+    /// reads them, and an old agent never writes them — the app reads absence
+    /// as "cannot tell" and does nothing (pinned in secureDesktopStatus.test.ts).
     SessionState {
         secure_desktop: bool,
         cursor_clipped: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_live: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_end: Option<String>,
     },
     /// Nothing changed since the last frame. NOT an error — the caller repeats
     /// the previous frame. A still desktop produces these constantly.
@@ -523,6 +554,13 @@ pub enum Response {
         message: String,
     },
 }
+
+/// `SessionState::stream_end` for a stream that ended because the display
+/// never produced a first frame. The literal hostAgent.ts compares against;
+/// pinned by the exact-bytes test below and by secureDesktopStatus.test.ts.
+// Only the Windows stream path produces it; a Linux build names it in tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const STREAM_END_NO_FRAME: &str = "no_frame";
 
 impl Response {
     pub fn error(message: impl Into<String>) -> Self {
@@ -597,10 +635,15 @@ mod tests {
     /// poll read as "no prompt" — the same silent failure from the other end.
     #[test]
     fn session_state_serialises_to_what_the_app_reads() {
+        // `stream_live: None` must leave the bytes EXACTLY as they were: that
+        // is what a Linux agent writes, and what the app's skew handling reads
+        // as "cannot tell".
         assert_eq!(
             serde_json::to_string(&Response::SessionState {
                 secure_desktop: true,
                 cursor_clipped: false,
+                stream_live: None,
+                stream_end: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":true,"cursor_clipped":false}"#,
@@ -609,9 +652,34 @@ mod tests {
             serde_json::to_string(&Response::SessionState {
                 secure_desktop: false,
                 cursor_clipped: true,
+                stream_live: None,
+                stream_end: None,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":true}"#,
+        );
+        // The names hostAgent.ts reads (`reply.stream_live`,
+        // `reply.stream_end`). A rename here would leave every replaced agent
+        // reading as "cannot tell" — the fix silently inert, nothing logged.
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(false),
+                stream_end: None,
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(false),
+                stream_end: Some(STREAM_END_NO_FRAME.to_string()),
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no_frame"}"#,
         );
         // The skew direction this side cannot test: an OLD agent omitting
         // `cursor_clipped` entirely. Response is Serialize-only here — the one
