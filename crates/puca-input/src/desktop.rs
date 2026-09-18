@@ -177,10 +177,26 @@ mod imp {
         /// see the close-the-previous note in `follow_input_desktop`.
         static PREV_DESKTOP: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     }
+
+    /// The name of the desktop this thread last FOLLOWED to, or `None` if it
+    /// never has — i.e. it is still on the desktop it started on.
+    ///
+    /// Read from the handle `follow_input_desktop` keeps, not from
+    /// `GetThreadDesktop`: no extra rights, no extra handle, and it answers
+    /// the question the lock-screen log asks ("is this thread on Winlogon?")
+    /// on the thread that is asking. One name lookup; callers throttle it.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn followed_desktop_name() -> Option<String> {
+        let h = PREV_DESKTOP.with(|p| p.get());
+        if h == 0 {
+            return None;
+        }
+        Some(name_of(HDESK(h as *mut core::ffi::c_void)))
+    }
 }
 
 #[cfg(windows)]
-pub use imp::follow_input_desktop;
+pub use imp::{follow_input_desktop, followed_desktop_name};
 
 #[cfg(not(windows))]
 pub fn follow_input_desktop() -> Result<String, String> {
