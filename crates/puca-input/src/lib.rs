@@ -1288,22 +1288,38 @@ fn check_move_on_secure_desktop(x: f64, y: f64, target: Option<TargetMonitor>) {
         static CHECKS: RefCell<crate::log_privacy::SecureMoveChecks> =
             RefCell::new(crate::log_privacy::SecureMoveChecks::default());
         static MOVES: Cell<u32> = const { Cell::new(0) };
+        // The desktop's NAME is a syscall, and this runs at pointer rate: it
+        // is asked at most once a second, as before (see
+        // `followed_desktop_name`: "callers throttle it").
+        static ASK: Cell<crate::log_privacy::LineGate> =
+            const { Cell::new(crate::log_privacy::LineGate::per_second()) };
     }
     let moves = MOVES.with(|m| {
         m.set(m.get().saturating_add(1));
         m.get()
     });
+    let now = Instant::now();
+    let ask = ASK.with(|g| {
+        let mut gate = g.get();
+        let due = gate.admit(now);
+        g.set(gate);
+        due
+    });
+    if !ask {
+        return;
+    }
+    // `moves` = the moves since the last time this asked, about a second.
+    MOVES.with(|m| m.set(0));
     let Some(desk) = crate::desktop::followed_desktop_name() else {
         return; // never followed: still on the desktop it started on
     };
     let (admitted, previous) = CHECKS.with(|c| {
         let mut c = c.borrow_mut();
-        (c.admit(&desk, Instant::now()), c.previous)
+        (c.admit(&desk, now), c.previous)
     });
     if !admitted {
         return;
     }
-    MOVES.with(|m| m.set(0));
     let primary = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     let requested = requested_pixel(x, y, target, primary);
     let mut pt = windows::Win32::Foundation::POINT::default();
