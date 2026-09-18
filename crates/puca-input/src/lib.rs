@@ -609,6 +609,18 @@ pub(crate) mod send_seam {
 
     thread_local! {
         static FOLLOW_LINES: Cell<usize> = const { Cell::new(0) };
+        static RELEASE_LINES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// `release_one` wrote its refusal line.
+    pub(crate) fn note_release_line() {
+        RELEASE_LINES.with(|f| f.set(f.get() + 1));
+    }
+
+    /// How many release refusal lines were written on this thread since the
+    /// last call.
+    pub fn release_lines() -> usize {
+        RELEASE_LINES.with(|f| f.replace(0))
     }
 
     /// `sent_following` wrote its follow line (stderr is not something a test
@@ -922,17 +934,40 @@ fn follow_log_due() -> bool {
         static GATE: std::cell::Cell<crate::log_privacy::LineGate> =
             const { std::cell::Cell::new(crate::log_privacy::LineGate::per_second()) };
     }
-    let due = GATE.with(|g| {
-        let mut gate = g.get();
-        let due = gate.admit(std::time::Instant::now());
-        g.set(gate);
-        due
-    });
+    let due = admit_now(&GATE);
     #[cfg(test)]
     if due {
         send_seam::note_follow_line();
     }
     due
+}
+
+/// Whether `release_one`'s refusal line may be written now: its own
+/// per-thread `LineGate`.
+#[cfg(windows)]
+fn release_log_due() -> bool {
+    thread_local! {
+        static GATE: std::cell::Cell<crate::log_privacy::LineGate> =
+            const { std::cell::Cell::new(crate::log_privacy::LineGate::per_second()) };
+    }
+    let due = admit_now(&GATE);
+    #[cfg(test)]
+    if due {
+        send_seam::note_release_line();
+    }
+    due
+}
+
+#[cfg(windows)]
+fn admit_now(
+    gate: &'static std::thread::LocalKey<std::cell::Cell<crate::log_privacy::LineGate>>,
+) -> bool {
+    gate.with(|g| {
+        let mut gate = g.get();
+        let due = gate.admit(std::time::Instant::now());
+        g.set(gate);
+        due
+    })
 }
 
 /// The desktop-follow half of `sent_following`, behind the same seam as the
@@ -1177,8 +1212,11 @@ pub fn release_all() {
 #[cfg(windows)]
 fn release_one(send: impl Fn() -> bool, what: &str) {
     if let Err(e) = sent_following(send, what) {
-        // Kind-free, like every per-event line (see `log_privacy`).
-        eprintln!("[input] release_all: {}", crate::log_privacy::without_event_kind(&e));
+        // Kind-free and at most one a second, like every per-event line (see
+        // `log_privacy`): one per refused release said how many keys were held.
+        if release_log_due() {
+            eprintln!("[input] release_all: {}", crate::log_privacy::without_event_kind(&e));
+        }
     }
 }
 
@@ -1600,6 +1638,26 @@ mod tests {
         }
         assert_eq!(send_seam::follows(), 8, "every refusal still follows and retries");
         assert_eq!(send_seam::follow_lines(), 1, "the first follow is logged, the rest of the second is not");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_teardown_refused_for_every_held_key_writes_one_line() {
+        // One "[input] release_all" line per refused release said how many
+        // keys were down when the session ended.
+        let _g = serial();
+        clean_slate();
+        send_seam::release_lines();
+        send_seam::script(&[true; 4]);
+        for code in ["Digit1", "Digit2", "Digit3", "Digit4"] {
+            inject(ControlInput::Key { code: code.into(), down: true }).expect("pressed");
+        }
+        send_seam::take_sent();
+        send_seam::script(&[false; 8]); // every release refused, and its retry too
+        release_all();
+        assert_eq!(send_seam::follows(), 4, "each release was still attempted and retried");
+        assert_eq!(send_seam::release_lines(), 1, "one line for the teardown, not one per key");
         clean_slate();
     }
 
