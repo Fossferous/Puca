@@ -148,6 +148,29 @@ whether that is the hardware decoder. A software decoder on a large picture is
 the slow case the fit exists for; if you see one on a *small* picture, that is
 worth reporting with the diagnostics attached.
 
+## The keyboard works but the mouse does nothing. What do I send?
+
+Keep driving while you copy the diagnostics: tap **Copy diagnostics** in the
+phone's Mouse menu, close the menu, and drag a finger around for the five
+seconds it measures. Then look at:
+
+- **`windowInputByKind`**: what left the phone during those five seconds. No
+  `move` while you were dragging means the phone never sent any; plenty of
+  them means they reached the host and the question is on that side.
+- **`stageInput`**: `mouseMode` (trackpad or touch), `gesturePhase` and
+  `gestureContacts` (the trackpad reading `pinch` with one finger down is a
+  stuck gesture; switching Touch and back clears it), and `cursorOwned` /
+  `cursorDrawn` (whether the phone is drawing the pointer, since the host
+  stops drawing its own once the phone takes over).
+- **`inputLane`**: whether input is going over the direct channel or the relay.
+
+On the host, the agent's log has one `[input-rx]` line a second per lane while
+input arrives (counts of moves, clicks, keys and text, and how many were
+refused), an `[aim]` line whenever the screen the mouse is aimed at changes,
+and, at the sign-in screen only, an `[input] move on 'Winlogon'` line comparing
+where a move asked the pointer to go with where it actually is. Send those
+lines with the diagnostics.
+
 ## I pinned Púca to my integrated GPU. Does that cover screen sharing?
 
 It does now. It did not before, and the reason is worth knowing.

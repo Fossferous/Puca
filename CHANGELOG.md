@@ -4,6 +4,31 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **The phone's trackpad can no longer go dead after a pinch.** If a finger's
+  lift was lost mid-pinch (the app sent to the background, say), every later
+  one-finger drag counted as a second finger and the pointer stopped moving,
+  with the keyboard still working, until you switched Touch mode and back. The
+  stuck finger is now forgotten on the next touch and whenever the app loses
+  focus.
+- **A click refused once is no longer swallowed from then on.** If Windows
+  refused a remote mouse button or key press (the screen changed under it,
+  such as the lock screen appearing), later presses of the same button or key
+  were silently dropped until it was released. And letting go of everything
+  at the end of a session now reaches the lock or sign-in screen too, rather
+  than failing silently there.
+
+### Added
+- **Better evidence for "the mouse does nothing".** The phone's Copy
+  diagnostics now says what kind of input it sent (moves, clicks, keys),
+  which way it went, what the trackpad believes and whether the phone is
+  drawing the pointer; the host's log records what input arrived on each
+  path, which screen the mouse is aimed at and, at the sign-in screen, where
+  the pointer actually went. See the FAQ entry "The keyboard works but the
+  mouse does nothing".
+
 ## 0.9.814 — 2026-09-17
 
 Púca Notes: a notes app in the style of Google Keep, in the browser and as its
