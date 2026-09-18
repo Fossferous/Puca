@@ -269,7 +269,7 @@ describe('a touch-mode stage left with a stranded finger', () => {
         // The forgotten finger may really still be down; its moves must not
         // steer the pointer the live finger now owns.
         h.sendInput.mockClear();
-        await fire(pe('pointermove', 2, 300, 700));
+        await fire(pe('pointermove', 2, 300, 420));
         expect(movesSent(), 'a finger the stage let go of drives nothing').toEqual([]);
         await fire(pe('pointerup', 3, 100, 400));
         expect(sentOf('up')).toHaveLength(1);
