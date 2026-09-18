@@ -165,8 +165,11 @@ seconds it measures. Then look at:
 - **`inputLane`**: whether input is going over the direct channel or the relay.
 
 On the host, the agent's log has one `[input-rx]` line a second per lane while
-input arrives (counts of moves, clicks, keys and text, and how many were
-refused), an `[aim]` line whenever the screen the mouse is aimed at changes,
+input arrives, plus one for the last burst when a session ends: exact counts of
+moves and clicks and how many were refused, but keyboard activity only as
+`keys=0`, `some` or `many` (the log is readable by anyone on that machine, and
+an exact count would give away how long a PIN is). It also has an `[aim]` line
+for each session, and again whenever the screen the mouse is aimed at changes,
 and, at the sign-in screen only, an `[input] move on 'Winlogon'` line comparing
 where a move asked the pointer to go with where it actually is. Send those
 lines with the diagnostics.
