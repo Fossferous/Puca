@@ -38,19 +38,85 @@ fn b64(bytes: &[u8]) -> String {
 /// unreachable from `SendInput` by design (see `ControlInput::Sas`). Letting it
 /// fall through would produce a correct-but-useless refusal where a working
 /// feature is available one process away.
-/// The stream thread's entry to the SAME dispatch the pipe path uses (R4).
-/// Public wrapper rather than making `dispatch_input` public: the Sas
-/// interception and the test seam below must apply to both callers, and two
-/// entry points into OS input is exactly how one of them ends up bypassing a
-/// gate the other has.
-pub fn dispatch_input_public(event: puca_input::ControlInput) -> Result<(), String> {
-    dispatch_input(event)
+/// The ONE entry to OS input for every lane: the stream thread's channel (R4),
+/// the app's pipe `Inject` and the service's `InjectSealed`. Public rather than
+/// making `dispatch_input` public: the Sas interception and the test seam
+/// below must apply to every caller, and two entry points into OS input is
+/// exactly how one of them ends up bypassing a gate the other has.
+///
+/// COUNTED on the caller's lane tally (see `input_tally`), which writes one
+/// line about once a second while input flows — so each lane can say what it
+/// received and whether it landed, which no log could before.
+pub fn dispatch_input_counted(
+    tally: &mut crate::input_tally::InputTally,
+    event: puca_input::ControlInput,
+) -> Result<(), String> {
+    let kind = crate::input_tally::kind_of(&event);
+    let result = dispatch_input(event);
+    if let Some(line) = tally.note(kind, result.is_ok(), std::time::Instant::now()) {
+        eprintln!("{line}");
+    }
+    result
+}
+
+/// The log line for an injection that failed on a lane, if `gate` admits one
+/// at `now`: the first always, then at most one a second, and never the
+/// event's kind (`puca_input::log_privacy`). One unthrottled line per refused
+/// event, each naming "key press" or "pointer move", counted the refused
+/// keystrokes on the sign-in screen in a log ordinary users can read; the
+/// lane's tally line already carries the failures, bucketed.
+pub fn inject_failure_line(
+    gate: &mut puca_input::log_privacy::LineGate,
+    prefix: &str,
+    err: &str,
+    now: std::time::Instant,
+) -> Option<String> {
+    if !gate.admit(now) {
+        return None;
+    }
+    Some(format!("{prefix} {}", puca_input::log_privacy::without_event_kind(err)))
 }
 
 fn dispatch_input(event: puca_input::ControlInput) -> Result<(), String> {
     match event {
         puca_input::ControlInput::Sas => dispatch_sas(),
         other => inject_seam(other),
+    }
+}
+
+/// The last `[aim]` line written, so `aim_input_at` logs only a change.
+///
+/// Process-global, and the line NAMES ITS SESSION, which is what keeps that
+/// safe: a SYSTEM agent outlives its sessions, and with the session left out
+/// a second session aimed at the same rectangle as the first wrote no `[aim]`
+/// line at all — so the block of log for that session, the one the repro
+/// note asks for, could simply be missing it.
+static LAST_AIM_LINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `line` if it differs from the last one recorded in `last` (which it then
+/// becomes), else `None` — so a re-aim at the same rectangle BY THE SAME
+/// SESSION, which every SetMonitor does, writes nothing.
+fn aim_changed(last: &std::sync::Mutex<Option<String>>, line: String) -> Option<String> {
+    let mut last = last.lock().ok()?;
+    if last.as_deref() == Some(line.as_str()) {
+        return None;
+    }
+    *last = Some(line.clone());
+    Some(line)
+}
+
+/// The `[aim]` log line for a resolved input target: which capture index, and
+/// the rectangle absolute moves will be mapped onto (virtual-desktop pixels),
+/// or the primary-only fallback when nothing resolved.
+fn aim_line(session_id: &str, monitor: usize, target: Option<&puca_input::TargetMonitor>) -> String {
+    match target {
+        Some(t) => format!(
+            "[aim] session={session_id} monitor={monitor} -> {}x{} at ({},{}) in desktop {}x{} at ({},{})",
+            t.width, t.height, t.left, t.top, t.virt_width, t.virt_height, t.virt_left, t.virt_top,
+        ),
+        None => format!(
+            "[aim] session={session_id} monitor={monitor} -> none: moves fall back to the PRIMARY screen"
+        ),
     }
 }
 
@@ -88,6 +154,12 @@ fn inject_seam(event: puca_input::ControlInput) -> Result<(), String> {
         puca_input::ControlInput::Text { ref text } if text.starts_with("FAIL-") => {
             Err("refused by the test stand-in".into())
         }
+        // The real refusal's shape, kind and all, for the tests that check the
+        // kind never leaves this process on the sealed lane.
+        puca_input::ControlInput::Key { ref code, down } if code.starts_with("FAIL") => Err(format!(
+            "Windows refused the injected {} (no retry was attempted). The usual cause is ...",
+            if down { "key press" } else { "key release" }
+        )),
         // Reached only if the routing above is broken. Answering Err rather than
         // Ok means a regression shows up as a failed request rather than as a
         // test that quietly still passes.
@@ -562,8 +634,14 @@ pub struct Agent {
     /// SendInput, a secure desktop plus a moving mouse produces one line per
     /// pointer event — around a hundred a second, into a FILE. The response to
     /// the controller is unthrottled (it asked, it gets an answer); only the
-    /// log is rationed.
-    last_inject_error_log: Option<std::time::Instant>,
+    /// log is rationed — and it no longer names the event's kind, since one
+    /// "key press" line a second still said when keys were being refused.
+    inject_error_log: puca_input::log_privacy::LineGate,
+    /// Input arriving over this pipe, counted by kind and logged about once a
+    /// second while it flows (see `input_tally`): the app's relay lane, and
+    /// the service's sealed lane. The stream thread keeps the channel's own.
+    input_tally_pipe: crate::input_tally::InputTally,
+    input_tally_sealed: crate::input_tally::InputTally,
     /// What this agent will do, fixed at launch by who started it. Held on the
     /// Agent rather than read from argv at each call site so there is one
     /// answer per process and no request can be served against a different one.
@@ -637,7 +715,9 @@ impl Agent {
             authenticated: false,
             sealed: HashMap::new(),
             ua: puca_ua::UaGate::default(),
-            last_inject_error_log: None,
+            inject_error_log: puca_input::log_privacy::LineGate::per_second(),
+            input_tally_pipe: crate::input_tally::InputTally::new("pipe"),
+            input_tally_sealed: crate::input_tally::InputTally::new("sealed"),
             flavour,
             captures: HashMap::new(),
             sessions: HashMap::new(),
@@ -676,10 +756,31 @@ impl Agent {
     /// relative to, and puca_input falls back to the PRIMARY display when
     /// no target is set. Called wherever the captured output changes, so the
     /// mouse always lands where the viewer is looking.
-    fn aim_input_at(monitor: usize) {
+    /// Write whatever the pipe lanes have counted and not yet logged. A
+    /// session ending is where the last burst before a disconnect sits in an
+    /// open window; without this it waited for the NEXT session's first event
+    /// (or the pipe client going away, which drops the tallies) and was folded
+    /// into a many-second span that no longer said anything.
+    fn flush_input_tallies(&mut self) {
+        for tally in [&mut self.input_tally_pipe, &mut self.input_tally_sealed] {
+            if let Some(line) = tally.flush() {
+                eprintln!("{line}");
+            }
+        }
+    }
+
+    fn aim_input_at(session_id: &str, monitor: usize) {
         let outputs = puca_capture::outputs();
         let list = puca_input::list_monitors();
-        puca_input::set_target(resolve_target(monitor, &outputs, &list));
+        let target = resolve_target(monitor, &outputs, &list);
+        // LOGGED ON CHANGE. Absolute moves are mapped onto this rectangle, and
+        // nothing recorded it: "the pointer landed on a screen nobody was
+        // watching" and "it landed where it should" were indistinguishable in
+        // the log. `None` is the primary-only fallback, the one worth seeing.
+        if let Some(line) = aim_changed(&LAST_AIM_LINE, aim_line(session_id, monitor, target.as_ref())) {
+            eprintln!("{line}");
+        }
+        puca_input::set_target(target);
     }
 
     /// Refuse a request this flavour does not serve.
@@ -1007,7 +1108,7 @@ impl Agent {
                 // the same global target, so without it a raw session injects
                 // using whatever screen the PREVIOUS session left aimed — or,
                 // on Linux, errors outright because no target is set at all.
-                Self::aim_input_at(monitor);
+                Self::aim_input_at(&session_id, monitor);
 
                 #[cfg(target_os = "linux")]
                 match puca_input::clear_stuck_keys() {
@@ -1049,6 +1150,7 @@ impl Agent {
                         self.captures.remove(&m);
                     }
                 }
+                self.flush_input_tallies();
                 puca_input::release_all();
                 Response::Ok
             }
@@ -1172,7 +1274,7 @@ impl Agent {
                         // blank a screen it cannot see.
                         if !data_only {
                             self.sessions.insert(session_id.clone(), target_monitor);
-                            Self::aim_input_at(target_monitor);
+                            Self::aim_input_at(&session_id, target_monitor);
                         }
                         Response::Streaming { session_id, answer_sdp }
                     }
@@ -1209,6 +1311,7 @@ impl Agent {
                     self.secure_desktop_up.remove(&session_id);
                     release_reservations(&mut self.monitor_reservations, &key);
                 }
+                self.flush_input_tallies();
                 puca_input::release_all();
                 // Nothing else ever turns the blackout off, and the agent
                 // outlives the session — a session that ended with privacy
@@ -1269,7 +1372,7 @@ impl Agent {
                             self.monitor_reservations.insert(*k, stream_key.clone());
                         }
                         self.sessions.insert(session_id.clone(), target_monitor);
-                        Self::aim_input_at(target_monitor);
+                        Self::aim_input_at(&session_id, target_monitor);
                         Response::Ok
                     }
                     Err(e) => Response::error(format!("failed to switch monitor: {}", e)),
@@ -1490,7 +1593,7 @@ impl Agent {
                                 self.monitor_reservations.insert(k, stream_key.clone());
                             }
                             self.sessions.insert(session_id.clone(), target);
-                            Self::aim_input_at(target);
+                            Self::aim_input_at(&session_id, target);
                         }
                         Err(e) => failures.push(format!("{session_id}: {e}")),
                     }
@@ -1510,21 +1613,16 @@ impl Agent {
                     return Response::error("no such capture session");
                 }
                 match serde_json::from_value(event) {
-                    Ok(parsed) => match dispatch_input(parsed) {
+                    Ok(parsed) => match dispatch_input_counted(&mut self.input_tally_pipe, parsed) {
                         Ok(()) => Response::Ok,
                         Err(e) => {
-                            let now = std::time::Instant::now();
-                            // Written as a match rather than `is_none_or`: that
-                            // method landed in Rust 1.82 and this workspace
-                            // declares 1.77.2, so it builds here and breaks a
-                            // toolchain that honours the floor.
-                            let due = match self.last_inject_error_log {
-                                None => true,
-                                Some(t) => now.duration_since(t) >= std::time::Duration::from_secs(1),
-                            };
-                            if due {
-                                self.last_inject_error_log = Some(now);
-                                eprintln!("[session] inject failed: {e}");
+                            if let Some(line) = inject_failure_line(
+                                &mut self.inject_error_log,
+                                "[session] inject failed:",
+                                &e,
+                                std::time::Instant::now(),
+                            ) {
+                                eprintln!("{line}");
                             }
                             Response::error(e)
                         }
@@ -1936,15 +2034,25 @@ impl Agent {
                 let Some(event) = v.get("e").cloned() else {
                     return Response::error("that frame was not the expected shape");
                 };
-                match serde_json::from_value(event) {
-                    Ok(parsed) => match dispatch_input(parsed) {
-                        Ok(()) => Response::Ok,
-                        // The error names the CAUSE, never the event: a message
-                        // echoing the frame would put the plaintext back above
-                        // this process, which is the whole thing this path
-                        // exists to prevent.
-                        Err(e) => Response::error(e),
-                    },
+                match serde_json::from_value::<puca_input::ControlInput>(event) {
+                    Ok(parsed) => {
+                        let sas = matches!(parsed, puca_input::ControlInput::Sas);
+                        match dispatch_input_counted(&mut self.input_tally_sealed, parsed) {
+                            Ok(()) => Response::Ok,
+                            // The error names the CAUSE, never the event: a
+                            // message echoing the frame would put the plaintext
+                            // back above this process, which is the whole thing
+                            // this path exists to prevent. Nor its KIND: the
+                            // service writes every refusal it is handed into a
+                            // world-readable log, and "key press" per refused
+                            // keystroke counts a PIN (and an unmapped key names
+                            // its code). A SAS keeps its own words — raising it
+                            // is on the screen anyway, and its failure is the
+                            // diagnosis.
+                            Err(e) if sas => Response::error(e),
+                            Err(e) => Response::error(puca_input::log_privacy::without_event_kind(&e)),
+                        }
+                    }
                     Err(_) => Response::error("unrecognised input event"),
                 }
             }
@@ -4158,6 +4266,45 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_sealed_keystroke_is_answered_without_its_kind() {
+        // The service writes every refusal it is handed into a world-readable
+        // log, one line each. Naming "key press" there counted a PIN.
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let key = open_sealed(&mut a, "s1");
+        let frame = serde_json::json!({ "s": 1, "e": { "t": "key", "code": "FAIL1", "down": true } });
+        let sealed = crate::control_key::seal(&key, &frame.to_string()).unwrap();
+        match a.handle(Request::InjectSealed { session_id: "s1".into(), payload: sealed }) {
+            Response::Error { message } => {
+                assert!(!message.contains("key"), "the kind must not leave this process: {message}");
+                assert!(message.contains("(no retry was attempted)"), "the diagnosis still does: {message}");
+            }
+            other => panic!("the stand-in refuses a FAIL key: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_inject_failure_is_logged_once_a_second_and_without_its_kind() {
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let mut gate = puca_input::log_privacy::LineGate::per_second();
+        let refusal = "Windows refused the injected key press (no retry was attempted). The usual cause";
+        let prefix = "[stream] input inject failed:";
+        let lines: Vec<String> = (0..8u64)
+            .filter_map(|i| inject_failure_line(&mut gate, prefix, refusal, t0 + ms(i * 100)))
+            .collect();
+        assert_eq!(lines.len(), 1, "a PIN's worth of refusals in a second writes one line: {lines:?}");
+        assert_eq!(
+            lines[0],
+            "[stream] input inject failed: Windows refused the injected input (no retry was attempted). The usual cause"
+        );
+        assert!(
+            inject_failure_line(&mut gate, prefix, refusal, t0 + ms(1_000)).is_some(),
+            "the next second writes the next line"
+        );
+    }
+
+    #[test]
     fn the_plaintext_never_comes_back_out() {
         // The property the whole stage exists for. If a frame's contents can be
         // recovered from any response, moving the key into the agent bought
@@ -4419,6 +4566,112 @@ mod tests {
         // The pre-2026-09-08 world, and still what an older app produces: no
         // channel, no hello, input keeps the relay.
         assert!(input_channel_for("s1", false, None, None, true).is_none());
+    }
+
+    // --- the lock-screen mouse instrumentation --------------------------------
+
+    #[test]
+    fn pipe_input_is_counted_on_the_pipe_lane_and_only_there() {
+        // "[input-rx] lane=pipe" is what separates "the relay carried the
+        // moves" from "nothing arrived", so the arm must feed its own tally.
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        fake_session(&mut a, "s1");
+        assert_eq!(a.input_tally_pipe.counted(), 0);
+        let resp = a.handle(Request::Inject {
+            session_id: "s1".into(),
+            event: serde_json::json!({ "t": "move", "x": 0.5, "y": 0.5 }),
+        });
+        assert!(matches!(resp, Response::Ok), "{resp:?}");
+        // A refused one is counted too: the line reports failures beside kinds.
+        let resp = a.handle(Request::Inject {
+            session_id: "s1".into(),
+            event: serde_json::json!({ "t": "text", "text": "FAIL-x" }),
+        });
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(a.input_tally_pipe.counted(), 2);
+        assert_eq!(a.input_tally_sealed.counted(), 0, "the sealed lane saw none of it");
+    }
+
+    // Windows only: StopCapture ends in `puca_input::release_all`, which on
+    // Linux opens an X connection. On Windows it drains lists that are empty
+    // here (agent tests inject through `inject_seam`), so nothing is sent.
+    #[cfg(windows)]
+    #[test]
+    fn ending_a_session_writes_the_pipe_lanes_last_burst() {
+        // The last burst before a disconnect is the one a report is about;
+        // it must not sit in an open window until the next session's input.
+        let burst = |stop: bool| {
+            let mut a = agent();
+            a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+            fake_session(&mut a, "s1");
+            let resp = a.handle(Request::Inject {
+                session_id: "s1".into(),
+                event: serde_json::json!({ "t": "move", "x": 0.5, "y": 0.5 }),
+            });
+            assert!(matches!(resp, Response::Ok), "{resp:?}");
+            if stop {
+                assert!(matches!(a.handle(Request::StopCapture { session_id: "s1".into() }), Response::Ok));
+            }
+            a.input_tally_pipe.flush()
+        };
+        // POSITIVE CONTROL: with no session end, the move is still pending.
+        assert!(burst(false).is_some_and(|l| l.contains(" move=1 ")), "the rig must see a pending window");
+        assert_eq!(burst(true), None, "StopCapture must have written it already");
+    }
+
+    #[test]
+    fn input_for_no_session_is_not_counted() {
+        // Positive control for the count above: a request refused BEFORE the
+        // dispatch (no such session) reaches neither the OS nor the tally.
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let resp = a.handle(Request::Inject {
+            session_id: "nope".into(),
+            event: serde_json::json!({ "t": "move", "x": 0.5, "y": 0.5 }),
+        });
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(a.input_tally_pipe.counted(), 0);
+    }
+
+    #[test]
+    fn the_aim_line_names_the_rectangle_or_the_primary_fallback() {
+        let t = puca_input::TargetMonitor {
+            left: -1440, top: -707, width: 1440, height: 2560,
+            virt_left: -1440, virt_top: -707, virt_width: 5440, virt_height: 2564,
+        };
+        assert_eq!(
+            super::aim_line("s1", 2, Some(&t)),
+            "[aim] session=s1 monitor=2 -> 1440x2560 at (-1440,-707) in desktop 5440x2564 at (-1440,-707)"
+        );
+        let none = super::aim_line("s1", 0, None);
+        assert!(none.starts_with("[aim] session=s1 monitor=0 -> none") && none.contains("PRIMARY"), "{none}");
+    }
+
+    #[test]
+    fn every_session_logs_its_first_aim_even_at_the_same_rectangle() {
+        // The SYSTEM agent outlives its sessions and the dedupe is process
+        // wide: a second session aimed where the first was must still get
+        // its own line, or its block of log is missing the one it needs.
+        let t = puca_input::TargetMonitor {
+            left: 0, top: 0, width: 1920, height: 1080,
+            virt_left: 0, virt_top: 0, virt_width: 1920, virt_height: 1080,
+        };
+        let last = std::sync::Mutex::new(None);
+        let first = super::aim_line("session-a", 0, Some(&t));
+        assert!(super::aim_changed(&last, first.clone()).is_some());
+        assert!(super::aim_changed(&last, first).is_none(), "POSITIVE CONTROL: a same-session re-aim is quiet");
+        let second = super::aim_line("session-b", 0, Some(&t));
+        assert!(super::aim_changed(&last, second).is_some(), "a NEW session at the same rectangle is news");
+    }
+
+    #[test]
+    fn the_aim_is_logged_only_when_it_changes() {
+        let last = std::sync::Mutex::new(None);
+        assert_eq!(super::aim_changed(&last, "a".into()).as_deref(), Some("a"), "the first aim is news");
+        assert_eq!(super::aim_changed(&last, "a".into()), None, "a re-aim at the same rect is not");
+        assert_eq!(super::aim_changed(&last, "b".into()).as_deref(), Some("b"));
+        assert_eq!(super::aim_changed(&last, "a".into()).as_deref(), Some("a"), "and back again is");
     }
 
 }

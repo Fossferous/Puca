@@ -7,6 +7,18 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
+- **Remote control survives unlocking the computer.** A session started
+  while the computer was locked (typing your PIN at its lock screen) ran on
+  the lock-screen helper, which Windows stops the moment the computer is
+  unlocked. The picture froze, nothing you did reached the computer, and about
+  15 seconds later the session ended and needed a manual reconnect. The app
+  now notices within a second that the helper under the session has gone and
+  restarts the picture on its own helper, in the same session, keeping the
+  screen, quality and privacy settings. The same recovery now covers a
+  picture the helper ended by itself (a lost network path or an encoder
+  fault), which restarts once instead of waiting out the timeout. A friend's
+  shared session is not moved onto a locked computer's sign-in screen; it
+  waits until the computer is unlocked.
 - **"Reach this computer after it restarts" now says when the server is
   refusing it.** The box is ticked from files on the computer itself, so it
   stayed ticked while Púca's server turned down the computer's sign-in-screen
@@ -24,6 +36,49 @@ one-line summary; this file is the full story. Versions follow
   and a connection the server rejects for a signed-out session goes straight to
   the computer's own key instead of retrying the dead one. The service reaches
   existing installs through the usual "update the service" prompt.
+- **The phone's trackpad can no longer go dead after a pinch.** If a finger's
+  lift was lost mid-pinch (the app sent to the background, say), every later
+  one-finger drag counted as a second finger and the pointer stopped moving,
+  with the keyboard still working, until you switched Touch mode and back. The
+  stuck finger is now forgotten on the next touch once the phone has let go of
+  it, and whenever the app loses focus. Losing focus now also clears the
+  picture's own count of fingers, so the first drag afterwards no longer
+  zooms the picture, and taps in Touch mode no longer go missing. On a
+  computer, a mouse button held down when the window loses focus is let go
+  on the remote machine too: the same button that was pressed, right and
+  middle included.
+- **A click refused once is no longer swallowed from then on.** If Windows
+  refused a remote mouse button or key press (the screen changed under it,
+  such as the lock screen appearing), later presses of the same button or key
+  were silently dropped until it was released. And letting go of everything
+  at the end of a session now reaches the lock or sign-in screen too, rather
+  than failing silently there.
+- **The host's logs no longer count refused keystrokes.** When Windows
+  refused remote input (at the lock or sign-in screen, say), the agent's log
+  and the service's log, which anyone signed in to that machine can read,
+  got one line per refused event, many of them naming whether it was a key
+  press or a mouse move, so the number of refused keystrokes (a PIN's
+  length) could be read off them. Those lines are now written at most once a
+  second on each path, the first always, and none says whether it was a key
+  or the mouse that was refused. Refusals are otherwise only counted, in the
+  once-a-second summary described below, with refused typing as none, some
+  or many.
+
+### Added
+- **Better evidence for "the mouse does nothing".** The phone's Copy
+  diagnostics now says what kind of input it sent (moves, clicks, keys),
+  which way it went, what the trackpad believes and whether the phone is
+  drawing the pointer, how often the trackpad has recovered from a stuck
+  finger, and whether a slow connection is holding mouse movement back while
+  keys still get through. The host's log records what input arrived on each
+  path, about once a second: mouse events counted exactly, but typing only
+  as none, some or many, and any stretch with typing in it timed only to the
+  second, so the log shows that typing happened then, and whether it was a
+  little or a lot, but not how many keys it was or its rhythm. It also records which screen the mouse is aimed at in each
+  session and, for the first few moves after the sign-in screen or a
+  security prompt appears, whether the pointer followed them ("tracks", "did
+  not move" or roughly how far off), never where on the screen it was.
+  See the FAQ entry "The keyboard works but the mouse does nothing".
 
 ## 0.9.814 — 2026-09-17
 

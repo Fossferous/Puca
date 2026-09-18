@@ -87,6 +87,17 @@ const NO_SINK: GestureSink = {
     cursor: () => {},
 };
 
+/** `TouchGestures.diag()`: the machine's state, and its recovery counters. */
+export interface GestureDiag {
+    phase: string;
+    contacts: number;
+    surface: boolean;
+    /** Stranded contacts `prune` has dropped, ever. */
+    pruned: number;
+    /** Whole-pad cancels that found at least one contact to drop, ever. */
+    blurCancels: number;
+}
+
 export class TouchGestures {
     private sink: GestureSink;
     private readonly clock: GestureClock;
@@ -114,6 +125,14 @@ export class TouchGestures {
     private lastWheelFlush = 0;
     /** Null until the picture's size is known. */
     private surface: Surface | null = null;
+    /** EVIDENCE, cumulative for the life of the machine, for "Copy
+     *  diagnostics": how many stranded contacts `prune` has dropped, and how
+     *  many whole-pad cancels (the stage's blur / hide / teardown / mode
+     *  switch) actually found a contact to drop. Both recoveries are silent
+     *  by design — a phone has no console — so without these a field capture
+     *  taken after a recovery could not say whether the wedge had happened. */
+    private prunedTotal = 0;
+    private blurCancelsTotal = 0;
 
     constructor(sink?: GestureSink, clock?: Partial<GestureClock>, opts?: GestureOptions) {
         this.sink = sink ?? NO_SINK;
@@ -352,7 +371,10 @@ export class TouchGestures {
      */
     cancel(c?: Contact): void {
         if (c) this.pointers.delete(c.id);
-        else this.pointers.clear();
+        else {
+            if (this.pointers.size > 0) this.blurCancelsTotal++;
+            this.pointers.clear();
+        }
         this.cancelLongPress();
         this.flushWheel();
         this.releaseButton();
@@ -366,6 +388,49 @@ export class TouchGestures {
         if (this.pointers.size === 0) this.phase = 'idle';
         else if (this.pointers.size >= 2) this.phase = 'pinch';
         else this.phase = 'pressed';
+    }
+
+    /**
+     * Forget every contact the owner no longer believes is on the glass.
+     *
+     * THE MACHINE KEEPS ITS OWN MAP, and a lost `pointerup`/`pointercancel`
+     * (the app backgrounded mid-pinch, capture lost on a remount) strands a
+     * contact in it. Two entries is a pinch, and a pinch swallows every move —
+     * so one stranded finger left the trackpad silently dead: every later
+     * one-finger drag arrived as the SECOND contact, the phase went straight
+     * back to 'pinch', and `move` returned with nothing sent and nothing
+     * logged until the mode was toggled. The keyboard kept working, which made
+     * it read as "the mouse is broken on that machine".
+     *
+     * Each stale contact is treated exactly as if the browser had cancelled
+     * it (see `cancel`), which is what it was: a button a drag pressed is
+     * released, and nothing on the way out reads as a tap. Returns how many
+     * were pruned, so the caller can log the rare case it fires.
+     */
+    prune(isLive: (id: number) => boolean): number {
+        let pruned = 0;
+        for (const c of [...this.pointers.values()]) {
+            if (isLive(c.id)) continue;
+            this.cancel(c);
+            pruned++;
+        }
+        this.prunedTotal += pruned;
+        return pruned;
+    }
+
+    /** What the machine believes right now, for "Copy diagnostics". A phase
+     *  of 'pinch' with no finger on the glass is the wedge `prune` exists
+     *  for; seeing it in a field capture settles the question at once. The
+     *  two counters say whether a recovery has ALREADY fired (see
+     *  `prunedTotal`), which the phase alone cannot once it has. */
+    diag(): GestureDiag {
+        return {
+            phase: this.phase,
+            contacts: this.pointers.size,
+            surface: this.surface !== null,
+            pruned: this.prunedTotal,
+            blurCancels: this.blurCancelsTotal,
+        };
     }
 
     /** Release any timer that could still fire after teardown. */

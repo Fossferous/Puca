@@ -31,10 +31,15 @@
 //! exact rather than sampled.
 //!
 //! PER THREAD, DELIBERATELY. `SetThreadDesktop` affects only the calling thread,
-//! and this agent injects on the pipe thread while capturing on the stream
-//! thread. Both call this independently; there is no shared state to keep in
+//! and this agent touches desktops on two: the pipe thread injects what the
+//! relay and the service's sealed lane deliver, and the stream thread captures
+//! AND — since R4 — injects what the direct input channel delivers. Each calls
+//! this independently when it is refused; there is no shared state to keep in
 //! step, which is the point — a single "current desktop" global would be a lie
-//! the moment those two threads disagreed.
+//! the moment those two threads disagreed. On the stream thread one follow
+//! serves both of its jobs (a refused injection moves its capture too, and an
+//! `AccessLost` moves its injection), which is harmless because both want the
+//! same desktop: the one that owns input now.
 //!
 //! It fails for an agent running on a user token, and that is correct: reaching
 //! the secure desktop is exactly the privilege a user-flavour agent must not
@@ -177,10 +182,26 @@ mod imp {
         /// see the close-the-previous note in `follow_input_desktop`.
         static PREV_DESKTOP: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     }
+
+    /// The name of the desktop this thread last FOLLOWED to, or `None` if it
+    /// never has — i.e. it is still on the desktop it started on.
+    ///
+    /// Read from the handle `follow_input_desktop` keeps, not from
+    /// `GetThreadDesktop`: no extra rights, no extra handle, and it answers
+    /// the question the lock-screen log asks ("is this thread on Winlogon?")
+    /// on the thread that is asking. One name lookup; callers throttle it.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn followed_desktop_name() -> Option<String> {
+        let h = PREV_DESKTOP.with(|p| p.get());
+        if h == 0 {
+            return None;
+        }
+        Some(name_of(HDESK(h as *mut core::ffi::c_void)))
+    }
 }
 
 #[cfg(windows)]
-pub use imp::follow_input_desktop;
+pub use imp::{follow_input_desktop, followed_desktop_name};
 
 #[cfg(not(windows))]
 pub fn follow_input_desktop() -> Result<String, String> {

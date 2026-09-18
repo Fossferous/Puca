@@ -15,6 +15,7 @@
 //! its tests — CI runs that on Linux and on Windows.
 
 pub mod desktop;
+pub mod log_privacy;
 
 /// Reading the text caret's position, for the viewer's typing camera.
 ///
@@ -353,7 +354,7 @@ pub const PUCA_INJECT_TAG: usize = 0x5055_4341;
 mod win {
     use super::{TargetMonitor, PUCA_INJECT_TAG};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
         KEYEVENTF_KEYUP,
         KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSEINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
         MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
@@ -361,8 +362,20 @@ mod win {
         MOUSE_EVENT_FLAGS,
     };
 
+    /// ONE event to the OS — or, in this crate's own test build, to the seam
+    /// (see `send_seam`), which NEVER reaches `SendInput`. Every inject path
+    /// and `release_all` goes through here or `send_many`, so no test in this
+    /// crate can move the pointer or press a key on the machine running it.
     pub fn send(input: INPUT) -> bool {
-        unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1 }
+        #[cfg(test)]
+        return super::send_seam::send(std::slice::from_ref(&input));
+        #[cfg(not(test))]
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
+                &[input],
+                std::mem::size_of::<INPUT>() as i32,
+            ) == 1
+        }
     }
 
     fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
@@ -386,10 +399,11 @@ mod win {
     pub fn move_abs(x: f64, y: f64, target: Option<TargetMonitor>) -> INPUT {
         let x = x.clamp(0.0, 1.0);
         let y = y.clamp(0.0, 1.0);
-        match target {
-            Some(m) if m.virt_width > 1 && m.virt_height > 1 => {
-                let px = m.left as f64 + x * m.width as f64;
-                let py = m.top as f64 + y * m.height as f64;
+        // The pixel comes from the SAME helper the lock-screen log line uses
+        // (`requested_pixel`), so that line can never compare the cursor with
+        // a position this injection did not ask for.
+        match super::pixel_on_target(x, y, target) {
+            Some((m, px, py)) => {
                 let ax = ((px - m.virt_left as f64) * 65535.0 / (m.virt_width as f64 - 1.0))
                     .round()
                     .clamp(0.0, 65535.0) as i32;
@@ -478,7 +492,16 @@ mod win {
         if inputs.is_empty() {
             return true;
         }
-        unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len() }
+        #[cfg(test)]
+        return super::send_seam::send(inputs);
+        #[cfg(not(test))]
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
+                inputs,
+                std::mem::size_of::<INPUT>() as i32,
+            ) as usize
+                == inputs.len()
+        }
     }
 
     /// Key event by hardware scan code (games often ignore VK-only injection).
@@ -514,6 +537,129 @@ mod win {
                 },
             },
         }
+    }
+}
+
+/// THE TEST SEAM OVER `SendInput`, and the only thing `win::send` and
+/// `win::send_many` reach in this crate's own test build.
+///
+/// WHY IT EXISTS. `inject` on Windows is real `SendInput`: it types into and
+/// moves the pointer over whatever has focus on the machine running `cargo
+/// test`. So the press bookkeeping — which decides whether a press is SENT at
+/// all — could only ever be pinned by reading its source text, and a source
+/// pin cannot see "a press that failed once swallows every later press of that
+/// button". With the OS call replaced here, the real `inject` and the real
+/// `release_all` run end to end in a test, and none of it can leave this
+/// process.
+///
+/// PER THREAD, like the agent's own seam: tests run in parallel, and one
+/// test's scripted refusal must not become another's. An unscripted send is
+/// REFUSED (false): an unexpected send then shows up as an error in the test
+/// that made it, never as a silent success. The desktop-follow step is faked
+/// here too (`follow`), so a refusal's retry never calls `SetThreadDesktop`.
+#[cfg(all(windows, test))]
+pub(crate) mod send_seam {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_KEYBOARD, INPUT_MOUSE};
+
+    /// One event as the OS would have received it: enough to tell a left-down
+    /// from a left-up and one scan code from another.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Sent {
+        pub mouse: bool,
+        pub flags: u32,
+        pub scan: u16,
+    }
+
+    thread_local! {
+        static ANSWERS: RefCell<VecDeque<bool>> = const { RefCell::new(VecDeque::new()) };
+        static SENT: RefCell<Vec<Sent>> = const { RefCell::new(Vec::new()) };
+        static FOLLOWS: Cell<usize> = const { Cell::new(0) };
+        static ON_FOLLOW: Cell<Option<fn()>> = const { Cell::new(None) };
+    }
+
+    /// Run `f` inside the next desktop follows on this thread — the gap
+    /// between a refused send and its retry, which is where another thread's
+    /// teardown can land. `None` removes it.
+    pub fn on_follow(f: Option<fn()>) {
+        ON_FOLLOW.with(|c| c.set(f));
+    }
+
+    /// What the next `SendInput` calls on this thread answer, in order.
+    pub fn script(answers: &[bool]) {
+        ANSWERS.with(|a| {
+            let mut a = a.borrow_mut();
+            a.clear();
+            a.extend(answers.iter().copied());
+        });
+    }
+
+    /// Every event offered to the OS on this thread since the last take —
+    /// refused ones included, since a refused send was still an attempt.
+    pub fn take_sent() -> Vec<Sent> {
+        SENT.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+
+    /// How many times a refusal made `sent_following` follow the desktop
+    /// since the last call.
+    pub fn follows() -> usize {
+        FOLLOWS.with(|f| f.replace(0))
+    }
+
+    thread_local! {
+        static FOLLOW_LINES: Cell<usize> = const { Cell::new(0) };
+        static RELEASE_LINES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// `release_one` wrote its refusal line.
+    pub(crate) fn note_release_line() {
+        RELEASE_LINES.with(|f| f.set(f.get() + 1));
+    }
+
+    /// How many release refusal lines were written on this thread since the
+    /// last call.
+    pub fn release_lines() -> usize {
+        RELEASE_LINES.with(|f| f.replace(0))
+    }
+
+    /// `sent_following` wrote its follow line (stderr is not something a test
+    /// can read).
+    pub(crate) fn note_follow_line() {
+        FOLLOW_LINES.with(|f| f.set(f.get() + 1));
+    }
+
+    /// How many follow lines were written on this thread since the last call.
+    pub fn follow_lines() -> usize {
+        FOLLOW_LINES.with(|f| f.replace(0))
+    }
+
+    pub(crate) fn send(inputs: &[INPUT]) -> bool {
+        SENT.with(|s| {
+            let mut s = s.borrow_mut();
+            for i in inputs {
+                // SAFETY: the union member read is the one `r#type` names.
+                let sent = unsafe {
+                    if i.r#type == INPUT_MOUSE {
+                        Sent { mouse: true, flags: i.Anonymous.mi.dwFlags.0, scan: 0 }
+                    } else if i.r#type == INPUT_KEYBOARD {
+                        Sent { mouse: false, flags: i.Anonymous.ki.dwFlags.0, scan: i.Anonymous.ki.wScan }
+                    } else {
+                        Sent { mouse: false, flags: 0, scan: 0 }
+                    }
+                };
+                s.push(sent);
+            }
+        });
+        ANSWERS.with(|a| a.borrow_mut().pop_front()).unwrap_or(false)
+    }
+
+    pub(crate) fn follow() -> Result<String, String> {
+        FOLLOWS.with(|f| f.set(f.get() + 1));
+        if let Some(hook) = ON_FOLLOW.with(|c| c.get()) {
+            hook();
+        }
+        Ok("TestDesktop".into())
     }
 }
 
@@ -679,9 +825,10 @@ fn unpack_key(packed: u16) -> (u16, bool) {
 /// nothing anywhere says so. `Text` alone got this right, which is what made the
 /// omission look deliberate rather than missed.
 ///
-/// `release_all` deliberately keeps `let _ =`: it is best-effort teardown with
-/// no caller left to tell, and one failure there must not stop the remaining
-/// keys being released.
+/// `release_all` is best-effort teardown with no caller left to tell: it goes
+/// through the same follow-and-retry, logs a refusal that survives it, and
+/// carries on, because one failure there must not stop the remaining keys
+/// being released.
 ///
 /// `follow` IS A SEPARATE PARAMETER RATHER THAN FOLDED INTO `what`: this
 /// process's own eprintln! diagnostics (`sent_following`'s "followed the input
@@ -702,10 +849,13 @@ fn sent_detail(
     if ok {
         return Ok(());
     }
+    // The kind is followed IMMEDIATELY by one of these three markers, which
+    // is what lets `log_privacy::without_event_kind` cut it out of a log line.
+    use crate::log_privacy::{DETAIL_FOLLOWED, DETAIL_NO_FOLLOW, DETAIL_NO_RETRY, REFUSED_PREFIX};
     let detail = match follow {
-        None => " (no retry was attempted)".to_string(),
-        Some(Ok(name)) => format!(" (followed the input desktop to '{name}', but the retry was STILL refused)"),
-        Some(Err(e)) => format!(" (could not follow the input desktop: {e})"),
+        None => DETAIL_NO_RETRY.to_string(),
+        Some(Ok(name)) => format!("{DETAIL_FOLLOWED}{name}', but the retry was STILL refused)"),
+        Some(Err(e)) => format!("{DETAIL_NO_FOLLOW}{e})"),
     };
     // GetLastError, READ AT THE CALL SITE, immediately after SendInput
     // returned 0 — this is the actual experiment. `5` (ERROR_ACCESS_DENIED)
@@ -718,7 +868,7 @@ fn sent_detail(
         Some(c) => format!(" GetLastError={c}."),
     };
     Err(format!(
-        "Windows refused the injected {what}{detail}.{code} The usual cause is that the \
+        "{REFUSED_PREFIX}{what}{detail}.{code} The usual cause is that the \
          screen showing right now is one this process cannot reach — a security \
          prompt, the lock screen, or a window running as administrator."
     ))
@@ -746,10 +896,16 @@ fn sent_following(send: impl Fn() -> bool, what: &str) -> Result<(), String> {
     if send() {
         return Ok(());
     }
-    let follow = crate::desktop::follow_input_desktop();
+    let follow = follow_for_retry();
     match &follow {
         Ok(name) => {
-            eprintln!("[input] refused; followed the input desktop to '{name}', retrying");
+            // ONE LINE A SECOND AT MOST, per thread, the first always. One per
+            // refusal was a count of refused keystrokes on the sign-in screen
+            // in a log ordinary users can read; the first is kept because it
+            // is the evidence that a follow happened at all.
+            if follow_log_due() {
+                eprintln!("[input] refused; followed the input desktop to '{name}', retrying");
+            }
             let ok = send();
             // READ IMMEDIATELY: GetLastError is only valid until the next
             // Win32 call on this thread, and `send()` itself is the only
@@ -770,6 +926,139 @@ fn sent_following(send: impl Fn() -> bool, what: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `sent_following`'s follow line may be written now, by this
+/// thread's `LineGate` (see `log_privacy`).
+#[cfg(windows)]
+fn follow_log_due() -> bool {
+    thread_local! {
+        static GATE: std::cell::Cell<crate::log_privacy::LineGate> =
+            const { std::cell::Cell::new(crate::log_privacy::LineGate::per_second()) };
+    }
+    let due = admit_now(&GATE);
+    #[cfg(test)]
+    if due {
+        send_seam::note_follow_line();
+    }
+    due
+}
+
+/// Whether `release_one`'s refusal line may be written now: its own
+/// per-thread `LineGate`.
+#[cfg(windows)]
+fn release_log_due() -> bool {
+    thread_local! {
+        static GATE: std::cell::Cell<crate::log_privacy::LineGate> =
+            const { std::cell::Cell::new(crate::log_privacy::LineGate::per_second()) };
+    }
+    let due = admit_now(&GATE);
+    #[cfg(test)]
+    if due {
+        send_seam::note_release_line();
+    }
+    due
+}
+
+#[cfg(windows)]
+fn admit_now(
+    gate: &'static std::thread::LocalKey<std::cell::Cell<crate::log_privacy::LineGate>>,
+) -> bool {
+    gate.with(|g| {
+        let mut gate = g.get();
+        let due = gate.admit(std::time::Instant::now());
+        g.set(gate);
+        due
+    })
+}
+
+/// The desktop-follow half of `sent_following`, behind the same seam as the
+/// send itself: a test that scripts a refusal must not attach its thread to a
+/// real desktop on the way to the retry.
+#[cfg(all(windows, not(test)))]
+fn follow_for_retry() -> Result<String, String> {
+    crate::desktop::follow_input_desktop()
+}
+#[cfg(all(windows, test))]
+fn follow_for_retry() -> Result<String, String> {
+    send_seam::follow()
+}
+
+/// Record `id` as held, send the press, and FORGET IT AGAIN if the press was
+/// refused.
+///
+/// THE ORDER USED TO BE "record, then send, and keep the record whatever
+/// happened" — and the record is also the dedupe. So one refused press (the
+/// input desktop changed under the thread, and even the retry failed) left
+/// the button or key recorded as held while nothing was held, and every later
+/// press of it returned `Ok` WITHOUT calling `SendInput`: clicks silently
+/// swallowed until a matching release or a teardown happened to clear it.
+///
+/// Recorded BEFORE the send rather than after, deliberately: the stream
+/// thread and the pipe thread can inject concurrently, and recording first is
+/// what keeps two racing presses of one button from both reaching the OS. The
+/// rollback removes only this press's own entry, so a release that raced in
+/// and already removed it is not undone twice.
+#[cfg(windows)]
+fn press_tracked<T: PartialEq + Copy>(
+    held: &Mutex<Vec<T>>,
+    id: T,
+    send: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if let Ok(mut list) = held.lock() {
+        if list.contains(&id) {
+            return Ok(()); // dedupe: a repeat of a press already held
+        }
+        list.push(id);
+        INJECT_HELD.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let sent = send();
+    if sent.is_err() {
+        forget_held(held, id);
+    }
+    sent
+}
+
+/// Release `id` only if it was recorded as held; a release for something
+/// never pressed is a silent `Ok` (the mirror of the dedupe above). A list
+/// that cannot be locked still sends — refusing a release is how keys stick.
+#[cfg(windows)]
+fn release_tracked<T: PartialEq + Copy>(
+    held: &Mutex<Vec<T>>,
+    id: T,
+    send: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if held.lock().is_ok() && !forget_held(held, id) {
+        return Ok(()); // never saw it go down
+    }
+    send()
+}
+
+/// Remove one recorded press and lower the held count with it. Whether it
+/// was there is the answer.
+///
+/// SATURATING, because `release_all` zeroes the count BEFORE it drains the
+/// lists (see there). A refused press rolling itself back in that gap finds
+/// its entry still listed and decrements a count that is already 0 — which a
+/// plain `fetch_sub` wraps to `usize::MAX`, muting the hotkey poll's press
+/// path for the rest of the process.
+#[cfg(windows)]
+fn forget_held<T: PartialEq + Copy>(held: &Mutex<Vec<T>>, id: T) -> bool {
+    if let Ok(mut list) = held.lock() {
+        if let Some(pos) = list.iter().position(|x| *x == id) {
+            list.swap_remove(pos);
+            lower_held_count();
+            return true;
+        }
+    }
+    false
+}
+
+/// `INJECT_HELD - 1`, stopping at zero.
+#[cfg(windows)]
+fn lower_held_count() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _ = INJECT_HELD.fetch_update(SeqCst, SeqCst, |n| Some(n.saturating_sub(1)));
+}
+
 #[cfg(windows)]
 pub fn inject(event: ControlInput) -> Result<(), String> {
     match event {
@@ -778,7 +1067,11 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
                 return Err("non-finite coordinate".into());
             }
             let target = TARGET.lock().ok().and_then(|t| *t);
-            sent_following(|| win::send(win::move_abs(x, y, target)), "pointer move")
+            let sent = sent_following(|| win::send(win::move_abs(x, y, target)), "pointer move");
+            if sent.is_ok() {
+                check_move_on_secure_desktop(x, y, target);
+            }
+            sent
         }
         ControlInput::Rmove { dx, dy } => {
             if !dx.is_finite() || !dy.is_finite() {
@@ -817,36 +1110,22 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
             if button > 2 {
                 return Ok(());
             }
-            // Dedupe: ignore a press for an already-held button.
-            if let Ok(mut b) = PRESSED_BUTTONS.lock() {
-                if b.contains(&button) {
-                    return Ok(());
-                }
-                b.push(button);
-                INJECT_HELD.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            if let Some(i) = win::button(button, true) {
-                return sent_following(|| win::send(i), "button press");
-            }
-            Ok(())
+            // Dedupe: ignore a press for an already-held button — and record
+            // one only if it was actually delivered (see `press_tracked`).
+            press_tracked(&PRESSED_BUTTONS, button, || match win::button(button, true) {
+                Some(i) => sent_following(|| win::send(i), "button press"),
+                None => Ok(()),
+            })
         }
         ControlInput::Up { button } => {
             if button > 2 {
                 return Ok(());
             }
             // Only release a button we recorded as down.
-            if let Ok(mut b) = PRESSED_BUTTONS.lock() {
-                if let Some(pos) = b.iter().position(|x| *x == button) {
-                    b.swap_remove(pos);
-                    INJECT_HELD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    return Ok(());
-                }
-            }
-            if let Some(i) = win::button(button, false) {
-                return sent_following(|| win::send(i), "button release");
-            }
-            Ok(())
+            release_tracked(&PRESSED_BUTTONS, button, || match win::button(button, false) {
+                Some(i) => sent_following(|| win::send(i), "button release"),
+                None => Ok(()),
+            })
         }
         ControlInput::Key { code, down } => {
             let vk = code_to_vk(&code).ok_or_else(|| format!("unmapped key: {code}"))?;
@@ -854,25 +1133,19 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
             let (scan, extended) = scan_and_prefix(&code, mapped);
             // Tracked by scan code AND prefix: see `pack_key`.
             let held_key = pack_key(scan, extended);
-            if let Ok(mut keys) = PRESSED_KEYS.lock() {
-                let held = keys.contains(&held_key);
-                if down {
-                    if held {
-                        return Ok(()); // dedupe key repeat
-                    }
-                    keys.push(held_key);
-                    INJECT_HELD.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                } else if let Some(pos) = keys.iter().position(|k| *k == held_key) {
-                    keys.swap_remove(pos);
-                    INJECT_HELD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    return Ok(()); // release for a key we never saw down
-                }
+            let send = || {
+                sent_following(
+                    || win::send(win::key(scan, extended, down)),
+                    if down { "key press" } else { "key release" },
+                )
+            };
+            // A repeat of a held key is deduped; a refused press is not
+            // remembered; a release for a key never seen down is dropped.
+            if down {
+                press_tracked(&PRESSED_KEYS, held_key, send)
+            } else {
+                release_tracked(&PRESSED_KEYS, held_key, send)
             }
-            sent_following(
-                || win::send(win::key(scan, extended, down)),
-                if down { "key press" } else { "key release" },
-            )
         }
         ControlInput::Text { text } => {
             validate_text(&text)?;
@@ -905,6 +1178,12 @@ pub fn inject(event: ControlInput) -> Result<(), String> {
 
 /// Release every key/button we currently believe is held. Called on any teardown
 /// so a session never leaves input stuck down.
+///
+/// THROUGH `sent_following`, like every other release. It used to call
+/// `win::send` bare, with no desktop-follow: on the lock screen a thread still
+/// attached to `Default` had every release refused while the lists were
+/// drained anyway — a button held on Winlogon, and an agent sure nothing was.
+/// Still best-effort (see `release_one`): one refusal must not stop the rest.
 #[cfg(windows)]
 pub fn release_all() {
     // Zeroed FIRST, not decremented per item: a teardown that failed halfway
@@ -914,21 +1193,150 @@ pub fn release_all() {
     if let Ok(mut b) = PRESSED_BUTTONS.lock() {
         for button in b.drain(..) {
             if let Some(i) = win::button(button, false) {
-                let _ = win::send(i);
+                release_one(|| win::send(i), "button release (teardown)");
             }
         }
     }
     if let Ok(mut keys) = PRESSED_KEYS.lock() {
         for packed in keys.drain(..) {
-            // Released with the SAME prefix it was pressed with. A release that
-            // dropped the E0 would leave the grey Delete down and lift the
-            // numpad decimal point instead — a key stuck on somebody else's
-            // machine, which is the one outcome this function exists to avoid.
+            // Released with the SAME prefix it was pressed with: see `pack_key`.
             let (scan, extended) = unpack_key(packed);
-            let _ = win::send(win::key(scan, extended, false));
+            release_one(|| win::send(win::key(scan, extended, false)), "key release (teardown)");
         }
     }
 }
+
+/// One teardown release: followed and retried like any inject, and a refusal
+/// that survives the retry is LOGGED rather than returned — there is no
+/// caller left to tell, and the next release must still be attempted.
+#[cfg(windows)]
+fn release_one(send: impl Fn() -> bool, what: &str) {
+    if let Err(e) = sent_following(send, what) {
+        // Kind-free and at most one a second, like every per-event line (see
+        // `log_privacy`): one per refused release said how many keys were held.
+        if release_log_due() {
+            eprintln!("[input] release_all: {}", crate::log_privacy::without_event_kind(&e));
+        }
+    }
+}
+
+/// THE ONE MAPPING from a normalized point (already clamped to 0..1) onto a
+/// usable target: the pixel it names in virtual-desktop coordinates, unrounded,
+/// with the target it was measured against. `None` = no usable target, and
+/// the caller falls back to the primary screen.
+///
+/// Shared by `win::move_abs` (the injection) and `requested_pixel` (the
+/// lock-screen log line). They used to carry a copy each, and a test pinned
+/// the copy — so a change to the injection's mapping would have left the log
+/// comparing the cursor with a position nothing had asked for.
+fn pixel_on_target(x: f64, y: f64, target: Option<TargetMonitor>) -> Option<(TargetMonitor, f64, f64)> {
+    match target {
+        Some(m) if m.virt_width > 1 && m.virt_height > 1 => Some((
+            m,
+            m.left as f64 + x * m.width as f64,
+            m.top as f64 + y * m.height as f64,
+        )),
+        _ => None,
+    }
+}
+
+/// Where an absolute move asks the pointer to land, in the pixel space
+/// `GetCursorPos` answers in: the target monitor's rectangle, or the primary
+/// screen (`primary` = its size) when there is no usable target — the same
+/// fallback `win::move_abs` takes, through the same `pixel_on_target`. For
+/// the lock-screen log line.
+pub fn requested_pixel(x: f64, y: f64, target: Option<TargetMonitor>, primary: (i32, i32)) -> (i32, i32) {
+    let x = if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
+    let y = if y.is_finite() { y.clamp(0.0, 1.0) } else { 0.0 };
+    match pixel_on_target(x, y, target) {
+        Some((_, px, py)) => (px.round() as i32, py.round() as i32),
+        None => ((x * primary.0 as f64).round() as i32, (y * primary.1 as f64).round() as i32),
+    }
+}
+
+/// THE LOCK-SCREEN MOUSE QUESTION, answered in the log.
+///
+/// Measured: on the sign-in desktop `SendInput` ACCEPTS injected moves (the
+/// access-mask fix, desktop.rs). Never measured: that an accepted absolute
+/// move actually moves the pointer there. A report of "the PIN went in but
+/// the mouse did nothing" sits exactly in that gap, and success logs nothing.
+/// So, ONLY while this thread sits on a desktop other than `Default`
+/// (Winlogon, a UAC prompt), at most once a second and only for the first
+/// few moves after each desktop switch (`log_privacy::SecureMoveChecks`),
+/// the log says whether the cursor FOLLOWED the request: "tracks", "did not
+/// move", or "off by N px" (`log_privacy::cursor_tracking`). A cursor that
+/// never follows says the secure desktop ignores the move; one that tracks
+/// says the pointer moved and the fault is visibility or aim.
+///
+/// NEVER A POSITION. This used to log the requested pixel beside
+/// `GetCursorPos`, in absolute coordinates, a line a second for as long as
+/// the sign-in screen was in use — in a log ordinary users can read, and on
+/// the screen where the pointer's job is tapping an on-screen keyboard.
+///
+/// The cursor may trail the request by an event (the OS applies moves on its
+/// own thread), so it is the TREND across lines that answers, not one line.
+/// Unreachable from tests: its test twin below does nothing; the gate and the
+/// verdict are tested in `log_privacy`.
+#[cfg(all(windows, not(test)))]
+fn check_move_on_secure_desktop(x: f64, y: f64, target: Option<TargetMonitor>) {
+    use std::cell::{Cell, RefCell};
+    use std::time::Instant;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+    };
+    thread_local! {
+        static CHECKS: RefCell<crate::log_privacy::SecureMoveChecks> =
+            RefCell::new(crate::log_privacy::SecureMoveChecks::default());
+        static MOVES: Cell<u32> = const { Cell::new(0) };
+        // The desktop's NAME is a syscall, and this runs at pointer rate: it
+        // is asked at most once a second, as before (see
+        // `followed_desktop_name`: "callers throttle it").
+        static ASK: Cell<crate::log_privacy::LineGate> =
+            const { Cell::new(crate::log_privacy::LineGate::per_second()) };
+    }
+    let moves = MOVES.with(|m| {
+        m.set(m.get().saturating_add(1));
+        m.get()
+    });
+    let now = Instant::now();
+    let ask = ASK.with(|g| {
+        let mut gate = g.get();
+        let due = gate.admit(now);
+        g.set(gate);
+        due
+    });
+    if !ask {
+        return;
+    }
+    // `moves` = the moves since the last time this asked, about a second.
+    MOVES.with(|m| m.set(0));
+    let Some(desk) = crate::desktop::followed_desktop_name() else {
+        return; // never followed: still on the desktop it started on
+    };
+    let (admitted, previous) = CHECKS.with(|c| {
+        let mut c = c.borrow_mut();
+        (c.admit(&desk, now), c.previous)
+    });
+    if !admitted {
+        return;
+    }
+    let primary = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    let requested = requested_pixel(x, y, target, primary);
+    let mut pt = windows::Win32::Foundation::POINT::default();
+    let cursor = match unsafe { GetCursorPos(&mut pt) } {
+        Ok(()) => Some((pt.x, pt.y)),
+        Err(_) => None,
+    };
+    CHECKS.with(|c| c.borrow_mut().previous = cursor);
+    let verdict = crate::log_privacy::cursor_tracking(requested, cursor, previous);
+    let aim = match target {
+        Some(m) => format!("{}x{}", m.width, m.height),
+        None => "none, primary only".to_string(),
+    };
+    eprintln!("[input] move on '{desk}': cursor {verdict} (aim {aim}, moves={moves})");
+}
+#[cfg(all(windows, test))]
+fn check_move_on_secure_desktop(_x: f64, _y: f64, _target: Option<TargetMonitor>) {}
 
 #[cfg(target_os = "linux")]
 mod linux_impl;
@@ -1165,6 +1573,335 @@ pub fn detect_anticheat() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The pressed lists and the held count are PROCESS-global, and tests run
+    /// in parallel: every test that presses something, or reads the count,
+    /// holds this. Poison is ignored — one failed test must not fail the rest.
+    static SERIAL: Mutex<()> = Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// This file ABOVE its test module, for the source pins. Cut at the module
+    /// itself rather than at the first `#[cfg(test)]`: the send seam puts
+    /// that attribute on lines inside `win`, and cutting there would hand the
+    /// pins a file that ends before the code they check. CR-stripped so a
+    /// CRLF checkout reads the same.
+    #[cfg(windows)]
+    fn non_test_source() -> String {
+        let src = include_str!("lib.rs").replace('\r', "");
+        let cut = src.find("\n#[cfg(test)]\nmod tests {").expect("the test module's own header");
+        src[..cut].to_string()
+    }
+
+    /// Nothing held, nothing recorded, nothing scripted — through the seam.
+    #[cfg(windows)]
+    fn clean_slate() {
+        send_seam::script(&[true; 32]);
+        release_all();
+        send_seam::script(&[]);
+        send_seam::take_sent();
+        send_seam::follows();
+    }
+
+    #[cfg(windows)]
+    const LEFTDOWN: u32 = 0x0002;
+    #[cfg(windows)]
+    const LEFTUP: u32 = 0x0004;
+    #[cfg(windows)]
+    const KEYUP: u32 = 0x0002;
+
+    // --- press bookkeeping, through the real inject over the send seam -----
+
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_press_rolling_back_after_a_teardown_zeroed_the_count_does_not_wrap_it() {
+        // THE RACE: release_all zeroes INJECT_HELD first and drains the lists
+        // after. A press refused on the pipe thread while the stream thread
+        // tears down can roll back in that gap: its entry is still listed,
+        // the count is already 0, and a plain fetch_sub wrapped it to
+        // usize::MAX — muting the hotkey poll's press path for good.
+        let _g = serial();
+        clean_slate();
+        // The teardown's first step lands between the refusal and its retry.
+        send_seam::on_follow(Some(|| INJECT_HELD.store(0, std::sync::atomic::Ordering::SeqCst)));
+        send_seam::script(&[false, false]);
+        let r = inject(ControlInput::Down { button: 0 });
+        send_seam::on_follow(None);
+        assert!(r.is_err(), "the press was refused twice");
+        assert_eq!(send_seam::follows(), 1, "the hook ran inside the one follow");
+        assert_eq!(super::injected_inputs_held(), 0, "the count must stop at zero, not wrap");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_burst_of_refusals_writes_one_follow_line_not_one_each() {
+        // THE LEAK: one "[input] refused; followed the input desktop" line per
+        // refusal, so the log counted refused keystrokes on the sign-in
+        // screen. Eight refused-then-retried events inside a second (a
+        // 4-digit PIN's downs and ups) must write the one line that proves a
+        // follow happened, and no more.
+        let _g = serial();
+        clean_slate();
+        send_seam::follow_lines();
+        let mut script = Vec::new();
+        for _ in 0..8 {
+            script.extend([false, true]); // refused, delivered on the retry
+        }
+        send_seam::script(&script);
+        for i in 0..8 {
+            inject(ControlInput::Key { code: "Digit1".into(), down: i % 2 == 0 }).expect("the retry lands");
+        }
+        assert_eq!(send_seam::follows(), 8, "every refusal still follows and retries");
+        assert_eq!(send_seam::follow_lines(), 1, "the first follow is logged, the rest of the second is not");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_teardown_refused_for_every_held_key_writes_one_line() {
+        // One "[input] release_all" line per refused release said how many
+        // keys were down when the session ended.
+        let _g = serial();
+        clean_slate();
+        send_seam::release_lines();
+        send_seam::script(&[true; 4]);
+        for code in ["Digit1", "Digit2", "Digit3", "Digit4"] {
+            inject(ControlInput::Key { code: code.into(), down: true }).expect("pressed");
+        }
+        send_seam::take_sent();
+        send_seam::script(&[false; 8]); // every release refused, and its retry too
+        release_all();
+        assert_eq!(send_seam::follows(), 4, "each release was still attempted and retried");
+        assert_eq!(send_seam::release_lines(), 1, "one line for the teardown, not one per key");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_press_is_not_remembered_so_the_next_press_is_sent() {
+        // THE DEFECT: the press was recorded as held BEFORE SendInput's answer
+        // was known and kept when it failed, and the record is the dedupe —
+        // so every later press of that button returned Ok with nothing sent.
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[false, false]); // refused, and refused again after the follow
+        assert!(inject(ControlInput::Down { button: 0 }).is_err(), "a refused press must say so");
+        let tried = send_seam::take_sent();
+        assert_eq!(tried.len(), 2, "the press and its one retry: {tried:?}");
+        assert_eq!(super::injected_inputs_held(), 0, "a refused press holds nothing");
+
+        send_seam::script(&[true]);
+        inject(ControlInput::Down { button: 0 }).expect("the next press is delivered");
+        let sent = send_seam::take_sent();
+        assert_eq!(
+            sent,
+            vec![send_seam::Sent { mouse: true, flags: LEFTDOWN, scan: 0 }],
+            "the next press must REACH the OS, not be swallowed as a duplicate"
+        );
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_delivered_press_is_deduped_until_it_is_released() {
+        // POSITIVE CONTROL for the test above: the rig can see a press being
+        // swallowed, because a genuinely held button's repeat IS swallowed.
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[true, true]);
+        inject(ControlInput::Down { button: 0 }).expect("press");
+        assert_eq!(send_seam::take_sent().len(), 1);
+        inject(ControlInput::Down { button: 0 }).expect("repeat");
+        assert!(send_seam::take_sent().is_empty(), "a repeat of a held press must not reach the OS");
+        inject(ControlInput::Up { button: 0 }).expect("release");
+        assert_eq!(send_seam::take_sent(), vec![send_seam::Sent { mouse: true, flags: LEFTUP, scan: 0 }]);
+        inject(ControlInput::Up { button: 0 }).expect("stray release");
+        assert!(send_seam::take_sent().is_empty(), "a release for nothing held is dropped");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_key_press_is_not_remembered_either() {
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[false, false]);
+        assert!(inject(ControlInput::Key { code: "KeyA".into(), down: true }).is_err());
+        send_seam::take_sent();
+        assert_eq!(super::injected_inputs_held(), 0);
+
+        send_seam::script(&[true]);
+        inject(ControlInput::Key { code: "KeyA".into(), down: true }).expect("delivered");
+        let sent = send_seam::take_sent();
+        assert_eq!(sent.len(), 1, "the next key press must reach the OS: {sent:?}");
+        assert!(!sent[0].mouse && sent[0].flags & KEYUP == 0 && sent[0].scan != 0, "{sent:?}");
+        // Positive control: now it IS held, and a repeat is deduped.
+        inject(ControlInput::Key { code: "KeyA".into(), down: true }).expect("repeat");
+        assert!(send_seam::take_sent().is_empty());
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_twins_are_both_pressed_through_the_seam() {
+        // Delete is E0 53 and the numpad point is 53: held by the packed
+        // identity, holding one must not swallow the other.
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[true, true]);
+        inject(ControlInput::Key { code: "Delete".into(), down: true }).expect("Delete");
+        inject(ControlInput::Key { code: "NumpadDecimal".into(), down: true }).expect("numpad .");
+        let sent = send_seam::take_sent();
+        assert_eq!(sent.len(), 2, "both twins must reach the OS: {sent:?}");
+        clean_slate();
+    }
+
+    // --- release_all reaches the desktop that owns input -------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn release_all_follows_the_input_desktop_and_retries_a_refused_release() {
+        // THE DEFECT: teardown sent its releases with a bare send, no follow,
+        // so on the lock screen they were refused while the lists were
+        // drained — a button left down on Winlogon.
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[true]);
+        inject(ControlInput::Down { button: 0 }).expect("press");
+        send_seam::take_sent();
+
+        send_seam::script(&[false, true]); // refused on the old desktop, accepted after the follow
+        release_all();
+        assert_eq!(send_seam::follows(), 1, "a refused release must follow the input desktop");
+        assert_eq!(
+            send_seam::take_sent(),
+            vec![
+                send_seam::Sent { mouse: true, flags: LEFTUP, scan: 0 },
+                send_seam::Sent { mouse: true, flags: LEFTUP, scan: 0 },
+            ],
+            "and the release must be sent again there"
+        );
+        assert_eq!(super::injected_inputs_held(), 0);
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn release_all_sends_once_and_follows_nothing_when_the_release_lands() {
+        // POSITIVE CONTROL: the follow above is a response to the refusal,
+        // not something release_all does unconditionally.
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[true]);
+        inject(ControlInput::Key { code: "KeyB".into(), down: true }).expect("press");
+        send_seam::take_sent();
+        send_seam::script(&[true]);
+        release_all();
+        assert_eq!(send_seam::follows(), 0);
+        let sent = send_seam::take_sent();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].flags & KEYUP != 0, "a release, not a press: {sent:?}");
+        clean_slate();
+    }
+
+    // --- the lock-screen log line's arithmetic ------------------------------
+
+    #[test]
+    fn the_requested_pixel_is_the_target_rect_or_the_primary() {
+        // A portrait screen left of and above the primary: negative origin.
+        let t = TargetMonitor {
+            left: -1440, top: -707, width: 1440, height: 2560,
+            virt_left: -1440, virt_top: -707, virt_width: 5440, virt_height: 2564,
+        };
+        assert_eq!(requested_pixel(0.0, 0.0, Some(t), (2560, 1440)), (-1440, -707));
+        assert_eq!(requested_pixel(0.5, 0.5, Some(t), (2560, 1440)), (-720, 573));
+        assert_eq!(requested_pixel(2.0, -1.0, Some(t), (2560, 1440)), (0, -707), "clamped like the move");
+        // No target (or a degenerate one): the primary, as move_abs falls back.
+        assert_eq!(requested_pixel(0.5, 0.5, None, (2560, 1440)), (1280, 720));
+        let flat = TargetMonitor { virt_width: 0, ..t };
+        assert_eq!(requested_pixel(1.0, 1.0, Some(flat), (2560, 1440)), (2560, 1440));
+        assert_eq!(requested_pixel(f64::NAN, 0.5, None, (100, 100)), (0, 50));
+    }
+
+    #[cfg(windows)]
+    fn abs_of(i: &windows::Win32::UI::Input::KeyboardAndMouse::INPUT) -> (i32, i32, u32) {
+        // SAFETY: move_abs builds a mouse INPUT; `mi` is the member it wrote.
+        unsafe { (i.Anonymous.mi.dx, i.Anonymous.mi.dy, i.Anonymous.mi.dwFlags.0) }
+    }
+
+    /// The targets the two mapping tests share: a portrait screen left of and
+    /// above the primary (negative origin), the primary inside that desktop,
+    /// a screen right of the primary and offset down, and none at all.
+    #[cfg(windows)]
+    fn mapping_targets() -> [Option<TargetMonitor>; 4] {
+        let portrait = TargetMonitor {
+            left: -1440, top: -707, width: 1440, height: 2560,
+            virt_left: -1440, virt_top: -707, virt_width: 5440, virt_height: 2564,
+        };
+        [
+            Some(portrait),
+            Some(TargetMonitor { left: 0, top: 0, width: 2560, height: 1440, ..portrait }),
+            Some(TargetMonitor {
+                left: 2560, top: 100, width: 1920, height: 1080,
+                virt_left: 0, virt_top: 0, virt_width: 4480, virt_height: 1440,
+            }),
+            None,
+        ]
+    }
+
+    #[cfg(windows)]
+    const MAPPING_POINTS: [(f64, f64); 5] = [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (0.123, 0.987), (2.0, -1.0)];
+
+    /// NO BEHAVIOUR CHANGE from sharing the mapping: these are the values the
+    /// injection produced BEFORE `pixel_on_target` existed, recorded from
+    /// that code, for every target and point above. Building the INPUT sends
+    /// nothing; only `win::send` reaches the OS.
+    #[cfg(windows)]
+    #[test]
+    fn move_abs_maps_exactly_as_it_did_before_the_mapping_was_shared() {
+        let golden: [[(i32, i32); 5]; 4] = [
+            [(0, 0), (8675, 32729), (17351, 65458), (2134, 64607), (17351, 0)],
+            [(17351, 18078), (32774, 36488), (48196, 54898), (21145, 54419), (48196, 18078)],
+            [(37457, 4554), (51503, 29147), (65535, 53740), (40912, 53100), (65535, 4554)],
+            [(0, 0), (32768, 32768), (65535, 65535), (8061, 64683), (65535, 0)],
+        ];
+        for (t, want) in mapping_targets().into_iter().zip(golden) {
+            for ((x, y), want) in MAPPING_POINTS.into_iter().zip(want) {
+                let (dx, dy, flags) = abs_of(&win::move_abs(x, y, t));
+                assert_eq!((dx, dy), want, "target {t:?} at ({x},{y})");
+                let virtualdesk = flags & 0x4000 != 0;
+                assert_eq!(virtualdesk, t.is_some(), "only a target maps onto the virtual desktop");
+            }
+        }
+    }
+
+    /// THE LOG LINE AND THE INJECTION AGREE. Take what `move_abs` actually
+    /// asked Windows for, map it back to a pixel, and it must be the pixel
+    /// `requested_pixel` reports (within the 65535-step quantisation).
+    #[cfg(windows)]
+    #[test]
+    fn requested_pixel_is_where_move_abs_actually_aims() {
+        let primary = (2560, 1440);
+        for t in mapping_targets() {
+            for (x, y) in MAPPING_POINTS {
+                let (dx, dy, _) = abs_of(&win::move_abs(x, y, t));
+                let (rx, ry) = requested_pixel(x, y, t, primary);
+                let (bx, by) = match t {
+                    Some(m) => (
+                        m.virt_left as f64 + dx as f64 * (m.virt_width as f64 - 1.0) / 65535.0,
+                        m.virt_top as f64 + dy as f64 * (m.virt_height as f64 - 1.0) / 65535.0,
+                    ),
+                    None => (dx as f64 * primary.0 as f64 / 65535.0, dy as f64 * primary.1 as f64 / 65535.0),
+                };
+                assert!(
+                    (bx - rx as f64).abs() <= 1.0 && (by - ry as f64).abs() <= 1.0,
+                    "target {t:?} at ({x},{y}): injection aims at ({bx:.2},{by:.2}), the log says ({rx},{ry})"
+                );
+            }
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn the_text_path_goes_through_the_desktop_following_retry() {
@@ -1177,7 +1914,8 @@ mod tests {
         // Scoped to ONLY the non-test half of the file — a self-scan that also
         // reads the test module would find this very assertion's own source
         // text and pass regardless of what the real code does.
-        let src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let src = non_test_source();
+        let src = src.as_str();
         let arm_start = src.find("ControlInput::Text { text } =>").expect("the Text arm");
         let arm = &src[arm_start..arm_start + 1100];
         assert!(
@@ -1620,6 +2358,44 @@ mod tests {
         }
     }
 
+    /// The held count is what the hotkey poll trusts to refuse a press it did
+    /// not see a hook for, so it has to move with every press and release that
+    /// reaches the OS, and `release_all` has to zero it. Driven through the
+    /// real `inject` over the send seam — this used to be a source scan,
+    /// because the only behavioural alternative was a real `SendInput`.
+    #[cfg(windows)]
+    #[test]
+    fn the_held_count_moves_with_every_press_and_release() {
+        let _g = serial();
+        clean_slate();
+        send_seam::script(&[true, true, true, true]);
+        inject(ControlInput::Down { button: 0 }).expect("press");
+        inject(ControlInput::Key { code: "KeyA".into(), down: true }).expect("key press");
+        assert_eq!(super::injected_inputs_held(), 2);
+        inject(ControlInput::Up { button: 0 }).expect("release");
+        assert_eq!(super::injected_inputs_held(), 1);
+        inject(ControlInput::Key { code: "KeyA".into(), down: false }).expect("key release");
+        assert_eq!(super::injected_inputs_held(), 0);
+
+        // And a teardown zeroes it, even with a press still recorded.
+        send_seam::script(&[true, true]);
+        inject(ControlInput::Down { button: 2 }).expect("press");
+        assert_eq!(super::injected_inputs_held(), 1);
+        release_all();
+        assert_eq!(super::injected_inputs_held(), 0);
+        send_seam::take_sent();
+    }
+
+    #[test]
+    fn the_held_count_starts_at_zero() {
+        // Not a tautology: it is read by another crate as "is a remote
+        // controller holding anything right now", and a non-zero start would
+        // mute that crate's fallback until the first release_all. Serialised
+        // with the seam tests, which press things and clean up after.
+        let _g = serial();
+        assert_eq!(super::injected_inputs_held(), 0);
+    }
+
     /// `inject` really does track held keys by the PACKED identity.
     ///
     /// THE GAP THIS CLOSES WAS FOUND BY BREAKING THE CODE AND WATCHING THE SUITE
@@ -1630,57 +2406,15 @@ mod tests {
     /// `release_all` then lifts the wrong one, leaving a key down on somebody
     /// else's machine — and every test still passed.
     ///
-    /// Scanned from source because the alternative is driving `inject` for real,
-    /// which presses keys into whatever window has focus. Scoped to the non-test
+    /// Scanned from source (the behavioural twin, through the send seam, is
+    /// `the_twins_are_both_pressed_through_the_seam`). Scoped to the non-test
     /// half of the file: a scan that also read this module would find this
     /// assertion's own text and pass whatever the real code does.
-    /// The held count is what the hotkey poll trusts to refuse a press it
-    /// did not see a hook for, so it has to move at every site that touches
-    /// the two pressed lists, and `release_all` has to zero it.
-    ///
-    /// Read from the source ABOVE the test module (the same trick the test
-    /// below uses), so this cannot pass by matching its own assertion text.
-    /// It is a source check because the only behavioural alternative is
-    /// calling `inject`, which on Windows is a real `SendInput` — a test that
-    /// types into whatever window happens to be focused.
-    #[cfg(windows)]
-    #[test]
-    fn the_held_count_moves_with_every_pressed_list_mutation() {
-        let src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap().replace('\r', "");
-        let arm_start = src.find("ControlInput::Key { code, down } =>").expect("the Key arm");
-        let arm = &src[arm_start..arm_start + 1500];
-        let push = arm.find("keys.push(held_key);").expect("the press no longer records the key");
-        let add = arm.find("INJECT_HELD.fetch_add").expect("a tracked key press no longer raises the held count");
-        let remove = arm.find("keys.swap_remove(pos);").expect("the release no longer forgets the key");
-        let sub = arm.find("INJECT_HELD.fetch_sub").expect("a tracked key release no longer lowers the held count");
-        assert!(push < add && add < remove && remove < sub, "the count moved to the wrong arm: {arm}");
-
-        let rel = src.find("pub fn release_all() {").expect("release_all");
-        assert!(
-            src[rel..rel + 400].contains("INJECT_HELD.store(0"),
-            "release_all no longer zeroes the held count, so a half-failed teardown mutes the hotkey poll forever"
-        );
-
-        let btn = src.find("// Dedupe: ignore a press for an already-held button.").expect("the button arm");
-        assert_eq!(
-            src[btn..btn + 900].matches("INJECT_HELD.fetch_").count(),
-            2,
-            "a button press or release stopped moving the held count"
-        );
-    }
-
-    #[test]
-    fn the_held_count_starts_at_zero() {
-        // Not a tautology: it is read by another crate as "is a remote
-        // controller holding anything right now", and a non-zero start would
-        // mute that crate's fallback until the first release_all.
-        assert_eq!(super::injected_inputs_held(), 0);
-    }
-
     #[cfg(windows)]
     #[test]
     fn the_key_arm_tracks_held_keys_by_the_packed_identity() {
-        let src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let src = non_test_source();
+        let src = src.as_str();
         let arm_start = src.find("ControlInput::Key { code, down } =>").expect("the Key arm");
         let arm = &src[arm_start..arm_start + 1500];
         assert!(

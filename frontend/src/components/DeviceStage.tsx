@@ -58,6 +58,7 @@ import {
 import { installBackgroundResume } from './deviceStageResume';
 import { installStallWatchdog } from './deviceStageStall';
 import { TouchGestures } from '../api/devices/touchGestures';
+import { stageInputDiagnostics, type StageInputState } from '../api/devices/stageInputDiag';
 import { isMobile as isNativeMobile } from '../api/platform';
 import { computeRmoveScale } from '../api/remoteControl';
 import {
@@ -112,6 +113,21 @@ function gestureSurface(v: HTMLVideoElement, scale: number): { dispW: number; di
 
 /** A touch device, whatever its current width or orientation. */
 const COARSE_POINTER_QUERY = '(pointer: coarse)';
+
+/**
+ * Let go of every button a contact recorded pressing (touch mode, and the
+ * desktop mouse outside game mode), each button once, and forget them.
+ *
+ * The RECORDED button, never an assumed one: this used to send `up` for
+ * button 0 whatever had been pressed, and the same record serves the desktop
+ * mouse, so a right or middle button held when the window lost focus stayed
+ * down on the host — the late pointerup then found nothing recorded and
+ * released nothing either.
+ */
+function releaseRecordedPresses(pressed: Map<number, number>, send: (event: unknown) => void): void {
+    for (const button of new Set(pressed.values())) send({ t: 'up', button });
+    pressed.clear();
+}
 
 function detectCoarsePointer(): boolean {
     // The Capacitor app is authoritative about itself; the media query covers a
@@ -269,6 +285,11 @@ function readVirtualMousePreference(): boolean {
  * APK has — a phone cannot reach chrome://inspect.
  */
 const caretDiag: { read: () => Record<string, unknown> } = { read: () => ({ active: false }) };
+/** The stage's POINTER state, for the same two routes and for the same reason:
+ *  only the stage knows the mouse mode, the trackpad machine's phase and
+ *  whether this end is drawing the pointer — see stageInputDiag.ts for what
+ *  each field rules in or out. `null` while no stage is mounted. */
+const stageInputDiag: { read: () => Record<string, unknown> | null } = { read: () => null };
 if (typeof window !== 'undefined') {
     const w = window as unknown as Record<string, unknown>;
     const base = w.__pucaDeviceDiag as (() => Promise<Record<string, unknown>[]>) | undefined;
@@ -276,7 +297,8 @@ if (typeof window !== 'undefined') {
         w.__pucaDeviceDiag = async () => {
             const rows = await base();
             const caret = caretDiag.read();
-            return rows.map(r => ({ ...r, caret }));
+            const stageInput = stageInputDiag.read();
+            return rows.map(r => ({ ...r, caret, stageInput }));
         };
     }
 }
@@ -414,9 +436,10 @@ export function DeviceStage() {
     useEffect(() => { transformRef.current = transform; }, [transform]);
     const activePointers = useRef<Map<number, React.PointerEvent>>(new Map());
     const lastPinchInfo = useRef<{ dist: number; center: { x: number; y: number } } | null>(null);
-    /** TOUCH mode: which contacts actually pressed a button, so only those
-     *  release one. */
-    const touchDownSent = useRef<Set<number>>(new Set());
+    /** TOUCH mode and the desktop mouse: which contacts actually pressed a
+     *  button, and WHICH button, so only those release one and each releases
+     *  the button it pressed. pointerId -> button. */
+    const touchDownSent = useRef<Map<number, number>>(new Map());
 
     // WHY A SESSION ENDED, kept after the session object is gone.
     //
@@ -656,6 +679,15 @@ export function DeviceStage() {
         if (document.pointerLockElement) document.exitPointerLock();
     }, []);
 
+    // THE TRACKPAD.
+    //
+    // ONE machine for the life of the stage: it owns three timers and the
+    // pointer position, so rebuilding it would drop a gesture mid-drag. It is
+    // created empty and WIRED UP in an effect, so nothing it needs is read
+    // during a render. Declared ABOVE the release-everything effect below,
+    // which has to reach it.
+    const [gestures] = useState(() => new TouchGestures());
+
     // Release everything we are holding on the host when input can no longer
     // reach us (alt-tab mid-press would otherwise leave the host's button or
     // key held). Keyed on the session id ALONE, through sendRef: with `send`
@@ -670,6 +702,26 @@ export function DeviceStage() {
             padPressedRef.current.clear();
             for (const code of heldKeysRef.current) sendRef.current({ t: 'key', code, down: false });
             heldKeysRef.current.clear();
+            // THE TRACKPAD MACHINE TOO. A gesture interrupted by the app going
+            // away never gets its pointerup, and the machine keeps its own map
+            // of fingers: one left behind mid-pinch meant every later
+            // one-finger drag counted as a second finger, so the machine sat
+            // in 'pinch' and dropped every move until the mode was toggled.
+            // Cancelling releases a drag's button only if one was pressed.
+            gestures.cancel();
+            // AND THE STAGE'S OWN MAP OF FINGERS, or the two disagree: the
+            // machine forgot the stranded finger while the stage still
+            // counted it, so every later one-finger drag pinch-zoomed the
+            // picture as the pointer moved, and in touch mode a tap arrived
+            // as a second contact and was swallowed (an up, and no down).
+            // A contact that pressed a button releases THAT button first,
+            // exactly as the mode switch does — the desktop mouse shares this
+            // record, so it may be the right or middle button. A finger
+            // really still down is safe to forget: its later moves and up are
+            // no-ops for an id the map does not hold.
+            releaseRecordedPresses(touchDownSent.current, sendRef.current);
+            activePointers.current.clear();
+            lastPinchInfo.current = null;
             // A gesture interrupted by the app going away never gets its
             // pointerup; the chrome margins it froze must not stay frozen.
             setChromeFrozen(null);
@@ -682,7 +734,7 @@ export function DeviceStage() {
             document.removeEventListener('visibilitychange', onVisibility);
             releaseAll(); // ending the session must not strand a held button
         };
-    }, [sessionActiveId]);
+    }, [sessionActiveId, gestures]);
 
     const adjustFpsSens = (delta: number) => {
         setFpsSens(s => {
@@ -692,13 +744,6 @@ export function DeviceStage() {
         });
     };
 
-    // THE TRACKPAD.
-    //
-    // ONE machine for the life of the stage: it owns three timers and the
-    // pointer position, so rebuilding it would drop a gesture mid-drag. It is
-    // created empty and WIRED UP in an effect, so nothing it needs is read
-    // during a render.
-    const [gestures] = useState(() => new TouchGestures());
 
     // FOLLOW THE CURSOR while zoomed in (trackpad mode): solve, on EVERY move,
     // for the pan that puts the pointer at the centre of the viewport — the
@@ -832,10 +877,7 @@ export function DeviceStage() {
         // the other mode will not release a button it does not know about — so
         // switching with a finger down stranded it down on the remote machine,
         // which then drag-selects everything the pointer passes over.
-        if (touchDownSent.current.size) {
-            send({ t: 'up', button: 0 });
-            touchDownSent.current.clear();
-        }
+        releaseRecordedPresses(touchDownSent.current, send);
         gestures.cancel();
         setIsMouseMode(next);
         try {
@@ -1043,6 +1085,25 @@ export function DeviceStage() {
             if (want) setCursorOwned(sessionActiveId, false);
         };
     }, [sessionActiveId, isMobile, isMouseMode]);
+
+    // THE POINTER HALF OF "COPY DIAGNOSTICS". Rendered state goes through a
+    // ref (the same split as the caret diagnostic below); the machine and the
+    // finger map are read LIVE at copy time, since neither renders.
+    const inputDiagStateRef = useRef<Omit<StageInputState, 'stageContacts' | 'gesture'>>({
+        isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn: false,
+    });
+    const cursorDrawn = cursorOwned && cursorAt !== null;
+    useEffect(() => {
+        inputDiagStateRef.current = { isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn };
+    }, [isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn]);
+    useEffect(() => {
+        stageInputDiag.read = () => stageInputDiagnostics({
+            ...inputDiagStateRef.current,
+            stageContacts: activePointers.current.size,
+            gesture: gestures.diag(),
+        });
+        return () => { stageInputDiag.read = () => null; };
+    }, [gestures]);
 
     // --- ZOOM FOLLOWS THE MONITOR (All Displays only) --------------------
     // The composite is integer-stepped down to fit the encoder cap
@@ -2134,7 +2195,10 @@ export function DeviceStage() {
             // APK has — so it has to be merged in here, not left to the window
             // global nobody on a phone can reach.
             const caret = caretDiag.read();
-            await navigator.clipboard.writeText(JSON.stringify(rows.map(r => ({ ...r, caret })), null, 2));
+            // Read at the END of the window, like the rows: the state the
+            // trackpad is in while they are still driving, not before.
+            const stageInput = stageInputDiag.read();
+            await navigator.clipboard.writeText(JSON.stringify(rows.map(r => ({ ...r, caret, stageInput })), null, 2));
             setClipboardNote('Diagnostics copied — paste them into the chat');
         } catch {
             // Clipboard can be refused (permission, insecure context). Say so
@@ -2308,7 +2372,10 @@ export function DeviceStage() {
             return;
         }
 
-        if (activePointers.current.size === 1) {
+        // Only the finger the map holds drives the pointer. A contact the
+        // stage has let go of (pruned, or forgotten on blur) may still be
+        // physically down; its moves must not steer the one that is live.
+        if (activePointers.current.size === 1 && activePointers.current.has(e.pointerId)) {
             const v = videoRef.current;
             if (!v) return;
 
@@ -2367,6 +2434,15 @@ export function DeviceStage() {
                 }
             }
         }
+        // AND THE MACHINE'S MAP, which the guard above never reached: the
+        // trackpad keeps its own record of fingers, so a contact pruned here
+        // stayed in it and wedged the pad in 'pinch' (see TouchGestures.prune).
+        // Measured against the map just pruned, so the machine can never
+        // believe in a finger the stage has already let go of.
+        if (isMobile && isMouseMode) {
+            const pruned = gestures.prune(id => id === e.pointerId || activePointers.current.has(id));
+            if (pruned) console.warn(`[touch] pruned ${pruned} stale trackpad contact(s)`);
+        }
         activePointers.current.set(e.pointerId, e);
         el.setPointerCapture?.(e.pointerId);
 
@@ -2395,10 +2471,9 @@ export function DeviceStage() {
             if (!p) return;
             send({ t: 'move', x: p.x, y: p.y });
             send({ t: 'down', button: e.button });
-            touchDownSent.current.add(e.pointerId);
+            touchDownSent.current.set(e.pointerId, e.button);
         } else if (activePointers.current.size === 2) {
-            send({ t: 'up', button: 0 });
-            touchDownSent.current.clear();
+            releaseRecordedPresses(touchDownSent.current, send);
         }
 
         if (activePointers.current.size === 2) {
@@ -2425,9 +2500,14 @@ export function DeviceStage() {
 
         if (isMobile && isMouseMode) {
             gestures.up({ id: e.pointerId, x: e.clientX, y: e.clientY });
-        } else if (touchDownSent.current.delete(e.pointerId)) {
-            // Only release a button this contact actually pressed.
-            send({ t: 'up', button: e.button });
+        } else {
+            // Only release a button this contact actually pressed — the one
+            // it pressed, which a chorded mouse's final pointerup may not name.
+            const pressed = touchDownSent.current.get(e.pointerId);
+            if (pressed !== undefined) {
+                touchDownSent.current.delete(e.pointerId);
+                send({ t: 'up', button: pressed });
+            }
         }
 
         if (activePointers.current.size < 2) {
@@ -2453,12 +2533,16 @@ export function DeviceStage() {
         if (isMobile && isMouseMode) {
             // The machine releases a button only if it pressed one.
             gestures.cancel({ id: e.pointerId, x: e.clientX, y: e.clientY });
-        } else if (touchDownSent.current.delete(e.pointerId)) {
+        } else {
             // WAS UNCONDITIONAL, and that was a real defect: a cancelled touch
             // that had never pressed anything still released a button on the
             // remote machine — a phantom click on whatever was under the
             // pointer, on a screen the user is not looking at.
-            send({ t: 'up', button: 0 });
+            const pressed = touchDownSent.current.get(e.pointerId);
+            if (pressed !== undefined) {
+                touchDownSent.current.delete(e.pointerId);
+                send({ t: 'up', button: pressed });
+            }
         }
         if (isMobile && activePointers.current.size === 0) setChromeFrozen(null);
         (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
@@ -2645,10 +2729,7 @@ export function DeviceStage() {
                             // mid-hold stranded a button down on the host.
                             for (const button of fpsPressedRef.current) send({ t: 'up', button });
                             fpsPressedRef.current.clear();
-                            if (touchDownSent.current.size) {
-                                send({ t: 'up', button: 0 });
-                                touchDownSent.current.clear();
-                            }
+                            releaseRecordedPresses(touchDownSent.current, send);
                             setFpsMode(f => { saveFpsMode(!f); return !f; });
                         }}
                         title="Game mode: relative mouse (pointer lock) for games that read raw input"

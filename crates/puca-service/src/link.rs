@@ -650,6 +650,9 @@ pub async fn run_socket(
 
     let mut attested = false;
     let mut last_wake: Option<(String, std::time::Instant)> = None;
+    // When an "[link] input refused" line was last written: see
+    // `input_refusal_log_due`.
+    let mut last_input_refusal_log: Option<std::time::Instant> = None;
     // The one live session, if any. See relay.rs: a second would collide inside
     // the agent, and the collision would arrive AFTER the controller had been
     // told it was accepted.
@@ -884,7 +887,9 @@ pub async fn run_socket(
                 if let Err(e) =
                     with_agent(&conn, move |c| crate::relay::relay_input(c, &sid, &ev)).await
                 {
-                    crate::log::line(&format!("[link] input refused: {e}"));
+                    if input_refusal_log_due(&mut last_input_refusal_log, std::time::Instant::now()) {
+                        crate::log::line(&format!("[link] input refused: {e}"));
+                    }
                 }
             }
 
@@ -910,6 +915,25 @@ pub async fn run_socket(
         }
     }
     Ok(())
+}
+
+/// Whether an "[link] input refused" line may be written at `now`: the first
+/// always, then at most one a second.
+///
+/// ONE LINE PER REFUSED EVENT was a count of refused keystrokes at the sign-in
+/// screen, in a log this file's own header calls world-readable — a PIN's
+/// length, with a timestamp per digit. (The agent no longer names the event's
+/// kind in the reply either; see `without_event_kind` in puca-input.) The
+/// first line stays: it is the evidence that input was being refused at all.
+fn input_refusal_log_due(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    let due = match *last {
+        None => true,
+        Some(t) => now.saturating_duration_since(t) >= Duration::from_secs(1),
+    };
+    if due {
+        *last = Some(now);
+    }
+    due
 }
 
 /// Ignore a repeat wake for the same MAC inside this window. A user tapping the
@@ -1611,6 +1635,18 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_burst_of_refused_input_writes_one_line_a_second() {
+        let t0 = std::time::Instant::now();
+        let mut last = None;
+        let written = (0..8u64)
+            .filter(|i| input_refusal_log_due(&mut last, t0 + Duration::from_millis(i * 100)))
+            .count();
+        assert_eq!(written, 1, "a PIN's worth of refusals must read like one");
+        assert!(input_refusal_log_due(&mut last, t0 + Duration::from_secs(1)), "the next second's is written");
+        assert!(!input_refusal_log_due(&mut last, t0 + Duration::from_millis(1_500)));
+    }
 
     fn jwt(claims: serde_json::Value) -> String {
         use base64::Engine;

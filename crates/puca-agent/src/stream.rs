@@ -1072,6 +1072,15 @@ fn run(
     let mut caret_channel: Option<str0m::channel::ChannelId> = None;
     // R4: the controller's direct input channel, learned from ChannelOpen.
     let mut input_channel_id: Option<str0m::channel::ChannelId> = None;
+    // What that channel delivered, by kind, logged about once a second while
+    // it flows ("[input-rx] lane=channel ..."): the only host-side record of
+    // input that ARRIVED and was accepted, rather than refused.
+    let mut input_tally = crate::input_tally::InputTally::new("channel");
+    // A refused frame or injection on this channel is logged at most once a
+    // second, the first always, and an injection's without its kind
+    // (`session::inject_failure_line`): one line per refused keystroke
+    // counted a PIN on the sign-in screen.
+    let mut inject_error_log = puca_input::log_privacy::LineGate::per_second();
     // `Some` = a viewer has asked for caret reports. Dropping the tracker
     // releases this session's claim on the process-wide sampler; it is a local
     // in `run()`, so a returning stream releases it with no teardown step.
@@ -1893,11 +1902,19 @@ fn run(
                                 // attended session ALL of its input in 0.8.121.
                                 // The controller now waits for the sealed hello
                                 // this stream only sends when it can serve.
+                                //
+                                // Every refusal on this channel, before or after
+                                // decryption, shares ONE gate: a line per refused
+                                // frame is a count of the keystrokes in them.
                                 match input_channel.as_ref() {
-                                    None => eprintln!(
-                                        "[stream] input frame on a session with no agent-held key \
-                                         — dropped; the controller should still be on the relay"
-                                    ),
+                                    None => {
+                                        if inject_error_log.admit(std::time::Instant::now()) {
+                                            eprintln!(
+                                                "[stream] input frame on a session with no agent-held key \
+                                                 — dropped; the controller should still be on the relay"
+                                            );
+                                        }
+                                    }
                                     Some(ch) => match crate::input_wire::accept_frame(
                                         ch, &frame,
                                         |k, p| crate::control_key::open(k, p),
@@ -1907,19 +1924,34 @@ fn run(
                                                 &event_json,
                                             ) {
                                                 Ok(ev) => {
-                                                    if let Err(e) = crate::session::dispatch_input_public(ev) {
-                                                        eprintln!("[stream] input inject failed: {e}");
+                                                    if let Err(e) = crate::session::dispatch_input_counted(
+                                                        &mut input_tally, ev,
+                                                    ) {
+                                                        if let Some(line) = crate::session::inject_failure_line(
+                                                            &mut inject_error_log,
+                                                            "[stream] input inject failed:",
+                                                            &e,
+                                                            std::time::Instant::now(),
+                                                        ) {
+                                                            eprintln!("{line}");
+                                                        }
                                                     }
                                                 }
-                                                Err(_) => eprintln!(
-                                                    "[stream] input frame refused: {}",
-                                                    crate::input_wire::InputReject::NotAnEvent.describe()
-                                                ),
+                                                Err(_) => {
+                                                    if inject_error_log.admit(std::time::Instant::now()) {
+                                                        eprintln!(
+                                                            "[stream] input frame refused: {}",
+                                                            crate::input_wire::InputReject::NotAnEvent.describe()
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
-                                        Err(why) => eprintln!(
-                                            "[stream] input frame refused: {}", why.describe()
-                                        ),
+                                        Err(why) => {
+                                            if inject_error_log.admit(std::time::Instant::now()) {
+                                                eprintln!("[stream] input frame refused: {}", why.describe());
+                                            }
+                                        }
                                     },
                                 }
                                 continue;

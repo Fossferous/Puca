@@ -225,6 +225,23 @@ describe('input coalescing', () => {
         expect(r.emitted).toEqual([move(0.3, 0.3)]);
     });
 
+    it('counts, for the diagnostics, the motion offered while the gate was closed and nothing else', () => {
+        let gateOpen = true;
+        const emitted: unknown[] = [];
+        const c = new InputCoalescer(e => emitted.push(e), {
+            now: () => 0, schedule: () => 0 as unknown as ReturnType<typeof setTimeout>, cancel: () => { /* none */ },
+        }, () => gateOpen);
+        c.push(move(0.1, 0.1));                 // open: not held
+        expect(c.motionHeld()).toBe(0);
+        gateOpen = false;
+        c.push(move(0.2, 0.2));
+        c.push({ t: 'rmove', dx: 1, dy: 1 });
+        c.push({ t: 'key', code: 'KeyA', down: true });   // state events pass the gate
+        c.push({ t: 'down', button: 0 });
+        expect(c.motionHeld(), 'one move and one rmove, and no state event').toBe(2);
+        expect(new InputCoalescer(() => { /* none */ }).motionHeld(), 'no gate, nothing ever held').toBe(0);
+    });
+
     it('passes anything it does not understand straight through', () => {
         const r = rig();
         const clip = { t: 'clip', data: 'hello' };

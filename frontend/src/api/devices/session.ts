@@ -158,14 +158,35 @@ export const LOCK_HANDOVER_REASON = 'console-locked-handover';
 /** The end-reason the host sends BEFORE shutting down on request. */
 export const SHUTDOWN_REASON = 'the device is shutting down';
 
-/** Events per second over a rolling window, for the diagnostics. */
+/** The input kinds the diagnostic counts by name. Anything else is 'other':
+ *  the wire's `t` is the peer's own string, and a diagnostic must never turn
+ *  an arbitrary one into a key of its output. */
+const INPUT_KINDS = new Set(['move', 'rmove', 'down', 'up', 'wheel', 'key', 'text', 'sas', 'clipboard']);
+
+/** Events per second over a rolling window, for the diagnostics — plus what
+ *  KIND each one was and which lane it took, cumulatively.
+ *
+ *  THE KINDS ARE THE POINT for a report like "the mouse does nothing but the
+ *  keyboard works". A total says the phone is sending; only the split says
+ *  whether it is sending MOVES, or only the keys that did land. Cumulative so
+ *  `deviceDiagnosticsWindow` can take the difference across the window the
+ *  user was actually driving in. */
 class RateCounter {
     private times: number[] = [];
-    tick(): void {
+    readonly byKind: Record<string, number> = {};
+    total = 0;
+    /** The transport the most recent event took. */
+    lane: 'channel' | 'relay' | null = null;
+    tick(event?: unknown, lane?: 'channel' | 'relay'): void {
         const now = Date.now();
         this.times.push(now);
         if (this.times.length > 512) this.times.splice(0, this.times.length - 512);
         while (this.times.length && now - this.times[0] > 1000) this.times.shift();
+        const t = (event as { t?: unknown } | null | undefined)?.t;
+        const kind = typeof t === 'string' && INPUT_KINDS.has(t) ? t : 'other';
+        this.byKind[kind] = (this.byKind[kind] ?? 0) + 1;
+        this.total++;
+        if (lane) this.lane = lane;
     }
     rate(): number {
         const now = Date.now();
@@ -2746,10 +2767,33 @@ export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string
         return out;
     };
 
+    // Input is counted apart from the media stats: it needs no pc, and a
+    // session whose getStats is failing is exactly one where "was the phone
+    // even sending?" still has to be answerable.
+    const inputSnap = () => {
+        const out = new Map<string, InputSnapshot>();
+        for (const s of sessions.values()) {
+            if (s.role !== 'controller') continue;
+            out.set(s.id, {
+                total: s.inputRate.total,
+                byKind: { ...s.inputRate.byKind },
+                motionHeld: s.sendCoalescer?.motionHeld() ?? 0,
+                at: Date.now(),
+            });
+        }
+        return out;
+    };
+
+    const inputBefore = inputSnap();
     const before = await raw();
     await new Promise(r => setTimeout(r, ms));
     const after = await raw();
-    const rows = await deviceDiagnostics();
+    const inputAfter = inputSnap();
+    const rows = (await deviceDiagnostics()).map(row => {
+        const i0 = inputBefore.get(String(row.id));
+        const i1 = inputAfter.get(String(row.id));
+        return i0 && i1 ? { ...row, ...inputWindow(i0, i1) } : row;
+    });
 
     return rows.map(row => {
         const id = String(row.id);
@@ -2773,6 +2817,43 @@ export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string
     });
 }
 
+/** The cumulative input counters `deviceDiagnosticsWindow` samples twice. */
+export interface InputSnapshot {
+    total: number;
+    byKind: Record<string, number>;
+    /** Motion offered while the coalescer's gate was closed (0 when absent). */
+    motionHeld?: number;
+    at: number;
+}
+
+/**
+ * Input sent across a diagnostic window: per second overall, and a count per
+ * kind. The window is the five seconds the user was asked to KEEP DRIVING, so
+ * a zero `move` here while they dragged a finger is the phone not sending —
+ * not a still desktop, and not a reading taken while they reached for the
+ * menu (which is what the one-second `inputSentPerSecond` beside it measures).
+ *
+ * `windowMotionHeldByGate` is the other half of that question: moves the
+ * phone DID produce and held back because the lane's send buffer was over
+ * the high-water mark. Keys pass that gate; motion does not.
+ */
+export function inputWindow(
+    a: InputSnapshot,
+    b: InputSnapshot,
+): { windowInputPerSecond: number; windowInputByKind: Record<string, number>; windowMotionHeldByGate: number } {
+    const secs = Math.max((b.at - a.at) / 1000, 0.001);
+    const byKind: Record<string, number> = {};
+    for (const [k, n] of Object.entries(b.byKind)) {
+        const d = n - (a.byKind[k] ?? 0);
+        if (d > 0) byKind[k] = d;
+    }
+    return {
+        windowInputPerSecond: Math.round(((b.total - a.total) / secs) * 10) / 10,
+        windowInputByKind: byKind,
+        windowMotionHeldByGate: Math.max(0, (b.motionHeld ?? 0) - (a.motionHeld ?? 0)),
+    };
+}
+
 export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
     const out: Record<string, unknown>[] = [];
     for (const s of sessions.values()) {
@@ -2784,6 +2865,40 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
             monitor: s.activeMonitor,
             captureSize: s.captureSize,
             inputSentPerSecond: s.inputRate.rate(),
+            // WHAT KIND of input, and which way it went. "The mouse does nothing
+            // but the PIN went in" is two different faults depending on
+            // whether this shows moves leaving the phone: none means the
+            // phone never sent them (the trackpad's own state — see the
+            // stage's `stageInput` beside this row); plenty means they left
+            // and the question is on the host. Counts are cumulative for the
+            // session; the window variant reports the difference.
+            inputSentTotal: s.inputRate.total,
+            inputSentByKind: { ...s.inputRate.byKind },
+            inputLane: s.inputRate.lane,
+            // THE MOTION GATE, the other way "keys work, the mouse does not"
+            // happens: over a congested path (a relayed, slow link) the lane's
+            // send buffer passes the high-water mark, and the coalescer HOLDS
+            // motion while keys and clicks still go out. `motionGateOpen:
+            // false` with a large buffer is that, now; `motionHeldByGate` is
+            // how many moves it has held this session (the window variant
+            // reports the difference).
+            ...(() => {
+                // A diagnostic must never be the thing that throws.
+                try {
+                    const m = motionLaneState(s);
+                    return { motionLane: m.lane, motionLaneBufferedAmount: m.bufferedAmount, motionGateOpen: m.open };
+                } catch {
+                    return { motionLane: null, motionLaneBufferedAmount: null, motionGateOpen: null };
+                }
+            })(),
+            motionHeldByGate: s.sendCoalescer?.motionHeld() ?? 0,
+            // Whether this end DRAWS the pointer. The host stops drawing its
+            // own once it acks ownership, so `true` with no dot on the picture,
+            // or `false` in trackpad mode (a lost ack: nobody draws one), are
+            // both "the pointer is invisible", which reads exactly like "the
+            // mouse does not work".
+            cursorOwned: s.cursorOwned,
+            cursorOwnerPending: s.pendingCursorOwner,
             // THE CARET PATH, in one line each. `caretChannel: 'open'` with
             // `caretCapable: false` is the whole old-agent story: the SCTP
             // stream opened and nothing ever came back, so the stage is running
@@ -3292,6 +3407,22 @@ export function sendInput(sessionId: string, event: unknown): boolean {
  *  State events (down/up/key/wheel) always pass. */
 const WS_MOTION_HIGH_WATER_BYTES = 64 * 1024;
 
+/** The transport MOTION is taking right now, how full its send buffer is, and
+ *  so whether the coalescer's motion gate is open. ONE function for both the
+ *  gate and "Copy diagnostics", so the report can never describe a different
+ *  lane or threshold from the one actually holding motion back. */
+function motionLaneState(s: Internal): { lane: 'channel' | 'relay'; bufferedAmount: number; open: boolean } {
+    // Backpressure from the transport motion is ACTUALLY taking. Read off the
+    // socket while the direct channel carries the frames, this held motion on
+    // a queue that was not the one filling up — and, worse, let a stalled
+    // socket throttle a healthy channel.
+    const lane = inputChannelUsable(s) ? 'channel' : 'relay';
+    const bufferedAmount = lane === 'channel'
+        ? (s.inputChannel?.bufferedAmount ?? 0)
+        : wsClient.bufferedAmount();
+    return { lane, bufferedAmount, open: bufferedAmount <= WS_MOTION_HIGH_WATER_BYTES };
+}
+
 /** The send-side coalescer for a session, created on first use. */
 function sendCoalescer(s: Internal): InputCoalescer {
     if (!s.sendCoalescer) {
@@ -3302,13 +3433,7 @@ function sendCoalescer(s: Internal): InputCoalescer {
         s.sendCoalescer = new InputCoalescer(
             event => { void sealAndSendInput(s, event); },
             undefined,
-            // Backpressure from the transport motion is ACTUALLY taking. Read
-            // off the socket while the direct channel carries the frames, this
-            // held motion on a queue that was not the one filling up — and,
-            // worse, let a stalled socket throttle a healthy channel.
-            () => (inputChannelUsable(s)
-                ? (s.inputChannel?.bufferedAmount ?? 0) <= WS_MOTION_HIGH_WATER_BYTES
-                : wsClient.bufferedAmount() <= WS_MOTION_HIGH_WATER_BYTES),
+            () => motionLaneState(s).open,
         );
     }
     return s.sendCoalescer;
@@ -3363,7 +3488,7 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                 try {
                     dc!.send(JSON.stringify({ sid: s.id, payload: sealed }));
                     s.inputDcSeq++;
-                    s.inputRate.tick();
+                    s.inputRate.tick(event, 'channel');
                     // TELL THE HOST SOMEBODY IS DRIVING. An unattended session
                     // carries a 30-minute idle revoke, and the only thing that
                     // ever fed its clock was input arriving over the relay
@@ -3402,7 +3527,7 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
             const relaySealed = await sealControl(
                 s.key, JSON.stringify({ s: s.sendSeq++, e: event }),
             );
-            s.inputRate.tick();
+            s.inputRate.tick(event, 'relay');
             wsClient.send({ type: 'DeviceInput', payload: { session_id: s.id, event: relaySealed } });
             // Only what an inversion would actually break, and only when it
             // really took the slow path — a clipboard push or a Ctrl+Alt+Del

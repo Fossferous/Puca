@@ -72,6 +72,14 @@ export class InputCoalescer {
      *  happen, a held one is just late. */
     private readonly motionGate: (() => boolean) | null;
 
+    /** DIAGNOSTICS: motion events offered while the gate was CLOSED, since
+     *  this coalescer was made. Each one was held (and superseded or summed
+     *  into the next, unless a state event forced it out). Cumulative, so
+     *  "Copy diagnostics" can take the difference across its window: keys
+     *  pass the gate and motion does not, so "the keyboard works but the
+     *  mouse is held back" is invisible without this count. */
+    private motionHeldTotal = 0;
+
     constructor(
         emit: (event: unknown) => void,
         clock?: {
@@ -91,6 +99,9 @@ export class InputCoalescer {
     /** Offer one event. It is emitted now, later, or superseded. */
     push(event: unknown): void {
         const e = (event ?? {}) as MotionEvent;
+        if ((e.t === 'move' || e.t === 'rmove') && this.motionGate && !this.motionGate()) {
+            this.motionHeldTotal++;
+        }
 
         if (e.t === 'move') {
             this.pendingMove = event;
@@ -170,6 +181,12 @@ export class InputCoalescer {
             this.lastRmoveSent = this.now();
             this.emit({ t: 'rmove', dx, dy });
         }
+    }
+
+    /** Motion events offered while the gate was closed (see
+     *  `motionHeldTotal`). */
+    motionHeld(): number {
+        return this.motionHeldTotal;
     }
 
     /** Drop pending motion without sending it, and stop the timer.

@@ -37,6 +37,8 @@ mod caret_wire;
 mod privacy;
 mod file_transfer;
 mod input_wire;
+// Per-lane input counts for the log; ungated so every CI leg tests it.
+mod input_tally;
 mod file_log;
 
 #[cfg(windows)]
