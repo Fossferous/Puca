@@ -11,7 +11,8 @@
  * lock-screen report ("the mouse doesn't actually work").
  *
  * The machine's own tests cover prune() and cancel(); this pins the WIRING —
- * the two stage paths that must reach them.
+ * the two stage paths that must reach them — plus the "Copy diagnostics"
+ * fields that would have shown the wedge in a field capture.
  *
  * jsdom has no pointer capture, so the rig emulates it: capture is granted on
  * pointerdown and released on pointerup, and a test "loses" a finger by
@@ -205,5 +206,38 @@ describe('a trackpad left with a stranded finger', () => {
         await flush();
         await dragFinger3();
         expect(movesSent().length, 'blur must reset the trackpad machine as well as the held keys').toBeGreaterThan(0);
+    });
+});
+
+describe('"Copy diagnostics" shows the trackpad state', () => {
+    it('carries the mouse mode, the machine phase and contacts, and who draws the pointer', async () => {
+        const writeText = vi.fn(async (_t: string) => { /* accepted */ });
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+        h.diagRows = [{ id: 'ds-1', inputSentPerSecond: 0 }];
+        await mount();
+        // The wedge itself, mid-drag: what a field capture would have shown.
+        await pinchLosingFinger2();
+        await dragFinger3();
+
+        const mouseBtn = host!.querySelector<HTMLButtonElement>('button[title="Mouse"]');
+        expect(mouseBtn, 'the phone toolbar must offer the Mouse menu').toBeTruthy();
+        await act(async () => { mouseBtn!.click(); });
+        await flush();
+        const copy = Array.from(host!.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Copy diagnostics');
+        expect(copy, 'the Mouse menu must offer Copy diagnostics').toBeTruthy();
+        await act(async () => { copy!.click(); });
+        await flush();
+
+        expect(writeText).toHaveBeenCalledTimes(1);
+        const rows = JSON.parse(writeText.mock.calls[0][0]) as Array<Record<string, unknown>>;
+        expect(rows[0].id, 'the session row is carried through').toBe('ds-1');
+        expect(rows[0].stageInput).toMatchObject({
+            mouseMode: 'trackpad',
+            controlEnabled: true,
+            gesturePhase: 'pinch',
+            gestureContacts: 2,
+            cursorOwned: true,
+        });
+        expect((rows[0].stageInput as Record<string, unknown>).stageContacts).toBe(2);
     });
 });

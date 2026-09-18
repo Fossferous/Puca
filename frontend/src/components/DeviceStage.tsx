@@ -58,6 +58,7 @@ import {
 import { installBackgroundResume } from './deviceStageResume';
 import { installStallWatchdog } from './deviceStageStall';
 import { TouchGestures } from '../api/devices/touchGestures';
+import { stageInputDiagnostics, type StageInputState } from '../api/devices/stageInputDiag';
 import { isMobile as isNativeMobile } from '../api/platform';
 import { computeRmoveScale } from '../api/remoteControl';
 import {
@@ -269,6 +270,11 @@ function readVirtualMousePreference(): boolean {
  * APK has — a phone cannot reach chrome://inspect.
  */
 const caretDiag: { read: () => Record<string, unknown> } = { read: () => ({ active: false }) };
+/** The stage's POINTER state, for the same two routes and for the same reason:
+ *  only the stage knows the mouse mode, the trackpad machine's phase and
+ *  whether this end is drawing the pointer — see stageInputDiag.ts for what
+ *  each field rules in or out. `null` while no stage is mounted. */
+const stageInputDiag: { read: () => Record<string, unknown> | null } = { read: () => null };
 if (typeof window !== 'undefined') {
     const w = window as unknown as Record<string, unknown>;
     const base = w.__pucaDeviceDiag as (() => Promise<Record<string, unknown>[]>) | undefined;
@@ -276,7 +282,8 @@ if (typeof window !== 'undefined') {
         w.__pucaDeviceDiag = async () => {
             const rows = await base();
             const caret = caretDiag.read();
-            return rows.map(r => ({ ...r, caret }));
+            const stageInput = stageInputDiag.read();
+            return rows.map(r => ({ ...r, caret, stageInput }));
         };
     }
 }
@@ -1052,6 +1059,25 @@ export function DeviceStage() {
             if (want) setCursorOwned(sessionActiveId, false);
         };
     }, [sessionActiveId, isMobile, isMouseMode]);
+
+    // THE POINTER HALF OF "COPY DIAGNOSTICS". Rendered state goes through a
+    // ref (the same split as the caret diagnostic below); the machine and the
+    // finger map are read LIVE at copy time, since neither renders.
+    const inputDiagStateRef = useRef<Omit<StageInputState, 'stageContacts' | 'gesture'>>({
+        isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn: false,
+    });
+    const cursorDrawn = cursorOwned && cursorAt !== null;
+    useEffect(() => {
+        inputDiagStateRef.current = { isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn };
+    }, [isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn]);
+    useEffect(() => {
+        stageInputDiag.read = () => stageInputDiagnostics({
+            ...inputDiagStateRef.current,
+            stageContacts: activePointers.current.size,
+            gesture: gestures.diag(),
+        });
+        return () => { stageInputDiag.read = () => null; };
+    }, [gestures]);
 
     // --- ZOOM FOLLOWS THE MONITOR (All Displays only) --------------------
     // The composite is integer-stepped down to fit the encoder cap
@@ -2143,7 +2169,10 @@ export function DeviceStage() {
             // APK has — so it has to be merged in here, not left to the window
             // global nobody on a phone can reach.
             const caret = caretDiag.read();
-            await navigator.clipboard.writeText(JSON.stringify(rows.map(r => ({ ...r, caret })), null, 2));
+            // Read at the END of the window, like the rows: the state the
+            // trackpad is in while they are still driving, not before.
+            const stageInput = stageInputDiag.read();
+            await navigator.clipboard.writeText(JSON.stringify(rows.map(r => ({ ...r, caret, stageInput })), null, 2));
             setClipboardNote('Diagnostics copied — paste them into the chat');
         } catch {
             // Clipboard can be refused (permission, insecure context). Say so

@@ -27,6 +27,8 @@ vi.mock('../api/websocket', () => ({
         isConnected: true,
         on: (t: string, h: Handler) => { handlers.set(t, h); },
         send: (m: { type: string; payload?: Record<string, unknown> }) => { sent.push(m); },
+        // The input coalescer's motion gate reads it; an idle socket.
+        bufferedAmount: () => 0,
     },
 }));
 
@@ -281,5 +283,64 @@ describe('cursor ownership is granted only by the host', () => {
         expect(activeSessions().find(s => s.id === id)?.cursorOwned).toBe(false);
         await hostSignal(id, key, { kind: 'cursor-owner-active', owned: true });
         expect(activeSessions().find(s => s.id === id)?.cursorOwned).toBe(true);
+    });
+});
+
+describe('"Copy diagnostics" carries the pointer story (the lock-screen mouse report)', () => {
+    it('counts sent input BY KIND and names the lane, so "no moves left the phone" is readable', async () => {
+        const { id } = await activeController();
+        const { activeSessions, sendInput, deviceDiagnostics } = await import('../api/devices/session');
+        expect(sessionById(activeSessions(), id)?.phase, 'precondition: an active controller').toBe('active');
+
+        const before = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(before.inputSentTotal).toBe(0);
+        expect(before.inputSentByKind).toEqual({});
+        expect(before.inputLane).toBeNull();
+
+        expect(sendInput(id, { t: 'move', x: 0.25, y: 0.5 })).toBe(true);
+        // A key force-flushes held motion ahead of itself, so both go out.
+        expect(sendInput(id, { t: 'key', code: 'KeyA', down: true })).toBe(true);
+        await settle();
+
+        // POSITIVE CONTROL for the rig: the frames really left.
+        expect(sent.filter(m => m.type === 'DeviceInput')).toHaveLength(2);
+        const row = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(row.inputSentTotal).toBe(2);
+        expect(row.inputSentByKind).toEqual({ move: 1, key: 1 });
+        expect(row.inputLane, 'no proved input channel in this rig: the relay carried it').toBe('relay');
+    });
+
+    it('reports whether this end owns (and must draw) the pointer, from the host ack only', async () => {
+        const { id, key } = await activeController();
+        const { deviceDiagnostics, setCursorOwned } = await import('../api/devices/session');
+        const row0 = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(row0.cursorOwned).toBe(false);
+
+        setCursorOwned(id, true);
+        await settle();
+        const asked = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(asked.cursorOwned, 'asking is not owning').toBe(false);
+        expect(asked, 'the held-request half is reported too').toHaveProperty('cursorOwnerPending');
+
+        await hostSignal(id, key, { kind: 'cursor-owner-active', owned: true });
+        const owned = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(owned.cursorOwned).toBe(true);
+    });
+
+    it('the window reports input per second and per kind across the time the user kept driving', async () => {
+        const { inputWindow } = await import('../api/devices/session');
+        const w = inputWindow(
+            { total: 10, byKind: { key: 10 }, at: 1_000 },
+            { total: 35, byKind: { key: 12, move: 20, down: 1, up: 1, wheel: 1 }, at: 6_000 },
+        );
+        expect(w.windowInputPerSecond).toBe(5);
+        expect(w.windowInputByKind).toEqual({ key: 2, move: 20, down: 1, up: 1, wheel: 1 });
+        // The shape of the report's own case: keys still going, no motion at all.
+        const keysOnly = inputWindow(
+            { total: 0, byKind: {}, at: 0 },
+            { total: 4, byKind: { key: 4 }, at: 5_000 },
+        );
+        expect(keysOnly.windowInputByKind).toEqual({ key: 4 });
+        expect(keysOnly.windowInputByKind.move).toBeUndefined();
     });
 });
