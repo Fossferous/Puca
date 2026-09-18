@@ -19,6 +19,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+/** What the socket reports as unsent — the input coalescer's motion gate
+ *  reads it. 0 is an idle socket; a test raises it to congest the relay. */
+let wsBuffered = 0;
 type Handler = (m: unknown) => void;
 const handlers = new Map<string, Handler>();
 
@@ -27,8 +30,8 @@ vi.mock('../api/websocket', () => ({
         isConnected: true,
         on: (t: string, h: Handler) => { handlers.set(t, h); },
         send: (m: { type: string; payload?: Record<string, unknown> }) => { sent.push(m); },
-        // The input coalescer's motion gate reads it; an idle socket.
-        bufferedAmount: () => 0,
+        // The input coalescer's motion gate reads it (see wsBuffered).
+        bufferedAmount: () => wsBuffered,
     },
 }));
 
@@ -135,7 +138,7 @@ function sessionById(list: Array<{ id: string }>, id: string) {
     return list.find(s => s.id === id);
 }
 
-beforeEach(() => { peerSeq = 0; });
+beforeEach(() => { peerSeq = 0; wsBuffered = 0; });
 
 describe('cursor ownership is granted only by the host', () => {
     it('POSITIVE CONTROL: an ack hands the cursor over', async () => {
@@ -316,15 +319,53 @@ describe('"Copy diagnostics" carries the pointer story (the lock-screen mouse re
         const row0 = (await deviceDiagnostics()).find(r => r.id === id)!;
         expect(row0.cursorOwned).toBe(false);
 
+        expect(row0.cursorOwnerPending, 'nothing asked, nothing held').toBeNull();
+
         setCursorOwned(id, true);
         await settle();
         const asked = (await deviceDiagnostics()).find(r => r.id === id)!;
         expect(asked.cursorOwned, 'asking is not owning').toBe(false);
-        expect(asked, 'the held-request half is reported too').toHaveProperty('cursorOwnerPending');
+        // An ACTIVE session sends the request at once: nothing is held.
+        // `cursorOwnerPending` is the request HELD for a session not yet
+        // able to send (see the next test), not "awaiting the ack".
+        expect(asked.cursorOwnerPending, 'sent, so not held').toBeNull();
 
         await hostSignal(id, key, { kind: 'cursor-owner-active', owned: true });
         const owned = (await deviceDiagnostics()).find(r => r.id === id)!;
         expect(owned.cursorOwned).toBe(true);
+        expect(owned.cursorOwnerPending).toBeNull();
+    });
+
+    it('reports a request HELD while connecting as pending, and clears it once going active sends it', async () => {
+        const { installDeviceSessions, connectToDevice, endAllSessions, setCursorOwned, deviceDiagnostics } =
+            await import('../api/devices/session');
+        installDeviceSessions();
+        endAllSessions('test reset');
+        sent.length = 0;
+        const id = await connectToDevice('dev-host');
+        const connect = sent.find(m => m.type === 'DeviceConnect');
+        const hostEph = generateControlEphemeral();
+        const key = deriveDeviceControlKey(new Uint8Array(32).fill(3), hostEph.priv, connect?.payload?.eph as string)!;
+
+        setCursorOwned(id, true);          // too early to send: held
+        await settle();
+        const held = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(held.phase, 'the premise: still connecting').toBe('connecting');
+        expect(held.cursorOwnerPending, 'the held request is reported').toBe(true);
+        expect(held.cursorOwned).toBe(false);
+
+        handlers.get('DeviceConnectAnswered')!({
+            payload: { session_id: id, accepted: true, eph: hostEph.pubEncoded },
+        });
+        await settle();
+        const replayed = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(replayed.cursorOwnerPending, 'going active sent it').toBeNull();
+        expect(replayed.cursorOwned, 'and only the ack grants it').toBe(false);
+
+        await hostSignal(id, key, { kind: 'cursor-owner-active', owned: true });
+        const owned = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(owned.cursorOwned).toBe(true);
+        expect(owned.cursorOwnerPending).toBeNull();
     });
 
     it('the window reports input per second and per kind across the time the user kept driving', async () => {
@@ -342,5 +383,91 @@ describe('"Copy diagnostics" carries the pointer story (the lock-screen mouse re
         );
         expect(keysOnly.windowInputByKind).toEqual({ key: 4 });
         expect(keysOnly.windowInputByKind.move).toBeUndefined();
+    });
+});
+
+/** Let `ms` of real time pass, settling the async seal queue as it goes. */
+async function wait(ms: number): Promise<void> {
+    await new Promise(r => setTimeout(r, ms));
+    await settle();
+}
+
+describe('the diagnostics WINDOW, end to end through sendInput', () => {
+    it('counts the moves sent while it was open, per kind and per second', async () => {
+        const { id } = await activeController();
+        const { sendInput, deviceDiagnosticsWindow } = await import('../api/devices/session');
+        // A move BEFORE the window is not counted in it.
+        expect(sendInput(id, { t: 'move', x: 0.1, y: 0.1 })).toBe(true);
+        await wait(30);
+
+        const pending = deviceDiagnosticsWindow(1_500);
+        // Spaced past the coalescer's 16 ms window, so each one goes out.
+        for (let i = 0; i < 4; i++) {
+            expect(sendInput(id, { t: 'move', x: 0.2 + i / 10, y: 0.5 })).toBe(true);
+            await wait(30);
+        }
+        const rows = await pending;
+        const row = rows.find(r => r.id === id)!;
+        expect(row, 'the window returns the session row').toBeTruthy();
+        expect(row.windowInputByKind).toEqual({ move: 4 });
+        expect(row.windowInputPerSecond as number).toBeGreaterThan(0);
+        expect(row.windowMotionHeldByGate, 'an idle socket held nothing').toBe(0);
+    });
+
+    it('CONTROL: keys only in the window reports no move key at all', async () => {
+        const { id } = await activeController();
+        const { sendInput, deviceDiagnosticsWindow } = await import('../api/devices/session');
+        const pending = deviceDiagnosticsWindow(1_500);
+        expect(sendInput(id, { t: 'key', code: 'Digit1', down: true })).toBe(true);
+        expect(sendInput(id, { t: 'key', code: 'Digit1', down: false })).toBe(true);
+        await wait(30);
+        const row = (await pending).find(r => r.id === id)!;
+        expect(row.windowInputByKind).toEqual({ key: 2 });
+        expect((row.windowInputByKind as Record<string, number>).move).toBeUndefined();
+        expect(row.windowInputPerSecond as number).toBeGreaterThan(0);
+    });
+});
+
+describe('the motion gate is in the diagnostics (keys work, the mouse is held back)', () => {
+    it('POSITIVE CONTROL: an idle socket reports the gate open and nothing held', async () => {
+        const { id } = await activeController();
+        const { sendInput, deviceDiagnostics } = await import('../api/devices/session');
+        expect(sendInput(id, { t: 'move', x: 0.5, y: 0.5 })).toBe(true);
+        await settle();
+        const row = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(row.motionLane).toBe('relay');
+        expect(row.motionLaneBufferedAmount).toBe(0);
+        expect(row.motionGateOpen).toBe(true);
+        expect(row.motionHeldByGate).toBe(0);
+        expect(sent.filter(m => m.type === 'DeviceInput'), 'the move went out').toHaveLength(1);
+    });
+
+    it('a congested relay: the gate reads closed, moves are held and counted, keys still pass', async () => {
+        const { id } = await activeController();
+        const { sendInput, deviceDiagnostics, deviceDiagnosticsWindow } = await import('../api/devices/session');
+        wsBuffered = 200_000;               // well past the 64 KiB high-water mark
+        const pending = deviceDiagnosticsWindow(1_500);
+        for (let i = 0; i < 3; i++) {
+            expect(sendInput(id, { t: 'move', x: 0.1 * (i + 1), y: 0.5 })).toBe(true);
+            await wait(20);
+        }
+        expect(sent.filter(m => m.type === 'DeviceInput'), 'held, not sent').toHaveLength(0);
+
+        const row = (await deviceDiagnostics()).find(r => r.id === id)!;
+        expect(row.motionLane).toBe('relay');
+        expect(row.motionLaneBufferedAmount).toBe(200_000);
+        expect(row.motionGateOpen).toBe(false);
+        expect(row.motionHeldByGate).toBe(3);
+
+        // The shape of the report: a key goes straight through the gate (and
+        // forces the held move out ahead of itself).
+        expect(sendInput(id, { t: 'key', code: 'KeyA', down: true })).toBe(true);
+        await settle();
+        const out = sent.filter(m => m.type === 'DeviceInput');
+        expect(out, 'the key and the one move it forced out').toHaveLength(2);
+
+        const win = (await pending).find(r => r.id === id)!;
+        expect(win.windowMotionHeldByGate, 'the window counts what the gate held in it').toBe(3);
+        wsBuffered = 0;
     });
 });

@@ -2610,10 +2610,15 @@ export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string
     // session whose getStats is failing is exactly one where "was the phone
     // even sending?" still has to be answerable.
     const inputSnap = () => {
-        const out = new Map<string, { total: number; byKind: Record<string, number>; at: number }>();
+        const out = new Map<string, InputSnapshot>();
         for (const s of sessions.values()) {
             if (s.role !== 'controller') continue;
-            out.set(s.id, { total: s.inputRate.total, byKind: { ...s.inputRate.byKind }, at: Date.now() });
+            out.set(s.id, {
+                total: s.inputRate.total,
+                byKind: { ...s.inputRate.byKind },
+                motionHeld: s.sendCoalescer?.motionHeld() ?? 0,
+                at: Date.now(),
+            });
         }
         return out;
     };
@@ -2651,17 +2656,30 @@ export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string
     });
 }
 
+/** The cumulative input counters `deviceDiagnosticsWindow` samples twice. */
+export interface InputSnapshot {
+    total: number;
+    byKind: Record<string, number>;
+    /** Motion offered while the coalescer's gate was closed (0 when absent). */
+    motionHeld?: number;
+    at: number;
+}
+
 /**
  * Input sent across a diagnostic window: per second overall, and a count per
  * kind. The window is the five seconds the user was asked to KEEP DRIVING, so
  * a zero `move` here while they dragged a finger is the phone not sending —
  * not a still desktop, and not a reading taken while they reached for the
  * menu (which is what the one-second `inputSentPerSecond` beside it measures).
+ *
+ * `windowMotionHeldByGate` is the other half of that question: moves the
+ * phone DID produce and held back because the lane's send buffer was over
+ * the high-water mark. Keys pass that gate; motion does not.
  */
 export function inputWindow(
-    a: { total: number; byKind: Record<string, number>; at: number },
-    b: { total: number; byKind: Record<string, number>; at: number },
-): { windowInputPerSecond: number; windowInputByKind: Record<string, number> } {
+    a: InputSnapshot,
+    b: InputSnapshot,
+): { windowInputPerSecond: number; windowInputByKind: Record<string, number>; windowMotionHeldByGate: number } {
     const secs = Math.max((b.at - a.at) / 1000, 0.001);
     const byKind: Record<string, number> = {};
     for (const [k, n] of Object.entries(b.byKind)) {
@@ -2671,6 +2689,7 @@ export function inputWindow(
     return {
         windowInputPerSecond: Math.round(((b.total - a.total) / secs) * 10) / 10,
         windowInputByKind: byKind,
+        windowMotionHeldByGate: Math.max(0, (b.motionHeld ?? 0) - (a.motionHeld ?? 0)),
     };
 }
 
@@ -2695,6 +2714,23 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
             inputSentTotal: s.inputRate.total,
             inputSentByKind: { ...s.inputRate.byKind },
             inputLane: s.inputRate.lane,
+            // THE MOTION GATE, the other way "keys work, the mouse does not"
+            // happens: over a congested path (a relayed, slow link) the lane's
+            // send buffer passes the high-water mark, and the coalescer HOLDS
+            // motion while keys and clicks still go out. `motionGateOpen:
+            // false` with a large buffer is that, now; `motionHeldByGate` is
+            // how many moves it has held this session (the window variant
+            // reports the difference).
+            ...(() => {
+                // A diagnostic must never be the thing that throws.
+                try {
+                    const m = motionLaneState(s);
+                    return { motionLane: m.lane, motionLaneBufferedAmount: m.bufferedAmount, motionGateOpen: m.open };
+                } catch {
+                    return { motionLane: null, motionLaneBufferedAmount: null, motionGateOpen: null };
+                }
+            })(),
+            motionHeldByGate: s.sendCoalescer?.motionHeld() ?? 0,
             // Whether this end DRAWS the pointer. The host stops drawing its
             // own once it acks ownership, so `true` with no dot on the picture,
             // or `false` in trackpad mode (a lost ack: nobody draws one), are
@@ -3209,6 +3245,22 @@ export function sendInput(sessionId: string, event: unknown): boolean {
  *  State events (down/up/key/wheel) always pass. */
 const WS_MOTION_HIGH_WATER_BYTES = 64 * 1024;
 
+/** The transport MOTION is taking right now, how full its send buffer is, and
+ *  so whether the coalescer's motion gate is open. ONE function for both the
+ *  gate and "Copy diagnostics", so the report can never describe a different
+ *  lane or threshold from the one actually holding motion back. */
+function motionLaneState(s: Internal): { lane: 'channel' | 'relay'; bufferedAmount: number; open: boolean } {
+    // Backpressure from the transport motion is ACTUALLY taking. Read off the
+    // socket while the direct channel carries the frames, this held motion on
+    // a queue that was not the one filling up — and, worse, let a stalled
+    // socket throttle a healthy channel.
+    const lane = inputChannelUsable(s) ? 'channel' : 'relay';
+    const bufferedAmount = lane === 'channel'
+        ? (s.inputChannel?.bufferedAmount ?? 0)
+        : wsClient.bufferedAmount();
+    return { lane, bufferedAmount, open: bufferedAmount <= WS_MOTION_HIGH_WATER_BYTES };
+}
+
 /** The send-side coalescer for a session, created on first use. */
 function sendCoalescer(s: Internal): InputCoalescer {
     if (!s.sendCoalescer) {
@@ -3219,13 +3271,7 @@ function sendCoalescer(s: Internal): InputCoalescer {
         s.sendCoalescer = new InputCoalescer(
             event => { void sealAndSendInput(s, event); },
             undefined,
-            // Backpressure from the transport motion is ACTUALLY taking. Read
-            // off the socket while the direct channel carries the frames, this
-            // held motion on a queue that was not the one filling up — and,
-            // worse, let a stalled socket throttle a healthy channel.
-            () => (inputChannelUsable(s)
-                ? (s.inputChannel?.bufferedAmount ?? 0) <= WS_MOTION_HIGH_WATER_BYTES
-                : wsClient.bufferedAmount() <= WS_MOTION_HIGH_WATER_BYTES),
+            () => motionLaneState(s).open,
         );
     }
     return s.sendCoalescer;

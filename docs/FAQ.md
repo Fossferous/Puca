@@ -159,10 +159,17 @@ seconds it measures. Then look at:
   them means they reached the host and the question is on that side.
 - **`stageInput`**: `mouseMode` (trackpad or touch), `gesturePhase` and
   `gestureContacts` (the trackpad reading `pinch` with one finger down is a
-  stuck gesture; switching Touch and back clears it), and `cursorOwned` /
-  `cursorDrawn` (whether the phone is drawing the pointer, since the host
-  stops drawing its own once the phone takes over).
+  stuck gesture; switching Touch and back clears it), `gesturePruned` and
+  `gestureBlurCancels` (how many times the phone has already recovered from
+  that stuck gesture on its own), and `cursorOwned` / `cursorDrawn` (whether
+  the phone is drawing the pointer, since the host stops drawing its own once
+  the phone takes over).
 - **`inputLane`**: whether input is going over the direct channel or the relay.
+- **`motionGateOpen`**, **`motionLaneBufferedAmount`** and
+  **`windowMotionHeldByGate`**: on a slow or congested connection the phone
+  holds mouse movement back while the connection catches up, but still sends
+  keys and clicks. `motionGateOpen: false` with a large buffer, and moves held
+  during the window, is that case.
 
 On the host, the agent's log has one `[input-rx]` line a second per lane while
 input arrives, plus one for the last burst when a session ends: exact counts of
