@@ -1062,6 +1062,10 @@ fn run(
     let mut caret_channel: Option<str0m::channel::ChannelId> = None;
     // R4: the controller's direct input channel, learned from ChannelOpen.
     let mut input_channel_id: Option<str0m::channel::ChannelId> = None;
+    // What that channel delivered, by kind, logged about once a second while
+    // it flows ("[input-rx] lane=channel ..."): the only host-side record of
+    // input that ARRIVED and was accepted, rather than refused.
+    let mut input_tally = crate::input_tally::InputTally::new("channel");
     // `Some` = a viewer has asked for caret reports. Dropping the tracker
     // releases this session's claim on the process-wide sampler; it is a local
     // in `run()`, so a returning stream releases it with no teardown step.
@@ -1897,7 +1901,9 @@ fn run(
                                                 &event_json,
                                             ) {
                                                 Ok(ev) => {
-                                                    if let Err(e) = crate::session::dispatch_input_public(ev) {
+                                                    if let Err(e) = crate::session::dispatch_input_counted(
+                                                        &mut input_tally, ev,
+                                                    ) {
                                                         eprintln!("[stream] input inject failed: {e}");
                                                     }
                                                 }

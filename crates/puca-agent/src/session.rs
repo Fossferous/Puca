@@ -38,19 +38,59 @@ fn b64(bytes: &[u8]) -> String {
 /// unreachable from `SendInput` by design (see `ControlInput::Sas`). Letting it
 /// fall through would produce a correct-but-useless refusal where a working
 /// feature is available one process away.
-/// The stream thread's entry to the SAME dispatch the pipe path uses (R4).
-/// Public wrapper rather than making `dispatch_input` public: the Sas
-/// interception and the test seam below must apply to both callers, and two
-/// entry points into OS input is exactly how one of them ends up bypassing a
-/// gate the other has.
-pub fn dispatch_input_public(event: puca_input::ControlInput) -> Result<(), String> {
-    dispatch_input(event)
+/// The ONE entry to OS input for every lane: the stream thread's channel (R4),
+/// the app's pipe `Inject` and the service's `InjectSealed`. Public rather than
+/// making `dispatch_input` public: the Sas interception and the test seam
+/// below must apply to every caller, and two entry points into OS input is
+/// exactly how one of them ends up bypassing a gate the other has.
+///
+/// COUNTED on the caller's lane tally (see `input_tally`), which writes one
+/// line about once a second while input flows — so each lane can say what it
+/// received and whether it landed, which no log could before.
+pub fn dispatch_input_counted(
+    tally: &mut crate::input_tally::InputTally,
+    event: puca_input::ControlInput,
+) -> Result<(), String> {
+    let kind = crate::input_tally::kind_of(&event);
+    let result = dispatch_input(event);
+    if let Some(line) = tally.note(kind, result.is_ok(), std::time::Instant::now()) {
+        eprintln!("{line}");
+    }
+    result
 }
 
 fn dispatch_input(event: puca_input::ControlInput) -> Result<(), String> {
     match event {
         puca_input::ControlInput::Sas => dispatch_sas(),
         other => inject_seam(other),
+    }
+}
+
+/// The last `[aim]` line written, so `aim_input_at` logs only a change.
+static LAST_AIM_LINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `line` if it differs from the last one recorded in `last` (which it then
+/// becomes), else `None` — so a re-aim at the same rectangle, which every
+/// SetMonitor and StartStream does, writes nothing.
+fn aim_changed(last: &std::sync::Mutex<Option<String>>, line: String) -> Option<String> {
+    let mut last = last.lock().ok()?;
+    if last.as_deref() == Some(line.as_str()) {
+        return None;
+    }
+    *last = Some(line.clone());
+    Some(line)
+}
+
+/// The `[aim]` log line for a resolved input target: which capture index, and
+/// the rectangle absolute moves will be mapped onto (virtual-desktop pixels),
+/// or the primary-only fallback when nothing resolved.
+fn aim_line(monitor: usize, target: Option<&puca_input::TargetMonitor>) -> String {
+    match target {
+        Some(t) => format!(
+            "[aim] monitor={monitor} -> {}x{} at ({},{}) in desktop {}x{} at ({},{})",
+            t.width, t.height, t.left, t.top, t.virt_width, t.virt_height, t.virt_left, t.virt_top,
+        ),
+        None => format!("[aim] monitor={monitor} -> none: moves fall back to the PRIMARY screen"),
     }
 }
 
@@ -564,6 +604,11 @@ pub struct Agent {
     /// the controller is unthrottled (it asked, it gets an answer); only the
     /// log is rationed.
     last_inject_error_log: Option<std::time::Instant>,
+    /// Input arriving over this pipe, counted by kind and logged about once a
+    /// second while it flows (see `input_tally`): the app's relay lane, and
+    /// the service's sealed lane. The stream thread keeps the channel's own.
+    input_tally_pipe: crate::input_tally::InputTally,
+    input_tally_sealed: crate::input_tally::InputTally,
     /// What this agent will do, fixed at launch by who started it. Held on the
     /// Agent rather than read from argv at each call site so there is one
     /// answer per process and no request can be served against a different one.
@@ -623,6 +668,8 @@ impl Agent {
             sealed: HashMap::new(),
             ua: puca_ua::UaGate::default(),
             last_inject_error_log: None,
+            input_tally_pipe: crate::input_tally::InputTally::new("pipe"),
+            input_tally_sealed: crate::input_tally::InputTally::new("sealed"),
             flavour,
             captures: HashMap::new(),
             sessions: HashMap::new(),
@@ -655,7 +702,15 @@ impl Agent {
     fn aim_input_at(monitor: usize) {
         let outputs = puca_capture::outputs();
         let list = puca_input::list_monitors();
-        puca_input::set_target(resolve_target(monitor, &outputs, &list));
+        let target = resolve_target(monitor, &outputs, &list);
+        // LOGGED ON CHANGE. Absolute moves are mapped onto this rectangle, and
+        // nothing recorded it: "the pointer landed on a screen nobody was
+        // watching" and "it landed where it should" were indistinguishable in
+        // the log. `None` is the primary-only fallback, the one worth seeing.
+        if let Some(line) = aim_changed(&LAST_AIM_LINE, aim_line(monitor, target.as_ref())) {
+            eprintln!("{line}");
+        }
+        puca_input::set_target(target);
     }
 
     /// Refuse a request this flavour does not serve.
@@ -1453,7 +1508,7 @@ impl Agent {
                     return Response::error("no such capture session");
                 }
                 match serde_json::from_value(event) {
-                    Ok(parsed) => match dispatch_input(parsed) {
+                    Ok(parsed) => match dispatch_input_counted(&mut self.input_tally_pipe, parsed) {
                         Ok(()) => Response::Ok,
                         Err(e) => {
                             let now = std::time::Instant::now();
@@ -1880,7 +1935,7 @@ impl Agent {
                     return Response::error("that frame was not the expected shape");
                 };
                 match serde_json::from_value(event) {
-                    Ok(parsed) => match dispatch_input(parsed) {
+                    Ok(parsed) => match dispatch_input_counted(&mut self.input_tally_sealed, parsed) {
                         Ok(()) => Response::Ok,
                         // The error names the CAUSE, never the event: a message
                         // echoing the frame would put the plaintext back above
@@ -4131,6 +4186,68 @@ mod tests {
         // The pre-2026-09-08 world, and still what an older app produces: no
         // channel, no hello, input keeps the relay.
         assert!(input_channel_for("s1", false, None, None, true).is_none());
+    }
+
+    // --- the lock-screen mouse instrumentation --------------------------------
+
+    #[test]
+    fn pipe_input_is_counted_on_the_pipe_lane_and_only_there() {
+        // "[input-rx] lane=pipe" is what separates "the relay carried the
+        // moves" from "nothing arrived", so the arm must feed its own tally.
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        fake_session(&mut a, "s1");
+        assert_eq!(a.input_tally_pipe.counted(), 0);
+        let resp = a.handle(Request::Inject {
+            session_id: "s1".into(),
+            event: serde_json::json!({ "t": "move", "x": 0.5, "y": 0.5 }),
+        });
+        assert!(matches!(resp, Response::Ok), "{resp:?}");
+        // A refused one is counted too: the line reports failures beside kinds.
+        let resp = a.handle(Request::Inject {
+            session_id: "s1".into(),
+            event: serde_json::json!({ "t": "text", "text": "FAIL-x" }),
+        });
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(a.input_tally_pipe.counted(), 2);
+        assert_eq!(a.input_tally_sealed.counted(), 0, "the sealed lane saw none of it");
+    }
+
+    #[test]
+    fn input_for_no_session_is_not_counted() {
+        // Positive control for the count above: a request refused BEFORE the
+        // dispatch (no such session) reaches neither the OS nor the tally.
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let resp = a.handle(Request::Inject {
+            session_id: "nope".into(),
+            event: serde_json::json!({ "t": "move", "x": 0.5, "y": 0.5 }),
+        });
+        assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+        assert_eq!(a.input_tally_pipe.counted(), 0);
+    }
+
+    #[test]
+    fn the_aim_line_names_the_rectangle_or_the_primary_fallback() {
+        let t = puca_input::TargetMonitor {
+            left: -1440, top: -707, width: 1440, height: 2560,
+            virt_left: -1440, virt_top: -707, virt_width: 5440, virt_height: 2564,
+        };
+        assert_eq!(
+            super::aim_line(2, Some(&t)),
+            "[aim] monitor=2 -> 1440x2560 at (-1440,-707) in desktop 5440x2564 at (-1440,-707)"
+        );
+        let none = super::aim_line(0, None);
+        assert!(none.starts_with("[aim] monitor=0 -> none") && none.contains("PRIMARY"), "{none}");
+    }
+
+    #[test]
+    fn the_aim_is_logged_only_when_it_changes() {
+        let last = std::sync::Mutex::new(None);
+        assert_eq!(super::aim_changed(&last, "a".into()).as_deref(), Some("a"), "the first aim is news");
+        assert_eq!(super::aim_changed(&last, "a".into()), None, "a re-aim at the same rect is not");
+        assert_eq!(super::aim_changed(&last, "b".into()).as_deref(), Some("b"));
+        assert_eq!(super::aim_changed(&last, "a".into()).as_deref(), Some("a"), "and back again is");
     }
 
 }
