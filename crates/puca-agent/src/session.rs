@@ -59,6 +59,24 @@ pub fn dispatch_input_counted(
     result
 }
 
+/// The log line for an injection that failed on a lane, if `gate` admits one
+/// at `now`: the first always, then at most one a second, and never the
+/// event's kind (`puca_input::log_privacy`). One unthrottled line per refused
+/// event, each naming "key press" or "pointer move", counted the refused
+/// keystrokes on the sign-in screen in a log ordinary users can read; the
+/// lane's tally line already carries the failures, bucketed.
+pub fn inject_failure_line(
+    gate: &mut puca_input::log_privacy::LineGate,
+    prefix: &str,
+    err: &str,
+    now: std::time::Instant,
+) -> Option<String> {
+    if !gate.admit(now) {
+        return None;
+    }
+    Some(format!("{prefix} {}", puca_input::log_privacy::without_event_kind(err)))
+}
+
 fn dispatch_input(event: puca_input::ControlInput) -> Result<(), String> {
     match event {
         puca_input::ControlInput::Sas => dispatch_sas(),
@@ -136,6 +154,12 @@ fn inject_seam(event: puca_input::ControlInput) -> Result<(), String> {
         puca_input::ControlInput::Text { ref text } if text.starts_with("FAIL-") => {
             Err("refused by the test stand-in".into())
         }
+        // The real refusal's shape, kind and all, for the tests that check the
+        // kind never leaves this process on the sealed lane.
+        puca_input::ControlInput::Key { ref code, down } if code.starts_with("FAIL") => Err(format!(
+            "Windows refused the injected {} (no retry was attempted). The usual cause is ...",
+            if down { "key press" } else { "key release" }
+        )),
         // Reached only if the routing above is broken. Answering Err rather than
         // Ok means a regression shows up as a failed request rather than as a
         // test that quietly still passes.
@@ -610,8 +634,9 @@ pub struct Agent {
     /// SendInput, a secure desktop plus a moving mouse produces one line per
     /// pointer event — around a hundred a second, into a FILE. The response to
     /// the controller is unthrottled (it asked, it gets an answer); only the
-    /// log is rationed.
-    last_inject_error_log: Option<std::time::Instant>,
+    /// log is rationed — and it no longer names the event's kind, since one
+    /// "key press" line a second still said when keys were being refused.
+    inject_error_log: puca_input::log_privacy::LineGate,
     /// Input arriving over this pipe, counted by kind and logged about once a
     /// second while it flows (see `input_tally`): the app's relay lane, and
     /// the service's sealed lane. The stream thread keeps the channel's own.
@@ -675,7 +700,7 @@ impl Agent {
             authenticated: false,
             sealed: HashMap::new(),
             ua: puca_ua::UaGate::default(),
-            last_inject_error_log: None,
+            inject_error_log: puca_input::log_privacy::LineGate::per_second(),
             input_tally_pipe: crate::input_tally::InputTally::new("pipe"),
             input_tally_sealed: crate::input_tally::InputTally::new("sealed"),
             flavour,
@@ -1534,18 +1559,13 @@ impl Agent {
                     Ok(parsed) => match dispatch_input_counted(&mut self.input_tally_pipe, parsed) {
                         Ok(()) => Response::Ok,
                         Err(e) => {
-                            let now = std::time::Instant::now();
-                            // Written as a match rather than `is_none_or`: that
-                            // method landed in Rust 1.82 and this workspace
-                            // declares 1.77.2, so it builds here and breaks a
-                            // toolchain that honours the floor.
-                            let due = match self.last_inject_error_log {
-                                None => true,
-                                Some(t) => now.duration_since(t) >= std::time::Duration::from_secs(1),
-                            };
-                            if due {
-                                self.last_inject_error_log = Some(now);
-                                eprintln!("[session] inject failed: {e}");
+                            if let Some(line) = inject_failure_line(
+                                &mut self.inject_error_log,
+                                "[session] inject failed:",
+                                &e,
+                                std::time::Instant::now(),
+                            ) {
+                                eprintln!("{line}");
                             }
                             Response::error(e)
                         }
@@ -1957,15 +1977,25 @@ impl Agent {
                 let Some(event) = v.get("e").cloned() else {
                     return Response::error("that frame was not the expected shape");
                 };
-                match serde_json::from_value(event) {
-                    Ok(parsed) => match dispatch_input_counted(&mut self.input_tally_sealed, parsed) {
-                        Ok(()) => Response::Ok,
-                        // The error names the CAUSE, never the event: a message
-                        // echoing the frame would put the plaintext back above
-                        // this process, which is the whole thing this path
-                        // exists to prevent.
-                        Err(e) => Response::error(e),
-                    },
+                match serde_json::from_value::<puca_input::ControlInput>(event) {
+                    Ok(parsed) => {
+                        let sas = matches!(parsed, puca_input::ControlInput::Sas);
+                        match dispatch_input_counted(&mut self.input_tally_sealed, parsed) {
+                            Ok(()) => Response::Ok,
+                            // The error names the CAUSE, never the event: a
+                            // message echoing the frame would put the plaintext
+                            // back above this process, which is the whole thing
+                            // this path exists to prevent. Nor its KIND: the
+                            // service writes every refusal it is handed into a
+                            // world-readable log, and "key press" per refused
+                            // keystroke counts a PIN (and an unmapped key names
+                            // its code). A SAS keeps its own words — raising it
+                            // is on the screen anyway, and its failure is the
+                            // diagnosis.
+                            Err(e) if sas => Response::error(e),
+                            Err(e) => Response::error(puca_input::log_privacy::without_event_kind(&e)),
+                        }
+                    }
                     Err(_) => Response::error("unrecognised input event"),
                 }
             }
@@ -3945,6 +3975,45 @@ mod tests {
             Response::Error { message } => assert!(message.contains("no sealed session"), "{message}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_refused_sealed_keystroke_is_answered_without_its_kind() {
+        // The service writes every refusal it is handed into a world-readable
+        // log, one line each. Naming "key press" there counted a PIN.
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let key = open_sealed(&mut a, "s1");
+        let frame = serde_json::json!({ "s": 1, "e": { "t": "key", "code": "FAIL1", "down": true } });
+        let sealed = crate::control_key::seal(&key, &frame.to_string()).unwrap();
+        match a.handle(Request::InjectSealed { session_id: "s1".into(), payload: sealed }) {
+            Response::Error { message } => {
+                assert!(!message.contains("key"), "the kind must not leave this process: {message}");
+                assert!(message.contains("(no retry was attempted)"), "the diagnosis still does: {message}");
+            }
+            other => panic!("the stand-in refuses a FAIL key: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_inject_failure_is_logged_once_a_second_and_without_its_kind() {
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let mut gate = puca_input::log_privacy::LineGate::per_second();
+        let refusal = "Windows refused the injected key press (no retry was attempted). The usual cause";
+        let prefix = "[stream] input inject failed:";
+        let lines: Vec<String> = (0..8u64)
+            .filter_map(|i| inject_failure_line(&mut gate, prefix, refusal, t0 + ms(i * 100)))
+            .collect();
+        assert_eq!(lines.len(), 1, "a PIN's worth of refusals in a second writes one line: {lines:?}");
+        assert_eq!(
+            lines[0],
+            "[stream] input inject failed: Windows refused the injected input (no retry was attempted). The usual cause"
+        );
+        assert!(
+            inject_failure_line(&mut gate, prefix, refusal, t0 + ms(1_000)).is_some(),
+            "the next second writes the next line"
+        );
     }
 
     #[test]

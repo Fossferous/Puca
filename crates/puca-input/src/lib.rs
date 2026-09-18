@@ -15,6 +15,7 @@
 //! its tests — CI runs that on Linux and on Windows.
 
 pub mod desktop;
+pub mod log_privacy;
 
 /// Reading the text caret's position, for the viewer's typing camera.
 ///
@@ -606,6 +607,21 @@ pub(crate) mod send_seam {
         FOLLOWS.with(|f| f.replace(0))
     }
 
+    thread_local! {
+        static FOLLOW_LINES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// `sent_following` wrote its follow line (stderr is not something a test
+    /// can read).
+    pub(crate) fn note_follow_line() {
+        FOLLOW_LINES.with(|f| f.set(f.get() + 1));
+    }
+
+    /// How many follow lines were written on this thread since the last call.
+    pub fn follow_lines() -> usize {
+        FOLLOW_LINES.with(|f| f.replace(0))
+    }
+
     pub(crate) fn send(inputs: &[INPUT]) -> bool {
         SENT.with(|s| {
             let mut s = s.borrow_mut();
@@ -821,10 +837,13 @@ fn sent_detail(
     if ok {
         return Ok(());
     }
+    // The kind is followed IMMEDIATELY by one of these three markers, which
+    // is what lets `log_privacy::without_event_kind` cut it out of a log line.
+    use crate::log_privacy::{DETAIL_FOLLOWED, DETAIL_NO_FOLLOW, DETAIL_NO_RETRY, REFUSED_PREFIX};
     let detail = match follow {
-        None => " (no retry was attempted)".to_string(),
-        Some(Ok(name)) => format!(" (followed the input desktop to '{name}', but the retry was STILL refused)"),
-        Some(Err(e)) => format!(" (could not follow the input desktop: {e})"),
+        None => DETAIL_NO_RETRY.to_string(),
+        Some(Ok(name)) => format!("{DETAIL_FOLLOWED}{name}', but the retry was STILL refused)"),
+        Some(Err(e)) => format!("{DETAIL_NO_FOLLOW}{e})"),
     };
     // GetLastError, READ AT THE CALL SITE, immediately after SendInput
     // returned 0 — this is the actual experiment. `5` (ERROR_ACCESS_DENIED)
@@ -837,7 +856,7 @@ fn sent_detail(
         Some(c) => format!(" GetLastError={c}."),
     };
     Err(format!(
-        "Windows refused the injected {what}{detail}.{code} The usual cause is that the \
+        "{REFUSED_PREFIX}{what}{detail}.{code} The usual cause is that the \
          screen showing right now is one this process cannot reach — a security \
          prompt, the lock screen, or a window running as administrator."
     ))
@@ -868,7 +887,13 @@ fn sent_following(send: impl Fn() -> bool, what: &str) -> Result<(), String> {
     let follow = follow_for_retry();
     match &follow {
         Ok(name) => {
-            eprintln!("[input] refused; followed the input desktop to '{name}', retrying");
+            // ONE LINE A SECOND AT MOST, per thread, the first always. One per
+            // refusal was a count of refused keystrokes on the sign-in screen
+            // in a log ordinary users can read; the first is kept because it
+            // is the evidence that a follow happened at all.
+            if follow_log_due() {
+                eprintln!("[input] refused; followed the input desktop to '{name}', retrying");
+            }
             let ok = send();
             // READ IMMEDIATELY: GetLastError is only valid until the next
             // Win32 call on this thread, and `send()` itself is the only
@@ -887,6 +912,27 @@ fn sent_following(send: impl Fn() -> bool, what: &str) -> Result<(), String> {
         // along as detail rather than being dropped, per sent_detail's doc.
         Err(_) => sent_detail(false, what, Some(&follow), None),
     }
+}
+
+/// Whether `sent_following`'s follow line may be written now, by this
+/// thread's `LineGate` (see `log_privacy`).
+#[cfg(windows)]
+fn follow_log_due() -> bool {
+    thread_local! {
+        static GATE: std::cell::Cell<crate::log_privacy::LineGate> =
+            const { std::cell::Cell::new(crate::log_privacy::LineGate::per_second()) };
+    }
+    let due = GATE.with(|g| {
+        let mut gate = g.get();
+        let due = gate.admit(std::time::Instant::now());
+        g.set(gate);
+        due
+    });
+    #[cfg(test)]
+    if due {
+        send_seam::note_follow_line();
+    }
+    due
 }
 
 /// The desktop-follow half of `sent_following`, behind the same seam as the
@@ -1131,7 +1177,8 @@ pub fn release_all() {
 #[cfg(windows)]
 fn release_one(send: impl Fn() -> bool, what: &str) {
     if let Err(e) = sent_following(send, what) {
-        eprintln!("[input] release_all: {e}");
+        // Kind-free, like every per-event line (see `log_privacy`).
+        eprintln!("[input] release_all: {}", crate::log_privacy::without_event_kind(&e));
     }
 }
 
@@ -1176,58 +1223,63 @@ pub fn requested_pixel(x: f64, y: f64, target: Option<TargetMonitor>, primary: (
 /// move actually moves the pointer there. A report of "the PIN went in but
 /// the mouse did nothing" sits exactly in that gap, and success logs nothing.
 /// So, ONLY while this thread sits on a desktop other than `Default`
-/// (Winlogon, a UAC prompt) and at most once a second, the requested pixel is
-/// logged beside `GetCursorPos`: a cursor that never follows the requests
-/// says the secure desktop ignores the move; one that tracks them says the
-/// pointer moved and the fault is visibility or aim. Read-only, and silent on
-/// `Default`, where it would be a line a second on every session.
+/// (Winlogon, a UAC prompt), at most once a second and only for the first
+/// few moves after each desktop switch (`log_privacy::SecureMoveChecks`),
+/// the log says whether the cursor FOLLOWED the request: "tracks", "did not
+/// move", or "off by N px" (`log_privacy::cursor_tracking`). A cursor that
+/// never follows says the secure desktop ignores the move; one that tracks
+/// says the pointer moved and the fault is visibility or aim.
+///
+/// NEVER A POSITION. This used to log the requested pixel beside
+/// `GetCursorPos`, in absolute coordinates, a line a second for as long as
+/// the sign-in screen was in use — in a log ordinary users can read, and on
+/// the screen where the pointer's job is tapping an on-screen keyboard.
 ///
 /// The cursor may trail the request by an event (the OS applies moves on its
 /// own thread), so it is the TREND across lines that answers, not one line.
-/// Unreachable from tests: its test twin below does nothing.
+/// Unreachable from tests: its test twin below does nothing; the gate and the
+/// verdict are tested in `log_privacy`.
 #[cfg(all(windows, not(test)))]
 fn check_move_on_secure_desktop(x: f64, y: f64, target: Option<TargetMonitor>) {
-    use std::cell::Cell;
-    use std::time::{Duration, Instant};
+    use std::cell::{Cell, RefCell};
+    use std::time::Instant;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
     };
     thread_local! {
-        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+        static CHECKS: RefCell<crate::log_privacy::SecureMoveChecks> =
+            RefCell::new(crate::log_privacy::SecureMoveChecks::default());
         static MOVES: Cell<u32> = const { Cell::new(0) };
     }
     let moves = MOVES.with(|m| {
         m.set(m.get().saturating_add(1));
         m.get()
     });
-    let now = Instant::now();
-    let due = match LAST.with(|l| l.get()) {
-        None => true,
-        Some(t) => now.duration_since(t) >= Duration::from_secs(1),
-    };
-    if !due {
-        return;
-    }
-    LAST.with(|l| l.set(Some(now)));
-    MOVES.with(|m| m.set(0));
     let Some(desk) = crate::desktop::followed_desktop_name() else {
         return; // never followed: still on the desktop it started on
     };
-    if desk.eq_ignore_ascii_case("Default") {
+    let (admitted, previous) = CHECKS.with(|c| {
+        let mut c = c.borrow_mut();
+        (c.admit(&desk, Instant::now()), c.previous)
+    });
+    if !admitted {
         return;
     }
+    MOVES.with(|m| m.set(0));
     let primary = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-    let (rx, ry) = requested_pixel(x, y, target, primary);
+    let requested = requested_pixel(x, y, target, primary);
     let mut pt = windows::Win32::Foundation::POINT::default();
-    let got = match unsafe { GetCursorPos(&mut pt) } {
-        Ok(()) => format!("({},{})", pt.x, pt.y),
-        Err(e) => format!("unreadable ({e})"),
+    let cursor = match unsafe { GetCursorPos(&mut pt) } {
+        Ok(()) => Some((pt.x, pt.y)),
+        Err(_) => None,
     };
+    CHECKS.with(|c| c.borrow_mut().previous = cursor);
+    let verdict = crate::log_privacy::cursor_tracking(requested, cursor, previous);
     let aim = match target {
-        Some(m) => format!("{}x{} at ({},{})", m.width, m.height, m.left, m.top),
+        Some(m) => format!("{}x{}", m.width, m.height),
         None => "none, primary only".to_string(),
     };
-    eprintln!("[input] move on '{desk}': requested ({rx},{ry}) cursor {got} aim {aim} moves={moves}");
+    eprintln!("[input] move on '{desk}': cursor {verdict} (aim {aim}, moves={moves})");
 }
 #[cfg(all(windows, test))]
 fn check_move_on_secure_desktop(_x: f64, _y: f64, _target: Option<TargetMonitor>) {}
@@ -1524,6 +1576,30 @@ mod tests {
         assert!(r.is_err(), "the press was refused twice");
         assert_eq!(send_seam::follows(), 1, "the hook ran inside the one follow");
         assert_eq!(super::injected_inputs_held(), 0, "the count must stop at zero, not wrap");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_burst_of_refusals_writes_one_follow_line_not_one_each() {
+        // THE LEAK: one "[input] refused; followed the input desktop" line per
+        // refusal, so the log counted refused keystrokes on the sign-in
+        // screen. Eight refused-then-retried events inside a second (a
+        // 4-digit PIN's downs and ups) must write the one line that proves a
+        // follow happened, and no more.
+        let _g = serial();
+        clean_slate();
+        send_seam::follow_lines();
+        let mut script = Vec::new();
+        for _ in 0..8 {
+            script.extend([false, true]); // refused, delivered on the retry
+        }
+        send_seam::script(&script);
+        for i in 0..8 {
+            inject(ControlInput::Key { code: "Digit1".into(), down: i % 2 == 0 }).expect("the retry lands");
+        }
+        assert_eq!(send_seam::follows(), 8, "every refusal still follows and retries");
+        assert_eq!(send_seam::follow_lines(), 1, "the first follow is logged, the rest of the second is not");
         clean_slate();
     }
 

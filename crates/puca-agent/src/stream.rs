@@ -1066,6 +1066,10 @@ fn run(
     // it flows ("[input-rx] lane=channel ..."): the only host-side record of
     // input that ARRIVED and was accepted, rather than refused.
     let mut input_tally = crate::input_tally::InputTally::new("channel");
+    // A refused injection on this channel is logged at most once a second,
+    // the first always, and without its kind (`session::inject_failure_line`):
+    // one line per refused keystroke counted a PIN on the sign-in screen.
+    let mut inject_error_log = puca_input::log_privacy::LineGate::per_second();
     // `Some` = a viewer has asked for caret reports. Dropping the tracker
     // releases this session's claim on the process-wide sampler; it is a local
     // in `run()`, so a returning stream releases it with no teardown step.
@@ -1904,7 +1908,14 @@ fn run(
                                                     if let Err(e) = crate::session::dispatch_input_counted(
                                                         &mut input_tally, ev,
                                                     ) {
-                                                        eprintln!("[stream] input inject failed: {e}");
+                                                        if let Some(line) = crate::session::inject_failure_line(
+                                                            &mut inject_error_log,
+                                                            "[stream] input inject failed:",
+                                                            &e,
+                                                            std::time::Instant::now(),
+                                                        ) {
+                                                            eprintln!("{line}");
+                                                        }
                                                     }
                                                 }
                                                 Err(_) => eprintln!(
