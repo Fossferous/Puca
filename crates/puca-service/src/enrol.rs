@@ -116,12 +116,17 @@ pub fn finish(
         sign_pub,
         account_sign_pub: account_sign_pub.to_string(),
     };
+    // SAVE FIRST. If the new config cannot be written, the previous identity
+    // is still the enrolled one and is still being refused, and its record is
+    // the only thing that tells the owner so — wiping it first would hide the
+    // warning until two fresh refusals had come in ten minutes apart.
+    cfg.save()?;
     // A FRESH ENROLMENT STARTS WITH NO VERDICT. The record is keyed by device
     // id, so an old refusal could not attach to the new identity anyway; this
     // clears the in-memory copy too, so the app's warning goes the moment the
     // owner re-enrols rather than at the next attestation.
     crate::link::forget_health();
-    cfg.save()
+    Ok(())
 }
 
 /// Remove everything enrolment put on this machine.
@@ -209,6 +214,15 @@ mod tests {
             let body = &body[..body.find("\n}").expect("end of fn")];
             assert!(body.contains("crate::link::forget_health();"), "{f} must clear the record");
         }
+        // finish() clears the record only once the new identity is SAVED: a
+        // failed save leaves the old identity enrolled, still refused, and its
+        // record is the only thing that says so.
+        let at = src.find("pub fn finish(").expect("finish");
+        let body = &src[at..];
+        let body = &body[..body.find("\n}").expect("end of fn")];
+        let save = body.find("cfg.save()?;").expect("finish must propagate a failed save");
+        let forget = body.find("crate::link::forget_health();").expect("the forget");
+        assert!(save < forget, "finish must save before it forgets the record: {body}");
     }
 
     #[test]
@@ -225,7 +239,12 @@ mod tests {
         let link_src = include_str!("link.rs").split("#[cfg(test)]").next().unwrap();
 
         let checked_start = link_src.find("[CONFIG_FILE, TOKEN_FILE").expect("is_enrolled list");
-        let checked = &link_src[checked_start..checked_start + 120];
+        // Up to the list's own closing bracket, not a fixed byte count: a
+        // byte slice panics if an edit ever lands a multi-byte character on
+        // the cut.
+        let checked_end =
+            link_src[checked_start..].find(']').expect("end of the list") + checked_start;
+        let checked = &link_src[checked_start..checked_end];
         for name in ["CONFIG_FILE", "TOKEN_FILE", "SIGN_SEED_FILE", "DEVICE_PRIV_FILE"] {
             assert!(checked.contains(name), "is_enrolled must check {name}");
             assert!(enrol_src.contains(name), "forget must remove {name}");

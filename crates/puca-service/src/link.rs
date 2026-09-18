@@ -1140,7 +1140,7 @@ pub const LINK_HEALTH_FILE: &str = "link-health.json";
 /// How long to wait after the server refused this computer's own key, instead
 /// of the one-minute ladder. Retrying a refusal every minute does nothing but
 /// fill the log (~1,440 lines a day); a server-side fix still heals on its own
-/// within a quarter of an hour, and a lock or unlock retries at once.
+/// within a quarter of an hour, and locking the computer retries at once.
 pub const REFUSED_RETRY_SECS: u64 = 900;
 
 /// The server's recorded answers, for ONE enrolled identity.
@@ -1360,6 +1360,17 @@ pub struct AfterAttempt {
     pub force_rekey: bool,
 }
 
+/// How THIS attempt got the token it presented, where that changes whether
+/// the next attempt may present the stored token again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttemptPath {
+    /// The attempt skipped the stored token and went straight to the device
+    /// key, because the one before it had that token rejected.
+    pub forced_rekey: bool,
+    /// `/devices/token` minted (and stored) a fresh token during this attempt.
+    pub minted: bool,
+}
+
 /// Decide the next step from THIS attempt's outcome — never from the record.
 ///
 /// THE RECORD IS NOT CONSULTED, deliberately. A refusal recorded yesterday
@@ -1367,10 +1378,23 @@ pub struct AfterAttempt {
 /// get the fast ladder, or a machine the server has since accepted again would
 /// sit unreachable for a quarter of an hour after every wake. Only an attempt
 /// that itself ended in a refusal, for the identity still enrolled, waits long.
+///
+/// FORCE_REKEY FOLLOWS THE STORED TOKEN, not just the last error:
+/// - a 401 on the upgrade marks the stored token dead, so the next attempt
+///   goes to the device key;
+/// - a forced rekey that then fails WITHOUT minting (refused, or a network
+///   error) leaves that same dead token stored, so the rekey stays set —
+///   otherwise every 15-minute cycle of a refused machine would open with a
+///   wasted 401 on the token the server already rejected;
+/// - a 401 on a token minted in this very attempt does NOT force another
+///   mint. The device key was just accepted, so minting again would get the
+///   same answer and add a server session per retry, up to one a minute, for
+///   as long as the fault lasts. It goes on the plain ladder instead.
 pub fn after_attempt(
     failures: u32,
     outcome: &Result<(), AttemptError>,
     enrolled_device: Option<&str>,
+    path: AttemptPath,
 ) -> AfterAttempt {
     match outcome {
         Ok(()) => AfterAttempt { failures: 0, wait_secs: backoff_secs(0), force_rekey: false },
@@ -1384,11 +1408,13 @@ pub fn after_attempt(
                 }
                 _ => backoff_secs(failures),
             };
-            AfterAttempt {
-                failures,
-                wait_secs,
-                force_rekey: matches!(e, AttemptError::TokenRejected(_)),
-            }
+            let force_rekey = match e {
+                AttemptError::TokenRejected(_) => !path.minted,
+                AttemptError::Refused { .. } | AttemptError::Other(_) => {
+                    path.forced_rekey && !path.minted
+                }
+            };
+            AfterAttempt { failures, wait_secs, force_rekey }
         }
     }
 }
@@ -1465,6 +1491,10 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
         }
         announced_absent = false;
 
+        // Set inside the attempt the moment `/devices/token` hands back a
+        // fresh token (see `AttemptPath`): a 401 on THAT token must not send
+        // the next attempt to mint yet another one.
+        let mut minted = false;
         let attempt = async {
             let cfg = LinkConfig::load()?;
             let token = String::from_utf8(crate::secrets::read_secret(TOKEN_FILE)?)
@@ -1486,7 +1516,9 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
                 crate::log::line(
                     "[link] the server refused the stored token; using this computer's own key",
                 );
-                obtain_device_token(&cfg).await?
+                let fresh = obtain_device_token(&cfg).await?;
+                minted = true;
+                fresh
             } else if should_redial_for_expiry(seconds_until_expiry(&token, now)) {
                 // Try to renew first — cheaper, and it keeps one session sliding
                 // rather than minting a new one every hour.
@@ -1500,7 +1532,9 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
                     // device key is, so use it.
                     Err(e) => {
                         crate::log::line(&format!("[link] {e}; using this computer's own key"));
-                        obtain_device_token(&cfg).await?
+                        let fresh = obtain_device_token(&cfg).await?;
+                        minted = true;
+                        fresh
                     }
                 }
             } else {
@@ -1525,14 +1559,18 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
         }
         // Decided by THIS attempt's outcome, for the identity enrolled NOW —
         // see `after_attempt` for why the record is not consulted.
-        let next = after_attempt(failures, &outcome, enrolled_device_id().as_deref());
+        let path = AttemptPath { forced_rekey: force_rekey, minted };
+        let next = after_attempt(failures, &outcome, enrolled_device_id().as_deref(), path);
         failures = next.failures;
         force_rekey = next.force_rekey;
 
         if next.wait_secs >= REFUSED_RETRY_SECS {
-            // The long wait still wakes on a lock or unlock: an owner who has
-            // just fixed the enrolment and locks the machine to try it should
-            // not wait a quarter of an hour to find out.
+            // The long wait ends on any change of the gate, so LOCKING the
+            // computer retries at once: an owner who has just fixed the
+            // enrolment and locks the machine to try it should not wait a
+            // quarter of an hour to find out. (An unlock ends the wait too,
+            // but the gate is then down and the loop naps; nothing is tried
+            // until the next lock.)
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(next.wait_secs)) => {}
                 _ = gate.changed() => {}
@@ -1973,6 +2011,13 @@ mod health_tests {
         Err(AttemptError::Refused { device_id: device_id.into(), message: "refused".into() })
     }
 
+    /// An attempt that presented the stored token and minted nothing.
+    const PLAIN: AttemptPath = AttemptPath { forced_rekey: false, minted: false };
+
+    fn rejected() -> Result<(), AttemptError> {
+        Err(AttemptError::TokenRejected("connect failed: HTTP error: 401 Unauthorized".into()))
+    }
+
     #[test]
     fn a_refusal_is_remembered_until_the_next_attestation() {
         let h0 = LinkHealth::default();
@@ -2061,7 +2106,7 @@ mod health_tests {
 
     #[test]
     fn a_refused_link_waits_longer_than_the_transient_ladder() {
-        let next = after_attempt(0, &refused("dev"), Some("dev"));
+        let next = after_attempt(0, &refused("dev"), Some("dev"), PLAIN);
         assert_eq!(next.wait_secs, REFUSED_RETRY_SECS);
         assert_eq!(REFUSED_RETRY_SECS, 900);
         assert_eq!(next.failures, 1);
@@ -2070,7 +2115,7 @@ mod health_tests {
         let ladder: Vec<u64> = (0..7).map(backoff_secs).collect();
         assert_eq!(ladder, vec![0, 1, 5, 15, 30, 60, 60]);
         // Success resets.
-        let ok = after_attempt(9, &Ok(()), Some("dev"));
+        let ok = after_attempt(9, &Ok(()), Some("dev"), PLAIN);
         assert_eq!((ok.failures, ok.wait_secs, ok.force_rekey), (0, 0, false));
     }
 
@@ -2085,12 +2130,12 @@ mod health_tests {
         assert_eq!(persisted.refused_count, 1, "precondition: a refusal is on record");
 
         let dns = Err(AttemptError::Other("connect failed: dns error".into()));
-        let first = after_attempt(0, &dns, Some("dev"));
+        let first = after_attempt(0, &dns, Some("dev"), PLAIN);
         assert_eq!(first.wait_secs, backoff_secs(1));
         // Straight after a refusal, too: the refusal's long wait does not stick.
-        let after_refusal = after_attempt(0, &refused("dev"), Some("dev"));
+        let after_refusal = after_attempt(0, &refused("dev"), Some("dev"), PLAIN);
         assert_eq!(after_refusal.wait_secs, REFUSED_RETRY_SECS, "positive control");
-        let then_dns = after_attempt(after_refusal.failures, &dns, Some("dev"));
+        let then_dns = after_attempt(after_refusal.failures, &dns, Some("dev"), PLAIN);
         assert_eq!(then_dns.wait_secs, backoff_secs(2));
         assert_ne!(then_dns.wait_secs, REFUSED_RETRY_SECS);
     }
@@ -2099,8 +2144,8 @@ mod health_tests {
     fn a_refusal_of_an_identity_no_longer_enrolled_does_not_wait_long() {
         // The owner re-enrolled while an attempt for the old identity was in
         // flight: the new identity has not been refused and must not wait.
-        assert_eq!(after_attempt(0, &refused("old"), Some("new")).wait_secs, backoff_secs(1));
-        assert_eq!(after_attempt(0, &refused("old"), None).wait_secs, backoff_secs(1));
+        assert_eq!(after_attempt(0, &refused("old"), Some("new"), PLAIN).wait_secs, backoff_secs(1));
+        assert_eq!(after_attempt(0, &refused("old"), None, PLAIN).wait_secs, backoff_secs(1));
     }
 
     #[test]
@@ -2112,7 +2157,7 @@ mod health_tests {
         let got = classify_connect_error(&e401);
         assert!(matches!(got, AttemptError::TokenRejected(_)), "{got:?}");
         assert!(got.to_string().contains("401"), "the status must reach the log: {got}");
-        let next = after_attempt(0, &Err(got), Some("dev"));
+        let next = after_attempt(0, &Err(got), Some("dev"), PLAIN);
         assert!(next.force_rekey, "a dead token must not be presented again");
         assert_eq!(next.wait_secs, backoff_secs(1), "and it is not a refusal of the device");
 
@@ -2123,8 +2168,70 @@ mod health_tests {
         assert!(matches!(classify_connect_error(&e502), AttemptError::Other(_)));
         let io = Error::Io(std::io::Error::other("dns"));
         assert!(matches!(classify_connect_error(&io), AttemptError::Other(_)));
-        assert!(!after_attempt(0, &Err(AttemptError::Other("x".into())), Some("dev")).force_rekey);
-        assert!(!after_attempt(0, &refused("dev"), Some("dev")).force_rekey);
+        assert!(!after_attempt(0, &Err(AttemptError::Other("x".into())), Some("dev"), PLAIN).force_rekey);
+        assert!(!after_attempt(0, &refused("dev"), Some("dev"), PLAIN).force_rekey);
+    }
+
+    #[test]
+    fn a_rekey_that_is_refused_does_not_present_the_dead_token_again() {
+        // THE SEQUENCE: the upgrade 401s (the stored token is dead), the next
+        // attempt goes straight to the device key, and the server refuses it.
+        // Nothing was minted, so the stored token is STILL the dead one: the
+        // attempt after the 15-minute wait must go to the device key again,
+        // not open with a wasted 401 on a token the server already rejected.
+        let first = after_attempt(0, &rejected(), Some("dev"), PLAIN);
+        assert!(first.force_rekey, "precondition: the 401 sends the next attempt to the key");
+
+        let rekey = AttemptPath { forced_rekey: first.force_rekey, minted: false };
+        let refused_rekey = after_attempt(first.failures, &refused("dev"), Some("dev"), rekey);
+        assert_eq!(refused_rekey.wait_secs, REFUSED_RETRY_SECS, "a refusal still waits long");
+        assert!(refused_rekey.force_rekey, "the stored token is still the dead one");
+
+        // And again, for as long as the refusal lasts: it stays set.
+        let rekey = AttemptPath { forced_rekey: refused_rekey.force_rekey, minted: false };
+        let again = after_attempt(refused_rekey.failures, &refused("dev"), Some("dev"), rekey);
+        assert!(again.force_rekey, "a second refused rekey keeps it too");
+
+        // The same for a rekey that failed on the network before minting.
+        let net = Err(AttemptError::Other("could not redeem the challenge: dns".into()));
+        assert!(after_attempt(1, &net, Some("dev"), rekey).force_rekey);
+
+        // POSITIVE CONTROLS. A refusal or network error on the ordinary path
+        // (no token was rejected) does not start rekeying; a rekey that
+        // MINTED has replaced the dead token, so whatever fails afterwards
+        // leaves the new one to be presented; and success clears it.
+        assert!(!after_attempt(0, &refused("dev"), Some("dev"), PLAIN).force_rekey);
+        assert!(!after_attempt(0, &net, Some("dev"), PLAIN).force_rekey);
+        let minted_rekey = AttemptPath { forced_rekey: true, minted: true };
+        assert!(!after_attempt(1, &net, Some("dev"), minted_rekey).force_rekey);
+        assert!(!after_attempt(1, &Ok(()), Some("dev"), rekey).force_rekey);
+    }
+
+    #[test]
+    fn a_401_on_a_token_minted_in_the_same_attempt_does_not_mint_again() {
+        // THE SEQUENCE: the stored token 401s, the rekey mints a fresh token,
+        // and the upgrade 401s on THAT one too (a server-side fault after the
+        // mint, e.g. token_session_live failing). The device key was just
+        // accepted, so another mint would get the same answer — and each one
+        // adds a server session. It goes on the plain ladder instead.
+        let first = after_attempt(0, &rejected(), Some("dev"), PLAIN);
+        assert!(first.force_rekey, "precondition");
+        let minted = AttemptPath { forced_rekey: first.force_rekey, minted: true };
+        let second = after_attempt(first.failures, &rejected(), Some("dev"), minted);
+        assert!(!second.force_rekey, "a token minted a moment ago must not trigger another mint");
+        assert_eq!(second.wait_secs, backoff_secs(2), "the plain ladder, not the refusal wait");
+        assert_eq!(second.failures, 2, "and the ladder keeps climbing");
+
+        // The same when the mint came from the expiry path's refresh fallback.
+        let fallback = AttemptPath { forced_rekey: false, minted: true };
+        assert!(!after_attempt(3, &rejected(), Some("dev"), fallback).force_rekey);
+
+        // POSITIVE CONTROL: a 401 on a token this attempt did NOT mint still
+        // goes to the device key, on the plain path and after a forced rekey
+        // that produced no token.
+        assert!(after_attempt(0, &rejected(), Some("dev"), PLAIN).force_rekey);
+        let unminted = AttemptPath { forced_rekey: true, minted: false };
+        assert!(after_attempt(0, &rejected(), Some("dev"), unminted).force_rekey);
     }
 
     #[test]
@@ -2198,7 +2305,11 @@ mod health_tests {
     fn an_attestation_is_recorded() {
         let s = src();
         let at = s.find("Incoming::Attested => {").expect("the Attested arm");
-        let arm = &s[at..at + 400];
+        // Up to the NEXT arm, not a fixed byte count: a byte slice panics when
+        // an edit lands a multi-byte character (this file is full of em
+        // dashes) on the cut, which would fail this test for no code reason.
+        let rest = &s[at + "Incoming::Attested => {".len()..];
+        let arm = &rest[..rest.find("Incoming::").expect("the arm after Attested")];
         assert!(
             arm.contains("record(&cfg.device_id, LinkEvent::Attested);"),
             "the Attested arm must record it: {arm}"
@@ -2216,8 +2327,23 @@ mod health_tests {
             mint.is_some_and(|m| m < refresh),
             "force_rekey must go straight to the device key, not through the refresh"
         );
-        assert!(body.contains("after_attempt(failures, &outcome, enrolled_device_id().as_deref())"));
+        assert!(body.contains(
+            "after_attempt(failures, &outcome, enrolled_device_id().as_deref(), path)"
+        ));
+        assert!(body.contains("let path = AttemptPath { forced_rekey: force_rekey, minted };"));
         assert!(body.contains("force_rekey = next.force_rekey;"));
+        // EVERY mint marks the attempt, or a 401 on a token minted a moment
+        // ago would send the next attempt to mint yet another one.
+        let mints: Vec<usize> =
+            body.match_indices("obtain_device_token(&cfg).await?").map(|(i, _)| i).collect();
+        assert_eq!(mints.len(), 2, "the forced rekey and the expiry fallback: {body}");
+        for i in mints {
+            let after = body[i..].trim_start_matches("obtain_device_token(&cfg).await?");
+            assert!(
+                after.trim_start_matches(';').trim_start().starts_with("minted = true;"),
+                "a mint must set `minted` straight away: {after}"
+            );
+        }
         let long = body.find("if next.wait_secs >= REFUSED_RETRY_SECS {").expect("the long wait");
         let long_arm = &body[long..];
         assert!(
@@ -2225,5 +2351,12 @@ mod health_tests {
             "the long wait must wake on a lock change: {long_arm}"
         );
         assert!(!body.contains("backoff_secs("), "the wait is after_attempt's, not a second policy");
+        // THE RECORD IS WRITE-ONLY ON THE RETRY PATH. `after_attempt` decides
+        // from this attempt alone (see its doc); a loop that read the record
+        // for its wait would strand a machine behind yesterday's refusal after
+        // every boot, and no after_attempt test could see it.
+        for read in ["health_for(", "HEALTH", "load_health_file", "LinkHealth"] {
+            assert!(!body.contains(read), "link_forever must not read the record ({read}): {body}");
+        }
     }
 }

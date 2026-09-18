@@ -19,7 +19,7 @@ one-line summary; this file is the full story. Versions follow
   refusal persists, locking the computer during a remote session no longer
   hands the session to a sign-in screen that cannot come online; it freezes and
   resumes on unlock instead. The service now retries a refused computer every
-  15 minutes rather than every minute (a lock or unlock still retries at once),
+  15 minutes rather than every minute (locking the computer retries at once),
   and a connection the server rejects for a signed-out session goes straight to
   the computer's own key instead of retrying the dead one. The service reaches
   existing installs through the usual "update the service" prompt.
