@@ -107,6 +107,16 @@ use str0m::{Input, Output};
 // it as crate::session::StreamKey (a re-export was flagged unused — nothing
 // references the old path any more).
 
+/// Why a video stream ends when its display never produced a first frame.
+///
+/// A named constant, not an inline string, because the session layer matches
+/// on it: the reap path (session.rs) remembers a stream that ended THIS way so
+/// `SessionStatus` can tell the app not to restart it — a restart cannot wake
+/// a sleeping panel, and it would replace the viewer's own "screens may be
+/// asleep" deadline message with a generic "could not be re-established".
+pub const NO_FRAME_EVER_REASON: &str =
+    "no frame ever arrived from the display — the screens on that computer appear to be asleep and did not wake";
+
 #[derive(Debug)]
 pub enum StreamEvent {
     Terminated {
@@ -2180,9 +2190,7 @@ fn run(
                             want_keyframe = true;
                         }
                         if waited >= Duration::from_secs(12) {
-                            return Err(
-                                "no frame ever arrived from the display — the screens on that computer appear to be asleep and did not wake".to_string(),
-                            );
+                            return Err(NO_FRAME_EVER_REASON.to_string());
                         }
                     }
                 }

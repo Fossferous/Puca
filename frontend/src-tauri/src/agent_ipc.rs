@@ -127,6 +127,25 @@ fn ensure_reaper_running() {
                 continue;
             }
             let Ok(mut guard) = CONN.lock() else { continue };
+            // RE-CHECK UNDER THE LOCK. `idle_for` above was read BEFORE taking
+            // CONN, and an exchange holds CONN for its whole round trip and
+            // refreshes LAST_USED just before letting go. So a slow exchange
+            // (a start_stream, a set_monitor) that began more than
+            // IDLE_RELEASE_MS after the previous one left this thread waiting
+            // on the lock with a stale reading — and releasing the connection
+            // the instant the exchange returned. The agent's pipe server
+            // builds a fresh Agent per client, so that release silently kills
+            // every stream the borrowed agent was carrying, including the one
+            // that exchange had just started. Same lock order as
+            // agent_request_blocking (CONN, then LAST_USED).
+            let still_idle = LAST_USED
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .is_some_and(|t| t.elapsed().as_millis() as u64 >= IDLE_RELEASE_MS);
+            if !still_idle {
+                continue;
+            }
             // ONLY a borrowed connection (child.is_none()) is released this
             // way. This app's OWN agent (child.is_some()) holds a pipe named
             // for OUR pid that nothing else contends for, and killing that
@@ -948,6 +967,49 @@ mod tests {
         assert!(
             src.contains("if guard.as_ref().is_some_and(|c| c.child.is_none())"),
             "the reaper must gate on the exact same field, read the exact same way"
+        );
+    }
+
+    #[test]
+    fn the_reaper_re_reads_the_idle_clock_after_it_holds_the_connection() {
+        // THE CHECK-THEN-ACT RACE. The reaper reads LAST_USED, then waits for
+        // CONN, which an exchange holds for its whole round trip, refreshing
+        // LAST_USED just before it lets go. Deciding on the reading taken
+        // BEFORE the lock released a connection whose exchange had just
+        // succeeded, and a fresh Agent per client (the agent's pipe.rs) means
+        // that release kills every stream on the borrowed agent, a freshly
+        // restarted one included. This cannot drive the real thread (it needs
+        // a live borrowed pipe and wall-clock sleeps), so it pins the ORDER in
+        // the source: under the lock, a second reading of LAST_USED that can
+        // veto the release, before the release itself.
+        // CR-stripped: a Windows checkout has CRLF, and the end-of-function
+        // search below is newline-anchored.
+        let src = include_str!("agent_ipc.rs").replace('\r', "");
+        let src = src.split("#[cfg(all(test").next().unwrap();
+        let start = src.find("fn ensure_reaper_running").expect("the reaper exists");
+        let reaper = &src[start..];
+        let reaper = &reaper[..reaper.find("\n}\n").expect("the reaper ends")];
+        // CODE ONLY. The comment under the lock names LAST_USED as well, and
+        // an earlier version of this pin matched that comment: replacing the
+        // re-read with the stale `idle_for` left it green.
+        let reaper: String = reaper
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lock = reaper.find("CONN.lock()").expect("the reaper takes CONN");
+        let recheck = reaper[lock..]
+            .find("let still_idle = LAST_USED")
+            .map(|i| i + lock)
+            .expect("the reaper must read LAST_USED again AFTER taking CONN");
+        let veto = reaper[recheck..]
+            .find("if !still_idle")
+            .map(|i| i + recheck)
+            .expect("the second reading must be able to veto the release");
+        let release = reaper.find("*guard = None;").expect("the reaper releases");
+        assert!(
+            lock < recheck && recheck < veto && veto < release,
+            "order must be: take CONN, re-read LAST_USED, veto if fresh, then release",
         );
     }
 

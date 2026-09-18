@@ -386,6 +386,20 @@ interface Internal extends DeviceControlSession {
      *  a controller-side readiness test, which is a condition no session can
      *  satisfy — the reconnect quality re-query behind it never once ran. */
     agentStreamStarted: boolean;
+    /** HOST side: bumped every time answerOffer starts an agent stream. A
+     *  status poll captures it before its await and re-checks it after, so a
+     *  reply read across a restart's stop-then-start (or describing the
+     *  stream a restart already replaced) is never reported as a death. An
+     *  inject does the same around its own await (the DeviceInputted handler). */
+    agentStreamGen: number;
+    /** HOST side: the last stream quality the agent ACKNOWLEDGED for this
+     *  session — what a restart started it at, what an update-stream applied,
+     *  what a quality query read back. A restart reads the live stream's rates
+     *  first, but when the stream is gone (a replaced agent, a reaped stream)
+     *  that read fails, and without this the rebuilt stream silently dropped
+     *  to the agent's 30 fps / 6 Mbps defaults. A field left undefined means
+     *  "the agent's default", which is what it was running. */
+    agentQuality: { fps?: number; bitrate_kbps?: number } | null;
     /** CONTROLLER side: did we query quality on reconnect yet? */
     agentStreamQualityQueried: boolean;
     /** HOST side: the person at this machine withdrew file access for this
@@ -596,7 +610,10 @@ interface Internal extends DeviceControlSession {
      *  wasted entirely when the sealed frame was handed to a below-OPEN
      *  socket (sendSignal cannot report that) — after which a REAL death was
      *  never reported again. While injects keep failing, the report simply
-     *  repeats every 30s until one lands. */
+     *  repeats every 30s until one lands. Reset to 0 whenever answerOffer
+     *  starts a NEW stream: a report about the old one (often one the
+     *  controller's restart mute threw away) must not delay the first report
+     *  about the new one by up to 30 s. */
     streamDiedAt: number;
     /** HOST: which screen to capture, chosen at consent time. */
     monitor: number | null;
@@ -1005,8 +1022,9 @@ async function answerOffer(
     sdp: string,
     /** Rates to start the new stream at — only a media RESTART passes this,
      *  carrying forward what the controller had applied so the rebuilt stream
-     *  does not silently reset to defaults. */
-    quality?: { fps: number; bitrate_kbps: number },
+     *  does not silently reset to defaults. A field left undefined starts at
+     *  the agent's default. */
+    quality?: { fps?: number; bitrate_kbps?: number },
 ): Promise<void> {
     // Never answer for a session that has ended or no longer owns its id.
     //
@@ -1069,6 +1087,15 @@ async function answerOffer(
         // take the direct path rather than being appended to a list nobody will
         // read again.
         s.agentStreamStarted = true;
+        s.agentStreamGen += 1;
+        // A new stream owes nothing to the old one's throttle (see
+        // streamDiedAt). The poll's generation guard already drops replies
+        // about the replaced stream, and the controller's restart mute still
+        // absorbs a report that lands inside its window.
+        s.streamDiedAt = 0;
+        // What the agent just accepted is what this stream runs at: the rates
+        // passed, or its defaults for any left out.
+        s.agentQuality = quality ? { fps: quality.fps, bitrate_kbps: quality.bitrate_kbps } : null;
         const queued = s.pendingIce.splice(0);
         if (queued.length) {
             const { agentAddRemoteCandidate } = await import('./hostAgent');
@@ -1518,6 +1545,73 @@ const RESTART_STREAM_DIED_MUTE_MS = 15_000;
 /** HOST: minimum gap between 'stream-died' reports — see streamDiedAt. */
 const STREAM_DIED_RESEND_MS = 30_000;
 
+/** HOST: tell the controller its picture is gone for good, so it restarts
+ *  the media once (or ends the session honestly). ONE throttle for every
+ *  path that can learn it — an inject answered "no such capture session", and
+ *  the status poll reading `streamLive: false` — so two detectors of the same
+ *  death cost the controller one report, not two. And ONE freeze policy for
+ *  them: see shareFrozenByLock. */
+function reportStreamDied(s: Internal): void {
+    if (s.share && shareFrozenByLock()) return;
+    if (Date.now() - s.streamDiedAt <= STREAM_DIED_RESEND_MS) return;
+    s.streamDiedAt = Date.now();
+    void sendSignal(s, { kind: 'stream-died' }).catch(() => undefined);
+}
+
+/** The agent's `stream_end` for a stream that ended because the display never
+ *  produced a first frame (crates/puca-agent protocol.rs STREAM_END_NO_FRAME).
+ *  The viewer's own media deadline already names that cause ("its screens may
+ *  be asleep"); a restart would replace it with RESTART_FAILED_MSG. */
+const AGENT_STREAM_END_NO_FRAME = 'no_frame';
+
+/** HOST: is this machine's session detached from an interactive desktop the
+ *  owner is sitting at? Driven by the Windows events session_events.rs maps
+ *  onto 'lock' and 'unlock' — and those are NOT only lock and unlock: 'lock'
+ *  also fires for WTS_CONSOLE_DISCONNECT and WTS_REMOTE_DISCONNECT, 'unlock'
+ *  for WTS_CONSOLE_CONNECT and WTS_REMOTE_CONNECT. So an RDP connect clears
+ *  this while the physical console may still sit on its sign-in screen.
+ *
+ *  Module state, so it starts false and RESETS to false whenever the webview
+ *  reloads (an app start, and also an OTA bundle being applied) — until the
+ *  next event, a machine that is locked reads unlocked. That is the exposure
+ *  this code had before the flag existed, not a new one. Read only by
+ *  reportStreamDied, for share sessions. */
+let consoleLocked = false;
+
+/** HOST: when the last 'unlock' event arrived (Date.now(), 0 = never). */
+let consoleUnlockedAt = 0;
+
+/** How long after an unlock a share stays frozen. The service stops the
+ *  lock-screen (SYSTEM) agent on the SAME unlock event (puca-service
+ *  supervisor.rs), and until it has, that agent can still answer this app. A
+ *  share reported at once would be restarted onto the agent being terminated,
+ *  die again inside the controller's restart mute, and end with
+ *  RESTART_FAILED_MSG instead of recovering onto the owner's own agent. */
+const UNLOCK_SHARE_GRACE_MS = 3_000;
+
+/** HOST: must a share's picture stay frozen rather than be restarted? While
+ *  locked, an unsolicited lock deliberately leaves a share frozen
+ *  (handleConsoleLock), and a restart would land on the lock-screen agent and
+ *  show the friend the owner's sign-in screen. For UNLOCK_SHARE_GRACE_MS after
+ *  the unlock, for the race above. Every stream-died path goes through
+ *  reportStreamDied, so the poll and the inject path follow the same policy.
+ *
+ *  The grace is bounded on BOTH sides: a wall clock stepped backwards after
+ *  the unlock (an NTP correction, a manual change) makes the difference
+ *  negative, and an unbounded `< GRACE` would then hold the share frozen for
+ *  as long as the step was — an hour's step, an hour's frozen picture. */
+function shareFrozenByLock(): boolean {
+    const sinceUnlock = Date.now() - consoleUnlockedAt;
+    return consoleLocked || (sinceUnlock >= 0 && sinceUnlock < UNLOCK_SHARE_GRACE_MS);
+}
+
+/** Record a console lock or unlock. Exported for the listeners' tests; the
+ *  listeners in installDeviceSessions are the production callers. */
+export function noteConsoleLocked(locked: boolean): void {
+    consoleLocked = locked;
+    if (!locked) consoleUnlockedAt = Date.now();
+}
+
 const RESTART_FAILED_MSG =
     'the video stream was lost and could not be re-established — reconnect to the device';
 
@@ -1925,7 +2019,8 @@ let secureDesktopPollBusy = false;
  *  flight. Dropped, it would silently degrade back to the next-tick latency
  *  the event exists to remove; queued, the finishing pass re-runs once. */
 let secureDesktopPollAgain = false;
-async function pollSecureDesktop(): Promise<void> {
+/** Exported for its test (deviceAgentReplaced.test.ts). */
+export async function pollSecureDesktop(): Promise<void> {
     if (sessions.size === 0) return;
     if (secureDesktopPollBusy) { secureDesktopPollAgain = true; return; }
     secureDesktopPollBusy = true;
@@ -1959,14 +2054,79 @@ async function pollSecureDesktop(): Promise<void> {
             }
             let up = false;
             let clipped = false;
+            // Captured BEFORE the await: which stream this poll is asking
+            // about. See the stream-died check below.
+            const gen = s.agentStreamGen;
+            const started = s.agentOwnsTransport && s.agentStreamStarted;
+            let streamLive: boolean | undefined;
+            let streamEnd: string | undefined;
             try {
                 const status = await backend.sessionStatus(s.id);
                 up = status.secureDesktop;
                 clipped = status.cursorClipped === true;
+                streamLive = status.streamLive;
+                streamEnd = status.streamEnd;
             } catch {
                 // sessionStatus swallows its own errors; this is belt and
                 // braces so one bad tick can never reach the caller.
                 continue;
+            }
+            // THE AGENT ANSWERING NO LONGER HOLDS THIS SESSION'S STREAM.
+            //
+            // The case this exists for: a session that started while the
+            // machine was locked streams from the lock-screen (SYSTEM) agent
+            // the app BORROWED. At unlock the service stops that agent, the
+            // app falls through to its own, and the new agent has never heard
+            // of this session — so the picture froze until someone reconnected
+            // by hand. Any other replaced connection looks the same (the
+            // agent's pipe server builds a fresh Agent per client, dropping
+            // the old one's streams): an idle release and re-borrow, a
+            // respawned agent. The existing 'stream-died' path then restarts
+            // the media onto whichever agent answers now, carrying the
+            // session's key, proof, monitor, privacy and file scope.
+            //
+            // HONEST ABOUT THE WIDER CHANGE: `false` also covers a stream the
+            // agent ended ITSELF — an encoder or capture fault, a ~20 s ICE
+            // loss, a dead TURN relay. Those used to wait for an inject to hit
+            // "no such capture session" or for the viewer's 15 s pc watchdog
+            // to end the session; they now restart once (and end honestly if
+            // the restart dies too, per the controller's cooldown).
+            //
+            // ONLY an explicit false: `undefined` is an old agent, a Linux one
+            // or a dead pipe — "could not ask", never "gone". Gated on a
+            // stream this host started, and on that stream still being the one
+            // the poll asked about: a restart in flight sets
+            // agentStreamStarted false and answerOffer bumps the generation,
+            // so a reply read across it describes the stream being replaced.
+            // What can still slip through (the agent ending the old stream on
+            // the controller's own close, before its restart-offer lands here)
+            // arrives inside the controller's RESTART_STREAM_DIED_MUTE_MS and
+            // is ignored there; the restart's answerOffer then resets this
+            // side's 30 s throttle, so it does not delay a report about the
+            // new stream.
+            //
+            // NOT for 'no_frame': the display never produced a first frame,
+            // and the viewer's own deadline already says the screens may be
+            // asleep. A restart cannot wake them and would replace that
+            // message with a generic one.
+            //
+            // `!s.filesOnly` is NOT what keeps a files session out of here in
+            // the ordinary case — the `hosts` filter above is. It is re-read
+            // after the await for the one way it can change mid-poll: a second
+            // 'offer' sets filesOnly BEFORE it awaits the agent's start, and
+            // the generation only moves once the agent has answered (the agent
+            // refuses a second stream for a live id, and the session is then
+            // torn down) — so in that window only this term says "files".
+            //
+            // A SHARE while the console is locked, or just unlocked, stays
+            // frozen: reportStreamDied applies that for every detector (see
+            // shareFrozenByLock).
+            if (streamLive === false
+                && streamEnd !== AGENT_STREAM_END_NO_FRAME
+                && started && s.agentStreamStarted && s.agentStreamGen === gen
+                && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
+                && !s.transportDown && !s.peerReconnecting) {
+                reportStreamDied(s);
             }
             if (up !== s.secureDesktop) {
                 s.secureDesktop = up;
@@ -2949,6 +3109,7 @@ export async function connectToDevice(
         sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
         agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
         lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
+        agentStreamGen: 0, agentQuality: null,
         filesChannel: null,
         inputChannel: null, inputProved: false, inputKey: null, inputDcSeq: 0,
         lastRelayInputAt: 0, inputAliveSentAt: 0,
@@ -3429,15 +3590,22 @@ export function installDeviceSessions(): void {
             await listen('system-suspend-or-lock', (e: { payload?: { reason?: string } }) => {
                 // ONLY "lock". A "suspend" is the machine going to sleep, not a
                 // sign-in screen coming up; its return is the wake path's job.
-                if (e?.payload?.reason === 'lock') void handleConsoleLock();
+                if (e?.payload?.reason === 'lock') {
+                    noteConsoleLocked(true);
+                    void handleConsoleLock();
+                }
             });
             // The unlock twin (session_events.rs UNLOCK_EVENT, pinned by a
             // test there). Purely a latency nudge: the poll below already
             // runs at 1 Hz and is edge-triggered + busy-guarded, so calling
             // it out of band is free — but it is the difference between the
             // controller's secure-desktop banner clearing the instant the
-            // PIN lands and clearing on the next tick.
+            // PIN lands and clearing on the next tick. It does NOT hurry a
+            // frozen share's restart: noteConsoleLocked(false) starts
+            // UNLOCK_SHARE_GRACE_MS, so this poll cannot restart a share onto
+            // the lock-screen agent the service is stopping right now.
             await listen('system-session-unlock', () => {
+                noteConsoleLocked(false);
                 void pollSecureDesktop();
             });
         } catch {
@@ -3515,6 +3683,7 @@ export function installDeviceSessions(): void {
                 sendSeq: 0, recvSeq: -1, sendSigSeq: 0, recvSigSeq: -1, sigQueue: new SerialQueue(), recvSigQueue: new SerialQueue(), inQueue: new SerialQueue(), recvInQueue: new SerialQueue(), injectQueue: new SerialQueue(), sendCoalescer: null, recvCoalescer: null, inputRate: new RateCounter(), pendingIce: [], preKeyFrames: [], hostStream: null,
                 agentOwnsTransport: false, agentStreamStarted: false, agentStreamQualityQueried: false, uaVerified: false, uaRequired: false, uaCache: null, reconnecting: false, transportDown: false, peerReconnecting: false, transportGraceTimer: null, connectTimer: null, pendingCursorOwner: null, pcDisconnectTimer: null, pendingOffer: null, mediaTimer: null, awaitingMedia: false, awaitingUaPassphrase: false, monitor: null, monitorDefaulted: false, consentedMonitor: null, monitors: [], activeMonitor: null,
                 lastInputAt: 0, liveness: null, mediaRestarting: false, mediaRestartAt: null, streamDiedAt: 0,
+                agentStreamGen: 0, agentQuality: null,
                 filesChannel: null,
                 inputChannel: null, inputProved: false, inputKey: null, inputDcSeq: 0,
         lastRelayInputAt: 0, inputAliveSentAt: 0,
@@ -4106,6 +4275,18 @@ export function installDeviceSessions(): void {
                         // draining afterwards would re-stick the very key the
                         // release just lifted.
                         if (sessions.get(s.id) !== s || s.phase === 'ended') return;
+                        // Which stream this inject is addressed to, captured
+                        // BEFORE its await — the poll's guard, for the same
+                        // race. An inject sent in a restart's stop-to-start
+                        // gap is answered "no such capture session" about the
+                        // stream being replaced; if that answer lands after
+                        // the new stream started, reporting it would stamp
+                        // the throttle answerOffer just reset, and hold back
+                        // a real death of the NEW stream for up to 30 s.
+                        // Captured here rather than at enqueue: an event that
+                        // waited in this queue while a restart completed is
+                        // sent to the new stream, and its failure is news.
+                        const gen = s.agentStreamGen;
                         try {
                             const backend = await getHostBackend();
                             await backend.injectEvent(s.id, JSON.stringify(ev));
@@ -4122,10 +4303,8 @@ export function installDeviceSessions(): void {
                             // the session honestly instead of wearing a frozen
                             // frame with input still landing.
                             const msg = e instanceof Error ? e.message : String(e);
-                            if (/no such capture session/i.test(msg)
-                                && Date.now() - s.streamDiedAt > STREAM_DIED_RESEND_MS) {
-                                s.streamDiedAt = Date.now();
-                                void sendSignal(s, { kind: 'stream-died' }).catch(() => undefined);
+                            if (/no such capture session/i.test(msg) && s.agentStreamGen === gen) {
+                                reportStreamDied(s);
                             }
                             // Ctrl+Alt+Del is the one input the user presses
                             // ONCE and expects a visible answer to. It can only
@@ -4948,6 +5127,15 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     // the only thing that converts to bps, and it does
                     // it once at the IPC boundary.
                     await backend.updateStream(s.id, data.fps as number | undefined, data.bitrate as number | undefined);
+                    // Remember what the agent accepted, field by field: an
+                    // update may carry only one of the two, and the other keeps
+                    // whatever the stream was already running.
+                    const prev = s.agentQuality ?? {};
+                    s.agentQuality = {
+                        fps: typeof data.fps === 'number' && Number.isFinite(data.fps) ? data.fps : prev.fps,
+                        bitrate_kbps: typeof data.bitrate === 'number' && Number.isFinite(data.bitrate)
+                            ? data.bitrate : prev.bitrate_kbps,
+                    };
                     await sendSignal(s, { kind: 'stream-quality-ack', fps: data.fps, bitrate_kbps: data.bitrate, applied: true });
                 } catch (e) {
                     // TELL THE CONTROLLER. Swallowing this into a
@@ -5377,6 +5565,7 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     if (!Number.isFinite(fps) || !Number.isFinite(bitrate_kbps)) {
                         throw new Error('Invalid stream-quality response from host backend');
                     }
+                    s.agentQuality = { fps, bitrate_kbps };
                     await sendSignal(s, { kind: 'stream-quality-ack', fps, bitrate_kbps });
                 } catch (error) {
                     console.error('[stream-quality] host query failed', { sessionId: s.id, error });
@@ -5454,7 +5643,7 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // deliberately ignored and s.filesOnly (set by the original offer)
             // decides whether the new stream captures.
             try {
-                let quality: { fps: number; bitrate_kbps: number } | null = null;
+                let quality: { fps?: number; bitrate_kbps?: number } | null = null;
                 if (s.agentOwnsTransport) {
                     const backend = await getHostBackend();
                     // Preserve the quality the controller had applied — the
@@ -5462,7 +5651,14 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                     // Read BEFORE the stop; the stream carries the answer.
                     try {
                         quality = (await backend.getStreamQuality?.(s.id)) ?? null;
-                    } catch { /* an old agent: defaults are what it had */ }
+                    } catch { /* no live stream to ask — see below */ }
+                    // THE STREAM IS GONE, so it cannot be asked: the agent
+                    // answering is a replacement (the lock-screen agent lost at
+                    // unlock) or reaped it. Fall back to what the agent last
+                    // acknowledged on this host, rather than letting recovery
+                    // drop the picture to 30 fps / 6 Mbps. Null (nothing was
+                    // ever changed) is the defaults the stream really had.
+                    if (!quality) quality = s.agentQuality;
                     // The agent refuses a second stream for a live session id,
                     // so the dead one goes first. Candidates trickling
                     // meanwhile queue against agentStreamStarted and drain

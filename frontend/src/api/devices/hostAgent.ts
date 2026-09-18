@@ -48,6 +48,12 @@ interface AgentReply {
      *  pointer entirely off the streamed monitor, so injected clicks get
      *  clamped elsewhere. Absent on agents older than this field. */
     cursor_clipped?: boolean;
+    /** `session_state`: does the agent ANSWERING hold a live stream for this
+     *  session? Absent on agents older than this field and on Linux. */
+    stream_live?: boolean;
+    /** `session_state`: why that agent's stream ended, when the host must not
+     *  answer it with a restart ('no_frame': the display never produced one). */
+    stream_end?: string;
 }
 
 /**
@@ -432,10 +438,19 @@ export function agentHostBackend(): HostBackend {
          *  "bad request", request() throws, and an escaped rejection once per
          *  second would be a session-killing error storm. "Could not ask" reads
          *  as false — which is exactly the behaviour every build had before this
-         *  existed: the picture freezes and nothing explains it. */
+         *  existed: the picture freezes and nothing explains it.
+         *
+         *  `streamLive` is THREE-state, and the third state is the safe one:
+         *  `true` / `false` only when the agent actually said so, `undefined`
+         *  for an old agent, a Linux one, a malformed reply or a dead pipe.
+         *  Only an explicit `false` may make the caller act (it restarts the
+         *  media), so "could not ask" can never read as "the stream is gone" —
+         *  the catch arm below carries no streamLive at all. `streamEnd` is
+         *  the agent's reason the host must stay silent ('no_frame'), passed
+         *  through only when it is a string. */
         async sessionStatus(
             sessionId: string,
-        ): Promise<{ secureDesktop: boolean; cursorClipped: boolean }> {
+        ): Promise<{ secureDesktop: boolean; cursorClipped: boolean; streamLive?: boolean; streamEnd?: string }> {
             try {
                 const reply = await request({ cmd: 'session_status', session_id: sessionId });
                 // `=== true`, not truthiness — a malformed reply must not be
@@ -445,6 +460,8 @@ export function agentHostBackend(): HostBackend {
                 return {
                     secureDesktop: reply.secure_desktop === true,
                     cursorClipped: reply.cursor_clipped === true,
+                    streamLive: typeof reply.stream_live === 'boolean' ? reply.stream_live : undefined,
+                    streamEnd: typeof reply.stream_end === 'string' ? reply.stream_end : undefined,
                 };
             } catch {
                 return { secureDesktop: false, cursorClipped: false };

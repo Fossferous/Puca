@@ -99,3 +99,55 @@ describe('the secure-desktop status poll', () => {
             .toEqual({ secureDesktop: false, cursorClipped: false });
     });
 });
+
+/**
+ * `stream_live` / `stream_end` — does the agent ANSWERING still hold this
+ * session's stream? The host restarts the media on an explicit `false`, so the
+ * parse is THREE-state and "cannot tell" must stay distinguishable from "gone":
+ * an old agent, a Linux one, a malformed reply and a dead pipe all read as
+ * `undefined`, which the caller never acts on. The field names are pinned on
+ * the Rust side too (protocol.rs `session_state_serialises_to_what_the_app_reads`).
+ */
+describe('the stream-liveness half of the same poll', () => {
+    beforeEach(() => { invokeMock.mockReset(); });
+
+    const reply = async (body: Record<string, unknown>) => {
+        invokeMock.mockResolvedValue(JSON.stringify({ ok: 'session_state', secure_desktop: false, ...body }));
+        return agentHostBackend().sessionStatus!('s1');
+    };
+
+    test('POSITIVE CONTROL: an agent without the stream says false, and it arrives as false', async () => {
+        expect((await reply({ stream_live: false })).streamLive).toBe(false);
+    });
+
+    test('an agent holding the stream says true', async () => {
+        expect((await reply({ stream_live: true })).streamLive).toBe(true);
+    });
+
+    test('an agent that predates the field reads as "cannot tell", never as "gone"', async () => {
+        // Parse with `!== true` and this is the test that goes red: absence
+        // would read as false and every old agent would restart its sessions.
+        expect((await reply({})).streamLive).toBeUndefined();
+    });
+
+    test('a non-boolean is "cannot tell" too', async () => {
+        expect((await reply({ stream_live: 'no' })).streamLive).toBeUndefined();
+        expect((await reply({ stream_live: 0 })).streamLive).toBeUndefined();
+        expect((await reply({ stream_live: null })).streamLive).toBeUndefined();
+    });
+
+    test('a dead pipe and an old agent refusal carry no streamLive at all', async () => {
+        invokeMock.mockRejectedValue(new Error('pipe closed'));
+        expect((await agentHostBackend().sessionStatus!('s1')).streamLive).toBeUndefined();
+        invokeMock.mockResolvedValue(JSON.stringify({ ok: 'error', message: 'bad request: session_status' }));
+        expect((await agentHostBackend().sessionStatus!('s1')).streamLive).toBeUndefined();
+    });
+
+    test('the agent reason to stay silent passes through, as the literal the agent writes', async () => {
+        // STREAM_END_NO_FRAME in protocol.rs; session.ts compares against it.
+        expect(await reply({ stream_live: false, stream_end: 'no_frame' }))
+            .toMatchObject({ streamLive: false, streamEnd: 'no_frame' });
+        expect((await reply({ stream_live: false, stream_end: 7 })).streamEnd).toBeUndefined();
+        expect((await reply({ stream_live: false })).streamEnd).toBeUndefined();
+    });
+});

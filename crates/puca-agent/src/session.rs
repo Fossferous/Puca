@@ -594,7 +594,22 @@ pub struct Agent {
     /// and read by Request::SessionStatus, so the app can bring up the bridge.
     #[cfg(windows)]
     secure_desktop_up: std::collections::HashSet<String>,
+    /// Session ids whose stream this agent REAPED because the display never
+    /// produced a first frame (`stream::NO_FRAME_EVER_REASON`), newest last.
+    /// Read by `SessionStatus` as `stream_end: "no_frame"`, so the app does
+    /// not answer a sleeping panel with a restart — the viewer's own media
+    /// deadline already says "the screens may be asleep", and a restart would
+    /// replace that with "could not be re-established". Cleared for an id by
+    /// StopStream and by a fresh StartStream; bounded, because an agent lives
+    /// for days and nothing else ever removes an entry.
+    #[cfg(windows)]
+    ended_without_frame: std::collections::VecDeque<String>,
 }
+
+/// How many `ended_without_frame` ids an agent remembers. Only the ids of
+/// sessions still being polled matter, and there are rarely more than one.
+#[cfg(windows)]
+const ENDED_WITHOUT_FRAME_CAP: usize = 16;
 
 /// Whether this Linux box can actually host: an X server we can reach, with
 /// XTEST present.
@@ -638,7 +653,16 @@ impl Agent {
             stream_events: (tx, rx),
             #[cfg(windows)]
             secure_desktop_up: std::collections::HashSet::new(),
+            #[cfg(windows)]
+            ended_without_frame: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Forget why `session_id`'s last stream ended — it has a new one, or was
+    /// stopped on purpose.
+    #[cfg(windows)]
+    fn forget_stream_end(&mut self, session_id: &str) {
+        self.ended_without_frame.retain(|id| id != session_id);
     }
 
     #[cfg(test)]
@@ -845,6 +869,13 @@ impl Agent {
                                 self.secure_desktop_up.remove(&session_id);
                                 release_reservations(&mut self.monitor_reservations, &key);
                                 eprintln!("[agent] reaped terminated stream session={session_id} gen={generation} reason={reason}");
+                                self.forget_stream_end(&session_id);
+                                if reason == crate::stream::NO_FRAME_EVER_REASON {
+                                    if self.ended_without_frame.len() >= ENDED_WITHOUT_FRAME_CAP {
+                                        self.ended_without_frame.pop_front();
+                                    }
+                                    self.ended_without_frame.push_back(session_id);
+                                }
                             }
                             Err(crate::stream::ReapError::GenerationMismatch { .. }) => {}
                         }
@@ -1133,6 +1164,7 @@ impl Agent {
                     Ok(stream) => {
                         let answer_sdp = stream.answer_sdp.clone();
                         self.streams.insert(session_id.clone(), stream);
+                        self.forget_stream_end(&session_id);
                         // Only a session WITH a screen is recorded in the session
                         // map or given the input aim. That map is what `Inject`
                         // and `SetPrivacyMode` consult, and a session with no
@@ -1168,6 +1200,7 @@ impl Agent {
 
             #[cfg(windows)]
             Request::StopStream { session_id } => {
+                self.forget_stream_end(&session_id);
                 if let Some(mut stream) = self.streams.remove(&session_id) {
                     let generation = stream.generation;
                     stream.stop_and_join();
@@ -1365,7 +1398,31 @@ impl Agent {
                         })
                         .map(puca_input::cursor_clip_conflict_for)
                         .unwrap_or(false);
-                Response::SessionState { secure_desktop, cursor_clipped }
+                // Does THIS agent hold the stream? `streams`, not `sessions`:
+                // the stream is what carries the video and the input channel,
+                // and a data-only stream has no `sessions` entry at all. The
+                // stream-event drain at the top of handle() has already run,
+                // so a stream reaped since the last poll reads false now. A
+                // fresh Agent (pipe.rs builds one per client connection) reads
+                // false by construction — which is the whole point: a borrowed
+                // lock-screen agent lost at unlock, or a respawned sidecar,
+                // answers from an empty map.
+                //
+                // Off Windows there is no streaming, so there is nothing to
+                // claim either way: None, never a false that would have a
+                // Linux host restart a session it never streamed.
+                #[cfg(windows)]
+                let (stream_live, stream_end) = {
+                    let live = self.streams.contains_key(&session_id);
+                    let no_frame = !live && self.ended_without_frame.iter().any(|id| id == &session_id);
+                    (
+                        Some(live),
+                        no_frame.then(|| crate::protocol::STREAM_END_NO_FRAME.to_string()),
+                    )
+                };
+                #[cfg(not(windows))]
+                let (stream_live, stream_end) = (None, None);
+                Response::SessionState { secure_desktop, cursor_clipped, stream_live, stream_end }
             }
 
             #[cfg(not(windows))]
@@ -2803,7 +2860,7 @@ mod tests {
         }).unwrap();
 
         match a.handle(Request::SessionStatus { session_id: "s1".into() }) {
-            Response::SessionState { secure_desktop, cursor_clipped } => {
+            Response::SessionState { secure_desktop, cursor_clipped, .. } => {
                 assert!(
                     !secure_desktop,
                     "a SYSTEM agent can reach the secure desktop, so it must never                  tell the viewer the screen is out of reach — that banner lands                  on top of the PIN box it is supposed to be showing",
@@ -2851,6 +2908,237 @@ mod tests {
             other => panic!("expected SessionState, got {other:?}"),
         }
         let _ = rx;
+    }
+
+    /// What `SessionStatus` says about THIS agent's stream: `(stream_live,
+    /// stream_end)`.
+    fn stream_status(a: &mut Agent, id: &str) -> (Option<bool>, Option<String>) {
+        match a.handle(Request::SessionStatus { session_id: id.into() }) {
+            Response::SessionState { stream_live, stream_end, .. } => (stream_live, stream_end),
+            other => panic!("expected SessionState, got {other:?}"),
+        }
+    }
+
+    /// THE FACT THE APP'S UNLOCK RECOVERY RESTS ON. A session whose stream
+    /// lives on ANOTHER agent (the lock-screen agent the app borrowed and lost
+    /// at unlock) is polled against this one, and before `stream_live` the
+    /// answer was indistinguishable from a healthy session. Hard-code
+    /// `Some(true)` and the first and last assertions go red; hard-code
+    /// `Some(false)` and the middle one does.
+    #[cfg(windows)]
+    #[test]
+    fn session_status_says_whether_this_agent_holds_the_stream() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+
+        assert_eq!(
+            stream_status(&mut a, "s1"),
+            (Some(false), None),
+            "an agent with no stream for the session must say so: this is what a \
+             replaced connection or a respawned agent looks like from the app",
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(|| ());
+        let stream = crate::stream::Stream::create_for_test(
+            "s1".into(), 3, 0, handle,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx,
+        );
+        a.streams.insert("s1".into(), stream);
+        a.sessions.insert("s1".into(), 0);
+        assert_eq!(stream_status(&mut a, "s1"), (Some(true), None), "a live stream reads live");
+
+        // The reap path: the stream thread ended on its own (an encoder fault
+        // here), and the NEXT request's drain removes it before answering.
+        a.stream_events.0.send(crate::stream::StreamEvent::Terminated {
+            session_id: "s1".into(),
+            generation: 3,
+            reason: "the encoder failed".into(),
+        }).unwrap();
+        assert_eq!(
+            stream_status(&mut a, "s1"),
+            (Some(false), None),
+            "a reaped stream reads gone on the very next poll, with no cause the \
+             app must stay silent for: a restart is the right answer to this one",
+        );
+        let _ = rx;
+    }
+
+    /// A stream that ended because the display NEVER produced a frame must not
+    /// be restarted by the app: the viewer's own deadline already says "the
+    /// screens may be asleep", and a restart replaces that with a generic
+    /// failure. The test above is the positive control (another cause reports
+    /// no `stream_end`). Delete the reap-side record and the first assertion
+    /// goes red; forget to clear it on StopStream and the last one does.
+    #[cfg(windows)]
+    #[test]
+    fn a_stream_that_never_produced_a_frame_says_so_until_it_is_stopped() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(|| ());
+        let stream = crate::stream::Stream::create_for_test(
+            "s1".into(), 4, 0, handle,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx,
+        );
+        a.streams.insert("s1".into(), stream);
+        a.sessions.insert("s1".into(), 0);
+
+        a.stream_events.0.send(crate::stream::StreamEvent::Terminated {
+            session_id: "s1".into(),
+            generation: 4,
+            reason: crate::stream::NO_FRAME_EVER_REASON.to_string(),
+        }).unwrap();
+        assert_eq!(
+            stream_status(&mut a, "s1"),
+            (Some(false), Some(crate::protocol::STREAM_END_NO_FRAME.to_string())),
+        );
+        // Another session is not tarred with it.
+        assert_eq!(stream_status(&mut a, "s2"), (Some(false), None));
+
+        a.handle(Request::StopStream { session_id: "s1".into() });
+        assert_eq!(
+            stream_status(&mut a, "s1"),
+            (Some(false), None),
+            "a deliberate stop ends the story; a later stream for this id owes \
+             nothing to how the old one ended",
+        );
+        let _ = rx;
+    }
+
+    /// Bounded: the agent lives for days, and a remembered id is only ever
+    /// removed by a stop or a new stream for the same id.
+    #[cfg(windows)]
+    #[test]
+    fn the_no_frame_record_is_bounded() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        for i in 0..(ENDED_WITHOUT_FRAME_CAP + 5) {
+            let id = format!("s{i}");
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let handle = std::thread::spawn(|| ());
+            let gen = i as u64 + 1;
+            let stream = crate::stream::Stream::create_for_test(
+                id.clone(), gen, 0, handle,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), tx,
+            );
+            a.streams.insert(id.clone(), stream);
+            a.stream_events.0.send(crate::stream::StreamEvent::Terminated {
+                session_id: id,
+                generation: gen,
+                reason: crate::stream::NO_FRAME_EVER_REASON.to_string(),
+            }).unwrap();
+            a.handle(Request::Capabilities);
+        }
+        assert_eq!(a.ended_without_frame.len(), ENDED_WITHOUT_FRAME_CAP);
+        let newest = format!("s{}", ENDED_WITHOUT_FRAME_CAP + 4);
+        assert_eq!(
+            stream_status(&mut a, &newest).1.as_deref(),
+            Some(crate::protocol::STREAM_END_NO_FRAME),
+        );
+        assert_eq!(stream_status(&mut a, "s0").1, None, "the oldest is the one forgotten");
+    }
+
+    /// THE STRING THE REAP MATCHES IS THE STRING THE STREAM SENDS. The reap
+    /// path remembers a no-frame end by EXACT equality with
+    /// NO_FRAME_EVER_REASON, and every test above feeds that constant straight
+    /// into the event channel — so a stream thread that wrapped or reworded
+    /// the error on its way to the guard (a `format!` prefix, a `map_err`)
+    /// would silently turn every sleeping-display end into "restart it", and
+    /// the viewer's "screens may be asleep" into a generic failure. The real
+    /// stream thread needs a display and an ICE peer, so pin the hand-off in
+    /// the source instead: run() returns the constant as it is, the thread
+    /// stores run()'s error unchanged, the guard sends what was stored, and
+    /// the reap compares against the same constant. Platform-independent: it
+    /// only reads the files.
+    #[test]
+    fn the_no_frame_reason_reaches_the_reap_unchanged() {
+        fn code_only(src: &str) -> String {
+            src.replace('\r', "")
+                .split("\nmod tests {")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+            let a = src.find(from).unwrap_or_else(|| panic!("missing: {from}"));
+            let rest = &src[a..];
+            let b = rest.find(to).unwrap_or_else(|| panic!("missing after {from}: {to}"));
+            &rest[..b]
+        }
+        let stream = code_only(include_str!("stream.rs"));
+        let session = code_only(include_str!("session.rs"));
+
+        // run() gives up on a display that never produced a frame by
+        // returning the constant itself — not a copy with anything added.
+        let run = between(&stream, "\nfn run(", "\n}\n");
+        assert!(
+            run.contains("return Err(NO_FRAME_EVER_REASON.to_string());"),
+            "stream.rs run() must end a frameless stream with NO_FRAME_EVER_REASON as it is",
+        );
+        // The thread body stores run()'s error AS IT IS in the reason cell.
+        let body = between(&stream, "if let Err(e) = run(", "puca_input::release_all();");
+        assert!(body.contains("*r = e;"), "the stream thread must store run()'s error unchanged");
+        // The guard sends exactly what was stored.
+        let guard = between(&stream, "impl Drop for TerminatedGuard", "\n}\n");
+        assert!(
+            guard.contains(".map(|r| r.clone())") && guard.contains("reason,") && !guard.contains("format!"),
+            "TerminatedGuard must send the stored reason unchanged",
+        );
+        // And the reap compares against the very same constant.
+        assert!(
+            session.contains("if reason == crate::stream::NO_FRAME_EVER_REASON {"),
+            "the reap must match the constant stream.rs sends",
+        );
+    }
+
+    /// A platform that does not stream has nothing to claim either way: None,
+    /// never a `false` that would have the app restart a session it never
+    /// streamed.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_platform_without_streaming_claims_nothing_about_the_stream() {
+        let mut a = agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        assert_eq!(stream_status(&mut a, "s1"), (None, None));
+    }
+
+    /// WHY `stream_live: false` MEANS "THE CONNECTION WAS REPLACED". The app
+    /// relies on a new client connection getting a NEW Agent with an empty
+    /// stream map: the lock-screen agent re-borrowed after an idle release,
+    /// or relaunched by the service, answers from nothing. A test on
+    /// `Agent::new` alone is true by construction; what can actually drift is
+    /// a transport building one Agent outside its accept loop and reusing it
+    /// (pipe.rs once did, for other reasons). So pin the placement in both
+    /// transports' source.
+    #[test]
+    fn every_transport_builds_a_fresh_agent_per_client_connection() {
+        for (name, src) in [
+            ("pipe.rs", include_str!("pipe.rs")),
+            ("unix_sock.rs", include_str!("unix_sock.rs")),
+        ] {
+            // Everything before the file's test module: tests may build
+            // Agents of their own.
+            let code = src.split("\nmod tests {").next().unwrap();
+            assert!(code.len() > 2_000, "{name}: that is not the real transport source");
+            let news: Vec<usize> = code.match_indices("Agent::new(").map(|(i, _)| i).collect();
+            assert_eq!(
+                news.len(), 1,
+                "{name}: expected exactly one Agent::new outside tests, found {}", news.len(),
+            );
+            let serve = code.find("pub fn serve").unwrap_or_else(|| panic!("{name}: no serve()"));
+            let accept_loop = code[serve..].find("\n    loop {").map(|i| i + serve)
+                .unwrap_or_else(|| panic!("{name}: serve() has no accept loop"));
+            assert!(
+                news[0] > accept_loop,
+                "{name}: the Agent must be built INSIDE serve()'s per-connection loop, so a new \
+                 client never inherits the previous one's streams (the app's stream_live check \
+                 depends on it)",
+            );
+        }
     }
 
     /// The viewer's stage is bounded BEFORE the stream lookup, and a valid one
