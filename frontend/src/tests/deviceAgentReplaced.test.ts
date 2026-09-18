@@ -116,6 +116,9 @@ vi.mock('../api/devices/unattendedHost', () => ({
 }));
 
 import { sealControl } from '../api/e2ee';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 let sessionMod: typeof import('../api/devices/session');
 beforeAll(async () => {
@@ -388,6 +391,29 @@ describe('a share session while the console is locked', () => {
         status = { ...status, streamLive: false };
         await poll();
         expect(await streamDiedSince(key, before)).toBe(1);
+    });
+});
+
+describe('the lock flag those tests set is the one the Windows events drive', () => {
+    // The tests above set the flag through noteConsoleLocked, because the
+    // Tauri listeners never register under jsdom (isTauri() is false). So pin
+    // the wiring in the source: without it the share gate reads "unlocked"
+    // forever and every test above still passes.
+    const src = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'api', 'devices', 'session.ts'), 'utf8',
+    ).replace(/\r/g, '');
+    const listener = (event: string): string => {
+        const at = src.indexOf(`listen('${event}'`);
+        expect(at, `session.ts listens for ${event}`).toBeGreaterThan(0);
+        return src.slice(at, src.indexOf('});', at));
+    };
+
+    it('a lock event sets it', () => {
+        expect(listener('system-suspend-or-lock')).toContain('noteConsoleLocked(true)');
+    });
+
+    it('the unlock event clears it', () => {
+        expect(listener('system-session-unlock')).toContain('noteConsoleLocked(false)');
     });
 });
 
