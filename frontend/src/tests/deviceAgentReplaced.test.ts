@@ -235,7 +235,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
 
     it('a live stream sends nothing', async () => {
         const key = await streamingSession();
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { ...status, streamLive: true };
         await poll();
         expect(sessionStatus).toHaveBeenCalled();
@@ -244,7 +244,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
 
     it('an agent that predates the field (streamLive undefined) sends nothing', async () => {
         const key = await streamingSession();
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { secureDesktop: false, cursorClipped: false, streamLive: undefined };
         await poll();
         expect(sessionStatus).toHaveBeenCalled();
@@ -253,7 +253,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
 
     it('a dead pipe (the catch shape: no streamLive key at all) sends nothing', async () => {
         const key = await streamingSession();
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { secureDesktop: false, cursorClipped: false };
         await poll();
         expect(sessionStatus).toHaveBeenCalled();
@@ -262,7 +262,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
 
     it('nothing is reported before this host has started a stream — and it is, once it has', async () => {
         const key = await activeHostSession();
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { ...status, streamLive: false };
 
         await poll();
@@ -307,7 +307,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         // Any later poll finds the new stream live.
         status = { ...status, streamLive: true };
 
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         resolve({ secureDesktop: false, cursorClipped: false, streamLive: false });
         await inFlight;
         await settle();
@@ -336,7 +336,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         const key = await activeHostSession();
         await signal(key, { kind: 'offer', sdp: FILES_OFFER, filesOnly: true });
         expect(agentAnswerOffer, 'the premise: the files session started a (data-only) stream').toHaveBeenCalledTimes(1);
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { ...status, streamLive: false };
         await poll();
         expect(await streamDiedSince(key, before)).toBe(0);
@@ -344,7 +344,7 @@ describe('the agent answering no longer holds this session\'s stream', () => {
 
     it('a stream that never produced a frame stays with the viewer\'s own message', async () => {
         const key = await streamingSession();
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { ...status, streamLive: false, streamEnd: 'no_frame' };
         await poll();
         expect(sessionStatus).toHaveBeenCalled();
@@ -362,7 +362,7 @@ describe('a share session while the console is locked', () => {
         shareCaps = ['control'];
         const key = await streamingSession();
         sessionMod.noteConsoleLocked(true);
-        const before = sent.length;
+        const before = 0; // the whole session: a report from any tick would count
         status = { ...status, streamLive: false };
 
         await poll();
