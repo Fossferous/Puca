@@ -274,6 +274,21 @@ describe('a touch-mode stage left with a stranded finger', () => {
         await fire(pe('pointerup', 3, 100, 400));
         expect(sentOf('up')).toHaveLength(1);
     });
+
+    it('a touch press held when the app loses focus is released, once', async () => {
+        // Forgetting the finger must not strand the button it pressed on the
+        // host: the same let-go-first rule the mode switch follows.
+        await mount();
+        await fire(pe('pointerdown', 1, 100, 400));
+        expect(sentOf('down'), 'precondition: the finger pressed').toHaveLength(1);
+        h.sendInput.mockClear();
+        await act(async () => { window.dispatchEvent(new Event('blur')); });
+        await flush();
+        expect(sentOf('up'), 'blur releases the press').toHaveLength(1);
+        // Its late up, if it ever comes, releases nothing a second time.
+        await fire(pe('pointerup', 1, 100, 400));
+        expect(sentOf('up')).toHaveLength(1);
+    });
 });
 
 describe('"Copy diagnostics" shows the trackpad state', () => {
