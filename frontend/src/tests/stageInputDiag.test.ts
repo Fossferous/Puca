@@ -12,7 +12,7 @@ import { mouseModeOf, stageInputDiagnostics, type StageInputState } from '../api
 const base: StageInputState = {
     isMobile: true, isMouseMode: true, fpsMode: false, controlEnabled: true,
     cursorOwned: true, cursorDrawn: true, stageContacts: 1,
-    gesture: { phase: 'pinch', contacts: 2, surface: true },
+    gesture: { phase: 'pinch', contacts: 2, surface: true, pruned: 3, blurCancels: 1 },
 };
 
 describe('mouse mode', () => {
@@ -34,6 +34,8 @@ describe('the report', () => {
             gesturePhase: 'pinch',
             gestureContacts: 2,
             gestureSurface: true,
+            gesturePruned: 3,
+            gestureBlurCancels: 1,
             stageContacts: 1,
             cursorOwned: true,
             cursorDrawn: true,
@@ -48,6 +50,16 @@ describe('the report', () => {
         // Everything that is still true in touch mode is still reported.
         expect(touch.stageContacts).toBe(1);
         expect(touch.cursorOwned).toBe(true);
+    });
+
+    it('reports the wedge recoveries in every mode: they are history, not present state', () => {
+        // A recovery fires silently, after which the phase looks healthy; a
+        // user who then switched to touch mode must not hide that it happened.
+        for (const over of [{}, { isMouseMode: false }, { isMobile: false }]) {
+            const r = stageInputDiagnostics({ ...base, ...over });
+            expect(r.gesturePruned, JSON.stringify(over)).toBe(3);
+            expect(r.gestureBlurCancels, JSON.stringify(over)).toBe(1);
+        }
     });
 
     it('says when the pointer is owned but not drawn, and when control is paused', () => {

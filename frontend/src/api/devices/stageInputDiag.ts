@@ -14,6 +14,12 @@
  *    is a stranded contact, not a gesture.
  *  - `stageContacts`: the stage's own count of fingers; two stale ones make
  *    every drag a pinch-zoom of the picture.
+ *  - `gesturePruned` / `gestureBlurCancels`: how often the wedge's two
+ *    recoveries have ALREADY fired (a stranded contact pruned on the next
+ *    touch; a blur, hide or mode switch that found fingers to drop). Both
+ *    are silent by design, so after a recovery the phase looks healthy and
+ *    only these say the wedge happened. Cumulative, and reported in every
+ *    mode: they are history, not the machine's present state.
  *  - `cursorOwned` / `cursorDrawn`: once the host acks ownership it stops
  *    drawing its pointer and this end draws one. Owned but not drawn — or not
  *    owned in trackpad mode — is a pointer nobody can see, which reads exactly
@@ -22,6 +28,8 @@
  *
  * Pure, so the shape is pinned by a test without mounting the stage.
  */
+import type { GestureDiag } from './touchGestures';
+
 export interface StageInputState {
     isMobile: boolean;
     isMouseMode: boolean;
@@ -30,7 +38,7 @@ export interface StageInputState {
     cursorOwned: boolean;
     cursorDrawn: boolean;
     stageContacts: number;
-    gesture: { phase: string; contacts: number; surface: boolean };
+    gesture: GestureDiag;
 }
 
 export type MouseMode = 'trackpad' | 'touch' | 'game' | 'desktop';
@@ -52,6 +60,8 @@ export function stageInputDiagnostics(s: StageInputState): Record<string, unknow
         gesturePhase: mouseMode === 'trackpad' ? s.gesture.phase : null,
         gestureContacts: mouseMode === 'trackpad' ? s.gesture.contacts : null,
         gestureSurface: mouseMode === 'trackpad' ? s.gesture.surface : null,
+        gesturePruned: s.gesture.pruned,
+        gestureBlurCancels: s.gesture.blurCancels,
         stageContacts: s.stageContacts,
         cursorOwned: s.cursorOwned,
         cursorDrawn: s.cursorDrawn,

@@ -180,6 +180,26 @@ async function dragFinger3() {
 }
 
 const movesSent = () => h.sendInput.mock.calls.filter(c => (c[1] as { t?: string }).t === 'move');
+const sentOf = (t: string) => h.sendInput.mock.calls.filter(c => (c[1] as { t?: string }).t === t);
+
+/** Press "Copy diagnostics" in the Mouse menu and return the stage's pointer
+ *  half of what it copied — read at that moment, mid-gesture if one is on. */
+async function copyStageInput(): Promise<Record<string, unknown>> {
+    const writeText = vi.fn(async (_t: string) => { /* accepted */ });
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    h.diagRows = [{ id: 'ds-1', inputSentPerSecond: 0 }];
+    const mouseBtn = host!.querySelector<HTMLButtonElement>('button[title="Mouse"]');
+    expect(mouseBtn, 'the phone toolbar must offer the Mouse menu').toBeTruthy();
+    await act(async () => { mouseBtn!.click(); });
+    await flush();
+    const copy = Array.from(host!.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Copy diagnostics');
+    expect(copy, 'the Mouse menu must offer Copy diagnostics').toBeTruthy();
+    await act(async () => { copy!.click(); });
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const rows = JSON.parse(writeText.mock.calls[0][0]) as Array<Record<string, unknown>>;
+    return rows[0].stageInput as Record<string, unknown>;
+}
 
 describe('a trackpad left with a stranded finger', () => {
     it('POSITIVE CONTROL: while finger 2 still holds capture, a new finger IS a pinch and sends no move', async () => {
@@ -197,6 +217,12 @@ describe('a trackpad left with a stranded finger', () => {
         h.captured.delete(2);          // the OS took the gesture away; no up arrived
         await dragFinger3();
         expect(movesSent().length, 'a one-finger drag must move the pointer again').toBeGreaterThan(0);
+        // And the recovery leaves evidence: silent by design, so this counter
+        // is the only thing a capture taken afterwards can show.
+        const diag = await copyStageInput();
+        expect(diag.gesturePruned, 'the prune is counted').toBe(1);
+        expect(diag.gestureBlurCancels).toBe(0);
+        expect(diag.stageContacts).toBe(1);
     });
 
     it('recovers after the app loses focus, even with the stale capture still reported', async () => {
@@ -206,6 +232,47 @@ describe('a trackpad left with a stranded finger', () => {
         await flush();
         await dragFinger3();
         expect(movesSent().length, 'blur must reset the trackpad machine as well as the held keys').toBeGreaterThan(0);
+        // THE STAGE AGREES WITH THE MACHINE, mid-drag. Clearing only the
+        // machine left the stage counting two fingers, so this same drag
+        // pinch-zoomed the picture while the pointer moved.
+        const diag = await copyStageInput();
+        expect(diag.stageContacts, 'the stage must have forgotten finger 2 too').toBe(1);
+        expect(diag.gestureContacts).toBe(1);
+        expect(diag.gesturePhase).not.toBe('pinch');
+        expect(diag.gestureBlurCancels, 'the blur that dropped a finger is counted').toBe(1);
+        expect(diag.gesturePruned).toBe(0);
+    });
+});
+
+describe('a touch-mode stage left with a stranded finger', () => {
+    beforeEach(() => { h.storage.set('device-stage-mouse-mode', 'touch'); });
+
+    async function tapFinger3() {
+        await fire(pe('pointerdown', 3, 100, 400), pe('pointerup', 3, 100, 400));
+    }
+
+    it('POSITIVE CONTROL: with finger 2 still counted, a tap arrives as a second contact and presses nothing', async () => {
+        await mount();
+        await pinchLosingFinger2();
+        await tapFinger3();
+        expect(sentOf('down'), 'the rig must see the swallowed tap').toEqual([]);
+    });
+
+    it('taps work again after the app loses focus', async () => {
+        await mount();
+        await pinchLosingFinger2();
+        await act(async () => { window.dispatchEvent(new Event('blur')); });
+        await flush();
+        h.sendInput.mockClear();
+        await fire(pe('pointerdown', 3, 100, 400));
+        expect(sentOf('down'), 'a tap after blur must press the button').toHaveLength(1);
+        // The forgotten finger may really still be down; its moves must not
+        // steer the pointer the live finger now owns.
+        h.sendInput.mockClear();
+        await fire(pe('pointermove', 2, 300, 700));
+        expect(movesSent(), 'a finger the stage let go of drives nothing').toEqual([]);
+        await fire(pe('pointerup', 3, 100, 400));
+        expect(sentOf('up')).toHaveLength(1);
     });
 });
 
@@ -236,6 +303,9 @@ describe('"Copy diagnostics" shows the trackpad state', () => {
             controlEnabled: true,
             gesturePhase: 'pinch',
             gestureContacts: 2,
+            // Nothing has recovered it yet: the wedge is live, not history.
+            gesturePruned: 0,
+            gestureBlurCancels: 0,
             cursorOwned: true,
         });
         expect((rows[0].stageInput as Record<string, unknown>).stageContacts).toBe(2);

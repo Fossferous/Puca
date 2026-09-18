@@ -693,6 +693,19 @@ export function DeviceStage() {
             // in 'pinch' and dropped every move until the mode was toggled.
             // Cancelling releases a drag's button only if one was pressed.
             gestures.cancel();
+            // AND THE STAGE'S OWN MAP OF FINGERS, or the two disagree: the
+            // machine forgot the stranded finger while the stage still
+            // counted it, so every later one-finger drag pinch-zoomed the
+            // picture as the pointer moved, and in touch mode a tap arrived
+            // as a second contact and was swallowed (an up, and no down).
+            // A touch-mode finger that pressed a button releases it first,
+            // exactly as the mode switch does. A finger really still down is
+            // safe to forget: its later moves and up are no-ops for an id
+            // the map does not hold.
+            if (touchDownSent.current.size) sendRef.current({ t: 'up', button: 0 });
+            touchDownSent.current.clear();
+            activePointers.current.clear();
+            lastPinchInfo.current = null;
             // A gesture interrupted by the app going away never gets its
             // pointerup; the chrome margins it froze must not stay frozen.
             setChromeFrozen(null);
@@ -2346,7 +2359,10 @@ export function DeviceStage() {
             return;
         }
 
-        if (activePointers.current.size === 1) {
+        // Only the finger the map holds drives the pointer. A contact the
+        // stage has let go of (pruned, or forgotten on blur) may still be
+        // physically down; its moves must not steer the one that is live.
+        if (activePointers.current.size === 1 && activePointers.current.has(e.pointerId)) {
             const v = videoRef.current;
             if (!v) return;
 

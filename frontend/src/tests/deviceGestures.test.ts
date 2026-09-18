@@ -269,7 +269,7 @@ describe('a stranded contact (a pointerup that never arrived)', () => {
         r.g.down(P(3, 100, 100));
         r.g.move(P(3, 140, 100));
         // Mid-drag, with ONE real finger down: what "Copy diagnostics" shows.
-        expect(r.g.diag()).toEqual({ phase: 'pinch', contacts: 2, surface: true });
+        expect(r.g.diag()).toEqual({ phase: 'pinch', contacts: 2, surface: true, pruned: 0, blurCancels: 0 });
         r.g.move(P(3, 180, 100));
         r.g.up(P(3, 180, 100));
         expect(r.moves()).toEqual([]);
@@ -280,7 +280,7 @@ describe('a stranded contact (a pointerup that never arrived)', () => {
         // What the stage does on the next pointerdown: keep only what it still
         // believes is on the glass (nothing, plus the new finger itself).
         expect(r.g.prune(id => id === 3)).toBe(1);
-        expect(r.g.diag()).toEqual({ phase: 'idle', contacts: 0, surface: true });
+        expect(r.g.diag()).toEqual({ phase: 'idle', contacts: 0, surface: true, pruned: 1, blurCancels: 0 });
         dragFinger3();
         expect(r.moves().length).toBeGreaterThan(0);
         // Pruning is not a tap, and the drag is not one either.
@@ -310,11 +310,34 @@ describe('a stranded contact (a pointerup that never arrived)', () => {
         expect(r.buttons()).toHaveLength(1);
     });
 
-    it('cancel() (the stage blur path) also recovers a wedged pad', () => {
+    // DOCUMENTATION, NOT A REGRESSION TEST: cancel() predates the wedge fix
+    // and this passes with every part of that fix reverted. What pins the
+    // blur WIRING is deviceStageTrackpadWedge's 'recovers after the app loses
+    // focus'. Kept because it states why the stage's blur path calls cancel().
+    it('documents why the stage blur path calls cancel(): it clears a wedged pad', () => {
         strandFinger2();
         r.g.cancel();
         dragFinger3();
         expect(r.moves().length).toBeGreaterThan(0);
         expect(r.buttons()).toEqual([]);
+    });
+
+    it('counts each recovery for "Copy diagnostics", and only the ones that dropped something', () => {
+        expect(r.g.diag()).toMatchObject({ pruned: 0, blurCancels: 0 });
+        // A whole-pad cancel with nothing on the glass is not a recovery.
+        r.g.cancel();
+        expect(r.g.diag().blurCancels, 'an empty cancel counts nothing').toBe(0);
+        // Nor is a per-contact cancel (the browser's own pointercancel).
+        r.g.down(P(1, 100, 100));
+        r.g.cancel(P(1, 100, 100));
+        expect(r.g.diag().blurCancels, 'a single-contact cancel is not a blur').toBe(0);
+        strandFinger2();
+        r.g.cancel();
+        expect(r.g.diag().blurCancels).toBe(1);
+        strandFinger2();
+        expect(r.g.prune(() => false)).toBe(1);
+        expect(r.g.prune(() => false), 'nothing left to prune').toBe(0);
+        // Cumulative: neither resets the other, and nothing resets either.
+        expect(r.g.diag()).toMatchObject({ pruned: 1, blurCancels: 1 });
     });
 });
