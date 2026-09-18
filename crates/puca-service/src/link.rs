@@ -2144,7 +2144,10 @@ mod health_tests {
     fn a_refusal_of_an_identity_no_longer_enrolled_does_not_wait_long() {
         // The owner re-enrolled while an attempt for the old identity was in
         // flight: the new identity has not been refused and must not wait.
-        assert_eq!(after_attempt(0, &refused("old"), Some("new"), PLAIN).wait_secs, backoff_secs(1));
+        assert_eq!(
+            after_attempt(0, &refused("old"), Some("new"), PLAIN).wait_secs,
+            backoff_secs(1)
+        );
         assert_eq!(after_attempt(0, &refused("old"), None, PLAIN).wait_secs, backoff_secs(1));
     }
 
@@ -2168,7 +2171,8 @@ mod health_tests {
         assert!(matches!(classify_connect_error(&e502), AttemptError::Other(_)));
         let io = Error::Io(std::io::Error::other("dns"));
         assert!(matches!(classify_connect_error(&io), AttemptError::Other(_)));
-        assert!(!after_attempt(0, &Err(AttemptError::Other("x".into())), Some("dev"), PLAIN).force_rekey);
+        let other = Err(AttemptError::Other("x".into()));
+        assert!(!after_attempt(0, &other, Some("dev"), PLAIN).force_rekey);
         assert!(!after_attempt(0, &refused("dev"), Some("dev"), PLAIN).force_rekey);
     }
 
