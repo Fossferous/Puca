@@ -174,12 +174,19 @@ seconds it measures. Then look at:
 On the host, the agent's log has one `[input-rx]` line a second per lane while
 input arrives, plus one for the last burst when a session ends: exact counts of
 moves and clicks and how many were refused, but keyboard activity only as
-`keys=0`, `some` or `many` (the log is readable by anyone on that machine, and
-an exact count would give away how long a PIN is). It also has an `[aim]` line
-for each session, and again whenever the screen the mouse is aimed at changes,
-and, at the sign-in screen only, an `[input] move on 'Winlogon'` line comparing
-where a move asked the pointer to go with where it actually is. Send those
-lines with the diagnostics.
+`keys=0`, `some` or `many`, and a line whose window held any typing gives its
+span in whole seconds (the log is readable by anyone on that machine, and an
+exact count or a span to the hundredth would give away how long a PIN is and
+how it was typed). Beyond those counts, lines saying input was refused come at
+most once a second on each path and do not say whether a key or the mouse was
+refused (the one exception: the service's log keeps a failed Ctrl+Alt+Del
+request's own reason). The log also has an `[aim]` line for each session, and
+again whenever the screen the mouse is aimed at changes, and, on the sign-in
+screen or a security prompt only, an `[input] move on 'Winlogon'` line for
+each of the first five moves checked after that screen appears (at most one a
+second), saying whether the pointer followed the move: `tracks`, `did not
+move` or `off by N px` (rounded to 10). It never records where on the screen
+the pointer was. Send those lines with the diagnostics.
 
 ## I pinned Púca to my integrated GPU. Does that cover screen sharing?
 
