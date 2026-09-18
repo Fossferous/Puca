@@ -167,14 +167,35 @@ export interface UnattendedAccessState {
      * is itself the strongest possible "this service needs updating".
      */
     binsHash: string | null;
+    /**
+     * What the SERVER last said about this computer's sign-in-screen link
+     * (unix seconds), from the service's link-health record. `enrolled` is
+     * local files and stays true while the server refuses the machine; these
+     * are what can tell. All null/0 from a service too old to report them,
+     * which reads as "nothing to say". Judged by `linkRefusalPersistent`.
+     */
+    linkAttestedAt: number | null;
+    linkRefusedFirst: number | null;
+    linkRefusedLast: number | null;
+    linkRefusedCount: number;
+    linkRefusedStatus: number | null;
     error?: string | null;
 }
+
+/** The link-health fields when there is nothing to report. */
+const NO_LINK_HEALTH = {
+    linkAttestedAt: null,
+    linkRefusedFirst: null,
+    linkRefusedLast: null,
+    linkRefusedCount: 0,
+    linkRefusedStatus: null,
+} as const;
 
 export async function unattendedAccessState(): Promise<UnattendedAccessState> {
     if (!isTauri()) {
         return {
             serviceInstalled: false, enrolled: false, armed: false,
-            deviceId: null, binsHash: null,
+            deviceId: null, binsHash: null, ...NO_LINK_HEALTH,
         };
     }
     try {
@@ -184,6 +205,12 @@ export async function unattendedAccessState(): Promise<UnattendedAccessState> {
             armed: boolean;
             device_id?: string | null;
             bins_hash?: string | null;
+            // Absent from an app shell older than the service's link record.
+            link_attested_at?: number | null;
+            link_refused_first?: number | null;
+            link_refused_last?: number | null;
+            link_refused_count?: number | null;
+            link_refused_status?: number | null;
             error?: string | null;
         }>('lock_screen_state');
         return {
@@ -192,6 +219,11 @@ export async function unattendedAccessState(): Promise<UnattendedAccessState> {
             armed: s.armed,
             deviceId: s.device_id ?? null,
             binsHash: s.bins_hash ?? null,
+            linkAttestedAt: s.link_attested_at ?? null,
+            linkRefusedFirst: s.link_refused_first ?? null,
+            linkRefusedLast: s.link_refused_last ?? null,
+            linkRefusedCount: s.link_refused_count ?? 0,
+            linkRefusedStatus: s.link_refused_status ?? null,
             error: s.error ?? null,
         };
     } catch (e) {
@@ -201,6 +233,7 @@ export async function unattendedAccessState(): Promise<UnattendedAccessState> {
             armed: false,
             deviceId: null,
             binsHash: null,
+            ...NO_LINK_HEALTH,
             error: e instanceof Error ? e.message : String(e),
         };
     }
