@@ -547,6 +547,50 @@ describe('the inject path ("no such capture session") reports through the same g
         expect(injectEvent).toHaveBeenCalled();
         expect(await streamDiedSince(key, 0)).toBe(1);
     });
+
+    /** Park the next inject on a reply the test delivers by hand. */
+    function parkInject(): (err: Error) => void {
+        let reject!: (err: Error) => void;
+        injectEvent.mockImplementationOnce(() => new Promise<void>((_ok, no) => { reject = no; }));
+        return err => reject(err);
+    }
+
+    it('POSITIVE CONTROL: a parked inject answered "no such capture session" with no restart between IS reported', async () => {
+        // The same parked-reply rig as the case below, minus the restart: so
+        // the silence there cannot come from a rig whose late rejection
+        // never reaches the report.
+        const key = await streamingSession();
+        const answer = parkInject();
+        await input(key);
+        expect(injectEvent, 'the premise: the inject is parked at the backend').toHaveBeenCalledTimes(1);
+
+        answer(new Error('no such capture session'));
+        await settle();
+        expect(await streamDiedSince(key, 0)).toBe(1);
+    });
+
+    it('an inject answered ACROSS a restart describes the replaced stream: not reported, and the new stream\'s throttle stays clear', async () => {
+        const key = await streamingSession();
+        const answer = parkInject();
+        await input(key);
+        expect(injectEvent, 'the premise: the inject is parked at the backend').toHaveBeenCalledTimes(1);
+
+        // The restart lands while the inject waits: stop, then a NEW stream.
+        await signal(key, { kind: 'restart-offer', sdp: OFFER });
+        expect(agentAnswerOffer, 'the premise: the restart started a new stream').toHaveBeenCalledTimes(2);
+
+        // Only now does the agent's answer about the OLD stream arrive.
+        answer(new Error('no such capture session'));
+        await settle();
+        expect(await streamDiedSince(key, 0), 'the old stream\'s "gone" is not news about the new one').toBe(0);
+
+        // And it did not spend the throttle the restart reset: the NEW
+        // stream's real death, a second later, is reported at once.
+        now += 1_000;
+        status = { ...status, streamLive: false };
+        await poll();
+        expect(await streamDiedSince(key, 0), 'the new stream\'s death is not held back').toBe(1);
+    });
 });
 
 describe('the real unlock order, end to end', () => {

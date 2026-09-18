@@ -389,7 +389,8 @@ interface Internal extends DeviceControlSession {
     /** HOST side: bumped every time answerOffer starts an agent stream. A
      *  status poll captures it before its await and re-checks it after, so a
      *  reply read across a restart's stop-then-start (or describing the
-     *  stream a restart already replaced) is never reported as a death. */
+     *  stream a restart already replaced) is never reported as a death. An
+     *  inject does the same around its own await (the DeviceInputted handler). */
     agentStreamGen: number;
     /** HOST side: the last stream quality the agent ACKNOWLEDGED for this
      *  session — what a restart started it at, what an update-stream applied,
@@ -4274,6 +4275,18 @@ export function installDeviceSessions(): void {
                         // draining afterwards would re-stick the very key the
                         // release just lifted.
                         if (sessions.get(s.id) !== s || s.phase === 'ended') return;
+                        // Which stream this inject is addressed to, captured
+                        // BEFORE its await — the poll's guard, for the same
+                        // race. An inject sent in a restart's stop-to-start
+                        // gap is answered "no such capture session" about the
+                        // stream being replaced; if that answer lands after
+                        // the new stream started, reporting it would stamp
+                        // the throttle answerOffer just reset, and hold back
+                        // a real death of the NEW stream for up to 30 s.
+                        // Captured here rather than at enqueue: an event that
+                        // waited in this queue while a restart completed is
+                        // sent to the new stream, and its failure is news.
+                        const gen = s.agentStreamGen;
                         try {
                             const backend = await getHostBackend();
                             await backend.injectEvent(s.id, JSON.stringify(ev));
@@ -4290,7 +4303,9 @@ export function installDeviceSessions(): void {
                             // the session honestly instead of wearing a frozen
                             // frame with input still landing.
                             const msg = e instanceof Error ? e.message : String(e);
-                            if (/no such capture session/i.test(msg)) reportStreamDied(s);
+                            if (/no such capture session/i.test(msg) && s.agentStreamGen === gen) {
+                                reportStreamDied(s);
+                            }
                             // Ctrl+Alt+Del is the one input the user presses
                             // ONCE and expects a visible answer to. It can only
                             // be raised by the Púca system service, so a
