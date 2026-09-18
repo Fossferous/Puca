@@ -989,9 +989,17 @@ mod tests {
         let start = src.find("fn ensure_reaper_running").expect("the reaper exists");
         let reaper = &src[start..];
         let reaper = &reaper[..reaper.find("\n}\n").expect("the reaper ends")];
+        // CODE ONLY. The comment under the lock names LAST_USED as well, and
+        // an earlier version of this pin matched that comment: replacing the
+        // re-read with the stale `idle_for` left it green.
+        let reaper: String = reaper
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let lock = reaper.find("CONN.lock()").expect("the reaper takes CONN");
         let recheck = reaper[lock..]
-            .find("LAST_USED")
+            .find("let still_idle = LAST_USED")
             .map(|i| i + lock)
             .expect("the reaper must read LAST_USED again AFTER taking CONN");
         let veto = reaper[recheck..]
