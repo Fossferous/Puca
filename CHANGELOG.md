@@ -4,7 +4,11 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.815 — 2026-09-19
+
+Remote control that survives unlocking the computer, a warning when the
+sign-in screen can no longer be reached after a restart, and a sturdier phone
+trackpad.
 
 ### Fixed
 - **Remote control survives unlocking the computer.** A session started
