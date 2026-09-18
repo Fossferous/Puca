@@ -3039,6 +3039,62 @@ mod tests {
         assert_eq!(stream_status(&mut a, "s0").1, None, "the oldest is the one forgotten");
     }
 
+    /// THE STRING THE REAP MATCHES IS THE STRING THE STREAM SENDS. The reap
+    /// path remembers a no-frame end by EXACT equality with
+    /// NO_FRAME_EVER_REASON, and every test above feeds that constant straight
+    /// into the event channel — so a stream thread that wrapped or reworded
+    /// the error on its way to the guard (a `format!` prefix, a `map_err`)
+    /// would silently turn every sleeping-display end into "restart it", and
+    /// the viewer's "screens may be asleep" into a generic failure. The real
+    /// stream thread needs a display and an ICE peer, so pin the hand-off in
+    /// the source instead: run() returns the constant as it is, the thread
+    /// stores run()'s error unchanged, the guard sends what was stored, and
+    /// the reap compares against the same constant. Platform-independent: it
+    /// only reads the files.
+    #[test]
+    fn the_no_frame_reason_reaches_the_reap_unchanged() {
+        fn code_only(src: &str) -> String {
+            src.replace('\r', "")
+                .split("\nmod tests {")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+            let a = src.find(from).unwrap_or_else(|| panic!("missing: {from}"));
+            let rest = &src[a..];
+            let b = rest.find(to).unwrap_or_else(|| panic!("missing after {from}: {to}"));
+            &rest[..b]
+        }
+        let stream = code_only(include_str!("stream.rs"));
+        let session = code_only(include_str!("session.rs"));
+
+        // run() gives up on a display that never produced a frame by
+        // returning the constant itself — not a copy with anything added.
+        let run = between(&stream, "\nfn run(", "\n}\n");
+        assert!(
+            run.contains("return Err(NO_FRAME_EVER_REASON.to_string());"),
+            "stream.rs run() must end a frameless stream with NO_FRAME_EVER_REASON as it is",
+        );
+        // The thread body stores run()'s error AS IT IS in the reason cell.
+        let body = between(&stream, "if let Err(e) = run(", "puca_input::release_all();");
+        assert!(body.contains("*r = e;"), "the stream thread must store run()'s error unchanged");
+        // The guard sends exactly what was stored.
+        let guard = between(&stream, "impl Drop for TerminatedGuard", "\n}\n");
+        assert!(
+            guard.contains(".map(|r| r.clone())") && guard.contains("reason,") && !guard.contains("format!"),
+            "TerminatedGuard must send the stored reason unchanged",
+        );
+        // And the reap compares against the very same constant.
+        assert!(
+            session.contains("if reason == crate::stream::NO_FRAME_EVER_REASON {"),
+            "the reap must match the constant stream.rs sends",
+        );
+    }
+
     /// A platform that does not stream has nothing to claim either way: None,
     /// never a `false` that would have the app restart a session it never
     /// streamed.
