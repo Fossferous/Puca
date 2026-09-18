@@ -99,6 +99,17 @@ pub struct LockScreenState {
     /// control-pipe field the app relies on silently never arrives. Absent
     /// from an older service, which is itself the strongest "needs update".
     pub bins_hash: Option<String>,
+    /// What the SERVER last said about the sign-in-screen link, from the
+    /// service's link-health record (`puca_service::link::LinkHealth`), for
+    /// the enrolled identity only. `enrolled` above is local files and reads
+    /// true while the server refuses the machine; these are what can tell.
+    /// All None from an older service, which the UI reads as "nothing to say".
+    /// Unix seconds.
+    pub link_attested_at: Option<i64>,
+    pub link_refused_first: Option<i64>,
+    pub link_refused_last: Option<i64>,
+    pub link_refused_count: u32,
+    pub link_refused_status: Option<u16>,
     /// Why the state could not be read, if it could not. Shown rather than
     /// swallowed: a toggle that silently renders "off" when it could not ask is
     /// how someone concludes a feature is broken.
@@ -114,14 +125,7 @@ pub struct LockScreenState {
 pub async fn lock_screen_state() -> LockScreenState {
     tauri::async_runtime::spawn_blocking(|| match ask(&ControlRequest::UnattendedState) {
         Ok(v) => read_unattended(&v),
-        Err(e) => LockScreenState {
-            service_installed: false,
-            enrolled: false,
-            armed: false,
-            device_id: None,
-            bins_hash: None,
-            error: Some(e),
-        },
+        Err(e) => LockScreenState { error: Some(e), ..LockScreenState::default() },
     })
     .await
     .unwrap_or_default()
@@ -154,8 +158,31 @@ fn read_unattended(v: &serde_json::Value) -> LockScreenState {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        link_attested_at: link_i64(v, "attested_at"),
+        link_refused_first: link_i64(v, "refused_first"),
+        link_refused_last: link_i64(v, "refused_last"),
+        link_refused_count: v
+            .get("link")
+            .and_then(|l| l.get("refused_count"))
+            .and_then(|x| x.as_u64())
+            .map(|n| n.min(u32::MAX as u64) as u32)
+            .unwrap_or(0),
+        // Only a client-error status is a refusal; anything else in this slot
+        // is a service this app does not understand, and says nothing.
+        link_refused_status: v
+            .get("link")
+            .and_then(|l| l.get("refused_status"))
+            .and_then(|x| x.as_u64())
+            .filter(|s| (400..=499).contains(s))
+            .map(|s| s as u16),
         error: None,
     }
+}
+
+/// One timestamp from the service's `link` object. Absent (an older service,
+/// or nothing recorded) is None.
+fn link_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
+    v.get("link").and_then(|l| l.get(key)).and_then(|x| x.as_i64())
 }
 
 #[derive(Serialize)]
@@ -308,6 +335,13 @@ mod tests {
             enrolled: true,
             device_id: Some("iE7UN9h775LJJ1rIbNblf".into()),
             bins_hash: Some("abc123".into()),
+            link: Some(puca_service::control::LinkHealthView {
+                attested_at: Some(1),
+                refused_first: Some(2),
+                refused_last: Some(3),
+                refused_count: 4,
+                refused_status: Some(400),
+            }),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
@@ -320,6 +354,14 @@ mod tests {
         // because the product failure it causes is a permanently missing
         // "update the service" prompt, which looks like nothing at all.
         assert_eq!(state.bins_hash.as_deref(), Some("abc123"));
+        // The link-health record, same discipline: a rename on either side
+        // would leave the app showing a ticked box with no warning while the
+        // server refuses the machine — the exact failure it was added for.
+        assert_eq!(state.link_attested_at, Some(1));
+        assert_eq!(state.link_refused_first, Some(2));
+        assert_eq!(state.link_refused_last, Some(3));
+        assert_eq!(state.link_refused_count, 4);
+        assert_eq!(state.link_refused_status, Some(400));
     }
 
     #[test]
@@ -332,6 +374,7 @@ mod tests {
             enrolled: false,
             device_id: None,
             bins_hash: None,
+            link: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&absent).unwrap()).unwrap();
@@ -347,6 +390,17 @@ mod tests {
         // the value the UI reads as "this service needs updating". True by
         // construction: a service too old to say what it is IS out of date.
         assert!(read_unattended(&old).bins_hash.is_none());
+        // An old service has nothing to say about the link — which must read
+        // as no refusal, so the app shows exactly what it always did.
+        let o = read_unattended(&old);
+        assert_eq!(
+            (o.link_attested_at, o.link_refused_first, o.link_refused_last),
+            (None, None, None)
+        );
+        assert_eq!((o.link_refused_count, o.link_refused_status), (0, None));
+        // As must a service that sent the key with nothing in it.
+        let n = read_unattended(&v);
+        assert_eq!((n.link_refused_first, n.link_refused_count), (None, 0));
 
         // An empty string is not an id.
         let blank: serde_json::Value = serde_json::from_str(

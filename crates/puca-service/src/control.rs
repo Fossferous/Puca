@@ -171,6 +171,29 @@ pub enum ControlRequest {
     Sas,
 }
 
+/// The server's recorded answers about this machine's sign-in-screen link, as
+/// the control pipe carries them. Unix seconds throughout.
+///
+/// Defined HERE, in the portable module, so the app crate's tests can build
+/// one from this type (see `frontend/src-tauri/src/lock_screen.rs`) rather than
+/// from a hand-typed string. Every field defaults, so a reply from another
+/// version still parses.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkHealthView {
+    /// Last time the link attested.
+    #[serde(default)]
+    pub attested_at: Option<i64>,
+    /// First and latest refusal of the current run, and how many.
+    #[serde(default)]
+    pub refused_first: Option<i64>,
+    #[serde(default)]
+    pub refused_last: Option<i64>,
+    #[serde(default)]
+    pub refused_count: u32,
+    #[serde(default)]
+    pub refused_status: Option<u16>,
+}
+
 /// What the service answers. Deliberately thin — a chatty service leaks state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -204,6 +227,13 @@ pub enum ControlResponse {
     /// `device_id` field below "never arrived" in the field and one PC kept
     /// listing as two devices. `None` (or absent, from an older service) reads
     /// as "needs update".
+    ///
+    /// `link` is what the SERVER last said about this machine's sign-in-screen
+    /// connection (`link::LinkHealth`), for the enrolled identity only. The
+    /// other fields are local files and read as "on" while the server refuses
+    /// the machine; this is the half that can tell. `serde(default)` both
+    /// ways: an older service omits it (the app shows what it always did) and
+    /// an older app ignores it.
     UnattendedState {
         armed: bool,
         enrolled: bool,
@@ -211,6 +241,8 @@ pub enum ControlResponse {
         device_id: Option<String>,
         #[serde(default)]
         bins_hash: Option<String>,
+        #[serde(default)]
+        link: Option<LinkHealthView>,
     },
     /// The public halves of the identity this machine just generated. The app
     /// signs an auth record over these and enrols it.

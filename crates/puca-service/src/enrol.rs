@@ -116,6 +116,11 @@ pub fn finish(
         sign_pub,
         account_sign_pub: account_sign_pub.to_string(),
     };
+    // A FRESH ENROLMENT STARTS WITH NO VERDICT. The record is keyed by device
+    // id, so an old refusal could not attach to the new identity anyway; this
+    // clears the in-memory copy too, so the app's warning goes the moment the
+    // owner re-enrols rather than at the next attestation.
+    crate::link::forget_health();
     cfg.save()
 }
 
@@ -137,6 +142,7 @@ pub fn forget() -> Result<(), String> {
         DEVICE_PRIV_FILE,
         SIGN_SEED_FILE,
         crate::arming::RECORD_FILE,
+        crate::link::LINK_HEALTH_FILE,
     ] {
         match std::fs::remove_file(dir.join(name)) {
             Ok(()) => {}
@@ -148,6 +154,10 @@ pub fn forget() -> Result<(), String> {
             }
         }
     }
+    // The file went with the list above; this clears the process's copy, which
+    // the control pipe would otherwise go on reporting until the service
+    // restarted.
+    crate::link::forget_health();
     match first_error {
         Some(e) => Err(e),
         None => Ok(()),
@@ -175,6 +185,29 @@ mod tests {
             ["TOKEN_FILE", "CONFIG_FILE", "DEVICE_PRIV_FILE", "SIGN_SEED_FILE", "RECORD_FILE"]
         {
             assert!(list.contains(expected), "forget() must remove {expected}");
+        }
+    }
+
+    #[test]
+    fn forget_removes_the_link_health_record() {
+        // The record describes an identity `forget` destroys. Left behind, a
+        // later enrolment would at best ignore it (it is keyed by device id)
+        // and at worst show the owner a warning about a machine they had
+        // already fixed. Same list-scan, same test-module exclusion, as above.
+        let src = include_str!("enrol.rs").split("#[cfg(test)]").next().unwrap();
+        let list_start = src.find("for name in [").expect("the list");
+        let list_end = src[list_start..].find("] {").expect("the end") + list_start;
+        assert!(
+            src[list_start..list_end].contains("LINK_HEALTH_FILE"),
+            "forget() must remove the link-health record"
+        );
+        // And both ways of starting over clear the in-memory copy the control
+        // pipe answers from, not just the file.
+        for f in ["pub fn forget()", "pub fn finish("] {
+            let at = src.find(f).expect(f);
+            let body = &src[at..];
+            let body = &body[..body.find("\n}").expect("end of fn")];
+            assert!(body.contains("crate::link::forget_health();"), "{f} must clear the record");
         }
     }
 
