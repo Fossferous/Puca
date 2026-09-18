@@ -11,8 +11,10 @@ one-line summary; this file is the full story. Versions follow
   lift was lost mid-pinch (the app sent to the background, say), every later
   one-finger drag counted as a second finger and the pointer stopped moving,
   with the keyboard still working, until you switched Touch mode and back. The
-  stuck finger is now forgotten on the next touch and whenever the app loses
-  focus.
+  stuck finger is now forgotten on the next touch once the phone has let go of
+  it, and whenever the app loses focus. Losing focus now also clears the
+  picture's own count of fingers, so the first drag afterwards no longer
+  zooms the picture, and taps in Touch mode no longer go missing.
 - **A click refused once is no longer swallowed from then on.** If Windows
   refused a remote mouse button or key press (the screen changed under it,
   such as the lock screen appearing), later presses of the same button or key
@@ -24,10 +26,13 @@ one-line summary; this file is the full story. Versions follow
 - **Better evidence for "the mouse does nothing".** The phone's Copy
   diagnostics now says what kind of input it sent (moves, clicks, keys),
   which way it went, what the trackpad believes and whether the phone is
-  drawing the pointer; the host's log records what input arrived on each
-  path, which screen the mouse is aimed at and, at the sign-in screen, where
-  the pointer actually went. See the FAQ entry "The keyboard works but the
-  mouse does nothing".
+  drawing the pointer, how often the trackpad has recovered from a stuck
+  finger, and whether a slow connection is holding mouse movement back while
+  keys still get through. The host's log records what input arrived on each
+  path (mouse events counted exactly, typing only as none, some or many, so a
+  PIN's length never reaches the log), which screen the mouse is aimed at in
+  each session and, at the sign-in screen, where the pointer actually went.
+  See the FAQ entry "The keyboard works but the mouse does nothing".
 
 ## 0.9.814 — 2026-09-17
 
