@@ -609,7 +609,10 @@ interface Internal extends DeviceControlSession {
      *  wasted entirely when the sealed frame was handed to a below-OPEN
      *  socket (sendSignal cannot report that) — after which a REAL death was
      *  never reported again. While injects keep failing, the report simply
-     *  repeats every 30s until one lands. */
+     *  repeats every 30s until one lands. Reset to 0 whenever answerOffer
+     *  starts a NEW stream: a report about the old one (often one the
+     *  controller's restart mute threw away) must not delay the first report
+     *  about the new one by up to 30 s. */
     streamDiedAt: number;
     /** HOST: which screen to capture, chosen at consent time. */
     monitor: number | null;
@@ -1084,6 +1087,11 @@ async function answerOffer(
         // read again.
         s.agentStreamStarted = true;
         s.agentStreamGen += 1;
+        // A new stream owes nothing to the old one's throttle (see
+        // streamDiedAt). The poll's generation guard already drops replies
+        // about the replaced stream, and the controller's restart mute still
+        // absorbs a report that lands inside its window.
+        s.streamDiedAt = 0;
         // What the agent just accepted is what this stream runs at: the rates
         // passed, or its defaults for any left out.
         s.agentQuality = quality ? { fps: quality.fps, bitrate_kbps: quality.bitrate_kbps } : null;
@@ -1540,8 +1548,10 @@ const STREAM_DIED_RESEND_MS = 30_000;
  *  the media once (or ends the session honestly). ONE throttle for every
  *  path that can learn it — an inject answered "no such capture session", and
  *  the status poll reading `streamLive: false` — so two detectors of the same
- *  death cost the controller one report, not two. */
+ *  death cost the controller one report, not two. And ONE freeze policy for
+ *  them: see shareFrozenByLock. */
 function reportStreamDied(s: Internal): void {
+    if (s.share && shareFrozenByLock()) return;
     if (Date.now() - s.streamDiedAt <= STREAM_DIED_RESEND_MS) return;
     s.streamDiedAt = Date.now();
     void sendSignal(s, { kind: 'stream-died' }).catch(() => undefined);
@@ -1553,17 +1563,46 @@ function reportStreamDied(s: Internal): void {
  *  be asleep"); a restart would replace it with RESTART_FAILED_MSG. */
 const AGENT_STREAM_END_NO_FRAME = 'no_frame';
 
-/** HOST: is this machine's console locked right now? Driven by the Windows
- *  lock/unlock events (session_events.rs), false until one arrives — so an
- *  app started while already locked reads unlocked, and gains nothing it did
- *  not have before this flag existed. Read only by the stream-died poll below,
- *  for share sessions. */
+/** HOST: is this machine's session detached from an interactive desktop the
+ *  owner is sitting at? Driven by the Windows events session_events.rs maps
+ *  onto 'lock' and 'unlock' — and those are NOT only lock and unlock: 'lock'
+ *  also fires for WTS_CONSOLE_DISCONNECT and WTS_REMOTE_DISCONNECT, 'unlock'
+ *  for WTS_CONSOLE_CONNECT and WTS_REMOTE_CONNECT. So an RDP connect clears
+ *  this while the physical console may still sit on its sign-in screen.
+ *
+ *  Module state, so it starts false and RESETS to false whenever the webview
+ *  reloads (an app start, and also an OTA bundle being applied) — until the
+ *  next event, a machine that is locked reads unlocked. That is the exposure
+ *  this code had before the flag existed, not a new one. Read only by
+ *  reportStreamDied, for share sessions. */
 let consoleLocked = false;
+
+/** HOST: when the last 'unlock' event arrived (Date.now(), 0 = never). */
+let consoleUnlockedAt = 0;
+
+/** How long after an unlock a share stays frozen. The service stops the
+ *  lock-screen (SYSTEM) agent on the SAME unlock event (puca-service
+ *  supervisor.rs), and until it has, that agent can still answer this app. A
+ *  share reported at once would be restarted onto the agent being terminated,
+ *  die again inside the controller's restart mute, and end with
+ *  RESTART_FAILED_MSG instead of recovering onto the owner's own agent. */
+const UNLOCK_SHARE_GRACE_MS = 3_000;
+
+/** HOST: must a share's picture stay frozen rather than be restarted? While
+ *  locked, an unsolicited lock deliberately leaves a share frozen
+ *  (handleConsoleLock), and a restart would land on the lock-screen agent and
+ *  show the friend the owner's sign-in screen. For UNLOCK_SHARE_GRACE_MS after
+ *  the unlock, for the race above. Every stream-died path goes through
+ *  reportStreamDied, so the poll and the inject path follow the same policy. */
+function shareFrozenByLock(): boolean {
+    return consoleLocked || Date.now() - consoleUnlockedAt < UNLOCK_SHARE_GRACE_MS;
+}
 
 /** Record a console lock or unlock. Exported for the listeners' tests; the
  *  listeners in installDeviceSessions are the production callers. */
 export function noteConsoleLocked(locked: boolean): void {
     consoleLocked = locked;
+    if (!locked) consoleUnlockedAt = Date.now();
 }
 
 const RESTART_FAILED_MSG =
@@ -2055,24 +2094,31 @@ export async function pollSecureDesktop(): Promise<void> {
             // What can still slip through (the agent ending the old stream on
             // the controller's own close, before its restart-offer lands here)
             // arrives inside the controller's RESTART_STREAM_DIED_MUTE_MS and
-            // is ignored there, though it does spend this side's 30 s throttle.
+            // is ignored there; the restart's answerOffer then resets this
+            // side's 30 s throttle, so it does not delay a report about the
+            // new stream.
             //
             // NOT for 'no_frame': the display never produced a first frame,
             // and the viewer's own deadline already says the screens may be
             // asleep. A restart cannot wake them and would replace that
             // message with a generic one.
             //
-            // NOT for a SHARE while the console is locked: an unsolicited lock
-            // deliberately leaves a share frozen (handleConsoleLock), and a
-            // restart now would land on the lock-screen agent and show the
-            // friend the owner's sign-in screen. At unlock the flag clears and
-            // the next poll recovers the share onto the owner's own agent.
+            // `!s.filesOnly` is NOT what keeps a files session out of here in
+            // the ordinary case — the `hosts` filter above is. It is re-read
+            // after the await for the one way it can change mid-poll: a second
+            // 'offer' sets filesOnly BEFORE it awaits the agent's start, and
+            // the generation only moves once the agent has answered (the agent
+            // refuses a second stream for a live id, and the session is then
+            // torn down) — so in that window only this term says "files".
+            //
+            // A SHARE while the console is locked, or just unlocked, stays
+            // frozen: reportStreamDied applies that for every detector (see
+            // shareFrozenByLock).
             if (streamLive === false
                 && streamEnd !== AGENT_STREAM_END_NO_FRAME
                 && started && s.agentStreamStarted && s.agentStreamGen === gen
                 && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
-                && !s.transportDown && !s.peerReconnecting
-                && !(s.share && consoleLocked)) {
+                && !s.transportDown && !s.peerReconnecting) {
                 reportStreamDied(s);
             }
             if (up !== s.secureDesktop) {
@@ -3547,7 +3593,10 @@ export function installDeviceSessions(): void {
             // runs at 1 Hz and is edge-triggered + busy-guarded, so calling
             // it out of band is free — but it is the difference between the
             // controller's secure-desktop banner clearing the instant the
-            // PIN lands and clearing on the next tick.
+            // PIN lands and clearing on the next tick. It does NOT hurry a
+            // frozen share's restart: noteConsoleLocked(false) starts
+            // UNLOCK_SHARE_GRACE_MS, so this poll cannot restart a share onto
+            // the lock-screen agent the service is stopping right now.
             await listen('system-session-unlock', () => {
                 noteConsoleLocked(false);
                 void pollSecureDesktop();

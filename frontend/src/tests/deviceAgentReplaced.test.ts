@@ -40,6 +40,7 @@ const sessionStatus = vi.fn(async (..._a: unknown[]): Promise<Status> => {
 const getStreamQuality = vi.fn(async (..._a: unknown[]) => ({ fps: 30, bitrate_kbps: 6000 }));
 const updateStream = vi.fn(async (..._a: unknown[]) => {});
 const stopSession = vi.fn(async (..._a: unknown[]) => {});
+const injectEvent = vi.fn(async (..._a: unknown[]) => {});
 
 const sent: Array<{ type: string; payload?: { session_id?: string; payload?: string } }> = [];
 type Handler = (m: unknown) => void;
@@ -71,7 +72,7 @@ vi.mock('../api/devices/hostBackend', () => ({
         sessionStatus: (...a: unknown[]) => sessionStatus(...a),
         setPrivacyMode: async () => {},
         setFileAccess: async () => {},
-        injectEvent: async () => {},
+        injectEvent: (...a: unknown[]) => injectEvent(...a),
     }),
 }));
 vi.mock('../api/devices/fileAccessConsent', () => ({ requestFileAccessConsent: async () => ({ root: 'C:\\Shared' }) }));
@@ -131,6 +132,7 @@ async function settle(rounds = 12): Promise<void> {
 }
 
 let peerSigSeq = 0;
+let peerInSeq = 0;
 const OFFER = 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
 const FILES_OFFER = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
 
@@ -141,6 +143,7 @@ async function activeHostSession(): Promise<Uint8Array> {
     await settle();
     sent.length = 0;
     peerSigSeq = 0;
+    peerInSeq = 0;
 
     const eph = (await import('../api/e2ee')).generateControlEphemeral();
     handlers.get('DeviceConnectRequested')!({
@@ -166,6 +169,14 @@ async function activeHostSession(): Promise<Uint8Array> {
 async function signal(key: Uint8Array, obj: Record<string, unknown>): Promise<void> {
     const sealed = await sealControl(key, JSON.stringify({ sid: 'ds-test', n: peerSigSeq++, ...obj }));
     handlers.get('DeviceSignalled')!({ payload: { session_id: 'ds-test', payload: sealed } });
+    await settle();
+}
+
+/** One key press from the controller, sealed the way the relay carries it,
+ *  through the host's real decrypt → coalesce → inject queues. */
+async function input(key: Uint8Array): Promise<void> {
+    const sealed = await sealControl(key, JSON.stringify({ s: peerInSeq++, e: { t: 'key', code: 'KeyA', down: true } }));
+    handlers.get('DeviceInputted')!({ payload: { session_id: 'ds-test', event: sealed } });
     await settle();
 }
 
@@ -211,10 +222,15 @@ beforeEach(() => {
     getStreamQuality.mockImplementation(async () => ({ fps: 30, bitrate_kbps: 6000 }));
     updateStream.mockClear();
     stopSession.mockClear();
-    sessionMod?.noteConsoleLocked(false);
+    injectEvent.mockReset();
+    injectEvent.mockImplementation(async () => {});
     // Time moves only when a test moves it — and only through Date.
-    now = 1_900_000_000_000;
     dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    // Unlocked, with the last unlock at the epoch: no test starts inside the
+    // unlock grace unless it asks to.
+    now = 0;
+    sessionMod?.noteConsoleLocked(false);
+    now = 1_900_000_000_000;
 });
 afterEach(() => {
     dateSpy?.mockRestore();
@@ -251,14 +267,11 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         expect(await streamDiedSince(key, before), 'absence is "cannot tell", never "gone"').toBe(0);
     });
 
-    it('a dead pipe (the catch shape: no streamLive key at all) sends nothing', async () => {
-        const key = await streamingSession();
-        const before = 0; // the whole session: a report from any tick would count
-        status = { secureDesktop: false, cursorClipped: false };
-        await poll();
-        expect(sessionStatus).toHaveBeenCalled();
-        expect(await streamDiedSince(key, before)).toBe(0);
-    });
+    // A DEAD PIPE reaches this code in the same shape as the old agent above
+    // (no streamLive key): hostAgent's catch arm builds it, and that arm is
+    // pinned in secureDesktopStatus.test.ts ('a dead pipe and an old agent
+    // refusal carry no streamLive at all'). hostAgent is mocked away here, so
+    // a separate case would only repeat the one above.
 
     it('nothing is reported before this host has started a stream — and it is, once it has', async () => {
         const key = await activeHostSession();
@@ -269,12 +282,15 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         expect(sessionStatus, 'the poll ran for this session').toHaveBeenCalled();
         expect(await streamDiedSince(key, before), 'no stream yet, nothing to have died').toBe(0);
 
-        // Same session, same answer, stream now started: the control.
+        // Same session, same answer, stream now started: the control. Counted
+        // from the START, not from after the offer: a real 1 Hz tick landing
+        // between the offer and this poll reports first and spends the 30 s
+        // throttle, and a window opened after the offer would then see 0.
+        // The first half already proved nothing came before the stream.
         await signal(key, { kind: 'offer', sdp: OFFER });
         expect(agentAnswerOffer).toHaveBeenCalledTimes(1);
-        const mid = sent.length;
         await poll();
-        expect(await streamDiedSince(key, mid)).toBe(1);
+        expect(await streamDiedSince(key, 0)).toBe(1);
     });
 
     it('is throttled to one report per 30 s, and repeats after it', async () => {
@@ -290,6 +306,28 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         now += 31_000;
         await poll();
         expect(await streamDiedSince(key, before), 'past the throttle: reported again').toBe(2);
+    });
+
+    it('a restart resets the throttle: the NEW stream\'s death is not held back by the old one\'s report', async () => {
+        const key = await streamingSession();
+        status = { ...status, streamLive: false };
+        await poll();
+        expect(await streamDiedSince(key, 0), 'the premise: the old stream was reported').toBe(1);
+
+        // The controller restarts the media onto whichever agent answers now.
+        now += 1_000;
+        await signal(key, { kind: 'restart-offer', sdp: OFFER });
+        expect(agentAnswerOffer, 'the premise: the restart started a new stream').toHaveBeenCalledTimes(2);
+
+        // The new stream dies too, 16 s after the first report: well inside
+        // the old 30 s throttle, and past the controller's 15 s restart mute.
+        now += 15_000;
+        status = { ...status, streamLive: false };
+        await poll();
+        expect(
+            await streamDiedSince(key, 0),
+            'reported now, not up to 30 s late with a frozen picture meanwhile',
+        ).toBe(2);
     });
 
     it('a reply read ACROSS a restart describes the replaced stream and is not reported', async () => {
@@ -332,7 +370,11 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         expect(opts.inputAuth, 'the input grant is re-derived for the new stream').toBeDefined();
     });
 
-    it('a files-only session is never reported', async () => {
+    it('REGRESSION GUARD: a files-only session is never reported', async () => {
+        // Held by the poll's pre-existing `hosts` filter (files-only sessions
+        // are never asked about), not by the new condition's `!s.filesOnly` —
+        // this passes with that term deleted. Pinned so the recovery can
+        // never start "restarting" a files session's data channel.
         const key = await activeHostSession();
         await signal(key, { kind: 'offer', sdp: FILES_OFFER, filesOnly: true });
         expect(agentAnswerOffer, 'the premise: the files session started a (data-only) stream').toHaveBeenCalledTimes(1);
@@ -369,10 +411,45 @@ describe('a share session while the console is locked', () => {
         expect(sessionStatus).toHaveBeenCalled();
         expect(await streamDiedSince(key, before), 'a restart now would show the friend the sign-in screen').toBe(0);
 
-        // And at unlock it IS: the share recovers onto the owner's own agent.
+        // And after the unlock (once its grace has passed — see below) it IS:
+        // the share recovers onto the owner's own agent.
         sessionMod.noteConsoleLocked(false);
+        now += 3_000;
         await poll();
         expect(await streamDiedSince(key, before)).toBe(1);
+    });
+
+    it('stays frozen for a short grace after the unlock, then is reported', async () => {
+        // The service stops the lock-screen agent on the same unlock event,
+        // and until it has, that agent can still answer. A share restarted at
+        // once would land on the agent being terminated.
+        shareCaps = ['control'];
+        const key = await streamingSession();
+        sessionMod.noteConsoleLocked(true);
+        status = { ...status, streamLive: false };
+        await poll();
+        expect(await streamDiedSince(key, 0), 'the premise: frozen while locked').toBe(0);
+
+        sessionMod.noteConsoleLocked(false);
+        await poll(); // the unlock listener's own nudge poll
+        expect(await streamDiedSince(key, 0), 'the unlock nudge must not restart it yet').toBe(0);
+
+        now += 2_900;
+        await poll();
+        expect(await streamDiedSince(key, 0), 'still inside the grace').toBe(0);
+
+        now += 200;
+        await poll();
+        expect(await streamDiedSince(key, 0), 'past the grace: recovered').toBe(1);
+    });
+
+    it('POSITIVE CONTROL: the owner\'s own session is reported the instant the console unlocks', async () => {
+        const key = await streamingSession();
+        sessionMod.noteConsoleLocked(true);
+        sessionMod.noteConsoleLocked(false);
+        status = { ...status, streamLive: false };
+        await poll();
+        expect(await streamDiedSince(key, 0), 'the grace is for shares only').toBe(1);
     });
 
     it('POSITIVE CONTROL: a share on an unlocked console is reported', async () => {
@@ -391,6 +468,104 @@ describe('a share session while the console is locked', () => {
         status = { ...status, streamLive: false };
         await poll();
         expect(await streamDiedSince(key, before)).toBe(1);
+    });
+});
+
+describe('the inject path ("no such capture session") reports through the same gate', () => {
+    const gone = (): void => { injectEvent.mockRejectedValue(new Error('no such capture session')); };
+
+    it('an inject the agent answers "no such capture session" sends stream-died', async () => {
+        shareCaps = ['control'];
+        const key = await streamingSession();
+        gone();
+        await input(key);
+        expect(injectEvent, 'the premise: the key press reached the backend').toHaveBeenCalled();
+        expect(await streamDiedSince(key, 0)).toBe(1);
+    });
+
+    it('the inject and the poll share ONE throttle — and it still repeats after 30 s', async () => {
+        const key = await streamingSession();
+        gone();
+        await input(key);
+        expect(injectEvent).toHaveBeenCalled();
+        expect(await streamDiedSince(key, 0), 'the inject reported it').toBe(1);
+
+        // The poll learns the same death 5 s later: no second report.
+        now += 5_000;
+        status = { ...status, streamLive: false };
+        await poll();
+        expect(sessionStatus).toHaveBeenCalled();
+        expect(await streamDiedSince(key, 0), 'two detectors, one death: one report').toBe(1);
+
+        // POSITIVE CONTROL: 31 s after that poll the throttle has lapsed.
+        now += 31_000;
+        await poll();
+        expect(await streamDiedSince(key, 0), 'past the throttle: reported again').toBe(2);
+    });
+
+    it('a share on a locked console sends nothing from an inject either', async () => {
+        shareCaps = ['control'];
+        const key = await streamingSession();
+        sessionMod.noteConsoleLocked(true);
+        gone();
+        await input(key);
+        expect(injectEvent, 'the premise: the key press reached the backend').toHaveBeenCalled();
+        expect(
+            await streamDiedSince(key, 0),
+            'a restart now would show the friend the owner\'s sign-in screen',
+        ).toBe(0);
+    });
+
+    it('POSITIVE CONTROL: the same share on an unlocked console is reported from an inject', async () => {
+        shareCaps = ['control'];
+        const key = await streamingSession();
+        gone();
+        await input(key);
+        expect(injectEvent).toHaveBeenCalled();
+        expect(await streamDiedSince(key, 0)).toBe(1);
+    });
+});
+
+describe('the real unlock order, end to end', () => {
+    it('dead pipe, then a fresh agent that never heard of it, then the restart, then live: ONE report', async () => {
+        // The owner's own session, streaming from the lock-screen agent the
+        // app borrowed while the machine was locked.
+        const key = await streamingSession();
+        sessionMod.noteConsoleLocked(true);
+
+        // 1. The unlock: the service stops the lock-screen agent, and the
+        //    tick that lands meanwhile finds the pipe dead — hostAgent's catch
+        //    arm answers with no streamLive at all ("could not ask").
+        sessionMod.noteConsoleLocked(false);
+        status = { secureDesktop: false, cursorClipped: false };
+        await poll();
+        expect(sessionStatus, 'the poll asked across the dead pipe').toHaveBeenCalled();
+        expect(await streamDiedSince(key, 0), 'a dead pipe is not "gone"').toBe(0);
+
+        // 2. The app falls through to its own agent, which has never heard of
+        //    this session.
+        now += 1_000;
+        status = { secureDesktop: false, cursorClipped: false, streamLive: false };
+        await poll();
+        expect(await streamDiedSince(key, 0), 'the fresh agent says the stream is gone').toBe(1);
+
+        // 3. The controller answers the report with a media restart, which
+        //    starts a new stream on the agent answering now. From the moment
+        //    that stream exists, the agent reports it live (set BEFORE the
+        //    signal: the restart resets the throttle, so a real tick landing
+        //    after it on a stale `false` would be a rig artefact).
+        now += 1_000;
+        status = { secureDesktop: false, cursorClipped: false, streamLive: true };
+        await signal(key, { kind: 'restart-offer', sdp: OFFER });
+        expect(agentAnswerOffer, 'the restart started a new stream').toHaveBeenCalledTimes(2);
+
+        // 4. That stream is live: nothing more, however long it runs — and
+        //    well past the throttle, so silence here is not the throttle.
+        await poll();
+        now += 40_000;
+        await poll();
+        expect(sessionStatus.mock.calls.length, 'the poll kept asking').toBeGreaterThanOrEqual(4);
+        expect(await streamDiedSince(key, 0), 'recovered: one report in total').toBe(1);
     });
 });
 
