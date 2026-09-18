@@ -31,10 +31,15 @@
 //! exact rather than sampled.
 //!
 //! PER THREAD, DELIBERATELY. `SetThreadDesktop` affects only the calling thread,
-//! and this agent injects on the pipe thread while capturing on the stream
-//! thread. Both call this independently; there is no shared state to keep in
+//! and this agent touches desktops on two: the pipe thread injects what the
+//! relay and the service's sealed lane deliver, and the stream thread captures
+//! AND — since R4 — injects what the direct input channel delivers. Each calls
+//! this independently when it is refused; there is no shared state to keep in
 //! step, which is the point — a single "current desktop" global would be a lie
-//! the moment those two threads disagreed.
+//! the moment those two threads disagreed. On the stream thread one follow
+//! serves both of its jobs (a refused injection moves its capture too, and an
+//! `AccessLost` moves its injection), which is harmless because both want the
+//! same desktop: the one that owns input now.
 //!
 //! It fails for an agent running on a user token, and that is correct: reaching
 //! the secure desktop is exactly the privilege a user-flavour agent must not

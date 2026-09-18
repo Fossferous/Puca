@@ -398,10 +398,11 @@ mod win {
     pub fn move_abs(x: f64, y: f64, target: Option<TargetMonitor>) -> INPUT {
         let x = x.clamp(0.0, 1.0);
         let y = y.clamp(0.0, 1.0);
-        match target {
-            Some(m) if m.virt_width > 1 && m.virt_height > 1 => {
-                let px = m.left as f64 + x * m.width as f64;
-                let py = m.top as f64 + y * m.height as f64;
+        // The pixel comes from the SAME helper the lock-screen log line uses
+        // (`requested_pixel`), so that line can never compare the cursor with
+        // a position this injection did not ask for.
+        match super::pixel_on_target(x, y, target) {
+            Some((m, px, py)) => {
                 let ax = ((px - m.virt_left as f64) * 65535.0 / (m.virt_width as f64 - 1.0))
                     .round()
                     .clamp(0.0, 65535.0) as i32;
@@ -574,6 +575,14 @@ pub(crate) mod send_seam {
         static ANSWERS: RefCell<VecDeque<bool>> = const { RefCell::new(VecDeque::new()) };
         static SENT: RefCell<Vec<Sent>> = const { RefCell::new(Vec::new()) };
         static FOLLOWS: Cell<usize> = const { Cell::new(0) };
+        static ON_FOLLOW: Cell<Option<fn()>> = const { Cell::new(None) };
+    }
+
+    /// Run `f` inside the next desktop follows on this thread — the gap
+    /// between a refused send and its retry, which is where another thread's
+    /// teardown can land. `None` removes it.
+    pub fn on_follow(f: Option<fn()>) {
+        ON_FOLLOW.with(|c| c.set(f));
     }
 
     /// What the next `SendInput` calls on this thread answer, in order.
@@ -619,6 +628,9 @@ pub(crate) mod send_seam {
 
     pub(crate) fn follow() -> Result<String, String> {
         FOLLOWS.with(|f| f.set(f.get() + 1));
+        if let Some(hook) = ON_FOLLOW.with(|c| c.get()) {
+            hook();
+        }
         Ok("TestDesktop".into())
     }
 }
@@ -941,16 +953,29 @@ fn release_tracked<T: PartialEq + Copy>(
 
 /// Remove one recorded press and lower the held count with it. Whether it
 /// was there is the answer.
+///
+/// SATURATING, because `release_all` zeroes the count BEFORE it drains the
+/// lists (see there). A refused press rolling itself back in that gap finds
+/// its entry still listed and decrements a count that is already 0 — which a
+/// plain `fetch_sub` wraps to `usize::MAX`, muting the hotkey poll's press
+/// path for the rest of the process.
 #[cfg(windows)]
 fn forget_held<T: PartialEq + Copy>(held: &Mutex<Vec<T>>, id: T) -> bool {
     if let Ok(mut list) = held.lock() {
         if let Some(pos) = list.iter().position(|x| *x == id) {
             list.swap_remove(pos);
-            INJECT_HELD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            lower_held_count();
             return true;
         }
     }
     false
+}
+
+/// `INJECT_HELD - 1`, stopping at zero.
+#[cfg(windows)]
+fn lower_held_count() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _ = INJECT_HELD.fetch_update(SeqCst, SeqCst, |n| Some(n.saturating_sub(1)));
 }
 
 #[cfg(windows)]
@@ -1110,20 +1135,37 @@ fn release_one(send: impl Fn() -> bool, what: &str) {
     }
 }
 
+/// THE ONE MAPPING from a normalized point (already clamped to 0..1) onto a
+/// usable target: the pixel it names in virtual-desktop coordinates, unrounded,
+/// with the target it was measured against. `None` = no usable target, and
+/// the caller falls back to the primary screen.
+///
+/// Shared by `win::move_abs` (the injection) and `requested_pixel` (the
+/// lock-screen log line). They used to carry a copy each, and a test pinned
+/// the copy — so a change to the injection's mapping would have left the log
+/// comparing the cursor with a position nothing had asked for.
+fn pixel_on_target(x: f64, y: f64, target: Option<TargetMonitor>) -> Option<(TargetMonitor, f64, f64)> {
+    match target {
+        Some(m) if m.virt_width > 1 && m.virt_height > 1 => Some((
+            m,
+            m.left as f64 + x * m.width as f64,
+            m.top as f64 + y * m.height as f64,
+        )),
+        _ => None,
+    }
+}
+
 /// Where an absolute move asks the pointer to land, in the pixel space
 /// `GetCursorPos` answers in: the target monitor's rectangle, or the primary
 /// screen (`primary` = its size) when there is no usable target — the same
-/// fallback `win::move_abs` takes. For the lock-screen log line only; the
-/// injection itself is mapped by `win::move_abs`, unchanged.
+/// fallback `win::move_abs` takes, through the same `pixel_on_target`. For
+/// the lock-screen log line.
 pub fn requested_pixel(x: f64, y: f64, target: Option<TargetMonitor>, primary: (i32, i32)) -> (i32, i32) {
     let x = if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
     let y = if y.is_finite() { y.clamp(0.0, 1.0) } else { 0.0 };
-    match target {
-        Some(m) if m.virt_width > 1 && m.virt_height > 1 => (
-            (m.left as f64 + x * m.width as f64).round() as i32,
-            (m.top as f64 + y * m.height as f64).round() as i32,
-        ),
-        _ => ((x * primary.0 as f64).round() as i32, (y * primary.1 as f64).round() as i32),
+    match pixel_on_target(x, y, target) {
+        Some((_, px, py)) => (px.round() as i32, py.round() as i32),
+        None => ((x * primary.0 as f64).round() as i32, (y * primary.1 as f64).round() as i32),
     }
 }
 
@@ -1466,6 +1508,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn a_refused_press_rolling_back_after_a_teardown_zeroed_the_count_does_not_wrap_it() {
+        // THE RACE: release_all zeroes INJECT_HELD first and drains the lists
+        // after. A press refused on the pipe thread while the stream thread
+        // tears down can roll back in that gap: its entry is still listed,
+        // the count is already 0, and a plain fetch_sub wrapped it to
+        // usize::MAX — muting the hotkey poll's press path for good.
+        let _g = serial();
+        clean_slate();
+        // The teardown's first step lands between the refusal and its retry.
+        send_seam::on_follow(Some(|| INJECT_HELD.store(0, std::sync::atomic::Ordering::SeqCst)));
+        send_seam::script(&[false, false]);
+        let r = inject(ControlInput::Down { button: 0 });
+        send_seam::on_follow(None);
+        assert!(r.is_err(), "the press was refused twice");
+        assert_eq!(send_seam::follows(), 1, "the hook ran inside the one follow");
+        assert_eq!(super::injected_inputs_held(), 0, "the count must stop at zero, not wrap");
+        clean_slate();
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_refused_press_is_not_remembered_so_the_next_press_is_sent() {
         // THE DEFECT: the press was recorded as held BEFORE SendInput's answer
         // was known and kept when it failed, and the record is the dedupe —
@@ -1609,6 +1672,84 @@ mod tests {
         let flat = TargetMonitor { virt_width: 0, ..t };
         assert_eq!(requested_pixel(1.0, 1.0, Some(flat), (2560, 1440)), (2560, 1440));
         assert_eq!(requested_pixel(f64::NAN, 0.5, None, (100, 100)), (0, 50));
+    }
+
+    #[cfg(windows)]
+    fn abs_of(i: &windows::Win32::UI::Input::KeyboardAndMouse::INPUT) -> (i32, i32, u32) {
+        // SAFETY: move_abs builds a mouse INPUT; `mi` is the member it wrote.
+        unsafe { (i.Anonymous.mi.dx, i.Anonymous.mi.dy, i.Anonymous.mi.dwFlags.0) }
+    }
+
+    /// The targets the two mapping tests share: a portrait screen left of and
+    /// above the primary (negative origin), the primary inside that desktop,
+    /// a screen right of the primary and offset down, and none at all.
+    #[cfg(windows)]
+    fn mapping_targets() -> [Option<TargetMonitor>; 4] {
+        let portrait = TargetMonitor {
+            left: -1440, top: -707, width: 1440, height: 2560,
+            virt_left: -1440, virt_top: -707, virt_width: 5440, virt_height: 2564,
+        };
+        [
+            Some(portrait),
+            Some(TargetMonitor { left: 0, top: 0, width: 2560, height: 1440, ..portrait }),
+            Some(TargetMonitor {
+                left: 2560, top: 100, width: 1920, height: 1080,
+                virt_left: 0, virt_top: 0, virt_width: 4480, virt_height: 1440,
+            }),
+            None,
+        ]
+    }
+
+    #[cfg(windows)]
+    const MAPPING_POINTS: [(f64, f64); 5] = [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (0.123, 0.987), (2.0, -1.0)];
+
+    /// NO BEHAVIOUR CHANGE from sharing the mapping: these are the values the
+    /// injection produced BEFORE `pixel_on_target` existed, recorded from
+    /// that code, for every target and point above. Building the INPUT sends
+    /// nothing; only `win::send` reaches the OS.
+    #[cfg(windows)]
+    #[test]
+    fn move_abs_maps_exactly_as_it_did_before_the_mapping_was_shared() {
+        let golden: [[(i32, i32); 5]; 4] = [
+            [(0, 0), (8675, 32729), (17351, 65458), (2134, 64607), (17351, 0)],
+            [(17351, 18078), (32774, 36488), (48196, 54898), (21145, 54419), (48196, 18078)],
+            [(37457, 4554), (51503, 29147), (65535, 53740), (40912, 53100), (65535, 4554)],
+            [(0, 0), (32768, 32768), (65535, 65535), (8061, 64683), (65535, 0)],
+        ];
+        for (t, want) in mapping_targets().into_iter().zip(golden) {
+            for ((x, y), want) in MAPPING_POINTS.into_iter().zip(want) {
+                let (dx, dy, flags) = abs_of(&win::move_abs(x, y, t));
+                assert_eq!((dx, dy), want, "target {t:?} at ({x},{y})");
+                let virtualdesk = flags & 0x4000 != 0;
+                assert_eq!(virtualdesk, t.is_some(), "only a target maps onto the virtual desktop");
+            }
+        }
+    }
+
+    /// THE LOG LINE AND THE INJECTION AGREE. Take what `move_abs` actually
+    /// asked Windows for, map it back to a pixel, and it must be the pixel
+    /// `requested_pixel` reports (within the 65535-step quantisation).
+    #[cfg(windows)]
+    #[test]
+    fn requested_pixel_is_where_move_abs_actually_aims() {
+        let primary = (2560, 1440);
+        for t in mapping_targets() {
+            for (x, y) in MAPPING_POINTS {
+                let (dx, dy, _) = abs_of(&win::move_abs(x, y, t));
+                let (rx, ry) = requested_pixel(x, y, t, primary);
+                let (bx, by) = match t {
+                    Some(m) => (
+                        m.virt_left as f64 + dx as f64 * (m.virt_width as f64 - 1.0) / 65535.0,
+                        m.virt_top as f64 + dy as f64 * (m.virt_height as f64 - 1.0) / 65535.0,
+                    ),
+                    None => (dx as f64 * primary.0 as f64 / 65535.0, dy as f64 * primary.1 as f64 / 65535.0),
+                };
+                assert!(
+                    (bx - rx as f64).abs() <= 1.0 && (by - ry as f64).abs() <= 1.0,
+                    "target {t:?} at ({x},{y}): injection aims at ({bx:.2},{by:.2}), the log says ({rx},{ry})"
+                );
+            }
+        }
     }
 
     #[cfg(windows)]
