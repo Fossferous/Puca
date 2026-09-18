@@ -1593,9 +1593,15 @@ const UNLOCK_SHARE_GRACE_MS = 3_000;
  *  (handleConsoleLock), and a restart would land on the lock-screen agent and
  *  show the friend the owner's sign-in screen. For UNLOCK_SHARE_GRACE_MS after
  *  the unlock, for the race above. Every stream-died path goes through
- *  reportStreamDied, so the poll and the inject path follow the same policy. */
+ *  reportStreamDied, so the poll and the inject path follow the same policy.
+ *
+ *  The grace is bounded on BOTH sides: a wall clock stepped backwards after
+ *  the unlock (an NTP correction, a manual change) makes the difference
+ *  negative, and an unbounded `< GRACE` would then hold the share frozen for
+ *  as long as the step was — an hour's step, an hour's frozen picture. */
 function shareFrozenByLock(): boolean {
-    return consoleLocked || Date.now() - consoleUnlockedAt < UNLOCK_SHARE_GRACE_MS;
+    const sinceUnlock = Date.now() - consoleUnlockedAt;
+    return consoleLocked || (sinceUnlock >= 0 && sinceUnlock < UNLOCK_SHARE_GRACE_MS);
 }
 
 /** Record a console lock or unlock. Exported for the listeners' tests; the

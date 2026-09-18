@@ -443,6 +443,29 @@ describe('a share session while the console is locked', () => {
         expect(await streamDiedSince(key, 0), 'past the grace: recovered').toBe(1);
     });
 
+    it('a clock stepped BACKWARDS after the unlock does not hold the share frozen', async () => {
+        // An NTP correction or a manual change moves the wall clock back. The
+        // grace is measured on that clock, so a step back makes "time since
+        // the unlock" negative — which must end the grace, not extend it by
+        // the size of the step.
+        shareCaps = ['control'];
+        const key = await streamingSession();
+        sessionMod.noteConsoleLocked(true);
+        sessionMod.noteConsoleLocked(false);
+        status = { ...status, streamLive: false };
+
+        // The forward case, same session: still inside the grace, still frozen.
+        now += 1_000;
+        await poll();
+        expect(await streamDiedSince(key, 0), 'the premise: inside the grace, frozen').toBe(0);
+
+        // The clock steps back an hour. Without the lower bound the grace
+        // would last until the clock caught up again.
+        now -= 3_600_000;
+        await poll();
+        expect(await streamDiedSince(key, 0), 'a backwards step ends the grace').toBe(1);
+    });
+
     it('POSITIVE CONTROL: the owner\'s own session is reported the instant the console unlocks', async () => {
         const key = await streamingSession();
         sessionMod.noteConsoleLocked(true);
