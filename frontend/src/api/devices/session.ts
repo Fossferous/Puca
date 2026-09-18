@@ -72,6 +72,7 @@ import {
     DEVICE_CONTROL_IDLE_MS,
 } from './controlGuard';
 import { appIsBackgrounded } from '../pagePainting';
+import { linkRefusalPersistent } from './linkHealth';
 
 /** How long a controller has to answer the unattended challenge before the
  *  session is torn down. Generous, because a human is typing a passphrase on a
@@ -3531,15 +3532,34 @@ export async function handleConsoleLock(): Promise<void> {
         // turned on or off between one lock and the next, and a stale "enrolled"
         // would hand a session to a row that no longer exists.
         let enrolled = false;
+        let refused = false;
         try {
             const { unattendedAccessState } = await import('./lockScreen');
-            enrolled = (await unattendedAccessState()).enrolled;
+            const state = await unattendedAccessState();
+            enrolled = state.enrolled;
+            // ENROLLED IS NOT REACHABLE. `enrolled` is files on this machine;
+            // the server can be refusing its sign-in-screen link all the same,
+            // and then the row this would hand the session to never comes
+            // online — the controller's follow gives up and the session ends,
+            // where freeze-and-resume would have kept it. Same persistence rule
+            // as the warning in DevicesView, so one refusal changes nothing.
+            refused = linkRefusalPersistent(state);
         } catch {
             // Could not read it — leave the freeze-and-resume path alone rather
             // than end a session on a guess.
             return;
         }
         if (!enrolled) return;
+        if (refused) {
+            // SAY WHY. Without this line a bug report cannot tell "froze
+            // because the server refuses the sign-in link" from "not enrolled"
+            // — both leave the session frozen and silent. No identifiers.
+            console.info(
+                '[device-session] console lock: enrolled, but the sign-in-screen link is '
+                + 'persistently refused; keeping freeze-and-resume',
+            );
+            return;
+        }
         for (const s of live) {
             // Re-check under the await: a session can end while the state query
             // is in flight, and teardown keys everything by id — acting on a

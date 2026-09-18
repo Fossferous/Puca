@@ -69,7 +69,7 @@ vi.mock('../api/devices/lanInfo', () => ({
     publishNow: () => { published += 1; calls.push('publishNow'); return Promise.resolve(); },
 }));
 
-import { enrolLockScreenAccess, unenrolLockScreenAccess } from '../api/devices/lockScreen';
+import { enrolLockScreenAccess, unenrolLockScreenAccess, unattendedAccessState } from '../api/devices/lockScreen';
 
 beforeEach(() => {
     calls.length = 0;
@@ -139,5 +139,37 @@ describe('unenrolLockScreenAccess', () => {
         };
         expect(await unenrolLockScreenAccess()).toBeNull();
         expect(revoked).toEqual([]);
+    });
+});
+
+describe('unattendedAccessState — the link-health record', () => {
+    it('carries the link-health record from the shell', async () => {
+        // The shell's keys (lock_screen.rs, LockScreenState) to the app's. A
+        // rename on either side would leave a ticked box with no warning while
+        // the server refuses the machine — the failure this was added for.
+        pipeState = {
+            ...pipeState,
+            link_attested_at: 100,
+            link_refused_first: 200,
+            link_refused_last: 1_100,
+            link_refused_count: 2,
+            link_refused_status: 400,
+        };
+        const s = await unattendedAccessState();
+        expect(s.linkAttestedAt).toBe(100);
+        expect(s.linkRefusedFirst).toBe(200);
+        expect(s.linkRefusedLast).toBe(1_100);
+        expect(s.linkRefusedCount).toBe(2);
+        expect(s.linkRefusedStatus).toBe(400);
+        expect(s.enrolled, 'the rest still maps').toBe(true);
+    });
+
+    it('an older shell, which sends none of it, reads as nothing to say', async () => {
+        const s = await unattendedAccessState();
+        expect(s.linkAttestedAt).toBeNull();
+        expect(s.linkRefusedFirst).toBeNull();
+        expect(s.linkRefusedLast).toBeNull();
+        expect(s.linkRefusedCount).toBe(0);
+        expect(s.linkRefusedStatus).toBeNull();
     });
 });

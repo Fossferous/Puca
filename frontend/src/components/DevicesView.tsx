@@ -92,6 +92,7 @@ import {
     updateLockScreenService,
     type UnattendedAccessState,
 } from '../api/devices/lockScreen';
+import { linkRefusalPersistent } from '../api/devices/linkHealth';
 import { getTunnelPolicy, setTunnelForwarding, tunnelSupported } from '../api/devices/tunnel';
 import {
     armUnattended,
@@ -114,6 +115,76 @@ import './DevicesView.css';
  *  as FriendsPanel, for the same reason: online/offline flips have no WS push
  *  to this surface, so without it the Control button only appears on reopen. */
 const PRESENCE_REFRESH_MS = 15_000;
+
+/** A unix-seconds timestamp as a date in the viewer's own format. */
+function localDate(unixSecs: number): string {
+    return new Date(unixSecs * 1000).toLocaleDateString();
+}
+
+/** A unix-seconds timestamp as a date and time in the viewer's own format. */
+function localDateTime(unixSecs: number): string {
+    return new Date(unixSecs * 1000).toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+    });
+}
+
+/**
+ * The server has refused this computer's sign-in-screen link, persistently.
+ *
+ * "Reach this computer after it restarts" is ticked from files on this
+ * machine, and stayed ticked for ten days while the server refused the
+ * machine's own key on every attempt — visible only in a service log. This is
+ * the server's side of that box.
+ *
+ * WORDED NOT TO CLAIM A REVOCATION: the same refusal comes back for a server
+ * database fault. It says what does not work and exactly what to click, using
+ * the on-screen labels of the two controls involved. Shown only when enrolled
+ * (unticked, there is nothing to warn about) and only for a persistent refusal
+ * (`linkRefusalPersistent` — one refusal can be a blip).
+ *
+ * DATED, NOT A TIMELESS VERDICT. The record only changes when the service
+ * tries again, and while someone is using the computer it does not try, so a
+ * server that has since healed still reads as refusing until the next lock.
+ * The text therefore says when it was last seen, and tells the owner that
+ * locking the computer checks again — so they can confirm before unticking a
+ * box that erases the sign-in-screen passphrase.
+ */
+function SignInRefusedNotice({ state }: { state: UnattendedAccessState | null }) {
+    if (
+        !state?.enrolled
+        || !linkRefusalPersistent(state)
+        || state.linkRefusedFirst == null
+        || state.linkRefusedLast == null
+    ) {
+        return null;
+    }
+    return (
+        <span className="device-signin-refused" data-testid="signin-refused">
+            <span className="device-custody-icon" aria-hidden="true"><WarningIcon /></span>
+            <span>
+                <strong>
+                    Púca&rsquo;s server has refused this computer at its sign-in screen
+                    since {localDate(state.linkRefusedFirst)}; most recently
+                    on {localDateTime(state.linkRefusedLast)}.
+                </strong>{' '}
+                While it does, you can&rsquo;t connect to this computer when nobody
+                is signed in to it, for example after it restarts, even though this
+                box is ticked. While you are signed in and Púca is running you can
+                still connect, lock screen included.
+                Locking this computer checks the connection again: lock it for a
+                minute, unlock it, and open this page again. If this message has
+                gone, nothing needs fixing. If it is still here: untick &ldquo;Reach
+                this computer after it restarts&rdquo;, tick it again, then set your
+                passphrase again under &ldquo;Passphrase for the sign-in screen&rdquo;
+                below.
+                {state.linkAttestedAt != null && (
+                    <> It last connected on {localDate(state.linkAttestedAt)}.</>
+                )}
+            </span>
+        </span>
+    );
+}
 
 /**
  * The pre-grant surface for "browse this phone's files from another device".
@@ -1723,6 +1794,10 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                 <strong>{signIn.error}</strong>
                                             </>
                                         )}
+                                        {/* The box reads ON from files on this
+                                            machine; this is the server's side,
+                                            which can disagree for days. */}
+                                        <SignInRefusedNotice state={signIn} />
                                     </span>
                                 </div>
                                 <input

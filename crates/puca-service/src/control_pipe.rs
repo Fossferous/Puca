@@ -351,15 +351,22 @@ pub fn handle_line(line: &str, view: &ServiceView) -> (ControlResponse, Option<A
             }
         },
 
-        ControlRequest::UnattendedState => (
-            ControlResponse::UnattendedState {
-                armed: crate::arming::is_armed(),
-                enrolled: crate::link::is_enrolled(),
-                device_id: crate::link::enrolled_device_id(),
-                bins_hash: installed_pair_fingerprint(),
-            },
-            None,
-        ),
+        ControlRequest::UnattendedState => {
+            let device_id = crate::link::enrolled_device_id();
+            // Only the enrolled identity's record: one kept for an identity this
+            // machine no longer holds says nothing about the one it does.
+            let link = crate::link::link_health_for(device_id.as_deref()).map(Into::into);
+            (
+                ControlResponse::UnattendedState {
+                    armed: crate::arming::is_armed(),
+                    enrolled: crate::link::is_enrolled(),
+                    device_id,
+                    bins_hash: installed_pair_fingerprint(),
+                    link,
+                },
+                None,
+            )
+        }
     }
 }
 

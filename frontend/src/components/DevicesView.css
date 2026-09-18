@@ -473,6 +473,15 @@
     flex: 0 0 auto;
 }
 
+/* The server refusing the sign-in-screen link: sits inside the option hint of
+   "Reach this computer after it restarts", icon beside the text. */
+.device-signin-refused {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 12px;
+}
+
 .device-option {
     display: flex;
     align-items: flex-start;

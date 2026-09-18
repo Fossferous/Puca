@@ -637,13 +637,15 @@ pub async fn run_socket(
     gate: &LinkGate,
     agent_running: &dyn Fn() -> bool,
     agent: &AgentHandle,
-) -> Result<(), String> {
+) -> Result<(), AttemptError> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
+    // TYPED, not a string: a 401 here means the stored token is dead, and the
+    // loop must go to the device key next time instead of re-presenting it.
     let (mut ws, _) = tokio_tungstenite::connect_async(cfg.ws_request(token)?)
         .await
-        .map_err(|e| format!("connect failed: {e}"))?;
+        .map_err(|e| classify_connect_error(&e))?;
     crate::log::line("[link] connected; waiting for the attestation challenge");
 
     let mut attested = false;
@@ -723,6 +725,7 @@ pub async fn run_socket(
             Incoming::Attested => {
                 attested = true;
                 crate::log::line(&format!("[link] attested as {}", cfg.device_id));
+                record(&cfg.device_id, LinkEvent::Attested);
             }
             Incoming::Wake { mac, broadcast } => {
                 // ATTESTATION IS NOT OPTIONAL HERE. The server should never
@@ -972,7 +975,7 @@ pub async fn refresh_token(cfg: &LinkConfig, token: &str) -> Result<Option<Strin
 /// replayable by anyone who saw it inside the acceptance window — and that
 /// window has to be wide enough for a machine whose clock drifted while it was
 /// switched off, which is precisely this machine.
-pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, String> {
+pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, AttemptError> {
     let sign_seed = read_seed(SIGN_SEED_FILE)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -1023,16 +1026,30 @@ pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, String> {
         // retrying is exactly right — the loop above keeps going on an Err. The
         // old code called every non-2xx "no longer enrolled", which both sent
         // the owner to re-enrol a machine that IS enrolled and hid the real
-        // fault. Only an explicit auth refusal (401/403/404) means the device
-        // row is genuinely gone.
+        // fault. Even a 4xx is not proof the row is gone: the server answers
+        // a database fault with the same 400 as a revoked row, on purpose
+        // (src/device_token.rs `db_error`). So a refusal is recorded and
+        // retried, never treated as final.
         if status.is_server_error() {
-            return Err(format!(
+            return Err(AttemptError::Other(format!(
                 "the server could not issue a token right now ({status}); will retry: {snippet}"
-            ));
+            )));
         }
-        return Err(format!(
-            "this computer is no longer enrolled on that account ({status}): {snippet}"
-        ));
+        // ONLY A REFUSAL OF THE DEVICE IS RECORDED — see `is_refusal`. A 429,
+        // or a challenge that expired because the server restarted between
+        // the two round trips, is this attempt failing, not this computer.
+        if is_refusal(status.as_u16(), &body) {
+            record(&cfg.device_id, LinkEvent::Refused(status.as_u16()));
+            return Err(AttemptError::Refused {
+                device_id: cfg.device_id.clone(),
+                message: format!(
+                    "the server refused this computer's own key ({status}): {snippet}"
+                ),
+            });
+        }
+        return Err(AttemptError::Other(format!(
+            "the server did not accept this attempt ({status}); will retry: {snippet}"
+        )));
     }
 
     let body: serde_json::Value =
@@ -1045,6 +1062,9 @@ pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, String> {
 
     crate::secrets::write_secret(TOKEN_FILE, token.as_bytes())?;
     crate::log::line("[link] obtained a fresh session with this computer's own key");
+    // The server accepted this computer's key: whatever was refused before is
+    // over, even if the socket that follows fails for some other reason.
+    record(&cfg.device_id, LinkEvent::Minted);
     Ok(token)
 }
 
@@ -1097,6 +1117,326 @@ fn read_seed(name: &str) -> Result<[u8; 32], String> {
     raw.try_into().map_err(|_| format!("{name} is not a 32-byte key"))
 }
 
+// ---------------------------------------------------------------------------
+// Link health: what the server last said about this computer
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS. "Reach this computer after it restarts" reads as ON from
+// local files alone (`is_enrolled` is four files existing), while the server
+// can be refusing this computer's own key on every attempt. That happened for
+// ten days: the service logged "no longer enrolled (400)" once a minute into a
+// file nobody reads, and the app kept showing a ticked box. This record is the
+// server's answer, kept where the app can ask for it.
+//
+// A RECORD, NOT A VERDICT. The same 400 comes back for a revoked row AND for a
+// server database fault (src/device_token.rs `db_error` answers identically on
+// purpose), so this never stops retrying and never claims a revocation. The app
+// decides what counts as persistent (`frontend/src/api/devices/linkHealth.ts`).
+
+/// Where the record lives: the secrets directory, beside the config it
+/// describes, so `enrol::forget` and `enrol::finish` can clear it with the rest.
+pub const LINK_HEALTH_FILE: &str = "link-health.json";
+
+/// How long to wait after the server refused this computer's own key, instead
+/// of the one-minute ladder. Retrying a refusal every minute does nothing but
+/// fill the log (~1,440 lines a day); a server-side fix still heals on its own
+/// within a quarter of an hour, and locking the computer retries at once.
+pub const REFUSED_RETRY_SECS: u64 = 900;
+
+/// The server's recorded answers, for ONE enrolled identity.
+///
+/// `device_id` keys it: a record for an identity this machine no longer holds
+/// says nothing about the one it does. `serde(default)` on every field so a
+/// record written by another version still reads.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkHealth {
+    #[serde(default)]
+    pub device_id: String,
+    /// Last time the WebSocket attested (unix seconds).
+    #[serde(default)]
+    pub attested_at: Option<i64>,
+    /// First refusal of the current run of refusals.
+    #[serde(default)]
+    pub refused_first: Option<i64>,
+    /// Most recent refusal.
+    #[serde(default)]
+    pub refused_last: Option<i64>,
+    /// Refusals since the last success. With first/last, this is what lets the
+    /// app tell one refusal (possibly a blip) from a persistent one.
+    #[serde(default)]
+    pub refused_count: u32,
+    #[serde(default)]
+    pub refused_status: Option<u16>,
+}
+
+/// Something the server said that the record keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkEvent {
+    /// The WebSocket attested: the server accepts this computer.
+    Attested,
+    /// `/devices/token` minted a session for this computer's own key — the
+    /// server accepts it, even if the socket has not attested yet.
+    Minted,
+    /// `/devices/token` refused this computer's own key (see [`is_refusal`]).
+    Refused(u16),
+}
+
+/// Fold one event into the record. PURE, so every rule is testable without a
+/// disk or a server.
+pub fn fold_health(prev: &LinkHealth, device_id: &str, ev: LinkEvent, now: i64) -> LinkHealth {
+    // Another identity's record says nothing about this one: start clean.
+    let mut next = if prev.device_id == device_id {
+        prev.clone()
+    } else {
+        LinkHealth { device_id: device_id.to_string(), ..LinkHealth::default() }
+    };
+    let clear_refusal = |h: &mut LinkHealth| {
+        h.refused_first = None;
+        h.refused_last = None;
+        h.refused_count = 0;
+        h.refused_status = None;
+    };
+    match ev {
+        LinkEvent::Attested => {
+            next.attested_at = Some(now);
+            clear_refusal(&mut next);
+        }
+        LinkEvent::Minted => clear_refusal(&mut next),
+        LinkEvent::Refused(status) => {
+            next.refused_first = next.refused_first.or(Some(now));
+            next.refused_last = Some(now);
+            next.refused_count = next.refused_count.saturating_add(1);
+            next.refused_status = Some(status);
+        }
+    }
+    next
+}
+
+/// Is this `/devices/token` failure the server refusing THIS COMPUTER, as
+/// opposed to refusing this one attempt?
+///
+/// NARROW ON PURPOSE. The endpoint answers 400 for several reasons, and only
+/// one of them is about the device: "that device could not be verified" (row
+/// missing or revoked, bad signature — or a server database fault, which is
+/// why nothing downstream calls it a revocation). The challenge errors — "that
+/// challenge is unknown or has expired", "that challenge was not issued for
+/// this device" — happen when the server restarts between the two round trips
+/// and say nothing about the device. 408 and 429 are the server being busy.
+/// Recording those would raise a warning the owner cannot act on.
+pub fn is_refusal(status: u16, body: &str) -> bool {
+    match status {
+        401 | 403 | 404 => true,
+        400 => body.contains("that device could not be verified"),
+        _ => false,
+    }
+}
+
+/// The record for `device_id`, or None when the record is another identity's.
+pub fn health_for(h: &LinkHealth, device_id: &str) -> Option<LinkHealth> {
+    (!device_id.is_empty() && h.device_id == device_id).then(|| h.clone())
+}
+
+/// The process's copy of the record, loaded lazily from disk. The link thread
+/// writes it and the control pipe reads it; both live in this process.
+static HEALTH: std::sync::Mutex<Option<LinkHealth>> = std::sync::Mutex::new(None);
+static HEALTH_WRITE_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn load_health_file() -> LinkHealth {
+    crate::secrets::read_secret(LINK_HEALTH_FILE)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Record one event for `device_id`. BEST-EFFORT: a failed write is logged once
+/// and never fails the link — the link is the feature, this only describes it.
+pub fn record(device_id: &str, ev: LinkEvent) {
+    let mut guard = HEALTH.lock().unwrap_or_else(|p| p.into_inner());
+    let prev = guard.get_or_insert_with(load_health_file).clone();
+    let next = fold_health(&prev, device_id, ev, now_unix());
+    if next == prev {
+        return;
+    }
+    *guard = Some(next.clone());
+    let written = serde_json::to_vec(&next)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| crate::secrets::write_secret(LINK_HEALTH_FILE, &raw));
+    if let Err(e) = written {
+        if !HEALTH_WRITE_WARNED.swap(true, Ordering::SeqCst) {
+            crate::log::line(&format!("[link] could not save the link-health record: {e}"));
+        }
+    }
+}
+
+/// Forget the record, in memory AND on disk. Called by `enrol::finish` and
+/// `enrol::forget`: after the owner re-enrols, the warning about the previous
+/// identity must go at once, not at the next attestation.
+pub fn forget_health() {
+    let mut guard = HEALTH.lock().unwrap_or_else(|p| p.into_inner());
+    *guard = Some(LinkHealth::default());
+    if let Ok(dir) = crate::secrets::secrets_dir() {
+        let _ = std::fs::remove_file(dir.join(LINK_HEALTH_FILE));
+    }
+}
+
+/// The record for the identity currently enrolled, if there is one.
+pub fn link_health_for(device_id: Option<&str>) -> Option<LinkHealth> {
+    let id = device_id?;
+    let mut guard = HEALTH.lock().unwrap_or_else(|p| p.into_inner());
+    health_for(guard.get_or_insert_with(load_health_file), id)
+}
+
+impl From<LinkHealth> for crate::control::LinkHealthView {
+    fn from(h: LinkHealth) -> Self {
+        crate::control::LinkHealthView {
+            attested_at: h.attested_at,
+            refused_first: h.refused_first,
+            refused_last: h.refused_last,
+            refused_count: h.refused_count,
+            refused_status: h.refused_status,
+        }
+    }
+}
+
+/// How one link attempt failed, where the difference changes what happens next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttemptError {
+    /// `/devices/token` refused this computer's own key (already recorded).
+    /// Carries the identity it refused, so the long wait applies only while
+    /// that identity is still the enrolled one.
+    Refused { device_id: String, message: String },
+    /// The WebSocket upgrade answered HTTP 401: the stored token is dead (a
+    /// signed-out or revoked session), however far from expiry it looks.
+    TokenRejected(String),
+    /// Everything else — DNS, TLS, a 5xx, a challenge that expired.
+    Other(String),
+}
+
+impl std::fmt::Display for AttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttemptError::Refused { message, .. } => f.write_str(message),
+            AttemptError::TokenRejected(m) | AttemptError::Other(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<String> for AttemptError {
+    fn from(s: String) -> Self {
+        AttemptError::Other(s)
+    }
+}
+
+impl From<&str> for AttemptError {
+    fn from(s: &str) -> Self {
+        AttemptError::Other(s.to_string())
+    }
+}
+
+/// Classify a failed WebSocket connect. A 401 on the upgrade is the only case
+/// that changes the next attempt: the token is dead, so go to the device key.
+pub fn classify_connect_error(e: &tokio_tungstenite::tungstenite::Error) -> AttemptError {
+    use tokio_tungstenite::tungstenite::Error;
+    let message = format!("connect failed: {e}");
+    match e {
+        Error::Http(resp) if resp.status().as_u16() == 401 => AttemptError::TokenRejected(message),
+        _ => AttemptError::Other(message),
+    }
+}
+
+/// What the loop does after an attempt.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AfterAttempt {
+    pub failures: u32,
+    pub wait_secs: u64,
+    /// Skip the stored token next time and go straight to the device key.
+    pub force_rekey: bool,
+}
+
+/// How THIS attempt got the token it presented, where that changes whether
+/// the next attempt may present the stored token again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttemptPath {
+    /// The attempt skipped the stored token and went straight to the device
+    /// key, because the one before it had that token rejected.
+    pub forced_rekey: bool,
+    /// `/devices/token` minted (and stored) a fresh token during this attempt.
+    pub minted: bool,
+}
+
+/// Decide the next step from THIS attempt's outcome — never from the record.
+///
+/// THE RECORD IS NOT CONSULTED, deliberately. A refusal recorded yesterday
+/// followed by a DNS failure at boot (routine: the network is not up yet) must
+/// get the fast ladder, or a machine the server has since accepted again would
+/// sit unreachable for a quarter of an hour after every wake. Only an attempt
+/// that itself ended in a refusal, for the identity still enrolled, waits long.
+///
+/// FORCE_REKEY FOLLOWS THE STORED TOKEN, not just the last error:
+/// - a 401 on the upgrade marks the stored token dead, so the next attempt
+///   goes to the device key;
+/// - a forced rekey that then fails WITHOUT minting (refused, or a network
+///   error) leaves that same dead token stored, so the rekey stays set —
+///   otherwise every 15-minute cycle of a refused machine would open with a
+///   wasted 401 on the token the server already rejected;
+/// - a 401 on a token minted in this very attempt does NOT force another
+///   mint. The device key was just accepted, so minting again would get the
+///   same answer and add a server session per retry, up to one a minute, for
+///   as long as the fault lasts. It goes on the plain ladder instead.
+pub fn after_attempt(
+    failures: u32,
+    outcome: &Result<(), AttemptError>,
+    enrolled_device: Option<&str>,
+    path: AttemptPath,
+) -> AfterAttempt {
+    match outcome {
+        Ok(()) => AfterAttempt { failures: 0, wait_secs: backoff_secs(0), force_rekey: false },
+        Err(e) => {
+            let failures = failures.saturating_add(1);
+            let wait_secs = match e {
+                AttemptError::Refused { device_id, .. }
+                    if enrolled_device == Some(device_id.as_str()) =>
+                {
+                    REFUSED_RETRY_SECS
+                }
+                _ => backoff_secs(failures),
+            };
+            let force_rekey = match e {
+                AttemptError::TokenRejected(_) => !path.minted,
+                AttemptError::Refused { .. } | AttemptError::Other(_) => {
+                    path.forced_rekey && !path.minted
+                }
+            };
+            AfterAttempt { failures, wait_secs, force_rekey }
+        }
+    }
+}
+
+/// Whether the rekey `after_attempt` asked for still applies to the next attempt.
+///
+/// A REKEY BELONGS TO THE IDENTITY WHOSE TOKEN WAS REJECTED. When the owner
+/// re-enrolls between attempts, enrolment writes a fresh token for a new device
+/// id, so the stored token is no longer the dead one: skipping it would mint a
+/// server session for nothing, and a refusal of that mint would keep the rekey
+/// set on a token nobody has presented yet. `rejected_for` is the device id the
+/// rejected attempt ran under; `enrolled_now` is the one this attempt runs under.
+/// An unknown id on either side drops the rekey: the worst that costs is one
+/// more 401 on a dead token, which sets it again.
+pub fn rekey_still_due(
+    force_rekey: bool,
+    rejected_for: Option<&str>,
+    enrolled_now: Option<&str>,
+) -> bool {
+    force_rekey && enrolled_now.is_some() && rejected_for == enrolled_now
+}
+
 /// Run the link for as long as the service lives, on its own thread.
 ///
 /// A DEDICATED THREAD WITH ITS OWN CURRENT-THREAD RUNTIME, rather than making
@@ -1134,6 +1474,15 @@ pub fn run_thread(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: AgentHand
 async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: AgentHandle) {
     let mut announced_absent = false;
     let mut failures: u32 = 0;
+    // Set when the last attempt's WebSocket upgrade answered 401. The stored
+    // token is then dead however far from expiry it looks (a signed-out or
+    // revoked session), and re-presenting it loops on the same 401 for ever
+    // without ever asking the one thing that can tell a sign-out from a
+    // revoked row: this computer's own key.
+    let mut force_rekey = false;
+    // The device id the attempt that set `force_rekey` ran under, so a
+    // re-enrolment in between clears it (see `rekey_still_due`).
+    let mut rekey_device: Option<String> = None;
 
     loop {
         if !gate.wants_up() {
@@ -1162,7 +1511,16 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
             continue;
         }
         announced_absent = false;
+        // Read BEFORE the attempt reads the token, so it names the identity
+        // whose token this attempt presents.
+        let attempt_device = enrolled_device_id();
+        force_rekey =
+            rekey_still_due(force_rekey, rekey_device.as_deref(), attempt_device.as_deref());
 
+        // Set inside the attempt the moment `/devices/token` hands back a
+        // fresh token (see `AttemptPath`): a 401 on THAT token must not send
+        // the next attempt to mint yet another one.
+        let mut minted = false;
         let attempt = async {
             let cfg = LinkConfig::load()?;
             let token = String::from_utf8(crate::secrets::read_secret(TOKEN_FILE)?)
@@ -1178,7 +1536,16 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let token = if should_redial_for_expiry(seconds_until_expiry(&token, now)) {
+            let token = if force_rekey {
+                // Straight to the device key: `refresh_token` presents the same
+                // dead token to GET /devices and would only 401 again.
+                crate::log::line(
+                    "[link] the server refused the stored token; using this computer's own key",
+                );
+                let fresh = obtain_device_token(&cfg).await?;
+                minted = true;
+                fresh
+            } else if should_redial_for_expiry(seconds_until_expiry(&token, now)) {
                 // Try to renew first — cheaper, and it keeps one session sliding
                 // rather than minting a new one every hour.
                 match refresh_token(&cfg, &token).await {
@@ -1191,7 +1558,9 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
                     // device key is, so use it.
                     Err(e) => {
                         crate::log::line(&format!("[link] {e}; using this computer's own key"));
-                        obtain_device_token(&cfg).await?
+                        let fresh = obtain_device_token(&cfg).await?;
+                        minted = true;
+                        fresh
                     }
                 }
             } else {
@@ -1210,17 +1579,31 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
             .await
         };
 
-        match attempt.await {
-            Ok(()) => failures = 0,
-            Err(e) => {
-                failures = failures.saturating_add(1);
-                crate::log::line(&format!("[link] {e}"));
-            }
+        let outcome = attempt.await;
+        if let Err(e) = &outcome {
+            crate::log::line(&format!("[link] {e}"));
         }
+        // Decided by THIS attempt's outcome, for the identity enrolled NOW —
+        // see `after_attempt` for why the record is not consulted.
+        let path = AttemptPath { forced_rekey: force_rekey, minted };
+        let next = after_attempt(failures, &outcome, enrolled_device_id().as_deref(), path);
+        failures = next.failures;
+        force_rekey = next.force_rekey;
+        rekey_device = attempt_device;
 
-        let wait = backoff_secs(failures);
-        if wait > 0 {
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+        if next.wait_secs >= REFUSED_RETRY_SECS {
+            // The long wait ends on any change of the gate, so LOCKING the
+            // computer retries at once: an owner who has just fixed the
+            // enrolment and locks the machine to try it should not wait a
+            // quarter of an hour to find out. (An unlock ends the wait too,
+            // but the gate is then down and the loop naps; nothing is tried
+            // until the next lock.)
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(next.wait_secs)) => {}
+                _ = gate.changed() => {}
+            }
+        } else if next.wait_secs > 0 {
+            tokio::time::sleep(Duration::from_secs(next.wait_secs)).await;
         }
     }
 }
@@ -1635,5 +2018,410 @@ mod handover_tests {
                 || client.contains("\"console-unlocked-handover\""),
             "session.ts must recognise the exact reason this service sends"
         );
+    }
+}
+
+/// The link-health record and the retry policy built on it.
+///
+/// PURE where it can be — the fold, the refusal test, the backoff decision and
+/// the connect-error classification take no disk and no server — and SOURCE
+/// PINS for the call sites, which the pure tests cannot see: deleting a
+/// `record(...)` call would leave every fold test green while the app never
+/// hears about a refusal again.
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    const VERIFIED_400: &str = "that device could not be verified";
+
+    fn refused(device_id: &str) -> Result<(), AttemptError> {
+        Err(AttemptError::Refused { device_id: device_id.into(), message: "refused".into() })
+    }
+
+    /// An attempt that presented the stored token and minted nothing.
+    const PLAIN: AttemptPath = AttemptPath { forced_rekey: false, minted: false };
+
+    fn rejected() -> Result<(), AttemptError> {
+        Err(AttemptError::TokenRejected("connect failed: HTTP error: 401 Unauthorized".into()))
+    }
+
+    #[test]
+    fn a_refusal_is_remembered_until_the_next_attestation() {
+        let h0 = LinkHealth::default();
+        let h1 = fold_health(&h0, "dev", LinkEvent::Refused(400), 1_000);
+        assert_eq!(h1.device_id, "dev");
+        assert_eq!(
+            (h1.refused_first, h1.refused_last, h1.refused_count),
+            (Some(1_000), Some(1_000), 1)
+        );
+        assert_eq!(h1.refused_status, Some(400));
+
+        // The FIRST refusal is kept: it is what "since {date}" means, and it is
+        // half of the persistence rule the app applies.
+        let h2 = fold_health(&h1, "dev", LinkEvent::Refused(400), 1_900);
+        assert_eq!(h2.refused_first, Some(1_000), "the run's start must not move");
+        assert_eq!(h2.refused_last, Some(1_900));
+        assert_eq!(h2.refused_count, 2);
+
+        let h3 = fold_health(&h2, "dev", LinkEvent::Attested, 2_000);
+        assert_eq!(h3.attested_at, Some(2_000));
+        assert_eq!(
+            (h3.refused_first, h3.refused_last, h3.refused_count, h3.refused_status),
+            (None, None, 0, None),
+            "an attestation ends the refusal"
+        );
+    }
+
+    #[test]
+    fn a_successful_mint_clears_the_refusal_too() {
+        // The server accepting this computer's key IS the answer, even when the
+        // socket that follows then fails for an unrelated reason.
+        let h = fold_health(&LinkHealth::default(), "dev", LinkEvent::Refused(400), 1_000);
+        let h = fold_health(&h, "dev", LinkEvent::Refused(400), 2_000);
+        assert_eq!(h.refused_count, 2, "precondition: a refusal is on record");
+        let m = fold_health(&h, "dev", LinkEvent::Minted, 3_000);
+        assert_eq!(
+            (m.refused_first, m.refused_last, m.refused_count, m.refused_status),
+            (None, None, 0, None)
+        );
+        assert_eq!(m.attested_at, None, "a mint is not an attestation");
+    }
+
+    #[test]
+    fn a_record_for_another_identity_is_not_carried_over() {
+        let old = LinkHealth {
+            device_id: "old".into(),
+            attested_at: Some(5),
+            refused_first: Some(10),
+            refused_last: Some(900),
+            refused_count: 7,
+            refused_status: Some(400),
+        };
+        let fresh = fold_health(&old, "new", LinkEvent::Refused(401), 2_000);
+        assert_eq!(fresh.device_id, "new");
+        assert_eq!(fresh.refused_first, Some(2_000), "the old run must not be inherited");
+        assert_eq!(fresh.refused_count, 1);
+        assert_eq!(fresh.attested_at, None);
+
+        // And the pipe reports nothing about an identity it does not hold.
+        assert!(health_for(&old, "new").is_none());
+        assert!(health_for(&old, "").is_none(), "an empty id matches nothing");
+        assert!(health_for(&LinkHealth::default(), "").is_none(), "not even an empty record");
+        assert_eq!(health_for(&old, "old"), Some(old.clone()), "positive control");
+    }
+
+    #[test]
+    fn only_a_refusal_of_the_device_itself_is_recorded() {
+        // The one 400 about the device.
+        assert!(is_refusal(400, VERIFIED_400));
+        // The challenge errors (src/device_token.rs) are about ONE attempt: a
+        // server restart between the two round trips produces them.
+        assert!(!is_refusal(400, "that challenge is unknown or has expired"));
+        assert!(!is_refusal(400, "that challenge was not issued for this device"));
+        assert!(!is_refusal(400, ""), "a bodyless 400 says nothing about the device");
+        // Busy, not refusing.
+        assert!(!is_refusal(429, VERIFIED_400));
+        assert!(!is_refusal(408, VERIFIED_400));
+        // Explicit auth refusals.
+        assert!(is_refusal(401, ""));
+        assert!(is_refusal(403, ""));
+        assert!(is_refusal(404, ""));
+        // A server fault is not a refusal.
+        assert!(!is_refusal(500, VERIFIED_400));
+        assert!(!is_refusal(503, ""));
+    }
+
+    #[test]
+    fn a_refused_link_waits_longer_than_the_transient_ladder() {
+        let next = after_attempt(0, &refused("dev"), Some("dev"), PLAIN);
+        assert_eq!(next.wait_secs, REFUSED_RETRY_SECS);
+        assert_eq!(REFUSED_RETRY_SECS, 900);
+        assert_eq!(next.failures, 1);
+        assert!(!next.force_rekey);
+        // The ordinary ladder is unchanged.
+        let ladder: Vec<u64> = (0..7).map(backoff_secs).collect();
+        assert_eq!(ladder, vec![0, 1, 5, 15, 30, 60, 60]);
+        // Success resets.
+        let ok = after_attempt(9, &Ok(()), Some("dev"), PLAIN);
+        assert_eq!((ok.failures, ok.wait_secs, ok.force_rekey), (0, 0, false));
+    }
+
+    #[test]
+    fn a_persisted_refusal_followed_by_a_network_error_gets_the_fast_ladder() {
+        // THE CRITICS' CASE. Yesterday's refusal is on disk; this boot's first
+        // attempts fail on DNS because the network is not up yet. Waiting a
+        // quarter of an hour after each would strand a machine the server has
+        // since accepted again. The record exists here only to make the point
+        // that nothing reads it: the wait comes from THIS attempt.
+        let persisted = fold_health(&LinkHealth::default(), "dev", LinkEvent::Refused(400), 1);
+        assert_eq!(persisted.refused_count, 1, "precondition: a refusal is on record");
+
+        let dns = Err(AttemptError::Other("connect failed: dns error".into()));
+        let first = after_attempt(0, &dns, Some("dev"), PLAIN);
+        assert_eq!(first.wait_secs, backoff_secs(1));
+        // Straight after a refusal, too: the refusal's long wait does not stick.
+        let after_refusal = after_attempt(0, &refused("dev"), Some("dev"), PLAIN);
+        assert_eq!(after_refusal.wait_secs, REFUSED_RETRY_SECS, "positive control");
+        let then_dns = after_attempt(after_refusal.failures, &dns, Some("dev"), PLAIN);
+        assert_eq!(then_dns.wait_secs, backoff_secs(2));
+        assert_ne!(then_dns.wait_secs, REFUSED_RETRY_SECS);
+    }
+
+    #[test]
+    fn a_refusal_of_an_identity_no_longer_enrolled_does_not_wait_long() {
+        // The owner re-enrolled while an attempt for the old identity was in
+        // flight: the new identity has not been refused and must not wait.
+        assert_eq!(
+            after_attempt(0, &refused("old"), Some("new"), PLAIN).wait_secs,
+            backoff_secs(1)
+        );
+        assert_eq!(after_attempt(0, &refused("old"), None, PLAIN).wait_secs, backoff_secs(1));
+    }
+
+    #[test]
+    fn a_401_on_the_upgrade_sends_the_next_attempt_to_the_device_key() {
+        use tokio_tungstenite::tungstenite::http::Response;
+        use tokio_tungstenite::tungstenite::Error;
+
+        let e401 = Error::Http(Response::builder().status(401).body(None).expect("response"));
+        let got = classify_connect_error(&e401);
+        assert!(matches!(got, AttemptError::TokenRejected(_)), "{got:?}");
+        assert!(got.to_string().contains("401"), "the status must reach the log: {got}");
+        let next = after_attempt(0, &Err(got), Some("dev"), PLAIN);
+        assert!(next.force_rekey, "a dead token must not be presented again");
+        assert_eq!(next.wait_secs, backoff_secs(1), "and it is not a refusal of the device");
+
+        // Anything else leaves the token path alone.
+        let e403 = Error::Http(Response::builder().status(403).body(None).expect("response"));
+        assert!(matches!(classify_connect_error(&e403), AttemptError::Other(_)));
+        let e502 = Error::Http(Response::builder().status(502).body(None).expect("response"));
+        assert!(matches!(classify_connect_error(&e502), AttemptError::Other(_)));
+        let io = Error::Io(std::io::Error::other("dns"));
+        assert!(matches!(classify_connect_error(&io), AttemptError::Other(_)));
+        let other = Err(AttemptError::Other("x".into()));
+        assert!(!after_attempt(0, &other, Some("dev"), PLAIN).force_rekey);
+        assert!(!after_attempt(0, &refused("dev"), Some("dev"), PLAIN).force_rekey);
+    }
+
+    #[test]
+    fn a_rekey_that_is_refused_does_not_present_the_dead_token_again() {
+        // THE SEQUENCE: the upgrade 401s (the stored token is dead), the next
+        // attempt goes straight to the device key, and the server refuses it.
+        // Nothing was minted, so the stored token is STILL the dead one: the
+        // attempt after the 15-minute wait must go to the device key again,
+        // not open with a wasted 401 on a token the server already rejected.
+        let first = after_attempt(0, &rejected(), Some("dev"), PLAIN);
+        assert!(first.force_rekey, "precondition: the 401 sends the next attempt to the key");
+
+        let rekey = AttemptPath { forced_rekey: first.force_rekey, minted: false };
+        let refused_rekey = after_attempt(first.failures, &refused("dev"), Some("dev"), rekey);
+        assert_eq!(refused_rekey.wait_secs, REFUSED_RETRY_SECS, "a refusal still waits long");
+        assert!(refused_rekey.force_rekey, "the stored token is still the dead one");
+
+        // And again, for as long as the refusal lasts: it stays set.
+        let rekey = AttemptPath { forced_rekey: refused_rekey.force_rekey, minted: false };
+        let again = after_attempt(refused_rekey.failures, &refused("dev"), Some("dev"), rekey);
+        assert!(again.force_rekey, "a second refused rekey keeps it too");
+
+        // The same for a rekey that failed on the network before minting.
+        let net = Err(AttemptError::Other("could not redeem the challenge: dns".into()));
+        assert!(after_attempt(1, &net, Some("dev"), rekey).force_rekey);
+
+        // POSITIVE CONTROLS. A refusal or network error on the ordinary path
+        // (no token was rejected) does not start rekeying; a rekey that
+        // MINTED has replaced the dead token, so whatever fails afterwards
+        // leaves the new one to be presented; and success clears it.
+        assert!(!after_attempt(0, &refused("dev"), Some("dev"), PLAIN).force_rekey);
+        assert!(!after_attempt(0, &net, Some("dev"), PLAIN).force_rekey);
+        let minted_rekey = AttemptPath { forced_rekey: true, minted: true };
+        assert!(!after_attempt(1, &net, Some("dev"), minted_rekey).force_rekey);
+        assert!(!after_attempt(1, &Ok(()), Some("dev"), rekey).force_rekey);
+    }
+
+    #[test]
+    fn a_401_on_a_token_minted_in_the_same_attempt_does_not_mint_again() {
+        // THE SEQUENCE: the stored token 401s, the rekey mints a fresh token,
+        // and the upgrade 401s on THAT one too (a server-side fault after the
+        // mint, e.g. token_session_live failing). The device key was just
+        // accepted, so another mint would get the same answer — and each one
+        // adds a server session. It goes on the plain ladder instead.
+        let first = after_attempt(0, &rejected(), Some("dev"), PLAIN);
+        assert!(first.force_rekey, "precondition");
+        let minted = AttemptPath { forced_rekey: first.force_rekey, minted: true };
+        let second = after_attempt(first.failures, &rejected(), Some("dev"), minted);
+        assert!(!second.force_rekey, "a token minted a moment ago must not trigger another mint");
+        assert_eq!(second.wait_secs, backoff_secs(2), "the plain ladder, not the refusal wait");
+        assert_eq!(second.failures, 2, "and the ladder keeps climbing");
+
+        // The same when the mint came from the expiry path's refresh fallback.
+        let fallback = AttemptPath { forced_rekey: false, minted: true };
+        assert!(!after_attempt(3, &rejected(), Some("dev"), fallback).force_rekey);
+
+        // POSITIVE CONTROL: a 401 on a token this attempt did NOT mint still
+        // goes to the device key, on the plain path and after a forced rekey
+        // that produced no token.
+        assert!(after_attempt(0, &rejected(), Some("dev"), PLAIN).force_rekey);
+        let unminted = AttemptPath { forced_rekey: true, minted: false };
+        assert!(after_attempt(0, &rejected(), Some("dev"), unminted).force_rekey);
+    }
+
+    #[test]
+    fn a_rekey_does_not_outlive_a_re_enrolment() {
+        // THE SEQUENCE: the upgrade 401s for "old", so the next attempt is set
+        // to go to the device key. Before it runs, the owner re-enrolls: the
+        // stored token is now the one enrolment just wrote for "new", which
+        // nobody has presented yet. It must be presented, not skipped.
+        let first = after_attempt(0, &rejected(), Some("old"), PLAIN);
+        assert!(first.force_rekey, "precondition: the 401 asks for a rekey");
+        assert!(!rekey_still_due(first.force_rekey, Some("old"), Some("new")));
+        // Enrolment gone, or its config unreadable: nothing to rekey for.
+        assert!(!rekey_still_due(true, Some("old"), None));
+        assert!(!rekey_still_due(true, None, None));
+
+        // POSITIVE CONTROL: the same identity keeps the rekey, and nothing
+        // turns one on that was not asked for.
+        assert!(rekey_still_due(first.force_rekey, Some("old"), Some("old")));
+        assert!(!rekey_still_due(false, Some("old"), Some("old")));
+        assert!(!rekey_still_due(false, Some("old"), Some("new")));
+    }
+
+    #[test]
+    fn a_record_from_another_version_still_reads() {
+        let empty: LinkHealth = serde_json::from_str("{}").expect("all fields default");
+        assert_eq!(empty, LinkHealth::default());
+        let h = LinkHealth {
+            device_id: "d".into(),
+            attested_at: Some(1),
+            refused_first: Some(2),
+            refused_last: Some(3),
+            refused_count: 4,
+            refused_status: Some(400),
+        };
+        let back: LinkHealth = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+        assert_eq!(back, h);
+        let view: crate::control::LinkHealthView = h.into();
+        assert_eq!(
+            view,
+            crate::control::LinkHealthView {
+                attested_at: Some(1),
+                refused_first: Some(2),
+                refused_last: Some(3),
+                refused_count: 4,
+                refused_status: Some(400),
+            }
+        );
+    }
+
+    /// Scanned from the NON-TEST source, for the reason `handover_tests` gives:
+    /// `include_str!` of this file includes these assertions, so searching the
+    /// whole file would find every string and pass whatever the code says.
+    fn src() -> &'static str {
+        include_str!("link.rs").split("#[cfg(test)]").next().unwrap()
+    }
+
+    fn body_of<'a>(src: &'a str, start: &str) -> &'a str {
+        let at = src.find(start).unwrap_or_else(|| panic!("missing {start}"));
+        let rest = &src[at + start.len()..];
+        // Up to the next top-level item.
+        let end = ["\npub fn ", "\npub async fn ", "\nfn ", "\nasync fn ", "\n/// "]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn the_device_token_path_records_what_the_server_said() {
+        let body = body_of(src(), "pub async fn obtain_device_token(");
+        assert!(
+            body.contains("if is_refusal(status.as_u16(), &body) {"),
+            "only a refusal of the device may be recorded: {body}"
+        );
+        assert!(
+            body.contains("record(&cfg.device_id, LinkEvent::Refused(status.as_u16()));"),
+            "the refusal arm must record it, or the app never hears: {body}"
+        );
+        assert!(
+            body.contains("record(&cfg.device_id, LinkEvent::Minted);"),
+            "a successful mint must clear the refusal: {body}"
+        );
+        // The refusal is recorded AFTER the 5xx arm has returned.
+        let five = body.find("status.is_server_error()").expect("5xx arm");
+        let rec = body.find("LinkEvent::Refused(").expect("refusal record");
+        assert!(five < rec, "a 5xx must never reach the refusal record");
+    }
+
+    #[test]
+    fn an_attestation_is_recorded() {
+        let s = src();
+        let at = s.find("Incoming::Attested => {").expect("the Attested arm");
+        // Up to the NEXT arm, not a fixed byte count: a byte slice panics when
+        // an edit lands a multi-byte character (this file is full of em
+        // dashes) on the cut, which would fail this test for no code reason.
+        let rest = &s[at + "Incoming::Attested => {".len()..];
+        let arm = &rest[..rest.find("Incoming::").expect("the arm after Attested")];
+        assert!(
+            arm.contains("record(&cfg.device_id, LinkEvent::Attested);"),
+            "the Attested arm must record it: {arm}"
+        );
+    }
+
+    #[test]
+    fn the_loop_rekeys_after_a_401_and_waits_by_the_last_attempt() {
+        let body = body_of(src(), "async fn link_forever(");
+        assert!(body.contains("let token = if force_rekey {"), "{body}");
+        let rekey = body.find("let token = if force_rekey {").unwrap();
+        let mint = body[rekey..].find("obtain_device_token(&cfg).await?").map(|i| i + rekey);
+        let refresh = body.find("refresh_token(&cfg, &token)").expect("the refresh path");
+        assert!(
+            mint.is_some_and(|m| m < refresh),
+            "force_rekey must go straight to the device key, not through the refresh"
+        );
+        assert!(body.contains(
+            "after_attempt(failures, &outcome, enrolled_device_id().as_deref(), path)"
+        ));
+        assert!(body.contains("let path = AttemptPath { forced_rekey: force_rekey, minted };"));
+        assert!(body.contains("force_rekey = next.force_rekey;"));
+        // A re-enrolment between attempts clears the rekey: the id is read
+        // before the attempt, checked against the one that asked for the
+        // rekey, and recorded as that one when the next rekey is decided.
+        let read = body.find("let attempt_device = enrolled_device_id();").expect("the id read");
+        let due = body
+            .find(
+                "rekey_still_due(force_rekey, rekey_device.as_deref(), attempt_device.as_deref());",
+            )
+            .expect("the rekey is re-checked against the enrolled identity");
+        let token = body.find("read_secret(TOKEN_FILE)").expect("the token read");
+        assert!(read < due && due < token, "checked before the token is read: {body}");
+        let set = body.find("force_rekey = next.force_rekey;").unwrap();
+        let owner = body.find("rekey_device = attempt_device;").expect("the id is recorded");
+        assert!(set < owner, "recorded with the decision it belongs to: {body}");
+        // EVERY mint marks the attempt, or a 401 on a token minted a moment
+        // ago would send the next attempt to mint yet another one.
+        let mints: Vec<usize> =
+            body.match_indices("obtain_device_token(&cfg).await?").map(|(i, _)| i).collect();
+        assert_eq!(mints.len(), 2, "the forced rekey and the expiry fallback: {body}");
+        for i in mints {
+            let after = body[i..].trim_start_matches("obtain_device_token(&cfg).await?");
+            assert!(
+                after.trim_start_matches(';').trim_start().starts_with("minted = true;"),
+                "a mint must set `minted` straight away: {after}"
+            );
+        }
+        let long = body.find("if next.wait_secs >= REFUSED_RETRY_SECS {").expect("the long wait");
+        let long_arm = &body[long..];
+        assert!(
+            long_arm.contains("_ = gate.changed() => {}"),
+            "the long wait must wake on a lock change: {long_arm}"
+        );
+        assert!(!body.contains("backoff_secs("), "the wait is after_attempt's, not a second policy");
+        // THE RECORD IS WRITE-ONLY ON THE RETRY PATH. `after_attempt` decides
+        // from this attempt alone (see its doc); a loop that read the record
+        // for its wait would strand a machine behind yesterday's refusal after
+        // every boot, and no after_attempt test could see it.
+        for read in ["health_for(", "HEALTH", "load_health_file", "LinkHealth"] {
+            assert!(!body.contains(read), "link_forever must not read the record ({read}): {body}");
+        }
     }
 }

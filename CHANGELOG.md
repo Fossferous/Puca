@@ -4,6 +4,27 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **"Reach this computer after it restarts" now says when the server is
+  refusing it.** The box is ticked from files on the computer itself, so it
+  stayed ticked while Púca's server turned down the computer's sign-in-screen
+  connection on every attempt — the only trace was a line a minute in the
+  service's own log. When that refusal persists (two refusals at least ten
+  minutes apart), Devices → This device now shows a warning under the box with
+  when it started and when it was last seen, how to check again (lock the
+  computer for a minute), and what to do if it is still there: untick the box,
+  tick it again, and set the sign-in-screen passphrase again. It does not claim
+  the computer was removed, because a server fault looks the same from here. While the
+  refusal persists, locking the computer during a remote session no longer
+  hands the session to a sign-in screen that cannot come online; it freezes and
+  resumes on unlock instead. The service now retries a refused computer every
+  15 minutes rather than every minute (locking the computer retries at once),
+  and a connection the server rejects for a signed-out session goes straight to
+  the computer's own key instead of retrying the dead one. The service reaches
+  existing installs through the usual "update the service" prompt.
+
 ## 0.9.814 — 2026-09-17
 
 Púca Notes: a notes app in the style of Google Keep, in the browser and as its
