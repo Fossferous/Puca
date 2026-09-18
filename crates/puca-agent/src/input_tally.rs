@@ -9,7 +9,8 @@
 //! actually flowing, answers it:
 //!
 //! ```text
-//! [input-rx] lane=channel 1.02s move=58 rmove=0 down=1 up=1 wheel=0 sas=0 failed=0 keys=some keys_failed=0
+//! [input-rx] lane=channel 1.02s move=58 rmove=0 down=1 up=1 wheel=0 sas=0 failed=0 keys=0 keys_failed=0
+//! [input-rx] lane=channel 1s move=12 rmove=0 down=0 up=0 wheel=0 sas=0 failed=0 keys=some keys_failed=0
 //! ```
 //!
 //! POINTER COUNTS ARE EXACT; KEYBOARD ACTIVITY IS NOT, ON PURPOSE. Keys and
@@ -20,7 +21,9 @@
 //! with the next lines giving away the typing rhythm. The bucket still says
 //! what the question needs (keys arrived, or they did not) and nothing a
 //! length can be read from. What remains visible is THAT typing happened in a
-//! given second, which the question cannot do without.
+//! given second, which the question cannot do without. And a window that
+//! holds a keystroke gives its span in whole seconds, not to 10 ms: a short
+//! flushed burst's span is how long the typing took.
 //!
 //! Never a coordinate, a key code or a character. Ungated so every CI leg
 //! compiles and tests it; the stream thread's lane is Windows-only, the pipe
@@ -152,11 +155,11 @@ impl InputTally {
 
     /// Format the open window as a line, and start a fresh one.
     fn take_line(&mut self, span: Duration) -> String {
-        let mut line = format!("[input-rx] lane={} {:.2}s", self.lane, span.as_secs_f64());
+        let keys = self.counts[5].saturating_add(self.counts[6]);
+        let mut line = format!("[input-rx] lane={} {}", self.lane, span_text(span, keys > 0));
         for &i in &EXACT {
             line.push_str(&format!(" {}={}", KINDS[i], self.counts[i]));
         }
-        let keys = self.counts[5].saturating_add(self.counts[6]);
         line.push_str(&format!(
             " failed={} keys={} keys_failed={}",
             self.failed,
@@ -169,6 +172,19 @@ impl InputTally {
         self.failed = 0;
         self.keys_failed = 0;
         line
+    }
+}
+
+/// A window's span as the line prints it: to 10 ms for pointer-only input,
+/// but WHOLE SECONDS once the window holds a keystroke. A flushed window's
+/// span runs from its first event to its last, so to 10 ms it was how long
+/// a short burst of typing took — at the sign-in screen, a PIN's rhythm by
+/// another name, beside a bucket that exists to hide its length.
+fn span_text(span: Duration, keyboard: bool) -> String {
+    if keyboard {
+        format!("{}s", span.as_secs_f64().round() as u64)
+    } else {
+        format!("{:.2}s", span.as_secs_f64())
     }
 }
 
@@ -223,7 +239,7 @@ mod tests {
         let line = t.note(mv, true, start + Duration::from_millis(1_010)).expect("a line is due");
         assert_eq!(
             line,
-            "[input-rx] lane=channel 1.01s move=61 rmove=0 down=0 up=0 wheel=0 sas=0 failed=0 keys=some keys_failed=some"
+            "[input-rx] lane=channel 1s move=61 rmove=0 down=0 up=0 wheel=0 sas=0 failed=0 keys=some keys_failed=some"
         );
         // And the next window starts from zero.
         let next = t.note(mv, true, start + Duration::from_millis(1_020));
@@ -271,6 +287,34 @@ mod tests {
     }
 
     #[test]
+    fn a_window_with_keys_gives_its_span_in_whole_seconds() {
+        // How long a burst of typing took, to 10 ms, is its rhythm; the span
+        // of a window holding a keystroke is rounded to the second.
+        let flushed = |key_at: Option<u64>, end_ms: u64| {
+            let start = t0();
+            let mut t = InputTally::new("sealed");
+            t.note(0, true, start);
+            if let Some(ms) = key_at {
+                t.note(key(), true, start + Duration::from_millis(ms));
+            }
+            t.note(0, true, start + Duration::from_millis(end_ms));
+            t.flush().expect("a burst")
+        };
+        let typed = flushed(Some(100), 370);
+        assert!(typed.starts_with("[input-rx] lane=sealed 0s "), "{typed}");
+        assert_eq!(typed, flushed(Some(200), 480), "two typing rhythms inside a second read the same");
+        assert!(flushed(Some(100), 620).starts_with("[input-rx] lane=sealed 1s "));
+        // A refused keystroke is a keystroke too.
+        let start = t0();
+        let mut t = InputTally::new("sealed");
+        t.note(key(), false, start);
+        let line = t.note(0, true, start + Duration::from_millis(2_640)).expect("due");
+        assert!(line.starts_with("[input-rx] lane=sealed 3s "), "{line}");
+        // POSITIVE CONTROL: pointer-only windows keep their 10 ms precision.
+        assert!(flushed(None, 370).starts_with("[input-rx] lane=sealed 0.37s "));
+    }
+
+    #[test]
     fn the_keyboard_bucket_has_three_values() {
         assert_eq!(keyboard_bucket(0), "0");
         assert_eq!(keyboard_bucket(1), "some");
@@ -312,7 +356,7 @@ mod tests {
         let line = t.flush().expect("a burst shorter than a second is still written");
         assert_eq!(
             line,
-            "[input-rx] lane=pipe 0.50s move=2 rmove=0 down=0 up=0 wheel=0 sas=0 failed=0 keys=some keys_failed=0"
+            "[input-rx] lane=pipe 1s move=2 rmove=0 down=0 up=0 wheel=0 sas=0 failed=0 keys=some keys_failed=0"
         );
         assert_eq!(t.flush(), None, "and the window it closed is not written twice");
         // A flush right after a line was due flushes nothing either.
