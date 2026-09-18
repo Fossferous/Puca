@@ -13,9 +13,10 @@ one-line summary; this file is the full story. Versions follow
   connection on every attempt — the only trace was a line a minute in the
   service's own log. When that refusal persists (two refusals at least ten
   minutes apart), Devices → This device now shows a warning under the box with
-  the date it started and exactly what to do: untick the box, tick it again,
-  and set the sign-in-screen passphrase again. It does not claim the computer
-  was removed, because a server fault looks the same from here. While the
+  when it started and when it was last seen, how to check again (lock the
+  computer for a minute), and what to do if it is still there: untick the box,
+  tick it again, and set the sign-in-screen passphrase again. It does not claim
+  the computer was removed, because a server fault looks the same from here. While the
   refusal persists, locking the computer during a remote session no longer
   hands the session to a sign-in screen that cannot come online; it freezes and
   resumes on unlock instead. The service now retries a refused computer every

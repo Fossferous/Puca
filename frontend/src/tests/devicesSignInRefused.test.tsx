@@ -10,8 +10,10 @@
  * Rules pinned: the warning appears only when enrolled AND the refusal is
  * persistent (two refusals ten minutes apart); a single refusal, or two close
  * together, shows nothing; the text names the two on-screen controls exactly,
- * so the owner can follow it; and it never says the device was revoked, since
- * the same refusal comes back for a server fault.
+ * so the owner can follow it; it is dated with the latest refusal and says
+ * that locking the computer checks again, so it never reads as a timeless
+ * verdict; and it never says the device was revoked, since the same refusal
+ * comes back for a server fault.
  *
  * Rig: devicesUnattended.test.tsx's, with lockScreen mocked at the module
  * boundary (lockScreenSupported() is isTauri(), false under jsdom, so the
@@ -21,6 +23,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { VerifiedDevice } from '../api/devices';
 import type { UnattendedAccessState } from '../api/devices/lockScreen';
 
@@ -113,12 +118,19 @@ const PERSISTENT = {
     linkRefusedFirst: T, linkRefusedLast: T + 900, linkRefusedCount: 2, linkRefusedStatus: 400,
 };
 
+/** Let every pending promise chain (the mocked state queries) land. */
+async function settle() {
+    for (let i = 0; i < 5; i++) {
+        await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    }
+}
+
 async function mount() {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
     await act(async () => { root!.render(<DevicesView onClose={() => {}} />); });
-    await act(async () => { await Promise.resolve(); });
+    await settle();
     const banner = host.querySelector('.device-error');
     if (banner) {
         throw new Error(`DevicesView failed to load, so nothing below is being tested: ${banner.textContent}`);
@@ -128,8 +140,8 @@ async function mount() {
     if (!tabBtn) throw new Error('DevicesView rendered without a This-device tab');
     await act(async () => {
         tabBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await Promise.resolve();
     });
+    await settle();
     // PRECONDITION: the card this warning lives in is on screen, so every
     // "no warning" below is about the rule and not about a card that never
     // rendered.
@@ -138,6 +150,28 @@ async function mount() {
 }
 
 const notice = () => host?.querySelector('[data-testid="signin-refused"]') ?? null;
+
+/** The warning's fixed opening, which docs/USER_GUIDE.md quotes as a heading
+ *  so an owner who searches for what they see finds it. */
+const HEADLINE = 'Púca’s server has refused this computer at its sign-in screen';
+
+/** Same format as DevicesView's `localDateTime`. */
+const dateTime = (unixSecs: number) => new Date(unixSecs * 1000).toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+});
+
+/**
+ * PRECONDITION for every ENROLLED negative: the box is ticked, which it only
+ * is once `unattendedAccessState` has answered — the card's label renders from
+ * `lockScreenState` and proves nothing about it. Without this, a state that
+ * never arrived would pass every "no warning" below.
+ */
+function expectBoxTicked() {
+    const box = host?.querySelector<HTMLInputElement>('#device-signin-enrol');
+    expect(box, 'the enrolment checkbox must be on screen').toBeTruthy();
+    expect(box!.checked, 'the enrolled state must have arrived (box ticked)').toBe(true);
+}
 
 beforeEach(() => {
     vi.clearAllMocks();
@@ -152,14 +186,25 @@ afterEach(() => {
 });
 
 describe('the sign-in-screen refusal warning', () => {
+    it('is quoted exactly by the USER_GUIDE heading that explains it', () => {
+        const here = dirname(fileURLToPath(import.meta.url));
+        const guide = readFileSync(join(here, '..', '..', '..', 'docs', 'USER_GUIDE.md'), 'utf8');
+        expect(guide).toContain(`### "${HEADLINE}"`);
+    });
+
     it('shows for an enrolled machine the server has persistently refused', async () => {
         unattendedAccessState.mockResolvedValue(state({ ...PERSISTENT, linkAttestedAt: T - 86_400 }));
         await mount();
         const n = notice();
         expect(n, 'the warning must be shown').toBeTruthy();
         const text = n!.textContent ?? '';
-        expect(text).toContain('is not accepting this computer at its sign-in screen');
-        expect(text).toContain(`since ${new Date(T * 1000).toLocaleDateString()}`);
+        expect(text).toContain(HEADLINE);
+        // DATED with the latest refusal, not a present-tense verdict.
+        expect(text).toContain(
+            `since ${new Date(T * 1000).toLocaleDateString()}; most recently on ${dateTime(T + 900)}.`,
+        );
+        // And how to check again before undoing anything.
+        expect(text).toContain('Locking this computer checks the connection again');
         // The exact labels of the two controls it tells the owner to use.
         expect(text).toContain('untick “Reach this computer after it restarts”');
         expect(text).toContain('“Passphrase for the sign-in screen”');
@@ -173,6 +218,7 @@ describe('the sign-in-screen refusal warning', () => {
     it('POSITIVE CONTROL: an enrolled machine with nothing refused shows no warning', async () => {
         unattendedAccessState.mockResolvedValue(state({}));
         await mount();
+        expectBoxTicked();
         expect(notice()).toBeNull();
     });
 
@@ -181,6 +227,7 @@ describe('the sign-in-screen refusal warning', () => {
             linkRefusedFirst: T, linkRefusedLast: T, linkRefusedCount: 1, linkRefusedStatus: 400,
         }));
         await mount();
+        expectBoxTicked();
         expect(notice()).toBeNull();
     });
 
@@ -189,6 +236,7 @@ describe('the sign-in-screen refusal warning', () => {
             linkRefusedFirst: T, linkRefusedLast: T + 599, linkRefusedCount: 2, linkRefusedStatus: 400,
         }));
         await mount();
+        expectBoxTicked();
         expect(notice()).toBeNull();
     });
 
@@ -198,13 +246,18 @@ describe('the sign-in-screen refusal warning', () => {
         expect(notice()).toBeNull();
     });
 
-    it('an older service, which reports none of it, shows nothing', async () => {
-        const old = state({}) as Partial<UnattendedAccessState>;
-        delete old.linkRefusedFirst;
-        delete old.linkRefusedLast;
-        delete old.linkRefusedCount;
-        unattendedAccessState.mockResolvedValue(old as UnattendedAccessState);
-        await mount();
-        expect(notice()).toBeNull();
-    });
+    // A reply that is PERSISTENT in every other respect but lacks one field
+    // (an older or partial service). Each key is missing in turn, so a rule
+    // that treated a missing value loosely — defaulting it, or comparing
+    // `undefined` — would show a warning the service never reported.
+    for (const missing of ['linkRefusedCount', 'linkRefusedFirst', 'linkRefusedLast'] as const) {
+        it(`a reply without ${missing} shows nothing, however persistent the rest`, async () => {
+            const partial = state(PERSISTENT) as Partial<UnattendedAccessState>;
+            delete partial[missing];
+            unattendedAccessState.mockResolvedValue(partial as UnattendedAccessState);
+            await mount();
+            expectBoxTicked();
+            expect(notice()).toBeNull();
+        });
+    }
 });

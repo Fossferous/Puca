@@ -3388,7 +3388,17 @@ export async function handleConsoleLock(): Promise<void> {
             // than end a session on a guess.
             return;
         }
-        if (!enrolled || refused) return;
+        if (!enrolled) return;
+        if (refused) {
+            // SAY WHY. Without this line a bug report cannot tell "froze
+            // because the server refuses the sign-in link" from "not enrolled"
+            // — both leave the session frozen and silent. No identifiers.
+            console.info(
+                '[device-session] console lock: enrolled, but the sign-in-screen link is '
+                + 'persistently refused; keeping freeze-and-resume',
+            );
+            return;
+        }
         for (const s of live) {
             // Re-check under the await: a session can end while the state query
             // is in flight, and teardown keys everything by id — acting on a

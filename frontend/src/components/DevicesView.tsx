@@ -121,6 +121,14 @@ function localDate(unixSecs: number): string {
     return new Date(unixSecs * 1000).toLocaleDateString();
 }
 
+/** A unix-seconds timestamp as a date and time in the viewer's own format. */
+function localDateTime(unixSecs: number): string {
+    return new Date(unixSecs * 1000).toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+    });
+}
+
 /**
  * The server has refused this computer's sign-in-screen link, persistently.
  *
@@ -134,9 +142,21 @@ function localDate(unixSecs: number): string {
  * the on-screen labels of the two controls involved. Shown only when enrolled
  * (unticked, there is nothing to warn about) and only for a persistent refusal
  * (`linkRefusalPersistent` — one refusal can be a blip).
+ *
+ * DATED, NOT A TIMELESS VERDICT. The record only changes when the service
+ * tries again, and while someone is using the computer it does not try, so a
+ * server that has since healed still reads as refusing until the next lock.
+ * The text therefore says when it was last seen, and tells the owner that
+ * locking the computer checks again — so they can confirm before unticking a
+ * box that erases the sign-in-screen passphrase.
  */
 function SignInRefusedNotice({ state }: { state: UnattendedAccessState | null }) {
-    if (!state?.enrolled || !linkRefusalPersistent(state) || state.linkRefusedFirst == null) {
+    if (
+        !state?.enrolled
+        || !linkRefusalPersistent(state)
+        || state.linkRefusedFirst == null
+        || state.linkRefusedLast == null
+    ) {
         return null;
     }
     return (
@@ -144,14 +164,18 @@ function SignInRefusedNotice({ state }: { state: UnattendedAccessState | null })
             <span className="device-custody-icon" aria-hidden="true"><WarningIcon /></span>
             <span>
                 <strong>
-                    Púca&rsquo;s server is not accepting this computer at its sign-in
-                    screen (since {localDate(state.linkRefusedFirst)}).
+                    Púca&rsquo;s server has refused this computer at its sign-in screen
+                    since {localDate(state.linkRefusedFirst)}; most recently
+                    on {localDateTime(state.linkRefusedLast)}.
                 </strong>{' '}
-                Until this is fixed, you can&rsquo;t connect to this computer after it
-                restarts or while it&rsquo;s locked, even though this box is ticked. To
-                fix it: untick &ldquo;Reach this computer after it restarts&rdquo;, tick it
-                again, then set your passphrase again under &ldquo;Passphrase for the
-                sign-in screen&rdquo; below.
+                While it does, you can&rsquo;t connect to this computer after it
+                restarts or while it&rsquo;s locked, even though this box is ticked.
+                Locking this computer checks the connection again: lock it for a
+                minute, unlock it, and open this page again. If this message has
+                gone, nothing needs fixing. If it is still here: untick &ldquo;Reach
+                this computer after it restarts&rdquo;, tick it again, then set your
+                passphrase again under &ldquo;Passphrase for the sign-in screen&rdquo;
+                below.
                 {state.linkAttestedAt != null && (
                     <> It last connected on {localDate(state.linkAttestedAt)}.</>
                 )}

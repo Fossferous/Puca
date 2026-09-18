@@ -377,9 +377,10 @@ Keybinds**. Push to talk and push to mute only do anything once you switch
 - **Can't reach the server**: check your internet connection; if that is fine, ask whoever runs the server whether it is restarting
 - **Live connection failed**: the server answered but the live connection did not open. Click **Try again**; if it keeps failing, click **Sign out** and sign in again
 
-### "The server is not accepting this computer at its sign-in screen"
-- Shown under **Reach this computer after it restarts** (Devices → This device) when Púca's server has refused this computer's sign-in-screen connection more than once, at least ten minutes apart. Until it is fixed you cannot connect to the computer after a restart or while it is locked, even though the box is ticked
-- To fix it: untick **Reach this computer after it restarts**, tick it again, then set the passphrase again under **Passphrase for the sign-in screen**
+### "Púca’s server has refused this computer at its sign-in screen"
+- Shown under **Reach this computer after it restarts** (Devices → This device) when Púca's server has refused this computer's sign-in-screen connection more than once, at least ten minutes apart. It says when the refusals started and when the most recent one was. While it lasts you cannot connect to the computer after a restart or while it is locked, even though the box is ticked
+- The computer only checks again while it is locked, so the message can be out of date. To check now: lock the computer for a minute, unlock it, and open Devices again. If the message has gone, nothing needs fixing
+- If it is still there: untick **Reach this computer after it restarts**, tick it again, then set the passphrase again under **Passphrase for the sign-in screen**
 - The same refusal can come from a fault on the server. If the warning comes back after you have done this, ask whoever runs the server
 
 ### Voice not working

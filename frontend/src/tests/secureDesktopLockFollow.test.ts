@@ -249,6 +249,13 @@ beforeEach(() => {
 });
 beforeEach(() => { enrolled = false; linkHealth = {}; });
 
+/** The one line handleConsoleLock logs when the refusal gate keeps a session
+ *  frozen — what lets a bug report tell that apart from "not enrolled". */
+const REFUSED_LINE = 'the sign-in-screen link is persistently refused';
+function refusedLineLogged(spy: { mock: { calls: unknown[][] } }): boolean {
+    return spy.mock.calls.some(c => c.some(a => typeof a === 'string' && a.includes(REFUSED_LINE)));
+}
+
 describe('an unsolicited console lock', () => {
     it('POSITIVE CONTROL: an enrolled machine hands the session to its sign-in row', async () => {
         enrolled = true;
@@ -269,12 +276,19 @@ describe('an unsolicited console lock', () => {
 
     it('a NON-enrolled machine keeps the session — there is nowhere to follow to', async () => {
         enrolled = false;
+        // A refusal on record must not change what an unenrolled lock SAYS:
+        // the diagnostic is for "enrolled but refused" only.
+        linkHealth = { linkRefusedFirst: 1_000, linkRefusedLast: 1_900, linkRefusedCount: 2 };
+        const info = vi.spyOn(console, 'info').mockImplementation(() => {});
         const { activeSessions, handleConsoleLock } = await import('../api/devices/session');
         await activeHostSession();
         const before = sent.length;
 
         await handleConsoleLock();
         await settle();
+
+        expect(refusedLineLogged(info), 'not enrolled is not "refused"').toBe(false);
+        info.mockRestore();
 
         expect(
             sent.slice(before).some(m => m.type === 'DeviceEnd'),
@@ -309,6 +323,7 @@ describe('an unsolicited console lock', () => {
         // apart: the service's own cadence, and past the persistence line.
         enrolled = true;
         linkHealth = { linkRefusedFirst: 1_000, linkRefusedLast: 1_900, linkRefusedCount: 2 };
+        const info = vi.spyOn(console, 'info').mockImplementation(() => {});
         const { activeSessions, handleConsoleLock } = await import('../api/devices/session');
         await activeHostSession();
         const before = sent.length;
@@ -316,6 +331,11 @@ describe('an unsolicited console lock', () => {
         await handleConsoleLock();
         await settle();
 
+        // SAID, so a bug report can tell this freeze from "not enrolled".
+        expect(refusedLineLogged(info), 'the refusal gate must log why it kept the session').toBe(true);
+        const line = info.mock.calls.flat().find(a => typeof a === 'string' && a.includes(REFUSED_LINE));
+        expect(line, 'and carries no identifiers').not.toMatch(/signin-row|ds-test/);
+        info.mockRestore();
         expect(
             sent.slice(before).some(m => m.type === 'DeviceEnd'),
             'handing over to a sign-in row the server refuses ends a session that would have resumed',
@@ -330,12 +350,16 @@ describe('an unsolicited console lock', () => {
         // proves the rig still sees a handover with link fields present.
         enrolled = true;
         linkHealth = { linkRefusedFirst: 1_000, linkRefusedLast: 1_000, linkRefusedCount: 1 };
+        const info = vi.spyOn(console, 'info').mockImplementation(() => {});
         const { handleConsoleLock } = await import('../api/devices/session');
         await activeHostSession();
         const before = sent.length;
 
         await handleConsoleLock();
         await settle();
+
+        expect(refusedLineLogged(info), 'one refusal is not the persistent case').toBe(false);
+        info.mockRestore();
 
         const ended = sent.slice(before).find(m => m.type === 'DeviceEnd') as
             { type: string; payload?: { reason?: string } } | undefined;
