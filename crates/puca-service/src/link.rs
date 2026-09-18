@@ -1419,6 +1419,24 @@ pub fn after_attempt(
     }
 }
 
+/// Whether the rekey `after_attempt` asked for still applies to the next attempt.
+///
+/// A REKEY BELONGS TO THE IDENTITY WHOSE TOKEN WAS REJECTED. When the owner
+/// re-enrolls between attempts, enrolment writes a fresh token for a new device
+/// id, so the stored token is no longer the dead one: skipping it would mint a
+/// server session for nothing, and a refusal of that mint would keep the rekey
+/// set on a token nobody has presented yet. `rejected_for` is the device id the
+/// rejected attempt ran under; `enrolled_now` is the one this attempt runs under.
+/// An unknown id on either side drops the rekey: the worst that costs is one
+/// more 401 on a dead token, which sets it again.
+pub fn rekey_still_due(
+    force_rekey: bool,
+    rejected_for: Option<&str>,
+    enrolled_now: Option<&str>,
+) -> bool {
+    force_rekey && enrolled_now.is_some() && rejected_for == enrolled_now
+}
+
 /// Run the link for as long as the service lives, on its own thread.
 ///
 /// A DEDICATED THREAD WITH ITS OWN CURRENT-THREAD RUNTIME, rather than making
@@ -1462,6 +1480,9 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
     // without ever asking the one thing that can tell a sign-out from a
     // revoked row: this computer's own key.
     let mut force_rekey = false;
+    // The device id the attempt that set `force_rekey` ran under, so a
+    // re-enrolment in between clears it (see `rekey_still_due`).
+    let mut rekey_device: Option<String> = None;
 
     loop {
         if !gate.wants_up() {
@@ -1490,6 +1511,11 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
             continue;
         }
         announced_absent = false;
+        // Read BEFORE the attempt reads the token, so it names the identity
+        // whose token this attempt presents.
+        let attempt_device = enrolled_device_id();
+        force_rekey =
+            rekey_still_due(force_rekey, rekey_device.as_deref(), attempt_device.as_deref());
 
         // Set inside the attempt the moment `/devices/token` hands back a
         // fresh token (see `AttemptPath`): a 401 on THAT token must not send
@@ -1563,6 +1589,7 @@ async fn link_forever(gate: LinkGate, agent_alive: Arc<AtomicBool>, agent: Agent
         let next = after_attempt(failures, &outcome, enrolled_device_id().as_deref(), path);
         failures = next.failures;
         force_rekey = next.force_rekey;
+        rekey_device = attempt_device;
 
         if next.wait_secs >= REFUSED_RETRY_SECS {
             // The long wait ends on any change of the gate, so LOCKING the
@@ -2239,6 +2266,26 @@ mod health_tests {
     }
 
     #[test]
+    fn a_rekey_does_not_outlive_a_re_enrolment() {
+        // THE SEQUENCE: the upgrade 401s for "old", so the next attempt is set
+        // to go to the device key. Before it runs, the owner re-enrolls: the
+        // stored token is now the one enrolment just wrote for "new", which
+        // nobody has presented yet. It must be presented, not skipped.
+        let first = after_attempt(0, &rejected(), Some("old"), PLAIN);
+        assert!(first.force_rekey, "precondition: the 401 asks for a rekey");
+        assert!(!rekey_still_due(first.force_rekey, Some("old"), Some("new")));
+        // Enrolment gone, or its config unreadable: nothing to rekey for.
+        assert!(!rekey_still_due(true, Some("old"), None));
+        assert!(!rekey_still_due(true, None, None));
+
+        // POSITIVE CONTROL: the same identity keeps the rekey, and nothing
+        // turns one on that was not asked for.
+        assert!(rekey_still_due(first.force_rekey, Some("old"), Some("old")));
+        assert!(!rekey_still_due(false, Some("old"), Some("old")));
+        assert!(!rekey_still_due(false, Some("old"), Some("new")));
+    }
+
+    #[test]
     fn a_record_from_another_version_still_reads() {
         let empty: LinkHealth = serde_json::from_str("{}").expect("all fields default");
         assert_eq!(empty, LinkHealth::default());
@@ -2336,6 +2383,20 @@ mod health_tests {
         ));
         assert!(body.contains("let path = AttemptPath { forced_rekey: force_rekey, minted };"));
         assert!(body.contains("force_rekey = next.force_rekey;"));
+        // A re-enrolment between attempts clears the rekey: the id is read
+        // before the attempt, checked against the one that asked for the
+        // rekey, and recorded as that one when the next rekey is decided.
+        let read = body.find("let attempt_device = enrolled_device_id();").expect("the id read");
+        let due = body
+            .find(
+                "rekey_still_due(force_rekey, rekey_device.as_deref(), attempt_device.as_deref());",
+            )
+            .expect("the rekey is re-checked against the enrolled identity");
+        let token = body.find("read_secret(TOKEN_FILE)").expect("the token read");
+        assert!(read < due && due < token, "checked before the token is read: {body}");
+        let set = body.find("force_rekey = next.force_rekey;").unwrap();
+        let owner = body.find("rekey_device = attempt_device;").expect("the id is recorded");
+        assert!(set < owner, "recorded with the decision it belongs to: {body}");
         // EVERY mint marks the attempt, or a 401 on a token minted a moment
         // ago would send the next attempt to mint yet another one.
         let mints: Vec<usize> =
