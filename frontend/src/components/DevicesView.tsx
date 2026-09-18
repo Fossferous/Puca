@@ -168,8 +168,10 @@ function SignInRefusedNotice({ state }: { state: UnattendedAccessState | null })
                     since {localDate(state.linkRefusedFirst)}; most recently
                     on {localDateTime(state.linkRefusedLast)}.
                 </strong>{' '}
-                While it does, you can&rsquo;t connect to this computer after it
-                restarts or while it&rsquo;s locked, even though this box is ticked.
+                While it does, you can&rsquo;t connect to this computer when nobody
+                is signed in to it, for example after it restarts, even though this
+                box is ticked. While you are signed in and Púca is running you can
+                still connect, lock screen included.
                 Locking this computer checks the connection again: lock it for a
                 minute, unlock it, and open this page again. If this message has
                 gone, nothing needs fixing. If it is still here: untick &ldquo;Reach

@@ -211,6 +211,13 @@ describe('the sign-in-screen refusal warning', () => {
         expect(text).toContain(`It last connected on ${new Date((T - 86_400) * 1000).toLocaleDateString()}`);
         // It must not claim what it cannot know.
         expect(text.toLowerCase()).not.toContain('revoked');
+        // Scoped to what the refused link actually serves: nobody signed in.
+        // A locked computer with Púca running in the signed-in session is
+        // reached through the app, not this link, so saying "or while it's
+        // locked" told the owner something false.
+        expect(text).toContain('when nobody is signed in to it');
+        expect(text).toContain('you can still connect, lock screen included');
+        expect(text).not.toMatch(/or while it.s locked/);
         // An icon from Icons.tsx, not an emoji.
         expect(n!.querySelector('svg'), 'the warning carries the WarningIcon').toBeTruthy();
     });
