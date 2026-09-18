@@ -114,6 +114,21 @@ function gestureSurface(v: HTMLVideoElement, scale: number): { dispW: number; di
 /** A touch device, whatever its current width or orientation. */
 const COARSE_POINTER_QUERY = '(pointer: coarse)';
 
+/**
+ * Let go of every button a contact recorded pressing (touch mode, and the
+ * desktop mouse outside game mode), each button once, and forget them.
+ *
+ * The RECORDED button, never an assumed one: this used to send `up` for
+ * button 0 whatever had been pressed, and the same record serves the desktop
+ * mouse, so a right or middle button held when the window lost focus stayed
+ * down on the host — the late pointerup then found nothing recorded and
+ * released nothing either.
+ */
+function releaseRecordedPresses(pressed: Map<number, number>, send: (event: unknown) => void): void {
+    for (const button of new Set(pressed.values())) send({ t: 'up', button });
+    pressed.clear();
+}
+
 function detectCoarsePointer(): boolean {
     // The Capacitor app is authoritative about itself; the media query covers a
     // phone browser, and a desktop with a touchscreen reports `fine` for its
@@ -421,9 +436,10 @@ export function DeviceStage() {
     useEffect(() => { transformRef.current = transform; }, [transform]);
     const activePointers = useRef<Map<number, React.PointerEvent>>(new Map());
     const lastPinchInfo = useRef<{ dist: number; center: { x: number; y: number } } | null>(null);
-    /** TOUCH mode: which contacts actually pressed a button, so only those
-     *  release one. */
-    const touchDownSent = useRef<Set<number>>(new Set());
+    /** TOUCH mode and the desktop mouse: which contacts actually pressed a
+     *  button, and WHICH button, so only those release one and each releases
+     *  the button it pressed. pointerId -> button. */
+    const touchDownSent = useRef<Map<number, number>>(new Map());
 
     // WHY A SESSION ENDED, kept after the session object is gone.
     //
@@ -698,12 +714,12 @@ export function DeviceStage() {
             // counted it, so every later one-finger drag pinch-zoomed the
             // picture as the pointer moved, and in touch mode a tap arrived
             // as a second contact and was swallowed (an up, and no down).
-            // A touch-mode finger that pressed a button releases it first,
-            // exactly as the mode switch does. A finger really still down is
-            // safe to forget: its later moves and up are no-ops for an id
-            // the map does not hold.
-            if (touchDownSent.current.size) sendRef.current({ t: 'up', button: 0 });
-            touchDownSent.current.clear();
+            // A contact that pressed a button releases THAT button first,
+            // exactly as the mode switch does — the desktop mouse shares this
+            // record, so it may be the right or middle button. A finger
+            // really still down is safe to forget: its later moves and up are
+            // no-ops for an id the map does not hold.
+            releaseRecordedPresses(touchDownSent.current, sendRef.current);
             activePointers.current.clear();
             lastPinchInfo.current = null;
             // A gesture interrupted by the app going away never gets its
@@ -861,10 +877,7 @@ export function DeviceStage() {
         // the other mode will not release a button it does not know about — so
         // switching with a finger down stranded it down on the remote machine,
         // which then drag-selects everything the pointer passes over.
-        if (touchDownSent.current.size) {
-            send({ t: 'up', button: 0 });
-            touchDownSent.current.clear();
-        }
+        releaseRecordedPresses(touchDownSent.current, send);
         gestures.cancel();
         setIsMouseMode(next);
         try {
@@ -2458,10 +2471,9 @@ export function DeviceStage() {
             if (!p) return;
             send({ t: 'move', x: p.x, y: p.y });
             send({ t: 'down', button: e.button });
-            touchDownSent.current.add(e.pointerId);
+            touchDownSent.current.set(e.pointerId, e.button);
         } else if (activePointers.current.size === 2) {
-            send({ t: 'up', button: 0 });
-            touchDownSent.current.clear();
+            releaseRecordedPresses(touchDownSent.current, send);
         }
 
         if (activePointers.current.size === 2) {
@@ -2488,9 +2500,14 @@ export function DeviceStage() {
 
         if (isMobile && isMouseMode) {
             gestures.up({ id: e.pointerId, x: e.clientX, y: e.clientY });
-        } else if (touchDownSent.current.delete(e.pointerId)) {
-            // Only release a button this contact actually pressed.
-            send({ t: 'up', button: e.button });
+        } else {
+            // Only release a button this contact actually pressed — the one
+            // it pressed, which a chorded mouse's final pointerup may not name.
+            const pressed = touchDownSent.current.get(e.pointerId);
+            if (pressed !== undefined) {
+                touchDownSent.current.delete(e.pointerId);
+                send({ t: 'up', button: pressed });
+            }
         }
 
         if (activePointers.current.size < 2) {
@@ -2516,12 +2533,16 @@ export function DeviceStage() {
         if (isMobile && isMouseMode) {
             // The machine releases a button only if it pressed one.
             gestures.cancel({ id: e.pointerId, x: e.clientX, y: e.clientY });
-        } else if (touchDownSent.current.delete(e.pointerId)) {
+        } else {
             // WAS UNCONDITIONAL, and that was a real defect: a cancelled touch
             // that had never pressed anything still released a button on the
             // remote machine — a phantom click on whatever was under the
             // pointer, on a screen the user is not looking at.
-            send({ t: 'up', button: 0 });
+            const pressed = touchDownSent.current.get(e.pointerId);
+            if (pressed !== undefined) {
+                touchDownSent.current.delete(e.pointerId);
+                send({ t: 'up', button: pressed });
+            }
         }
         if (isMobile && activePointers.current.size === 0) setChromeFrozen(null);
         (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
@@ -2708,10 +2729,7 @@ export function DeviceStage() {
                             // mid-hold stranded a button down on the host.
                             for (const button of fpsPressedRef.current) send({ t: 'up', button });
                             fpsPressedRef.current.clear();
-                            if (touchDownSent.current.size) {
-                                send({ t: 'up', button: 0 });
-                                touchDownSent.current.clear();
-                            }
+                            releaseRecordedPresses(touchDownSent.current, send);
                             setFpsMode(f => { saveFpsMode(!f); return !f; });
                         }}
                         title="Game mode: relative mouse (pointer lock) for games that read raw input"

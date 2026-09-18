@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
     storage: new Map<string, string>(),
     captured: new Set<number>(),
     diagRows: [] as Record<string, unknown>[],
+    /** A phone unless a test says otherwise (the desktop-mouse cases). */
+    phone: true,
 }));
 
 vi.mock('../api/devices/session', () => ({
@@ -62,7 +64,7 @@ vi.mock('../api/devices/tunnel', () => ({
 vi.mock('../api/devices/chords', () => ({ sendChord: () => true }));
 vi.mock('../api/platform', async (importOriginal) => {
     const real = await importOriginal<typeof import('../api/platform')>();
-    return { ...real, isMobile: () => true, isTauri: () => false };
+    return { ...real, isMobile: () => h.phone, isTauri: () => false };
 });
 vi.mock('../api/keyboardInset', () => ({
     currentKeyboardInset: () => ({ visible: false, top: null, source: 'none' }),
@@ -85,9 +87,9 @@ beforeEach(() => {
     (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
         observe() { /* noop */ } unobserve() { /* noop */ } disconnect() { /* noop */ }
     };
-    // A phone: coarse pointer.
+    // A phone: coarse pointer (the desktop cases flip `h.phone` first).
     window.matchMedia = (() => ({
-        matches: true, media: '', onchange: null,
+        matches: h.phone, media: '', onchange: null,
         addEventListener() { /* noop */ }, removeEventListener() { /* noop */ },
         addListener() { /* noop */ }, removeListener() { /* noop */ }, dispatchEvent() { return false; },
     })) as unknown as typeof window.matchMedia;
@@ -106,6 +108,7 @@ beforeEach(() => {
     h.snapshot = [];
     h.sendInput.mockClear();
     h.diagRows = [];
+    h.phone = true;
 });
 
 let root: Root | null = null;
@@ -156,8 +159,8 @@ function surface(): HTMLElement {
 
 /** A PointerEvent-shaped MouseEvent: React reads `pointerId` off the native
  *  event, and jsdom's MouseEvent has none. */
-function pe(type: string, id: number, x: number, y: number): MouseEvent {
-    const e = new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
+function pe(type: string, id: number, x: number, y: number, button = 0): MouseEvent {
+    const e = new MouseEvent(type, { bubbles: true, button, clientX: x, clientY: y });
     Object.defineProperty(e, 'pointerId', { value: id });
     return e;
 }
@@ -285,9 +288,49 @@ describe('a touch-mode stage left with a stranded finger', () => {
         await act(async () => { window.dispatchEvent(new Event('blur')); });
         await flush();
         expect(sentOf('up'), 'blur releases the press').toHaveLength(1);
+        expect((sentOf('up')[0][1] as { button?: number }).button, 'a finger presses button 0').toBe(0);
         // Its late up, if it ever comes, releases nothing a second time.
         await fire(pe('pointerup', 1, 100, 400));
         expect(sentOf('up')).toHaveLength(1);
+    });
+});
+
+describe('the desktop mouse (fine pointer, not game mode) when the window loses focus', () => {
+    // The same press record serves the desktop mouse, and it records whatever
+    // button was pressed. The blur release once sent `up` for button 0
+    // regardless, then forgot the record: a right button held at blur stayed
+    // down on the host, and its late pointerup released nothing.
+    beforeEach(() => { h.phone = false; });
+
+    const upButtons = () => sentOf('up').map(c => (c[1] as { button?: number }).button);
+
+    it('a held RIGHT button is released, once, as button 2', async () => {
+        await mount();
+        await fire(pe('pointerdown', 1, 100, 400, 2));
+        expect(sentOf('down').map(c => (c[1] as { button?: number }).button), 'precondition: the right button pressed').toEqual([2]);
+        h.sendInput.mockClear();
+        await act(async () => { window.dispatchEvent(new Event('blur')); });
+        await flush();
+        expect(upButtons(), 'blur releases the button that was pressed, not button 0').toEqual([2]);
+        await fire(pe('pointerup', 1, 100, 400, 2));
+        expect(upButtons(), 'the late pointerup releases nothing a second time').toEqual([2]);
+    });
+
+    it('a held MIDDLE button is released as button 1', async () => {
+        await mount();
+        await fire(pe('pointerdown', 1, 100, 400, 1));
+        h.sendInput.mockClear();
+        await act(async () => { window.dispatchEvent(new Event('blur')); });
+        await flush();
+        expect(upButtons()).toEqual([1]);
+    });
+
+    it('a mouse that pressed nothing releases nothing on blur', async () => {
+        await mount();
+        h.sendInput.mockClear();
+        await act(async () => { window.dispatchEvent(new Event('blur')); });
+        await flush();
+        expect(upButtons()).toEqual([]);
     });
 });
 
