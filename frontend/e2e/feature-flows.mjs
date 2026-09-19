@@ -455,6 +455,39 @@ async function main() {
     const cleared = (await must('GET', `/task-lists/${rl.id}/tasks`, null, A.t)).find(t => t.id === t1.id);
     check('due/empty string clears due_at', cleared.due_at === null, `due_at=${cleared.due_at}`);
 
+    section('NOTE TEXT + TRASH (migration 065, docs/NOTES.md)');
+    // Capability: answered without having any list (C has none).
+    const feat = await must('GET', '/task-lists/features', null, C.t);
+    check('notes/features announces body, attachments and trash', feat.body === true && feat.attachments === true && feat.trash === true && typeof feat.trash_retention_days === 'number', JSON.stringify(feat));
+    // A sealed body round-trips; plaintext is refused.
+    const env = (ct) => JSON.stringify({ v: 2, t: 'self', ct, n: 'AAAA' });
+    const noteList = await must('POST', '/task-lists', { title: `note_${RUN}`, body: env('BODY1') }, A.t);
+    check('notes/create stores the sealed body', noteList.body === env('BODY1'), JSON.stringify(noteList.body));
+    const plainBody = await api('PATCH', `/task-lists/${noteList.id}`, { body: 'plain words' }, A.t);
+    check('notes/plaintext body → 400', plainBody.status === 400, `status=${plainBody.status}`);
+    await must('PATCH', `/task-lists/${noteList.id}`, { body: env('BODY2') }, A.t);
+    const afterBody = (await must('GET', '/task-lists', null, A.t)).find(l => l.id === noteList.id);
+    check('notes/body-only PATCH keeps the title', afterBody.body === env('BODY2') && afterBody.title === `note_${RUN}`, JSON.stringify(afterBody));
+    // Trash: gone from the listing and the reminders, listed in ?trashed=true, frozen, restorable.
+    const noteTask = await must('POST', `/task-lists/${noteList.id}/tasks`, { description: 'due', due_at: dueSoon }, A.t);
+    const trashed = await must('POST', `/task-lists/${noteList.id}/trash`, {}, A.t);
+    check('trash/returns the trash time', typeof trashed.trashed_at === 'string', JSON.stringify(trashed));
+    const liveAfter = await must('GET', '/task-lists', null, A.t);
+    check('trash/hidden from the default listing', !liveAfter.some(l => l.id === noteList.id), `${liveAfter.length} live`);
+    const trashList = await must('GET', '/task-lists?trashed=true', null, A.t);
+    check('trash/listed by ?trashed=true', trashList.some(l => l.id === noteList.id), JSON.stringify(trashList.map(l => l.id)));
+    reminders = await must('GET', '/task-reminders', null, A.t);
+    check('trash/its items leave the reminders', !reminders.some(r => r.id === noteTask.id), JSON.stringify(reminders));
+    const frozen = await api('POST', `/task-lists/${noteList.id}/tasks`, { description: 'more' }, A.t);
+    check('trash/a write into a trashed list → 409', frozen.status === 409, `status=${frozen.status}`);
+    const cTrash = await api('POST', `/task-lists/${noteList.id}/restore`, {}, C.t);
+    check('trash/someone else cannot restore it (404)', cTrash.status === 404, `status=${cTrash.status}`);
+    await must('POST', `/task-lists/${noteList.id}/restore`, {}, A.t);
+    const back = await must('GET', '/task-lists', null, A.t);
+    check('trash/restore brings it back', back.some(l => l.id === noteList.id && l.trashed_at === null), '');
+    const selfTrash = await api('POST', `/task-lists/${aSelf.id}/trash`, {}, A.t);
+    check('trash/Notes to self cannot be trashed (400)', selfTrash.status === 400, `status=${selfTrash.status}`);
+
     section('INPUT CAPS (DoS hardening)');
     const big = 'x'.repeat(9000);
     const bigMsg = await api('POST', `/channels/${tc.id}/messages`, { content: 'ok', is_task: false }, A.t);

@@ -26,6 +26,7 @@ import { MAX_READABLE_ENVELOPE_VERSION } from './e2ee';
 import { PERM, hasPerm } from './permissionBits';
 import * as MARKERS from './decryptMarkers';
 import { parseServerTimestamp } from '../utils/serverTime';
+import { openListContent } from './listSeal';
 
 export interface Task {
     id: number;
@@ -75,6 +76,16 @@ export interface TaskList {
      *  Absent for the server-created "Notes to self" label, which is plain by
      *  design (see getSelfChecklist). */
     titleEncState?: MessageEncState;
+    /** Púca Notes' list content (migration 065; api/listSeal.ts): the OPENED
+     *  note text and note-level attachments sidecar (a marker when it cannot
+     *  be read — never the envelope), and when it was trashed. Each is absent
+     *  when the server predates them, null when the list has none. */
+    body?: string | null;
+    attachments?: string | null;
+    trashed_at?: string | null;
+    /** The "Notes to self" list, which the server will not trash (absent
+     *  from servers older than the trash). */
+    is_self?: boolean;
 }
 
 /** The one list title the server writes itself, as a plain label. */
@@ -305,7 +316,7 @@ async function openSelf(stored: string): Promise<string> {
  *  envelope and is decrypted here. Items are encrypt-to-self like any list. */
 export async function getSelfChecklist(): Promise<TaskList> {
     const list: TaskList = await apiClient.get('/task-lists/self');
-    return { ...list, title: await openSelf(list.title) };
+    return { ...list, title: await openSelf(list.title), ...await openListContent(list) };
 }
 
 export async function listTaskLists(): Promise<TaskList[]> {
@@ -317,6 +328,7 @@ export async function listTaskLists(): Promise<TaskList[]> {
             ...l,
             title,
             titleEncState: wire === SELF_LIST_DEFAULT_TITLE ? undefined : messageEncState(wire, title),
+            ...await openListContent(l),
         };
     }));
 }

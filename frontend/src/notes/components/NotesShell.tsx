@@ -23,6 +23,7 @@ import {
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { noteToMarkdown, openItemsOf } from '../model/noteText';
+import { readableBody } from '../model/noteContent';
 import { AccountMenu } from './AccountMenu';
 import { ColorPicker } from './ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
@@ -35,6 +36,8 @@ import { NoteGrid } from './NoteGrid';
 import { Popover } from './Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
+import { TrashView } from './TrashView';
+import { type NoteExtras } from '../model/useListContent';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
 import { useNotesReminderLoop } from '../native/useNativeReminders';
@@ -71,6 +74,7 @@ type Popup =
 
 type Pending =
     | { kind: 'delete'; key: string; ref: NoteRef; title: string; token: number }
+    | { kind: 'trash'; key: string; ref: NoteRef; title: string; token: number }
     | { kind: 'archive'; key: string; ref: NoteRef; title: string; token: number };
 
 function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
@@ -119,6 +123,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     // --- View --------------------------------------------------------------------
     const path = location.pathname;
     const remindersView = path === '/reminders';
+    const trashView = path === '/trash';
     const filter: NoteFilter = useMemo(() => {
         if (query.trim() && !remindersView) return { kind: 'search', query };
         if (path === '/archive') return { kind: 'archive' };
@@ -189,6 +194,15 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         if (card.ref.kind !== 'list') return;
         commitPending(pendingRef.current);
         if (openKey === card.key) closeNote();
+        // Where the server has a trash the move happens NOW and Undo restores;
+        // otherwise the delete waits out the undo window, as before.
+        if (actions.content.trashEnabled) {
+            // A failure is reported by the data layer, once (useListContent.ts).
+            void actions.deleteNote(card.ref).then(ok => {
+                if (ok) setPending({ kind: 'trash', key: card.key, ref: card.ref, title: card.title, token: ++tokenSeq.current });
+            });
+            return;
+        }
         setPending({ kind: 'delete', key: card.key, ref: card.ref, title: card.title, token: ++tokenSeq.current });
     };
     const archiveWithUndo = useCallback((card: NoteCard, archived: boolean) => {
@@ -201,6 +215,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         const p = pendingRef.current;
         if (!p) return;
         if (p.kind === 'archive') actions.setArchived(p.ref, false);
+        if (p.kind === 'trash') void actions.restoreNote(p.ref);
         setPending(null);
     };
     const expirePending = () => {
@@ -221,7 +236,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         }
     };
     const duplicate = async (card: NoteCard) => {
-        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card));
+        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card), readableBody(card.body) ? { body: readableBody(card.body) } : undefined);
         if (ref) {
             pushMessageToast({ title: 'Copied — open items only, un-nested' });
             setParams(p => { p.set('note', `${ref.kind}:${ref.id}`); return p; });
@@ -269,8 +284,12 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             items.push(
                 { id: 'sep3', label: '', separator: true },
                 { id: 'rename', label: 'Rename', icon: 'pencil', onClick: () => openNote(card) },
-                { id: 'delete', label: 'Delete note', icon: 'trash', danger: true, onClick: () => deleteWithUndo(card) },
             );
+            // Notes to self cannot go to the trash (the server refuses it), so
+            // it is not offered rather than offered and failing.
+            if (!(actions.content.trashEnabled && actions.content.isSelfList(card.ref.id))) {
+                items.push({ id: 'delete', label: actions.content.trashEnabled ? 'Move to trash' : 'Delete note', icon: 'trash', danger: true, onClick: () => deleteWithUndo(card) });
+            }
         }
         return items;
     };
@@ -286,8 +305,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const onLabelClick = useCallback((l: string) => { setQuery(''); go(`/label/${encodeURIComponent(l)}`); }, [setQuery, go]);
 
     // --- Composer --------------------------------------------------------------------------------
-    const createNote = async (title: string, items: string[]): Promise<boolean> => {
-        const ref = await actions.createNote(title, items);
+    const createNote = async (title: string, items: string[], extra?: NoteExtras): Promise<boolean> => {
+        const ref = await actions.createNote(title, items, extra);
         if (!ref) {
             pushMessageToast({ title: 'Couldn’t save the note — check your connection. Your text is still here.' });
             return false;
@@ -322,6 +341,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const exportJson = () => { void exportNotes(cards, 'json'); };
 
     const popupCard = popup && popup.kind !== 'account' ? cardsByKey.get(popup.key) ?? null : null;
+    const composerContent = { text: actions.content.features.body, pictures: actions.content.features.attachments, camera: coarse };
     const offline = error !== null && error !== undefined && isNetworkError(error);
 
     return (
@@ -345,7 +365,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             <NotesUpdateStripSlot />
             <div className="notes-body">
                 <NotesRail
-                    filter={remindersView ? { kind: 'reminders' } : filter}
+                    filter={remindersView ? { kind: 'reminders' } : trashView ? { kind: 'trash' } : filter}
+                    trashEnabled={actions.content.trashEnabled}
                     labels={labels}
                     reminderBadge={reminderBadgeCount(reminders)}
                     counts={counts}
@@ -368,7 +389,9 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
                             </div>
                         )}
-                        {remindersView ? (
+                        {trashView ? (
+                            <TrashView content={actions.content} />
+                        ) : remindersView ? (
                             <RemindersView
                                 groups={reminders}
                                 actions={actions}
@@ -381,7 +404,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                             />
                         ) : (
                             <>
-                                {filter.kind === 'all' && <QuickAdd onCreate={createNote} openSignal={quickSignal} />}
+                                {filter.kind === 'all' && <QuickAdd onCreate={createNote} openSignal={quickSignal} content={composerContent} />}
                                 {filter.kind === 'label' && <h1 className="notes-section-title">Label: {filter.label}</h1>}
                                 {filter.kind === 'archive' && <h1 className="notes-section-title">Archive</h1>}
                                 {filter.kind === 'search' && <h1 className="notes-section-title">Results for “{filter.query}”</h1>}
@@ -408,12 +431,12 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                 </main>
             </div>
 
-            {!remindersView && (
+            {!remindersView && !trashView && (
                 <button type="button" className="notes-fab" aria-label="New note" title="New note" onClick={() => setSheet(true)}>
                     <PlusIcon />
                 </button>
             )}
-            {sheet && <QuickAdd sheet onCreate={createNote} onDismiss={() => setSheet(false)} />}
+            {sheet && <QuickAdd sheet onCreate={createNote} onDismiss={() => setSheet(false)} content={composerContent} />}
 
             {openCard && (
                 <NoteEditor
@@ -465,7 +488,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             {pending && (
                 <UndoBar
                     token={pending.token}
-                    message={pending.kind === 'delete' ? `Deleted “${pending.title}”` : `Archived “${pending.title}”`}
+                    message={pending.kind === 'delete' ? `Deleted “${pending.title}”` : pending.kind === 'trash' ? `Moved “${pending.title}” to the trash` : `Archived “${pending.title}”`}
                     onUndo={undoPending}
                     onExpire={expirePending}
                 />

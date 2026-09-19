@@ -44,7 +44,6 @@ import {
     orderTaskTabs,
     isFavoriteTab,
     buildPrefsForOrder,
-    toggleFavoritePrefs,
     taskTabKey,
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
@@ -59,6 +58,10 @@ import { useContextMenu } from './contextMenuUtils';
 import { ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
+import { ListContentBlock, TasksTrash } from './ListContentBlock';
+import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
+import { fetchListFeatures, flushBodySave, keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
 import './ServerTasksBoard.css';
@@ -123,6 +126,10 @@ export function TasksView() {
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const currentUserId = tokenUserId();
     const notesHref = notesUrl();
+    // Púca Notes' text/photo notes and the trash, where the server has them.
+    const support = useListContentSupport();
+    const qc = useQueryClient();
+    const patchList = (id: number, patch: Partial<TaskList>) => setLists(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
     // Read at async completion time (the reparent refetch guard) — the load
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
@@ -180,6 +187,12 @@ export function TasksView() {
      *  before either edit — only the latest save may roll back. */
     const saveSeq = useRef(0);
     const savePrefs = (next: TaskTabPref[]) => {
+        // Built before the trash was read, `next` has no slot for a trashed
+        // list (keepHiddenSlots needs its key), and the PUT is a full replace.
+        if (!support.trashSettled) {
+            pushMessageToast({ title: 'Still loading the trash — try again in a moment' });
+            return;
+        }
         const prev = prefs;
         const seq = ++saveSeq.current;
         setPrefs(next);
@@ -190,7 +203,8 @@ export function TasksView() {
     };
 
     const toggleFavorite = (tab: BarTab) => {
-        savePrefs(toggleFavoritePrefs(orderedTabs, prefs, tab));
+        // A trashed list keeps its slot in the saved order (api/listContent.ts).
+        savePrefs(toggleFavoriteKeepingHidden(orderedTabs, prefs, tab, support.trashedKeys));
     };
 
     // Tab drag: mouse drags after a small threshold; touch long-presses to
@@ -207,7 +221,7 @@ export function TasksView() {
             const newKeys = [...order];
             newKeys.splice(insertAt, 0, key);
             const newOrder = newKeys.map(k => byKey.get(k)).filter((t): t is BarTab => !!t);
-            savePrefs(buildPrefsForOrder(newOrder, prefs));
+            savePrefs(buildPrefsForOrder(keepHiddenSlots(newOrder, prefs, support.trashedKeys), prefs));
         },
     });
 
@@ -301,7 +315,46 @@ export function TasksView() {
         }
     };
 
+    /** The "Notes to self" list cannot go to the trash (the server refuses
+     *  it), so where there is a trash it is not offered for that list. */
+    const canDeleteList = (list: TaskList) => !(support.trashEnabled && list.is_self === true);
+
     const handleDeleteList = async (list: TaskList) => {
+        // Only a server KNOWN to have no trash gets the permanent delete.
+        let features = support.features;
+        if (!support.featuresKnown) {
+            try {
+                features = await qc.fetchQuery({ queryKey: listContentQueryKeys.features, queryFn: fetchListFeatures });
+            } catch {
+                pushMessageToast({ title: 'Couldn’t reach the server — nothing was deleted' });
+                return;
+            }
+        }
+        if (features.trash) {
+            const days = features.trashRetentionDays;
+            if (list.is_self) {
+                pushMessageToast({ title: 'Notes to self can’t be moved to the trash' });
+                return;
+            }
+            if (!confirm(`Move "${list.title}" to the trash? ${days > 0 ? `You can restore it for ${days} days` : 'You can restore it'} from the Trash below the All tasks board, or in Púca Notes.`)) return;
+            // Text typed just before this is still saving: let it land first.
+            await flushBodySave(list.id);
+            const original = lists;
+            setLists(prev => prev.filter(l => l.id !== list.id));
+            if (selected?.kind === 'list' && selected.id === list.id) setSelected(null);
+            try {
+                await trashTaskList(list.id);
+                qc.setQueryData<TaskList[]>(listContentQueryKeys.trash, prev => [{ ...list, trashed_at: new Date().toISOString() }, ...(prev ?? []).filter(l => l.id !== list.id)]);
+                void qc.invalidateQueries({ queryKey: listContentQueryKeys.trash });
+                pokeTaskReminders();
+            } catch (err) {
+                console.error('Failed to move list to the trash:', err);
+                // The server's own reason when it gave one (400, 409), else ours.
+                pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t move the list to the trash — check your connection' });
+                setLists(original);
+            }
+            return;
+        }
         if (!confirm(`Delete list "${list.title}" and all its tasks?`)) return;
         const original = lists;
         setLists(prev => prev.filter(l => l.id !== list.id));
@@ -480,25 +533,25 @@ export function TasksView() {
         if (tab.kind === 'list') {
             const list = lists.find(l => l.id === tab.id);
             if (list) {
-                items.push(
-                    {
-                        id: 'rename-list',
-                        label: 'Rename List',
-                        icon: 'pencil',
-                        onClick: () => {
-                            setSelected({ kind: 'list', id: list.id });
-                            setTitleDraft(list.title);
-                            setEditingTitle(true);
-                        },
+                items.push({
+                    id: 'rename-list',
+                    label: 'Rename List',
+                    icon: 'pencil',
+                    onClick: () => {
+                        setSelected({ kind: 'list', id: list.id });
+                        setTitleDraft(list.title);
+                        setEditingTitle(true);
                     },
-                    {
+                });
+                if (canDeleteList(list)) {
+                    items.push({
                         id: 'delete-list',
-                        label: 'Delete List',
+                        label: support.trashEnabled ? 'Move to trash' : 'Delete List',
                         icon: 'trash',
                         danger: true,
                         onClick: () => handleDeleteList(list),
-                    },
-                );
+                    });
+                }
             }
         }
         return items;
@@ -549,6 +602,7 @@ export function TasksView() {
                             : list && list.total_tasks > 0 ? `${list.completed_tasks}/${list.total_tasks}` : ''}
                     </span>
                 </header>
+                {tab.kind === 'list' && listBodySnippet(list) && <p className="tasks-card-body">{listBodySnippet(list)}</p>}
                 {tab.kind === 'list' ? (
                     <ChecklistBody
                         listId={tab.id}
@@ -568,6 +622,16 @@ export function TasksView() {
             </section>
         );
     };
+
+    // The trash rides at the end of the All-tasks board (inside its scroll,
+    // so on a phone it never sits under the bottom nav).
+    const trashSection = (
+        <TasksTrash
+            features={support.features}
+            trashed={support.trashed}
+            onRestored={l => setLists(prev => (prev.some(x => x.id === l.id) ? prev : [...prev, l]))}
+        />
+    );
 
     return (
         <div className="tasks-view-outer">
@@ -647,12 +711,14 @@ export function TasksView() {
                     <div className="tasks-editor-empty" {...contentSwipe}>
                         <div className="tasks-empty-icon"><FileTextIcon size={40} /></div>
                         <p>Create a list with New list, above — or make any text channel a checklist and it will show up here.</p>
+                        {trashSection}
                     </div>
                 ) : (
                     <div className="server-tasks-scroll tasks-all-scroll" {...contentSwipe}>
                         <div className="all-checklists-grid server-tasks-grid">
                             {orderedTabs.map(renderCard)}
                         </div>
+                        {trashSection}
                     </div>
                 )
             ) : selectedChannel ? (
@@ -699,14 +765,23 @@ export function TasksView() {
                                 {selectedList.title}
                             </h2>
                         )}
-                        <button
-                            className="tasks-editor-delete"
-                            title="Delete this list"
-                            onClick={() => handleDeleteList(selectedList)}
-                        >
-                            <TrashIcon />
-                        </button>
+                        {canDeleteList(selectedList) && (
+                            <button
+                                className="tasks-editor-delete"
+                                title={support.trashEnabled ? 'Move this list to the trash' : 'Delete this list'}
+                                onClick={() => handleDeleteList(selectedList)}
+                            >
+                                <TrashIcon />
+                            </button>
+                        )}
                     </div>
+
+                    <ListContentBlock
+                        list={selectedList}
+                        features={support.features}
+                        onPatch={patchList}
+                        coarse={isMobile() || window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches}
+                    />
 
                     <form className="tasks-add" onSubmit={handleAddTask}>
                         <input

@@ -27,6 +27,19 @@ transaction. A plain `CREATE INDEX` briefly locks writes on that table.
 
 Take a database dump before shipping any of them.
 
+**Rollbacks.** Since the release after 0.9.815 the startup migrator is
+`migrator::app_migrator()` (`src/migrator.rs`), which tolerates applied
+versions it does not embed, so reinstalling an older binary boots over a newer
+database without a restore — as long as every migration after it was
+**additive** (nullable columns, new tables, nothing an older binary still
+reads dropped or renamed). A migration that is not additive breaks rollback
+to anything before it, and its release notes must say so. Binaries up to and
+including 0.9.815 predate this and still refuse a newer database: rolling back
+to one of those needs the dump. `deploy/ops/dual-ship.sh backend` knows the
+difference — its pre-flight lets an applied version the tarball lacks through
+only when the tarball's own migrator tolerates it, and still refuses a
+checksum mismatch (`deploy/ops/README.md`, "Rolling back the backend").
+
 This file is not a migration and sqlx ignores it: the resolver skips any name
 that does not parse as `<version>_<description>.sql`.
 

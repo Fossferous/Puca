@@ -55,6 +55,45 @@ one-line summary; this file is the full story. Versions follow
 - **The Windows installer no longer carries a copy of Púca Notes.** The
   desktop app never opened it; Notes on a computer is the browser page, as
   before.
+- **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
+  free text as well as (or instead of) items, and its own photos and
+  drawings: take a picture with the phone's camera or pick one, or draw with
+  a pen and eraser; a drawing can be opened and changed again. Photos are
+  made smaller on your device before they are encrypted and uploaded. The
+  text and pictures are end-to-end encrypted like everything else in a note,
+  and Púca's Tasks view shows and edits the same text and photos, so both
+  apps agree.
+- **A Trash.** Deleting a note, in Púca Notes or in Púca's Tasks view, now
+  moves it to the Trash (in Púca Notes, Undo brings it straight back). From the Trash you can
+  restore a note or delete it forever. A note in the trash does not remind
+  you and cannot be changed until you restore it; it keeps its colour, labels
+  and place in the order. The server deletes trashed notes for good after 30
+  days (server owners: `NOTES_TRASH_RETENTION_DAYS`, 0 keeps them until the
+  trash is emptied). Deleting forever also deletes the note's photos,
+  drawings and attachments; Púca Notes does the same for notes about to
+  expire when it is open in the last day, but a note that expires while no
+  Púca Notes is open leaves its uploaded files behind on the server.
+
+### Changed
+- **Rolling back the server no longer needs a database restore — from this
+  release on.** The server now starts on a database that a newer release has
+  already updated, and the release script's safety check now lets such a
+  rollback through (server owners: build the older release's backend and ship
+  it with `dual-ship.sh backend` as usual; `deploy/ops/README.md`, "Rolling
+  back the backend"). This holds as long as every update in between only
+  added to the database, which is the rule for Púca's migrations. Going back
+  to **0.9.815 or earlier** still needs the database backup taken before the
+  update: those releases refuse to start on a newer database, and the script
+  refuses to ship them over one.
+- Apps older than this release keep working against the new server: they do
+  not show trashed notes, renaming a note in them leaves its text and
+  pictures alone, and their Delete still deletes at once. But they do not
+  keep a trashed note whole: an older Púca Notes forgets a trashed note's
+  colour, labels and archive flag, and a pin or reorder saved from any older
+  app puts a restored note at the end instead of its old place. **Install
+  the new Púca Notes APK on every phone before using the trash** (Notes has
+  no automatic updates); the camera button also needs the new APKs of both
+  apps.
 
 ## 0.9.815 — 2026-09-19
 

@@ -2158,6 +2158,12 @@ const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     // after deletion should hold nothing that could ever be replayed
     // (0.9.810 audit, C-02; SECURITY_MODEL.md §11 says the material is gone).
     "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
+    // A personal list's note text and its photo/drawing refs (migration 065):
+    // sealed to an identity the tombstone no longer has, so nobody can ever
+    // open them again, and the refs name uploads the grace purge is already
+    // removing. The list rows themselves stay, like the items in them (tasks
+    // are content — see the header above and SECURITY_MODEL.md §11).
+    "UPDATE task_lists SET body = NULL, attachments = NULL WHERE owner_id = $1",
 ];
 
 /// DELETE /account — tombstone the account.
@@ -2602,6 +2608,7 @@ mod account_deletion_residue_tests {
             "DELETE FROM channel_keys WHERE recipient_id = $1",
             "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
             "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
+            "UPDATE task_lists SET body = NULL, attachments = NULL WHERE owner_id = $1",
         ];
         assert_eq!(
             ACCOUNT_DELETE_CLEANUP, expected,

@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- "Take photo" (a note's camera button, <input accept="image/*" capture>).
+         The WebView's file chooser opens the camera only if
+         ACTION_IMAGE_CAPTURE resolves to an app, and from Android 11 that
+         lookup sees nothing this manifest does not declare it queries —
+         without this the button quietly falls back to the file picker. -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
+
     <!-- allowBackup=false, for the same reason as the Púca app: the WebView
          profile (app_webview) holds the E2EE identity seed and the session
          token, and Auto Backup / device-to-device transfer would copy it to

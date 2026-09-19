@@ -1,0 +1,197 @@
+/* A note's own pictures (NoteImages.tsx) — Púca Notes' editor and Púca's
+   Tasks view. Theme tokens only; every control is visible without hover. */
+.note-images { display: flex; flex-direction: column; gap: 8px; }
+.ni-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 6px;
+}
+.ni-grid.single { grid-template-columns: minmax(0, 1fr); }
+.ni-item {
+    position: relative;
+    margin: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-quaternary);
+    min-height: 60px;
+}
+.ni-open {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: zoom-in;
+}
+.ni-open img { display: block; width: 100%; max-height: 360px; object-fit: cover; }
+.ni-grid.single .ni-open img { object-fit: contain; max-height: 420px; background: var(--bg-quaternary); }
+.ni-item.drawing .ni-open img { object-fit: contain; background: #fff; }
+.ni-pending { display: block; height: 120px; animation: ni-pulse 1.2s ease-in-out infinite; }
+@keyframes ni-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+.ni-broken, .ni-file {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px;
+    font-size: 13px;
+    color: var(--text-muted);
+    word-break: break-word;
+}
+.ni-tools {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 4px;
+}
+.ni-tool {
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-floating);
+    color: var(--text-normal);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+}
+.ni-tool:hover { background: var(--bg-modifier-hover); }
+.ni-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ni-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    background: none;
+    color: var(--text-normal);
+    font-size: 13px;
+    cursor: pointer;
+}
+.ni-action:hover { background: var(--bg-modifier-hover); }
+.ni-locked, .ni-busy { font-size: 12px; color: var(--text-muted); display: flex; gap: 6px; align-items: center; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .ni-tool { width: 44px; height: 44px; }
+    .ni-action { min-height: 44px; padding: 8px 14px; font-size: 15px; }
+    .ni-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .ni-pending { animation: none; }
+}
+
+/* A note's text (NoteBodyField.tsx). */
+.note-body-field { display: flex; flex-direction: column; gap: 4px; }
+.nb-text {
+    width: 100%;
+    min-height: 44px;
+    resize: none;
+    overflow: hidden;
+    border: none;
+    outline: none;
+    background: none;
+    color: var(--text-normal);
+    font: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 6px 4px;
+    box-sizing: border-box;
+}
+.nb-text::placeholder { color: var(--text-faint); }
+.nb-status { font-size: 12px; color: var(--text-muted); }
+.nb-status.failed { color: var(--text-danger); }
+.nb-retry {
+    border: none;
+    background: none;
+    color: var(--brand-primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+}
+.nb-locked {
+    font-size: 13px;
+    color: var(--text-warning);
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 4px;
+}
+@media (pointer: coarse) and (max-width: 1024px) {
+    .nb-text { font-size: 16px; }   /* below 16px iOS zooms on focus */
+    .nb-retry { min-height: 44px; padding: 0 8px; }
+}
+
+/* Púca's Tasks view: a list's note text and pictures (ListContentBlock.tsx)
+   and the trash under the All-tasks board. */
+.list-content-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* The Tasks editor centres a 760px column; line up with its header and add row. */
+    width: 100%;
+    max-width: 760px;
+    box-sizing: border-box;
+    padding: 0 20px 8px;
+}
+.tasks-card-body {
+    margin: 0 12px 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.tasks-trash { margin: 16px 12px 24px; }
+.tasks-trash-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 4px;
+    cursor: pointer;
+}
+.tasks-trash-toggle:hover { color: var(--text-normal); }
+.tasks-trash-copy { font-size: 12px; color: var(--text-muted); margin: 4px 4px 8px; }
+.tasks-trash-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tasks-trash-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+/* A basis, not 0: a row too narrow for title and buttons wraps the buttons
+   to the next line instead of squeezing the title to a letter per line. */
+.tasks-trash-title { flex: 1 1 10em; min-width: 0; font-size: 14px; color: var(--text-normal); word-break: break-word; }
+.tasks-trash-when { font-size: 12px; color: var(--text-muted); }
+.tasks-trash-btn {
+    border: 1px solid var(--border-subtle);
+    background: none;
+    color: var(--text-normal);
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+.tasks-trash-btn:hover { background: var(--bg-modifier-hover); }
+.tasks-trash-btn.danger { color: var(--text-danger); }
+@media (pointer: coarse) and (max-width: 1024px) {
+    .tasks-trash-toggle, .tasks-trash-btn { min-height: 44px; font-size: 15px; }
+    .tasks-trash-btn { padding: 8px 14px; }
+    .tasks-trash-title { flex-basis: 100%; font-size: 15px; }
+}

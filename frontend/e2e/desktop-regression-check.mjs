@@ -20,7 +20,7 @@ const tryStep = async (name, fn) => {
     try { await fn(); return true; } catch (e) { console.log(`STEP-FAIL ${name}:`, String(e).split('\n')[0]); return false; }
 };
 
-await page.goto('http://localhost:5173/');
+await page.goto(`${process.env.WALK_BASE_URL || 'http://localhost:5173'}/`);
 await page.waitForURL('**/login');
 console.log('coarse-pointer matches (should be false):', await page.evaluate(() => matchMedia('(pointer: coarse) and (max-width: 1024px)').matches));
 console.log('bottom-nav present (should be false pre-login):', await page.evaluate(() => !!document.querySelector('.mobile-bottom-nav')));

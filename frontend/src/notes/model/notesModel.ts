@@ -94,6 +94,10 @@ export interface NoteSource {
     totalTasks?: number;
     completedTasks?: number;
     createdAt?: string;
+    /** Personal notes: the OPENED note text and note-level attachments
+     *  sidecar (api/listSeal.ts), when the server has them. */
+    body?: string | null;
+    noteAttachments?: string | null;
 }
 
 /** Everything one card renders from. */
@@ -147,6 +151,8 @@ export function buildNoteCards(
             totalTasks: s.totalTasks,
             completedTasks: s.completedTasks,
             createdAt: s.createdAt,
+            body: s.body,
+            noteAttachments: s.noteAttachments,
             key,
             tasks,
             pinned: isFavoriteTab(prefs, { kind: s.ref.kind, id: s.ref.id }),
@@ -223,6 +229,7 @@ export function noteMatches(card: NoteCard, query: string): boolean {
     const readable = (s: string) => (isUndecryptable(s) ? '' : s);
     const hay = [
         readable(card.title),
+        readable(card.body ?? ''),
         card.serverName ?? '',
         ...card.labels,
         ...(card.tasks ?? []).map(t => readable(t.description)),

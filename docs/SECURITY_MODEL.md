@@ -74,6 +74,9 @@ whether the tool fits your threat model.
   has not read it. The DM v4 design shipped in 0.9.3 is days old.
 - **The Windows build is not code-signed** until the operator buys a certificate; the
   pipeline is in place and idle (`docs/CODE_SIGNING.md`).
+- **Personal notes' sealed fields are not bound to where they are stored.** The operator
+  can move or replay your own note text and picture lists between your own notes without
+  the client noticing, though never read them (§2, "Can do").
 
 ---
 
@@ -89,6 +92,14 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Who talks to whom, and when
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events
+- For a personal note (Púca Notes, migration 065): whether it has text or
+  pictures and roughly how much (the sealed envelopes' sizes, which also hint
+  at how many pictures), the encrypted uploads themselves as it sees any
+  upload, and when you moved the note to the trash and restored it
+  (`trashed_at`, plaintext timing like a due time). The text, the pictures and
+  WHICH uploads a note uses stay sealed — which is also why the server cannot
+  delete a note's uploads itself when its trash time runs out
+  (`docs/NOTES.md`).
 - IP addresses and device tokens
 - When a phone with the Púca Notes app is alive: while signed in, the app
   asks `GET /task-reminders` about once an hour even while it is closed (and
@@ -128,6 +139,18 @@ additional check is `token_version`, a plain integer in their own database
 This does not give them your keys — the identity seed is stored only wrapped
 (§7) — but it does mean **any username you see could have been chosen by the operator**.
 That matters most in §5.
+
+**Move your own sealed personal-note fields between your own rows.** A personal note's
+title, text (`body`) and pictures sidecar (`attachments`, migration 065) — like a personal
+task's text — are encrypt-to-self envelopes with no context bound into them: nothing in
+the ciphertext names the note or the field it belongs to (`encryptSelf`, a constant key
+derivation and no associated data). The operator cannot read or forge them, but can
+rearrange them undetected: show one note's text on another, replay an older version of a
+note's text, put a note's pictures sidecar (which holds its files' keys) into a text
+field, where it would open and display as text, or copy another note's sidecar into a
+trashed note so that *Delete forever* deletes files a live note still uses. The planned
+fix is a v3 self envelope that binds (list id, field) as associated data, so a moved or
+replayed field fails to open instead of opening in the wrong place.
 
 ---
 
@@ -741,7 +764,10 @@ restore your old grants — an Admin role included — if the account ever rejoi
 
 - **Your messages and tasks**, as ciphertext attributed to the tombstone. They
   are other people's conversations too, and the server cannot read them to
-  decide otherwise.
+  decide otherwise. Your personal notes' sealed text and picture refs
+  (migration 065) are the exception: nobody else could ever open them, so
+  they are nulled (`ACCOUNT_DELETE_CLEANUP`); the list rows stay, like the
+  items in them.
 - **Your enrolled devices**, REVOKED rather than deleted, because device shares
   reference those rows and "a revoked device stays revoked" is what stops a
   machine that still holds its Ed25519 key from minting fresh account tokens.

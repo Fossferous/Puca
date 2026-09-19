@@ -204,6 +204,40 @@ tar -xzf /opt/puca/backups/puca-config-<ts>.tar.gz -C / opt/puca/.env   # before
 Quick DB-only peek: `gunzip -c <file>.sql.gz | sudo -u postgres psql -d puca`.
 Rehearse without touching prod with `restore-drill.sh` (above).
 
+### Rolling back the backend
+
+What going back to an older backend takes depends on the release you go back
+TO, because that release's own startup migrator decides whether it will boot
+on a database a newer release has already migrated:
+
+- **A release built with `src/migrator.rs` (every release after 0.9.815).** Its
+  migrator tolerates applied migrations it does not carry (`ignore_missing`),
+  so no restore is needed — provided every migration since was additive
+  (`migrations/README.md` sets that rule; a release that breaks it says so in
+  its notes). Build the older release's source tarball from the same
+  long-lived checkout you always ship from (the migration bytes must still
+  match), check it, then ship it the normal way — every host, as always:
+
+  ```bash
+  DUAL_SHIP_PREFLIGHT_ONLY=1 deploy/ops/dual-ship.sh backend <older-src.tar.gz>   # reads each host's _sqlx_migrations, ships nothing
+  deploy/ops/dual-ship.sh backend <older-src.tar.gz>
+  ```
+
+  The pre-flight prints a `NOTE` for each applied version newer than the
+  tarball and lets it through only because the tarball's own `src/migrator.rs`
+  sets `set_ignore_missing(true)` and its `main.rs` uses `app_migrator()`. It
+  still refuses a migration the tarball carries whose bytes differ from what
+  the database recorded, and an applied version missing from BELOW the
+  tarball's newest (a different history, not a rollback).
+- **0.9.815 or anything older.** Those binaries refuse to start on a newer
+  database, and the pre-flight refuses them and says so. Going back to one
+  means restoring the dump taken before the newer release shipped (`Restore`,
+  above) — and losing every write made since. Take that dump before every
+  backend ship regardless.
+
+Either way, take a fresh dump before rolling back: the newer release's data is
+what you would otherwise be gambling with.
+
 ## Content-Security-Policy on the web origin
 
 The API origin sets COOP/COEP, `nosniff`, `X-Frame-Options: DENY`, a strict

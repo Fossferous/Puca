@@ -22,6 +22,8 @@ import {
 } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
+import { NoteBodyPreview, NoteHero } from './NoteCardContent';
+import { heroItems } from '../../api/noteMedia';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
@@ -84,13 +86,15 @@ function NoteCardImpl({
     const due = tasks ? nearestDue(tasks) : null;
     const canComplete = card.ref.kind === 'list'
         || hasPerm(card.myPerms, PERM.COMPLETE_TASKS) || hasPerm(card.myPerms, PERM.MANAGE_TASKS);
+    const hero = heroItems(card.noteAttachments);
+    const hasBody = !!card.body;
     const untitled = !card.title.trim();
     const titleUnreadable = isUndecryptable(card.title);
 
     // Image thumbnails: first three image refs across the note's rows, and a
     // lock chip if ANY row's sidecar could not be opened.
     const thumbs: TaskAttachmentRef[] = [];
-    let anyLocked = false;
+    let anyLocked = isAttachmentsLocked(card.noteAttachments ?? null);
     let fileCount = 0;
     for (const t of tasks ?? []) {
         if (!t.attachments) continue;
@@ -128,6 +132,7 @@ function NoteCardImpl({
             }}
             onContextMenu={e => onMenu(e, card, e.currentTarget)}
         >
+            <NoteHero items={hero} visible={onScreen} />
             <div className="notes-card-head">
                 <h3 className={`notes-card-title ${untitled ? 'untitled' : ''}`}>
                     {untitled ? 'Untitled note' : card.title}
@@ -147,10 +152,11 @@ function NoteCardImpl({
                 </button>
             </div>
 
+            <NoteBodyPreview body={card.body} />
             {preview === null ? (
                 <div className="notes-card-empty">Loading…</div>
             ) : preview.rows.length === 0 && preview.completedCount === 0 ? (
-                <div className="notes-card-empty">Empty note</div>
+                hasBody || hero.length > 0 ? null : <div className="notes-card-empty">Empty note</div>
             ) : (
                 <ul className="notes-card-items">
                     {preview.rows.map(({ task, depth }) => (
