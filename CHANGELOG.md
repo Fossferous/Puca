@@ -22,6 +22,8 @@ one-line summary; this file is the full story. Versions follow
 - **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
   morning.
 - **Edited.** Notes show when they were last changed, and can be sorted by it.
+- **Your data export includes dates, repeats and snoozes**, opened like the rest
+  of your items.
 - **.ics export and import.** Export gives your dated items as a standard
   calendar file. The file is not encrypted, and the app says so first. Import
   brings a calendar file into a personal note. It first lists anything it
