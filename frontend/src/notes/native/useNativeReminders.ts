@@ -67,7 +67,11 @@ export function useNotesReminderLoop(navigate: (to: string) => void): void {
             if (live && target === 'reminders') navRef.current('/reminders');
         };
         void consumeNativeLaunchNav().then(go);
-        const off = onNativeNavigate(go);
+        // The native side also keeps an event's target as the pending launch
+        // target (for a page that was not listening yet); take it here too, or
+        // the next mount of this shell — say, after signing out and back in —
+        // would replay a tap from long ago.
+        const off = onNativeNavigate(target => { go(target); void consumeNativeLaunchNav(); });
         return () => { live = false; off(); };
     }, []);
 }
