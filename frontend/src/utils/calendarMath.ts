@@ -251,3 +251,18 @@ export function moveToDay(w: Wall, newDayKey: string, tz: string): { wall: Wall;
     const wall: Wall = { ...p.wall, hh: w.hh, mm: w.mm };
     return { wall, instant: wallToInstant(wall, tz), adjusted: isInGap(wall, tz) };
 }
+
+/** The start of the working day a time grid opens on. */
+export const GRID_WORKDAY_HOUR = 8;
+
+/**
+ * Where a Week/Day time grid should open, as an hour: an hour before now
+ * when the grid shows today (so "now" is in view, not scrolled past), else
+ * the start of the working day — never midnight, which is where a scroll
+ * container starts and where nothing ever is. `nowMinutes` is minutes into
+ * the viewer's day.
+ */
+export function gridOpenHour(days: readonly string[], today: string, nowMinutes: number): number {
+    if (days.includes(today)) return Math.max(0, Math.min(23, Math.floor(nowMinutes / 60) - 1));
+    return GRID_WORKDAY_HOUR;
+}

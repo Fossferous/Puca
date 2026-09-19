@@ -5,8 +5,8 @@
  * tab render the same component.
  *
  * One gate (calendarGate.ts) decides phone vs desktop in JS and CSS alike:
- * the week time grid exists only off it; on a phone the month shows dots and
- * the selected day's list, and a day is an hour list.
+ * the Week and Day time grids exist only off it; on a phone the month shows
+ * dots and the selected day's list, and a day is that list alone.
  *
  * Every drag has a tap alternative (the item menu's "Move to date…") and a
  * keyboard one ([ and ] on a focused item move it a day; arrows, Home/End,
@@ -18,7 +18,7 @@ import { type CalendarEntry, type CalendarSource, entriesInRange, groupByDay, la
 import { type SnoozePreset, activeSnooze } from '../../api/taskSchedule';
 import { formatDateKey, formatTime } from '../../api/scheduleFormat';
 import {
-    type WeekStart, addDaysToKey, localDayKey, monthMatrix, parseWall, viewerZone, weekOf,
+    type WeekStart, addDaysToKey, gridOpenHour, localDayKey, minutesIntoDay, monthMatrix, parseWall, viewerZone, weekOf,
 } from '../../utils/calendarMath';
 import { isEditableTarget } from '../../api/hotkeys';
 import { useDropOnTarget } from '../../hooks/useDropOnTarget';
@@ -117,6 +117,7 @@ export function Calendar(props: CalendarProps) {
     const [seenDate, setSeenDate] = useState(date);
     if (seenDate !== date) { setSeenDate(date); setFocusDay(date); }
     const gridRef = useRef<HTMLDivElement>(null);
+    const tgBodyRef = useRef<HTMLDivElement>(null);
 
     // The range this view needs.
     const p = parseWall(date)?.wall ?? parseWall(today)!.wall;
@@ -131,6 +132,19 @@ export function Calendar(props: CalendarProps) {
         [sources, from, to, showCompleted, showPlain, tz],
     );
     const byDay = useMemo(() => groupByDay(entries), [entries]);
+
+    // A Week/Day grid opens on working hours (or just before now on today),
+    // not at 00:00 — once per view/date, never on the half-minute clock tick.
+    const gridDays = view === 'week' ? week.join(',') : view === 'day' && !coarse ? date : '';
+    const nowRef = useRef(now);
+    useEffect(() => { nowRef.current = now; }, [now]);
+    useEffect(() => {
+        const el = tgBodyRef.current;
+        if (!el || !gridDays) return;
+        const hour = gridOpenHour(gridDays.split(','), localDayKey(nowRef.current, tz), minutesIntoDay(nowRef.current, tz));
+        el.scrollTop = hour * HOUR_PX;
+        el.dataset.openHour = String(hour);
+    }, [gridDays, tz]);
     const byId = useMemo(() => new Map(entries.map(e => [e.id, e])), [entries]);
 
     const { state: drag, onPointerDown } = useDropOnTarget({
@@ -288,7 +302,7 @@ export function Calendar(props: CalendarProps) {
                         </div>
                     ))}
                 </div>
-                <div className="cal-tg-body">
+                <div className="cal-tg-body" ref={tgBodyRef}>
                     <div className="cal-tg-gutter">
                         {hours.map(h => <div key={h} className="cal-tg-hour" style={{ height: HOUR_PX }}>{formatTime(Date.UTC(2026, 0, 1, h), locale, 'UTC')}</div>)}
                     </div>
@@ -422,12 +436,10 @@ export function Calendar(props: CalendarProps) {
     } else if (view === 'week') {
         body = timeGrid(week);
     } else if (view === 'day') {
-        body = coarse ? (
-            <>
-                {dayList(date)}
-                {timeGrid([date])}
-            </>
-        ) : timeGrid([date]);
+        // Under the phone gate a day is its LIST only: no time grid (the
+        // brief put both grids behind the fine-pointer gate — a 24-row grid
+        // under a list is a second, cramped copy of the same items at 390 px).
+        body = coarse ? dayList(date) : timeGrid([date]);
     } else {
         const days: string[] = [];
         for (let i = 0; i < agendaDays; i++) days.push(addDaysToKey(date, i));

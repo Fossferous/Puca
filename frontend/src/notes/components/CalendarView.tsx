@@ -13,6 +13,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, type CalView, type CalendarAction } from '../../components/calendar/Calendar';
 import { effectiveWeekStart, setCalendarPrefs, useCalendarPrefs } from '../../components/calendar/calendarPrefs';
+import { useCoarseCalendar } from '../../components/calendar/calendarGate';
 import { ScheduleEditor } from '../../components/schedule/ScheduleEditor';
 import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
@@ -40,16 +41,19 @@ interface CalendarViewProps {
     cards: NoteCard[];
     actions: NoteActions;
     now: number;
-    coarse: boolean;
     onOpenNote: (key: string) => void;
     /** No dialog/editor above the calendar: its single-key shortcuts may run. */
     shortcutsEnabled: boolean;
 }
 
-export function CalendarView({ cards, actions, now, coarse, onOpenNote, shortcutsEnabled }: CalendarViewProps) {
+export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled }: CalendarViewProps) {
+    // The ONE phone/desktop gate both calendar hosts use (calendarGate.ts):
+    // the native shell or the coarse-pointer query — not the Notes shell's
+    // own media-query-only check, which a native phone could fall through.
     const [params, setParams] = useSearchParams();
     const qc = useQueryClient();
     const prefs = useCalendarPrefs();
+    const coarse = useCoarseCalendar();
     const scheduleOn = useTaskFeature('schedule') === true;
     const snoozeOn = useTaskFeature('snooze') === true;
     const today = localDayKey(now);

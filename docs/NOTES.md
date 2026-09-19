@@ -212,8 +212,11 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   force. `mark` changes whenever the item must fire again.
 - **Calendar**: in the rail at `/calendar`, the view and day in the URL (never
   a title). **Month**: on a phone it shows dots and the chosen day's list.
-  **Week** and **Day** are time grids off the phone. One gate,
-  `components/calendar/calendarGate.ts`, is shared with the CSS. **Agenda**
+  **Week** and **Day** are time grids off the phone, opening on working hours
+  (or just before now on today). On a phone there is no time grid: **Day** is
+  the day's list, and Week falls back to it. One gate,
+  `components/calendar/calendarGate.ts`, is shared with the CSS and by both
+  hosts (Notes' `/calendar` and Púca's Calendar tab). **Agenda**
   lists what is coming. Drag an item to another day, or use *Move to date…*
   (tap), or `[` / `]` (keyboard). Tap a day to add: the item and its timing go
   in one request. *Skip this time* skips one occurrence. *Show completed* and

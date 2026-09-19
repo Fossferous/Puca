@@ -380,7 +380,6 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 cards={cards}
                                 actions={actions}
                                 now={now}
-                                coarse={coarse}
                                 onOpenNote={key => setParams(p => { p.set('note', key); return p; })}
                                 shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu}
                             />

@@ -162,9 +162,6 @@
     .cal-row-title { min-height: 44px; font-size: 15px; }
     .cal-row-note { flex-basis: 100%; max-width: none; padding-left: 28px; }
     .cal-row-when { min-width: 0; }
-    /* Day view on a phone: an hour list with room to tap. */
-    .cal-tg-body { max-height: none; }
-    .cal-tg-item .cal-chip { font-size: 13px; }
     .cal-menu-backdrop { align-items: flex-end; }
     .cal-menu { width: 100vw; max-height: 85dvh; border-radius: 12px 12px 0 0; padding-bottom: var(--safe-area-bottom, 0px); }
     .cal-menu-item { min-height: 44px; font-size: 15px; }
