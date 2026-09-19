@@ -26,6 +26,12 @@ const MAX_TASK_LEN: usize = 8000;
 const MAX_LIST_TITLE_LEN: usize = 200;
 /// Sealed attachments sidecar (client-side-encrypted JSON of up to 12 refs).
 const MAX_ATTACHMENTS_LEN: usize = 16384;
+/// Sealed EventSchedule (calendar/recurrence; see task_timing.rs). The client
+/// pads the plaintext to a bucket of at most 8 KiB; sealing adds ~35% plus
+/// the envelope, so 16 KiB leaves real headroom for both envelope kinds.
+const MAX_SCHEDULE_LEN: usize = crate::task_timing::MAX_SCHEDULE_LEN;
+/// Sealed snooze ({forDue, until}), padded to 128 bytes by the client.
+const MAX_SNOOZE_LEN: usize = crate::task_timing::MAX_SNOOZE_LEN;
 /// Ceiling on tasks per checklist scope (one channel checklist or one personal
 /// list). Without it a member could post tens of thousands of tasks; every
 /// list fetch materializes all of them and each change fans a ChecklistUpdate
@@ -62,8 +68,17 @@ pub struct TaskResponse {
     /// Sealed attachments JSON (same key path as the description); None = none.
     pub attachments: Option<String>,
     /// Optional due time (RFC3339). Plaintext metadata like is_completed —
-    /// the server learns WHEN, never WHAT (descriptions stay E2EE).
+    /// the server learns WHEN, never WHAT (descriptions stay E2EE). For an
+    /// item with a schedule it is the NEXT reminder instant.
     pub due_at: Option<String>,
+    /// Sealed EventSchedule, or null. ALWAYS serialized (no skip), so every
+    /// task a 066+ server returns carries the key.
+    pub schedule: Option<String>,
+    /// Sealed snooze, or null. Always serialized, like schedule.
+    pub snooze: Option<String>,
+    /// When the item's content last changed (RFC3339; created_at for rows
+    /// that predate migration 066).
+    pub updated_at: String,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +88,10 @@ pub struct CreateTaskRequest {
     pub attachments: Option<String>,
     /// RFC3339 due time; absent/null = none.
     pub due_at: Option<String>,
+    /// Sealed EventSchedule, so an event is created in ONE request with its
+    /// due_at. Absent/null/"" = none. Serde-defaulted: older clients omit it.
+    #[serde(default)]
+    pub schedule: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +107,28 @@ pub struct UpdateTaskRequest {
     /// envelope_version.rs. Absent from clients that predate it.
     #[serde(default)]
     pub reads_up_to: Option<u64>,
+    /// Sealed EventSchedule; the three-state contract of attachments.
+    /// Creator or MANAGE_TASKS, like the description.
+    #[serde(default)]
+    pub schedule: Option<String>,
+    /// Sealed snooze; three-state. COMPLETE_TASKS (or MANAGE_TASKS), like
+    /// ticking the item: snoozing is what a completer does to a reminder.
+    #[serde(default)]
+    pub snooze: Option<String>,
+    /// Compare-and-swap on due_at: "" = expect NULL, RFC3339 = expect that
+    /// instant, absent = no check. A mismatch is 409 and nothing is written —
+    /// two devices advancing the same reminder cannot both win.
+    #[serde(default)]
+    pub expect_due_at: Option<String>,
+    /// The client knows about schedules: completing an item (or a parent of
+    /// one) that carries a schedule is refused without it, because an older
+    /// client would silently end a repeating series (task_timing.rs).
+    #[serde(default)]
+    pub recurrence_aware: bool,
+    /// Reopen every task under this one (a repeating task that advanced to
+    /// its next occurrence starts it with its subtasks unticked).
+    #[serde(default)]
+    pub reopen_subtree: bool,
 }
 
 /// Parse a request's due time. "" means "clear" and maps to None; anything
@@ -131,7 +172,13 @@ pub struct TaskListResponse {
     pub created_at: String,
     pub total_tasks: i64,
     pub completed_tasks: i64,
+    /// Last edit of the list or any of its items (migration 066 triggers);
+    /// created_at for a list untouched since before it.
+    pub updated_at: String,
 }
+
+/// updated_at as every task-list query renders it.
+const LIST_UPDATED_AT: &str = "(replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at";
 
 #[derive(Deserialize)]
 pub struct TaskListRequest {
@@ -153,6 +200,9 @@ type TaskRow = (
     i64,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
 );
 
 fn task_row_to_response(row: TaskRow) -> TaskResponse {
@@ -168,6 +218,9 @@ fn task_row_to_response(row: TaskRow) -> TaskResponse {
         created_by,
         attachments,
         due_at,
+        schedule,
+        snooze,
+        updated_at,
     ) = row;
     TaskResponse {
         id,
@@ -181,12 +234,15 @@ fn task_row_to_response(row: TaskRow) -> TaskResponse {
         created_by,
         attachments,
         due_at,
+        schedule,
+        snooze,
+        updated_at,
     }
 }
 
 // NULL due_at stays NULL through the replace/concat (both are strict).
 const TASK_COLUMNS: &str =
-    "id, channel_id, list_id, parent_id, description, is_completed, position, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, created_by, attachments, (replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at";
+    "id, channel_id, list_id, parent_id, description, is_completed, position, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, created_by, attachments, (replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, schedule, snooze, (replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at";
 
 // --- Scope checks ---
 
@@ -390,6 +446,10 @@ async fn insert_task(
             ));
         }
     }
+    let schedule = match payload.schedule.as_deref() {
+        Some(raw) => crate::task_timing::validate_sealed(raw, MAX_SCHEDULE_LEN, "schedule")?,
+        None => None,
+    };
     if let Some(pid) = payload.parent_id {
         validate_parent(state, pid, channel_id, list_id).await?;
     }
@@ -424,10 +484,10 @@ async fn insert_task(
     // New tasks append: next position within the whole checklist keeps every
     // sibling group in creation order until the user moves things.
     let sql = format!(
-        "INSERT INTO channel_tasks (channel_id, list_id, parent_id, description, created_by, position, attachments, due_at) \
+        "INSERT INTO channel_tasks (channel_id, list_id, parent_id, description, created_by, position, attachments, due_at, schedule) \
          VALUES ($1, $2, $3, $4, $5, \
                  (SELECT COALESCE(MAX(position), 0) + 1 FROM channel_tasks \
-                  WHERE channel_id IS NOT DISTINCT FROM $1 AND list_id IS NOT DISTINCT FROM $2), $6, $7) \
+                  WHERE channel_id IS NOT DISTINCT FROM $1 AND list_id IS NOT DISTINCT FROM $2), $6, $7, $8) \
          RETURNING {TASK_COLUMNS}"
     );
     let row: Result<TaskRow, _> = sqlx::query_as(&sql)
@@ -438,6 +498,7 @@ async fn insert_task(
         .bind(claims.sub)
         .bind(attachments)
         .bind(due_at)
+        .bind(schedule)
         .fetch_one(&state.pool)
         .await;
 
@@ -529,7 +590,9 @@ pub async fn update_task(
     if let Some(perms) = access.perms {
         // MANAGE_TASKS implies completion rights (role editors describe it as
         // "check off anyone's tasks"), so managers don't also need COMPLETE.
-        if payload.is_completed.is_some()
+        // A snooze and a subtree reopen are what a completer does to an
+        // item, so they ride the completion right, not the edit right.
+        if (payload.is_completed.is_some() || payload.snooze.is_some() || payload.reopen_subtree)
             && !perms.has(Permissions::COMPLETE_TASKS)
             && !perms.has(Permissions::MANAGE_TASKS)
         {
@@ -537,7 +600,8 @@ pub async fn update_task(
         }
         if (payload.description.is_some()
             || payload.attachments.is_some()
-            || payload.due_at.is_some())
+            || payload.due_at.is_some()
+            || payload.schedule.is_some())
             && !access.can_manage(claims.sub)
         {
             return (
@@ -569,6 +633,30 @@ pub async fn update_task(
         }
     }
 
+    // Schedule and snooze: sealed envelopes or "" (clear), nothing else.
+    let new_schedule = match payload.schedule.as_deref() {
+        Some(raw) => match crate::task_timing::validate_sealed(raw, MAX_SCHEDULE_LEN, "schedule") {
+            Ok(v) => v,
+            Err(e) => return e.into_response(),
+        },
+        None => None,
+    };
+    let new_snooze = match payload.snooze.as_deref() {
+        Some(raw) => match crate::task_timing::validate_sealed(raw, MAX_SNOOZE_LEN, "snooze") {
+            Ok(v) => v,
+            Err(e) => return e.into_response(),
+        },
+        None => None,
+    };
+    // Compare-and-swap target, parsed before anything is locked.
+    let expect_due = match payload.expect_due_at.as_deref() {
+        Some(raw) => match parse_due(raw) {
+            Ok(d) => Some(d),
+            Err(e) => return e.into_response(),
+        },
+        None => None,
+    };
+
     // Attachments and due_at are three-state: absent = keep, "" = clear to
     // NULL, s = set. COALESCE can't express "clear", so gate on explicit
     // update flags.
@@ -589,9 +677,9 @@ pub async fn update_task(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
         }
     };
-    if payload.description.is_some() || new_attachments.is_some() {
-        let current: Option<(String, Option<String>)> = match sqlx::query_as(
-            "SELECT description, attachments FROM channel_tasks WHERE id = $1 FOR UPDATE",
+    if payload.description.is_some() || new_attachments.is_some() || new_schedule.is_some() || new_snooze.is_some() {
+        let current: Option<(String, Option<String>, Option<String>, Option<String>)> = match sqlx::query_as(
+            "SELECT description, attachments, schedule, snooze FROM channel_tasks WHERE id = $1 FOR UPDATE",
         )
         .bind(task_id)
         .fetch_optional(&mut *tx)
@@ -603,7 +691,7 @@ pub async fn update_task(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
             }
         };
-        let Some((cur_desc, cur_att)) = current else {
+        let Some((cur_desc, cur_att, cur_sched, cur_snooze)) = current else {
             return (StatusCode::NOT_FOUND, "Task not found").into_response();
         };
         if let Some(desc) = payload.description.as_deref().map(str::trim) {
@@ -614,6 +702,33 @@ pub async fn update_task(
         if let (Some(cur), Some(new)) = (cur_att.as_deref(), new_attachments) {
             if crate::envelope_version::edit_is_downgrade(cur, new, payload.reads_up_to) {
                 return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+            }
+        }
+        for (cur, new) in [(cur_sched.as_deref(), new_schedule), (cur_snooze.as_deref(), new_snooze)] {
+            if let (Some(cur), Some(new)) = (cur, new) {
+                if crate::envelope_version::edit_is_downgrade(cur, new, payload.reads_up_to) {
+                    return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+                }
+            }
+        }
+    }
+    // An older client completing a scheduled item (or a parent whose sweep
+    // would reach one) would end a repeating series without knowing it:
+    // refuse unless the client says it understands schedules. Read inside
+    // the transaction, fail CLOSED (a data-loss guard, like the one above).
+    if payload.is_completed == Some(true) && !payload.recurrence_aware {
+        match sqlx::query_as::<_, (bool,)>(crate::task_timing::SUBTREE_HAS_SCHEDULE_SQL)
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await
+        {
+            Ok((false,)) => {}
+            Ok((true,)) => {
+                return (StatusCode::CONFLICT, crate::task_timing::SCHEDULE_COMPLETE_MESSAGE).into_response();
+            }
+            Err(e) => {
+                tracing::error!("Failed to read schedules before completion: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
             }
         }
     }
@@ -629,7 +744,10 @@ pub async fn update_task(
     let result = sqlx::query(
         "UPDATE channel_tasks SET is_completed = COALESCE($1, is_completed), description = COALESCE($2, description), \
          attachments = CASE WHEN $3 THEN $4 ELSE attachments END, \
-         due_at = CASE WHEN $5 THEN $6 ELSE due_at END WHERE id = $7"
+         due_at = CASE WHEN $5 THEN $6 ELSE due_at END, \
+         schedule = CASE WHEN $8 THEN $9 ELSE schedule END, \
+         snooze = CASE WHEN $10 THEN $11 ELSE snooze END \
+         WHERE id = $7 AND (NOT $12 OR due_at IS NOT DISTINCT FROM $13)"
     )
     .bind(payload.is_completed)
     .bind(payload.description.as_deref().map(str::trim))
@@ -638,12 +756,36 @@ pub async fn update_task(
     .bind(set_due)
     .bind(new_due)
     .bind(task_id)
+    .bind(payload.schedule.is_some())
+    .bind(new_schedule)
+    .bind(payload.snooze.is_some())
+    .bind(new_snooze)
+    .bind(expect_due.is_some())
+    .bind(expect_due.flatten())
     .execute(&mut *tx)
     .await;
 
-    if let Err(e) = result {
-        tracing::error!("Failed to update task: {:?}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
+    match result {
+        // The compare-and-swap lost: someone moved due_at first. Nothing was
+        // written (the transaction rolls back on drop).
+        Ok(r) if r.rows_affected() == 0 && expect_due.is_some() => {
+            return (StatusCode::CONFLICT, crate::task_timing::DUE_CHANGED_MESSAGE).into_response();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Failed to update task: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
+        }
+    }
+    if payload.reopen_subtree {
+        if let Err(e) = sqlx::query(crate::task_timing::REOPEN_SUBTREE_SQL)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::error!("Failed to reopen subtree: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
+        }
     }
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to update task: {:?}", e);
@@ -1172,14 +1314,15 @@ pub async fn list_task_lists(
 ) -> impl IntoResponse {
     // Includes the "Notes to self" (is_self) list: since the Tasks view became
     // the single home for personal lists, hiding it would strand those items.
-    let rows: Result<Vec<(i64, String, String, i64, i64)>, _> = sqlx::query_as(
+    let rows: Result<Vec<(i64, String, String, i64, i64, String)>, _> = sqlx::query_as(
         "SELECT l.id, l.title, (replace((l.created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, \
                 COUNT(t.id) AS total, \
-                COUNT(t.id) FILTER (WHERE t.is_completed) AS done \
+                COUNT(t.id) FILTER (WHERE t.is_completed) AS done, \
+                (replace((COALESCE(l.updated_at, l.created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at \
          FROM task_lists l \
          LEFT JOIN channel_tasks t ON t.list_id = l.id \
          WHERE l.owner_id = $1 \
-         GROUP BY l.id, l.title, l.created_at \
+         GROUP BY l.id, l.title, l.created_at, l.updated_at \
          ORDER BY l.is_self DESC, l.id ASC",
     )
     .bind(claims.sub)
@@ -1189,12 +1332,13 @@ pub async fn list_task_lists(
     match rows {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|(id, title, created_at, total, done)| TaskListResponse {
+                .map(|(id, title, created_at, total, done, updated_at)| TaskListResponse {
                     id,
                     title,
                     created_at,
                     total_tasks: total,
                     completed_tasks: done,
+                    updated_at,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1224,21 +1368,23 @@ pub async fn create_task_list(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Title too long").into_response();
     }
 
-    let row: Result<(i64, String, String), _> = sqlx::query_as(
-        "INSERT INTO task_lists (owner_id, title) VALUES ($1, $2) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at",
-    )
-    .bind(claims.sub)
-    .bind(title)
-    .fetch_one(&state.pool)
-    .await;
+    let sql = format!(
+        "INSERT INTO task_lists (owner_id, title) VALUES ($1, $2) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, {LIST_UPDATED_AT}"
+    );
+    let row: Result<(i64, String, String, String), _> = sqlx::query_as(&sql)
+        .bind(claims.sub)
+        .bind(title)
+        .fetch_one(&state.pool)
+        .await;
 
     match row {
-        Ok((id, title, created_at)) => Json(TaskListResponse {
+        Ok((id, title, created_at, updated_at)) => Json(TaskListResponse {
             id,
             title,
             created_at,
             total_tasks: 0,
             completed_tasks: 0,
+            updated_at,
         })
         .into_response(),
         Err(e) => {
@@ -1261,10 +1407,11 @@ pub async fn get_self_checklist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
+    let select_self = format!(
+        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, {LIST_UPDATED_AT} FROM task_lists WHERE owner_id = $1 AND is_self = TRUE"
+    );
     // Try to fetch the existing one first.
-    let existing: Option<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at FROM task_lists WHERE owner_id = $1 AND is_self = TRUE",
-    )
+    let existing: Option<(i64, String, String, String)> = sqlx::query_as(&select_self)
     .bind(claims.sub)
     .fetch_optional(&state.pool)
     .await
@@ -1284,16 +1431,14 @@ pub async fn get_self_checklist(
         .bind(claims.sub)
         .execute(&state.pool)
         .await;
-        sqlx::query_as(
-            "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at FROM task_lists WHERE owner_id = $1 AND is_self = TRUE",
-        )
-        .bind(claims.sub)
-        .fetch_one(&state.pool)
-        .await
+        sqlx::query_as(&select_self)
+            .bind(claims.sub)
+            .fetch_one(&state.pool)
+            .await
     };
 
     match row {
-        Ok((id, title, created_at)) => {
+        Ok((id, title, created_at, updated_at)) => {
             let counts: (i64, i64) = sqlx::query_as(
                 "SELECT COUNT(*), COUNT(*) FILTER (WHERE is_completed) FROM channel_tasks WHERE list_id = $1",
             )
@@ -1307,6 +1452,7 @@ pub async fn get_self_checklist(
                 created_at,
                 total_tasks: counts.0,
                 completed_tasks: counts.1,
+                updated_at,
             })
             .into_response()
         }
@@ -1599,7 +1745,21 @@ pub struct TaskReminderResponse {
     pub channel_id: Option<i64>,
     pub list_id: Option<i64>,
     pub due_at: String,
+    /// The task's creator: a checklist item's sealed snooze/schedule bind it
+    /// into their AAD, so the client needs it to open them.
+    pub created_by: i64,
+    /// Sealed; the reminder loop opens it to find a scheduled item's next
+    /// alert after this one fires.
+    pub schedule: Option<String>,
+    /// Sealed {forDue, until}; the effective reminder time when it matches.
+    pub snooze: Option<String>,
 }
+
+/// Newest overdue reminders kept in the feed, and upcoming ones. Split so a
+/// pile of never-ticked past items cannot starve every future reminder out of
+/// one ORDER BY due_at ASC LIMIT (a calendar makes such piles likely).
+const REMINDERS_PAST_LIMIT: i64 = 100;
+const REMINDERS_FUTURE_LIMIT: i64 = 400;
 
 /// GET /task-reminders — every OPEN task with a due time that this user
 /// should be reminded about: tasks in their own personal lists, plus channel
@@ -1617,23 +1777,32 @@ pub async fn list_task_reminders(
 ) -> impl IntoResponse {
     // Two UNION arms so each side has its own per-caller index path (see
     // migration 048); a single OR would force a scan over everyone's due rows.
-    let rows: Result<Vec<(i64, Option<i64>, Option<i64>, String)>, _> = sqlx::query_as(
-        "SELECT u.id, u.channel_id, u.list_id, \
-                (replace((u.due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at \
-         FROM ( \
-             SELECT t.id, t.channel_id, t.list_id, t.due_at \
+    #[allow(clippy::type_complexity)]
+    let rows: Result<Vec<(i64, Option<i64>, Option<i64>, String, i64, Option<String>, Option<String>)>, _> = sqlx::query_as(
+        "WITH mine AS ( \
+             SELECT t.id, t.channel_id, t.list_id, t.due_at, t.created_by, t.schedule, t.snooze \
              FROM channel_tasks t \
              JOIN task_lists l ON l.id = t.list_id AND l.owner_id = $1 \
              WHERE t.due_at IS NOT NULL AND t.is_completed = FALSE \
              UNION ALL \
-             SELECT t.id, t.channel_id, t.list_id, t.due_at \
+             SELECT t.id, t.channel_id, t.list_id, t.due_at, t.created_by, t.schedule, t.snooze \
              FROM channel_tasks t \
              WHERE t.created_by = $1 AND t.channel_id IS NOT NULL \
                AND t.due_at IS NOT NULL AND t.is_completed = FALSE \
-         ) u \
-         ORDER BY u.due_at ASC LIMIT 500",
+         ), past AS ( \
+             SELECT * FROM mine WHERE due_at <= NOW() ORDER BY due_at DESC, id DESC LIMIT $2 \
+         ), future AS ( \
+             SELECT * FROM mine WHERE due_at > NOW() ORDER BY due_at ASC, id ASC LIMIT $3 \
+         ) \
+         SELECT u.id, u.channel_id, u.list_id, \
+                (replace((u.due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, \
+                u.created_by, u.schedule, u.snooze \
+         FROM (SELECT * FROM past UNION ALL SELECT * FROM future) u \
+         ORDER BY u.due_at ASC, u.id ASC",
     )
     .bind(claims.sub)
+    .bind(REMINDERS_PAST_LIMIT)
+    .bind(REMINDERS_FUTURE_LIMIT)
     .fetch_all(&state.pool)
     .await;
 
@@ -1654,7 +1823,7 @@ pub async fn list_task_reminders(
     // channel that can't be resolved yields no reminders.
     let mut channel_visible: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
-    for (id, channel_id, list_id, due_at) in rows {
+    for (id, channel_id, list_id, due_at, created_by, schedule, snooze) in rows {
         if let Some(cid) = channel_id {
             let visible = match channel_visible.get(&cid) {
                 Some(v) => *v,
@@ -1673,6 +1842,9 @@ pub async fn list_task_reminders(
             channel_id,
             list_id,
             due_at,
+            created_by,
+            schedule,
+            snooze,
         });
     }
     Json(out).into_response()

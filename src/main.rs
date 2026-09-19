@@ -46,6 +46,7 @@ mod sfu;
 mod signaling;
 mod state;
 mod task_handlers;
+mod task_timing;
 mod update_routes;
 mod upload_handlers;
 mod wake;
@@ -616,6 +617,8 @@ async fn main() -> anyhow::Result<()> {
             "/task-tab-prefs",
             axum::routing::put(task_handlers::put_tab_prefs),
         )
+        // Which task-timing fields this server stores (schedule, snooze, ...)
+        .route("/task-features", get(task_timing::task_features))
         // Due-time reminders (ids + times only; content stays E2EE)
         .route(
             "/task-reminders",
