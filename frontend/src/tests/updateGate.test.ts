@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, shouldApplyOtaVersion, sameVersion, bundleLabelDisagrees } from '../components/updateGate.utils';
+import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, otaChannelMatches, shouldApplyOtaVersion, sameVersion, bundleLabelDisagrees } from '../components/updateGate.utils';
 
 describe('OTA anti-rollback compares against the running BYTES (0.9.810 audit, C-04)', () => {
     // The plugin's bundle.version is whatever the manifest SAID. Recording it
@@ -131,5 +131,36 @@ describe('OTA build-variant gate (bundleVariantMatches)', () => {
         expect(bundleVariantMatches('beta', false)).toBe(false);
         expect(bundleVariantMatches('beta', true)).toBe(false);
         expect(bundleVariantMatches('', false)).toBe(false);
+    });
+});
+
+describe('OTA channel gate (otaChannelMatches) — Púca Notes is a different app, not a variant', () => {
+    // The server that predates the notes manifest answers ?variant=notes with
+    // Púca's FULL manifest (untagged, or tagged "full"). Accepting that would
+    // install Púca into the Notes app; Púca's own entry point then blesses it
+    // with notifyAppReady, so Capgo would never roll it back.
+    it('notes accepts exactly "notes"', () => {
+        expect(otaChannelMatches('notes', 'notes')).toBe(true);
+    });
+
+    it.each([undefined, null, 'full', 'lite', 'Notes', 'notes ', '', 'notes2'])(
+        'notes REFUSES %j (absent does NOT mean notes)', (v) => {
+            expect(otaChannelMatches(v as string | null | undefined, 'notes')).toBe(false);
+        },
+    );
+
+    it('full and lite refuse a notes manifest', () => {
+        expect(otaChannelMatches('notes', 'full')).toBe(false);
+        expect(otaChannelMatches('notes', 'lite')).toBe(false);
+        expect(bundleVariantMatches('notes', true)).toBe(false);
+        expect(bundleVariantMatches('notes', false)).toBe(false);
+    });
+
+    it('full and lite keep their rule: absent means full (positive control for the wrapper)', () => {
+        expect(otaChannelMatches(undefined, 'full')).toBe(true);
+        expect(otaChannelMatches(null, 'full')).toBe(true);
+        expect(otaChannelMatches(undefined, 'lite')).toBe(false);
+        expect(otaChannelMatches('lite', 'lite')).toBe(true);
+        expect(otaChannelMatches('full', 'full')).toBe(true);
     });
 });

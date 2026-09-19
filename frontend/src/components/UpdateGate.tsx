@@ -20,8 +20,8 @@
 
 import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { isTauri, RC_ENABLED } from '../api/platform';
-import { isNewerVersion, isTrustedBundleUrl, bundleVariantMatches, shouldAutoInstallOnLaunch, shouldApplyOtaVersion, bundleLabelDisagrees, AUTO_ATTEMPT_KEY } from './updateGate.utils';
-import { updateCheckBases } from '../api/updateCheckBases';
+import { isNewerVersion, shouldAutoInstallOnLaunch, AUTO_ATTEMPT_KEY } from './updateGate.utils';
+import { runCapacitorOta, CHECKING_DEADLINE_MS, DOWNLOAD_STALL_MS, type OtaUiState } from '../api/mobileOta';
 import { checkForNewVersion, currentAppVersion, installUpdateInPlace, UpdateAbandonedError } from '../api/appVersion';
 import { loadSettings } from './settingsStore';
 import { CrownIcon, DownloadIcon, CheckCircleIcon, WarningIcon } from './Icons';
@@ -31,45 +31,17 @@ interface UpdateGateProps {
     children: ReactNode;
 }
 
-/** Per-base bound on the update-check fetch. Without one, a HUNG connection
- *  (stalled TLS, captive portal, mid-handover radio — normal phone states)
- *  held the gate forever, and worse: the fallback-base loop only advances on
- *  a THROW, so a hung PRIMARY meant the hardcoded production fallback — the
- *  whole 0.8.24/25 self-healing mechanism — was never even tried. */
-const CHECK_FETCH_TIMEOUT_MS = 8_000;
-/** Hard deadline on the whole CHECK phase. The gate's one invariant: it may
- *  delay the app, it may never hold it — past this, we continue on the
- *  bundle we already have and let the next launch try again. */
-const CHECKING_DEADLINE_MS = 15_000;
-/** A download whose progress hasn't ADVANCED for this long is stalled. Real
- *  downloads on slow links can legitimately take minutes — bounding total
- *  time would break them; bounding silence doesn't. */
-const DOWNLOAD_STALL_MS = 45_000;
+// CHECKING_DEADLINE_MS and DOWNLOAD_STALL_MS (and the per-fetch bound the
+// mobile check uses) live in api/mobileOta.ts beside the engine they bound;
+// the desktop branch below applies the same two.
+
 /** Desktop only. The NSIS installer normally kills this process and relaunches
  *  the app; if it ever resolves and we are still alive, the "Restarting…"
  *  screen must not become a permanent hold. */
 const RESTART_GRACE_MS = 30_000;
 
-/** fetch bounded by an AbortController (AbortSignal.timeout is missing from
- *  some WebViews and from the test runtime). */
-async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), ms);
-    try {
-        return await fetch(url, { signal: ctrl.signal });
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
-type UpdateStatus = 'checking' | 'downloading' | 'ready' | 'error' | 'upToDate';
-
-interface UpdateState {
-    status: UpdateStatus;
-    progress: number;
-    version: string | null;
-    error: string | null;
-}
+/** The screen's state — the same shape the shared mobile engine drives. */
+type UpdateState = OtaUiState;
 
 export function UpdateGate({ children }: UpdateGateProps) {
     const [state, setState] = useState<UpdateState>({
@@ -272,288 +244,20 @@ export function UpdateGate({ children }: UpdateGateProps) {
     }
 
     async function checkCapacitorUpdates() {
-        const { CapacitorUpdater } = await import('@capgo/capacitor-updater');
-
-        // The gate's invariant: it may DELAY the app, it may never HOLD it.
-        // Whatever phase 1 is stuck in when this fires — a native call that
-        // never answers, a fetch a stalled connection keeps open — the app
-        // proceeds on the bundle it already has. `gaveUp` makes the stuck
-        // work a no-op if it ever does finish.
-        const gaveUp = { value: false };
-        const checkingDeadline = setTimeout(() => {
-            gaveUp.value = true;
-            console.warn('[UpdateGate] check exceeded its deadline — continuing on the current bundle');
-            setState(s => (s.status === 'checking' ? { ...s, status: 'upToDate' } : s));
-        }, CHECKING_DEADLINE_MS);
-
-        // Phase 1 — the CHECK. Any failure here (offline, server down, bad
-        // response) is non-fatal: keep the current bundle and load the app.
-        let updateInfo: {
-            version?: string; url?: string; checksum?: string; sessionKey?: string;
-            /** Which build this bundle is for. Absent means the full build,
-             *  because every manifest published before lite existed omits it. */
-            variant?: string;
-        };
-        let currentVersion: string;
-        /** Running the bundle baked into the APK (no OTA has applied). */
-        let runningBuiltin = true;
-        /** The update-check base that actually answered — the only base the
-         *  bundle URL may be trusted against. '' until one answers. */
-        let answeringBase = '';
-        try {
-            // Blessed at the entry point too (main.tsx — see the comment
-            // there: the native appReadyTimeout rollback must not wait for
-            // this component). Idempotent, kept for the retry path.
-            await CapacitorUpdater.notifyAppReady();
-            const currentBundle = await CapacitorUpdater.current();
-            const bundleLabel = currentBundle?.bundle?.version || '';
-            // The builtin bundle is identified by its ID, never by the version
-            // label: the plugin also reports the literal "builtin" as the
-            // version of any bundle whose stored version is null (BundleInfo's
-            // getVersionName fallback), so keying on the label would treat an
-            // OTA bundle with lost metadata as the APK's own. An unexpected
-            // shape (no id) therefore reads as NOT builtin, which fails closed:
-            // only a strictly newer manifest applies.
-            runningBuiltin = currentBundle?.bundle?.id === 'builtin';
-            // The version the running BYTES were built as — never the label the
-            // manifest gave them. The plugin's `bundle.version` is whatever the
-            // manifest said, and the manifest is unsigned: recording it as "what
-            // I am running" meant one mislabelled manifest (a replayed old bundle
-            // under a higher number, or a typo in dual-ship.sh) made every genuine
-            // later release read as "<= current" until an APK reinstall
-            // (0.9.810 audit, C-04). See shouldApplyOtaVersion for what this
-            // does and does not buy.
-            currentVersion = __APP_VERSION__;
-            if (bundleLabelDisagrees(bundleLabel, __APP_VERSION__)) {
-                console.error(
-                    `[UpdateGate] MISLABELLED OTA: the running bundle was labelled ${bundleLabel} by its manifest `
-                    + `but was built as ${__APP_VERSION__}. A replayed or mistyped manifest; comparing future `
-                    + 'updates against the bytes, not the label.',
-                );
-            }
-            console.log('[UpdateGate] Running', currentVersion, runningBuiltin ? '(APK builtin bundle)' : `(OTA bundle labelled ${bundleLabel})`);
-
-            // Configured base first, then the hardcoded production fallback: a
-            // bundle built without .env.production points at localhost and
-            // would otherwise NEVER see the fixed OTA (the 0.8.24/25
-            // stranding — notifyAppReady above already blessed the broken
-            // bundle, so Capgo won't roll back either). Safe here because the
-            // bundle is RSA-verified against the key baked into the APK.
-            // Each attempt is TIME-BOUND: an abort advances the loop exactly
-            // like a refusal, so a hung base can no longer mask the fallback.
-            const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-            let checkResponse: Response | null = null;
-            for (const base of updateCheckBases(API_BASE)) {
-                try {
-                    // The OTA pushes a JS BUNDLE into an installed APK, so a
-                    // lite install served the full manifest would receive the
-                    // whole remote-control frontend over the air and the
-                    // guarantee would evaporate after shipping. Ask for this
-                    // build's channel; the refusal below is what enforces it,
-                    // since an older server ignores the parameter.
-                    const checkUrl = `${base}/api/mobile-updates/check`
-                        + (RC_ENABLED ? '' : '?variant=lite');
-                    const res = await fetchWithTimeout(checkUrl, CHECK_FETCH_TIMEOUT_MS);
-                    // A 404 (nothing published) or 204 is a real answer from a
-                    // server that serves this route, and it is final. Any OTHER
-                    // non-2xx means whatever answered is not serving manifests
-                    // — a proxy's 502, an origin lock's 403, or, in the exact
-                    // mis-build this loop exists for, whatever happens to be
-                    // listening on localhost:3000 — so it must not end the
-                    // search: treat it like an unreachable base and move on.
-                    if (!res.ok && res.status !== 404 && res.status !== 204) {
-                        console.warn(`[UpdateGate] check via ${base} answered ${res.status} — trying the next base`);
-                        continue;
-                    }
-                    checkResponse = res;
-                    // The base that ANSWERED is the one the bundle URL is held
-                    // against below. Holding it against the configured base
-                    // instead refused every manifest the fallback ever fetched:
-                    // the fallback only runs when the configured base is wrong
-                    // or absent, and an absent base fails the trust check
-                    // closed — so the recovery path could fetch a manifest and
-                    // then never apply it.
-                    answeringBase = base;
-                    break;
-                } catch (err) {
-                    console.warn(`[UpdateGate] check via ${base} unreachable:`, err);
-                }
-            }
-            if (!checkResponse || !checkResponse.ok) {
-                setState(s => ({ ...s, status: 'upToDate' }));
-                return;
-            }
-            updateInfo = await checkResponse.json();
-        } catch (error) {
-            console.warn('[UpdateGate] Update check failed (continuing on current bundle):', error);
-            setState(s => ({ ...s, status: 'upToDate' }));
-            return;
-        } finally {
-            clearTimeout(checkingDeadline);
-        }
-
-        // The deadline already waved the app through — applying an update
-        // UNDER the running app now would yank a live session through a
-        // reload. The next launch gets a fresh, faster attempt.
-        if (gaveUp.value) return;
-
-        if (!updateInfo || !updateInfo.url || !updateInfo.version) {
-            setState(s => ({ ...s, status: 'upToDate' }));
-            return;
-        }
-
-        // VARIANT MUST MATCH, and this is checked CLIENT-SIDE on purpose.
-        //
-        // Requesting ?variant=lite protects nothing by itself: a server that
-        // predates lite ignores the parameter and answers with the ordinary
-        // manifest, which would install the full remote-control bundle into a
-        // lite app. So the client refuses anything that is not its own variant.
-        //
-        // Absent means FULL — every manifest published before lite existed has
-        // no variant field, and those are full bundles. That asymmetry is why
-        // the comparison is written against the expected value rather than by
-        // testing for the string 'lite'.
-        if (!bundleVariantMatches(updateInfo.variant, RC_ENABLED)) {
-            console.warn(
-                `[UpdateGate] Refusing a "${updateInfo.variant ?? 'full'}" bundle: this is the `
-                + `"${RC_ENABLED ? 'full' : 'lite'}" build. Publish a matching manifest for this channel.`,
-            );
-            setState(s => ({ ...s, status: 'upToDate' }));
-            return;
-        }
-
-        // Anti-rollback against the RUNNING BYTES' own version: strictly newer,
-        // or the same version when we are still on the APK's builtin bundle.
-        // The Capgo signature authenticates the bundle bytes but NOT the
-        // advertised version, so a lower-numbered manifest must never apply;
-        // and the previous 'builtin' placeholder parsed as the oldest version
-        // of all, so a fresh install accepted ANY signed bundle, however old.
-        if (!shouldApplyOtaVersion(updateInfo.version, currentVersion, runningBuiltin)) {
-            console.log('[UpdateGate] Manifest version', updateInfo.version, 'is not newer than the running build', currentVersion, '- not applying');
-            setState(s => ({ ...s, status: 'upToDate' }));
-            return;
-        }
-
-        // The bundle URL must be HTTPS and on the same site as the base that
-        // answered the check — never follow a manifest that points the download
-        // at an arbitrary/plaintext host. The same-site rule still means
-        // something with the fallback: that base is operator-set build-time
-        // config, not something the manifest chose. Only the answering base
-        // is passed, never a default: an unknown base fails closed in
-        // isTrustedBundleUrl, and that branch is right for a base nobody
-        // configured.
-        if (!isTrustedBundleUrl(updateInfo.url, answeringBase)) {
-            console.error(`[UpdateGate] Refusing untrusted bundle URL ${updateInfo.url} (manifest came from ${answeringBase || 'an unknown base'})`);
-            setState(s => ({ ...s, status: 'upToDate' }));
-            return;
-        }
-
-        // SIGNATURE IS MANDATORY. Our capacitor.config ships an updater
-        // publicKey, so every legitimate bundle is AES-encrypted with an
-        // RSA-wrapped session key AND carries an RSA-signed SHA-256. The Capgo
-        // plugin only RUNS the RSA checksum verification inside its `sessionKey`
-        // branch (CapgoUpdater.download): a manifest that supplies a plain
-        // checksum and OMITS sessionKey is installed with NO signature check at
-        // all. A compromised/malicious manifest server could exploit that to
-        // ship an UNSIGNED bundle — remote code execution on every client. So
-        // refuse to download unless BOTH the RSA-wrapped session key and the
-        // signed checksum are present, and forward them UNCONDITIONALLY below so
-        // the plugin can only ever take its verifying path. Our release pipeline
-        // (dual-ship.sh) always emits both; a manifest lacking either is not one
-        // we produced.
-        if (!updateInfo.sessionKey || !updateInfo.checksum) {
-            console.error('[UpdateGate] Refusing UNSIGNED OTA bundle — missing sessionKey/checksum');
-            setState(s => ({ ...s, status: 'upToDate' }));
-            return;
-        }
-
-        // Phase 2 — the APPLY. A failure here means an update WAS advertised but
-        // couldn't be downloaded/verified/installed. Unlike a check failure this
-        // is surfaced (not silently swallowed): most commonly it's an old APK
-        // that lacks the signing key and can't consume signed bundles — which
-        // only a reinstall fixes. The app still loads via "Continue Anyway".
-        let dlListener: { remove: () => Promise<void> } | undefined;
-        // Silence detector, not a total-time cap: a slow link may legitimately
-        // take minutes, but its progress events keep arriving. A transfer
-        // whose LAST advance is DOWNLOAD_STALL_MS ago is wedged, and without
-        // this it pinned the gate at N% forever with no control on screen.
-        let lastAdvanceAt = Date.now();
-        let lastPct = -1;
-        let stalled = false;
-        const stallWatchdog = setInterval(() => {
-            if (Date.now() - lastAdvanceAt < DOWNLOAD_STALL_MS) return;
-            stalled = true;
-            clearInterval(stallWatchdog);
-            console.error('[UpdateGate] download stalled — surfacing instead of holding the gate');
-            setState(s => ({
-                ...s,
-                status: 'error',
-                error: 'The update download stalled. Check your connection and retry, or continue on the current version — the update will be offered again next launch.',
-            }));
-        }, 5_000);
-        try {
-            console.log('[UpdateGate] Updating from', currentVersion, 'to', updateInfo.version);
-            setState(s => ({ ...s, status: 'downloading', version: updateInfo.version!, progress: 0 }));
-
-            // Reflect real download progress on the screen — without a listener the
-            // bar sits at 0% for the whole download.
-            dlListener = await CapacitorUpdater.addListener('download', (info: { percent?: number }) => {
-                if (typeof info.percent === 'number') {
-                    const pct = Math.min(100, Math.max(0, Math.round(info.percent)));
-                    if (pct > lastPct) {
-                        lastPct = pct;
-                        lastAdvanceAt = Date.now();
-                    }
-                    setState(s => ({ ...s, progress: pct }));
-                }
-            });
-
-            // Authenticated OTA: with an embedded public key (capacitor.config),
-            // bundles are AES-encrypted and the SHA-256 is RSA-signed off-server.
-            // `sessionKey` carries the (RSA-wrapped) AES key + IV so the plugin
-            // decrypts; `checksum` is the RSA-signed hash it verifies against the
-            // decrypted zip. Both are guaranteed present by the mandatory-signature
-            // gate above and are forwarded UNCONDITIONALLY, so the plugin always
-            // takes its verifying path — a forged/tampered/unsigned bundle fails
-            // → throws here → surfaced below.
-            const result = await CapacitorUpdater.download({
-                url: updateInfo.url,
-                version: updateInfo.version,
-                checksum: updateInfo.checksum,
-                sessionKey: updateInfo.sessionKey,
-            });
-
-            // The watchdog already handed control to the user — a completion
-            // arriving AFTER that must not yank whatever they chose into a
-            // surprise reload. The bundle is on disk; the next launch's check
-            // applies it in a fraction of the time.
-            if (stalled) return;
-
-            if (result && result.version) {
-                // Visible truth while the native side swaps bundles: without
-                // this the bar just froze at 100% until the reload landed.
-                setState(s => ({ ...s, status: 'ready' }));
-                await CapacitorUpdater.set(result); // reloads into the new bundle
-            } else {
-                setState(s => ({ ...s, status: 'upToDate' }));
-            }
-        } catch (error) {
-            if (stalled) return; // the stall UI is already up; keep its message
-            console.error('[UpdateGate] Update download/verify/apply failed:', error);
-            setState(s => ({
-                ...s,
-                status: 'error',
-                // Name the real cause. "Reinstall to get the latest signed
-                // version" was the previous advice, and it cannot help: the
-                // public key is baked into the APK, so reinstalling the SAME
-                // APK reinstalls the same key. Only an APK built for this
-                // server (whose key matches what it publishes) updates again.
-                error: 'This update could not be verified or installed. Púca only applies updates signed with the key built into this app, so this usually means the server is publishing bundles signed with a different key — or the download was corrupted. Retry once; if it keeps happening, an APK built for this server (from its download page) will update again, while reinstalling this same APK will not.',
-            }));
-        } finally {
-            clearInterval(stallWatchdog);
-            await dlListener?.remove();
-        }
+        // The engine lives in api/mobileOta.ts, shared with Púca Notes' own
+        // gate; this component stays Púca's view of it. The channel decides
+        // the query string (?variant=lite for lite) and which manifest tag is
+        // accepted — absent means full, as it always has.
+        await runCapacitorOta({
+            channel: RC_ENABLED ? 'full' : 'lite',
+            setState,
+            // Name the real cause. "Reinstall to get the latest signed
+            // version" was the previous advice, and it cannot help: the
+            // public key is baked into the APK, so reinstalling the SAME
+            // APK reinstalls the same key. Only an APK built for this
+            // server (whose key matches what it publishes) updates again.
+            verifyFailedMessage: 'This update could not be verified or installed. Púca only applies updates signed with the key built into this app, so this usually means the server is publishing bundles signed with a different key — or the download was corrupted. Retry once; if it keeps happening, an APK built for this server (from its download page) will update again, while reinstalling this same APK will not.',
+        });
     }
 
     function retry() {
