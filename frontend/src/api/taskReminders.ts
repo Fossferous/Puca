@@ -61,6 +61,42 @@ export function planReminders(
     return { toFire, nextDueAt, prunedFired };
 }
 
+/**
+ * One reminder as a native alarm engine sees it — the contract Púca Notes'
+ * Android app (NotesNative.syncReminders) and the task-timing work share:
+ * `at` is the EFFECTIVE fire time in epoch ms (snooze included once it
+ * exists), `mark` changes whenever the item must fire again, and `due` is the
+ * server's raw due_at, so a background refresh can tell "unchanged" from
+ * "moved on another device". Ids and times only — never content.
+ */
+export interface ReminderEntry {
+    id: number;
+    at: number;
+    mark: string;
+    due?: string;
+}
+
+/** The feed as ReminderEntry[]; rows with an unreadable time are dropped. */
+export function reminderEntries(reminders: TaskReminder[]): ReminderEntry[] {
+    const out: ReminderEntry[] = [];
+    for (const r of reminders) {
+        const at = parseServerTimestamp(r.due_at);
+        if (!Number.isFinite(at)) continue;
+        out.push({ id: r.id, at, mark: r.due_at, due: r.due_at });
+    }
+    return out;
+}
+
+/** Options for a caller that fires reminders some other way (Púca Notes'
+ *  native alarms). Omitted, the loop behaves exactly as it always has. */
+export interface TaskReminderOptions {
+    /** false: never post a notification from here (and keep no fired
+     *  markers) — something else owns firing. Default true. */
+    notify?: boolean;
+    /** Every successful fetch, as entries. Errors thrown here are swallowed. */
+    onFeed?: (entries: ReminderEntry[]) => void;
+}
+
 function loadFired(): Record<string, string> {
     try {
         const parsed: unknown = JSON.parse(localStorage.getItem(FIRED_KEY) ?? '{}');
@@ -94,7 +130,7 @@ export function pokeTaskReminders(): void {
  * owning effect's cleanup. Failures (old backend without the endpoint,
  * offline) are silent — reminders simply don't fire until it works.
  */
-export function startTaskReminders(): () => void {
+export function startTaskReminders(opts: TaskReminderOptions = {}): () => void {
     if (running) return () => {};
     running = true;
     let stopped = false;
@@ -109,9 +145,15 @@ export function startTaskReminders(): () => void {
             return; // old backend / offline — the poll will try again
         }
         if (stopped) return;
-        const plan = planReminders(reminders, loadFired(), Date.now());
-        saveFired(plan.prunedFired);
-        if (plan.toFire.length > 0) notifyTasksDue(plan.toFire.length);
+        if (opts.onFeed) {
+            try { opts.onFeed(reminderEntries(reminders)); } catch { /* the loop must outlive a bad consumer */ }
+        }
+        const notify = opts.notify !== false;
+        const plan = planReminders(reminders, notify ? loadFired() : {}, Date.now());
+        if (notify) {
+            saveFired(plan.prunedFired);
+            if (plan.toFire.length > 0) notifyTasksDue(plan.toFire.length);
+        }
         if (dueTimer !== null) window.clearTimeout(dueTimer);
         if (plan.nextDueAt !== null) {
             const wait = Math.min(Math.max(plan.nextDueAt - Date.now(), 0) + 500, MAX_TIMEOUT_MS);

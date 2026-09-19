@@ -676,6 +676,21 @@
     font-size: 13px;
 }
 .notes-menu-sep { height: 1px; background: var(--border-faint); margin: 4px 0; }
+/* Android app only: location reminders in the account menu (notes/native/). */
+.notes-menu-location { max-width: 300px; }
+.notes-menu-hint { margin: 0 10px 6px; font-size: 12px; line-height: 1.4; color: var(--text-muted); }
+.notes-menu-hint.warn { color: var(--text-warning); }
+.notes-link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text-link);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.notes-link-btn:disabled { color: var(--text-faint); text-decoration: none; cursor: default; }
+.notes-reminder-when .svrn-icon { vertical-align: -2px; }
 
 /* ---------- Editor (modal on desktop) ----------------------------------------- */
 .notes-editor-backdrop {

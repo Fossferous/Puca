@@ -18,11 +18,15 @@ import { NotesLogin } from './components/NotesLogin';
 import { NotesShell } from './components/NotesShell';
 import { invalidateNotesPrefs } from './model/notesPrefs';
 import { notesKeys } from './model/notesQueries';
+import { NativeTokenGate } from './native/NativeTokenGate';
+import { useNotesNativeSession } from './native/useNotesNativeSession';
 
 export function NotesApp() {
     return (
         <HashRouter>
-            <SessionGate />
+            <NativeTokenGate>
+                <SessionGate />
+            </NativeTokenGate>
         </HashRouter>
     );
 }
@@ -31,6 +35,8 @@ function SessionGate() {
     const navigate = useNavigate();
     const qc = useQueryClient();
     const [signedIn, setSignedIn] = useState(isAuthenticated());
+    // Android app: every way out of the session clears the native side too.
+    useNotesNativeSession(signedIn);
 
     /** Land on the login screen without touching the keys (App.tsx's rule:
      *  a re-authentication must never risk the E2EE identity). */

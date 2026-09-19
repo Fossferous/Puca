@@ -29,8 +29,7 @@ import {
     mobileBatteryStatus, mobileNotificationStatus, openMobileNotificationSettings,
     requestIgnoreBatteryOptimizations, requestMobileNotificationPermission,
 } from '../api/mobileApp';
-import { requestBackgroundLocation, requestForegroundLocation } from '../api/mobileLocation';
-import { clearAllPlaces, listPlaces, syncTaskPlacesToNative } from '../api/taskPlaces';
+import { clearAllPlaces, listPlaces, requestLocationReminderPermissions } from '../api/taskPlaces';
 import {
     CheckIcon, CloseIcon, GlobeIcon, HeadphonesIcon, HeartIcon, Icon, LogoutIcon,
     MicIcon, PlayIcon, RecordIcon, StopIcon, TrashIcon, WarningIcon,
@@ -2194,20 +2193,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 // into "stored off", unrecoverable from this UI.
                                                 updateSetting('locationReminders', e.target.checked);
                                                 if (e.target.checked) {
-                                                    // Two-step by Android's rule: foreground first;
-                                                    // background is a separate ask that bounces
-                                                    // through the system settings page on 11+.
-                                                    void (async () => {
-                                                        const fg = await requestForegroundLocation();
-                                                        if (fg) await requestBackgroundLocation();
-                                                        // FORCED: the settingsChanged listener already
-                                                        // synced this exact fence set while the
-                                                        // permission dialog was still up, so a plain
-                                                        // sync would dedupe to nothing — and the
-                                                        // service would keep running under its
-                                                        // pre-grant FGS type with no location watch.
-                                                        void syncTaskPlacesToNative({ force: true });
-                                                    })();
+                                                    // Two-step ask + forced re-sync, shared with
+                                                    // Púca Notes (api/taskPlaces.ts has why).
+                                                    void requestLocationReminderPermissions();
                                                 }
                                                 // The settingsChanged listener (main.tsx) reconciles
                                                 // the native fence set for the off path too.
