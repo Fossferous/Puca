@@ -65,6 +65,43 @@ describe('auth expiry signalling', () => {
         expect(events).toBe(0); // 403 = permission denial, not expiry
     });
 
+    it('does NOT signal when the token was replaced while the request was out (the resume race)', async () => {
+        // Púca Notes resumed after a day: a refetch left with the stale token,
+        // then adoptOnResume stored the job's renewed one. The stale request's
+        // 401 is about the OLD token; expiring here signed the user out and
+        // cleared the renewed token too.
+        const stale = jwt({ sub: 1, exp: 0 });
+        const renewed = jwt({ sub: 1, exp: 9999999999 });
+        let current = stale;
+        vi.mocked(window.localStorage.getItem).mockImplementation(
+            (key: string) => (key === 'auth_token' ? current : null),
+        );
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            current = renewed; // adopted while the request was in flight
+            return new Response('Invalid token', { status: 401 });
+        }));
+
+        await Promise.allSettled([apiClient.get('/task-reminders')]);
+
+        expect(events).toBe(0);
+    });
+
+    it('DOES signal when the token the 401 was for is still the current one (control)', async () => {
+        const token = jwt({ sub: 1, exp: 9999999999 });
+        let current = token;
+        vi.mocked(window.localStorage.getItem).mockImplementation(
+            (key: string) => (key === 'auth_token' ? current : null),
+        );
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            current = token; // same shape as above, token unchanged
+            return new Response('Invalid token', { status: 401 });
+        }));
+
+        await Promise.allSettled([apiClient.get('/task-reminders')]);
+
+        expect(events).toBe(1);
+    });
+
     it('re-arms after resetAuthExpiredFlag (next expiry signals again)', async () => {
         setStoredToken(jwt({ sub: 1, exp: 0 }));
         vi.stubGlobal('fetch', vi.fn(async () => new Response('Invalid token', { status: 401 })));

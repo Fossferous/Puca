@@ -165,6 +165,12 @@ export function startTaskEvents(o: TaskEventsOptions): { stop(): void; kick(): v
             return;
         }
         if (res.status === 401) {
+            // Refused the token this request CARRIED. If the page has a
+            // different one by now (a renewal adopted from Púca Notes'
+            // background job on resume), that is not the session ending:
+            // try again with it (api/client.ts applies the same rule).
+            const now = o.token();
+            if (now && now !== token) { schedule(0); return; }
             o.onUnauthorized?.();
             stopped = true;
             setState('stopped');
