@@ -284,8 +284,16 @@ for entry in "${HOSTS[@]}"; do
 	elif [ "${sw_nc:-0}" -gt 0 ]; then
 		printf 'PASS  %-22s /notes/sw.js is no-cache on %s\n' "notes worker cache" "$APP_HOST"
 	else
-		printf 'FAIL  %-22s /notes/sw.js on %s is cacheable (add the Cache-Control lines from deploy/webapp/README.md)\n' \
+		# The fix is spelled out here, because this line is what the operator
+		# is reading when it matters (deploy/webapp/README.md, step 3).
+		printf 'FAIL  %-22s /notes/sw.js on %s is cacheable. Fix, on EVERY host: add these two lines inside\n' \
 			"notes worker cache" "$APP_HOST"
+		printf '      the %s { ... } block of /etc/caddy/Caddyfile (next to file_server):\n' "$APP_HOST"
+		printf '          @notesSw path /notes/sw.js\n'
+		printf '          header @notesSw Cache-Control "no-cache"\n'
+		printf '      then: caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy\n'
+		printf '      and purge https://%s/notes/sw.js from the CDN cache (Cloudflare: Caching > Purge by URL);\n' "$APP_HOST"
+		printf '      a copy the edge already holds is served until it expires otherwise.\n'
 		FAILED+=("$label/notes-sw-cache")
 	fi
 

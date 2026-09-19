@@ -346,6 +346,8 @@ serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\ncache-contro
 out="$(versions)"
 check "FAILS a cacheable worker" "$(has "$out" 'FAIL  notes worker cache')" "$out"
 check "and counts it in the verdict" "$([ "$(has "$out" 'sandbox/notes-sw-cache')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+# The operator reads the FAIL line, not the README: it must carry the fix.
+check "and the FAIL carries the exact Caddy lines, the reload and the CDN purge" "$([ "$(has "$out" '@notesSw path /notes/sw.js')" = 1 ] && [ "$(has "$out" 'header @notesSw Cache-Control "no-cache"')" = 1 ] && [ "$(has "$out" 'systemctl reload caddy')" = 1 ] && [ "$(has "$out" 'purge https://app.invalid/notes/sw.js')" = 1 ] && echo 1 || echo 0)" "$out"
 serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\n'
 out="$(versions)"
 check "FAILS a worker with no Cache-Control at all" "$(has "$out" 'FAIL  notes worker cache')" "$out"

@@ -100,5 +100,14 @@ deployed here. The one-off exception is the release that introduced Púca Notes:
 re-apply the `try_files` line above once, or `/notes` and `/notes/` keep
 serving the main app (`/notes/index.html` works regardless). The release that
 introduced Notes' offline worker needs the two `@notesSw` lines above added
-once; `check-versions.sh` fails on `notes-sw-cache` until they are live (and
-reports INFO while the deployed webapp has no worker yet).
+once, on every host, inside the app block next to `file_server`:
+```
+    @notesSw path /notes/sw.js
+    header @notesSw Cache-Control "no-cache"
+```
+then `caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy`,
+and purge `https://app.example.com/notes/sw.js` from the CDN cache (Cloudflare:
+Caching > Purge by URL), or a copy the edge already holds is served until it
+expires. `check-versions.sh` fails on `notes-sw-cache` until they are live, and
+its FAIL line prints these same steps (it reports INFO while the deployed
+webapp has no worker yet).
