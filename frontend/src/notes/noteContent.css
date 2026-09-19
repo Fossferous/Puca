@@ -43,7 +43,16 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    /* The items below keep their room: long text or a tall
+       picture scrolls inside this region instead of pushing the item list
+       (and the footer) out of the dialog. dvh, not %: the dialog's height
+       is only a max-height, so a percentage here would resolve to nothing. */
+    flex-shrink: 0;
+    max-height: 40dvh;
+    overflow-y: auto;
 }
+.notes-editor-content .ni-open img { max-height: 200px; }
+.notes-editor-content .ni-grid.single .ni-open img { max-height: 220px; }
 .notes-editor-content .nb-text { font-size: 15px; }
 .notes-convert-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
@@ -183,6 +192,11 @@
 @media (pointer: coarse) and (max-width: 1024px) {
     .notes-quickadd-body { font-size: 16px; }
     .notes-editor-content .nb-text { font-size: 16px; }
+    /* A phone gives the note's own content more of the screen, and its
+       pictures less of that, so the text and the picture buttons stay in
+       view above the items. */
+    .notes-editor-content { max-height: 55dvh; }
+    .notes-editor-content .ni-open img, .notes-editor-content .ni-grid.single .ni-open img { max-height: 140px; }
     .notes-draw-backdrop { padding: 0; align-items: stretch; }
     .notes-draw {
         width: 100%;

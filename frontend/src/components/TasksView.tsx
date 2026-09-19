@@ -606,6 +606,16 @@ export function TasksView() {
         );
     };
 
+    // The trash rides at the end of the All-tasks board (inside its scroll,
+    // so on a phone it never sits under the bottom nav).
+    const trashSection = (
+        <TasksTrash
+            features={support.features}
+            trashed={support.trashed}
+            onRestored={l => setLists(prev => (prev.some(x => x.id === l.id) ? prev : [...prev, l]))}
+        />
+    );
+
     return (
         <div className="tasks-view-outer">
             {/* Tab bar: pinned All-tasks board, then every list + server
@@ -684,12 +694,14 @@ export function TasksView() {
                     <div className="tasks-editor-empty" {...contentSwipe}>
                         <div className="tasks-empty-icon"><FileTextIcon size={40} /></div>
                         <p>Create a list with New list, above — or make any text channel a checklist and it will show up here.</p>
+                        {trashSection}
                     </div>
                 ) : (
                     <div className="server-tasks-scroll tasks-all-scroll" {...contentSwipe}>
                         <div className="all-checklists-grid server-tasks-grid">
                             {orderedTabs.map(renderCard)}
                         </div>
+                        {trashSection}
                     </div>
                 )
             ) : selectedChannel ? (
@@ -784,14 +796,6 @@ export function TasksView() {
                     <div className="tasks-empty-icon"><FileTextIcon size={40} /></div>
                     <p>That checklist is gone. Pick another above.</p>
                 </div>
-            )}
-
-            {selected === null && !loading && (
-                <TasksTrash
-                    features={support.features}
-                    trashed={support.trashed}
-                    onRestored={l => setLists(prev => (prev.some(x => x.id === l.id) ? prev : [...prev, l]))}
-                />
             )}
 
             {contextMenu && (

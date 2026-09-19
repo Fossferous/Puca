@@ -127,7 +127,16 @@
 
 /* Púca's Tasks view: a list's note text and pictures (ListContentBlock.tsx)
    and the trash under the All-tasks board. */
-.list-content-block { display: flex; flex-direction: column; gap: 8px; padding: 0 12px 8px; }
+.list-content-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* The Tasks editor centres a 760px column; line up with its header and add row. */
+    width: 100%;
+    max-width: 760px;
+    box-sizing: border-box;
+    padding: 0 20px 8px;
+}
 .tasks-card-body {
     margin: 0 12px 6px;
     font-size: 13px;

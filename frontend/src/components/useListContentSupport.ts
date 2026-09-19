@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { type TaskList } from '../api/tasks';
 import { type ListFeatures, NO_LIST_FEATURES, fetchListFeatures, listTrashedTaskLists } from '../api/listContent';
 import { isUndecryptable } from '../api/decryptMarkers';
+import { heroItems } from '../api/noteMedia';
 
 export const listContentQueryKeys = {
     features: ['listContent', 'features'] as const,
@@ -24,10 +25,13 @@ export function useListContentSupport(): { features: ListFeatures; featuresKnown
     return { features, featuresKnown: f.isSuccess, trashEnabled, trashed, trashedKeys: new Set(trashed.map(l => `list:${l.id}`)) };
 }
 
-/** A short line for the All-tasks board card. */
+/** A short line for the All-tasks board card: the note's text, or — for a
+ *  picture-only note — how many pictures it holds (the board is a glance;
+ *  the list's own view shows them). */
 export function listBodySnippet(list: TaskList | undefined): string {
     const b = list?.body;
-    if (!b || isUndecryptable(b)) return '';
-    return b.length > 240 ? `${b.slice(0, 239)}…` : b;
+    if (b && !isUndecryptable(b)) return b.length > 240 ? `${b.slice(0, 239)}…` : b;
+    const pictures = heroItems(list?.attachments, Number.MAX_SAFE_INTEGER).length;
+    return pictures > 0 ? `${pictures} picture${pictures === 1 ? '' : 's'}` : '';
 }
 

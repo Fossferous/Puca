@@ -158,6 +158,14 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
 
     return (
         <div className="notes-editor-content">
+            {showBody && (
+                <NoteBodyField
+                    key={card.key}
+                    value={card.body}
+                    onSave={t => c.setBody(listId, t)}
+                    placeholder={tasks.length > 0 ? 'Add some text…' : 'Take a note…'}
+                />
+            )}
             {showImages && (
                 <NoteImages
                     opened={opened}
@@ -167,14 +175,6 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     onRemove={item => void remove(item)}
                     onDraw={item => void openDrawing(item)}
                     showCamera={!!coarse}
-                />
-            )}
-            {showBody && (
-                <NoteBodyField
-                    key={card.key}
-                    value={card.body}
-                    onSave={t => c.setBody(listId, t)}
-                    placeholder={tasks.length > 0 ? 'Add some text…' : 'Take a note…'}
                 />
             )}
             {showBody && tasksLoaded && !bodyLocked && (text !== '' || tasks.length > 0) && (

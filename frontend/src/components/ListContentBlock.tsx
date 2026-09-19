@@ -88,6 +88,9 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
 
     return (
         <div className="list-content-block">
+            {features.body && (
+                <NoteBodyField key={list.id} value={list.body} onSave={saveBody} placeholder="Add a note…" />
+            )}
             {features.attachments && (
                 <NoteImages
                     opened={opened}
@@ -97,9 +100,6 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
                     onRemove={item => void remove(item)}
                     showCamera={coarse}
                 />
-            )}
-            {features.body && (
-                <NoteBodyField key={list.id} value={list.body} onSave={saveBody} placeholder="Add a note…" />
             )}
         </div>
     );
