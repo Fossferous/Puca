@@ -131,14 +131,35 @@ pub struct TaskListResponse {
     pub created_at: String,
     pub total_tasks: i64,
     pub completed_tasks: i64,
+    /// Sealed-to-self body / attachments sidecar, and the trash time
+    /// (list_content.rs). Always present (null = none).
+    pub body: Option<String>,
+    pub attachments: Option<String>,
+    pub trashed_at: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct TaskListRequest {
-    pub title: String,
+    /// Required on create. On PATCH, absent = leave the title alone, so a
+    /// body-only edit needs no title (every older client always sends one).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Sealed body and attachments sidecar: absent = keep, "" = clear,
+    /// an envelope = replace (list_content::check_sealed_field).
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub attachments: Option<String>,
     /// See UpdateTaskRequest::reads_up_to.
     #[serde(default)]
     pub reads_up_to: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct TaskListsQuery {
+    /// `?trashed=true` lists the trash instead of the live lists.
+    #[serde(default)]
+    pub trashed: Option<bool>,
 }
 
 type TaskRow = (
@@ -214,13 +235,14 @@ async fn check_channel_access(
     }
 }
 
-/// Confirm the caller owns the given personal list.
+/// Confirm the caller owns the given personal list. `Ok(true)` = it is in
+/// the trash (readable, not writable — see check_list_writable).
 async fn check_list_owner(
     state: &AppState,
     list_id: i64,
     claims: &Claims,
-) -> Result<(), (StatusCode, &'static str)> {
-    let owner: Option<(i64,)> = sqlx::query_as("SELECT owner_id FROM task_lists WHERE id = $1")
+) -> Result<bool, (StatusCode, &'static str)> {
+    let owner: Option<(i64, bool)> = sqlx::query_as("SELECT owner_id, trashed_at IS NOT NULL FROM task_lists WHERE id = $1")
         .bind(list_id)
         .fetch_optional(&state.pool)
         .await
@@ -228,11 +250,25 @@ async fn check_list_owner(
 
     match owner {
         None => Err((StatusCode::NOT_FOUND, "List not found")),
-        Some((owner_id,)) if owner_id == claims.sub => Ok(()),
+        Some((owner_id, trashed)) if owner_id == claims.sub => Ok(trashed),
         // Same answer as a missing list: a 403 here told any account which
         // sequential list ids belong to someone (see check_channel_access).
         Some(_) => Err((StatusCode::NOT_FOUND, "List not found")),
     }
+}
+
+/// check_list_owner for a WRITE: a trashed list is read-only until restored
+/// (409), so an item cannot change under a note the owner has put away — and
+/// a stale device cannot keep editing a note another one trashed.
+async fn check_list_writable(
+    state: &AppState,
+    list_id: i64,
+    claims: &Claims,
+) -> Result<(), (StatusCode, &'static str)> {
+    if check_list_owner(state, list_id, claims).await? {
+        return Err((StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE));
+    }
+    Ok(())
 }
 
 /// Everything a task-scoped handler needs to authorize an operation.
@@ -293,7 +329,9 @@ async fn check_task_access(
     let perms = if let Some(cid) = channel_id {
         Some(check_channel_access(state, cid, claims).await?)
     } else if let Some(lid) = list_id {
-        check_list_owner(state, lid, claims).await?;
+        // Every caller of check_task_access is a write (update, move,
+        // reorder, delete), so a trashed list refuses here.
+        check_list_writable(state, lid, claims).await?;
         None
     } else {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Task has no scope"));
@@ -1165,36 +1203,49 @@ pub async fn delete_task(
 
 // --- Personal task-list handlers ---
 
-/// List the caller's task lists with progress counts.
+/// List the caller's task lists with progress counts. Trashed lists are
+/// hidden (every client older than the trash therefore stops showing them
+/// with no change); `?trashed=true` lists only those, most recent first.
 pub async fn list_task_lists(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    axum::extract::Query(q): axum::extract::Query<TaskListsQuery>,
 ) -> impl IntoResponse {
+    let trashed = q.trashed.unwrap_or(false);
     // Includes the "Notes to self" (is_self) list: since the Tasks view became
     // the single home for personal lists, hiding it would strand those items.
-    let rows: Result<Vec<(i64, String, String, i64, i64)>, _> = sqlx::query_as(
+    let order = if trashed { "l.trashed_at DESC, l.id DESC" } else { "l.is_self DESC, l.id ASC" };
+    let sql = format!(
         "SELECT l.id, l.title, (replace((l.created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, \
                 COUNT(t.id) AS total, \
-                COUNT(t.id) FILTER (WHERE t.is_completed) AS done \
+                COUNT(t.id) FILTER (WHERE t.is_completed) AS done, \
+                l.body, l.attachments, \
+                (replace((l.trashed_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS trashed_at \
          FROM task_lists l \
          LEFT JOIN channel_tasks t ON t.list_id = l.id \
-         WHERE l.owner_id = $1 \
-         GROUP BY l.id, l.title, l.created_at \
-         ORDER BY l.is_self DESC, l.id ASC",
-    )
-    .bind(claims.sub)
-    .fetch_all(&state.pool)
-    .await;
+         WHERE l.owner_id = $1 AND (l.trashed_at IS NOT NULL) = $2 \
+         GROUP BY l.id \
+         ORDER BY {order}"
+    );
+    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>);
+    let rows: Result<Vec<ListRow>, _> = sqlx::query_as(&sql)
+        .bind(claims.sub)
+        .bind(trashed)
+        .fetch_all(&state.pool)
+        .await;
 
     match rows {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|(id, title, created_at, total, done)| TaskListResponse {
+                .map(|(id, title, created_at, total, done, body, attachments, trashed_at)| TaskListResponse {
                     id,
                     title,
                     created_at,
                     total_tasks: total,
                     completed_tasks: done,
+                    body,
+                    attachments,
+                    trashed_at,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1216,29 +1267,42 @@ pub async fn create_task_list(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<TaskListRequest>,
 ) -> impl IntoResponse {
-    let title = payload.title.trim();
+    let title = payload.title.as_deref().unwrap_or("").trim();
     if title.is_empty() {
         return (StatusCode::BAD_REQUEST, "Title cannot be empty").into_response();
     }
     if title.len() > MAX_LIST_TITLE_LEN {
         return (StatusCode::PAYLOAD_TOO_LARGE, "Title too long").into_response();
     }
+    if let Err(e) = crate::list_content::check_body(payload.body.as_deref())
+        .and_then(|_| crate::list_content::check_attachments(payload.attachments.as_deref()))
+    {
+        return e.into_response();
+    }
+    // Empty on create means "none" — store NULL, not "".
+    let body = payload.body.as_deref().filter(|b| !b.is_empty());
+    let attachments = payload.attachments.as_deref().filter(|a| !a.is_empty());
 
-    let row: Result<(i64, String, String), _> = sqlx::query_as(
-        "INSERT INTO task_lists (owner_id, title) VALUES ($1, $2) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at",
+    let row: Result<(i64, String, String, Option<String>, Option<String>), _> = sqlx::query_as(
+        "INSERT INTO task_lists (owner_id, title, body, attachments) VALUES ($1, $2, $3, $4) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments",
     )
     .bind(claims.sub)
     .bind(title)
+    .bind(body)
+    .bind(attachments)
     .fetch_one(&state.pool)
     .await;
 
     match row {
-        Ok((id, title, created_at)) => Json(TaskListResponse {
+        Ok((id, title, created_at, body, attachments)) => Json(TaskListResponse {
             id,
             title,
             created_at,
             total_tasks: 0,
             completed_tasks: 0,
+            body,
+            attachments,
+            trashed_at: None,
         })
         .into_response(),
         Err(e) => {
@@ -1262,8 +1326,8 @@ pub async fn get_self_checklist(
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     // Try to fetch the existing one first.
-    let existing: Option<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at FROM task_lists WHERE owner_id = $1 AND is_self = TRUE",
+    let existing: Option<(i64, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments FROM task_lists WHERE owner_id = $1 AND is_self = TRUE",
     )
     .bind(claims.sub)
     .fetch_optional(&state.pool)
@@ -1285,7 +1349,7 @@ pub async fn get_self_checklist(
         .execute(&state.pool)
         .await;
         sqlx::query_as(
-            "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at FROM task_lists WHERE owner_id = $1 AND is_self = TRUE",
+            "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments FROM task_lists WHERE owner_id = $1 AND is_self = TRUE",
         )
         .bind(claims.sub)
         .fetch_one(&state.pool)
@@ -1293,7 +1357,7 @@ pub async fn get_self_checklist(
     };
 
     match row {
-        Ok((id, title, created_at)) => {
+        Ok((id, title, created_at, body, attachments)) => {
             let counts: (i64, i64) = sqlx::query_as(
                 "SELECT COUNT(*), COUNT(*) FILTER (WHERE is_completed) FROM channel_tasks WHERE list_id = $1",
             )
@@ -1307,6 +1371,10 @@ pub async fn get_self_checklist(
                 created_at,
                 total_tasks: counts.0,
                 completed_tasks: counts.1,
+                body,
+                attachments,
+                // The self list cannot be trashed (list_content::trash_list).
+                trashed_at: None,
             })
             .into_response()
         }
@@ -1321,30 +1389,55 @@ pub async fn get_self_checklist(
     }
 }
 
-/// Rename a personal task list.
+/// Rename a personal task list, and/or replace its sealed body or
+/// attachments sidecar (list_content.rs).
 pub async fn rename_task_list(
     State(state): State<Arc<AppState>>,
     Path(list_id): Path<i64>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<TaskListRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = check_list_owner(&state, list_id, &claims).await {
+    if let Err(e) = check_list_writable(&state, list_id, &claims).await {
         return e.into_response();
     }
-    let title = payload.title.trim();
-    if title.is_empty() {
-        return (StatusCode::BAD_REQUEST, "Title cannot be empty").into_response();
+    // Title, body and attachments are each optional here (a body-only edit
+    // sends no title); an empty PATCH is a client bug, not a no-op to hide.
+    if payload.title.is_none() && payload.body.is_none() && payload.attachments.is_none() {
+        return (StatusCode::BAD_REQUEST, "Nothing to update").into_response();
     }
-    if title.len() > MAX_LIST_TITLE_LEN {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Title too long").into_response();
+    let title = payload.title.as_deref().map(str::trim);
+    if let Some(t) = title {
+        if t.is_empty() {
+            return (StatusCode::BAD_REQUEST, "Title cannot be empty").into_response();
+        }
+        if t.len() > MAX_LIST_TITLE_LEN {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "Title too long").into_response();
+        }
+    }
+    if let Err(e) = crate::list_content::check_body(payload.body.as_deref())
+        .and_then(|_| crate::list_content::check_attachments(payload.attachments.as_deref()))
+    {
+        return e.into_response();
     }
 
-    // Titles are sealed encrypt-to-self bodies with no history: the same
-    // downgrade rule as descriptions (envelope_version.rs), fail-closed.
-    let current: Option<(String,)> = match sqlx::query_as("SELECT title FROM task_lists WHERE id = $1")
-        .bind(list_id)
-        .fetch_optional(&state.pool)
-        .await
+    // Titles, bodies and sidecars are sealed encrypt-to-self values with no
+    // history: the same downgrade rule as descriptions (envelope_version.rs),
+    // fail-closed, read UNDER A ROW LOCK in the transaction the UPDATE runs
+    // in — which also sees a trash that landed after check_list_writable.
+    // Clearing a body or sidecar ("") is a deletion and stays allowed.
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to update task list: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename task list").into_response();
+        }
+    };
+    let current: Option<(String, Option<String>, Option<String>, bool)> = match sqlx::query_as(
+        "SELECT title, body, attachments, trashed_at IS NOT NULL FROM task_lists WHERE id = $1 FOR UPDATE",
+    )
+    .bind(list_id)
+    .fetch_optional(&mut *tx)
+    .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -1352,16 +1445,40 @@ pub async fn rename_task_list(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename task list").into_response();
         }
     };
-    if let Some((cur,)) = current {
-        if crate::envelope_version::edit_is_downgrade(&cur, title, payload.reads_up_to) {
-            return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
-        }
+    let Some((cur_title, cur_body, cur_att, trashed)) = current else {
+        return (StatusCode::NOT_FOUND, "List not found").into_response();
+    };
+    if trashed {
+        return (StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE).into_response();
     }
-    let result = sqlx::query("UPDATE task_lists SET title = $1 WHERE id = $2")
-        .bind(title)
-        .bind(list_id)
-        .execute(&state.pool)
-        .await;
+    let downgrade = |cur: Option<&str>, new: Option<&str>| match (cur, new.filter(|n| !n.is_empty())) {
+        (Some(c), Some(n)) => crate::envelope_version::edit_is_downgrade(c, n, payload.reads_up_to),
+        _ => false,
+    };
+    if downgrade(Some(&cur_title), title)
+        || downgrade(cur_body.as_deref(), payload.body.as_deref())
+        || downgrade(cur_att.as_deref(), payload.attachments.as_deref())
+    {
+        return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
+    }
+    let result = sqlx::query(
+        "UPDATE task_lists SET title = COALESCE($1, title), \
+         body = CASE WHEN $2 THEN $3 ELSE body END, \
+         attachments = CASE WHEN $4 THEN $5 ELSE attachments END \
+         WHERE id = $6",
+    )
+    .bind(title)
+    .bind(payload.body.is_some())
+    .bind(payload.body.as_deref().filter(|b| !b.is_empty()))
+    .bind(payload.attachments.is_some())
+    .bind(payload.attachments.as_deref().filter(|a| !a.is_empty()))
+    .bind(list_id)
+    .execute(&mut *tx)
+    .await;
+    let result = match result {
+        Ok(_) => tx.commit().await,
+        Err(e) => Err(e),
+    };
 
     match result {
         Ok(_) => StatusCode::OK.into_response(),
@@ -1443,7 +1560,7 @@ pub async fn create_list_task(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = check_list_owner(&state, list_id, &claims).await {
+    if let Err(e) = check_list_writable(&state, list_id, &claims).await {
         return e.into_response();
     }
     match insert_task(&state, None, Some(list_id), &payload, &claims).await {
@@ -1623,7 +1740,7 @@ pub async fn list_task_reminders(
          FROM ( \
              SELECT t.id, t.channel_id, t.list_id, t.due_at \
              FROM channel_tasks t \
-             JOIN task_lists l ON l.id = t.list_id AND l.owner_id = $1 \
+             JOIN task_lists l ON l.id = t.list_id AND l.owner_id = $1 AND l.trashed_at IS NULL \
              WHERE t.due_at IS NOT NULL AND t.is_completed = FALSE \
              UNION ALL \
              SELECT t.id, t.channel_id, t.list_id, t.due_at \

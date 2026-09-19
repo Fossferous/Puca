@@ -209,7 +209,7 @@ const REACTIONS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM
     ORDER BY r.created_at, r.id) t";
 
 const TASK_LISTS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM ( \
-    SELECT id, title, created_at FROM task_lists WHERE owner_id = $1::bigint ORDER BY id) t";
+    SELECT id, title, body, attachments, created_at, trashed_at FROM task_lists WHERE owner_id = $1::bigint ORDER BY id) t";
 
 /// Checklist items the user created, plus every item in the user's own
 /// personal lists (those are encrypt-to-self: nobody else can have written

@@ -220,6 +220,24 @@ boundary rules added in 0.9.5.
 
 ---
 
+## Personal task lists (Púca Notes)
+
+A Púca Notes note is a personal task list ([`docs/NOTES.md`](NOTES.md)).
+`title`, `body` and `attachments` are encrypt-to-self envelopes; the server
+refuses a `body` or `attachments` value that is not one (400).
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/task-lists/features` | ✅ | What this server supports for lists: `{ body, attachments, trash, trash_retention_days, max_body_len }` (`trash_retention_days` 0 = kept until emptied). An older server answers with an error (405), which clients read as "none of it" — the detection does not depend on the account having lists. |
+| GET | `/task-lists` | ✅ | Your live lists with progress counts, `body`, `attachments` and `trashed_at` (null on every live list). Trashed lists are not listed. `?trashed=true` lists only the trash, most recently trashed first. |
+| POST | `/task-lists` | ✅ | Create a list: `title` (required), optional `body` and `attachments`. |
+| PATCH | `/task-lists/:id` | ✅ | Change `title`, `body` and/or `attachments`; each is optional (absent = unchanged, `""` clears `body`/`attachments`), an empty request is a 400. 409 while the list is in the trash, and 409 for an edit that would downgrade a newer envelope (`reads_up_to`, as for tasks). `body` over 64 KiB of envelope is a 413. |
+| POST | `/task-lists/:id/trash` | ✅ | Move a list to the trash: `{ trashed_at }`. Idempotent — a second call keeps the first time. 400 for the Notes-to-self list; 404 for anyone else's list. While trashed, every write to the list or its items is a 409, its items leave `GET /task-reminders`, and the six-hourly sweep deletes it once it is older than `NOTES_TRASH_RETENTION_DAYS` (default 30). |
+| POST | `/task-lists/:id/restore` | ✅ | Take a list out of the trash (a no-op 200 on a live list). 404 for anyone else's list. |
+| DELETE | `/task-lists/:id` | ✅ | Delete a list and its items immediately and for good, trashed or not. The uploads its sealed attachment refs name are not touched — the server cannot read them; clients delete those with `DELETE /files/:id` first. |
+
+---
+
 ## WebSocket
 
 **URL:** `ws://localhost:3000/ws`, authenticated with the WebSocket

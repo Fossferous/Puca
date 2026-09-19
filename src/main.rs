@@ -29,6 +29,7 @@ mod invite_handlers;
 mod logtag;
 mod source_offer;
 mod key_handlers;
+mod list_content;
 mod message_handlers;
 mod middleware;
 mod migrator;
@@ -632,6 +633,11 @@ async fn main() -> anyhow::Result<()> {
         // Static path — registered before the :list_id routes so "self" is never
         // parsed as a list id.
         .route("/task-lists/self", get(task_handlers::get_self_checklist))
+        // Púca Notes' list content: what this server supports, and the trash
+        // (list_content.rs). Static "features" beats :list_id like "self".
+        .route("/task-lists/features", get(list_content::list_features))
+        .route("/task-lists/:list_id/trash", post(list_content::trash_list))
+        .route("/task-lists/:list_id/restore", post(list_content::restore_list))
         .route(
             "/task-lists/:list_id",
             patch(task_handlers::rename_task_list),
@@ -1043,6 +1049,11 @@ async fn main() -> anyhow::Result<()> {
                     .bind(days as i32)
                     .execute(&pool)
                     .await;
+                }
+                // Púca Notes' trash: lists trashed longer than the window
+                // go for good (list_content.rs; 0 keeps them forever).
+                if let Some(days) = list_content::trash_retention_days() {
+                    list_content::purge_expired_trash(&pool, days).await;
                 }
                 if let Some(days) = retention::retention_days("AUDIT_RETENTION_DAYS", retention::AUDIT_RETENTION_DAYS_DEFAULT) {
                     let _ = sqlx::query(
