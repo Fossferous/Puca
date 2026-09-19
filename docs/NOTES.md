@@ -472,6 +472,17 @@ launch — on **its own channel**:
   the release that first ships it, then re-records the surface.
 - The account menu shows the running version and a **Check for updates** that
   re-runs the check without closing an open note.
+- **Device check, not yet done (no test can reach it):** stall a download (cut
+  the network mid-download), wait for *Retry*, restore the network and press
+  it. Capacitor delivers every download's progress to every listener, and the
+  first download of the same version cannot be told apart from the retry's
+  (its bundle id is only known when it finishes), so both run at once and the
+  bar may jump between their two percentages; the stall watchdog is fed by
+  either. Expect: the gate still ends in the app or a control (never a bare
+  spinner), exactly one reload into the new version, and no *Update failed*
+  when the first download finishes late. The unit tests
+  (`notesUpdateGate.test.tsx`) cover each run's own listener and an event
+  labelled with another version, which the engine drops — not this.
 
 **Existing installs need one manual install.** Notes APKs up to and including
 0.9.815 have no updater, so nothing can reach them over the air; they stay as
