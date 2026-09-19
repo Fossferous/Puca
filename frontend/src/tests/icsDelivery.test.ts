@@ -5,7 +5,22 @@
  * {ok:false, reason} on failure. A mismatch shares "notes.txt" as text/plain
  * and reports a failed share as "Exported"; these tests pin the contract.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The all-day test below only catches a local-midnight mutant (new Date(y, m-1,
+// d)) when local time is not UTC — and CI boxes usually are UTC. Pin a zone
+// with a summer offset before anything reads the clock; the test also checks
+// the pin took, so a runtime that ignores it fails rather than passing blind.
+const ambientTz = vi.hoisted(() => {
+    const was = process.env.TZ;
+    process.env.TZ = 'Europe/Dublin';
+    return was;
+});
+afterAll(() => {
+    // A reused worker must not carry this zone into the next file.
+    if (ambientTz === undefined) delete process.env.TZ;
+    else process.env.TZ = ambientTz;
+});
 
 const plugin = {
     info: vi.fn(async (): Promise<{ api?: number; features?: string[] }> => ({ api: 1, features: ['share', 'calendar'] })),
@@ -72,6 +87,8 @@ describe('phoneCalendarArgs', () => {
         // In Dublin in summer, local midnight of 1 July is 30 June 23:00Z: sending
         // that lands the event on 30 June in the phone's calendar.
         const localMidnight = Date.parse('2026-06-30T23:00:00Z');
+        // The pin took: local midnight of 1 July is not UTC midnight here.
+        expect(new Date(2026, 6, 1).getTime()).toBe(localMidnight);
         const a = phoneCalendarArgs({ title: 'Holiday', startMs: localMidnight, endMs: localMidnight + 2 * 86_400_000, allDay: true, dayKeys: ['2026-07-01', '2026-07-02'] });
         expect(a).toEqual({ title: 'Holiday', allDay: true, beginMs: Date.UTC(2026, 6, 1), endMs: Date.UTC(2026, 6, 3) });
         expect(a.beginMs).not.toBe(localMidnight);
