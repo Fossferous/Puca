@@ -17,7 +17,7 @@
  */
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { decodeJwtPayload } from '../../api/auth';
-import type { ReminderEntry } from '../../api/taskReminders';
+import type { ReminderEntry } from '../../api/reminderFeed';
 
 export interface NotesNotificationStatus {
     granted: boolean;
