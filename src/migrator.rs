@@ -33,6 +33,22 @@ pub fn app_migrator() -> Migrator {
     m
 }
 
+/// The database a DB-backed test may use: `TEST_DATABASE_URL`, and nothing
+/// else. Never `DATABASE_URL` (nor a `.env` that sets it): the tests that call
+/// this migrate the database, run sweeps that delete rows for every account
+/// in it, and create and drop scratch databases on its server — a plain
+/// `cargo test` in a checkout configured for a dev database must not do that
+/// to it.
+#[cfg(test)]
+pub(crate) fn test_database_url() -> Option<String> {
+    test_database_url_from(|k| std::env::var(k).ok())
+}
+
+#[cfg(test)]
+fn test_database_url_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    get("TEST_DATABASE_URL").filter(|u| !u.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,11 +57,33 @@ mod tests {
     fn the_startup_migrator_tolerates_newer_databases_and_embeds_everything() {
         let m = app_migrator();
         assert!(m.ignore_missing, "an older binary must boot against a database a newer one migrated");
-        // Still the full embedded set: the flag must not come with a
-        // different (empty, partial) source.
-        let plain = sqlx::migrate!("./migrations");
-        assert_eq!(m.iter().count(), plain.iter().count());
-        assert!(m.iter().count() > 0);
+        // Still the full set: every `<version>_<name>.sql` in migrations/ is
+        // embedded, no more and no fewer — read from the directory at test
+        // time, not from a second expansion of the same macro.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut on_disk: Vec<i64> = std::fs::read_dir(&dir)
+            .expect("migrations/ is readable")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".sql"))
+            .filter_map(|n| n.split_once('_')?.0.parse::<i64>().ok())
+            .collect();
+        on_disk.sort_unstable();
+        let embedded: Vec<i64> = m.iter().map(|mig| mig.version).collect();
+        assert!(on_disk.len() >= 65, "positive control: the directory scan found the migrations ({})", on_disk.len());
+        assert_eq!(embedded, on_disk, "the startup migrator embeds exactly migrations/*.sql");
+    }
+
+    #[test]
+    fn db_tests_use_test_database_url_and_never_database_url() {
+        let only_dev = |k: &str| (k == "DATABASE_URL").then(|| "postgres://dev/puca".to_string());
+        assert_eq!(test_database_url_from(only_dev), None, "a dev DATABASE_URL must never be picked up");
+        let both = |k: &str| match k {
+            "TEST_DATABASE_URL" => Some("postgres://test/scratch".to_string()),
+            "DATABASE_URL" => Some("postgres://dev/puca".to_string()),
+            _ => None,
+        };
+        assert_eq!(test_database_url_from(both).as_deref(), Some("postgres://test/scratch"), "positive control");
+        assert_eq!(test_database_url_from(|_| Some("  ".to_string())), None, "blank is unset");
     }
 
     /// Against a real database: a version this binary does not embed is
@@ -55,13 +93,12 @@ mod tests {
     /// situation a rollback meets. Uses a database of its own, created and
     /// dropped here, because a foreign version in a shared test database
     /// would make every OTHER test's default migrator refuse. Skips (prints)
-    /// without TEST_DATABASE_URL / DATABASE_URL, like auth::session_tests.
+    /// without TEST_DATABASE_URL — never DATABASE_URL (test_database_url).
     #[tokio::test]
     async fn a_database_migrated_by_a_newer_release_still_boots_this_one() {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => { println!("skipping: no database"); return; }
+        let Some(url) = test_database_url() else {
+            println!("skipping: TEST_DATABASE_URL not set");
+            return;
         };
         let admin = match sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&url).await {
             Ok(p) => p,

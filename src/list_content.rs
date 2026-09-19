@@ -105,17 +105,29 @@ pub struct ListFeatures {
     /// The purge window; 0 = the operator keeps trash forever.
     pub trash_retention_days: i64,
     pub max_body_len: usize,
+    /// The server's clock (Unix ms) when it answered. A client that purges its
+    /// own expired trash measures "expired" against THIS, never its own clock:
+    /// a phone whose clock runs days ahead would otherwise delete the owner's
+    /// trash early, with no undo. A client that cannot read it does not purge.
+    pub server_now_ms: i64,
+}
+
+/// What the features route says, for a given trash window (None = forever)
+/// and server time — pure, so a test can pin every field.
+pub fn features_for(retention_days: Option<i64>, now_ms: i64) -> ListFeatures {
+    ListFeatures {
+        body: true,
+        attachments: true,
+        trash: true,
+        trash_retention_days: retention_days.unwrap_or(0),
+        max_body_len: MAX_LIST_BODY_LEN,
+        server_now_ms: now_ms,
+    }
 }
 
 /// GET /task-lists/features
 pub async fn list_features(Extension(_claims): Extension<Claims>) -> impl IntoResponse {
-    Json(ListFeatures {
-        body: true,
-        attachments: true,
-        trash: true,
-        trash_retention_days: trash_retention_days().unwrap_or(0),
-        max_body_len: MAX_LIST_BODY_LEN,
-    })
+    Json(features_for(trash_retention_days(), chrono::Utc::now().timestamp_millis()))
 }
 
 #[derive(Serialize)]
@@ -269,8 +281,12 @@ mod tests {
     }
 }
 
-/// The handlers against a real database (TEST_DATABASE_URL / DATABASE_URL;
-/// skipped, with a printed line, without one — like auth::session_tests).
+/// The handlers against a real database: TEST_DATABASE_URL ONLY (skipped,
+/// with a printed line, without it). Never DATABASE_URL: these tests migrate
+/// the database, run the trash sweep (which purges expired trash for EVERY
+/// account in it) and create scratch rows, so a plain `cargo test` in a
+/// checkout configured for a dev database must not reach it
+/// (migrator::test_database_url).
 #[cfg(test)]
 mod db_tests {
     use super::*;
@@ -285,10 +301,9 @@ mod db_tests {
     const V3: &str = r#"{"v":3,"t":"self","ct":"EEEE","n":"FFFF"}"#;
 
     async fn setup() -> Option<(Arc<AppState>, PgPool)> {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => { println!("skipping: no database"); return None; }
+        let Some(url) = crate::migrator::test_database_url() else {
+            println!("skipping: TEST_DATABASE_URL not set");
+            return None;
         };
         let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await {
             Ok(p) => p,
@@ -460,6 +475,12 @@ mod db_tests {
         let self_id = json_of(s).await["id"].as_i64().unwrap();
         let r = trash_list(State(state.clone()), Path(self_id), Extension(alice.clone())).await.into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // ...and the listing says which list that is, so a client can hide
+        // "Move to trash" for it instead of offering a button that fails.
+        let rows = listing(&state, &alice, false).await;
+        let flag = |id: i64| rows.iter().find(|r| r["id"] == id).map(|r| r["is_self"].clone());
+        assert_eq!(flag(self_id), Some(Value::Bool(true)), "the self list is flagged");
+        assert_eq!(flag(keep), Some(Value::Bool(false)), "positive control: an ordinary list is not");
 
         // DELETE (Delete forever) still works on a trashed list.
         let _ = trash_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
@@ -498,15 +519,33 @@ mod db_tests {
     }
 
     #[tokio::test]
-    async fn the_features_route_announces_the_trash_window() {
-        let c =Claims { sub: 1, username: String::new(), exp: 0, tv: 0, sst: 0, sid: String::new() };
+    async fn the_features_route_announces_the_trash_window_and_the_server_clock() {
+        // Every field, pinned, through the same serializer the route uses —
+        // these names are the wire contract api/listContent.ts parses.
+        let seven = serde_json::to_value(features_for(Some(7), 1_700_000_000_123)).unwrap();
+        assert_eq!(
+            seven,
+            serde_json::json!({
+                "body": true, "attachments": true, "trash": true,
+                "trash_retention_days": 7, "max_body_len": MAX_LIST_BODY_LEN,
+                "server_now_ms": 1_700_000_000_123_i64,
+            })
+        );
+        let forever = serde_json::to_value(features_for(None, 5)).unwrap();
+        assert_eq!(forever["trash_retention_days"], 0, "None (keep forever) is announced as 0");
+
+        // The route itself answers with the server's CURRENT clock, not a
+        // constant: a client purges against it.
+        let c = Claims { sub: 1, username: String::new(), exp: 0, tv: 0, sst: 0, sid: String::new() };
+        let before = chrono::Utc::now().timestamp_millis();
         let r = list_features(Extension(c)).await.into_response();
+        let after = chrono::Utc::now().timestamp_millis();
         assert_eq!(r.status(), StatusCode::OK);
         let v = json_of(r).await;
-        assert_eq!(v["body"], true);
+        let now = v["server_now_ms"].as_i64().expect("server_now_ms is an integer");
+        assert!(before <= now && now <= after, "server_now_ms {now} not within [{before}, {after}]");
         assert_eq!(v["trash"], true);
-        assert_eq!(v["max_body_len"], MAX_LIST_BODY_LEN);
-        assert!(v["trash_retention_days"].is_number());
+        assert!(v["trash_retention_days"].as_i64().is_some_and(|d| d >= 0));
     }
 
     #[tokio::test]

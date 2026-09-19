@@ -136,6 +136,9 @@ pub struct TaskListResponse {
     pub body: Option<String>,
     pub attachments: Option<String>,
     pub trashed_at: Option<String>,
+    /// The "Notes to self" list (get_self_checklist). It cannot be trashed
+    /// (list_content::trash_list), so a client hides "Move to trash" for it.
+    pub is_self: bool,
 }
 
 #[derive(Deserialize)]
@@ -1220,14 +1223,15 @@ pub async fn list_task_lists(
                 COUNT(t.id) AS total, \
                 COUNT(t.id) FILTER (WHERE t.is_completed) AS done, \
                 l.body, l.attachments, \
-                (replace((l.trashed_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS trashed_at \
+                (replace((l.trashed_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS trashed_at, \
+                l.is_self \
          FROM task_lists l \
          LEFT JOIN channel_tasks t ON t.list_id = l.id \
          WHERE l.owner_id = $1 AND (l.trashed_at IS NOT NULL) = $2 \
          GROUP BY l.id \
          ORDER BY {order}"
     );
-    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>);
+    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool);
     let rows: Result<Vec<ListRow>, _> = sqlx::query_as(&sql)
         .bind(claims.sub)
         .bind(trashed)
@@ -1237,7 +1241,7 @@ pub async fn list_task_lists(
     match rows {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|(id, title, created_at, total, done, body, attachments, trashed_at)| TaskListResponse {
+                .map(|(id, title, created_at, total, done, body, attachments, trashed_at, is_self)| TaskListResponse {
                     id,
                     title,
                     created_at,
@@ -1246,6 +1250,7 @@ pub async fn list_task_lists(
                     body,
                     attachments,
                     trashed_at,
+                    is_self,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1303,6 +1308,7 @@ pub async fn create_task_list(
             body,
             attachments,
             trashed_at: None,
+            is_self: false,
         })
         .into_response(),
         Err(e) => {
@@ -1375,6 +1381,7 @@ pub async fn get_self_checklist(
                 attachments,
                 // The self list cannot be trashed (list_content::trash_list).
                 trashed_at: None,
+                is_self: true,
             })
             .into_response()
         }
