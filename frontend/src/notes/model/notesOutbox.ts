@@ -54,7 +54,7 @@ import { ApiError, isNetworkError } from '../../api/client';
 import { getActiveIdentity, openLocal, sealLocal, seedMatchesCurrentAccount, type Identity } from '../../api/e2ee';
 import {
     type Task, type TaskList, type TaskTabPref, type TaskTabRef,
-    createTask, createListTask, createTaskList, renameTaskList, deleteTaskList,
+    createTask, createListTask, createTaskList, renameTaskList,
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask,
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder,
 } from '../../api/tasks';
@@ -62,6 +62,7 @@ import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { beginNoteWrite, LISTS_KEY, PREFS_KEY, setQueuedNotes } from './noteBusy';
 import { idbStore, type KV } from './notesCache';
+import { trashOrDeleteList } from './listTrash';
 import { noteKey, type NoteRef } from './notesModel';
 
 // --- Ops --------------------------------------------------------------------------
@@ -179,7 +180,10 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Prom
             return list;
         }
         case 'renameList': return renameTaskList(r(op.listId), op.title);
-        case 'deleteList': return deleteTaskList(r(op.listId));
+        // The trash where the server has one (listTrash.ts), probed at the
+        // moment it runs — a queued delete replays against whatever server
+        // answers then.
+        case 'deleteList': return trashOrDeleteList(r(op.listId));
         case 'createTask': {
             const n = note(op.note);
             const parent = op.parentId === undefined ? undefined : r(op.parentId);

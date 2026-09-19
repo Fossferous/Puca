@@ -60,3 +60,16 @@ export const restoreArchived = (flags: Record<string, boolean>) => apply(s => {
     for (const [k, v] of Object.entries(flags)) { if (v) next[k] = true; else delete next[k]; }
     return { ...s, archived: next };
 });
+
+/**
+ * Put ONE list back into the list set as it is NOW, at (about) the place it
+ * was taken from — the rollback of a failed delete. Never a whole snapshot:
+ * a bulk delete runs several at once, and restoring one call's snapshot
+ * would bring back notes the others had already deleted on the server.
+ */
+export function reinsertList<T extends { id: number }>(current: T[] | undefined, item: T, index: number): T[] | undefined {
+    if (!current) return current;
+    if (current.some(l => l.id === item.id)) return current;
+    const at = Math.max(0, Math.min(index, current.length));
+    return [...current.slice(0, at), item, ...current.slice(at)];
+}

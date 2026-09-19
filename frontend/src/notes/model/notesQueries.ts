@@ -37,12 +37,15 @@ import { ApiError } from '../../api/client';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import {
-    type NoteCard, type NoteRef, type NoteSource,
+    type NoteCard, type NoteRef, type NoteSource, type NotesNoteState,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder, withCreatedList,
 } from './notesModel';
 import { useTaskEventsLive } from './taskEvents';
 import { ops, sendCreateList, sendCreateTask, sendNoteOp, type PrefsIntent } from './notesOutbox';
 import { anythingQueued } from './noteBusy';
+import { reinsertList } from './notesBulk';
+import { listTrashSupported, trashedListIds, type ListDeleteOutcome } from './listTrash';
+import { newPruneState, pruneStep, type PruneGens } from './notesPrune';
 import { getNotesPrefs, subscribeNotesPrefs, forgetNoteKeys, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
@@ -116,8 +119,8 @@ export function useServersQuery() {
 /** One NoteSource per checklist channel across every joined server, plus
  *  whether any server's channel query is still pending or failed (a caller
  *  must not prune prefs against an INCOMPLETE set). */
-export function useChannelSources(): { sources: NoteSource[]; complete: boolean } {
-    const { data: servers = [], isSuccess: serversDone } = useServersQuery();
+export function useChannelSources(): { sources: NoteSource[]; complete: boolean; updatedAt: number } {
+    const { data: servers = [], isSuccess: serversDone, dataUpdatedAt: serversAt } = useServersQuery();
     const channelQueries = useQueries({
         queries: servers.map((s: Server) => ({
             queryKey: notesKeys.channels(s.id),
@@ -134,7 +137,10 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean 
     const channelData = channelQueries.map(q => q.data);
     const memberData = memberQueries.map(q => q.data);
     const allChannelsSettled = channelQueries.every(q => q.isSuccess);
-    return useMemo(() => {
+    // When the channel set was last fetched: the prune's generation for
+    // checklist notes (notesPrune.ts).
+    const updatedAt = Math.max(serversAt, ...channelQueries.map(q => q.dataUpdatedAt));
+    const memo = useMemo(() => {
         const sources: NoteSource[] = servers.flatMap((server: Server, i: number) => {
             const names = new Map(
                 ((memberData[i] as MemberWithRoles[] | undefined) ?? [])
@@ -156,6 +162,7 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean 
         // what matters, and react-query keeps THAT referentially stable.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [servers, serversDone, allChannelsSettled, ...channelData, ...memberData]);
+    return useMemo(() => ({ ...memo, updatedAt }), [memo, updatedAt]);
 }
 
 function listSource(l: TaskList): NoteSource {
@@ -176,6 +183,8 @@ export function useNoteSources(): {
     loading: boolean;
     error: unknown;
     complete: boolean;
+    /** When the lists and the channel set were last fetched (prune gens). */
+    gens: PruneGens;
 } {
     const lists = useTaskListsQuery();
     const channels = useChannelSources();
@@ -189,6 +198,7 @@ export function useNoteSources(): {
         loading: lists.isPending,
         error: lists.error,
         complete: lists.isSuccess && channels.complete,
+        gens: { list: lists.dataUpdatedAt, channel: channels.updatedAt },
     };
 }
 
@@ -263,7 +273,7 @@ export function useNoteCards(): {
     error: unknown;
     tasksPending: boolean;
 } {
-    const { sources, loading, error } = useNoteSources();
+    const { sources, loading, error, complete, gens } = useNoteSources();
     const prefsQuery = useTabPrefsQuery();
     const prefsData = prefsQuery.data;
     const prefs = useMemo(() => prefsData ?? [], [prefsData]);
@@ -273,11 +283,46 @@ export function useNoteCards(): {
         () => buildNoteCards(sources, tasks.byKey, prefs, local),
         [sources, tasks.byKey, prefs, local],
     );
-    // No automatic prune: colour, labels and archive are shared across the
-    // account's devices now (notesPrefsSync.ts), and a note THIS device has
-    // not loaded yet — created elsewhere a second ago, or trashed — is not a
-    // deleted note. They are forgotten on an explicit delete (deleteNote).
+    // Colour, labels and archive of notes deleted OUTSIDE Notes are forgotten
+    // only once they have been missing across two settled, complete fetches a
+    // grace period apart, and a personal list only once the trash has been
+    // asked too (notesPrune.ts). Never while offline edits are queued: the
+    // server's set is behind this device's then.
+    useSettledAbsencePrune(sources, local, complete, gens);
     return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending };
+}
+
+const prunes = newPruneState();
+
+/** Ask the trash before forgetting a personal list: a trashed note keeps its
+ *  colour and labels for a restore. Any failure means "not confirmed". */
+export async function confirmGone(qc: QueryClient, keys: string[]): Promise<string[]> {
+    const lists = keys.filter(k => k.startsWith('list:'));
+    if (lists.length === 0) return keys;
+    try {
+        if (!(await listTrashSupported())) return keys;
+        const trashed = await qc.fetchQuery({ queryKey: ['notes', 'trashed-ids'], queryFn: trashedListIds, staleTime: 0 });
+        return keys.filter(k => !k.startsWith('list:') || !trashed.has(Number(k.slice(5))));
+    } catch {
+        return keys.filter(k => !k.startsWith('list:'));
+    }
+}
+
+function useSettledAbsencePrune(sources: NoteSource[], local: NotesNoteState, complete: boolean, gens: PruneGens): void {
+    const qc = useQueryClient();
+    const { list, channel } = gens;
+    useEffect(() => {
+        if (!complete || anythingQueued()) return;
+        const present = new Set(sources.map(s => noteKey(s.ref)));
+        const stored = new Set([...Object.keys(local.colors), ...Object.keys(local.labels), ...Object.keys(local.archived)]);
+        const due = pruneStep(prunes, { list, channel }, Date.now(), present, stored);
+        if (due.length === 0) return;
+        let cancelled = false;
+        void confirmGone(qc, due).then(gone => {
+            if (!cancelled && gone.length > 0 && !anythingQueued()) forgetNoteKeys(gone);
+        });
+        return () => { cancelled = true; };
+    }, [qc, sources, local, complete, list, channel]);
 }
 
 // --- Mutations -------------------------------------------------------------------
@@ -510,15 +555,24 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const deleteNote = useCallback(async (note: NoteRef): Promise<boolean> => {
         if (note.kind !== 'list') return false;
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
+        const index = prev?.findIndex(l => l.id === note.id) ?? -1;
+        const removed = index >= 0 ? prev![index] : undefined;
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.filter(l => l.id !== note.id));
         try {
-            await sendNoteOp(ops.deleteList(note.id, prev?.find(l => l.id === note.id)?.title ?? ''));
+            // To the trash where the server has one (listTrash.ts).
+            const sent = await sendNoteOp<ListDeleteOutcome>(ops.deleteList(note.id, removed?.title ?? ''));
             qc.removeQueries({ queryKey: notesKeys.tasks(note) });
-            forgetNoteKeys([noteKey(note)]);
+            // A trashed note keeps its colour and labels for a restore; only
+            // a permanent delete forgets them. A queued one is left to the
+            // settled-absence prune (useNoteCards).
+            if (!sent.queued && sent.value === 'deleted') forgetNoteKeys([noteKey(note)]);
             return true;
         } catch (err) {
             explain('delete list failed', err);
-            qc.setQueryData(notesKeys.lists, prev);
+            // Put back THIS note only, into the set as it is now: bulk
+            // deletes run concurrently, and a whole-snapshot restore would
+            // resurrect notes the others had already deleted.
+            if (removed) qc.setQueryData<TaskList[]>(notesKeys.lists, cur => reinsertList(cur, removed, index));
             return false;
         }
     }, [qc]);
