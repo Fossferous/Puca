@@ -13,6 +13,12 @@
 // encrypted"; and on the phone — one column, no horizontal overflow, every
 // tap target at size, 16px inputs, the FAB composer, the drawer, a popover
 // inside the viewport, the full-screen editor with the grip and arrows.
+// And the Notes Android app's updates (NotesUpdateGate): in the browser no
+// update check is ever made and the menu has no update rows; inside a FAKED
+// native shell (the updater plugin answered in-page, the manifest answered by
+// page.route) a bundle that needs a newer APK is not downloaded, the "install
+// the new app" screen and the strip fit the phone, and the account menu shows
+// the version and a working Check for updates.
 //
 // Usage: node e2e/notes-walk.mjs [outdir] [baseURL] [psql-dsn]
 //   baseURL  default http://127.0.0.1:5176 — `PORT=5176 node e2e/serve-dist.mjs`
@@ -67,6 +73,10 @@ const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, b
 const page = await ctx.newPage();
 watch(page);
 const shot = shotOf(page);
+// The browser page must never ask for an OTA manifest (NotesUpdateGate runs
+// only inside the Notes Android app).
+const browserUpdateChecks = [];
+page.on('request', rq => { if (rq.url().includes('/api/mobile-updates/check')) browserUpdateChecks.push(rq.url()); });
 
 // ---- 1. Notes before any sign-in: its OWN login card, not the main app ----------
 await page.goto('/notes/');
@@ -331,6 +341,8 @@ await page2.waitForSelector('.chat-container', { timeout: 20000 }).catch(() => {
 await page.click('button[aria-label="Account and settings"]');
 await page.waitForSelector('.notes-menu', { timeout: 5000 });
 await shot('account-menu');
+ck('browser: the account menu has no update rows (they are the Android app\'s)', !/Check for updates/.test(await page.locator('.notes-menu').innerText()));
+ck('browser: Notes never asked for an OTA manifest', browserUpdateChecks.length === 0, JSON.stringify(browserUpdateChecks));
 await page.getByRole('button', { name: 'Sign out', exact: true }).click();
 await page.waitForSelector('.login-card', { timeout: 10000 });
 ck('sign out: Notes returns to its login', true);
@@ -484,6 +496,117 @@ for (const [name, patch] of [
     await mshot(`phone-${name}`);
 }
 ck('phone: no page errors', errors.length === 0, errors[0]);
+
+// =============================================================================
+// The Notes ANDROID APP's updates, in a faked native shell at 390x844
+// =============================================================================
+// @capacitor/core treats a page with window.androidBridge as Android and
+// routes a plugin call to window.Capacitor.nativePromise when PluginHeaders
+// lists it — so answering CapacitorUpdater here stands in for the one native
+// plugin the Notes APK carries. Nothing else is faked: every other plugin is
+// as absent as it is in the real APK. The manifest comes from page.route.
+const nctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL, storageState: state });
+await nctx.addInitScript(() => {
+    const calls = [];
+    window.__otaCalls = calls;
+    window.androidBridge = { postMessage() {} };
+    window.Capacitor = {
+        PluginHeaders: [{
+            name: 'CapacitorUpdater',
+            methods: ['notifyAppReady', 'current', 'download', 'set', 'next', 'reset', 'list', 'delete', 'getLatest', 'getId', 'getPluginVersion', 'removeListener']
+                .map(name => ({ name, rtype: 'promise' }))
+                // As the real bridge declares it: events arrive through a callback.
+                .concat([{ name: 'addListener', rtype: 'callback' }]),
+        }],
+        nativePromise: async (plugin, method) => {
+            calls.push(`${plugin}.${method}`);
+            if (method === 'current') return { bundle: { id: 'builtin', version: 'builtin' }, native: '0.9.815' };
+            if (method === 'download') return new Promise(() => {});
+            return {};
+        },
+        nativeCallback: () => 'cb',
+    };
+});
+const nativeChecks = [];
+let manifest = null;
+await nctx.route('**/api/mobile-updates/check**', route => {
+    nativeChecks.push(route.request().url());
+    return manifest
+        ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(manifest) })
+        : route.fulfill({ status: 404, body: '' });
+});
+const nm = await nctx.newPage();
+watch(nm);
+const nshot = shotOf(nm);
+const gateAudit = () => nm.evaluate(() => {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+    const within = sel => [...document.querySelectorAll(sel)].filter(vis).every(el => { const r = el.getBoundingClientRect(); return r.left >= -0.5 && r.right <= vw + 0.5 && r.top >= -0.5 && r.bottom <= vh + 0.5; });
+    const small = [...document.querySelectorAll('.notes-update-gate button, .notes-update-strip button')].filter(vis)
+        .map(b => b.getBoundingClientRect()).filter(r => r.width < 43.5 || r.height < 43.5).map(r => `${Math.round(r.width)}x${Math.round(r.height)}`);
+    return { overflow: document.documentElement.scrollWidth > vw + 1, small,
+        gateInside: within('.notes-update-gate-content'), stripInside: within('.notes-update-strip') };
+});
+
+// 1. A bundle that needs a newer APK: NOT downloaded, the install screen says why.
+manifest = {
+    version: '99.0.0', variant: 'notes', url: 'https://download.example.com/mobile/puca-notes-web-99.0.0.enc.zip',
+    sessionKey: 'x:y', checksum: 'ab', native: { min: '99.0.0', version: '99.0.0' },
+};
+await nm.goto('/notes/');
+await nm.waitForSelector('.notes-update-gate', { timeout: 20000 });
+ck('app: the update check asks ?variant=notes', nativeChecks.some(u => u.includes('variant=notes')), JSON.stringify(nativeChecks));
+ck('app: the running bundle is blessed first thing (notifyAppReady)', (await nm.evaluate(() => window.__otaCalls)).includes('CapacitorUpdater.notifyAppReady'));
+ck('app: native.min newer than the APK → the install-the-new-app screen', /Install the new Púca Notes app/.test(await nm.locator('.notes-update-gate').innerText()));
+ck('app: …and the bundle is NOT downloaded', !(await nm.evaluate(() => window.__otaCalls)).includes('CapacitorUpdater.download'));
+let g = await gateAudit();
+await nshot('app-needs-new-apk');
+ck('app: install screen fits the phone, no overflow', g.gateInside && !g.overflow, JSON.stringify(g));
+ck('app: install screen buttons at size', g.small.length === 0, JSON.stringify(g.small));
+await nm.getByRole('button', { name: 'Continue', exact: true }).tap();
+await nm.waitForSelector('.notes-card', { timeout: 20000 });
+ck('app: Continue runs the app on the bundle it has', await nm.locator('.notes-update-gate').count() === 0);
+ck('app: the strip keeps saying why', /needs Púca Notes 99\.0\.0/.test(await nm.locator('.notes-update-strip').innerText()));
+g = await gateAudit();
+await nshot('app-strip');
+ck('app: strip inside the viewport, buttons at size', g.stripInside && g.small.length === 0 && !g.overflow, JSON.stringify(g));
+
+// 2. The account menu: version + Check for updates, which re-runs the check
+//    without unmounting the app.
+await nm.tap('.notes-update-strip-close');
+ck('app: the strip dismisses', await nm.locator('.notes-update-strip').count() === 0);
+await nm.tap('button[aria-label="Account and settings"]');
+await nm.waitForSelector('.notes-menu', { timeout: 5000 });
+ck('app: the account menu shows the running version', /\S/.test(await nm.locator('[data-testid="notes-app-version"]').innerText()));
+await nshot('app-account-menu');
+manifest = null;   // nothing published now
+const before = nativeChecks.length;
+await nm.getByRole('button', { name: 'Check for updates' }).tap();
+await nm.waitForSelector('.notes-menu [role="status"]', { timeout: 20000 });
+ck('app: Check for updates asks again and reports', nativeChecks.length === before + 1 && /up to date/.test(await nm.locator('.notes-menu [role="status"]').innerText()),
+    `${nativeChecks.length - before} check(s): ${await nm.locator('.notes-menu [role="status"]').innerText()}`);
+ck('app: …without leaving the app', await nm.locator('.notes-card').count() >= 1 && await nm.locator('.notes-update-gate').count() === 0);
+await nm.keyboard.press('Escape');
+
+// 3. POSITIVE CONTROL for the refusals: Púca's full manifest (what an old
+//    server answers on ?variant=notes) is not applied either — but a tagged,
+//    current-APK manifest IS downloaded, so the refusals above are not a gate
+//    that refuses everything.
+manifest = { version: '99.0.0', url: 'https://download.example.com/mobile/puca-web-99.0.0.enc.zip', sessionKey: 'x:y', checksum: 'ab', variant: 'full' };
+await nm.reload();
+await nm.waitForSelector('.notes-card', { timeout: 20000 });
+ck('app: Púca\'s full manifest is refused (no download)', !(await nm.evaluate(() => window.__otaCalls)).includes('CapacitorUpdater.download'));
+manifest = { version: '99.0.0', url: `${new URL(nativeChecks[0]).origin.replace(/^http:/, 'https:')}/b.enc.zip`, sessionKey: 'x:y', checksum: 'ab', variant: 'notes' };
+await nm.reload();
+await nm.waitForSelector('.notes-update-gate', { timeout: 20000 }).catch(() => {});
+const applied = (await nm.evaluate(() => window.__otaCalls)).includes('CapacitorUpdater.download');
+ck('app: a tagged Notes manifest IS downloaded (positive control)', applied, JSON.stringify(await nm.evaluate(() => window.__otaCalls)));
+if (applied) {
+    g = await gateAudit();
+    await nshot('app-downloading');
+    ck('app: the downloading screen fits the phone', g.gateInside && !g.overflow, JSON.stringify(g));
+}
+ck('app: no page errors', errors.length === 0, errors[0]);
 
 await browser.close();
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);

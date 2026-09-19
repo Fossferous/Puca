@@ -134,7 +134,7 @@
 }
 
 .notes-update-strip-btn {
-    min-height: 36px;
+    min-height: 44px;
     padding: 6px 14px;
     border: none;
     border-radius: 8px;
@@ -148,8 +148,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     border: none;
     border-radius: 8px;
     background: transparent;
