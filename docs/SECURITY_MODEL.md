@@ -90,6 +90,16 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events
 - IP addresses and device tokens
+- When a phone with the Púca Notes app is alive: while signed in, the app
+  asks `GET /task-reminders` about once an hour even while it is closed (and
+  once more just before a reminder fires), so the operator sees that phone's
+  requests, their timing and its IP, and the session keeps renewing while the
+  app is unopened — still bounded by the 30-day cap and killed by *Sign out of
+  every device*. The request carries nothing new: the feed is task ids and due
+  times, which the server already holds in clear. The copy of the session
+  token this needs lives in the app's private storage, excluded from backup
+  and device transfer. Nothing about saved places is ever sent (they stay on
+  the phone), and no notification carries note text.
 
   This used to say the session token lands in every proxy access log too, because
   the WebSocket carried it in the query string. It no longer does: every client —

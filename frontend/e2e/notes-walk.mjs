@@ -256,6 +256,10 @@ ck('search: cleared', await page.locator('.notes-card').count() === 3);
 await page.locator('.notes-rail-item', { hasText: 'Reminders' }).click();
 await page.waitForSelector('.notes-reminders', { timeout: 5000 });
 ck('reminders: the due item is listed under Upcoming', await page.locator('.notes-reminder-row', { hasText: 'Eggs' }).count() === 1);
+// The Android app's status lines and "At a place" are app-only: a browser
+// has no alarms to describe and no place store to read.
+ck('reminders (web): no native status banner', await page.locator('[data-native-banner]').count() === 0);
+ck('reminders (web): no "At a place" section', await page.locator('section[aria-label="At a place"]').count() === 0);
 await shot('reminders');
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
@@ -322,6 +326,30 @@ if (psqlDsn) {
         ck('database checks ran', false, String(e).slice(0, 200));
     }
 }
+
+// ---- 12b. Export and share on the web ---------------------------------------------------------------
+// The Android app saves to Documents and offers Share and location reminders;
+// the browser keeps its download and shows neither app-only control.
+await page.click('button[aria-label="Account and settings"]');
+await page.waitForSelector('.notes-menu', { timeout: 5000 });
+ck('web menu: no location-reminders toggle', await page.locator('#notes-location').count() === 0);
+ck('web menu: no "Share notes…"', await page.getByRole('button', { name: /Share notes/ }).count() === 0);
+ck('web menu: the export items are there', await page.getByRole('button', { name: 'Export notes as Markdown' }).count() === 1
+    && await page.getByRole('button', { name: 'Export notes as JSON' }).count() === 1);
+const [dl] = await Promise.all([
+    page.waitForEvent('download', { timeout: 10000 }).catch(() => null),
+    page.getByRole('button', { name: 'Export notes as Markdown' }).click(),
+]);
+ck('web export: still a browser download', !!dl && /^puca-notes-\d{4}-\d{2}-\d{2}\.md$/.test(dl.suggestedFilename()), dl ? dl.suggestedFilename() : 'no download');
+const groceries = page.locator('.notes-card', { hasText: 'Groceries' });
+await groceries.hover();
+await groceries.locator('button[aria-label="More actions"]').click();
+await page.waitForSelector('.context-menu-item', { timeout: 5000 });
+ck('web card menu: "Copy as text" is there, "Share…" is not',
+    await page.locator('.context-menu-item', { hasText: 'Copy as text' }).count() === 1
+    && await page.locator('.context-menu-item', { hasText: 'Share…' }).count() === 0);
+await page.keyboard.press('Escape');
+await sleep(200);
 
 // ---- 13. Cross-tab: a Notes sign-out lands the main app's tab on its login ---------------------------
 const page2 = await ctx.newPage();

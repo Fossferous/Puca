@@ -10,9 +10,11 @@ import type { CapacitorConfig } from '@capacitor/cli';
  *   - its own WebView origin (https://localhost, but a different app's
  *     storage), so it has its own sign-in — Notes' login form takes the same
  *     Púca account;
- *   - none of Púca's native plugins (notifications, keep-alive, geofences,
- *     FCM, the OTA updater): Notes is a notes surface, and the web code
- *     degrades to "not available" where it asks for them.
+ *   - none of Púca's native plugins (keep-alive, FCM, the OTA updater). Its
+ *     own small ones live in android/app/src/main/java/com/sovereign/notes
+ *     (due-reminder alarms, the hourly refresh, location reminders, share)
+ *     and every native dependency is listed in THIS folder's package.json,
+ *     never in ../package.json, which would link it into Púca's APK.
  *
  * The web bundle is the Notes page built in NATIVE mode
  * (`NOTES_TARGET=native vite build --config vite.notes.config.ts`, base '/'

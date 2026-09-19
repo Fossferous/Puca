@@ -4,6 +4,34 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Púca Notes on Android reminds you even when it is closed.** A due item
+  now raises a notification from the Notes app itself — open or closed,
+  after a restart of the phone too — saying only "An item is due"; tapping it
+  opens Reminders. About once an hour the app also checks for due times set
+  on your other devices, so they reach the phone without opening Notes (a
+  time set less than about an hour ahead can arrive late, and a phone that
+  has not opened Notes in days checks less often). If your session ends, one
+  notice asks you to open the app. The Reminders view says plainly when
+  notifications are off, when Android may delay them, and how to fix it.
+- **Location reminders in Púca Notes.** The account menu can turn on
+  reminders for when this phone arrives at a place you save, as in Púca.
+  Places stay on the phone and are separate from the ones saved in Púca.
+- **Save and share notes from the Android app.** Export now saves Markdown or
+  JSON into Documents/Puca Notes, and Share sends every note or one note
+  through Android's share sheet. Exports are plaintext, and the app says so.
+
+### Changed
+- **One notification per due item when both apps are installed.** With Púca
+  Notes on the phone, Púca no longer notifies for due items; Notes does.
+
+### Fixed
+- **Saving an attachment on Android saves it.** In both apps the Save button
+  on a file reported success without writing anything. Files now land in
+  Documents/Puca under a unique name, or you are told why they could not.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the
