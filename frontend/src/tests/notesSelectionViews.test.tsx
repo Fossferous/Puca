@@ -8,7 +8,7 @@
  * hook and the real SelectionBar through the routes the shell passes in.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { act, useState } from 'react';
+import { act, useEffect, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { isGridPath, useBulkPending, useNoteSelection } from '../notes/components/useNoteSelection';
 import { UNDO_WINDOW_MS } from '../notes/components/UndoBar';
@@ -32,10 +32,11 @@ let selectedSize = -1;
 
 function Shell({ actions, initial, noteOpen = false }: { actions: NoteActions; initial: string; noteOpen?: boolean }) {
     const [path, set] = useState(initial);
-    setPath = set;
     const bulk = useBulkPending(actions);
     const selection = useNoteSelection({ visible: CARDS, actions, labels: [], bulk, grid: isGridPath(path), enabled: !noteOpen });
-    selectedSize = selection.selected.size;
+    useEffect(() => { setPath = set; }, [set]);
+    const size = selection.selected.size;
+    useEffect(() => { selectedSize = size; }, [size]);
     return (
         <div>
             {CARDS.map(c => <button key={c.key} data-key={c.key} onClick={() => selection.onSelect(c)}>{c.key}</button>)}
