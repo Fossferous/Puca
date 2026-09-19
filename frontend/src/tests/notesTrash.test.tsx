@@ -30,7 +30,8 @@ vi.mock('../api/auth', async () => {
 });
 
 import { ApiError } from '../api/client';
-import { registerBodyFlush, resetTrashProbe } from '../api/listContent';
+import { parseListFeatures, registerBodyFlush, resetTrashProbe } from '../api/listContent';
+import { listContentKeys } from '../notes/model/useListContent';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { resetNotesPrune, useNoteActions, useNoteCards, type NoteActions } from '../notes/model/notesQueries';
 import { PRUNE_GRACE_MS } from '../notes/model/notesPrune';
@@ -51,6 +52,8 @@ interface ServerState {
     selfId: number | null;
     /** Holds the trash listing until released (a trash not read yet). */
     trashGate: Promise<void> | null;
+    /** Holds the live listing until released (a refetch still in flight). */
+    listsGate?: Promise<void> | null;
 }
 let server: ServerState;
 const row = (id: number, trashed = false) => ({
@@ -69,7 +72,10 @@ function installServer() {
             if (server.trashGate) await server.trashGate;
             return server.trashSupported ? server.trashed.map(id => row(id, true)) : server.live.map(id => row(id));
         }
-        if (path === '/task-lists') return server.live.map(id => row(id));
+        if (path === '/task-lists') {
+            if (server.listsGate) await server.listsGate;
+            return server.live.map(id => row(id));
+        }
         if (path === '/task-tab-prefs') return server.prefs;
         if (path === '/servers') return [];
         if (/^\/task-lists\/\d+\/tasks$/.test(path)) return [];
@@ -251,6 +257,37 @@ describe('a note trashed ELSEWHERE keeps its device-local state', () => {
         server.live = [1, 3];   // gone for good
         await act(async () => { await qc.refetchQueries({ queryKey: ['notes', 'lists'], exact: true }); });
         await settle();
+        await listFetchAfterGrace(qc);
+        expect(getNotesPrefs().colors['list:2']).toBeUndefined();
+    });
+});
+
+describe('the device cache is never a strike', () => {
+    // notesCache.ts hydrates each query with its OLD fetch time. That cached
+    // view plus ONE fresh fetch a grace period after it used to be "two
+    // fetches a minute apart" and prune.
+    it('a cached listing, then one fresh fetch a grace period later: nothing is forgotten', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        setNoteColor('list:2', 'mint');
+        server.live = [1, 3];   // deleted elsewhere while this page was closed
+        server.prefs = server.prefs.filter(p => p.ref_id !== 2);
+        let release!: () => void;
+        server.listsGate = new Promise<void>(r => { release = r; });
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
+        const cachedAt = Date.now() - 3_600_000;
+        qc.setQueryData(['notes', 'lists'], [row(1), row(3)], { updatedAt: cachedAt });
+        qc.setQueryData(['notes', 'servers'], [], { updatedAt: cachedAt });
+        qc.setQueryData(listContentKeys.features, parseListFeatures({ body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 }), { updatedAt: cachedAt });
+        qc.setQueryData(listContentKeys.trash, [], { updatedAt: cachedAt });
+        await act(async () => { root.render(<QueryClientProvider client={qc}><Harness /></QueryClientProvider>); });
+        await settle();
+        expect(latest!.keys).toEqual(['list:1', 'list:3']);   // the cached view is on screen
+        vi.setSystemTime(Date.now() + PRUNE_GRACE_MS + 1);
+        await act(async () => { release(); });
+        await settle();
+        expect(getNotesPrefs().colors['list:2']).toBe('mint');
+        // Positive control: a SECOND fresh fetch a grace period later does forget it.
+        server.listsGate = null;
         await listFetchAfterGrace(qc);
         expect(getNotesPrefs().colors['list:2']).toBeUndefined();
     });
