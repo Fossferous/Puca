@@ -95,9 +95,19 @@ step:
   whenever the live stream says it changed.
 - **Nothing is dropped quietly.** A document over the 256 KiB cap, one that will
   not open, or one older than a revision already seen (a rollback) is shown as a
-  banner; the local copy is kept either way.
-- **Deleting a note forgets its colour and labels.** Nothing prunes state from
-  one device's partial view of the notes any more.
+  banner; the local copy is kept either way. A refused rollback (usually a
+  restored server backup) offers *Use the server's copy* or *Keep this
+  device's*; either resumes syncing. A conflict re-reads this device's copy
+  after the round trip, so an edit made while it was out is merged, not lost.
+- **Deleting a note forgets its colour and labels** when the delete is
+  permanent; a note moved to the trash keeps them for a restore. Notes deleted
+  *outside* Notes (Púca's Tasks view, a removed checklist channel) are pruned
+  only once they have been missing from two settled, complete fetches at least
+  a minute apart, never while offline edits are queued, and a personal list
+  only after the trash has been asked and does not hold it
+  (`frontend/src/notes/model/notesPrune.ts`). One device's momentary view — a
+  note created elsewhere a second ago, a channel query that failed — never
+  prunes anything.
 
 A backend without the route (404) leaves Notes as it was: device-local.
 
@@ -131,7 +141,9 @@ is open. The poll is off only while the stream is live.
   IndexedDB (`pucaNotesCache:<user>`), sealed with a key derived from your
   identity seed and bound to your account (`sealLocal` in `e2ee.ts`); a result
   containing anything that failed to decrypt is never stored. On a cold start
-  the cache is put back before the first render. On the web, a service worker
+  the cache is put back as soon as IndexedDB answers (the first render does not
+  wait for it) and is marked stale, so an online start re-reads the server at
+  once; offline, the cached copy fills the grid. On the web, a service worker
   (`/notes/sw.js`, built by `frontend/scripts/notes-sw.mjs`) serves the page
   itself: network first with a short timeout, then the cached copy; hashed
   assets from cache. Its scope is `/notes/`, so by the service-worker spec it
@@ -149,15 +161,26 @@ is open. The poll is off only while the stream is live.
   refused, everything under it is dropped with it. A change the server refuses
   (lost access, deleted elsewhere) is dropped and one message lists what did not
   save, in your words. Item edits are last-write-wins: the task API has no
-  revision to compare against.
+  revision to compare against. **Creates are at-least-once:** the create
+  routes take no client op id, so a create the server committed whose answer
+  was lost (the connection dropped mid-response) is replayed and the note or
+  item appears twice; delete the extra one. Closing that needs an idempotency
+  key on the server's create routes. A change sent right after a cold start
+  waits for the queue a previous page left behind before it may run.
 - **Not offline:** adding an attachment (the upload needs the network) — it
   fails with a message and nothing is queued.
 - **A session that expires while offline** keeps the cached notes on screen with
-  a *Sign in to sync* banner instead of clearing them. The queue replays only
+  a banner (*Your session has expired. You're offline, so this is what this
+  device last saw — sign in again when you're back online to sync.*) instead
+  of clearing them. The queue replays only
   for the same account; signing in as someone else drops the other account's
   cache.
-- **Sign-out** deletes every Notes database on this browser, and warns first if
-  offline edits have not been sent.
+- **Sign-out** deletes every Notes database on this browser and this account's
+  local colours and labels. It first pushes any colour or label change still
+  pending (bounded), then asks if offline edits or colour/label changes have
+  still not reached the server. Signing out from **Púca** deletes the same
+  things, so it asks the same question: Notes publishes the counts (never
+  content) to a per-account flag Púca's sign-out reads.
 
 ## Sessions: one origin, two pages
 
@@ -175,9 +198,15 @@ another document has changed it. Signing out **from Notes** also revokes this
 browser's *device enrolment*: the device id is derived from the browser's device
 key, so no socket is needed (`logout()` in `frontend/src/api/auth.ts`). The key
 is deleted only when the server confirms the revoke. A 404 keeps it (on a shared
-browser it may be another account's enrolment), and so does being offline, so
-the next sign-in re-attests as the same device instead of adding a ghost row to
-the Devices view.
+browser it may be another account's enrolment). Any other outcome — offline, the
+tab closed straight after, the answer lost after the server committed — keeps
+the key and a local marker written before the request
+(`frontend/src/api/deviceIdentity/pendingRevoke.ts`); the next sign-in on this
+browser sends the revoke again before it enrols (the server answers 200 for a
+row it already revoked) and then enrols as a new device, so the browser is
+never left refused as a revoked device. The session itself is revoked after the
+device, but never only after it: leaving the page or 1.5 s without an answer
+sends it anyway.
 
 Notes **never opens the WebSocket**. Púca wires its file-transfer handlers
 before its socket opens because the server sweeps parked P2P file offers to

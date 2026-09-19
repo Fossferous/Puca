@@ -12,8 +12,9 @@
  * FULL note order so hidden notes keep their slots (notesModel bulkPinOrder);
  * colour, labels and archive are one write of the synced note state
  * (notesBulk.ts) — one sealed push, not one per note. Delete waits out an
- * Undo window like a single delete, then deletes the personal notes with
- * bounded concurrency and says which failed. Shared notes (channel
+ * Undo window like a single delete, then moves the personal notes to the
+ * trash where the server has one (else deletes them, listTrash.ts) with
+ * bounded concurrency, and says which failed. Shared notes (channel
  * checklists) are skipped by Delete, and the button says so.
  */
 import { useState } from 'react';

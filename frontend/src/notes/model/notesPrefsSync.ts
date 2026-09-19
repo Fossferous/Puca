@@ -29,7 +29,10 @@
  * server's; and the highest revision seen is remembered, so a server serving
  * an OLDER document (a rollback) is refused rather than applied. That record
  * is scrubbed at sign-out with the rest of Notes' per-account state, so the
- * rollback check starts fresh on each sign-in (docs/SECURITY_MODEL.md).
+ * rollback check starts fresh on each sign-in (docs/SECURITY_MODEL.md). A
+ * refused rollback is not a dead end: after a restored backup the user
+ * chooses the server's copy (acceptServer) or this device's
+ * (overwriteServer), and either restarts the floor at the server's revision.
  *
  * NOT SYNCED: grid/list and sort are per device, on purpose.
  *

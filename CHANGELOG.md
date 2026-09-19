@@ -9,9 +9,12 @@ one-line summary; this file is the full story. Versions follow
 ### Púca Notes
 - **Colours, labels and archive follow your account.** They used to live in one
   browser and vanish when you signed out. They are now sealed with your own key
-  and synced, so every device you sign in on shows the same ones, and a sign-out
-  no longer loses them. The server stores them encrypted and cannot read them.
-  Grid or list view and the sort order still stay per device.
+  and synced, so every device you sign in on shows the same ones and a new
+  sign-in brings them back. A sign-out still deletes this device's copy, so
+  changes that have not reached your account yet are pushed first, and if any
+  still have not, Notes (or Púca) asks before signing out. The server stores
+  them encrypted and cannot read them. Grid or list view and the sort order
+  still stay per device.
 - **Notes update live.** A change made on one device or by someone sharing a
   checklist appears on your other open devices within a moment, with no
   refresh. The server says only which note changed, never what it says.
@@ -21,9 +24,13 @@ one-line summary; this file is the full story. Versions follow
   which. The copy on your device is encrypted with a key from your account.
 - **Select several notes at once** and pin, colour, label, archive, delete, copy
   or duplicate them together: Ctrl-click, Shift-click or Ctrl+A on a computer,
-  a long press on a phone.
+  a long press on a phone. Deleted notes go to the trash where your server has
+  one.
 - **Signing out of Notes now removes this browser from your Devices list**, as
-  signing out of Púca does, instead of leaving it enrolled.
+  signing out of Púca does, instead of leaving it enrolled. If the tab closes
+  or the connection drops before the server answers, the next sign-in on that
+  browser finishes it, instead of the browser being refused as a signed-out
+  device.
 
 ### For operators
 - Serve `/notes/sw.js` with `Cache-Control: no-cache` (two lines in the web app's
