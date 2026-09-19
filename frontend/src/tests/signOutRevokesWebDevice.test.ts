@@ -50,10 +50,12 @@ function webKey(seed = 7): string {
     return btoa(s);
 }
 
-/** A token whose payload names the user (signature is irrelevant here). */
+/** A token whose payload names the user (signature is irrelevant here).
+ *  Deterministic — a fixed far-future expiry — so two calls compare equal
+ *  even across a second boundary. */
 function jwt(sub: number): string {
     const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-    return `${b64({ alg: 'HS256' })}.${b64({ sub, exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
+    return `${b64({ alg: 'HS256' })}.${b64({ sub, exp: 4_102_444_800 })}.sig`;
 }
 
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
