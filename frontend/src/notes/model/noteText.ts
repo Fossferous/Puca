@@ -107,7 +107,8 @@ export function fileStamp(now: number): string {
 export async function saveNotesExport(name: string, text: string, mime: string): Promise<SaveResult> {
     if (isMobile()) {
         try {
-            return await saveTextToDevice(NOTES_FOLDER, timestampedName(name), text);
+            // The timestamp carries the date: drop the name's own -YYYY-MM-DD.
+            return await saveTextToDevice(NOTES_FOLDER, timestampedName(name.replace(/-\d{4}-\d{2}-\d{2}(?=\.[^.]+$)/, '')), text);
         } catch (e) {
             console.warn('[notes] export could not be written:', e);
             throw new Error(deviceWriteFailedMessage('Púca Notes', 'the export'));

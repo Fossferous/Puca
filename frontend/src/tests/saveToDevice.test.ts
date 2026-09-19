@@ -123,7 +123,7 @@ describe('saveNotesExport', () => {
     it('Android: Documents/Puca Notes with a timestamped name', async () => {
         writeFile.mockResolvedValue({ uri: 'file://x' });
         const r = await saveNotesExport('puca-notes-2026-09-19.md', '# x', 'text/markdown');
-        expect(r.where).toMatch(/^Documents\/Puca Notes\/puca-notes-2026-09-19-\d{8}-\d{6}\.md$/);
+        expect(r.where).toMatch(/^Documents\/Puca Notes\/puca-notes-\d{8}-\d{6}\.md$/);
     });
     it('Android: a failed write names the Android 10 permission, not success', async () => {
         writeFile.mockRejectedValue(new Error('EACCES'));
