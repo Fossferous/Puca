@@ -90,6 +90,13 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events
 - IP addresses and device tokens
+- Which app is asking for updates, and when: the Android update check is
+  unauthenticated and names its channel (`?variant=lite` for Púca Lite,
+  `?variant=notes` for the Púca Notes app), so the operator's logs show that
+  some device at that IP runs that app and when it launched — never who, and
+  nothing of its content. The update manifests themselves are public release
+  metadata (version, bundle URL, signature, and for Notes an optional
+  minimum-APK version).
 
   This used to say the session token lands in every proxy access log too, because
   the WebSocket carried it in the query string. It no longer does: every client —

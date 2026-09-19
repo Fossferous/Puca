@@ -116,9 +116,12 @@ The web tarball ships it (`deploy/webapp/README.md`); the operator's Caddy
 phone shells strip `dist/notes/` (`scripts/strip-notes-from-native.mjs` after
 every `cap sync`, and `rm -rf ota-src/notes` in the OTA recipe) — a browser-only
 page with no CSP meta has no business inside a WebView. The desktop installer
-still carries `dist/notes/` inside its resources, unused: the shell only ever
-loads `index.html` and nothing in the app links to `/notes/` there; dropping it
-from the Tauri bundle is a follow-up. `deploy/ops/dual-ship.sh webapp` checks
+no longer carries it either: Tauri embeds `dist-desktop/`
+(`tauri.conf.json` `frontendDist`), a copy of `dist/` without `notes/` that
+`scripts/stage-desktop-dist.mjs` makes after every full and Lite build — the
+shell only ever loads `index.html`, and `dist/` itself stays whole because it is
+the webapp tarball. `scripts/check-lite-identity.mjs` fails if the installer is
+pointed back at `dist/`. `deploy/ops/dual-ship.sh webapp` checks
 Notes' entry chunk for the API host the same way it checks the main one.
 
 In development the main dev server serves it: `npm run dev`, then open
@@ -130,9 +133,9 @@ In development the main dev server serves it: `npm run dev`, then open
 its own Android app, **Púca Notes** (`com.sovereign.notes`), installed beside the
 Púca app with its own storage and its own sign-in (the same Púca account).
 None of Púca's native plugins are in it — notifications, background delivery,
-location reminders and the OTA updater stay Púca's — so due-time reminders show
-in the Reminders view but do not notify from this app, and it updates by
-installing a new APK.
+location reminders stay Púca's — so due-time reminders show in the Reminders
+view but do not notify from this app. It has one plugin of its own, the OTA
+updater (below), so its web layer updates itself.
 
 ```bash
 cd frontend && npm run notes:android            # debug APK, sideloadable
@@ -146,13 +149,66 @@ CSP meta (`scripts/cap-index-csp.mjs --index`), runs `cap sync android` inside
 like every other build. Output:
 `frontend/notes-app/android/app/build/outputs/apk/debug/app-debug.apk`.
 
-**It ships with every release.** The app has no updater of its own, so a Púca
-Notes that trails the task API it talks to would break quietly; it is therefore
-a release surface like the others: built from the same version
-(`tauri.conf.json`, checked by `scripts/check-lite-identity.mjs`), release-signed
-with the same keystore as Púca, uploaded by `deploy/ops/dual-ship.sh apk-notes`
-under `APK_PREFIX_NOTES` from `hosts.conf`, linked from the download page (the
-ship refuses until it is), and asserted by `check-versions.sh`.
+**It ships with every release — twice.** A Púca Notes that trails the task API
+it talks to would break quietly, so it is a release surface like the others,
+built from the same version (`tauri.conf.json`, checked by
+`scripts/check-lite-identity.mjs`) and release-signed with the same keystore as
+Púca. The steady-state rule, every release:
+
+1. **`dual-ship.sh mobile-notes`** — the OTA bundle, which is what brings
+   installed apps up to date (next section);
+2. **`dual-ship.sh apk-notes`** — the APK, under `APK_PREFIX_NOTES` from
+   `hosts.conf`, linked from the download page (the ship refuses until it is),
+   so a fresh install starts current rather than needing its first OTA.
+
+`check-versions.sh` asserts the notes OTA manifest carries the release once one
+is deployed; with a current notes OTA a trailing APK is INFO, except when the
+manifest's `native.min` is newer than the APK the page links (a fresh install
+would then refuse its own first update), which is a FAIL — as a trailing APK is
+whenever no current notes OTA exists.
+
+### Updates over the air
+
+From the first APK that carries the updater (the release after 0.9.815),
+Notes updates its web layer the way Púca does — a signed bundle applied at
+launch — on **its own channel**:
+
+- It asks `GET /api/mobile-updates/check?variant=notes`, which the server
+  answers from `mobile-update-notes.json` (`MOBILE_UPDATE_FILE_NOTES`;
+  `src/update_routes.rs`). A server from before that route answers with Púca's
+  full manifest, and the app refuses anything not tagged exactly
+  `"variant": "notes"` (`otaChannelMatches`), so that skew leaves Notes where it
+  is rather than installing Púca into it.
+- Bundles are signed with a **separate Notes key** (`notes-updater-rsa.key` in
+  the keys directory, backed up by `deploy/ops/backup-keys.sh`); the APK embeds
+  only its public half (`notes-app/capacitor.config.ts`). A Púca bundle cannot
+  decrypt or verify inside Notes, nor a Notes bundle inside Púca, whatever an
+  unsigned manifest claims. `deploy/mobile/verify-bundle.mjs` proves a bundle
+  against the TARGET app's key before `dual-ship.sh` uploads it.
+- The bundle is the native Notes build: `node scripts/build-notes-app.mjs --ota`
+  writes `notes-ota/puca-notes-web-<v>.zip` after checking the CSP meta and the
+  `"app": "notes"` tag in `version.json`; `encrypt-bundle.mjs --notes` refuses
+  anything else (in particular `dist/notes/`, the web page, which would
+  white-screen the app). Recipe: `deploy/mobile/README.md`, *Púca Notes*.
+- The gate (`src/notes/components/NotesUpdateGate.tsx`, engine shared with Púca
+  in `src/api/mobileOta.ts`) may delay the app but never hold it, and
+  `notes/main.tsx` blesses the running bundle first thing, so a bundle that
+  never boots is rolled back.
+- **Native changes** still need a new APK. The manifest can say so in an
+  optional `native` block (`dual-ship.sh mobile-notes ... --native-min <v>
+  --native-version <v>`): an APK older than `native.min` does not apply the
+  bundle and shows *Install the new Púca Notes app* with a Download button to
+  the download page's `#notes-app` section (same-site HTTPS only); a newer
+  `native.version` is a dismissable strip, once per version. Raise
+  `--native-min` in any release that adds a native plugin, permission or
+  manifest entry the new web code depends on.
+- The account menu shows the running version and a **Check for updates** that
+  re-runs the check without closing an open note.
+
+**Existing installs need one manual install.** Notes APKs up to and including
+0.9.815 have no updater, so nothing can reach them over the air; they stay as
+they are until their owner installs the first OTA-capable APK from the download
+page. After that one install, updates arrive by themselves.
 
 ## Not built (and why)
 
@@ -163,6 +219,9 @@ ship refuses until it is), and asserted by `check-versions.sh`.
   Notes gives a six-second Undo instead.
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
+- **A desktop Notes app.** Notes on a computer is the browser page; the
+  desktop installer deliberately carries no copy of it (see *Building and
+  serving*).
 - **Photo/drawing notes, recurring or snoozable reminders, bulk selection,
   edited-at.** No source in the task API yet.
 
