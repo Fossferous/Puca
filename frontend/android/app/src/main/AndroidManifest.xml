@@ -16,6 +16,7 @@
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -184,6 +185,14 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- Saving an attachment (Save on a file) writes Documents/Puca through
+         @capacitor/filesystem. Android 10 and older need this grant for it,
+         which the plugin asks for at the first save, plus
+         requestLegacyExternalStorage on the application for Android 10's
+         scoped storage; 11+ need neither for a file the app creates. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- Keeping a file transfer running while the app is in the background.
          Android freezes a cached process, which stalls the transfer; a

@@ -31,6 +31,8 @@ one-line summary; this file is the full story. Versions follow
 - **Saving an attachment on Android saves it.** In both apps the Save button
   on a file reported success without writing anything. Files now land in
   Documents/Puca under a unique name, or you are told why they could not.
+  On Android 10 and older, Púca can write there once its next app update
+  (not an over-the-air update) is installed.
 
 ## 0.9.815 — 2026-09-19
 
