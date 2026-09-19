@@ -23,9 +23,10 @@
  * `ImageLightbox` already documented this reasoning for images; the message and
  * task attachment lists never got the same treatment.
  */
-import { isTauri } from './platform';
+import { isMobile, isTauri } from './platform';
 import { loadSettings } from '../components/settingsStore';
 import { chooseSavePath } from './savePath';
+import { PUCA_FOLDER, deviceWriteFailedMessage, saveBytesToDevice, timestampedName } from './saveToDevice';
 
 /** Where a saved file ended up, for the "Saved to …" line. */
 export interface SaveResult {
@@ -69,6 +70,20 @@ export async function saveAttachment(blobUrl: string, name: string): Promise<Sav
             },
         });
         return { where: path, onDisk: true };
+    }
+
+    // A phone: the anchor below writes NOTHING in a WebView (Capacitor 8 has
+    // no download listener) and would then report "saved". Documents/Puca
+    // through the filesystem plugin instead, under a timestamped name — on
+    // Android 11+ a reinstalled app no longer owns what it wrote before, and
+    // writing over that name fails. A failure throws; it never falls through.
+    if (isMobile()) {
+        try {
+            return await saveBytesToDevice(PUCA_FOLDER, timestampedName(safeName), blobUrl);
+        } catch (e) {
+            console.warn('[attachment] could not write to this device:', e);
+            throw new Error(deviceWriteFailedMessage(null, 'the file'));
+        }
     }
 
     // Web: a transient anchor. Created, clicked and removed synchronously so it
