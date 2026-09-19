@@ -783,6 +783,23 @@ mod tests {
         sqlx::query("UPDATE tl_probe SET title = 'renamed', updated_at = NOW()").execute(&mut *c).await.unwrap();
         let got = mine(collect(&mut l, Duration::from_millis(800)).await);
         assert_eq!(got.len(), 1, "a rename raises one: {got:?}");
+
+        // The same rule on the TASK trigger (a channel-shaped row; the channel
+        // id is made unique so other tests' events cannot be mistaken for it).
+        let cid: i64 = 900_000_000 + (owner % 1_000_000);
+        sqlx::query("CREATE TEMP TABLE ct_probe (id BIGINT PRIMARY KEY, channel_id BIGINT, list_id BIGINT, description TEXT, is_completed BOOLEAN, updated_at TIMESTAMPTZ)")
+            .execute(&mut *c).await.unwrap();
+        sqlx::query("CREATE TRIGGER ct_probe_ev AFTER INSERT OR UPDATE OR DELETE ON ct_probe FOR EACH ROW EXECUTE FUNCTION puca_task_events_task()")
+            .execute(&mut *c).await.unwrap();
+        let chan = |v: Vec<String>| v.into_iter().filter(|p| p.contains(&format!("{cid}"))).collect::<Vec<_>>();
+        sqlx::query("INSERT INTO ct_probe VALUES (1, $1, NULL, 'secret item', FALSE, NOW())").bind(cid).execute(&mut *c).await.unwrap();
+        let got = chan(collect(&mut l, Duration::from_millis(800)).await);
+        assert_eq!(got.len(), 1, "a task insert raises one: {got:?}");
+        assert!(!got[0].contains("secret"), "no content: {}", got[0]);
+        sqlx::query("UPDATE ct_probe SET updated_at = NOW() + INTERVAL '1 minute'").execute(&mut *c).await.unwrap();
+        assert!(chan(collect(&mut l, Duration::from_millis(800)).await).is_empty(), "updated_at alone raises nothing on the task trigger");
+        sqlx::query("UPDATE ct_probe SET is_completed = TRUE, updated_at = NOW()").execute(&mut *c).await.unwrap();
+        assert_eq!(chan(collect(&mut l, Duration::from_millis(800)).await).len(), 1, "a toggle does");
         let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
     }
 
