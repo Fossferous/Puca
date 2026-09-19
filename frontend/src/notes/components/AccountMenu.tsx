@@ -5,7 +5,8 @@
  */
 import { useState } from 'react';
 import { loadSettings, saveSettings } from '../../components/settingsStore';
-import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon } from '../../components/Icons';
+import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon, UploadIcon } from '../../components/Icons';
+import { NotesLocationSettings } from '../native/NotesLocationSettings';
 import { isMobile } from '../../api/platform';
 import { type NotesSortMode } from '../model/notesPrefs';
 
@@ -20,12 +21,14 @@ interface AccountMenuProps {
     onSort: (s: NotesSortMode) => void;
     onExportMarkdown: () => void;
     onExportJson: () => void;
+    /** Android app only: the share sheet (undefined hides the item). */
+    onShare?: () => void;
     onHelp: () => void;
     onSignOut: () => void;
     onSignOutEverywhere: () => void;
 }
 
-export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExportJson, onHelp, onSignOut, onSignOutEverywhere }: AccountMenuProps) {
+export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExportJson, onShare, onHelp, onSignOut, onSignOutEverywhere }: AccountMenuProps) {
     const [settings, setSettings] = useState(loadSettings);
     const update = (patch: Partial<ReturnType<typeof loadSettings>>) => {
         const next = { ...loadSettings(), ...patch };
@@ -65,12 +68,14 @@ export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExport
                     <option value="created">Newest first</option>
                 </select>
             </div>
+            <NotesLocationSettings />
             <div className="notes-menu-sep" />
-            {/* Browser only: an Android WebView ignores the download attribute, so
-                in the app these two did nothing at all. "Copy as text" on a note
-                is the app's way out; a share-sheet export is not built. */}
-            {!NATIVE && <button type="button" className="notes-menu-item" onClick={onExportMarkdown}><DownloadIcon /> Export notes as Markdown</button>}
-            {!NATIVE && <button type="button" className="notes-menu-item" onClick={onExportJson}><DownloadIcon /> Export notes as JSON</button>}
+            {/* In the Android app these write to Documents/Puca Notes (an
+                Android WebView ignores the download attribute, so the browser
+                path would save nothing) and Share opens the share sheet. */}
+            <button type="button" className="notes-menu-item" onClick={onExportMarkdown}><DownloadIcon /> {NATIVE ? 'Save as Markdown' : 'Export notes as Markdown'}</button>
+            <button type="button" className="notes-menu-item" onClick={onExportJson}><DownloadIcon /> {NATIVE ? 'Save as JSON' : 'Export notes as JSON'}</button>
+            {onShare && <button type="button" className="notes-menu-item" onClick={onShare}><UploadIcon /> Share notes…</button>}
             <button type="button" className="notes-menu-item" onClick={onHelp}><HelpIcon /> Keyboard shortcuts</button>
             {!NATIVE && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
             <div className="notes-menu-sep" />

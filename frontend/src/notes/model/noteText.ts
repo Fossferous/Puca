@@ -6,6 +6,9 @@
 import { type Task, buildTaskTree, type TaskNode, parseTaskAttachments } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from './notesModel';
+import { isMobile } from '../../api/platform';
+import { type SaveResult } from '../../api/saveAttachment';
+import { NOTES_FOLDER, deviceWriteFailedMessage, saveTextToDevice, timestampedName } from '../../api/saveToDevice';
 
 function lines(nodes: TaskNode[], depth: number, out: string[]): void {
     for (const n of nodes) {
@@ -93,8 +96,30 @@ export function fileStamp(now: number): string {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * Save an export where this platform keeps files. In the Android app that is
+ * Documents/Puca Notes/<name-with-timestamp> through the filesystem plugin
+ * (a WebView ignores the download attribute — the anchor would write
+ * nothing); it throws with a real reason when the write fails. In a browser
+ * it is the download below. Either way the file is PLAINTEXT, and the caller
+ * says so.
+ */
+export async function saveNotesExport(name: string, text: string, mime: string): Promise<SaveResult> {
+    if (isMobile()) {
+        try {
+            // The timestamp carries the date: drop the name's own -YYYY-MM-DD.
+            return await saveTextToDevice(NOTES_FOLDER, timestampedName(name.replace(/-\d{4}-\d{2}-\d{2}(?=\.[^.]+$)/, '')), text);
+        } catch (e) {
+            console.warn('[notes] export could not be written:', e);
+            throw new Error(deviceWriteFailedMessage('Púca Notes', 'the export'));
+        }
+    }
+    downloadTextFile(name, text, mime);
+    return { where: name, onDisk: false };
+}
+
 /** Hand the browser a file to save. BROWSER only: the Android app's WebView
- *  ignores the download attribute, so its account menu hides the callers. */
+ *  ignores the download attribute — saveNotesExport routes around it. */
 export function downloadTextFile(name: string, text: string, mime: string): void {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);

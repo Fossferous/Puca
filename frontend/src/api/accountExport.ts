@@ -24,6 +24,7 @@ import { isUndecryptable } from './decryptMarkers';
 import { parseEnvelopeEx } from './e2ee';
 import { isMobile } from './platform';
 import { saveAttachment, type SaveResult } from './saveAttachment';
+import { PUCA_FOLDER, saveTextToDevice } from './saveToDevice';
 
 /** A sealed body's parsed header — what the row looks like without the key. */
 export interface EnvelopeMeta {
@@ -268,21 +269,8 @@ export async function saveExportFile(doc: Record<string, unknown>, username: str
         // it is a silent failure that then reports "Downloaded as …". Either
         // the real write happens or the caller is told it did not.
         try {
-            const { Capacitor } = await import('@capacitor/core');
-            if (Capacitor.getPlatform() !== 'android' || !Capacitor.isPluginAvailable('Filesystem')) {
-                throw new Error('this app cannot write files on this platform');
-            }
-            {
-                const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
-                await Filesystem.writeFile({
-                    path: `Puca/${name}`,
-                    data: json,
-                    directory: Directory.Documents,
-                    encoding: Encoding.UTF8,
-                    recursive: true,
-                });
-                return { where: `Documents/Puca/${name}`, onDisk: true };
-            }
+            // Documents/Puca/<name> through @capacitor/filesystem (api/saveToDevice.ts).
+            return await saveTextToDevice(PUCA_FOLDER, name, json);
         } catch (e) {
             console.warn('[export] could not write the export to this device:', e);
             // DO NOT blame disk space alone. Writing into the public Documents

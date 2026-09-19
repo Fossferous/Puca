@@ -18,11 +18,16 @@ import { NotesLogin } from './components/NotesLogin';
 import { NotesShell } from './components/NotesShell';
 import { invalidateNotesPrefs } from './model/notesPrefs';
 import { notesKeys } from './model/notesQueries';
+import { NativeTokenGate } from './native/NativeTokenGate';
+import { adoptFromNative, adoptOnResume, rescueOrExpire } from './native/nativeSessionRescue';
+import { useNotesNativeSession } from './native/useNotesNativeSession';
 
 export function NotesApp() {
     return (
         <HashRouter>
-            <SessionGate />
+            <NativeTokenGate>
+                <SessionGate />
+            </NativeTokenGate>
         </HashRouter>
     );
 }
@@ -31,6 +36,8 @@ function SessionGate() {
     const navigate = useNavigate();
     const qc = useQueryClient();
     const [signedIn, setSignedIn] = useState(isAuthenticated());
+    // Android app: every way out of the session clears the native side too.
+    useNotesNativeSession(signedIn);
 
     /** Land on the login screen without touching the keys (App.tsx's rule:
      *  a re-authentication must never risk the E2EE identity). */
@@ -41,18 +48,35 @@ function SessionGate() {
         navigate('/login', { state: { expired }, replace: true });
     }, [navigate, qc]);
 
+    // The Android app's job may have renewed the token while the page slept
+    // (native/nativeSessionRescue.ts): adopting it continues the session, so
+    // the expiry signal is re-armed and whatever failed on the old token is
+    // fetched again. In the browser adoption is always false.
+    const onAdopted = useCallback(() => {
+        resetAuthExpiredFlag();
+        void qc.invalidateQueries();
+    }, [qc]);
+
     // The API client fires this ONCE per session when an authenticated
-    // request 401s (the token is dead) — same contract as App.tsx.
+    // request 401s (the token is dead) — same contract as App.tsx. The Android
+    // app first tries the job's renewed token; only with none does it expire.
     useEffect(() => {
-        const h = () => expire(true);
+        const h = () => { void rescueOrExpire({ adopt: adoptFromNative, onAdopted, expire: () => expire(true) }); };
         window.addEventListener('auth-expired', h);
         return () => window.removeEventListener('auth-expired', h);
-    }, [expire]);
+    }, [expire, onAdopted]);
 
-    // A token we can SEE has expired will never work; go straight to sign-in.
+    // Back into view after a long background stay: adopt before the next
+    // poll can 401 on a token that expired meanwhile.
+    useEffect(() => adoptOnResume(adoptFromNative, onAdopted), [onAdopted]);
+
+    // A token we can SEE has expired will never work; go straight to sign-in
+    // (after the same rescue).
     useEffect(() => {
         const t = getToken();
-        if (signedIn && t && isTokenExpired(t)) expire(true);
+        if (signedIn && t && isTokenExpired(t)) {
+            void rescueOrExpire({ adopt: adoptFromNative, onAdopted, expire: () => expire(true) });
+        }
         // Mount-time check only.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);

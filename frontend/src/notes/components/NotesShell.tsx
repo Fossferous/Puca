@@ -10,7 +10,6 @@ import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import { notificationPermission } from '../../api/desktopNotify';
-import { startTaskReminders } from '../../api/taskReminders';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
 import { useContextMenu } from '../../components/contextMenuUtils';
 import { IdentityBanner } from '../../components/IdentityBanner';
@@ -23,7 +22,7 @@ import {
 } from '../model/notesModel';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
-import { downloadTextFile, fileStamp, noteToMarkdown, notesToJson, notesToMarkdown, openItemsOf } from '../model/noteText';
+import { noteToMarkdown, openItemsOf } from '../model/noteText';
 import { AccountMenu } from './AccountMenu';
 import { ColorPicker } from './ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
@@ -37,6 +36,10 @@ import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
+import { useNotesReminderLoop } from '../native/useNativeReminders';
+import { canShareNotes, exportNotes, shareNote, shareNotes } from '../native/notesExport';
+import { usePlaceReminderItems } from '../native/useNotesPlaces';
+import { NativeReminderBanners } from '../native/NativeReminderBanners';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -160,7 +163,9 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     }, [setParams]);
 
     // --- Reminders loop + notifications -------------------------------------------------
-    useEffect(() => startTaskReminders(), []);
+    // Android app: native alarms own firing, open or closed (notes/native/).
+    useNotesReminderLoop(go);
+    const placeItems = usePlaceReminderItems(cards);
     const enableNotifications = async () => {
         if (typeof Notification === 'undefined') return;
         await Notification.requestPermission();
@@ -255,6 +260,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             { id: 'copy-text', label: 'Copy as text', icon: 'copy', onClick: () => { void copyAsText(card); } },
             { id: 'duplicate', label: 'Make a copy', icon: 'file-text', onClick: () => { void duplicate(card); } },
         );
+        if (canShareNotes()) items.push({ id: 'share', label: 'Share…', icon: 'upload', onClick: () => { void shareNote(card); } });
         if (pucaHref) {
             items.push({ id: 'puca', label: 'Open in Púca', icon: 'pop-out', onClick: () => window.open(pucaHref, '_blank', 'noopener') });
         }
@@ -311,8 +317,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         }
         onSignOut();
     };
-    const exportMd = () => downloadTextFile(`puca-notes-${fileStamp(Date.now())}.md`, notesToMarkdown(cards), 'text/markdown;charset=utf-8');
-    const exportJson = () => downloadTextFile(`puca-notes-${fileStamp(Date.now())}.json`, notesToJson(cards, new Date().toISOString()), 'application/json');
+    const exportMd = () => { void exportNotes(cards, 'md'); };
+    const exportJson = () => { void exportNotes(cards, 'json'); };
 
     const popupCard = popup && popup.kind !== 'account' ? cardsByKey.get(popup.key) ?? null : null;
     const offline = error !== null && error !== undefined && isNetworkError(error);
@@ -367,6 +373,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 onOpen={openNote}
                                 notificationsState={notif}
                                 onEnableNotifications={() => { void enableNotifications(); }}
+                                nativeBanner={<NativeReminderBanners />}
+                                placeItems={placeItems}
                             />
                         ) : (
                             <>
@@ -438,6 +446,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                         onSort={s => setNotesSort(s)}
                         onExportMarkdown={() => { setPopup(null); exportMd(); }}
                         onExportJson={() => { setPopup(null); exportJson(); }}
+                        onShare={canShareNotes() ? () => { setPopup(null); void shareNotes(cards); } : undefined}
                         onHelp={() => { setPopup(null); setHelp(true); }}
                         onSignOut={() => { setPopup(null); onSignOut(); }}
                         onSignOutEverywhere={() => { setPopup(null); void signOutEverywhere(); }}

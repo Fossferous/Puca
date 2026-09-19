@@ -4,6 +4,42 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Púca Notes on Android reminds you even when it is closed.** A due item
+  now raises a notification from the Notes app itself — open or closed,
+  after a restart of the phone too — saying only "An item is due"; tapping it
+  opens Reminders. About once an hour the app also checks for due times set
+  on your other devices, so they reach the phone without opening Notes (a
+  time set less than about an hour ahead can arrive late, and a phone that
+  has not opened Notes in days checks less often). If your session ends, one
+  notice asks you to sign in again, and a reminder that was due at that
+  moment still arrives. The Reminders view says plainly when
+  notifications are off, when Android may delay them, and how to fix it.
+- **Location reminders in Púca Notes.** The account menu can turn on
+  reminders for when this phone arrives at a place you save, as in Púca.
+  Places stay on the phone and are separate from the ones saved in Púca.
+- **Save and share notes from the Android app.** Export now saves Markdown or
+  JSON into Documents/Puca Notes, and Share sends every note or one note
+  through Android's share sheet. Exports are plaintext, and the app says so.
+
+### Changed
+- **One notification per due item when both apps are installed.** When
+  Púca Notes on the phone is signed in to the same account, keeping up with
+  your reminders and allowed to notify, Púca leaves due items to it; in every
+  other case (Notes signed out, out of date, stopped, muted, or an older
+  version) Púca notifies as before, so an item is never left unannounced.
+  Ship the Púca Notes APK with or before the Púca APK; if you update Notes
+  from an older version, allow its notifications once.
+
+### Fixed
+- **Saving an attachment on Android saves it.** In both apps the Save button
+  on a file reported success without writing anything. Files now land in
+  Documents/Puca under a unique name, or you are told why they could not.
+  On Android 10 and older, Púca can write there once its next app update
+  (not an over-the-air update) is installed.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the

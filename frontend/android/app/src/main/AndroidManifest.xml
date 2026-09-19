@@ -16,6 +16,7 @@
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -149,6 +150,19 @@
         </receiver>
     </application>
 
+    <!-- Package visibility (Android 11+) for ONE package: Púca Notes, so
+         Púca can ask its ReminderOwnerProvider whether Notes owns due-item
+         reminders on this phone right now (Púca stays quiet only on a yes;
+         SovereignAppPlugin.notesOwnsDueReminders, docs/NOTES.md). Nothing
+         else about installed apps is visible to Púca. -->
+    <queries>
+        <package android:name="com.sovereign.notes" />
+    </queries>
+    <!-- The signature permission that provider is guarded by (declared in
+         Púca Notes' manifest): granted only because both apps are signed
+         with the same Púca key. -->
+    <uses-permission android:name="com.sovereign.notes.permission.DUE_REMINDER_OWNER" />
+
     <!-- Permissions -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -176,6 +190,14 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- Saving an attachment (Save on a file) writes Documents/Puca through
+         @capacitor/filesystem. Android 10 and older need this grant for it,
+         which the plugin asks for at the first save, plus
+         requestLegacyExternalStorage on the application for Android 10's
+         scoped storage; 11+ need neither for a file the app creates. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- Keeping a file transfer running while the app is in the background.
          Android freezes a cached process, which stalls the transfer; a

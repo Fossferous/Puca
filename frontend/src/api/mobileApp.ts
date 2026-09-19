@@ -85,6 +85,10 @@ interface SovereignAppPlugin {
     pipSupported(): Promise<{ supported: boolean }>;
     enterPip(opts: { width: number; height: number }): Promise<{ ok: boolean; reason?: string }>;
     exitPip(): Promise<{ ok: boolean }>;
+    /** Does Púca Notes (com.sovereign.notes) own due-item reminders for
+     *  `account` right now (its signature-guarded ReminderOwnerProvider says
+     *  yes)? APKs with the method only; older ones reject. */
+    notesOwnsDueReminders(opts: { account: string }): Promise<{ owns: boolean }>;
     addListener(
         eventName: 'navigate',
         listener: (data: { target: string }) => void,
@@ -353,6 +357,34 @@ export async function openMobileAppSettings(): Promise<boolean> {
     } catch {
         appSettingsSupported = false;
         return false;
+    }
+}
+
+/** Whether notesOwnsDueReminders exists natively. Its own latch, like the
+ *  others: a rejection here must not blind anything else. */
+let notesOwnerProbeSupported: boolean | null = null;
+
+/**
+ * Does Púca Notes own due-item reminders on this phone, for this account,
+ * right now? Owner decision (docs/NOTES.md): when Notes is installed AND able
+ * to deliver them — signed in to the same account, keeping up with the feed,
+ * notifications allowed, its alarm set — it does, and Púca stays quiet so one
+ * due item is one notification, never zero. true ONLY on Notes' own yes.
+ * false = Notes said no, is not installed, or predates the question.
+ * null = not Android, or a Púca APK without the method: the caller keeps
+ * today's behaviour (Púca notifies). Asked at every due-reminder fire, not
+ * cached: Notes' answer changes as it signs in and out.
+ */
+export async function notesOwnsDueReminders(account: string | null): Promise<boolean | null> {
+    if (!android() || usable === false || notesOwnerProbeSupported === false) return null;
+    if (!account) return false;
+    try {
+        const r = await App.notesOwnsDueReminders({ account });
+        notesOwnerProbeSupported = true;
+        return r.owns === true;
+    } catch {
+        if (notesOwnerProbeSupported === null) notesOwnerProbeSupported = false;
+        return null;
     }
 }
 

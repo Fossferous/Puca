@@ -725,6 +725,48 @@ public class SovereignAppPlugin extends Plugin {
         call.resolve();
     }
 
+    /** The Púca Notes app's application id (frontend/notes-app). */
+    static final String NOTES_PACKAGE = "com.sovereign.notes";
+    /** Its ReminderOwnerProvider: one row, ownsDueReminders = 1 or 0. */
+    static final android.net.Uri NOTES_OWNER_URI =
+            android.net.Uri.parse("content://com.sovereign.notes.reminderowner/owner");
+
+    /**
+     * Does Púca Notes OWN due-item reminders on this phone right now — for
+     * this account? Owner decision: when Notes is installed AND able to
+     * deliver them, it does, and Púca stays quiet so one due item is one
+     * notification; otherwise Púca notifies. So the answer is true ONLY on
+     * Notes' own positive answer (signed in to the same account, feed read
+     * within three hours, notifications allowed, alarm set — Notes'
+     * ReminderRules.ownsDueReminders). Everything else is false: Notes not
+     * installed, a Notes APK from before the provider existed, a signature
+     * that does not match (the provider is signature-guarded), a stopped or
+     * failing provider. Needs the <queries> entry and the
+     * DUE_REMINDER_OWNER <uses-permission> in the manifest. Older Púca APKs
+     * lack this method; the JS side then keeps notifying as before.
+     */
+    @PluginMethod
+    public void notesOwnsDueReminders(PluginCall call) {
+        String account = call.getString("account");
+        boolean owns = false;
+        if (account != null && !account.isEmpty()) {
+            android.net.Uri uri = NOTES_OWNER_URI.buildUpon().appendQueryParameter("account", account).build();
+            try (android.database.Cursor c = getContext().getContentResolver().query(uri, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    int col = c.getColumnIndex("ownsDueReminders");
+                    owns = col >= 0 && c.getInt(col) == 1;
+                }
+            } catch (Exception e) {
+                // No provider (not installed, an older Notes), no permission
+                // (another signing key), a dead provider: Púca notifies.
+                owns = false;
+            }
+        }
+        JSObject ret = new JSObject();
+        ret.put("owns", owns);
+        call.resolve(ret);
+    }
+
     /** Is the notification permission granted? On < 33 there is nothing to ask. */
     @PluginMethod
     public void notificationStatus(PluginCall call) {

@@ -265,6 +265,13 @@
     border-radius: 6px;
     padding: 3px 10px;
     cursor: pointer;
+    /* The sentence beside it wraps; the button must not shrink under its own
+       label (at 390 px "Enable" ran out of its border). */
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+@media (pointer: coarse) {
+    .notes-status button { min-height: 44px; }
 }
 
 .notes-empty {
@@ -676,6 +683,21 @@
     font-size: 13px;
 }
 .notes-menu-sep { height: 1px; background: var(--border-faint); margin: 4px 0; }
+/* Android app only: location reminders in the account menu (notes/native/). */
+.notes-menu-location { max-width: 300px; }
+.notes-menu-hint { margin: 0 10px 6px; font-size: 12px; line-height: 1.4; color: var(--text-muted); }
+.notes-menu-hint.warn { color: var(--text-warning); }
+.notes-link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text-link);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.notes-link-btn:disabled { color: var(--text-faint); text-decoration: none; cursor: default; }
+.notes-reminder-when .svrn-icon { vertical-align: -2px; }
 
 /* ---------- Editor (modal on desktop) ----------------------------------------- */
 .notes-editor-backdrop {
@@ -809,6 +831,7 @@
 .notes-reminder-row:hover { background: var(--bg-modifier-hover); }
 .notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
 .notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
+.notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
 .notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
 .notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
 .notes-reminder-group.overdue .notes-reminder-when { color: var(--text-danger); font-weight: 600; }

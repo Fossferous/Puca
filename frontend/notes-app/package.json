@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "description": "The native shell for Púca Notes (Capacitor). It lists only the Capacitor packages the shell uses; run `npm install` here once so `cap sync` and Gradle can resolve @capacitor/android from this folder's node_modules.",
   "dependencies": {
-    "@capacitor/android": "*",
-    "@capacitor/core": "*"
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/filesystem": "8.1.3"
   }
 }

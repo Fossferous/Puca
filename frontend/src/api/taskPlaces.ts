@@ -23,7 +23,7 @@
  * task text — so even SharedPreferences never holds a place name.
  */
 import { loadSettings } from '../components/settingsStore';
-import { setNativeFences, mobileLocationAvailable, type NativeFence } from './mobileLocation';
+import { setNativeFences, mobileLocationAvailable, requestBackgroundLocation, requestForegroundLocation, type NativeFence } from './mobileLocation';
 import { repushKeepAlive, setGeofenceKeepAlive } from './mobileApp';
 import { decodeJwtPayload, getToken } from './auth';
 
@@ -330,4 +330,24 @@ export async function syncTaskPlacesToNative(opts?: { force?: boolean }): Promis
         setGeofenceKeepAlive(fences.length > 0);
         if (opts?.force && fences.length > 0) repushKeepAlive();
     }
+}
+
+/**
+ * The permission half of turning location reminders ON — one implementation
+ * for both front doors (Púca's Settings toggle, Púca Notes' account menu).
+ * Two steps by Android's rule: foreground first; background ("Allow all the
+ * time") is a separate ask that bounces through the system settings page on
+ * 11+. Records nothing: the caller has already saved the INTENT
+ * (`locationReminders: true`) — under Android's silent denial lockout a
+ * write-back would turn "trying to enable" into "stored off", unrecoverable
+ * from the UI. The sync afterwards is FORCED: the settingsChanged listener
+ * already pushed this exact fence set while the dialog was up, so a plain
+ * sync would dedupe to nothing and the watcher would keep running under its
+ * pre-grant state.
+ */
+export async function requestLocationReminderPermissions(): Promise<{ foreground: boolean; background: boolean }> {
+    const foreground = await requestForegroundLocation();
+    const background = foreground ? await requestBackgroundLocation() : false;
+    void syncTaskPlacesToNative({ force: true });
+    return { foreground, background };
 }
