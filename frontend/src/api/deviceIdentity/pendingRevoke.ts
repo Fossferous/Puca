@@ -120,6 +120,34 @@ export async function sendDeviceRevoke(devId: string, token: string): Promise<Re
     }
 }
 
+/** The Web Locks name every tab of this origin (Púca and Púca Notes share
+ *  one) takes around a settle, and around a settle-plus-enrol. */
+export const DEVICE_REVOKE_LOCK = 'puca-device-revoke';
+
+/**
+ * Run `fn` holding the cross-tab device-revoke lock. Two tabs must not both
+ * act on one marker: if Púca's settle failed and it then enrolled the old key
+ * LIVE, a Notes tab's DELETE landing afterwards would revoke the session that
+ * just proved it. Under the lock the second tab starts only once the first is
+ * done, and re-reads the marker it left (cleared, by then).
+ *
+ * Not reentrant: never call it from inside `fn`. Where Web Locks are absent
+ * (an insecure context, an old engine) or refuse, `fn` runs unlocked — the
+ * per-tab guard below still holds, which is how this behaved before.
+ */
+export async function withDeviceRevokeLock<T>(fn: () => Promise<T>): Promise<T> {
+    let locks: LockManager | undefined;
+    try { locks = typeof navigator !== 'undefined' ? navigator.locks : undefined; } catch { locks = undefined; }
+    if (!locks || typeof locks.request !== 'function') return fn();
+    let started = false;
+    try {
+        return await locks.request(DEVICE_REVOKE_LOCK, () => { started = true; return fn(); });
+    } catch (e) {
+        if (started) throw e;   // fn itself failed: never run it twice
+        return fn();            // the lock manager refused (e.g. an opaque origin)
+    }
+}
+
 let inFlight: Promise<'none' | RevokeOutcome> | null = null;
 
 /**
@@ -127,7 +155,8 @@ let inFlight: Promise<'none' | RevokeOutcome> | null = null;
  * session. Resolves 'none' when there is nothing to do (no marker, another
  * account's marker, no token). On a 2xx the key goes with the marker; a 404
  * (not this account's row) drops the marker and keeps the key; anything else
- * keeps both for the next attempt. Never rejects; one attempt at a time.
+ * keeps both for the next attempt. Never rejects; one attempt at a time in
+ * this tab, and one at a time across tabs (withDeviceRevokeLock).
  *
  * MUST run before this browser enrols (attest.ts awaits it): the DELETE
  * revokes every session that proved the old device, and a session only
@@ -135,17 +164,27 @@ let inFlight: Promise<'none' | RevokeOutcome> | null = null;
  */
 export function settlePendingDeviceRevoke(token: string | null, uid: number | null): Promise<'none' | RevokeOutcome> {
     if (inFlight) return inFlight;
-    const m = readPendingRevoke();
-    if (!m || !token) return Promise.resolve('none');
-    if (m.uid !== null && uid !== null && m.uid !== uid) return Promise.resolve('none');
-    inFlight = (async () => {
-        const outcome = await sendDeviceRevoke(m.devId, token);
-        // Re-read: another tab may have settled (or replaced) it meanwhile.
-        const now = readPendingRevoke();
-        const same = now !== null && now.devId === m.devId;
-        if (outcome === 'revoked' && same) forgetKeyForPendingRevoke(now);
-        else if (outcome === 'not-found' && same) clearPendingRevoke();
-        return outcome;
-    })().finally(() => { inFlight = null; });
+    if (!readPendingRevoke() || !token) return Promise.resolve('none');
+    inFlight = withDeviceRevokeLock(() => settlePendingDeviceRevokeLocked(token, uid))
+        .catch((): 'failed' => 'failed')
+        .finally(() => { inFlight = null; });
     return inFlight;
+}
+
+/**
+ * settlePendingDeviceRevoke's body, for a caller ALREADY holding the lock
+ * (attest.ts settles and enrols under one). Reads the marker only now, so a
+ * tab that waited for the lock sees what the holder left.
+ */
+export async function settlePendingDeviceRevokeLocked(token: string | null, uid: number | null): Promise<'none' | RevokeOutcome> {
+    const m = readPendingRevoke();
+    if (!m || !token) return 'none';
+    if (m.uid !== null && uid !== null && m.uid !== uid) return 'none';
+    const outcome = await sendDeviceRevoke(m.devId, token);
+    // Re-read: a tab without Web Locks may have settled (or replaced) it meanwhile.
+    const now = readPendingRevoke();
+    const same = now !== null && now.devId === m.devId;
+    if (outcome === 'revoked' && same) forgetKeyForPendingRevoke(now);
+    else if (outcome === 'not-found' && same) clearPendingRevoke();
+    return outcome;
 }

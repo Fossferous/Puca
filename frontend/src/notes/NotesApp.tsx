@@ -152,7 +152,8 @@ function SessionGate() {
 
     // A web sign-out whose device revoke was never confirmed is finished with
     // this session (api/deviceIdentity/pendingRevoke.ts). Notes never enrols
-    // a device, so there is no enrolment for the revoke to race.
+    // a device; a Púca tab enrolling at the same moment holds the cross-tab
+    // lock, so this waits and then finds the marker that enrolment left.
     useEffect(() => {
         if (signedIn) void settlePendingDeviceRevoke(getToken(), currentUserIdFromToken());
     }, [signedIn]);

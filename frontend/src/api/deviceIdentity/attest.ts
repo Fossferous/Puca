@@ -20,7 +20,8 @@ import { wsClient } from '../websocket';
 import { thisDeviceId, setThisDeviceId, clearThisDeviceId } from '../thisDevice';
 import { ensureDeviceKey, signWithDeviceKey } from './deviceKey';
 import {
-    clearPendingRevoke, forgetKeyForPendingRevoke, pendingRevokeMatches, readPendingRevoke, settlePendingDeviceRevoke,
+    clearPendingRevoke, forgetKeyForPendingRevoke, pendingRevokeMatches, readPendingRevoke, settlePendingDeviceRevokeLocked,
+    withDeviceRevokeLock,
 } from './pendingRevoke';
 import { attestationMessage, buildAuthRecord, signAuthRecord, type DevicePlatform } from './identity';
 
@@ -124,7 +125,16 @@ export function isThisDeviceRevoked(): boolean {
  * than throwing, because it runs opportunistically at startup and a user who
  * has not completed E2EE setup is a normal state, not an error.
  */
-export async function enrolThisDevice(userId: number, name?: string, retried = false): Promise<DeviceRow | null> {
+export async function enrolThisDevice(userId: number, name?: string): Promise<DeviceRow | null> {
+    if (!getActiveIdentity()) return null;
+    // On the web the settle below and the enrolment run as ONE step across
+    // tabs (pendingRevoke.ts withDeviceRevokeLock): a Púca Notes tab settling
+    // the same marker waits, then finds it cleared by this enrolment.
+    const web = !isTauri() && !isMobile();
+    return web ? withDeviceRevokeLock(() => enrolLocked(userId, name, false)) : enrolLocked(userId, name, false);
+}
+
+async function enrolLocked(userId: number, name: string | undefined, retried: boolean): Promise<DeviceRow | null> {
     const identity = getActiveIdentity();
     if (!identity) return null;
 
@@ -133,7 +143,7 @@ export async function enrolThisDevice(userId: number, name?: string, retried = f
     // DELETE revokes every session that proved the old device, and this one
     // proves it only once enrolled.
     const web = !isTauri() && !isMobile();
-    if (web) await settlePendingDeviceRevoke(getToken(), userId);
+    if (web) await settlePendingDeviceRevokeLocked(getToken(), userId);
 
     const keys = await ensureDeviceKey();
     const { canonical, deviceId } = buildAuthRecord({
@@ -183,7 +193,7 @@ export async function enrolThisDevice(userId: number, name?: string, retried = f
             const m = web ? readPendingRevoke() : null;
             if (m && !retried && pendingRevokeMatches(m, deviceId, userId)) {
                 forgetKeyForPendingRevoke(m);
-                return enrolThisDevice(userId, name, true);
+                return enrolLocked(userId, name, true);
             }
             clearThisDeviceId();
             thisDeviceRevoked = true;

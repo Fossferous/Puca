@@ -31,7 +31,9 @@ import { logout, pendingDeviceRevoke, SESSION_REVOKE_MAX_WAIT_MS } from '../api/
 import { apiClient } from '../api/client';
 import { WEB_KEY_STORAGE, ensureDeviceKey } from '../api/deviceIdentity/deviceKey';
 import { deriveDeviceId } from '../api/deviceIdentity/identity';
-import { PENDING_REVOKE_KEY, settlePendingDeviceRevoke, storedWebDeviceId } from '../api/deviceIdentity/pendingRevoke';
+import {
+    DEVICE_REVOKE_LOCK, PENDING_REVOKE_KEY, settlePendingDeviceRevoke, storedWebDeviceId, withDeviceRevokeLock,
+} from '../api/deviceIdentity/pendingRevoke';
 import { enrolThisDevice } from '../api/deviceIdentity/attest';
 
 const store: Record<string, string> = {};
@@ -314,5 +316,136 @@ describe('the session revoke is never held hostage by the device revoke', () => 
         await vi.advanceTimersByTimeAsync(200);
         expect(sessionCalls()).toHaveLength(1);
         hung?.();
+    });
+});
+
+/** An exclusive, FIFO Web Locks stand-in (jsdom has none). */
+function installLocks(): { uninstall: () => void; requests: string[] } {
+    const tails = new Map<string, Promise<unknown>>();
+    const requests: string[] = [];
+    const locks = {
+        request: (name: string, cb: (l: { name: string; mode: string }) => Promise<unknown>) => {
+            requests.push(name);
+            const prev = tails.get(name) ?? Promise.resolve();
+            const run = prev.then(() => cb({ name, mode: 'exclusive' }));
+            tails.set(name, run.catch(() => undefined));
+            return run;
+        },
+    };
+    Object.defineProperty(navigator, 'locks', { value: locks, configurable: true });
+    return { uninstall: () => { delete (navigator as unknown as { locks?: unknown }).locks; }, requests };
+}
+
+describe('two tabs (Púca and Púca Notes) never both settle one marker', () => {
+    let off: (() => void) | null = null;
+    beforeEach(() => { vi.clearAllMocks(); rows.clear(); hung = null; });
+    afterEach(() => { off?.(); off = null; vi.unstubAllGlobals(); });
+
+    /** DELETEs answer 500 first (Púca's settle fails), then as the server does. */
+    function stubFlakyDelete() {
+        calls = [];
+        let deletes = 0;
+        vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+            calls.push({ url: String(url), method: init?.method ?? 'GET', auth: null });
+            const m = /\/devices\/([^/?]+)$/.exec(String(url));
+            if (m && init?.method === 'DELETE') {
+                if (deletes++ === 0) return new Response('', { status: 500 });
+                const row = rows.get(decodeURIComponent(m[1]));
+                if (!row) return new Response('', { status: 404 });
+                row.revoked = true;
+                return new Response('', { status: 200 });
+            }
+            return new Response('', { status: 200 });
+        }));
+    }
+    /** POST /devices held until released, then answered as the server does. */
+    function gatedEnrol(uid: number, fail = false): () => void {
+        let release!: () => void;
+        const gate = new Promise<void>(r => { release = r; });
+        vi.mocked(apiClient.post).mockImplementation(async (path: string, body?: unknown) => {
+            await gate;
+            if (fail) throw new TypeError('Failed to fetch');
+            const b = body as { device_pub: string; sign_pub: string };
+            const id = deriveDeviceId(b.device_pub, b.sign_pub);
+            if (rows.get(id)?.revoked) throw new Error('device_revoked');
+            rows.set(id, { uid, revoked: false });
+            return { id } as never;
+        });
+        return release;
+    }
+
+    it('a Notes settle waits for Púca’s settle-and-enrol, then finds the marker gone: the live session is never revoked', async () => {
+        off = installLocks().uninstall;
+        const key = webKey();
+        useBackingStore({ auth_token: jwt(80), [WEB_KEY_STORAGE]: key });
+        const id = await keyId();
+        rows.set(id, { uid: 80, revoked: false });
+        store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: id, uid: 80, at: 1 });
+        stubFlakyDelete();
+        const release = gatedEnrol(80);
+
+        const puca = enrolThisDevice(80);                        // settle fails (500), then enrols the old key
+        await settle();
+        expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(1);
+        const notes = settlePendingDeviceRevoke(store.auth_token, 80);   // the Notes tab, meanwhile
+        await settle();
+        expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(1);   // waiting for the lock
+        release();
+        expect(await puca).not.toBeNull();
+        expect(await notes).toBe('none');                        // the enrolment cleared the marker
+        expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(1);
+        expect(rows.get(id)?.revoked).toBe(false);               // the session Púca just proved lives
+        expect(store[WEB_KEY_STORAGE]).toBe(key);
+        expect(store[PENDING_REVOKE_KEY]).toBeUndefined();
+    });
+
+    it('positive control: when Púca’s enrolment fails, the waiting Notes settle then finishes the revoke', async () => {
+        off = installLocks().uninstall;
+        const key = webKey();
+        useBackingStore({ auth_token: jwt(81), [WEB_KEY_STORAGE]: key });
+        const id = await keyId();
+        rows.set(id, { uid: 81, revoked: false });
+        store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: id, uid: 81, at: 1 });
+        stubFlakyDelete();
+        const release = gatedEnrol(81, true);
+
+        const puca = enrolThisDevice(81).catch(e => e);
+        await settle();
+        const notes = settlePendingDeviceRevoke(store.auth_token, 81);
+        release();
+        expect(await puca).toBeInstanceOf(TypeError);
+        expect(await notes).toBe('revoked');
+        expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(2);
+        expect(rows.get(id)?.revoked).toBe(true);
+        expect(store[WEB_KEY_STORAGE]).toBeUndefined();
+        expect(store[PENDING_REVOKE_KEY]).toBeUndefined();
+    });
+
+    it('without Web Locks, or with a lock manager that refuses, the settle still runs — once', async () => {
+        const key = webKey();
+        useBackingStore({ auth_token: jwt(82), [WEB_KEY_STORAGE]: key });
+        const id = await keyId();
+        rows.set(id, { uid: 82, revoked: false });
+        store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: id, uid: 82, at: 1 });
+        stubFetch('offline');
+        expect('locks' in navigator).toBe(false);
+        expect(await settlePendingDeviceRevoke(store.auth_token, 82)).toBe('failed');
+        expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(1);
+
+        Object.defineProperty(navigator, 'locks', { value: { request: () => Promise.reject(new DOMException('denied', 'SecurityError')) }, configurable: true });
+        off = () => { delete (navigator as unknown as { locks?: unknown }).locks; };
+        stubFetch('ok');
+        expect(await settlePendingDeviceRevoke(store.auth_token, 82)).toBe('revoked');
+        expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(1);
+        expect(store[PENDING_REVOKE_KEY]).toBeUndefined();
+    });
+
+    it('a failure INSIDE the lock is not retried outside it', async () => {
+        const { uninstall, requests } = installLocks();
+        off = uninstall;
+        const run = vi.fn(async () => { throw new Error('boom'); });
+        await expect(withDeviceRevokeLock(run)).rejects.toThrow('boom');
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(requests).toEqual([DEVICE_REVOKE_LOCK]);
     });
 });
