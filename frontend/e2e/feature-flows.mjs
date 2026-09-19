@@ -455,6 +455,29 @@ async function main() {
     const cleared = (await must('GET', `/task-lists/${rl.id}/tasks`, null, A.t)).find(t => t.id === t1.id);
     check('due/empty string clears due_at', cleared.due_at === null, `due_at=${cleared.due_at}`);
 
+    section('TASK TIMING (066): sealed schedule + snooze, the old-client guard');
+    // Opaque stand-ins for client-sealed envelopes: the server only checks the shape.
+    const SCHED = '{"v":2,"t":"self","ct":"c2NoZWR1bGU="}';
+    const SNOOZE = '{"v":2,"t":"self","ct":"c25vb3pl"}';
+    const feats = await must('GET', '/task-features', null, A.t);
+    check('timing/GET /task-features names schedule + snooze', Array.isArray(feats.features) && feats.features.includes('schedule') && feats.features.includes('snooze'), JSON.stringify(feats));
+    const ev = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'event', schedule: SCHED, due_at: dueSoon }, A.t);
+    check('timing/create carries the sealed schedule in ONE request', ev.schedule === SCHED && 'snooze' in ev && typeof ev.updated_at === 'string', JSON.stringify(ev));
+    const plainSched = await api('PATCH', `/tasks/${ev.id}`, { schedule: '{"v":1,"kind":"event","start":"2030-01-01"}' }, A.t);
+    check('timing/plaintext schedule → 400 (envelope-only)', plainSched.status === 400, `status=${plainSched.status}`);
+    const oldTick = await api('PATCH', `/tasks/${ev.id}`, { is_completed: true }, A.t);
+    const afterOld = (await must('GET', `/task-lists/${rl.id}/tasks`, null, A.t)).find(t => t.id === ev.id);
+    check('timing/an old client ticking a scheduled item → 409, item stays open', oldTick.status === 409 && afterOld.is_completed === false, `status=${oldTick.status}`);
+    await must('PATCH', `/tasks/${ev.id}`, { snooze: SNOOZE }, A.t);
+    const rem = (await must('GET', '/task-reminders', null, A.t)).find(r => r.id === ev.id);
+    check('timing/reminder feed carries the sealed schedule + snooze', rem && rem.schedule === SCHED && rem.snooze === SNOOZE && rem.created_by !== undefined, JSON.stringify(rem));
+    const cas = await api('PATCH', `/tasks/${ev.id}`, { due_at: new Date(Date.now() + 7200_000).toISOString(), expect_due_at: '2001-01-01T00:00:00Z' }, A.t);
+    check('timing/expect_due_at mismatch → 409', cas.status === 409, `status=${cas.status}`);
+    const cSched = await api('PATCH', `/tasks/${ev.id}`, { schedule: SCHED }, C.t);
+    check('timing/an outsider cannot write a schedule', cSched.status === 403 || cSched.status === 404, `status=${cSched.status}`);
+    const awareTick = await api('PATCH', `/tasks/${ev.id}`, { is_completed: true, recurrence_aware: true }, A.t);
+    check('timing/a schedule-aware client completes it', awareTick.status === 200, `status=${awareTick.status}`);
+
     section('INPUT CAPS (DoS hardening)');
     const big = 'x'.repeat(9000);
     const bigMsg = await api('POST', `/channels/${tc.id}/messages`, { content: 'ok', is_task: false }, A.t);
