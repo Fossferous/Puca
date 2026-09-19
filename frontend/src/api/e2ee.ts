@@ -354,7 +354,7 @@ function aadInt(n: number, what: string): string {
 
 /** Which channel-keyed thing this is. A checklist item must not open as a
  *  message, nor an attachment sidecar as a description. */
-export type ChannelAadKind = 'chan-msg' | 'chan-task' | 'chan-taskatt';
+export type ChannelAadKind = 'chan-msg' | 'chan-task' | 'chan-taskatt' | 'chan-taskevt' | 'chan-tasksnz';
 
 export interface ChannelContext {
     kind: ChannelAadKind;
@@ -370,7 +370,7 @@ export interface DmContext {
     recipientId: number;
 }
 
-const CHANNEL_AAD_KINDS: ReadonlySet<string> = new Set(['chan-msg', 'chan-task', 'chan-taskatt']);
+const CHANNEL_AAD_KINDS: ReadonlySet<string> = new Set(['chan-msg', 'chan-task', 'chan-taskatt', 'chan-taskevt', 'chan-tasksnz']);
 
 export function channelAad(ctx: ChannelContext, epoch: number): Uint8Array {
     // The type says the kind is one of three tokens; the runtime check makes

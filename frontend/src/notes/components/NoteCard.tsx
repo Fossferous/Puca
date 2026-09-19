@@ -24,6 +24,7 @@ import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../mode
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
 import { heroItems } from '../../api/noteMedia';
+import { ScheduleChip } from '../../components/schedule/ScheduleChip';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
@@ -173,7 +174,8 @@ function NoteCardImpl({
                             {task.descEncState === 'legacy' && (
                                 <span className="tt-not-encrypted" title="Not encrypted — this item was stored as plaintext, not end-to-end encrypted."><WarningIcon /> Not encrypted</span>
                             )}
-                            {task.due_at && (
+                            {task.schedule != null && <ScheduleChip task={task} now={now} />}
+                            {task.due_at && task.schedule == null && (
                                 <span className={`tt-due ${isTaskOverdue(task, now) ? 'overdue' : ''}`} title={`Due ${new Date(task.due_at).toLocaleString()}`}>
                                     <ClockIcon /><span className="tt-due-label">{formatDueShort(task.due_at, now)}</span>
                                 </span>

@@ -92,6 +92,18 @@ describe('v3 channel messages', () => {
         expect(await decryptChannelMessage(CK, task, { ...ctx, kind: 'chan-taskatt' })).toBeNull();
         expect(await decryptChannelMessage(CK, task, { ...ctx, kind: 'chan-task' })).toBe('buy milk');
     });
+    it('a sealed schedule or snooze opens only as itself (chan-taskevt / chan-tasksnz)', async () => {
+        const evt = await sealChannelEnvelope(CK, 3, '{"v":1}', { ...ctx, kind: 'chan-taskevt' }, 3);
+        const snz = await sealChannelEnvelope(CK, 3, '{"k":"snooze/1"}', { ...ctx, kind: 'chan-tasksnz' }, 3);
+        for (const other of ['chan-msg', 'chan-task', 'chan-taskatt', 'chan-tasksnz'] as const) {
+            expect(await decryptChannelMessage(CK, evt, { ...ctx, kind: other })).toBeNull();
+        }
+        for (const other of ['chan-msg', 'chan-task', 'chan-taskatt', 'chan-taskevt'] as const) {
+            expect(await decryptChannelMessage(CK, snz, { ...ctx, kind: other })).toBeNull();
+        }
+        expect(await decryptChannelMessage(CK, evt, { ...ctx, kind: 'chan-taskevt' })).toBe('{"v":1}');
+        expect(await decryptChannelMessage(CK, snz, { ...ctx, kind: 'chan-tasksnz' })).toBe('{"k":"snooze/1"}');
+    });
 });
 
 describe('v3 channel key wraps (the highest-value binding: the wrong KEY, not just the wrong author)', () => {
@@ -236,6 +248,48 @@ describe('the checklist wrappers (tasks.ts) seal under the CREATOR, never the ed
         expect(out[0].description).toBe('plain legacy note');
         expect(out[1].description).toBe(ENC_UNSUPPORTED_VERSION);
         get.mockRestore();
+    });
+
+    it('schedule and snooze: sealed under created_by with their own kinds, and a PLAINTEXT value from the server is never opened as one', async () => {
+        const { listTasks, patchTaskTiming, createTask } = await import('../api/tasks');
+        const { apiClient } = await import('../api/client');
+        const desc = JSON.stringify(await sealChannelEnvelope(CK, 3, 'standup', { kind: 'chan-task', channelId: 7, senderId: 41 }, 3));
+        const evt = JSON.stringify(await sealChannelEnvelope(CK, 3, '{"v":1,"kind":"event"}', { kind: 'chan-taskevt', channelId: 7, senderId: 41 }, 3));
+        const get = vi.spyOn(apiClient, 'get').mockResolvedValue([
+            { ...row(41, desc), schedule: evt, snooze: null },
+            // A server that injects a plaintext "event": must not be believed.
+            { ...row(41, desc), id: 2, schedule: '{"v":1,"kind":"event","uid":"injected-01","allDay":true,"start":"2026-10-01"}', snooze: 'tomorrow' },
+            // An older server: no keys at all, so none appear.
+            { ...row(41, desc), id: 3 },
+        ] as never);
+        const out = await listTasks(7);
+        expect(out[0].schedule).toBe('{"v":1,"kind":"event"}');
+        expect(out[0].snooze).toBeNull();
+        expect(out[1].schedule).toBe('[Unable to decrypt]');
+        expect(out[1].snooze).toBe('[Unable to decrypt]');
+        expect('schedule' in out[2]).toBe(false);
+        get.mockRestore();
+
+        const patch = vi.spyOn(apiClient, 'patch').mockResolvedValue(undefined as never);
+        await patchTaskTiming({ id: 1, channel_id: 7, created_by: 99 }, { schedule: '{"v":1}', snooze: '{"k":"snooze/1"}', due_at: null, expect_due_at: '2026-10-01T09:00:00Z' });
+        expect(vi.mocked(encryptChannelMessage)).toHaveBeenCalledWith(CK, 3, '{"v":1}', { kind: 'chan-taskevt', channelId: 7, senderId: 99 });
+        expect(vi.mocked(encryptChannelMessage)).toHaveBeenLastCalledWith(CK, 3, '{"k":"snooze/1"}', { kind: 'chan-tasksnz', channelId: 7, senderId: 99 });
+        const body = patch.mock.calls.at(-1)![1] as Record<string, unknown>;
+        expect(body).toMatchObject({ due_at: '', expect_due_at: '2026-10-01T09:00:00Z', recurrence_aware: true, reads_up_to: 4 });
+        expect(String(body.schedule)).toContain('"v":3');
+        await patchTaskTiming({ id: 1, channel_id: 7, created_by: 99 }, { schedule: null, snooze: '' });
+        expect(patch.mock.calls.at(-1)![1]).toMatchObject({ schedule: '', snooze: '' });
+        await expect(patchTaskTiming({ id: 1, channel_id: 7, created_by: 99 }, { schedule: ENC_KEY_UNAVAILABLE })).rejects.toThrow(/decrypt-failure marker/);
+        patch.mockRestore();
+
+        // Created WITH a schedule in one POST; local state gets the PLAINTEXT.
+        const post = vi.spyOn(apiClient, 'post').mockImplementation(async (_url: string, body: unknown) => ({ ...row(41, 'x'), ...(body as object) }) as never);
+        const created = await createTask(7, 'standup', undefined, { dueAt: '2026-10-01T08:50:00.000Z', schedule: '{"v":1,"kind":"event"}' });
+        expect(created.schedule).toBe('{"v":1,"kind":"event"}');
+        const sent = post.mock.calls.at(-1)![1] as Record<string, unknown>;
+        expect(sent.due_at).toBe('2026-10-01T08:50:00.000Z');
+        expect(String(sent.schedule)).toContain('"t":"ch"');
+        post.mockRestore();
     });
 
     it('listTasks opens each item under ITS created_by; a re-attributed v3 item shows the context marker', async () => {

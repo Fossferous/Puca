@@ -1,0 +1,172 @@
+/* The calendar (Calendar.tsx). Desktop first; the phone block at the bottom
+ * uses the SAME query calendarGate.ts evaluates in JS — change both or
+ * neither (docs/DESIGN_PHILOSOPHY.md §2). Content inside the page it sits in
+ * (Notes' main column, Púca's .chat-main), so no panel-system work. */
+
+.cal { display: flex; flex-direction: column; gap: 12px; min-width: 0; color: var(--text-normal); }
+.cal.dragging, body.drop-drag-live { user-select: none; -webkit-user-select: none; }
+
+.cal-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.cal-nav { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.cal-title { margin: 0 0 0 8px; font-size: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-views { display: inline-flex; border: 1px solid var(--border-subtle); border-radius: 8px; overflow: hidden; }
+.cal-viewbtn { border: none; background: transparent; color: var(--text-muted); padding: 6px 12px; cursor: pointer; font: inherit; font-size: 13px; }
+.cal-viewbtn.on { background: var(--brand-primary, #5865f2); color: #fff; }
+.cal-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--text-muted); }
+.cal-toggles label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.cal-foot { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
+
+.cal-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 5px 10px; border: 1px solid var(--border-subtle); border-radius: 8px;
+    background: transparent; color: var(--text-normal); cursor: pointer; font: inherit; font-size: 13px;
+}
+.cal-btn:hover { background: var(--bg-modifier-hover); }
+.cal-btn:disabled { opacity: 0.5; cursor: default; }
+.cal-iconbtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border: none; border-radius: 8px;
+    background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.cal-iconbtn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+
+/* ---- Month ---------------------------------------------------------------- */
+.cal-month { display: flex; flex-direction: column; border: 1px solid var(--border-faint); border-radius: 10px; overflow: hidden; }
+.cal-month-dow, .cal-month-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.cal-dow { padding: 6px; font-size: 12px; color: var(--text-muted); text-align: center; border-bottom: 1px solid var(--border-faint); }
+.cal-cell {
+    min-height: 96px; min-width: 0; padding: 4px; display: flex; flex-direction: column; gap: 2px;
+    border-right: 1px solid var(--border-faint); border-bottom: 1px solid var(--border-faint);
+}
+.cal-month-row .cal-cell:last-child { border-right: none; }
+.cal-month-row:last-child .cal-cell { border-bottom: none; }
+.cal-cell.other { background: var(--bg-modifier-hover); opacity: 0.75; }
+.cal-cell.selected { box-shadow: inset 0 0 0 2px var(--brand-primary, #5865f2); }
+.cal-cell.drop, .cal-tg-slot.drop, .cal-tg-allday-cell.drop { background: var(--bg-modifier-selected); }
+.cal-daynum {
+    align-self: flex-start; min-width: 26px; height: 26px; padding: 0 6px; border: none; border-radius: 13px;
+    background: transparent; color: var(--text-normal); font: inherit; font-size: 13px; cursor: pointer;
+}
+.cal-cell.today .cal-daynum { background: var(--brand-primary, #5865f2); color: #fff; font-weight: 600; }
+.cal-daynum:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 1px; }
+.cal-cell-chips { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cal-dots { display: none; }
+.cal-more { border: none; background: transparent; color: var(--text-muted); font-size: 11px; text-align: left; cursor: pointer; padding: 0 4px; }
+
+.cal-chip {
+    display: flex; align-items: center; gap: 4px; min-width: 0; width: 100%;
+    padding: 1px 6px; border: none; border-radius: 4px; cursor: pointer; text-align: left;
+    background: var(--bg-modifier-accent); color: var(--text-normal); font: inherit; font-size: 12px; line-height: 18px;
+}
+.cal-chip.kind-event { background: color-mix(in srgb, var(--brand-primary, #5865f2) 28%, transparent); }
+.cal-chip.kind-task { background: color-mix(in srgb, var(--text-positive, #23a55a) 24%, transparent); }
+.cal-chip.done { opacity: 0.55; text-decoration: line-through; }
+.cal-chip.movable { cursor: grab; }
+.cal-chip.dragging { opacity: 0.4; }
+.cal-chip:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 1px; }
+.cal-chip-time { color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.cal-chip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.cal-chip-span { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.cal-chip svg { flex-shrink: 0; width: 12px; height: 12px; }
+
+/* ---- Selected day / agenda list ----------------------------------------------- */
+.cal-daylist { display: flex; flex-direction: column; gap: 6px; }
+.cal-daylist-head { display: flex; align-items: center; gap: 8px; }
+.cal-daylist-head h3 { flex: 1; margin: 0; font-size: 15px; }
+.cal-empty { margin: 0; color: var(--text-muted); font-size: 13px; }
+.cal-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.cal-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; min-width: 0; }
+.cal-row:hover { background: var(--bg-modifier-hover); }
+.cal-row.done .cal-row-title { text-decoration: line-through; opacity: 0.6; }
+.cal-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
+.cal-row-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; min-width: 72px; font-variant-numeric: tabular-nums; }
+.cal-row-title {
+    flex: 1; min-width: 0; text-align: left; border: none; background: transparent; color: var(--text-normal);
+    font: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;
+}
+.cal-row-note { font-size: 12px; color: var(--text-muted); max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-agenda { display: flex; flex-direction: column; gap: 16px; }
+.cal-agenda-more { align-self: flex-start; }
+
+/* ---- Time grid (week / day) ---------------------------------------------------- */
+.cal-timegrid { border: 1px solid var(--border-faint); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+.cal-tg-head, .cal-tg-allday, .cal-tg-body { display: grid; grid-template-columns: 56px repeat(var(--cal-cols, 7), minmax(0, 1fr)); }
+.cal-timegrid.cols-1 { --cal-cols: 1; }
+.cal-timegrid.cols-7 { --cal-cols: 7; }
+.cal-tg-gutter { font-size: 11px; color: var(--text-muted); text-align: right; padding-right: 6px; }
+.cal-tg-dayhead { border: none; background: transparent; color: var(--text-normal); padding: 6px; font: inherit; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border-faint); }
+.cal-tg-dayhead.today { color: var(--brand-primary); font-weight: 600; }
+.cal-tg-allday { border-bottom: 1px solid var(--border-faint); }
+.cal-tg-allday .cal-tg-gutter { padding-top: 4px; }
+.cal-tg-allday-cell { min-height: 26px; padding: 2px; display: flex; flex-direction: column; gap: 2px; border-left: 1px solid var(--border-faint); min-width: 0; }
+.cal-tg-body { max-height: 60vh; overflow-y: auto; }
+.cal-tg-hour { position: relative; top: -7px; }
+.cal-tg-col { position: relative; border-left: 1px solid var(--border-faint); min-width: 0; }
+.cal-tg-slot {
+    position: absolute; left: 0; right: 0; border: none; border-top: 1px solid var(--border-faint);
+    background: transparent; cursor: cell; padding: 0;
+}
+.cal-tg-slot:hover { background: var(--bg-modifier-hover); }
+.cal-tg-item { position: absolute; z-index: 1; display: flex; }
+.cal-tg-item .cal-chip { height: 100%; align-items: flex-start; overflow: hidden; }
+.cal-tg-now { position: absolute; left: 0; right: 0; height: 2px; background: var(--text-danger, #f23f43); z-index: 2; pointer-events: none; }
+
+/* ---- Item menu (the tap alternative to drag) ---------------------------------- */
+/* z 2040, the date & repeat editor's band: above Notes (900) and every Púca
+ * surface it can open from; registered in docs/DESIGN_PHILOSOPHY.md §1. */
+.cal-menu-backdrop { position: fixed; inset: 0; z-index: 2040; background: var(--bg-overlay, rgba(0, 0, 0, 0.5)); display: flex; align-items: center; justify-content: center; }
+.cal-menu {
+    width: min(420px, calc(100vw - 16px)); max-height: 85dvh; overflow-y: auto;
+    background: var(--bg-floating); color: var(--text-normal); border: 1px solid var(--border-subtle);
+    border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.cal-menu-head { display: flex; align-items: flex-start; gap: 10px; padding: 12px 12px 8px 14px; border-bottom: 1px solid var(--border-faint); }
+.cal-menu-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.cal-menu-title span { font-size: 13px; color: var(--text-muted); }
+.cal-menu-note { display: inline-flex; align-items: center; gap: 4px; }
+.cal-menu-body { display: flex; flex-direction: column; padding: 6px; gap: 2px; }
+.cal-menu-item {
+    display: flex; align-items: center; gap: 8px; text-align: left; padding: 8px 10px; border: none; border-radius: 8px;
+    background: transparent; color: var(--text-normal); font: inherit; cursor: pointer;
+}
+.cal-menu-item:hover { background: var(--bg-modifier-hover); }
+.cal-menu-move, .cal-menu-snooze { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+.cal-menu-move label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.cal-menu-move input {
+    flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border-subtle); border-radius: 6px;
+    background: var(--bg-tertiary); color: var(--text-normal); font: inherit; color-scheme: dark;
+}
+[data-theme="light"] .cal-menu-move input { color-scheme: light; }
+.cal-menu-snooze > span { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 13px; }
+
+/* ---- Phone: the gate calendarGate.ts evaluates -------------------------------- */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .cal-head { gap: 8px; }
+    .cal-title { font-size: 16px; }
+    .cal-viewbtn.view-week { display: none; }
+    .cal-viewbtn { min-height: 44px; padding: 0 14px; font-size: 14px; }
+    .cal-btn { min-height: 44px; padding: 0 12px; font-size: 14px; }
+    .cal-iconbtn { width: 44px; height: 44px; }
+    .cal-toggles { font-size: 14px; }
+    .cal-toggles input { width: 20px; height: 20px; }
+    /* Month: dates and dots; the selected day's list below carries the items. */
+    .cal-cell { min-height: 48px; padding: 2px; align-items: center; }
+    .cal-cell-chips { display: none; }
+    .cal-dots { display: flex; gap: 3px; justify-content: center; }
+    .cal-dot { width: 6px; height: 6px; border-radius: 3px; background: var(--text-muted); }
+    .cal-dot.kind-event { background: var(--brand-primary, #5865f2); }
+    .cal-dot.kind-task { background: var(--text-positive, #23a55a); }
+    .cal-daynum { align-self: center; min-width: 44px; height: 44px; border-radius: 22px; font-size: 15px; }
+    .cal-row { padding: 6px 4px; gap: 6px; flex-wrap: wrap; }
+    .cal-row input[type="checkbox"] { width: 22px; height: 22px; }
+    .cal-row-title { min-height: 44px; font-size: 15px; }
+    .cal-row-note { flex-basis: 100%; max-width: none; padding-left: 28px; }
+    .cal-row-when { min-width: 0; }
+    .cal-menu-backdrop { align-items: flex-end; }
+    .cal-menu { width: 100vw; max-height: 85dvh; border-radius: 12px 12px 0 0; padding-bottom: var(--safe-area-bottom, 0px); }
+    .cal-menu-item { min-height: 44px; font-size: 15px; }
+    .cal-menu-move input { font-size: 16px; min-height: 44px; }
+}
+
+/* Púca's Tasks view tab (TasksCalendar.tsx) — content inside .chat-main. */
+.tasks-calendar { padding: 12px 16px 24px; min-width: 0; }

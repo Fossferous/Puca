@@ -12,11 +12,15 @@ import {
     listTasks, createTask, updateChannelTask, updateChannelTaskAttachments,
     listListTasks, createListTask, updateListTask, updateListTaskAttachments,
     updateTask, deleteTask, moveTask, reorderTask,
-    applyToggle, applyMove, applyReorder, collectSubtreeIds,
+    applyMove, applyReorder, collectSubtreeIds,
     serializeTaskAttachments,
 } from '../api/tasks';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { pokeTaskReminders } from '../api/taskReminders';
+import { planToggle } from '../api/taskCompletion';
+import { useTaskFeature } from '../api/taskFeatures';
+import { useScheduleSetter } from './schedule/useScheduleSetter';
+import { canEditTask } from '../api/tasks';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { ApiError } from '../api/client';
 import { pushMessageToast } from './messageToastBus';
@@ -123,11 +127,14 @@ export function ChecklistBody({
 
     const handleToggle = async (task: Task, completed: boolean) => {
         const original = tasks;
-        setTasks(prev => applyToggle(prev, task, completed));
+        // One completion path (taskCompletion.ts): a repeating task advances.
+        const plan = planToggle(tasks, task, completed, { canEdit: canEditTask(task, currentUserId, myPerms) });
+        setTasks(plan.next);
         try {
-            await updateTask(task.id, { is_completed: completed });
+            await plan.send();
         } catch (err) {
             console.error('Failed to update task:', err);
+            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
         }
     };
@@ -200,6 +207,10 @@ export function ChecklistBody({
         }
     };
 
+    // Date & repeat: only against a server that stores it (taskFeatures).
+    const scheduleOn = useTaskFeature('schedule') === true;
+    const handleSetSchedule = useScheduleSetter(tasks, setTasks);
+
     const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
         const original = tasks;
         try {
@@ -262,6 +273,7 @@ export function ChecklistBody({
                     onMove={handleMove}
                     onReorder={handleReorder}
                     onSetDue={handleSetDue}
+                    onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
                     onSetAttachments={handleSetAttachments}
                     myPerms={myPerms}
                     currentUserId={currentUserId}

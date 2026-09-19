@@ -30,13 +30,20 @@ import {
     listTasks, createTask, updateChannelTask, updateChannelTaskAttachments,
     updateTask, deleteTask, moveTask, reorderTask,
     getTaskTabPrefs, putTaskTabPrefs,
-    applyToggle, applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
+    applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
     buildPrefsForOrder,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
 import { ApiError } from '../../api/client';
 import { pokeTaskReminders } from '../../api/taskReminders';
+import { planToggle } from '../../api/taskCompletion';
+import { patchTaskTiming } from '../../api/tasks';
+import { snoozePatch } from '../../api/taskSchedule';
+import { type NewTaskTiming } from '../../api/tasks';
+import { canEditTask } from '../../api/tasks';
+import { currentUserIdFromToken } from '../../api/auth';
 import { pushMessageToast } from '../../components/messageToastBus';
+import { toastRefusal } from '../../api/refusalToast';
 import {
     type NoteCard, type NoteRef, type NoteSource,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
@@ -173,6 +180,7 @@ function listSource(l: TaskList): NoteSource {
         createdAt: l.created_at,
         body: l.body,
         noteAttachments: l.attachments,
+        updatedAt: l.updated_at,
     };
 }
 
@@ -293,27 +301,30 @@ export function useNoteCards(): {
  *  refusal in its own words, so it is shown; everything else is logged. */
 function explain(what: string, err: unknown): boolean {
     console.error(`[notes] ${what}:`, err);
-    if (err instanceof ApiError && err.status === 409) {
-        pushMessageToast({ title: err.message });
-        return true;
-    }
-    return false;
+    // Every server refusal is the user's to see (a 403 on a snooze or a tick
+    // in a shared note used to roll back without a word). True when one
+    // was shown, so a caller can add its own offline message otherwise.
+    return toastRefusal(err);
 }
 
 export interface NoteActions {
     /** Task-level edits on one note. */
     toggleTask: (note: NoteRef, task: Task, completed: boolean) => Promise<void>;
     editTask: (note: NoteRef, task: Task, description: string) => Promise<void>;
-    addTask: (note: NoteRef, description: string, parentId?: number) => Promise<Task | null>;
+    addTask: (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming) => Promise<Task | null>;
     deleteTaskFrom: (note: NoteRef, taskId: number) => Promise<void>;
     moveTaskIn: (note: NoteRef, task: Task, direction: 'up' | 'down') => Promise<void>;
     reorderTaskIn: (note: NoteRef, task: Task, afterId: number | null, reparent?: { parentId: number | null }) => Promise<void>;
     setDue: (note: NoteRef, task: Task, dueAt: string | null) => Promise<void>;
+    /** Date & repeat (plaintext schedule, null removes) with its derived due_at. */
+    setSchedule: (note: NoteRef, task: Task, schedule: string | null, dueAt: string | null) => Promise<void>;
+    /** Snooze the item's current reminder until an instant (null = unsnooze). */
+    snoozeTask: (note: NoteRef, task: Task, until: number | null) => Promise<void>;
     setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
      *  and null only when nothing was saved. */
-    createNote: (title: string, items: string[], extra?: NoteExtras) => Promise<NoteRef | null>;
+    createNote: (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
     renameNote: (note: NoteRef, title: string) => Promise<boolean>;
     /** Moves the note to the trash where the server has one
      *  (`content.trashEnabled`), else deletes it for good. */
@@ -372,15 +383,21 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const toggleTask = useCallback(async (note: NoteRef, task: Task, completed: boolean) => {
         const original = await snapshot(note);
-        const next = applyToggle(original, task, completed);
+        // One completion path (taskCompletion.ts): a repeating task advances.
+        const card = cardsRef.current.find(c => c.ref.kind === note.kind && c.ref.id === note.id);
+        const canEdit = note.kind === 'list' || canEditTask(task, currentUserIdFromToken() ?? undefined, card?.myPerms);
+        const plan = planToggle(original, task, completed, { canEdit });
+        const next = plan.next;
         restore(note, next);
         syncListCounts(note, next);
         try {
-            await updateTask(task.id, { is_completed: completed });
+            await plan.send();
         } catch (err) {
             explain('toggle failed', err);
             restore(note, original);
             syncListCounts(note, original);
+            // A lost race with another device's advance: show the truth.
+            if (err instanceof ApiError && err.status === 409) restore(note, await fetchTasksFor(note).catch(() => original));
         }
     }, [snapshot, restore, syncListCounts]);
 
@@ -396,11 +413,13 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
-    const addTask = useCallback(async (note: NoteRef, description: string, parentId?: number): Promise<Task | null> => {
+    const addTask = useCallback(async (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task | null> => {
         try {
+            // `timing` (a calendar tap-to-add) rides the same one POST.
             const created = note.kind === 'channel'
-                ? await createTask(note.id, description, parentId)
-                : await createListTask(note.id, description, parentId);
+                ? await createTask(note.id, description, parentId, timing)
+                : await createListTask(note.id, description, parentId, timing);
+            if (timing) pokeTaskReminders();
             const next = [...await snapshot(note), created];
             restore(note, next);
             syncListCounts(note, next);
@@ -469,6 +488,39 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
+    const setSchedule = useCallback(async (note: NoteRef, task: Task, schedule: string | null, dueAt: string | null) => {
+        const original = await snapshot(note);
+        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, schedule, due_at: dueAt } : t)));
+        try {
+            await patchTaskTiming(task, { schedule, due_at: dueAt });
+            pokeTaskReminders();
+        } catch (err) {
+            explain('schedule failed', err);
+            restore(note, original);
+        }
+    }, [snapshot, setTasks, restore]);
+
+    const snoozeTask = useCallback(async (note: NoteRef, task: Task, until: number | null) => {
+        // A snooze moves the item's plaintext due_at to the snooze instant
+        // when this user may edit its time (taskSchedule.snoozePatch), so a
+        // phone reminding with Notes closed fires it then, not at the old time.
+        const card = cardsRef.current.find(c => c.ref.kind === note.kind && c.ref.id === note.id);
+        const canMoveDue = note.kind === 'list' || canEditTask(task, currentUserIdFromToken() ?? undefined, card?.myPerms);
+        const patch = snoozePatch(task, until, canMoveDue);
+        if (!patch) return;   // nothing to snooze: the reminder has no time on the server
+        const original = await snapshot(note);
+        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, snooze: patch.snooze, ...(patch.due_at !== undefined ? { due_at: patch.due_at } : {}) } : t)));
+        try {
+            await patchTaskTiming(task, patch);
+            pokeTaskReminders();
+        } catch (err) {
+            explain('snooze failed', err);
+            restore(note, original);
+            // Lost a race with another device's edit or advance: show the truth.
+            if (err instanceof ApiError && err.status === 409) restore(note, await fetchTasksFor(note).catch(() => original));
+        }
+    }, [snapshot, setTasks, restore]);
+
     const setAttachments = useCallback(async (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => {
         const original = await snapshot(note);
         try {
@@ -482,9 +534,17 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
-    const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras): Promise<NoteRef | null> => {
+    const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
+        // A note with text or pictures goes through the content path, which
+        // carries no item timing (see integration notes in docs/NOTES.md).
         if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra);
-        const cleanItems = cleanQuickItems(items);
+        // Timing rides with its item through the blank-dropping clean.
+        const timingOf = new Map<number, NewTaskTiming | undefined>();
+        const cleanItems = cleanQuickItems(items.filter((raw, i) => {
+            const keep = cleanQuickItems([raw]).length > 0;
+            if (keep) timingOf.set(timingOf.size, timing?.[i]);
+            return keep;
+        }));
         let list: TaskList;
         try {
             list = await createTaskList(deriveQuickTitle(title, cleanItems));
@@ -497,9 +557,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const missing: string[] = [];
         // Sequential so positions follow the typed order. An item that fails
         // does not lose the note: the list exists, the rest is reported.
-        for (const text of cleanItems) {
+        for (const [i, text] of cleanItems.entries()) {
             try {
-                created.push(await createListTask(list.id, text));
+                created.push(await createListTask(list.id, text, undefined, timingOf.get(i)));
             } catch (err) {
                 explain('create item failed', err);
                 missing.push(text);
@@ -610,12 +670,12 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [qc]);
 
     return useMemo(() => ({
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
         createNote, renameNote, deleteNote, togglePin, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
         restoreNote, content,
     }), [
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
         createNote, renameNote, deleteNote, togglePin, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
         restoreNote, content,

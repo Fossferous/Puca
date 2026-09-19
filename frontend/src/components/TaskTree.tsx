@@ -27,9 +27,11 @@ import { ApiError } from '../api/client';
 import { TaskAttachments } from './TaskAttachments';
 import { useDragReorder } from '../hooks/useDragReorder';
 import {
-    ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, ClockIcon, GripIcon, LockIcon,
+    CalendarIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, ClockIcon, GripIcon, LockIcon,
     MapPinIcon, PaperclipIcon, PendingIcon, PlusIcon, TrashIcon, WarningIcon,
 } from './Icons';
+import { ScheduleChip, SnoozeChip } from './schedule/ScheduleChip';
+import { ScheduleEditor } from './schedule/ScheduleEditor';
 import './TaskTree.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { isAndroidApp } from '../api/platform';
@@ -171,6 +173,13 @@ interface TaskTreeProps {
     /** Set or clear a task's due time (ISO string; null clears). When
      *  provided, editable rows grow a clock action + due chip. */
     onSetDue?: (task: Task, dueAt: string | null) => void;
+    /** Set or remove a task's date & repeat (plaintext schedule, sealed by the
+     *  owner; null removes) with the due_at derived for it. Pass it ONLY when
+     *  the server stores schedules (taskFeatures) — an older one drops the
+     *  field silently. Whether or not it is passed, an item that HAS a
+     *  schedule never shows the raw due editor or a "Due" chip: its due_at is
+     *  the next reminder, not a deadline. */
+    onSetSchedule?: (task: Task, schedule: string | null, dueAt: string | null) => void;
     /** Replace a task's full attachment list (add and remove both land here). */
     onSetAttachments: (task: Task, refs: TaskAttachmentRef[]) => void;
     /** Resolved channel permission bits (Channel.my_permissions). undefined =
@@ -189,7 +198,7 @@ interface TaskTreeProps {
 }
 
 export function TaskTree({
-    tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetAttachments,
+    tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSetAttachments,
     myPerms, currentUserId, resolveUserName, channelId,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
@@ -200,6 +209,8 @@ export function TaskTree({
     // Row with its due-time editor open, and the datetime-local draft value.
     const [dueFor, setDueFor] = useState<number | null>(null);
     const [dueDraft, setDueDraft] = useState('');
+    // Row with its date & repeat editor open.
+    const [scheduleFor, setScheduleFor] = useState<number | null>(null);
     // Row with its place picker open (Android location reminders).
     const [placeFor, setPlaceFor] = useState<number | null>(null);
     // Place chips read the device-local store directly; this subscription is
@@ -390,6 +401,8 @@ export function TaskTree({
         const byline = bylineFor(task);
         // Device-local; empty everywhere except an Android phone that saved one.
         const place = isAndroidApp() ? getTaskPlace(task.id) : null;
+        // Any schedule value (even one this build cannot read) owns the timing.
+        const hasSchedule = task.schedule !== undefined && task.schedule !== null;
         return (
         <li
             key={task.id}
@@ -438,7 +451,9 @@ export function TaskTree({
                 </span>
             )}
             {/* Due chip: red once the deadline passes on an open task. */}
-            {task.due_at && editingId !== task.id && (
+            {hasSchedule && editingId !== task.id && <ScheduleChip task={task} now={now} />}
+            {editingId !== task.id && <SnoozeChip task={task} now={now} />}
+            {task.due_at && !hasSchedule && editingId !== task.id && (
                 <span
                     className={`tt-due ${isTaskOverdue(task, now) ? 'overdue' : ''}`}
                     title={`Due ${new Date(parseServerTimestamp(task.due_at)).toLocaleString()}`}
@@ -488,7 +503,7 @@ export function TaskTree({
                         <PlusIcon />
                     </button>
                 )}
-                {!task.is_completed && editable && onSetDue && (
+                {!task.is_completed && editable && onSetDue && !hasSchedule && (
                     <button
                         className="tt-btn"
                         title={task.due_at ? 'Edit due time' : 'Add due time'}
@@ -499,6 +514,16 @@ export function TaskTree({
                         }}
                     >
                         <ClockIcon />
+                    </button>
+                )}
+                {!task.is_completed && editable && onSetSchedule && (
+                    <button
+                        className="tt-btn"
+                        title={hasSchedule ? 'Edit date & repeat' : 'Add date & repeat'}
+                        aria-label={hasSchedule ? 'Edit date & repeat' : 'Add date & repeat'}
+                        onClick={() => setScheduleFor(scheduleFor === task.id ? null : task.id)}
+                    >
+                        <CalendarIcon />
                     </button>
                 )}
                 {/* NOT gated on `editable`: the place is this phone's own
@@ -591,6 +616,13 @@ export function TaskTree({
             )}
             {placeFor === node.task.id && (
                 <PlacePicker task={node.task} onDone={() => setPlaceFor(null)} />
+            )}
+            {scheduleFor === node.task.id && onSetSchedule && (
+                <ScheduleEditor
+                    task={node.task}
+                    onClose={() => setScheduleFor(null)}
+                    onSave={(schedule, dueAt) => { setScheduleFor(null); onSetSchedule(node.task, schedule, dueAt); }}
+                />
             )}
             {locked ? (
                 <div className="tt-attach-row">

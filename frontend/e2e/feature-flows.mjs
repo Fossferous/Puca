@@ -487,6 +487,64 @@ async function main() {
     check('trash/restore brings it back', back.some(l => l.id === noteList.id && l.trashed_at === null), '');
     const selfTrash = await api('POST', `/task-lists/${aSelf.id}/trash`, {}, A.t);
     check('trash/Notes to self cannot be trashed (400)', selfTrash.status === 400, `status=${selfTrash.status}`);
+    section('TASK TIMING (066): sealed schedule + snooze, the old-client guard');
+    // Opaque stand-ins for client-sealed envelopes: the server only checks the shape.
+    const SCHED = '{"v":2,"t":"self","ct":"c2NoZWR1bGU="}';
+    const SNOOZE = '{"v":2,"t":"self","ct":"c25vb3pl"}';
+    const feats = await must('GET', '/task-features', null, A.t);
+    // A 429's wait must be readable cross-origin, or the paced .ics import
+    // (api/icsImport.ts) can never honour it and falls back to guessing.
+    const corsRes = await fetch(`${API}/task-features`, { headers: { Origin: 'http://cors-check.invalid', Authorization: `Bearer ${A.t}` } });
+    const exposed = (corsRes.headers.get('access-control-expose-headers') ?? '').toLowerCase();
+    check('timing/CORS exposes retry-after and x-ratelimit-after', exposed.includes('retry-after') && exposed.includes('x-ratelimit-after'), `expose=${exposed}`);
+    check('timing/GET /task-features names schedule + snooze', Array.isArray(feats.features) && feats.features.includes('schedule') && feats.features.includes('snooze'), JSON.stringify(feats));
+    const ev = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'event', schedule: SCHED, due_at: dueSoon }, A.t);
+    check('timing/create carries the sealed schedule in ONE request', ev.schedule === SCHED && 'snooze' in ev && typeof ev.updated_at === 'string', JSON.stringify(ev));
+    const plainSched = await api('PATCH', `/tasks/${ev.id}`, { schedule: '{"v":1,"kind":"event","start":"2030-01-01"}' }, A.t);
+    check('timing/plaintext schedule → 400 (envelope-only)', plainSched.status === 400, `status=${plainSched.status}`);
+    const oldTick = await api('PATCH', `/tasks/${ev.id}`, { is_completed: true }, A.t);
+    const afterOld = (await must('GET', `/task-lists/${rl.id}/tasks`, null, A.t)).find(t => t.id === ev.id);
+    check('timing/an old client ticking a scheduled item → 409, item stays open', oldTick.status === 409 && afterOld.is_completed === false, `status=${oldTick.status}`);
+    await must('PATCH', `/tasks/${ev.id}`, { snooze: SNOOZE }, A.t);
+    const rem = (await must('GET', '/task-reminders', null, A.t)).find(r => r.id === ev.id);
+    check('timing/reminder feed carries the sealed schedule + snooze', rem && rem.schedule === SCHED && rem.snooze === SNOOZE && rem.created_by !== undefined, JSON.stringify(rem));
+    const cas = await api('PATCH', `/tasks/${ev.id}`, { due_at: new Date(Date.now() + 7200_000).toISOString(), expect_due_at: '2001-01-01T00:00:00Z' }, A.t);
+    check('timing/expect_due_at mismatch → 409', cas.status === 409, `status=${cas.status}`);
+    const cSched = await api('PATCH', `/tasks/${ev.id}`, { schedule: SCHED }, C.t);
+    check('timing/an outsider cannot write a schedule', cSched.status === 403 || cSched.status === 404, `status=${cSched.status}`);
+    const awareTick = await api('PATCH', `/tasks/${ev.id}`, { is_completed: true, recurrence_aware: true }, A.t);
+    check('timing/a schedule-aware client completes it', awareTick.status === 200, `status=${awareTick.status}`);
+    // A plain parent with a scheduled child: the server can refuse only a
+    // client that does not know about schedules (it cannot see whether the
+    // child repeats). An aware client's completion sweeps the child, which
+    // is why the CLIENT refuses it when the child repeats
+    // (taskCompletion.subtreeCompletionBlock; notes-walk-calendar proves the
+    // built client does).
+    const pParent = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'plain parent' }, A.t);
+    const pKid = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'weekly kid', parent_id: pParent.id, schedule: SCHED, due_at: dueSoon }, A.t);
+    const oldParent = await api('PATCH', `/tasks/${pParent.id}`, { is_completed: true }, A.t);
+    check('timing/an old client ticking a PLAIN parent of a scheduled child → 409', oldParent.status === 409, `status=${oldParent.status}`);
+    const awareParent = await api('PATCH', `/tasks/${pParent.id}`, { is_completed: true, recurrence_aware: true }, A.t);
+    const kidAfter = (await must('GET', `/task-lists/${rl.id}/tasks`, null, A.t)).find(t => t.id === pKid.id);
+    check('timing/an aware completion of the parent sweeps the scheduled child (the server cannot tell it repeats)', awareParent.status === 200 && kidAfter?.is_completed === true, `status=${awareParent.status} kid=${JSON.stringify(kidAfter)}`);
+    // A SHARED item's timing must be a v3 channel envelope (bound to the
+    // channel, epoch, creator and kind); an unbound v2 or a self envelope is
+    // refused on create and on edit — with the v3 positive control.
+    const CH_V3 = '{"v":3,"t":"ch","epoch":1,"ct":"c2NoZWR1bGU="}';
+    const CH_V2 = '{"v":2,"t":"ch","epoch":1,"ct":"c2NoZWR1bGU="}';
+    const chV2 = await api('POST', `/channels/${clc.id}/tasks`, { description: CH_V3, schedule: CH_V2 }, A.t);
+    check('timing/a shared item created with a v2 channel schedule → 400', chV2.status === 400, `status=${chV2.status}`);
+    const chV3 = await api('POST', `/channels/${clc.id}/tasks`, { description: CH_V3, schedule: CH_V3 }, A.t);
+    check('timing/positive control: the same item with a v3 channel schedule → 200', chV3.status === 200, `status=${chV3.status}`);
+    if (chV3.status === 200) {
+        const chSnzV2 = await api('PATCH', `/tasks/${chV3.body.id}`, { snooze: CH_V2 }, A.t);
+        const chSnzSelf = await api('PATCH', `/tasks/${chV3.body.id}`, { snooze: SNOOZE }, A.t);
+        const chSnzV3 = await api('PATCH', `/tasks/${chV3.body.id}`, { snooze: CH_V3 }, A.t);
+        check('timing/a shared item refuses a v2 or self snooze and takes a v3 one', chSnzV2.status === 400 && chSnzSelf.status === 400 && chSnzV3.status === 200,
+            `v2=${chSnzV2.status} self=${chSnzSelf.status} v3=${chSnzV3.status}`);
+    } else {
+        check('timing/a shared item refuses a v2 or self snooze and takes a v3 one', false, 'SKIPPED: the v3 create failed, nothing to patch');
+    }
 
     section('INPUT CAPS (DoS hardening)');
     const big = 'x'.repeat(9000);

@@ -28,6 +28,7 @@ import {
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type MessageEncState } from '../../api/e2ee';
 import { parseServerTimestamp } from '../../utils/serverTime';
+import { type ReminderSlot, noteUpdatedAt, reminderSlotOf, scheduleSearchText } from './notesTiming';
 
 /** Which checklist a note is: a personal list or a channel checklist. */
 export interface NoteRef {
@@ -98,6 +99,8 @@ export interface NoteSource {
      *  sidecar (api/listSeal.ts), when the server has them. */
     body?: string | null;
     noteAttachments?: string | null;
+    /** The list row's last edit (066+ servers; personal lists only). */
+    updatedAt?: string;
 }
 
 /** Everything one card renders from. */
@@ -153,6 +156,8 @@ export function buildNoteCards(
             createdAt: s.createdAt,
             body: s.body,
             noteAttachments: s.noteAttachments,
+            // The newest of the list's own stamp and its items' (notesTiming).
+            updatedAt: noteUpdatedAt(s.updatedAt, tasks),
             key,
             tasks,
             pinned: isFavoriteTab(prefs, { kind: s.ref.kind, id: s.ref.id }),
@@ -233,6 +238,7 @@ export function noteMatches(card: NoteCard, query: string): boolean {
         card.serverName ?? '',
         ...card.labels,
         ...(card.tasks ?? []).map(t => readable(t.description)),
+        ...(card.tasks ?? []).map(scheduleSearchText),
     ].map(normalizeForSearch).join('\n');
     return terms.every(term => hay.includes(term));
 }
@@ -321,7 +327,9 @@ export function nearestDue(tasks: Task[]): Task | null {
     let best: Task | null = null;
     let bestT = Infinity;
     for (const t of tasks) {
-        if (t.is_completed || !t.due_at) continue;
+        // A scheduled item's due_at is its next REMINDER, not a deadline: its
+        // own chip (ScheduleChip) says when it is.
+        if (t.is_completed || !t.due_at || (t.schedule !== undefined && t.schedule !== null)) continue;
         const at = parseServerTimestamp(t.due_at);
         if (!Number.isFinite(at) || at >= bestT) continue;
         best = t;
@@ -336,6 +344,8 @@ export interface DueItem {
     note: NoteCard;
     /** Epoch ms. */
     at: number;
+    /** How the item's timing reads (notesTiming.reminderSlotOf). */
+    slot?: ReminderSlot;
 }
 
 export interface ReminderGroups {
@@ -360,16 +370,17 @@ export function groupReminders(cards: NoteCard[], now: number): ReminderGroups {
     const items: DueItem[] = [];
     for (const note of cards) {
         for (const task of note.tasks ?? []) {
-            if (task.is_completed || !task.due_at) continue;
-            const at = parseServerTimestamp(task.due_at);
-            if (!Number.isFinite(at)) continue;
-            items.push({ task, note, at });
+            // Snoozes, repeats and events (notesTiming.reminderSlotOf): an
+            // event is never overdue, a snoozed item sorts by its snooze.
+            const slot = reminderSlotOf(task, now);
+            if (!slot) continue;
+            items.push({ task, note, at: slot.at, slot });
         }
     }
     items.sort((a, b) => a.at - b.at || a.task.id - b.task.id);
     const groups: ReminderGroups = { overdue: [], today: [], upcoming: [] };
     for (const it of items) {
-        if (isTaskOverdue(it.task, now)) groups.overdue.push(it);
+        if (it.slot ? it.slot.overdue : isTaskOverdue(it.task, now)) groups.overdue.push(it);
         else if (sameLocalDay(it.at, now)) groups.today.push(it);
         else groups.upcoming.push(it);
     }

@@ -1,0 +1,162 @@
+/* The date & repeat editor (ScheduleEditor.tsx) and the schedule chips.
+ * z 2040: above every Notes/Púca surface it can be opened from (the Notes
+ * editor at 900, the checklist drawer at 250, the settings modal at 2000),
+ * below the 2050 file browser and the 2100 live-connection prompts —
+ * registered in docs/DESIGN_PHILOSOPHY.md §1. */
+
+.sched-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2040;
+    background: var(--bg-overlay, rgba(0, 0, 0, 0.6));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.sched-dialog {
+    width: min(460px, calc(100vw - 32px));
+    max-height: 85dvh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-floating, #111);
+    color: var(--text-normal, #ddd);
+    border: 1px solid var(--border-subtle, #333);
+    border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.sched-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 12px 8px 16px;
+    border-bottom: 1px solid var(--border-faint, #222);
+}
+.sched-head h3 { flex: 1; margin: 0; font-size: 16px; }
+
+.sched-iconbtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted, #999);
+    cursor: pointer;
+}
+.sched-iconbtn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+
+.sched-body {
+    overflow-y: auto;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.sched-task-title {
+    margin: 0;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.sched-seg { display: inline-flex; align-self: flex-start; border: 1px solid var(--border-subtle); border-radius: 8px; overflow: hidden; }
+.sched-seg button {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 6px 14px;
+    cursor: pointer;
+    font: inherit;
+}
+.sched-seg button.on { background: var(--brand-primary, #5865f2); color: #fff; }
+
+.sched-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+.sched-row > span:first-child { width: 72px; flex-shrink: 0; color: var(--text-muted); font-size: 13px; }
+.sched-row input[type="date"],
+.sched-row input[type="time"],
+.sched-row input[type="text"],
+.sched-row input[type="number"],
+.sched-row select {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+    font: inherit;
+    font-size: 14px;
+    color-scheme: dark;
+}
+[data-theme="light"] .sched-row input,
+[data-theme="light"] .sched-row select { color-scheme: light; }
+.sched-check > span { width: auto !important; color: var(--text-normal) !important; display: inline-flex; align-items: center; gap: 6px; font-size: 14px !important; }
+.sched-pair { display: flex; gap: 12px; flex-wrap: wrap; }
+.sched-pair .sched-row { flex: 1 1 180px; }
+
+.sched-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+}
+.sched-note.warn { color: var(--text-warning, #f0b232); }
+
+.sched-foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px 14px;
+    border-top: 1px solid var(--border-faint);
+}
+.sched-spacer { flex: 1; }
+.sched-btn {
+    padding: 7px 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-normal);
+    cursor: pointer;
+    font: inherit;
+}
+.sched-btn.primary { background: var(--brand-primary, #5865f2); border-color: transparent; color: #fff; }
+.sched-btn.danger { color: var(--text-danger, #f23f43); }
+
+/* Chips beside the plain due chip (TaskTree.css owns .tt-due). */
+.tt-sched.ended { opacity: 0.7; }
+.tt-sched.locked { color: var(--text-muted); }
+.tt-snoozed { color: var(--text-link, #00a8fc); }
+.tt-sched svg + svg,
+.tt-sched .tt-due-label + svg { margin-left: 2px; }
+
+/* Phone: a full-screen sheet; 16px inputs (no iOS zoom); 44px buttons. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .sched-backdrop { align-items: stretch; }
+    .sched-dialog {
+        width: 100vw;
+        max-height: none;
+        height: 100dvh;
+        border-radius: 0;
+        border: none;
+        padding-top: var(--safe-area-top, 0px);
+        padding-bottom: var(--safe-area-bottom, 0px);
+    }
+    .sched-row input[type="date"],
+    .sched-row input[type="time"],
+    .sched-row input[type="text"],
+    .sched-row input[type="number"],
+    .sched-row select { font-size: 16px; min-height: 44px; }
+    .sched-iconbtn { width: 44px; height: 44px; }
+    .sched-btn { min-height: 44px; }
+    .sched-seg button { min-height: 44px; }
+    .sched-check input { width: 22px; height: 22px; }
+}

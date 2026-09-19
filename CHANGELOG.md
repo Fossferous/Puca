@@ -94,6 +94,38 @@ one-line summary; this file is the full story. Versions follow
   the new Púca Notes APK on every phone before using the trash** (Notes has
   no automatic updates); the camera button also needs the new APKs of both
   apps.
+- **A calendar in Púca Notes, and the same calendar as a tab in Púca's Tasks
+  view.** Month, week, day and agenda views. On a phone, the month shows dots
+  and the chosen day's list. Drag an item to another day, or use *Move to date…*
+  or the `[` and `]` keys. Tap a day to add something to it.
+- **Dates that repeat.** An item can be an event or a to-do, all-day or at a
+  time in its own time zone, with an end, a place and reminders, repeating
+  daily, weekly, monthly or yearly. Ticking a repeating to-do moves it to the
+  next time and reopens its subtasks. It does not end the series. The date,
+  the repeat rule and the place are encrypted like the item itself. By default
+  the server sees the next reminder time, so reminders reach your other
+  devices. A per-item *Keep the time private from the server* switch hides that
+  too, and then the item gets no reminders.
+- **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
+  morning. The reminder time the server holds moves with the snooze, so a
+  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
+  is only offered to people allowed to tick the item.
+- **Ticking an item with a repeating to-do under it** is refused with a
+  reason instead of quietly ending the repeat.
+- **Edited.** Notes show when they were last changed, and can be sorted by it.
+- **Your data export includes dates, repeats and snoozes**, opened like the rest
+  of your items.
+- **.ics export and import.** Export gives your dated items as a standard
+  calendar file. The file is not encrypted, and the app says so first. Import
+  brings a calendar file into a personal note. It first lists anything it
+  cannot bring across, and it skips events it already has. In the Púca Notes
+  Android app, *Add to phone calendar* copies one event to your phone's
+  calendar.
+
+### Changed
+- An older app can no longer tick off an item that has a date or repeats; it
+  is told to update instead. It would otherwise have ended a repeating series
+  without knowing.
 
 ## 0.9.815 — 2026-09-19
 

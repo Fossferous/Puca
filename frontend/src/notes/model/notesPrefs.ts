@@ -29,7 +29,7 @@ import { isNoteColor, normalizeLabel, type NotesNoteState, type NoteColor, MAX_L
 export type NotesViewMode = 'grid' | 'list';
 /** `puca` = the saved tab order Púca's Tasks view uses (pins lead); the
  *  others are display-only sorts and disable the Move actions. */
-export type NotesSortMode = 'puca' | 'title' | 'created';
+export type NotesSortMode = 'puca' | 'title' | 'created' | 'edited';
 
 export interface NotesPrefs extends NotesNoteState {
     view: NotesViewMode;
@@ -97,7 +97,7 @@ export function parseNotesPrefs(raw: string | null): NotesPrefs {
     }
 
     const view: NotesViewMode = o.view === 'list' ? 'list' : 'grid';
-    const sort: NotesSortMode = o.sort === 'title' || o.sort === 'created' ? o.sort : 'puca';
+    const sort: NotesSortMode = o.sort === 'title' || o.sort === 'created' || o.sort === 'edited' ? o.sort : 'puca';
     return { colors, labels, archived, view, sort };
 }
 

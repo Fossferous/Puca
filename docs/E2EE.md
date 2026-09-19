@@ -117,8 +117,26 @@ associated data, recomputed by the reader from the row's own metadata:
 channel message        puca/v3/chan-msg/<channelId>/<epoch>/<user_id>
 channel checklist item puca/v3/chan-task/<channelId>/<epoch>/<created_by>
 task attachment sidecar puca/v3/chan-taskatt/<channelId>/<epoch>/<created_by>
+task schedule (event)  puca/v3/chan-taskevt/<channelId>/<epoch>/<created_by>
+task snooze            puca/v3/chan-tasksnz/<channelId>/<epoch>/<created_by>
 DM                     puca/v3/dm/<sender_id>/<recipient_id>      (directional)
 ```
+
+`chan-taskevt` and `chan-tasksnz` (migration 066) seal a checklist item's
+EventSchedule and snooze, so neither opens as the other, as a description or
+as a message. They bind the channel, epoch and creator but **not the task id**:
+the server could move one item's schedule onto another item by the same
+creator in the same channel. Personal-list items seal both to self (v2, no
+associated data); there the plaintexts carry their own type tag (`"v":1` +
+`kind` for a schedule, `"k":"snooze/1"` for a snooze) and each parser refuses
+the other's, so a swap between the two columns reads as "no value" — but a
+swap between two of your own items is not detected. `docs/SECURITY_MODEL.md` §2
+states this. Neither field ever had a plaintext era, so a non-envelope value
+from the server is treated as unreadable, never as plaintext. In a channel
+they are **v3-only**: these kinds were born v3, so a v2 (unbound) channel
+envelope in either column opens to a failure marker on the client
+(`tasks.ts` `openTimingValue`) and is refused by the server on create and
+edit (`task_timing::validate_sealed_scoped`).
 
 Every field is a token from a closed set or a non-negative integer, so the
 grammar needs no escaping. What it buys: a v3 body re-attributed to another

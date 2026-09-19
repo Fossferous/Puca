@@ -10,9 +10,11 @@ fs.mkdirSync(outdir, { recursive: true });
 
 const iphone = devices['iPhone 13'];
 const browser = await chromium.launch({
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+    // --mute-audio: the fake media device must never reach the speakers.
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--mute-audio'],
 });
-const ctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL: (process.env.WALK_BASE_URL || 'http://localhost:5173') });
+// APP=<origin> (or WALK_BASE_URL) points it at a throwaway static server; default is the dev server.
+const ctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL: process.env.APP || process.env.WALK_BASE_URL || 'http://localhost:5173' });
 const page = await ctx.newPage();
 page.on('pageerror', e => console.log('[pageerror]', String(e).slice(0, 300)));
 
@@ -25,6 +27,14 @@ const shot = async (name) => {
 };
 const tryStep = async (name, fn) => {
     try { await fn(); return true; } catch (e) { console.log(`STEP-FAIL ${name}:`, String(e).split('\n')[0]); return false; }
+};
+// A step whose failure FAILS the run (exit 1). tryStep alone logs and moves
+// on, which is right for a layout probe and wrong for an assertion.
+const mustFails = [];
+const mustStep = async (name, fn) => {
+    const ok = await tryStep(name, fn);
+    if (!ok) mustFails.push(name);
+    return ok;
 };
 
 // ---- Login
@@ -183,6 +193,31 @@ await tryStep('tasks-all-board', async () => {
     await page.waitForTimeout(1200);
 });
 await shot('tasks-all-board');
+// The pinned Calendar tab (the same component as Notes' /calendar) on the
+// phone gate: no Week button, dots in the month, nothing wider than the screen.
+await mustStep('tasks-calendar-tab', async () => {
+    await page.locator('.tasks-tab-calendar').tap({ timeout: 3000 });
+    await page.locator('.tasks-calendar .cal-month').waitFor({ timeout: 5000 });
+    const r = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        week: (() => { const b = document.querySelector('.tasks-calendar .cal-viewbtn.view-week'); return !!b && getComputedStyle(b).display !== 'none'; })(),
+        // The pinned tab is a whole tap target, not squeezed to "C…".
+        tabW: Math.round(document.querySelector('.tasks-tab-calendar')?.getBoundingClientRect().width ?? 0),
+    }));
+    console.log('tasks calendar (phone): no overflow, no Week button, tab >= 44px (should be true):', !r.overflow && !r.week && r.tabW >= 44, r.tabW);
+    if (r.overflow || r.week || r.tabW < 44) throw new Error(`phone calendar gate: ${JSON.stringify(r)}`);
+    // Day on a phone is the day's list alone: no time grid under it.
+    await page.locator('.tasks-calendar .cal-viewbtn.view-day').tap({ timeout: 3000 });
+    await page.locator('.tasks-calendar .cal.view-day').waitFor({ timeout: 5000 });
+    const d = await page.evaluate(() => ({
+        list: !!document.querySelector('.tasks-calendar .cal-daylist'),
+        grid: document.querySelectorAll('.tasks-calendar .cal-timegrid').length,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    }));
+    console.log('tasks calendar (phone Day): the list, no time grid, no overflow (should be true):', d.list && d.grid === 0 && !d.overflow, JSON.stringify(d));
+    if (!d.list || d.grid !== 0 || d.overflow) throw new Error(`phone Day: ${JSON.stringify(d)}`);
+});
+await shot('tasks-calendar-phone');
 // A server checklist opened as its own tab (channel tabs carry the kind glyph).
 await tryStep('tasks-channel-tab', async () => {
     await page.locator('.tasks-tab.tasks-tab-channel').first().tap({ timeout: 3000 });
@@ -235,3 +270,7 @@ await shot('friends-panel');
 
 console.log('DONE');
 await browser.close();
+if (mustFails.length) {
+    console.log(`FAILED: ${mustFails.length} required step(s): ${mustFails.join(', ')}`);
+    process.exit(1);
+}

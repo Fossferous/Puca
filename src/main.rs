@@ -48,6 +48,7 @@ mod sfu;
 mod signaling;
 mod state;
 mod task_handlers;
+mod task_timing;
 mod update_routes;
 mod upload_handlers;
 mod wake;
@@ -370,9 +371,13 @@ async fn main() -> anyhow::Result<()> {
             ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
-            .expose_headers([header::HeaderName::from_static(
-                crate::auth::RENEWED_TOKEN_HEADER,
-            )])
+            // A 429's wait (the limiter's x-ratelimit-after, or Retry-After) is
+            // exposed so a paced client can honour it (api/client.ts).
+            .expose_headers([
+                header::HeaderName::from_static(crate::auth::RENEWED_TOKEN_HEADER),
+                header::RETRY_AFTER,
+                header::HeaderName::from_static("x-ratelimit-after"),
+            ])
     } else if is_production {
         // Fail closed: a production server must name its allowed origins. Every
         // documented deploy sets CORS_ORIGINS (chat + app + tauri/capacitor
@@ -405,9 +410,13 @@ async fn main() -> anyhow::Result<()> {
             ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
-            .expose_headers([header::HeaderName::from_static(
-                crate::auth::RENEWED_TOKEN_HEADER,
-            )])
+            // A 429's wait (the limiter's x-ratelimit-after, or Retry-After) is
+            // exposed so a paced client can honour it (api/client.ts).
+            .expose_headers([
+                header::HeaderName::from_static(crate::auth::RENEWED_TOKEN_HEADER),
+                header::RETRY_AFTER,
+                header::HeaderName::from_static("x-ratelimit-after"),
+            ])
     };
 
     // Routes that require JWT authentication
@@ -622,6 +631,8 @@ async fn main() -> anyhow::Result<()> {
             "/task-tab-prefs",
             axum::routing::put(task_handlers::put_tab_prefs),
         )
+        // Which task-timing fields this server stores (schedule, snooze, ...)
+        .route("/task-features", get(task_timing::task_features))
         // Due-time reminders (ids + times only; content stays E2EE)
         .route(
             "/task-reminders",

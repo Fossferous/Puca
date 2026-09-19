@@ -99,7 +99,7 @@ export interface OpenStats {
 export interface ExportReaders {
     channelMessage: (channelId: number, content: string, senderId: number) => Promise<string>;
     dmMessage: (content: string, partnerUserId: number, senderId: number) => Promise<string>;
-    channelTask: (channelId: number, stored: string, kind: 'chan-task' | 'chan-taskatt', ownerId: number) => Promise<string>;
+    channelTask: (channelId: number, stored: string, kind: 'chan-task' | 'chan-taskatt' | 'chan-taskevt' | 'chan-tasksnz', ownerId: number) => Promise<string>;
     selfText: (stored: string) => Promise<string>;
     /** A personal list's note text / picture sidecar (migration 065): the
      *  STRICT self reader — those fields never held plaintext. */
@@ -160,6 +160,37 @@ async function open(stored: string, read: () => Promise<string>, stats: OpenStat
     }
     stats.opened++;
     return { content_ciphertext: stored, envelope, text: out, unreadable: null };
+}
+
+/**
+ * A task's sealed schedule and snooze (066+ servers), opened like its
+ * attachments. Keys the server did not send stay absent. These columns never
+ * had a plaintext era, so a value that is not an envelope is reported as
+ * unreadable rather than exported as if it were the user's text.
+ */
+async function openTaskTimingForExport(
+    t: RawTask,
+    viaChannel: (channelId: number, read: () => Promise<string>) => () => Promise<string>,
+    readers: ExportReaders,
+    stats: OpenStats,
+): Promise<{ schedule?: OpenedText | null; snooze?: OpenedText | null }> {
+    const out: { schedule?: OpenedText | null; snooze?: OpenedText | null } = {};
+    for (const [key, kind] of [['schedule', 'chan-taskevt'], ['snooze', 'chan-tasksnz']] as const) {
+        if (!(key in t)) continue;
+        const stored = t[key];
+        if (typeof stored !== 'string' || stored === '') { out[key] = null; continue; }
+        if (envelopeMeta(stored) === null) {
+            stats.sealed++;
+            stats.unreadable++;
+            out[key] = { content_ciphertext: stored, envelope: null, text: null, unreadable: '[Not sealed — a timing value must be encrypted; not read as text]' };
+            continue;
+        }
+        const read = t.channel_id !== null
+            ? viaChannel(t.channel_id, () => readers.channelTask(t.channel_id!, stored, kind, t.created_by))
+            : () => readers.selfText(stored);
+        out[key] = await open(stored, read, stats);
+    }
+    return out;
 }
 
 /**
@@ -237,7 +268,7 @@ export async function openExport(
                 : () => readers.selfText(attachments);
             attachmentsOpened = await open(attachments, readAtt, stats);
         }
-        tasks.push({ ...rest, description: opened, attachments: attachmentsOpened });
+        tasks.push({ ...rest, description: opened, attachments: attachmentsOpened, ...await openTaskTimingForExport(t, viaChannel, readers, stats) });
         tick();
     }
     const task_lists = [];

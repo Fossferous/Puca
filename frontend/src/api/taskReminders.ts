@@ -17,6 +17,7 @@
  */
 import { listTaskReminders, type TaskReminder } from './tasks';
 import { notifyTasksDue } from './desktopNotify';
+import { applyAdvances, openReminderFeed, planAdvances, planEntries, toReminderEntries } from './reminderFeed';
 import { parseServerTimestamp } from '../utils/serverTime';
 
 const FIRED_KEY = 'sovereignTaskRemindersFired';
@@ -36,29 +37,21 @@ export interface ReminderPlan {
     prunedFired: Record<string, string>;
 }
 
-/** Pure scheduling decision — everything testable lives here. */
+/** Pure scheduling decision over plain rows (no timing opened) — the same
+ *  rule the loop runs, via the shared entries in reminderFeed.ts, so there is
+ *  one implementation. Kept for callers that hold bare feed rows. */
 export function planReminders(
     reminders: TaskReminder[],
     fired: Record<string, string>,
     now: number,
 ): ReminderPlan {
-    const toFire: TaskReminder[] = [];
-    const prunedFired: Record<string, string> = {};
-    let nextDueAt: number | null = null;
-    for (const r of reminders) {
-        const t = parseServerTimestamp(r.due_at);
-        if (!Number.isFinite(t)) continue;
-        const key = String(r.id);
-        if (t <= now) {
-            // Fired markers match on the exact due_at: an edited deadline
-            // that passes again is a new reminder, not a duplicate.
-            if (fired[key] !== r.due_at) toFire.push(r);
-            prunedFired[key] = r.due_at;
-        } else if (nextDueAt === null || t < nextDueAt) {
-            nextDueAt = t;
-        }
-    }
-    return { toFire, nextDueAt, prunedFired };
+    const plan = planEntries(toReminderEntries(reminders), fired, now);
+    const byId = new Map(reminders.map(r => [r.id, r]));
+    return {
+        toFire: plan.toFire.map(e => byId.get(e.id)).filter((r): r is TaskReminder => r !== undefined),
+        nextDueAt: plan.nextAt,
+        prunedFired: plan.prunedFired,
+    };
 }
 
 /**
@@ -145,18 +138,30 @@ export function startTaskReminders(opts: TaskReminderOptions = {}): () => void {
             return; // old backend / offline — the poll will try again
         }
         if (stopped) return;
+        // Snoozes and schedules ride the feed sealed (reminderFeed.ts): the
+        // plan runs over the shared {id, at, mark} entries, and a fired
+        // event's due_at moves on to its next alert once the grace is over.
+        // The same entries go to a native alarm engine when one owns firing
+        // (the Púca Notes app: onFeed, notify false).
+        const opened = await openReminderFeed(reminders);
+        if (stopped) return;
+        const now = Date.now();
+        const entries = toReminderEntries(opened, now);
         if (opts.onFeed) {
-            try { opts.onFeed(reminderEntries(reminders)); } catch { /* the loop must outlive a bad consumer */ }
+            try { opts.onFeed(entries); } catch { /* the loop must outlive a bad consumer */ }
         }
         const notify = opts.notify !== false;
-        const plan = planReminders(reminders, notify ? loadFired() : {}, Date.now());
+        const plan = planEntries(entries, notify ? loadFired() : {}, now);
         if (notify) {
             saveFired(plan.prunedFired);
             if (plan.toFire.length > 0) notifyTasksDue(plan.toFire.length);
         }
+        const { advances, nextCheckAt } = planAdvances(opened, now);
+        if (advances.length > 0) void applyAdvances(advances);
         if (dueTimer !== null) window.clearTimeout(dueTimer);
-        if (plan.nextDueAt !== null) {
-            const wait = Math.min(Math.max(plan.nextDueAt - Date.now(), 0) + 500, MAX_TIMEOUT_MS);
+        const nextAt = [plan.nextAt, nextCheckAt].filter((t): t is number => t !== null);
+        if (nextAt.length > 0) {
+            const wait = Math.min(Math.max(Math.min(...nextAt) - Date.now(), 0) + 500, MAX_TIMEOUT_MS);
             dueTimer = window.setTimeout(() => { void tick(); }, wait);
         }
     };

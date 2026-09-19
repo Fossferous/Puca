@@ -10,6 +10,7 @@ import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import { notificationPermission } from '../../api/desktopNotify';
+import { useTaskFeature } from '../../api/taskFeatures';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
 import { useContextMenu } from '../../components/contextMenuUtils';
 import { IdentityBanner } from '../../components/IdentityBanner';
@@ -22,7 +23,7 @@ import {
 } from '../model/notesModel';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
-import { noteToMarkdown, openItemsOf } from '../model/noteText';
+import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
 import { readableBody } from '../model/noteContent';
 import { AccountMenu } from './AccountMenu';
 import { ColorPicker } from './ColorPicker';
@@ -38,6 +39,7 @@ import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { TrashView } from './TrashView';
 import { type NoteExtras } from '../model/useListContent';
+import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
 import { useNotesReminderLoop } from '../native/useNativeReminders';
@@ -81,6 +83,7 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     if (sort === 'puca') return cards;
     const out = [...cards];
     if (sort === 'title') out.sort((a, b) => a.title.localeCompare(b.title));
+    else if (sort === 'edited') out.sort((a, b) => (Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0) - (Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0));
     else out.sort((a, b) => (Date.parse(b.createdAt ?? '') || 0) - (Date.parse(a.createdAt ?? '') || 0));
     return out;
 }
@@ -104,6 +107,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const local = useNotesPrefs();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
+    const canSnooze = useTaskFeature('snooze') === true;
+    const scheduleOnServer = useTaskFeature('schedule') === true;
 
     const [drawer, setDrawer] = useState(false);
     const [popup, setPopup] = useState<Popup | null>(null);
@@ -124,6 +129,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const path = location.pathname;
     const remindersView = path === '/reminders';
     const trashView = path === '/trash';
+    const calendarView = path === '/calendar';
     const filter: NoteFilter = useMemo(() => {
         if (query.trim() && !remindersView) return { kind: 'search', query };
         if (path === '/archive') return { kind: 'archive' };
@@ -159,8 +165,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const go = useCallback((to: string) => { navigate(to); }, [navigate]);
     const setQuery = useCallback((q: string) => {
         setQueryState(q);
-        if (q && remindersView) navigate('/', { replace: true });
-    }, [navigate, remindersView]);
+        if (q && (remindersView || calendarView)) navigate('/', { replace: true });
+    }, [navigate, remindersView, calendarView]);
     const openNote = useCallback((card: NoteCard) => {
         setParams(p => { p.set('note', card.key); return p; });
     }, [setParams]);
@@ -236,7 +242,9 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         }
     };
     const duplicate = async (card: NoteCard) => {
-        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card), readableBody(card.body) ? { body: readableBody(card.body) } : undefined);
+        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card),
+            readableBody(card.body) ? { body: readableBody(card.body) } : undefined,
+            scheduleOnServer ? openItemTimingOf(card) : undefined);
         if (ref) {
             pushMessageToast({ title: 'Copied — open items only, un-nested' });
             setParams(p => { p.set('note', `${ref.kind}:${ref.id}`); return p; });
@@ -365,7 +373,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             <NotesUpdateStripSlot />
             <div className="notes-body">
                 <NotesRail
-                    filter={remindersView ? { kind: 'reminders' } : trashView ? { kind: 'trash' } : filter}
+                    filter={remindersView ? { kind: 'reminders' } : trashView ? { kind: 'trash' } : calendarView ? { kind: 'calendar' } : filter}
                     trashEnabled={actions.content.trashEnabled}
                     labels={labels}
                     reminderBadge={reminderBadgeCount(reminders)}
@@ -401,6 +409,15 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 onEnableNotifications={() => { void enableNotifications(); }}
                                 nativeBanner={<NativeReminderBanners />}
                                 placeItems={placeItems}
+                                canSnooze={canSnooze}
+                            />
+                        ) : calendarView ? (
+                            <CalendarView
+                                cards={cards}
+                                actions={actions}
+                                now={now}
+                                onOpenNote={key => setParams(p => { p.set('note', key); return p; })}
+                                shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu}
                             />
                         ) : (
                             <>
@@ -431,7 +448,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                 </main>
             </div>
 
-            {!remindersView && !trashView && (
+            {!remindersView && !trashView && !calendarView && (
                 <button type="button" className="notes-fab" aria-label="New note" title="New note" onClick={() => setSheet(true)}>
                     <PlusIcon />
                 </button>

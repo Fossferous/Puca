@@ -23,6 +23,8 @@
 // the new app" screen and the strip fit the phone, the strip takes its own
 // row below the top bar with the account button still tappable, and the
 // account menu shows the version and a working Check for updates.
+// Then the calendar (notes-walk-calendar.mjs): Dublin/en-GB and New York/en-US
+// with a fixed clock beside a DST change, and the phone gate.
 //
 // Every check is ck(): a precondition that did not happen (nothing to measure,
 // an element not found) is a FAIL line, never a silent pass, and any FAIL
@@ -43,6 +45,7 @@
 import { chromium, devices } from '@playwright/test';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { calendarWalk } from './notes-walk-calendar.mjs';
 
 const outdir = process.argv[2] || 'e2e/shots-notes';
 const baseURL = process.argv[3] || 'http://127.0.0.1:5176';
@@ -72,7 +75,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let skipped = 0;
 const skip = why => { skipped++; console.log(`SKIP  ${why}`); };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });   // a walk never makes a sound
 const errors = [];
 const watch = page => {
     page.on('dialog', d => { void d.accept(); });
@@ -137,6 +140,7 @@ ck('notes: fresh account shows the empty state', /Take a note/.test(await page.l
 await shot('notes-empty');
 
 // ---- 4. Take a note… ---------------------------------------------------------------
+const notesCreatedAt = Date.now();
 await openComposer();
 await page.fill('.notes-quickadd-title', 'Groceries');
 const item = i => page.locator('.notes-quickadd-item input').nth(i);
@@ -1256,6 +1260,10 @@ if (applied) {
 }
 ck('app: no page errors', errors.length === 0, errors[0]);
 
+// ---- 15. Calendar (pinned zones, locales and a fixed clock) — notes-walk-calendar.mjs ----------
+const calendar = await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql: psqlDsn ? sql : null, errors, notesCreatedAt });
+
 await browser.close();
-console.log(fail === 0 ? `\nALL PASS${skipped ? ` (${skipped} section(s) SKIPPED: give the psql DSN to run them)` : ''}` : `\n${fail} FAILED`);
+const skipNotes = [skipped ? `${skipped} section(s) SKIPPED: give the psql DSN to run them` : '', calendar.skipped ? `${calendar.skipped} calendar database proof(s) SKIPPED (no DSN)` : ''].filter(Boolean).join('; ');
+console.log(fail === 0 ? `\nALL PASS${skipNotes ? ` (${skipNotes})` : ''}` : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

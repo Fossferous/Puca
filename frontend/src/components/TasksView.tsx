@@ -36,7 +36,6 @@ import {
     reorderTask,
     getTaskTabPrefs,
     putTaskTabPrefs,
-    applyToggle,
     applyMove,
     applyReorder,
     collectSubtreeIds,
@@ -48,6 +47,9 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
+import { planToggle } from '../api/taskCompletion';
+import { useTaskFeature } from '../api/taskFeatures';
+import { useScheduleSetter } from './schedule/useScheduleSetter';
 import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
 import { isMobile, isTauri } from '../api/platform';
@@ -55,7 +57,8 @@ import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { TasksCalendar } from './calendar/TasksCalendar';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
@@ -108,7 +111,8 @@ interface BarTab {
     resolveUserName?: (id: number) => string | undefined;
 }
 
-type Selected = { kind: TaskTabKind; id: number } | null;
+/** 'calendar' = the pinned Calendar tab (TasksCalendar), beside All tasks. */
+type Selected = { kind: TaskTabKind | 'calendar'; id: number } | null;
 
 export function TasksView() {
     // null = the pinned "All tasks" board (the default view).
@@ -412,13 +416,16 @@ export function TasksView() {
     const handleToggle = async (task: Task, completed: boolean) => {
         if (selectedList === null) return;
         const original = tasks;
-        const next = applyToggle(tasks, task, completed);
+        // One completion path (taskCompletion.ts): a repeating task advances.
+        const plan = planToggle(tasks, task, completed, { canEdit: true });
+        const next = plan.next;
         setTasks(next);
         syncListCounts(selectedList.id, next);
         try {
-            await updateListTask(task.id, { is_completed: completed });
+            await plan.send();
         } catch (err) {
             console.error('Failed to update task:', err);
+            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
             syncListCounts(selectedList.id, original);
         }
@@ -488,6 +495,10 @@ export function TasksView() {
             setTasks(original);
         }
     };
+
+    // Date & repeat: only against a server that stores it (taskFeatures).
+    const scheduleOn = useTaskFeature('schedule') === true;
+    const handleSetSchedule = useScheduleSetter(tasks, setTasks);
 
     const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
         const original = tasks;
@@ -662,6 +673,15 @@ export function TasksView() {
                         <TasksIcon className="tasks-tab-kind" />
                         <span className="tasks-tab-title">All tasks</span>
                     </button>
+                    <button
+                        className={`tasks-tab tasks-tab-calendar ${selected?.kind === 'calendar' ? 'active' : ''}`}
+                        onClick={() => setSelected({ kind: 'calendar', id: 0 })}
+                        title="Calendar — every dated item"
+                        aria-label="Calendar"
+                    >
+                        <CalendarIcon className="tasks-tab-kind" />
+                        <span className="tasks-tab-title">Calendar</span>
+                    </button>
                     {orderedTabs.map(renderTab)}
                     {addingList && (
                         <form className="tasks-tab-newform" onSubmit={handleCreateList}>
@@ -702,7 +722,16 @@ export function TasksView() {
                 </div>
             </div>
 
-            {selected === null ? (
+            {selected?.kind === 'calendar' ? (
+                <div className="server-tasks-scroll tasks-calendar-scroll">
+                    <TasksCalendar
+                        lists={lists}
+                        channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
+                        currentUserId={currentUserId}
+                        onOpen={(kind, id) => setSelected({ kind, id })}
+                    />
+                </div>
+            ) : selected === null ? (
                 // The All-tasks board: every list + channel checklist as a
                 // live card, in bar order (favourites lead after favouriting).
                 loading ? (
@@ -803,6 +832,7 @@ export function TasksView() {
                         onMove={handleMove}
                         onReorder={handleReorder}
                         onSetDue={handleSetDue}
+                        onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
                         onSetAttachments={handleSetAttachments}
                     />
                 </div>
