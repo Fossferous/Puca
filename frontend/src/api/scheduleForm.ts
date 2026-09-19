@@ -4,7 +4,7 @@
  * sealed lives here.
  */
 import { parseRRule, serializeRRule, type RRule } from './recurrence';
-import { type EventSchedule, type ScheduleKind, newUid } from './taskSchedule';
+import { type EventSchedule, type ScheduleKind, type ScheduleState, newUid, nextOccurrence } from './taskSchedule';
 import { addDays, daysInMonth, instantToWall, parseWall, viewerZone, wallToInstant, weekdayOf, type Wall } from '../utils/calendarMath';
 
 export type RepeatPreset = 'none' | 'daily' | 'weekdays' | 'weekly' | 'monthly-day' | 'monthly-nth' | 'monthly-last' | 'yearly' | 'custom';
@@ -195,4 +195,24 @@ export function scheduleFromForm(f: ScheduleForm, base?: EventSchedule): EventSc
     if (f.privateTiming) out.privateTiming = true;
     if (f.kind !== 'task') delete out.doneThrough;
     return out;
+}
+
+/**
+ * The due_at to write when the date & repeat is REMOVED. The item keeps a
+ * plain due time at its next occurrence, so it does not silently lose its
+ * date — except where the schedule kept its time PRIVATE from the server:
+ * there due_at is null by design, and writing the next occurrence would
+ * publish the very time the user hid. That needs the user's explicit yes
+ * (`reveal`); without it the item stays dateless on the server (null).
+ */
+export function dueAtAfterRemoving(parsed: ScheduleState, taskDueAt: string | null, nowMs: number, reveal: boolean): string | null {
+    if (parsed.state !== 'ok') return taskDueAt;
+    if (parsed.schedule.privateTiming && !reveal) return null;
+    const next = nextOccurrence(parsed.schedule, nowMs);
+    return next ? new Date(next.startMs).toISOString() : taskDueAt;
+}
+
+/** Does removing this schedule need to ask before it reveals a time? */
+export function removingRevealsPrivateTime(parsed: ScheduleState): boolean {
+    return parsed.state === 'ok' && parsed.schedule.privateTiming === true;
 }

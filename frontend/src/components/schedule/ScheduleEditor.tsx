@@ -13,9 +13,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
-import { type ScheduleKind, deriveDueAt, nextOccurrence, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
+import { type ScheduleKind, deriveDueAt, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import {
-    ALLDAY_ALERTS, TIMED_ALERTS, type ScheduleForm, formFromSchedule, isLastWeekdayOfMonth, newForm, nthOfMonth, scheduleFromForm,
+    ALLDAY_ALERTS, TIMED_ALERTS, type ScheduleForm, dueAtAfterRemoving, formFromSchedule, isLastWeekdayOfMonth, newForm, nthOfMonth,
+    removingRevealsPrivateTime, scheduleFromForm,
 } from '../../api/scheduleForm';
 import { formatDateKey } from '../../api/scheduleFormat';
 import { parseWall, viewerZone, isInGap } from '../../utils/calendarMath';
@@ -94,13 +95,12 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
 
     const remove = () => {
         // The item keeps a plain due time at its next occurrence, so it does
-        // not silently lose its date.
-        if (parsed.state === 'ok') {
-            const next = nextOccurrence(parsed.schedule, Date.now());
-            onSave(null, next ? new Date(next.startMs).toISOString() : task.due_at);
-        } else {
-            onSave(null, task.due_at);
-        }
+        // not silently lose its date — but a PRIVATE time is only published
+        // to the server on an explicit yes (scheduleForm.dueAtAfterRemoving).
+        const reveal = removingRevealsPrivateTime(parsed)
+            ? window.confirm('This item keeps its time private from the server. Keep a reminder at its next time? The server will then see that time. (Cancel removes the date without a reminder.)')
+            : true;
+        onSave(null, dueAtAfterRemoving(parsed, task.due_at, Date.now(), reveal));
     };
 
     const alerts = form.allDay ? ALLDAY_ALERTS : TIMED_ALERTS;
