@@ -10,7 +10,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { type TaskList } from '../../api/tasks';
-import { trashPurgeAt } from '../../api/listContent';
+import { serverNowFrom, trashPurgeAt } from '../../api/listContent';
 import { galleryItems } from '../../api/noteMedia';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseServerTimestamp } from '../../utils/serverTime';
@@ -49,7 +49,8 @@ function TrashRow({ list, content, now }: { list: TaskList; content: ListContent
     if (list.total_tasks > 0) parts.push(`${list.total_tasks} item${list.total_tasks === 1 ? '' : 's'}`);
     if (pictures > 0) parts.push(`${pictures} picture${pictures === 1 ? '' : 's'}`);
     if (Number.isFinite(trashed)) parts.push(`trashed ${new Date(trashed).toLocaleDateString()}`);
-    if (purge !== null) parts.push(`deleted forever ${purgeLabel(purge, now)}`);
+    // Counted on the server's clock when it gave one: it is the server that deletes.
+    if (purge !== null) parts.push(`deleted forever ${purgeLabel(purge, serverNowFrom(content.features, now) ?? now)}`);
     return (
         <li className="notes-trash-row" data-list-id={list.id}>
             <div className="notes-trash-main">

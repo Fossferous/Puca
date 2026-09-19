@@ -83,6 +83,9 @@ export interface TaskList {
     body?: string | null;
     attachments?: string | null;
     trashed_at?: string | null;
+    /** The "Notes to self" list, which the server will not trash (absent
+     *  from servers older than the trash). */
+    is_self?: boolean;
 }
 
 /** The one list title the server writes itself, as a plain label. */

@@ -40,6 +40,12 @@ export interface ListFeatures {
     /** 0 = the server keeps trash until it is emptied. */
     trashRetentionDays: number;
     maxBodyLen: number;
+    /** The server's clock minus this device's, in ms, measured when the
+     *  answer arrived (`server_now_ms`); null when the server did not say.
+     *  Anything that decides "this trash has expired" uses the SERVER's
+     *  clock (`serverNowFrom`): a phone whose clock runs ahead must not
+     *  delete the owner's trash early. */
+    serverClockOffsetMs: number | null;
 }
 
 export const NO_LIST_FEATURES: ListFeatures = Object.freeze({
@@ -48,23 +54,32 @@ export const NO_LIST_FEATURES: ListFeatures = Object.freeze({
     trash: false,
     trashRetentionDays: 0,
     maxBodyLen: 0,
+    serverClockOffsetMs: null,
 });
 
 /** Parse the features answer. Anything malformed reads as "not supported"
- *  field by field — never as supported. */
-export function parseListFeatures(raw: unknown): ListFeatures {
+ *  field by field — never as supported. `receivedAt` is this device's clock
+ *  when the answer arrived. */
+export function parseListFeatures(raw: unknown, receivedAt: number = Date.now()): ListFeatures {
     if (typeof raw !== 'object' || raw === null) return NO_LIST_FEATURES;
     const o = raw as Record<string, unknown>;
     const days = typeof o.trash_retention_days === 'number' && Number.isFinite(o.trash_retention_days) && o.trash_retention_days >= 0
         ? Math.floor(o.trash_retention_days) : 0;
     const maxBody = typeof o.max_body_len === 'number' && o.max_body_len > 0 ? Math.floor(o.max_body_len) : 0;
+    const serverNow = typeof o.server_now_ms === 'number' && Number.isFinite(o.server_now_ms) && o.server_now_ms > 0 ? o.server_now_ms : null;
     return {
         body: o.body === true && maxBody > 0,
         attachments: o.attachments === true,
         trash: o.trash === true,
         trashRetentionDays: days,
         maxBodyLen: maxBody,
+        serverClockOffsetMs: serverNow === null ? null : serverNow - receivedAt,
     };
+}
+
+/** The server's "now", or null when the server has not told us its clock. */
+export function serverNowFrom(features: Pick<ListFeatures, 'serverClockOffsetMs'>, localNow: number = Date.now()): number | null {
+    return features.serverClockOffsetMs === null ? null : localNow + features.serverClockOffsetMs;
 }
 
 /** What the server supports. 404/405 = a server older than 065 (the path
@@ -160,19 +175,36 @@ export async function deleteFiles(ids: string[]): Promise<void> {
     await Promise.allSettled(ids.map(id => apiClient.delete(`/files/${id}`)));
 }
 
+/** Delete forever refused because the note's files cannot all be found
+ *  (its items could not be listed, or a sidecar is locked on this device). */
+export class NoteFilesUnreadableError extends Error {
+    constructor() {
+        super('This note’s pictures and attachments can’t be read here yet, so it wasn’t deleted — its files would be left behind. Try again once Púca is unlocked and online.');
+        this.name = 'NoteFilesUnreadableError';
+    }
+}
+
 /**
  * Delete a list for good, and the uploads it names first. Files before the
  * row: the server cannot read the sidecars, so once the row is gone nothing
  * can find those files again. If the list delete then fails the note is
  * still in the trash, with broken images, and the user can try again.
+ *
+ * For the same reason it REFUSES (NoteFilesUnreadableError, nothing deleted)
+ * when it cannot know every file: the items cannot be listed, or the list's
+ * or any item's sidecar is locked (identity not unlocked, a key missing).
+ * Deleting the row anyway would orphan those uploads for good — the very
+ * thing this exists to prevent.
  */
 export async function deleteListForever(list: Pick<TaskList, 'id' | 'attachments'>): Promise<void> {
-    let tasks: Task[] = [];
+    if (isAttachmentsLocked(list.attachments ?? null)) throw new NoteFilesUnreadableError();
+    let tasks: Task[];
     try {
         tasks = await listListTasks(list.id);
     } catch {
-        // Unreadable items: the note's own files are still worth reclaiming.
+        throw new NoteFilesUnreadableError();
     }
+    if (tasks.some(t => isAttachmentsLocked(t.attachments ?? null))) throw new NoteFilesUnreadableError();
     await deleteFiles(noteFileIds(list.attachments, tasks));
     await apiClient.delete(`/task-lists/${list.id}`);
 }
@@ -255,4 +287,30 @@ export const MAX_BODY_BYTES = 48_000;
 
 export function bodyBytes(text: string): number {
     return new TextEncoder().encode(text).length;
+}
+
+// --- A note's text save that has not reached the server yet ------------------------------
+
+/**
+ * The text editor (NoteBodyField) saves a pause after the last keystroke,
+ * and again as it unmounts. Moving the note to the trash inside that pause
+ * would lose the last words typed: the trash commits first, and the late
+ * save then meets the trashed note's 409 in a component nobody can see. So
+ * the editor registers how to finish its save here, per list, and a trash
+ * waits on `flushBodySave` before it is sent.
+ */
+const bodyFlushes = new Map<number, () => Promise<unknown>>();
+
+/** Register `flush` (finish any pending save now) for a list; returns the
+ *  unregister function, which only removes this registration. */
+export function registerBodyFlush(listId: number, flush: () => Promise<unknown>): () => void {
+    bodyFlushes.set(listId, flush);
+    return () => { if (bodyFlushes.get(listId) === flush) bodyFlushes.delete(listId); };
+}
+
+/** Finish any pending or in-flight text save for a list. Never throws. */
+export async function flushBodySave(listId: number): Promise<void> {
+    const flush = bodyFlushes.get(listId);
+    if (!flush) return;
+    try { await flush(); } catch { /* the editor reports its own failure */ }
 }

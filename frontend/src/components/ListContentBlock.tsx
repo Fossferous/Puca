@@ -18,7 +18,7 @@ import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { type TaskAttachmentRef, type TaskList, isAttachmentsLocked, parseTaskAttachments } from '../api/tasks';
 import {
-    type ListFeatures, deleteFiles, deleteListForever,
+    type ListFeatures, NoteFilesUnreadableError, deleteFiles, deleteListForever,
     restoreTaskList, setTaskListAttachments, setTaskListBody, trashPurgeAt,
 } from '../api/listContent';
 import { listContentQueryKeys } from './useListContentSupport';
@@ -89,7 +89,7 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
     return (
         <div className="list-content-block">
             {features.body && (
-                <NoteBodyField key={list.id} value={list.body} onSave={saveBody} placeholder="Add a note…" />
+                <NoteBodyField key={list.id} listId={list.id} value={list.body} onSave={saveBody} placeholder="Add a note…" />
             )}
             {features.attachments && (
                 <NoteImages
@@ -134,7 +134,8 @@ export function TasksTrash({ features, trashed, onRestored }: TrashProps) {
             drop(l.id);
         } catch (err) {
             console.error('Failed to delete list:', err);
-            pushMessageToast({ title: 'Couldn’t delete the list' });
+            // Refused because its files cannot all be found: say so, in its words.
+            pushMessageToast({ title: err instanceof NoteFilesUnreadableError ? err.message : 'Couldn’t delete the list' });
         }
     };
     const days = features.trashRetentionDays;

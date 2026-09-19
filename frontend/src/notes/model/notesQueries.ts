@@ -41,9 +41,9 @@ import {
     type NoteCard, type NoteRef, type NoteSource,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
 } from './notesModel';
-import { getNotesPrefs, subscribeNotesPrefs, pruneNotesPrefs, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
+import { getNotesPrefs, subscribeNotesPrefs, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
 import { keepHiddenSlots, toggleFavoriteKeepingHidden } from '../../api/listContent';
-import { type ListContentActions, type NoteExtras, hasExtras, useListContentActions, useTrashedKeys } from './useListContent';
+import { type ListContentActions, type NoteExtras, hasExtras, useListContentActions, useTrashAwarePrune } from './useListContent';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
  *  unlike Púca's shared client which has a socket for that. */
@@ -112,6 +112,7 @@ export function useTabPrefsQuery() {
  * cache but may come back on rollback, and a pruned label cannot.
  */
 let listMutationsInFlight = 0;
+const pruneBlocked = () => listMutationsInFlight > 0;
 
 export function useServersQuery() {
     return useQuery({ queryKey: notesKeys.servers, queryFn: listServers });
@@ -271,21 +272,18 @@ export function useNoteCards(): {
     const prefs = useMemo(() => prefsData ?? [], [prefsData]);
     const local = useNotesPrefs();
     const tasks = useAllNoteTasks(sources);
-    // A trashed note is not deleted: its colour, labels and archive flag must
-    // survive the prune so a restore brings it back whole (useListContent.ts).
-    const trash = useTrashedKeys();
     const cards = useMemo(
         () => buildNoteCards(sources, tasks.byKey, prefs, local),
         [sources, tasks.byKey, prefs, local],
     );
-    useEffect(() => {
-        // Only against a COMPLETE, SETTLED set: a failed server query must not
-        // look like a deleted note, and neither must a delete whose request
-        // is still in flight (it comes back on rollback; a pruned label does
-        // not). The rollback changes `sources`, so this re-runs then.
-        if (!complete || !trash.settled || listMutationsInFlight > 0) return;
-        pruneNotesPrefs(new Set([...sources.map(s => noteKey(s.ref)), ...trash.keys]));
-    }, [complete, sources, trash.settled, trash.keys]);
+    // Prune only against a COMPLETE set: a failed server query must not look
+    // like a deleted note, and neither must a delete whose request is still
+    // in flight (it comes back on rollback; a pruned label does not — the
+    // rollback changes `sources`, so the prune re-runs then). A trashed note
+    // is not deleted either: its colour, labels and archive flag must survive
+    // so a restore brings it back whole (useListContent.ts).
+    const liveKeys = useMemo(() => sources.map(s => noteKey(s.ref)), [sources]);
+    useTrashAwarePrune(notesKeys.lists, liveKeys, complete, pruneBlocked);
     return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending };
 }
 
@@ -293,9 +291,13 @@ export function useNoteCards(): {
 
 /** Púca's own rule: a 409 is the server explaining an envelope-version
  *  refusal in its own words, so it is shown; everything else is logged. */
-function explain(what: string, err: unknown): void {
+function explain(what: string, err: unknown): boolean {
     console.error(`[notes] ${what}:`, err);
-    if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
+    if (err instanceof ApiError && err.status === 409) {
+        pushMessageToast({ title: err.message });
+        return true;
+    }
+    return false;
 }
 
 export interface NoteActions {
@@ -539,7 +541,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             pushMessageToast({ title: 'Couldn’t reach the server — the note was not deleted' });
             return false;
         }
-        if (features.trash) return contentRef.current.trash(note.id);
+        if (features.trash) return contentRef.current.trash(note.id);   // toasts its own failure
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
         listMutationsInFlight++;   // holds the device-local prune off until this settles
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.filter(l => l.id !== note.id));
@@ -548,7 +550,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             qc.removeQueries({ queryKey: notesKeys.tasks(note) });
             return true;
         } catch (err) {
-            explain('delete list failed', err);
+            if (!explain('delete list failed', err)) pushMessageToast({ title: 'Couldn’t delete the note — check your connection' });
             qc.setQueryData(notesKeys.lists, prev);
             return false;
         } finally {
@@ -565,6 +567,12 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         // replace of the row Púca's Tasks tab bar renders from.
         if (!prefsReadyRef.current) {
             pushMessageToast({ title: 'Pins and order couldn’t be loaded — refresh, then try again' });
+            return;
+        }
+        // ...nor one built before the trash was read: its notes' slots would
+        // be dropped from the saved order (keepHiddenSlots needs their keys).
+        if (!contentRef.current.trashSettled) {
+            pushMessageToast({ title: 'Still loading the trash — try again in a moment' });
             return;
         }
         const before = prefsRef.current;

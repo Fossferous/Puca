@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { NoteBodyField } from '../components/NoteBodyField';
-import { BODY_SAVE_DELAY_MS } from '../api/listContent';
+import { BODY_SAVE_DELAY_MS, flushBodySave } from '../api/listContent';
 import { TASK_DECRYPT_FAILED } from '../api/decryptMarkers';
 
 let root: Root;
@@ -74,6 +74,38 @@ describe('NoteBodyField', () => {
         act(() => { root.render(<></>); });
         await flushPromises();
         expect(onSave).toHaveBeenCalledWith('last thought');
+    });
+
+    it('a trash of the list waits for text typed inside the save pause (flushBodySave)', async () => {
+        let resolveSave!: (ok: boolean) => void;
+        const onSave = vi.fn(() => new Promise<boolean>(r => { resolveSave = r; }));
+        act(() => { root.render(<NoteBodyField listId={41} value="" onSave={onSave} />); });
+        type(area(), 'typed a moment ago');
+        // No timer has fired: the save would still be 800 ms away.
+        let flushed = false;
+        const flushing = flushBodySave(41).then(() => { flushed = true; });
+        await flushPromises();
+        expect(onSave).toHaveBeenCalledWith('typed a moment ago');
+        expect(flushed).toBe(false);   // ...and it waits for the save to LAND
+        await act(async () => { resolveSave(true); await flushing; });
+        expect(flushed).toBe(true);
+        // POSITIVE CONTROL: another list's flush has nothing to wait for.
+        await flushBodySave(42);
+    });
+
+    it('...also when the field has already unmounted (closing the note is what a trash does)', async () => {
+        let resolveSave!: (ok: boolean) => void;
+        const onSave = vi.fn(() => new Promise<boolean>(r => { resolveSave = r; }));
+        act(() => { root.render(<NoteBodyField listId={43} value="" onSave={onSave} />); });
+        type(area(), 'last words');
+        act(() => { root.render(<></>); });
+        let flushed = false;
+        const flushing = flushBodySave(43).then(() => { flushed = true; });
+        await flushPromises();
+        expect(onSave).toHaveBeenCalledWith('last words');
+        expect(flushed).toBe(false);
+        await act(async () => { resolveSave(true); await flushing; });
+        expect(flushed).toBe(true);
     });
 
     it('text from another device replaces the field only when nothing is being typed here', async () => {

@@ -191,9 +191,9 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         // Where the server has a trash the move happens NOW and Undo restores;
         // otherwise the delete waits out the undo window, as before.
         if (actions.content.trashEnabled) {
+            // A failure is reported by the data layer, once (useListContent.ts).
             void actions.deleteNote(card.ref).then(ok => {
                 if (ok) setPending({ kind: 'trash', key: card.key, ref: card.ref, title: card.title, token: ++tokenSeq.current });
-                else pushMessageToast({ title: 'Couldn’t move the note to the trash — check your connection' });
             });
             return;
         }
@@ -277,8 +277,12 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             items.push(
                 { id: 'sep3', label: '', separator: true },
                 { id: 'rename', label: 'Rename', icon: 'pencil', onClick: () => openNote(card) },
-                { id: 'delete', label: actions.content.trashEnabled ? 'Move to trash' : 'Delete note', icon: 'trash', danger: true, onClick: () => deleteWithUndo(card) },
             );
+            // Notes to self cannot go to the trash (the server refuses it), so
+            // it is not offered rather than offered and failing.
+            if (!(actions.content.trashEnabled && actions.content.isSelfList(card.ref.id))) {
+                items.push({ id: 'delete', label: actions.content.trashEnabled ? 'Move to trash' : 'Delete note', icon: 'trash', danger: true, onClick: () => deleteWithUndo(card) });
+            }
         }
         return items;
     };

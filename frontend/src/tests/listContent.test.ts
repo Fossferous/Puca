@@ -13,7 +13,7 @@ vi.mock('../api/client', async () => {
 
 import { ApiError } from '../api/client';
 import {
-    NO_LIST_FEATURES, parseListFeatures, fetchListFeatures, listTrashedTaskLists, keepHiddenSlots,
+    NO_LIST_FEATURES, parseListFeatures, fetchListFeatures, listTrashedTaskLists, keepHiddenSlots, serverNowFrom, NoteFilesUnreadableError,
     trashPurgeAt, listsDueForClientPurge, toggleFavoriteKeepingHidden, noteFileIds, deleteListForever, setTaskListBody,
     setTaskListAttachments, createTaskListWithContent, bodyBytes, MAX_BODY_BYTES,
 } from '../api/listContent';
@@ -119,9 +119,21 @@ describe('capability detection does not depend on having lists', () => {
 
     it('parses the answer field by field, never assuming support', async () => {
         get.mockResolvedValueOnce({ body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 });
-        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536 });
+        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null });
         expect(parseListFeatures('nonsense')).toEqual(NO_LIST_FEATURES);
         expect(parseListFeatures({ body: 'yes', trash: true, trash_retention_days: -3 })).toEqual({ ...NO_LIST_FEATURES, trash: true });
+    });
+});
+
+describe('expiry is measured on the SERVER’s clock', () => {
+    it('reads server_now_ms as an offset from this device’s clock, and says "unknown" without it', () => {
+        const f = parseListFeatures({ trash: true, trash_retention_days: 30, server_now_ms: 1_000_000 }, 400_000);
+        expect(f.serverClockOffsetMs).toBe(600_000);
+        // Later on this device, the server has moved on by the same amount.
+        expect(serverNowFrom(f, 500_000)).toBe(1_100_000);
+        expect(serverNowFrom(parseListFeatures({ trash: true }))).toBeNull();
+        expect(serverNowFrom(parseListFeatures({ trash: true, server_now_ms: 'soon' }))).toBeNull();
+        expect(serverNowFrom(NO_LIST_FEATURES)).toBeNull();
     });
 });
 
@@ -208,6 +220,29 @@ describe('Delete forever takes the note’s files with it', () => {
         await deleteListForever({ id: 4, attachments: JSON.stringify([ref('p1'), ref('p2')]) });
         await settle();
         expect(order).toEqual(['/files/p1', '/files/p2', '/task-lists/4']);
+    });
+
+    it('REFUSES, deleting nothing, when the items cannot be listed (their files would be orphaned)', async () => {
+        get.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+        await expect(deleteListForever({ id: 4, attachments: JSON.stringify([ref('p1')]) })).rejects.toBeInstanceOf(NoteFilesUnreadableError);
+        expect(del).not.toHaveBeenCalled();
+    });
+
+    it('REFUSES when the note’s own sidecar is locked on this device', async () => {
+        await expect(deleteListForever({ id: 4, attachments: TASK_DECRYPT_FAILED })).rejects.toBeInstanceOf(NoteFilesUnreadableError);
+        expect(get).not.toHaveBeenCalled();
+        expect(del).not.toHaveBeenCalled();
+    });
+
+    it('REFUSES when any item’s sidecar is locked', async () => {
+        get.mockResolvedValueOnce([task(1, { attachments: JSON.stringify([ref('c')]) }), task(2, { attachments: TASK_DECRYPT_FAILED })]);
+        await expect(deleteListForever({ id: 4, attachments: null })).rejects.toBeInstanceOf(NoteFilesUnreadableError);
+        expect(del).not.toHaveBeenCalled();
+        // POSITIVE CONTROL: the same note with every sidecar readable goes, files first.
+        get.mockResolvedValueOnce([task(1, { attachments: JSON.stringify([ref('c')]) }), task(2, { attachments: null })]);
+        del.mockResolvedValue({});
+        await deleteListForever({ id: 4, attachments: null });
+        expect(del.mock.calls.map(c => c[0])).toEqual(['/files/c', '/task-lists/4']);
     });
 
     it('a file that will not delete does not stop the note going (best effort)', async () => {

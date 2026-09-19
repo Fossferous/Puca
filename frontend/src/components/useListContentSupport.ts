@@ -16,13 +16,21 @@ export const listContentQueryKeys = {
     trash: ['listContent', 'trash'] as const,
 };
 
-export function useListContentSupport(): { features: ListFeatures; featuresKnown: boolean; trashEnabled: boolean; trashed: TaskList[]; trashedKeys: ReadonlySet<string> } {
+export function useListContentSupport(): {
+    features: ListFeatures; featuresKnown: boolean; trashEnabled: boolean;
+    /** The trash has been read (or there is none). Until then `trashedKeys`
+     *  is empty for want of knowing, and a tab-pref save — a full replace —
+     *  would drop every trashed list's slot, so saves wait for this. */
+    trashSettled: boolean;
+    trashed: TaskList[]; trashedKeys: ReadonlySet<string>;
+} {
     const f = useQuery({ queryKey: listContentQueryKeys.features, queryFn: fetchListFeatures, staleTime: 10 * 60_000 });
     const features = f.data ?? NO_LIST_FEATURES;
     const trashEnabled = f.isSuccess && features.trash;
     const t = useQuery({ queryKey: listContentQueryKeys.trash, queryFn: listTrashedTaskLists, enabled: trashEnabled });
     const trashed = t.data ?? [];
-    return { features, featuresKnown: f.isSuccess, trashEnabled, trashed, trashedKeys: new Set(trashed.map(l => `list:${l.id}`)) };
+    const trashSettled = f.isSuccess && (!trashEnabled || t.isSuccess);
+    return { features, featuresKnown: f.isSuccess, trashEnabled, trashSettled, trashed, trashedKeys: new Set(trashed.map(l => `list:${l.id}`)) };
 }
 
 /** A short line for the All-tasks board card: the note's text, or — for a
