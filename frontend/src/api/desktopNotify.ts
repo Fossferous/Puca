@@ -14,7 +14,7 @@
 import { loadSettings } from '../components/settingsStore';
 import { appIsForeground, isMobile, isTauri } from './platform';
 import { isBadgeWorthy, setUnreadBadge } from './unreadBadge';
-import { mobileAppAvailable, postMobileNotification, requestMobileNotificationPermission } from './mobileApp';
+import { mobileAppAvailable, notesAppInstalled, postMobileNotification, requestMobileNotificationPermission } from './mobileApp';
 
 export type NotifyDecision =
     | { fire: true }
@@ -304,7 +304,16 @@ export function notifyTasksDue(count: number): void {
     const body = count === 1 ? 'A task is due' : `${count} tasks are due`;
 
     if (isMobile() && mobileNative) {
-        void postMobileNotification('tasks-due', 'Púca Tasks', body, 'tasks');
+        void (async () => {
+            // Púca Notes installed: it owns due-item reminders (its own
+            // alarms fire them, open or closed), so Púca stays quiet and one
+            // due item is one notification. Unknown (older APK) = notify.
+            if (await notesAppInstalled() === true) {
+                recordNotify({ at: new Date().toISOString(), kind: 'task', key: 'tasks-due', outcome: 'notes-app-owns' });
+                return;
+            }
+            await postMobileNotification('tasks-due', 'Púca Tasks', body, 'tasks');
+        })();
         return;
     }
 

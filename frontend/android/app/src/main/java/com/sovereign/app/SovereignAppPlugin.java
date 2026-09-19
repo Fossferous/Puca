@@ -725,6 +725,31 @@ public class SovereignAppPlugin extends Plugin {
         call.resolve();
     }
 
+    /** The Púca Notes app's application id (frontend/notes-app). */
+    static final String NOTES_PACKAGE = "com.sovereign.notes";
+
+    /**
+     * Is Púca Notes installed on this phone? When it is, Notes owns due-item
+     * reminders (its own exact alarms, open or closed) and Púca stays quiet
+     * for them, so one due item is one notification (owner decision; see
+     * docs/NOTES.md). Needs the <queries> entry in the manifest to see the
+     * package on Android 11+. Older APKs lack this method; the JS side then
+     * keeps notifying as before.
+     */
+    @PluginMethod
+    public void notesInstalled(PluginCall call) {
+        boolean installed;
+        try {
+            getContext().getPackageManager().getPackageInfo(NOTES_PACKAGE, 0);
+            installed = true;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            installed = false;
+        }
+        JSObject ret = new JSObject();
+        ret.put("installed", installed);
+        call.resolve(ret);
+    }
+
     /** Is the notification permission granted? On < 33 there is nothing to ask. */
     @PluginMethod
     public void notificationStatus(PluginCall call) {

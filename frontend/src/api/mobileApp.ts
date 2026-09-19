@@ -85,6 +85,9 @@ interface SovereignAppPlugin {
     pipSupported(): Promise<{ supported: boolean }>;
     enterPip(opts: { width: number; height: number }): Promise<{ ok: boolean; reason?: string }>;
     exitPip(): Promise<{ ok: boolean }>;
+    /** Is Púca Notes (com.sovereign.notes) installed? APKs with the method
+     *  and the manifest's <queries> entry only; older ones reject. */
+    notesInstalled(): Promise<{ installed: boolean }>;
     addListener(
         eventName: 'navigate',
         listener: (data: { target: string }) => void,
@@ -353,6 +356,29 @@ export async function openMobileAppSettings(): Promise<boolean> {
     } catch {
         appSettingsSupported = false;
         return false;
+    }
+}
+
+/** Whether notesInstalled exists natively. Its own latch, like the others. */
+let notesProbeSupported: boolean | null = null;
+
+/**
+ * Is Púca Notes installed on this phone? When it is, Notes owns due-item
+ * reminders (native exact alarms, open or closed) and Púca stays quiet for
+ * them — owner decision, docs/NOTES.md. null = not Android, or an APK
+ * without the method: the caller keeps today's behaviour (Púca notifies).
+ * Asked at every due-reminder fire, not cached: Notes can be installed or
+ * removed while Púca runs.
+ */
+export async function notesAppInstalled(): Promise<boolean | null> {
+    if (!android() || usable === false || notesProbeSupported === false) return null;
+    try {
+        const r = await App.notesInstalled();
+        notesProbeSupported = true;
+        return r.installed === true;
+    } catch {
+        if (notesProbeSupported === null) notesProbeSupported = false;
+        return null;
     }
 }
 

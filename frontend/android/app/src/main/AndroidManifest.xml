@@ -149,6 +149,14 @@
         </receiver>
     </application>
 
+    <!-- Package visibility (Android 11+) for ONE package: Púca Notes. When
+         it is installed it owns due-item reminders and Púca stays quiet for
+         them (SovereignAppPlugin.notesInstalled; docs/NOTES.md). Nothing else
+         about installed apps is visible to Púca. -->
+    <queries>
+        <package android:name="com.sovereign.notes" />
+    </queries>
+
     <!-- Permissions -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
