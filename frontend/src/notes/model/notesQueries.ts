@@ -532,7 +532,14 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const deleteNote = useCallback(async (note: NoteRef): Promise<boolean> => {
         if (note.kind !== 'list') return false;
-        if (contentRef.current.trashEnabled) return contentRef.current.trash(note.id);
+        // Trash where the server has one. Only a server KNOWN to lack it gets
+        // the permanent delete; an unreachable one gets nothing.
+        const features = contentRef.current.trashEnabled ? contentRef.current.features : await contentRef.current.ensureFeatures();
+        if (!features) {
+            pushMessageToast({ title: 'Couldn’t reach the server — the note was not deleted' });
+            return false;
+        }
+        if (features.trash) return contentRef.current.trash(note.id);
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
         listMutationsInFlight++;   // holds the device-local prune off until this settles
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.filter(l => l.id !== note.id));

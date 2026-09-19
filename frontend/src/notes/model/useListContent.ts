@@ -93,6 +93,9 @@ export interface ListContentActions {
     features: ListFeatures;
     trashEnabled: boolean;
     trashedKeys: ReadonlySet<string>;
+    /** What the server supports, asking it now if that is not known yet;
+     *  null when it cannot be reached. A delete must never guess. */
+    ensureFeatures: () => Promise<ListFeatures | null>;
     createContentNote: (title: string, items: string[], extra: NoteExtras) => Promise<NoteRef | null>;
     setBody: (listId: number, body: string) => Promise<boolean>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
@@ -223,7 +226,19 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     // Trash and restore move the note between the two caches in ONE step, both
     // before the request: a moment where it is in neither is a moment the
     // device-local prune reads as "deleted" (see the header).
+    const ensureFeatures = useCallback(async (): Promise<ListFeatures | null> => {
+        try {
+            return await qc.fetchQuery({ queryKey: listContentKeys.features, queryFn: fetchListFeatures, staleTime: 10 * 60_000 });
+        } catch {
+            return null;
+        }
+    }, [qc]);
+
     const trash = useCallback(async (listId: number): Promise<boolean> => {
+        // An in-flight refetch of either cache would land after this and put
+        // the note back where it was.
+        await qc.cancelQueries({ queryKey: keysRef.current.lists });
+        await qc.cancelQueries({ queryKey: listContentKeys.trash });
         const listsBefore = lists();
         const trashBefore = qc.getQueryData<TaskList[]>(listContentKeys.trash);
         const list = listsBefore?.find(l => l.id === listId);
@@ -243,6 +258,8 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     }, [qc, lists]);
 
     const restore = useCallback(async (listId: number): Promise<boolean> => {
+        await qc.cancelQueries({ queryKey: keysRef.current.lists });
+        await qc.cancelQueries({ queryKey: listContentKeys.trash });
         const trashBefore = qc.getQueryData<TaskList[]>(listContentKeys.trash);
         const listsBefore = lists();
         const list = trashBefore?.find(l => l.id === listId);
@@ -251,6 +268,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         try {
             await restoreTaskList(listId);
             void qc.invalidateQueries({ queryKey: keysRef.current.lists });
+            void qc.invalidateQueries({ queryKey: listContentKeys.trash });
             pokeTaskReminders();
             return true;
         } catch (err) {
@@ -302,7 +320,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
 
     const trashEnabled = known && features.trash;
     return useMemo(() => ({
-        features, trashEnabled, trashedKeys,
+        features, trashEnabled, trashedKeys, ensureFeatures,
         createContentNote, setBody, setNoteAttachments, addNoteMedia, trash, restore, deleteForever, emptyTrash,
-    }), [features, trashEnabled, trashedKeys, createContentNote, setBody, setNoteAttachments, addNoteMedia, trash, restore, deleteForever, emptyTrash]);
+    }), [features, trashEnabled, trashedKeys, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, trash, restore, deleteForever, emptyTrash]);
 }

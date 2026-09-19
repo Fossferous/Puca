@@ -60,7 +60,7 @@ import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
-import { keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { fetchListFeatures, keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -310,8 +310,18 @@ export function TasksView() {
     };
 
     const handleDeleteList = async (list: TaskList) => {
-        if (support.trashEnabled) {
-            const days = support.features.trashRetentionDays;
+        // Only a server KNOWN to have no trash gets the permanent delete.
+        let features = support.features;
+        if (!support.featuresKnown) {
+            try {
+                features = await qc.fetchQuery({ queryKey: listContentQueryKeys.features, queryFn: fetchListFeatures });
+            } catch {
+                pushMessageToast({ title: 'Couldn’t reach the server — nothing was deleted' });
+                return;
+            }
+        }
+        if (features.trash) {
+            const days = features.trashRetentionDays;
             if (!confirm(`Move "${list.title}" to the trash? ${days > 0 ? `You can restore it for ${days} days` : 'You can restore it'} from the Trash below the All tasks board, or in Púca Notes.`)) return;
             const original = lists;
             setLists(prev => prev.filter(l => l.id !== list.id));

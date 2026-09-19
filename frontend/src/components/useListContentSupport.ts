@@ -15,13 +15,13 @@ export const listContentQueryKeys = {
     trash: ['listContent', 'trash'] as const,
 };
 
-export function useListContentSupport(): { features: ListFeatures; trashEnabled: boolean; trashed: TaskList[]; trashedKeys: ReadonlySet<string> } {
+export function useListContentSupport(): { features: ListFeatures; featuresKnown: boolean; trashEnabled: boolean; trashed: TaskList[]; trashedKeys: ReadonlySet<string> } {
     const f = useQuery({ queryKey: listContentQueryKeys.features, queryFn: fetchListFeatures, staleTime: 10 * 60_000 });
     const features = f.data ?? NO_LIST_FEATURES;
     const trashEnabled = f.isSuccess && features.trash;
     const t = useQuery({ queryKey: listContentQueryKeys.trash, queryFn: listTrashedTaskLists, enabled: trashEnabled });
     const trashed = t.data ?? [];
-    return { features, trashEnabled, trashed, trashedKeys: new Set(trashed.map(l => `list:${l.id}`)) };
+    return { features, featuresKnown: f.isSuccess, trashEnabled, trashed, trashedKeys: new Set(trashed.map(l => `list:${l.id}`)) };
 }
 
 /** A short line for the All-tasks board card. */

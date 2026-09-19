@@ -170,6 +170,24 @@ describe('the trash keeps a note whole', () => {
     });
 });
 
+describe('when the server cannot be reached', () => {
+    it('a delete does NOTHING — it is never mistaken for an old server and made permanent', async () => {
+        const base = get.getMockImplementation()!;
+        get.mockImplementation(async (path: string) => {
+            if (path === '/task-lists/features') throw new TypeError('Failed to fetch');
+            return base(path);
+        });
+        await mount();
+        let ok: boolean | undefined;
+        await act(async () => { ok = await latest!.actions.deleteNote({ kind: 'list', id: 2 }); });
+        await settle();
+        expect(ok).toBe(false);
+        expect(del).not.toHaveBeenCalled();
+        expect(post).not.toHaveBeenCalled();
+        expect(latest!.keys).toContain('list:2');
+    });
+});
+
 describe('against a server older than the trash', () => {
     it('delete stays the permanent delete (no /trash request that could 404 mid-way)', async () => {
         server.trashSupported = false;
