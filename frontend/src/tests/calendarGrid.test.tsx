@@ -3,7 +3,7 @@
 // Week/Day grid opens on working hours or just before now, never at 00:00.
 // Also: Notes' /calendar takes its phone/desktop answer from the SAME gate
 // as Púca's Calendar tab (calendarGate.useCoarseCalendar).
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Calendar, type CalendarProps } from '../components/calendar/Calendar';
