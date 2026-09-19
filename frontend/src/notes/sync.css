@@ -66,14 +66,26 @@
 .notes-selectbar .notes-iconbtn.active .svrn-icon { fill: currentColor; }
 
 @media (pointer: coarse) and (max-width: 1024px) {
-    /* Touch: the checkbox appears once selecting (a long press starts it), and
-       is big enough to hit. */
-    .notes-card-select { width: 36px; height: 36px; top: -8px; left: -8px; min-width: 0; min-height: 0; }
-    .notes-card:hover .notes-card-select:not(.shown):not(.on) { opacity: 0; }
-    /* A dense icon row: 40px targets (DESIGN_PHILOSOPHY §5 allows a scoped
-       exception down to ~30px), no gap, so all actions fit at 390px. */
+    /* Touch: the checkbox exists only once selecting (a long press starts it) —
+       display:none, never an invisible-but-tappable control (§5). When it
+       does, the TARGET is a full 44px but the visible disc stays 28px and
+       centred on the card's corner, so it never covers the title (a 44px
+       disc hid its first letters). A tap anywhere on a card toggles it while
+       selecting anyway, so the transparent margin takes nothing away. */
+    .notes-card-select { width: 44px; height: 44px; top: -16px; left: -16px; opacity: 1; background: transparent; box-shadow: none; }
+    .notes-card-select::before {
+        content: '';
+        position: absolute;
+        inset: 8px;
+        border-radius: 50%;
+        background: var(--bg-floating);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    }
+    .notes-card-select .svrn-icon { position: relative; }
+    .notes-card-select:not(.shown):not(.on) { display: none; }
+    /* Full 44px targets and no gap, so the five core actions fit at 390px. */
     .notes-selectbar { padding: 0 4px; padding-top: var(--safe-area-top, 0px); gap: 0; }
-    .notes-selectbar .notes-iconbtn { width: 40px; height: 40px; min-width: 40px; min-height: 40px; flex-shrink: 0; }
+    .notes-selectbar .notes-iconbtn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; flex-shrink: 0; }
     .notes-selectbar-all { display: none; }
     .notes-selectbar-count { font-size: 15px; }
 }
