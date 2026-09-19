@@ -7,6 +7,10 @@
 #   - Tauri updater key  -> desktop auto-update dies; users must manually reinstall
 #   - mobile OTA RSA key -> no new signed OTA bundle can EVER be produced; a new
 #                           signed APK (new embedded key) is the only recovery
+#   - Notes OTA RSA key  -> the same, for the Púca Notes Android app: its OTA is
+#                           signed with its OWN key (so a Púca bundle can never
+#                           verify inside Notes), and losing it freezes Notes
+#                           updates until a new Notes APK with a new key ships
 #   - Android keystore   -> cannot publish an APK update under the same identity;
 #                           a new keystore = new app identity (fresh install)
 #   - CF origin key      -> re-issuable from the Cloudflare dashboard, but bundled
@@ -91,6 +95,8 @@ KEYS=(
 	"tauri-updater.key.password!!$TAURI_DIR/puca-updater.key.password!!$TAURI_DIR/sovereign-updater.key.password!!$KEY_HOME/tauri-updater.key.password!!Password for the Tauri updater key!!passwords"
 	"mobile-updater-rsa.key!!$KEY_HOME/mobile-updater-rsa.key!!Mobile OTA signing key (Capgo RSA private)!!keys"
 	"mobile-updater-rsa.pub!!$KEY_HOME/mobile-updater-rsa.pub!!Mobile OTA public key (embedded in the APK)!!keys"
+	"notes-updater-rsa.key!!$KEY_HOME/notes-updater-rsa.key!!Púca Notes OTA signing key (Capgo RSA private; NOT the Púca one)!!keys"
+	"notes-updater-rsa.pub!!$KEY_HOME/notes-updater-rsa.pub!!Púca Notes OTA public key (embedded in the Notes APK)!!keys"
 	"cf-origin-key.pem!!$KEY_HOME/cf-origin-key.pem!!Cloudflare Origin CA private key (re-issuable from dashboard)!!keys"
 	"cf-origin-cert.pem!!$KEY_HOME/cf-origin-cert.pem!!Cloudflare Origin CA certificate!!keys"
 	"release.keystore!!$HOME/.android/puca-release.keystore!!$HOME/.android/sovereign-release.keystore!!Android release signing keystore!!keys"

@@ -35,6 +35,24 @@ mkdir -p "$TMP/deploy/ops" "$TMP/deploy/download-site" "$TMP/bin" "$TMP/frontend
 # sandbox without it fails every case with "No such file or directory" rather
 # than testing anything. Add any future sourced helper here too.
 cp "$HERE/dual-ship.sh" "$HERE/check-versions.sh" "$HERE/waker-source-sha.sh" "$TMP/deploy/ops/"
+# The mobile subcommands verify a bundle's signature against the key the
+# target app's capacitor.config.ts embeds (deploy/mobile/verify-bundle.mjs).
+# The sandbox gets the verifier and two FIXTURE configs, each carrying the
+# public half of a throwaway key made below — never the real ones.
+mkdir -p "$TMP/deploy/mobile" "$TMP/frontend/notes-app"
+cp "$REPO/deploy/mobile/verify-bundle.mjs" "$TMP/deploy/mobile/"
+cat > "$TMP/mkkey.js" <<'JS'
+const { generateKeyPairSync } = require('crypto');
+const fs = require('fs');
+const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+fs.writeFileSync(process.argv[2], privateKey.export({ type: 'pkcs1', format: 'pem' }));
+const lines = String(publicKey.export({ type: 'pkcs1', format: 'pem' })).trim().split(/\r?\n/);
+const lit = lines.map((l, i) => "'" + l + (i < lines.length - 1 ? '\\n' : '') + "'").join(' +\n        ');
+fs.writeFileSync(process.argv[3], 'const config = { plugins: { CapacitorUpdater: {\n    publicKey:\n        ' + lit + ',\n} } };\nexport default config;\n');
+JS
+fixture_key() { node "$TMP/mkkey.js" "$1" "$2"; } # <private key out> <capacitor.config.ts out>
+fixture_key "$TMP/puca-fixture.key" "$TMP/frontend/capacitor.config.ts"
+fixture_key "$TMP/notes-fixture.key" "$TMP/frontend/notes-app/capacitor.config.ts"
 
 cat > "$TMP/deploy/ops/hosts.conf" <<'CONF'
 HOSTS=("sandbox:root@127.0.0.1")
@@ -54,6 +72,7 @@ INSTALLER_NAME_LITE="Puca-Lite-Setup.exe"
 MOBILE_BUNDLE_PREFIX_LITE="puca-web-lite"
 APK_PREFIX_LITE="Puca-Lite"
 APK_PREFIX_NOTES="Puca-Notes"
+MOBILE_BUNDLE_PREFIX_NOTES="puca-notes-web"
 SSH_OPTS=()
 CONF
 
@@ -183,6 +202,7 @@ case "\$cmd" in
 	*latest-lite.json*) ;;
 	*latest.json*) echo '{"version":"9.9.9"}' ;;
 	*app-version*) echo '{"version":"9.9.9"}' ;;
+	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
 	*mobile-updates/check*) echo '{"version":"9.9.9"}' ;;
 	*http_code*) echo 200 ;;
 	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
@@ -218,6 +238,28 @@ check "and counts it in the verdict"                 "$([ "$(has "$out" 'sandbox
 serve_page_version 9.9.9
 out="$(versions)"
 check "PASSES a current Notes APK (positive control)" "$([ "$(has "$out" 'PASS  download-page notesAPK 9.9.9 (current)')" = 1 ] && [ "$(has "$out" 'notes-apk-trails')" = 0 ] && echo 1 || echo 0)" "$out"
+
+# Once a Notes OTA is deployed (a manifest TAGGED "variant":"notes" answers
+# ?variant=notes), it is a surface like any other OTA, and a trailing APK is
+# INFO: the OTA brings the web layer up. Except when that manifest's
+# native.min is newer than the APK the page links — a fresh install would then
+# refuse its own first update — which stays a FAIL.
+check "with no notes OTA deployed, says so" "$(has "$out" 'INFO  notes OTA manifest     not deployed')" "$out"
+printf '{"version":"9.9.9","variant":"notes"}\n' > "$TMP/notes-ota.json"
+NOTES_APK_VER=9.9.8 serve_page_version 9.9.9
+out="$(versions)"
+check "a current notes OTA is checked like the others"            "$(has "$out" 'PASS  notes OTA manifest     9.9.9')" "$out"
+check "and makes a trailing Notes APK INFO, not FAIL"             "$([ "$(has "$out" 'INFO  download-page notesAPK 9.9.8 (trails 9.9.9')" = 1 ] && [ "$(has "$out" 'notes-apk-trails')" = 0 ] && echo 1 || echo 0)" "$out"
+printf '{"version":"9.9.9","variant":"notes","native":{"min":"9.9.9","download_url":"https://dl.invalid/#notes-app"}}\n' > "$TMP/notes-ota.json"
+out="$(versions)"
+check "but FAILS when native.min is newer than the linked APK"    "$([ "$(has "$out" 'FAIL  download-page notesAPK 9.9.8 (the notes OTA needs native.min 9.9.9')" = 1 ] && [ "$(has "$out" 'sandbox/notes-apk-below-native-min')" = 1 ] && echo 1 || echo 0)" "$out"
+printf '{"version":"9.9.9","variant":"notes","native":{"min":"9.9.8"}}\n' > "$TMP/notes-ota.json"
+out="$(versions)"
+check "and not when the APK meets it (positive control)"          "$([ "$(has "$out" 'below-native-min')" = 0 ] && [ "$(has "$out" 'INFO  download-page notesAPK 9.9.8')" = 1 ] && echo 1 || echo 0)" "$out"
+printf '{"version":"9.9.8","variant":"notes"}\n' > "$TMP/notes-ota.json"
+out="$(versions)"
+check "a notes OTA that trails the release FAILS"                 "$([ "$(has "$out" 'FAIL  notes OTA manifest     9.9.8 (expected 9.9.9)')" = 1 ] && [ "$(has "$out" 'sandbox/notes-apk-trails')" = 1 ] && echo 1 || echo 0)" "$out"
+rm -f "$TMP/notes-ota.json"
 
 # A page that names the release AND mentions an older one in prose is correct,
 # not stale. Failing on that would be crying wolf, and an operator who learns to
@@ -496,6 +538,78 @@ PYEOF
 	check "a file whose entry list cannot be read is refused, not signed" "$([ $rc -eq 2 ] && [ "$(has "$out" 'Refusing to sign what cannot be checked')" = 1 ] && [ ! -e "$TMP/ota-notazip.enc.zip" ] && echo 1 || echo 0)" "rc=$rc $out"
 	out="$(node "$EB" "$TMP/ota-clean.zip" "$TMP/ota-fixture.key" "$TMP/ota-clean.enc.zip" "$TMP/ota-version.json" 2>&1)"; rc=$?
 	check "a clean bundle is signed, 'notes' inside another name notwithstanding (positive control)" "$([ $rc -eq 0 ] && [ -s "$TMP/ota-clean.enc.zip" ] && [ "$(cat "$TMP/ota-clean.enc.zip.version" 2>/dev/null | tr -d '\r\n')" = "1.2.3" ] && [ "$(has "$out" 'ivSessionKey')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
+fi
+
+echo
+echo "--- dual-ship.sh mobile / mobile-notes: the right app, the right key ---"
+# Real signed bundles, made by the real signer with the fixture keys above.
+if [ -z "$PY" ]; then
+	check "python (zipfile) is available to build the fixture bundles" 0 "neither python nor python3 runs"
+else
+	restore_recording_ssh() {
+		cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+echo "ssh \$*" >> "$LOG"
+case "\$*" in *variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;; esac
+exit 0
+STUB
+		chmod +x "$TMP/bin/ssh"
+	}
+	restore_recording_ssh
+	echo '{"version":"9.9.9","app":"notes"}' > "$TMP/notes-version.json"
+	echo '{"version":"9.9.9","app":"puca"}' > "$TMP/puca-version.json"
+	"$PY" - "$TMP" <<'PYEOF'
+import sys, zipfile
+t = sys.argv[1]
+csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'">'
+with zipfile.ZipFile(t + '/notes-app.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr('index.html', '<html><head>' + csp + '</head></html>')
+    z.writestr('version.json', '{"version":"9.9.9","app":"notes"}')
+with zipfile.ZipFile(t + '/puca-app.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr('index.html', '<html><head></head></html>')
+    z.writestr('version.json', '{"version":"9.9.9","app":"puca"}')
+PYEOF
+	signed() { # <var-prefix> <flag|""> <zip> <key> <version.json>
+		local json
+		json="$(node "$EB" $2 "$3" "$4" "$TMP/$1.enc.zip" "$5" 2>&1)" || { echo "signing $1 failed: $json" >&2; return 1; }
+		eval "${1//-/_}_SK=\"$(printf '%s' "$json" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["ivSessionKey"])')\""
+		eval "${1//-/_}_CK=\"$(printf '%s' "$json" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["checksum"])')\""
+	}
+	signed notes-good --notes "$TMP/notes-app.zip" "$TMP/notes-fixture.key" "$TMP/notes-version.json"
+	# The Notes build signed with PÚCA's key: channel says notes, the key is wrong.
+	signed notes-wrongkey --notes "$TMP/notes-app.zip" "$TMP/puca-fixture.key" "$TMP/notes-version.json"
+	signed puca-good "" "$TMP/puca-app.zip" "$TMP/puca-fixture.key" "$TMP/puca-version.json"
+
+	out="$(ship mobile "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile REFUSES a Púca Notes bundle, and names mobile-notes" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: $TMP/notes-good.enc.zip was signed for the 'notes' app")" = 1 ] && [ "$(has "$out" 'dual-ship.sh mobile-notes')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+	out="$(ship mobile-lite "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-lite REFUSES it too" "$([ $rc -ne 0 ] && [ "$(has "$out" "signed for the 'notes' app")" = 1 ] && echo 1 || echo 0)" "$out"
+	out="$(ship mobile "$TMP/puca-good.enc.zip" 9.9.9 "$puca_good_SK" "$puca_good_CK")"
+	check "mobile verifies a Púca bundle under Púca's key and ships it (positive control)" "$([ "$(has "$out" 'PASS  OK ')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && grep -q 'mobile-update.json' "$LOG" && echo 1 || echo 0)" "$out"
+
+	out="$(ship mobile-notes "$TMP/puca-good.enc.zip" 9.9.9 "$puca_good_SK" "$puca_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a Púca bundle" "$([ $rc -ne 0 ] && [ "$(has "$out" "signed for the 'puca' app")" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+	cp "$TMP/notes-good.enc.zip" "$TMP/nochan.enc.zip"; cp "$TMP/notes-good.enc.zip.version" "$TMP/nochan.enc.zip.version"
+	out="$(ship mobile-notes "$TMP/nochan.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a bundle with no .channel sidecar" "$([ $rc -ne 0 ] && [ "$(has "$out" 'nothing says this is a Púca Notes bundle')" = 1 ] && echo 1 || echo 0)" "$out"
+	out="$(ship mobile-notes "$TMP/notes-wrongkey.enc.zip" 9.9.9 "$notes_wrongkey_SK" "$notes_wrongkey_CK")"; rc=$?
+	check "mobile-notes REFUSES a Notes bundle signed with Púca's key" "$([ $rc -ne 0 ] && [ "$(has "$out" 'does not verify under the key the Púca Notes app embeds')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-min 9.9)"; rc=$?
+	check "mobile-notes REFUSES a malformed native version" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: '9.9' is not a MAJOR.MINOR.PATCH version")" = 1 ] && echo 1 || echo 0)" "$out"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.8 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a manifest version the bundle was not built as" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: the manifest says 9.9.8 but')" = 1 ] && echo 1 || echo 0)" "$out"
+
+	rm -f "$TMP/notes-ota.json"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-min 9.9.9 --native-version 9.9.9)"; rc=$?
+	check "a good Notes bundle passes every gate and is uploaded" "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'PASS  OK ')" = 1 ] && grep -q 'puca-notes-web-9.9.9.enc.zip' "$LOG" && echo 1 || echo 0)" "$out"
+	check "its manifest is mobile-update-notes.json, tagged notes, with the native block" "$(grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -q '"variant": "notes"' "$LOG" && grep -q '"min": "9.9.9"' "$LOG" && grep -q '"download_url": "https://dl.invalid/#notes-app"' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
+	check "it never writes the full or lite manifest" "$(! grep -q 'cat > mobile-update.json' "$LOG" && ! grep -q 'cat > mobile-update-lite.json' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
+	check "an UNTAGGED answer on ?variant=notes FAILS and says to ship the backend first" "$([ $rc -ne 0 ] && [ "$(has "$out" 'WITHOUT "variant":"notes"')" = 1 ] && [ "$(has "$out" 'Ship the backend first')" = 1 ] && echo 1 || echo 0)" "$out"
+	printf '{"version":"9.9.9","url":"x","variant":"notes"}\n' > "$TMP/notes-ota.json"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"
+	check "a tagged answer with the version PASSES (positive control)" "$([ "$(has "$out" 'PASS  sandbox notes OTA endpoint reports 9.9.9 with variant:notes')" = 1 ] && [ "$(has "$out" 'mobile-notes-variant')" = 0 ] && echo 1 || echo 0)" "$out"
+	check "and with no --native flags the manifest carries no native block" "$(! grep -q '"native"' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
+	rm -f "$TMP/notes-ota.json"
 fi
 
 if [ "$fails" -gt 0 ]; then

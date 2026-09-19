@@ -134,10 +134,12 @@
       <div class="meta">v0.9.815 &middot; Windows 10/11 (64-bit) &middot; Android 7+</div>
     </div>
 
-    <div class="notes-app">
+    <!-- id="notes-app" is load-bearing: the Notes app's "install the new app" prompt
+         links here (dual-ship.sh mobile-notes writes https://<download host>/#notes-app). -->
+    <div class="notes-app" id="notes-app">
       <b>Púca Notes</b> &mdash; your task lists as notes, Google-Keep style, on the same account.
       In the browser it is part of the web app; on Android it is its own small app that installs
-      beside Púca and updates with each release.
+      beside Púca and updates itself with each release.
       <div class="downloads">
         <!-- This filename must match APK_PREFIX_NOTES in deploy/ops/hosts.conf:
              what dual-ship.sh's `apk-notes` subcommand uploads. Same
