@@ -100,6 +100,13 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   token this needs lives in the app's private storage, excluded from backup
   and device transfer. Nothing about saved places is ever sent (they stay on
   the phone), and no notification carries note text.
+- Which app is asking for updates, and when: the Android update check is
+  unauthenticated and names its channel (`?variant=lite` for Púca Lite,
+  `?variant=notes` for the Púca Notes app), so the operator's logs show that
+  some device at that IP runs that app and when it launched — never who, and
+  nothing of its content. The update manifests themselves are public release
+  metadata (version, bundle URL, signature, and for Notes an optional
+  minimum-APK version).
 
   This used to say the session token lands in every proxy access log too, because
   the WebSocket carried it in the query string. It no longer does: every client —

@@ -22,6 +22,8 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkDesktopDist, checkNotesOta } from './notes-ota-identity.mjs';
+import { checkNativeMin, readNativeMin } from './notes-native-min.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tauriDir = join(here, '..', 'src-tauri');
@@ -91,6 +93,41 @@ if (!existsSync(notesGradle)) {
         fail('notes-app release build is not wired to the release signing config');
     }
     if (failures.length === 0) ok.push('Púca Notes: own applicationId, version from tauri.conf.json, release-signed');
+}
+
+// Púca Notes' OTA: its own key, no cloud, no telemetry, no allowNavigation,
+// and the plugin's native half pinned to the JS half frontend/ bundles.
+// scripts/notes-ota-identity.mjs has the reasons; its tests feed it broken
+// configs.
+{
+    const frontendDir = join(here, '..');
+    const lock = JSON.parse(readFileSync(join(frontendDir, 'package-lock.json'), 'utf8'));
+    const r = checkNotesOta({
+        notesCfg: readFileSync(join(frontendDir, 'notes-app', 'capacitor.config.ts'), 'utf8'),
+        pucaCfg: readFileSync(join(frontendDir, 'capacitor.config.ts'), 'utf8'),
+        notesPkg: JSON.parse(readFileSync(join(frontendDir, 'notes-app', 'package.json'), 'utf8')),
+        frontendUpdaterVersion: lock?.packages?.['node_modules/@capgo/capacitor-updater']?.version ?? null,
+    });
+    ok.push(...r.ok);
+    r.failures.forEach(fail);
+}
+
+// Púca Notes' native floor (notes-app/native-min.json) still describes the
+// APK's native surface — a new plugin or permission cannot land without a
+// decision about native.min. scripts/notes-native-min.mjs has the reasons.
+{
+    const { record, surface } = readNativeMin(join(here, '..'));
+    const r = checkNativeMin(record, surface);
+    ok.push(...r.ok);
+    r.failures.forEach(fail);
+}
+
+// The desktop installers embed dist-desktop/ — dist/ without Púca Notes.
+{
+    const winPath = join(tauriDir, 'tauri.windows.conf.json');
+    const r = checkDesktopDist(base, lite, existsSync(winPath) ? readJson(winPath) : null);
+    ok.push(...r.ok);
+    r.failures.forEach(fail);
 }
 
 const migrateFile = join(tauriDir, 'installer-migrate.nsh');

@@ -12,7 +12,7 @@ export default defineConfig([
   // otherwise bury the handful of genuine issues under hundreds of parse errors.
   // notes-app/android is the Púca Notes shell's generated Capacitor project
   // (same reason as android/); dist-notes-app is its build output.
-  globalIgnores(['dist', 'dist-notes-app', 'src/wasm/df', 'df-wasm', 'android', 'ios', 'src-tauri', 'notes-app/android']),
+  globalIgnores(['dist', 'dist-notes-app', 'dist-desktop', 'src/wasm/df', 'df-wasm', 'android', 'ios', 'src-tauri', 'notes-app/android']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

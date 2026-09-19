@@ -39,6 +39,22 @@ one-line summary; this file is the full story. Versions follow
   Documents/Puca under a unique name, or you are told why they could not.
   On Android 10 and older, Púca can write there once its next app update
   (not an over-the-air update) is installed.
+- **Púca Notes on Android updates itself.** Like Púca, the Notes app now
+  downloads each release's update when it starts, checks that it was signed
+  for Notes (Notes has its own signing key, so it can never be handed Púca's
+  update, or the other way round), and applies it. The account menu shows the
+  version you are running and has a **Check for updates** button that does not
+  close the note you have open. When a release needs a newer Notes app than
+  the one installed, the app says so and links to the download page instead
+  of applying an update it could not run. **One manual install is needed
+  first:** a Notes app from 0.9.815 or earlier has no updater, so install the
+  new one from the download page once; after that, updates arrive by
+  themselves.
+
+### Changed
+- **The Windows installer no longer carries a copy of Púca Notes.** The
+  desktop app never opened it; Notes on a computer is the browser page, as
+  before.
 
 ## 0.9.815 — 2026-09-19
 

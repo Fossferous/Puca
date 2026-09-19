@@ -18,6 +18,7 @@
 #   dual-ship.sh webapp        <dist-tarball.tar.gz>
 #   dual-ship.sh mobile        <enc-bundle.zip> <version> <sessionKey> <checksum>
 #   dual-ship.sh mobile-lite   <enc-bundle.zip> <version> <sessionKey> <checksum>
+#   dual-ship.sh mobile-notes  <enc-bundle.zip> <version> <sessionKey> <checksum> [--native-version v] [--lower-native-min]
 #   dual-ship.sh installer     <setup.exe> <sig-file> <version> <notes>
 #   dual-ship.sh installer-lite <setup.exe> <sig-file> <version> <notes>
 #   dual-ship.sh backend       <src-tarball.tar.gz>
@@ -439,6 +440,64 @@ refuse_mislabelled_bundle() {
 	fi
 }
 
+# WHICH APP a signed bundle is for. encrypt-bundle.mjs writes `<bundle>.channel`
+# ("puca", or "notes" with --notes). Púca's OTA must never carry the Notes app's
+# bundle and the Notes OTA must never carry Púca's: the two apps embed different
+# keys, so the phones would refuse the bundle anyway — this refuses it HERE,
+# before a manifest nobody can use is published. An absent sidecar reads as
+# "puca" (every bundle signed before the sidecar existed was a Púca one) for
+# the Púca channels, and as a refusal for the Notes one.
+refuse_wrong_channel() {
+	local bundle="$1" want="$2" got
+	if [ ! -f "$bundle.channel" ]; then
+		if [ "$want" = "puca" ]; then return 0; fi
+		echo "REFUSING: no $bundle.channel, so nothing says this is a Púca Notes bundle."
+		echo "Sign it with: node deploy/mobile/encrypt-bundle.mjs --notes <zip> <notes key> <out.enc.zip> <version.json>"
+		exit 1
+	fi
+	got="$(tr -d '[:space:]' < "$bundle.channel")"
+	if [ "$got" != "$want" ]; then
+		echo "REFUSING: $bundle was signed for the '$got' app (per $bundle.channel), and this subcommand ships '$want'."
+		[ "$got" = "notes" ] && echo "Ship a Púca Notes bundle with: dual-ship.sh mobile-notes ..."
+		[ "$want" = "notes" ] && echo "Ship a Púca bundle with: dual-ship.sh mobile / mobile-lite ..."
+		exit 1
+	fi
+}
+
+# The signature must verify under the public key the TARGET app embeds — the
+# check each phone's updater makes, run here before anything is uploaded.
+# Two keys exist now (Púca's and Púca Notes'), both RSA-2048, so the length
+# checks above cannot tell them apart; a bundle signed with the other app's
+# key passes those and is then refused by every phone.
+refuse_unverifiable_bundle() {
+	local bundle="$1" session_key="$2" checksum="$3" config="$4" app="$5" out
+	if ! command -v node >/dev/null 2>&1; then
+		echo "REFUSING: node is not on PATH, and it is needed to verify $bundle against $config."
+		exit 1
+	fi
+	if ! out="$(node "$HERE/../mobile/verify-bundle.mjs" "$bundle" "$session_key" "$checksum" "$config" 2>&1)"; then
+		echo "REFUSING: $bundle does not verify under the key $app embeds ($config):"
+		printf '%s\n' "$out" | sed 's/^/  /'
+		echo "Re-sign it with $app's private key (deploy/mobile/README.md)."
+		exit 1
+	fi
+	echo "PASS  $out"
+}
+
+# a > b, both MAJOR.MINOR.PATCH (sort -V, as check-versions.sh does).
+ver_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+
+# The native.min a ?variant=notes answer carries — only from a manifest TAGGED
+# "variant":"notes" (an old backend answers with Púca's, which has none).
+# Empty when there is none.
+notes_served_min() {
+	local body="$1" tagged
+	# grep -c, not -q: -q SIGPIPEs the writer under pipefail.
+	tagged="$(printf '%s' "$body" | grep -cE '"variant"[[:space:]]*:[[:space:]]*"notes"' || true)"
+	[ "${tagged:-0}" -gt 0 ] || return 0
+	printf '%s' "$body" | grep -oE '"min"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
+}
+
 cmd_mobile() {
 	local bundle="${1:?enc bundle}" version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
 	# Same lengths verify.sh and the original ship enforce — a manifest with
@@ -446,6 +505,8 @@ cmd_mobile() {
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
 	refuse_mislabelled_bundle "$bundle" "$version"
+	refuse_wrong_channel "$bundle" puca
+	refuse_unverifiable_bundle "$bundle" "$session_key" "$checksum" "$HERE/../../frontend/capacitor.config.ts" "Púca"
 	ensure_download_dirs
 	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
@@ -499,6 +560,8 @@ cmd_mobile_lite() {
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
 	refuse_mislabelled_bundle "$bundle" "$version"
+	refuse_wrong_channel "$bundle" puca
+	refuse_unverifiable_bundle "$bundle" "$session_key" "$checksum" "$HERE/../../frontend/capacitor.config.ts" "Púca"
 	ensure_download_dirs
 	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
 	for entry in "${HOSTS[@]}"; do
@@ -567,6 +630,177 @@ MEOF
 		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip")"
 		[ "$bundle_code" = "200" ] && echo "PASS  $label lite bundle downloadable" \
 			|| { echo "FAIL  $label lite bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-lite-bundle"); }
+	done
+}
+
+# Púca Notes' Android app: its OWN OTA channel. Same shape as cmd_mobile_lite,
+# with three differences that are the point of it:
+#   - the bundle must be a Notes one: `<bundle>.channel` = notes, and it must
+#     verify under the key frontend/notes-app/capacitor.config.ts embeds (a
+#     different key from Púca's);
+#   - the manifest goes to mobile-update-notes.json, which only
+#     GET /api/mobile-updates/check?variant=notes serves (src/update_routes.rs),
+#     tagged "variant":"notes" — the Notes app refuses anything else, and a
+#     backend that predates the route answers ?variant=notes with Púca's FULL
+#     manifest, which is why the tag is DEMANDED below, not just the version;
+#   - the manifest ALWAYS carries a "native" block saying which APK the bundle
+#     needs:
+#       min      the oldest Notes APK that can run this bundle. NOT a flag: it
+#                comes from the bundle's `.native-min` sidecar, which
+#                encrypt-bundle.mjs --notes writes from the build's
+#                version.json, which the build takes from the TRACKED
+#                frontend/notes-app/native-min.json. It used to be a
+#                --native-min flag, which applied only to the release that
+#                passed it: the next release, shipped without the flag,
+#                published no floor and old APKs applied web code calling a
+#                plugin they lacked. It is refused when newer than the release
+#                (every Notes app would refuse the update), and when LOWER than
+#                what any host already serves, unless --lower-native-min says
+#                that is deliberate (a floor raised by mistake).
+#       version  --native-version <v>: the newest Notes APK on the download
+#                page (a one-per-version nudge in the app); never newer than
+#                the release.
+#     download_url points at the page's #notes-app section.
+# Never touches mobile-update.json or mobile-update-lite.json, and PROVES it by
+# comparing both endpoints before and after.
+cmd_mobile_notes() {
+	local bundle="${1:?usage: dual-ship.sh mobile-notes <enc.zip> <version> <sessionKey> <checksum> [--native-version v] [--lower-native-min]}"
+	local version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
+	shift 4
+	local native_min="" native_version="" lower_native_min=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--native-version) native_version="${2:?--native-version needs a version}"; shift 2 ;;
+			--lower-native-min) lower_native_min=1; shift ;;
+			--native-min)
+				echo "REFUSING: --native-min is gone. The floor is frontend/notes-app/native-min.json: raise \"min\" there,"
+				echo "rebuild (node scripts/build-notes-app.mjs --ota) and re-sign; it rides in $bundle.native-min."
+				exit 2 ;;
+			*) echo "REFUSING: unknown option '$1' (expected --native-version <v> / --lower-native-min)"; exit 2 ;;
+		esac
+	done
+	: "${MOBILE_BUNDLE_PREFIX_NOTES:?MOBILE_BUNDLE_PREFIX_NOTES is not set in hosts.conf (see hosts.conf.example)}"
+	# Every value below is pasted into a JSON file on the host: hold each one
+	# to the shape it must have, so nothing else can ride along.
+	local v
+	for v in "$version" ${native_version:+"$native_version"}; do
+		[[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "REFUSING: '$v' is not a MAJOR.MINOR.PATCH version"; exit 1; }
+	done
+	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
+	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
+	[[ "$session_key" =~ ^[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$ ]] || { echo "REFUSING: sessionKey is not base64:base64"; exit 1; }
+	[[ "$checksum" =~ ^[0-9a-f]+$ ]] || { echo "REFUSING: checksum is not lowercase hex"; exit 1; }
+	refuse_mislabelled_bundle "$bundle" "$version"
+	refuse_wrong_channel "$bundle" notes
+	refuse_unverifiable_bundle "$bundle" "$session_key" "$checksum" "$HERE/../../frontend/notes-app/capacitor.config.ts" "the Púca Notes app"
+	# The native floor rides with the bundle; see the header above.
+	if [ ! -f "$bundle.native-min" ]; then
+		echo "REFUSING: no $bundle.native-min, so nothing says which Notes APKs can run this bundle."
+		echo "Rebuild (cd frontend && node scripts/build-notes-app.mjs --ota) and re-sign with encrypt-bundle.mjs --notes."
+		exit 1
+	fi
+	native_min="$(tr -d '[:space:]' < "$bundle.native-min")"
+	[[ "$native_min" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "REFUSING: $bundle.native-min says '$native_min', not a MAJOR.MINOR.PATCH version"; exit 1; }
+	# Neither may be newer than the release: a typo (0.9.9160) or the NEXT
+	# version would make every Notes install show "install the new app" and
+	# never apply an update — and nothing else would ever notice.
+	if ver_gt "$native_min" "$version"; then
+		echo "REFUSING: native.min $native_min (from $bundle.native-min) is newer than this release ($version)."
+		echo "Every Púca Notes app would refuse the update. Fix frontend/notes-app/native-min.json, rebuild and re-sign."
+		exit 1
+	fi
+	if [ -n "$native_version" ] && ver_gt "$native_version" "$version"; then
+		echo "REFUSING: --native-version $native_version is newer than this release ($version): no such APK is on the page."
+		exit 1
+	fi
+	# The floor only goes UP. Read what every host serves now, BEFORE writing
+	# anywhere: lowering it re-exposes every APK between the two versions to
+	# web code calling a plugin they do not have.
+	# A host that cannot be read cannot be proved safe: refuse rather than
+	# guess (curl -s answers a 404 with exit 0, so this is a real failure).
+	local entry served_body served_min lowered=()
+	for entry in "${HOSTS[@]}"; do
+		if ! served_body="$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
+			echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
+			exit 1
+		fi
+		served_min="$(notes_served_min "$served_body")"
+		if [ -n "$served_min" ] && ver_gt "$served_min" "$native_min"; then
+			lowered+=("$(label_of "$entry") serves $served_min")
+		fi
+	done
+	if [ "${#lowered[@]}" -gt 0 ]; then
+		if [ "$lower_native_min" != 1 ]; then
+			echo "REFUSING: this bundle's native.min $native_min is LOWER than a host already serves (${lowered[*]})."
+			echo "Every APK in between would apply web code that calls a plugin it lacks. If the old floor was a mistake,"
+			echo "re-run with --lower-native-min; otherwise raise frontend/notes-app/native-min.json, rebuild and re-sign."
+			exit 1
+		fi
+		echo "WARNING: lowering native.min to $native_min (${lowered[*]}) — --lower-native-min was passed."
+	fi
+	local native_json=",
+  \"native\": {
+    \"min\": \"$native_min\",${native_version:+
+    \"version\": \"$native_version\",}
+    \"download_url\": \"https://$DOWNLOAD_HOST/#notes-app\"
+  }"
+	ensure_download_dirs
+	local bundle_sha; bundle_sha="$(sha256sum "$bundle" | cut -d' ' -f1)"
+	for entry in "${HOSTS[@]}"; do
+		local label; label="$(label_of "$entry")"
+		echo "=== mobile OTA (Púca Notes) $version -> $label ==="
+		local others_before others_after
+		others_before="$(remote_code "$entry" "$API_HOST" /api/mobile-updates/check):$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)|$(remote_code "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite'):$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite')"
+		scp_to "$entry" "$bundle" "${entry#*:}:$INSTALL_DIR/downloads/mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip"
+		record_sha256 "$entry" "$label" "$bundle_sha" "mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip"
+		ssh_to "$entry" "set -e
+			cd $INSTALL_DIR
+			[ -f mobile-update-notes.json ] && cp -a mobile-update-notes.json mobile-update-notes.json.bak-dual-\$(date +%Y%m%d-%H%M%S)
+			cat > mobile-update-notes.json <<'MEOF'
+{
+  \"version\": \"$version\",
+  \"url\": \"https://$DOWNLOAD_HOST/mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip\",
+  \"sessionKey\": \"$session_key\",
+  \"checksum\": \"$checksum\",
+  \"variant\": \"notes\"$native_json
+}
+MEOF
+			chown $SERVICE_USER:$SERVICE_USER mobile-update-notes.json"
+		local check seen_version tag_hits
+		check="$(remote_body "$entry" "$API_HOST" "/api/mobile-updates/check?variant=notes")"
+		seen_version="$(printf '%s' "$check" | grep -oE '"version":[[:space:]]*"[^"]*"' | head -1 | grep -oE '[0-9][0-9.]*' | head -1 || true)"
+		# grep -c, not -q: -q SIGPIPEs the writer under pipefail.
+		tag_hits="$(printf '%s' "$check" | grep -cE '"variant"[[:space:]]*:[[:space:]]*"notes"' || true)"
+		if [ "${tag_hits:-0}" -eq 0 ]; then
+			echo "FAIL  $label ?variant=notes answered version '${seen_version:-<none>}' WITHOUT \"variant\":\"notes\" —"
+			echo "      this host's backend predates the notes route and serves Púca's manifest (or nothing) on"
+			echo "      the Notes channel; every Notes app refuses it. Ship the backend first, then re-run mobile-notes."
+			FAILED+=("$label:mobile-notes-variant")
+		elif [ "$seen_version" != "$version" ]; then
+			echo "FAIL  $label notes OTA endpoint reports '$seen_version', expected $version"
+			FAILED+=("$label:mobile-notes")
+		else
+			echo "PASS  $label notes OTA endpoint reports $seen_version with variant:notes"
+		fi
+		local seen_min
+		seen_min="$(notes_served_min "$check")"
+		if [ "${tag_hits:-0}" -gt 0 ] && [ "$seen_min" != "$native_min" ]; then
+			echo "FAIL  $label notes OTA endpoint serves native.min '${seen_min:-<none>}', expected $native_min"
+			FAILED+=("$label:mobile-notes-native-min")
+		elif [ "${tag_hits:-0}" -gt 0 ]; then
+			echo "PASS  $label notes OTA endpoint serves native.min $native_min"
+		fi
+		others_after="$(remote_code "$entry" "$API_HOST" /api/mobile-updates/check):$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)|$(remote_code "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite'):$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite')"
+		if [ "$others_after" = "$others_before" ]; then
+			echo "PASS  $label full and lite OTA endpoints undisturbed"
+		else
+			echo "FAIL  $label the full or lite OTA endpoint CHANGED during a Notes ship (bodies compared)"
+			FAILED+=("$label:mobile-notes-isolation")
+		fi
+		local bundle_code
+		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip")"
+		[ "$bundle_code" = "200" ] && echo "PASS  $label notes bundle downloadable" \
+			|| { echo "FAIL  $label notes bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-notes-bundle"); }
 	done
 }
 
@@ -1013,11 +1247,13 @@ cmd_apk_lite() {
 }
 
 # Púca Notes' Android app: a THIRD APK, not a variant of Púca — its own
-# applicationId, installed beside Púca, and no OTA (every update is a new
-# APK), which is exactly why it ships with every release under the same
-# version: a notes app that trails the task API it talks to is a notes app
-# that breaks quietly. Same refuse-until-linked rule against APK_PREFIX_NOTES,
-# and the same independence from the other APK gates as apk-lite explains.
+# applicationId, installed beside Púca. Its web layer updates over the air
+# (mobile-notes, above) from the first OTA-capable APK on; the APK still ships
+# with EVERY release under the same version, so a fresh install from the
+# download page starts current and never needs a native.min prompt on day one
+# — and installs from before the OTA existed have only this path. Same
+# refuse-until-linked rule against APK_PREFIX_NOTES, and the same
+# independence from the other APK gates as apk-lite explains.
 cmd_apk_notes() {
 	local apk="${1:?usage: dual-ship.sh apk-notes <APK> <version>}" version="${2:?version}"
 	: "${APK_PREFIX_NOTES:?APK_PREFIX_NOTES is not set in hosts.conf (see hosts.conf.example)}"
@@ -1063,13 +1299,14 @@ main() {
 		webapp)         cmd_webapp "$@" ;;
 		mobile)         cmd_mobile "$@" ;;
 		mobile-lite)    cmd_mobile_lite "$@" ;;
+		mobile-notes)   cmd_mobile_notes "$@" ;;
 		installer)      cmd_installer "$@" ;;
 		installer-lite) cmd_installer_lite "$@" ;;
 		backend)        cmd_backend "$@" ;;
 		apk)            cmd_apk "$@" ;;
 		apk-lite)       cmd_apk_lite "$@" ;;
 		apk-notes)      cmd_apk_notes "$@" ;;
-		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|installer|installer-lite|backend|apk|apk-lite|apk-notes} ..." >&2; exit 2 ;;
+		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|mobile-notes|installer|installer-lite|backend|apk|apk-lite|apk-notes} ..." >&2; exit 2 ;;
 	esac
 
 	# Independent of what was shipped: confirm each host identifies as itself,

@@ -36,6 +36,8 @@ printf 'not-a-real-key\n'        > "$KEYS/tauri-updater.key"
 printf 'not-a-real-password\n'   > "$KEYS/tauri-updater.key.password"
 printf 'not-a-real-rsa\n'        > "$KEYS/mobile-updater-rsa.key"
 printf 'not-a-real-pub\n'        > "$KEYS/mobile-updater-rsa.pub"
+printf 'not-a-real-notes-rsa\n'  > "$KEYS/notes-updater-rsa.key"
+printf 'not-a-real-notes-pub\n'  > "$KEYS/notes-updater-rsa.pub"
 printf 'not-a-real-cfkey\n'      > "$KEYS/cf-origin-key.pem"
 printf 'not-a-real-cfcert\n'     > "$KEYS/cf-origin-cert.pem"
 printf 'not-a-real-fcm\n'        > "$KEYS/fcm-service-account.json"
@@ -64,6 +66,10 @@ if [ -f "$keys_tar" ] && [ -f "$pw_tar" ]; then
 
 	check "keys bundle holds the updater key"   "$(printf '%s\n' "$keys_list" | grep -qx './tauri-updater.key' && echo 1 || echo 0)"
 	check "keys bundle holds the keystore"      "$(printf '%s\n' "$keys_list" | grep -qx './release.keystore' && echo 1 || echo 0)"
+	# Púca Notes' OTA is signed with its OWN key; losing it freezes Notes updates.
+	check "keys bundle holds the Notes OTA key"  "$(printf '%s\n' "$keys_list" | grep -qx './notes-updater-rsa.key' && echo 1 || echo 0)"
+	check "keys bundle holds the Notes OTA public key" "$(printf '%s\n' "$keys_list" | grep -qx './notes-updater-rsa.pub' && echo 1 || echo 0)"
+	check "the Notes key is NOT in the passwords bundle" "$(printf '%s\n' "$pw_list" | grep -q 'notes-updater' && echo 0 || echo 1)"
 	# THE POINT OF THE SPLIT.
 	check "keys bundle holds NO password"       "$(printf '%s\n' "$keys_list" | grep -qE '\.password$|keystore\.properties$' && echo 0 || echo 1)" \
 		"$(printf '%s\n' "$keys_list" | grep -E '\.password$|keystore\.properties$' || true)"
@@ -113,6 +119,12 @@ check "says which one"                       "$(printf '%s' "$out" | grep -q 'MI
 rm -f "$OUT"/*.tar
 out="$(ALLOW_MISSING=1 run 2>&1)"; rc=$?
 check "ALLOW_MISSING=1 still overrides"      "$(yes_no $rc)" "$out"
+
+# The Notes key is as irreplaceable as Púca's: missing it is fatal too.
+printf 'not-a-real-rsa\n' > "$KEYS/mobile-updater-rsa.key"
+rm -f "$KEYS/notes-updater-rsa.key" "$OUT"/*.tar
+out="$(run 2>&1)"; rc=$?
+check "a missing Notes OTA key is fatal"     "$([ $rc -ne 0 ] && printf '%s' "$out" | grep -q 'MISSING  notes-updater-rsa.key' && echo 1 || echo 0)" "$out"
 
 echo
 if [ "$fails" -gt 0 ]; then

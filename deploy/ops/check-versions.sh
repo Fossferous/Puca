@@ -108,6 +108,8 @@ body() {
 }
 
 ver_of() { grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1; }
+# a > b, both MAJOR.MINOR.PATCH.
+notes_ver_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
 
 # --- preflight: is the version we are ABOUT to build still free? -------------
 #
@@ -327,13 +329,42 @@ for entry in "${HOSTS[@]}"; do
 	fi
 
 	# --- Púca Notes' Android app -------------------------------------------
-	# A third APK, and the one with NO OTA: it can only stay current by
-	# shipping with every release, so the page must link one, the link must
-	# serve, AND its version must be the release's. The other two APKs may
-	# trail after an OTA-only release because their web layer updates itself;
-	# this one has no such path, so trailing here means users are stuck on it.
+	# A third APK. Its web layer has its own OTA channel (?variant=notes,
+	# shipped by dual-ship.sh mobile-notes) — but only from the first
+	# OTA-capable APK on, and only once that manifest is published. So:
+	#   - the notes OTA manifest, once one is deployed (tagged
+	#     "variant":"notes"), must carry this release, like every other OTA;
+	#     an untagged answer is a backend that predates the route (or nothing
+	#     published) and reads as "not deployed";
+	#   - the APK must be linked and must serve;
+	#   - a TRAILING APK is INFO while a current notes OTA covers the web
+	#     layer. With no notes OTA deployed, a trailing APK never catches up
+	#     and is a FAIL, as it always was;
+	#   - whatever the APK's version — even the release's own — the manifest's
+	#     native.min must not be newer than the APK the page links (a fresh
+	#     install would refuse its own first update) nor newer than the
+	#     manifest's own version (every Notes app would refuse it). A current
+	#     APK used to PASS here unexamined, so a mistyped floor (0.9.9160)
+	#     read as a healthy release.
 	# An older hosts.conf without APK_PREFIX_NOTES warns rather than dying on
 	# set -u.
+	notes_ota_body="$(body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"
+	notes_ota_ver="$(printf '%s' "$notes_ota_body" | ver_of || true)"
+	# grep -c, not -q: -q SIGPIPEs the writer under pipefail.
+	notes_ota_tagged="$(printf '%s' "$notes_ota_body" | grep -cE '"variant"[[:space:]]*:[[:space:]]*"notes"' || true)"
+	notes_native_min=""
+	notes_ota_current=0
+	if [ "${notes_ota_tagged:-0}" -gt 0 ]; then
+		notes_native_min="$(printf '%s' "$notes_ota_body" | grep -oE '"min"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+		check "notes OTA manifest" "$notes_ota_ver"
+		[ "$notes_ota_ver" = "$EXPECTED" ] && notes_ota_current=1
+		if [ -n "$notes_native_min" ] && [ -n "$notes_ota_ver" ] && notes_ver_gt "$notes_native_min" "$notes_ota_ver"; then
+			printf 'FAIL  %-22s native.min %s is newer than the manifest itself (%s) — every Notes app refuses it\n' "notes OTA manifest" "$notes_native_min" "$notes_ota_ver"
+			FAILED+=("$label/notes-native-min-above-release")
+		fi
+	else
+		printf 'INFO  %-22s not deployed on this host (?variant=notes carries no "variant":"notes" — ship the backend, then dual-ship.sh mobile-notes)\n' "notes OTA manifest"
+	fi
 	if [ -n "${APK_PREFIX_NOTES:-}" ]; then
 		notes_apk_href="$(body "$entry" "$DOWNLOAD_HOST" / | grep -oE "$APK_PREFIX_NOTES-[0-9.]+\.apk" | head -1 || true)"
 		if [ -z "$notes_apk_href" ]; then
@@ -343,10 +374,17 @@ for entry in "${HOSTS[@]}"; do
 			notes_apk_code="$(ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/mobile/$notes_apk_href' --max-time 25" 2>/dev/null || true)"
 			notes_apk_ver="$(printf '%s' "$notes_apk_href" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 			if [ "$notes_apk_code" = "200" ]; then
-				if [ "$notes_apk_ver" = "$EXPECTED" ]; then
+				if [ -n "$notes_native_min" ] && notes_ver_gt "$notes_native_min" "$notes_apk_ver"; then
+					printf 'FAIL  %-22s %s (the notes OTA needs native.min %s — a fresh install would refuse its own first update: ship dual-ship.sh apk-notes, or fix the floor)\n' \
+						"download-page notesAPK" "$notes_apk_ver" "$notes_native_min"
+					FAILED+=("$label/notes-apk-below-native-min")
+				elif [ "$notes_apk_ver" = "$EXPECTED" ]; then
 					printf 'PASS  %-22s %s (current)\n' "download-page notesAPK" "$notes_apk_ver"
+				elif [ "$notes_ota_current" = 1 ]; then
+					printf 'INFO  %-22s %s (trails %s — the notes OTA brings the web layer up; ship apk-notes anyway so fresh installs start current)\n' \
+						"download-page notesAPK" "$notes_apk_ver" "$EXPECTED"
 				else
-					printf 'FAIL  %-22s %s (trails %s — Notes has NO OTA, so a trailing APK never catches up: ship dual-ship.sh apk-notes)\n' \
+					printf 'FAIL  %-22s %s (trails %s — no current notes OTA here, so a trailing APK never catches up: ship dual-ship.sh apk-notes)\n' \
 						"download-page notesAPK" "$notes_apk_ver" "$EXPECTED"
 					FAILED+=("$label/notes-apk-trails")
 				fi

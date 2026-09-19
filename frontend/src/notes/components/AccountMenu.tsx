@@ -9,6 +9,7 @@ import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon, UploadIcon } from '../.
 import { NotesLocationSettings } from '../native/NotesLocationSettings';
 import { isMobile } from '../../api/platform';
 import { type NotesSortMode } from '../model/notesPrefs';
+import { NotesUpdateMenu } from './NotesUpdateMenu';
 
 /** The Notes Android shell: no Púca page at `/` to open. */
 const NATIVE = isMobile();
@@ -78,6 +79,7 @@ export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExport
             {onShare && <button type="button" className="notes-menu-item" onClick={onShare}><UploadIcon /> Share notes…</button>}
             <button type="button" className="notes-menu-item" onClick={onHelp}><HelpIcon /> Keyboard shortcuts</button>
             {!NATIVE && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
+            {NATIVE && <><div className="notes-menu-sep" /><NotesUpdateMenu /></>}
             <div className="notes-menu-sep" />
             <button type="button" className="notes-menu-item" onClick={onSignOut}><LogoutIcon /> Sign out</button>
             <button type="button" className="notes-menu-item danger" onClick={onSignOutEverywhere}><LogoutIcon /> Sign out of every device</button>

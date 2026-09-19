@@ -74,9 +74,15 @@ APK_PREFIX="Puca"                   # Android build: <prefix>-<version>.apk
 INSTALLER_NAME_LITE="Puca-Lite-Setup.exe"
 MOBILE_BUNDLE_PREFIX_LITE="puca-web-lite"
 APK_PREFIX_LITE="Puca-Lite"
-# Púca Notes' Android app (a separate app installed beside Púca, no OTA), shipped
-# with every release by `dual-ship.sh apk-notes`: <prefix>-<version>.apk.
+# Púca Notes' Android app (a separate app installed beside Púca), shipped with
+# every release by `dual-ship.sh apk-notes`: <prefix>-<version>.apk.
 APK_PREFIX_NOTES="Puca-Notes"
+# ...and its OTA bundle, shipped with every release by `dual-ship.sh
+# mobile-notes`: <prefix>-<version>.enc.zip. Signed with the NOTES key, not
+# Púca's. Its manifest's filename is not configurable here either: dual-ship.sh
+# writes mobile-update-notes.json, the backend's default for
+# MOBILE_UPDATE_FILE_NOTES — the same "do not override it" rule as lite.
+MOBILE_BUNDLE_PREFIX_NOTES="puca-notes-web"
 
 # ------------------------------------------------------------- loopback TLS --
 #

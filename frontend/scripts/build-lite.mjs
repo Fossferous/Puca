@@ -33,6 +33,12 @@ run('npx', ['vite', 'build']);
 // Púca Notes is its own build into dist/notes/ (vite.notes.config.ts). Built
 // under the same env so rc-exclusion-guard checks its graph too.
 run('npx', ['vite', 'build', '--config', 'vite.notes.config.ts']);
+// The desktop installer embeds dist-desktop/ (tauri.conf.json frontendDist):
+// dist/ minus Púca Notes, which the shell never loads. Staged HERE for Lite
+// because its beforeBuildCommand must stay "" — and re-staged on every run, so
+// a Lite installer can never pick up a stale FULL copy. Harmless before a
+// --sync: the phone shells read dist/, not this.
+run('node', ['scripts/stage-desktop-dist.mjs']);
 
 // `cap sync` must run under the SAME env: it writes appId from
 // capacitor.config.ts into the native project, and Gradle reads PUCA_LITE

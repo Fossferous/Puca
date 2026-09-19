@@ -1,0 +1,15 @@
+{
+  "min": "0.9.816",
+  "why": "The oldest Púca Notes APK every OTA bundle built from this tree can run on. It only ever goes UP. Raise it to the release that first ships the new capability whenever a change adds a native plugin, a Capacitor package or an Android permission that the web layer will call, and re-record 'surface' below in the same change (scripts/notes-native-min.mjs fails vitest, build-notes-app.mjs and check-lite-identity.mjs until the two agree). The build writes it into the bundle's version.json, encrypt-bundle.mjs --notes copies it into the .native-min sidecar, and dual-ship.sh mobile-notes publishes it as the manifest's native.min on EVERY release, refusing to lower what a host already serves. 0.9.816: the first OTA-capable Notes APK, and the release that gives the Notes app its own native plugins.",
+  "surface": {
+    "packages": [
+      "@capacitor/android",
+      "@capacitor/core",
+      "@capgo/capacitor-updater"
+    ],
+    "plugins": [],
+    "permissions": [
+      "android.permission.INTERNET"
+    ]
+  }
+}

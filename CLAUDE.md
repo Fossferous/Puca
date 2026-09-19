@@ -151,7 +151,7 @@ a fingerprint of `crates/puca-waker` against the one `ship-waker.sh` records in
 REFUSED. **Change that crate and the version check fails until you run
 `ship-waker.sh`.**
 
-**Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|installer|
+**Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|mobile-notes|installer|
 installer-lite|backend|apk|apk-lite|apk-notes} ...`, never a manual `scp`/`ssh` to one
 box.** A single-host deploy leaves the others silently stale, which looks
 identical to a successful release. dual-ship.sh refuses to report success
@@ -166,9 +166,14 @@ excluded at compile time, not just hidden). Lite is a separate artifact under
 a separate name (`INSTALLER_NAME_LITE`, `MOBILE_BUNDLE_PREFIX_LITE`,
 `APK_PREFIX_LITE` in `hosts.conf`), uploaded **alongside**, never over, the
 full one — both variants ship the same version number. `apk-notes` ships
-Púca Notes' own Android app (a third APK, not a variant: its own id, no OTA,
-so it can only stay current by riding every release) under `APK_PREFIX_NOTES`,
-with the same page-must-link-it gate. `apk-lite` refuses to
+Púca Notes' own Android app (a third APK, not a variant: its own id) under
+`APK_PREFIX_NOTES`, with the same page-must-link-it gate, and `mobile-notes`
+ships its OTA bundle. **Púca Notes' steady-state rule: `mobile-notes` AND
+`apk-notes` every release** — the OTA brings installed apps up to date, the APK
+keeps a fresh install from the download page current. Notes APKs up to 0.9.815
+have no updater: each existing install needs ONE manual install of the first
+OTA-capable APK, after which it updates itself (docs/NOTES.md, *Updates over
+the air*). `apk-lite` refuses to
 publish until `deploy/download-site/index.html` actually links the exact lite
 APK filename, the same page-and-APK-ship-together gate `apk` has. The
 installer links carry no version in their filenames, so neither installer
@@ -186,7 +191,24 @@ writes the lite manifest and verifies it through that same query param,
 demanding the `"variant": "lite"` tag in the answer — the version number alone
 proves nothing, since both variants ship the same one and a backend that
 predates the variant-aware route answers `?variant=lite` with the full
-manifest. Never assume the plain endpoint reflects a lite ship. The download page
+manifest. Never assume the plain endpoint reflects a lite ship.
+
+Púca Notes' Android app is the third channel: `?variant=notes` →
+`mobile-update-notes.json` (`MOBILE_UPDATE_FILE_NOTES`), written by
+`mobile-notes` and demanded back tagged `"variant": "notes"` — **ship the
+backend before the first `mobile-notes`**, or that check fails by design. Its
+bundles are signed with a SEPARATE key (`notes-updater-rsa.key` in the keys
+directory; the Notes APK embeds only the public half), built with
+`node scripts/build-notes-app.mjs --ota` and signed with
+`encrypt-bundle.mjs --notes`. Every mobile subcommand now proves the bundle
+verifies under the key the TARGET app embeds (`deploy/mobile/verify-bundle.mjs`)
+and refuses the other app's `<bundle>.channel`. A change that adds a native
+plugin or permission to the Notes app raises `min` in
+`frontend/notes-app/native-min.json` (vitest and `build-notes-app.mjs` fail
+until its recorded surface matches); every `mobile-notes` then publishes that floor, never lower
+than a host already serves, so older APKs prompt for the new install instead of
+applying a bundle they cannot run; `check-versions.sh` FAILS until the page
+links an APK at least that new. The download page
 (`deploy/download-site/index.html`) understands `?variant=lite` too, so the
 client's own "no update path" fallback (`api/appVersion.ts`'s
 `openDownloadPage`, which appends `?variant=lite` when `RC_ENABLED` is false)
@@ -569,6 +591,10 @@ in your keys directory (outside this repo) and are backed up off-machine.
 Losing that directory's `key-backups/*.tar` bundles would permanently break
 desktop auto-update and the mobile OTA: no validly signed release could ever be
 produced again and every user would need a manual reinstall.
+
+The Púca Notes OTA key (`notes-updater-rsa.key` / `.pub`) is as irreplaceable
+as Púca's: losing it freezes Notes updates until a Notes APK with a new key
+ships. `backup-keys.sh` includes it, and a missing one is fatal.
 
 `backup-keys.sh` writes **two** bundles — key material, and the passphrases that
 unlock it — and they are only a real separation if you store them in DIFFERENT

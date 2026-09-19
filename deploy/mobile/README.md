@@ -161,3 +161,79 @@ curl -s https://chat.example.com/api/mobile-updates/check
 ```
 
 If that does not report the version you just shipped, mobile did not ship.
+
+## Púca Notes — its own channel, its own key
+
+Púca Notes' Android app (`com.sovereign.notes`, `frontend/notes-app/`) updates
+its web layer over the air too, from the first APK that carries the updater.
+It is a different app, not a variant, so everything that could let one app's
+bundle reach the other is separate:
+
+| | Púca (full / lite) | Púca Notes |
+|---|---|---|
+| Asks | `/api/mobile-updates/check` (`?variant=lite`) | `/api/mobile-updates/check?variant=notes` |
+| Manifest on the server | `mobile-update.json` / `mobile-update-lite.json` | `mobile-update-notes.json` (`MOBILE_UPDATE_FILE_NOTES`) |
+| Accepts | untagged or `"full"` / exactly `"lite"` | exactly `"notes"` |
+| Signing key | `mobile-updater-rsa.key` | `notes-updater-rsa.key` |
+| Public key embedded in | `frontend/capacitor.config.ts` | `frontend/notes-app/capacitor.config.ts` |
+| Bundle | `dist/` minus `notes/` + CSP | `dist-notes-app/` (native build, CSP injected) |
+| Signer flag | none | `--notes` |
+| Ship | `dual-ship.sh mobile` / `mobile-lite` | `dual-ship.sh mobile-notes` |
+
+### Keys
+
+- `notes-updater-rsa.key` (private) — in the same keys directory as Púca's,
+  **backed up by `deploy/ops/backup-keys.sh`** (a missing one fails it). If lost,
+  Notes OTA stops until a Notes APK embedding a new key ships.
+- `notes-updater-rsa.pub` — mirrored into `frontend/notes-app/capacitor.config.ts`
+  (`CapacitorUpdater.publicKey`). `scripts/check-lite-identity.mjs` fails if it
+  ever equals Púca's key.
+- Generate (only when starting fresh, never twice):
+  `openssl genrsa -traditional -out notes-updater-rsa.key 2048 && openssl rsa -in
+  notes-updater-rsa.key -RSAPublicKey_out -out notes-updater-rsa.pub`, then paste
+  the `.pub` into the Notes config. Rotating it is the same flag day as Púca's.
+
+### Publish steps, every release
+
+```bash
+cd frontend && node scripts/build-notes-app.mjs --ota
+                         # native Notes build -> dist-notes-app/, CSP injected, then
+                         # notes-ota/puca-notes-web-<ver>.zip (its CONTENTS, index.html
+                         # at the root). Refuses without exactly one CSP meta or with a
+                         # version.json that does not say "app": "notes".
+cd ..
+node deploy/mobile/encrypt-bundle.mjs --notes \
+    frontend/notes-ota/puca-notes-web-<ver>.zip <keys dir>/notes-updater-rsa.key \
+    frontend/notes-ota/puca-notes-web-<ver>.enc.zip frontend/dist-notes-app/version.json
+                         # prints {ivSessionKey, checksum}; writes .version,
+                         # .channel (= notes) and .native-min beside the bundle
+deploy/ops/dual-ship.sh mobile-notes frontend/notes-ota/puca-notes-web-<ver>.enc.zip <ver> \
+    <ivSessionKey> <checksum> [--native-version <v>] [--lower-native-min]
+deploy/ops/dual-ship.sh apk-notes <Puca-Notes-<ver>.apk> <ver>   # every release too
+```
+
+`mobile-notes` refuses a bundle whose `.channel` is not `notes`, or that does
+not verify under the key `frontend/notes-app/capacitor.config.ts` embeds
+(`deploy/mobile/verify-bundle.mjs`), then writes `mobile-update-notes.json` and
+demands `?variant=notes` answer the version AND `"variant": "notes"` on every
+host — a backend from before the route answers with Púca's manifest, so **ship
+the backend first**. It proves the full and lite endpoints did not change.
+`mobile` and `mobile-lite` refuse a Notes bundle the same way.
+
+`native.min`, the oldest Notes APK that can run this bundle, is NOT a flag: it
+is `frontend/notes-app/native-min.json`, carried by the build's `version.json`
+into the bundle's `.native-min` sidecar, and `mobile-notes` publishes it on
+every release (older APKs then show *Install the new Púca Notes app*, linking
+`https://<download host>/#notes-app`, instead of applying a bundle they cannot
+run). Raise it in the file — to the release that first ships the plugin,
+permission or manifest entry the web code needs — never on the command line.
+`mobile-notes` refuses a floor newer than the release, and one lower than what
+any host already serves unless `--lower-native-min` is passed (for a floor
+raised by mistake). `--native-version <v>`: nudge (once per version) about a
+newer APK; never newer than the release. Neither is signed — a hostile manifest
+host could withhold updates or nag, not deliver an APK (Android refuses one
+signed with another key).
+
+**Existing installs need one manual install.** Notes APKs up to 0.9.815 carry
+no updater; they update only by installing the first OTA-capable APK from the
+download page.

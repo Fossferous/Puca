@@ -111,7 +111,30 @@ export function bundleVariantMatches(
     manifestVariant: string | undefined | null,
     rcEnabled: boolean,
 ): boolean {
-    return (manifestVariant ?? 'full') === (rcEnabled ? 'full' : 'lite');
+    return otaChannelMatches(manifestVariant, rcEnabled ? 'full' : 'lite');
+}
+
+/** The three OTA channels: Púca full, Púca Lite, and Púca Notes' own app. */
+export type OtaChannel = 'full' | 'lite' | 'notes';
+
+/**
+ * May an app on `channel` apply a bundle whose manifest says `manifestVariant`?
+ *
+ * For Púca's two channels this is bundleVariantMatches: absent means "full".
+ * For 'notes' the match is EXACT — absent, null, 'full', 'lite' and any other
+ * spelling are refused. Púca Notes is a different app, not a variant, and the
+ * server that predates its manifest answers `?variant=notes` with Púca's FULL
+ * manifest, untagged or tagged "full"; reading that as a match would install
+ * Púca into the Notes app. (Its bundle would then fail the signature check
+ * against Notes' own key — this is the first of the independent layers, not
+ * the only one.)
+ */
+export function otaChannelMatches(
+    manifestVariant: string | undefined | null,
+    channel: OtaChannel,
+): boolean {
+    if (channel === 'notes') return manifestVariant === 'notes';
+    return (manifestVariant ?? 'full') === channel;
 }
 
 /** Parsed-tuple equality — never string equality, so 'v0.9.811', a trailing

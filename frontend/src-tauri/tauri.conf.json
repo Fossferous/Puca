@@ -5,10 +5,10 @@
   "version": "0.9.815",
   "identifier": "com.sovereign.chat",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../dist-desktop",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build && node scripts/stage-desktop-dist.mjs"
   },
   "app": {
     "windows": [
