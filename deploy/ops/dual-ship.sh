@@ -720,13 +720,32 @@ cmd_mobile_notes() {
 	# anywhere: lowering it re-exposes every APK between the two versions to
 	# web code calling a plugin they do not have.
 	# A host that cannot be read cannot be proved safe: refuse rather than
-	# guess (curl -s answers a 404 with exit 0, so this is a real failure).
-	local entry served_body served_min lowered=()
+	# guess. curl -s exits 0 on ANY status, so the status is read first: 404
+	# is the one answer that means "no Notes manifest here yet" (no floor to
+	# keep); 200 must carry a JSON manifest; a 502/503 or an HTML error page
+	# from a backend mid-restart proves nothing and used to read as "no floor".
+	local entry served_code served_body served_min lowered=() json_re='^[[:space:]]*[{]'
 	for entry in "${HOSTS[@]}"; do
-		if ! served_body="$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
+		if ! served_code="$(remote_code "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
 			echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
 			exit 1
 		fi
+		case "$served_code" in
+			404) served_body="" ;;
+			200)
+				if ! served_body="$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
+					echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
+					exit 1
+				fi
+				if [[ ! "$served_body" =~ $json_re ]]; then
+					echo "REFUSING: $(label_of "$entry") answered its Notes manifest with something that is not JSON, so nothing proves this release keeps its native.min."
+					exit 1
+				fi ;;
+			*)
+				echo "REFUSING: $(label_of "$entry") answered HTTP ${served_code:-<none>} for its current Notes manifest (expected 200, or 404 before the first Notes OTA)."
+				echo "Nothing proves this release keeps its native.min; wait for the host to answer and re-run."
+				exit 1 ;;
+		esac
 		served_min="$(notes_served_min "$served_body")"
 		if [ -n "$served_min" ] && ver_gt "$served_min" "$native_min"; then
 			lowered+=("$(label_of "$entry") serves $served_min")

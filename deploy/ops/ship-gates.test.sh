@@ -697,7 +697,10 @@ else
 		cat > "$TMP/bin/ssh" <<STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
-case "\$*" in *variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;; esac
+case "\$*" in
+	*http_code*variant=notes*) if [ -f "$TMP/notes-code" ]; then cat "$TMP/notes-code"; elif [ -f "$TMP/notes-ota.json" ]; then echo 200; else echo 404; fi ;;
+	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
+esac
 exit 0
 STUB
 		chmod +x "$TMP/bin/ssh"
@@ -807,6 +810,24 @@ STUB
 	check "an unreadable host REFUSES the ship before anything is written" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: could not read sandbox's current Notes manifest")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
 	restore_recording_ssh
 
+	# A host whose backend is restarting answers 502 with Caddy's HTML page.
+	# That is not "no floor served": it proves nothing, so it must refuse, and
+	# so must a 200 whose body is not a JSON manifest. Only a 404 (no Notes
+	# manifest on that host yet) is an answer with no floor in it.
+	printf '<html><body>502 Bad Gateway</body></html>\n' > "$TMP/notes-ota.json"
+	echo 502 > "$TMP/notes-code"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "a host answering 502 on ?variant=notes REFUSES the ship before anything is written" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered HTTP 502 for its current Notes manifest")" = 1 ] && ! grep -q '^scp' "$LOG" && ! grep -q 'cat > mobile-update-notes.json' "$LOG" && echo 1 || echo 0)" "$out"
+	echo 503 > "$TMP/notes-code"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "and one answering 503" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered HTTP 503")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
+	echo 200 > "$TMP/notes-code"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "and a 200 whose body is an HTML page, not a manifest" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered its Notes manifest with something that is not JSON")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
+	rm -f "$TMP/notes-code" "$TMP/notes-ota.json"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "a 404 (no Notes manifest on the host yet) proceeds to write one (positive control)" "$([ "$(has "$out" 'REFUSING')" = 0 ] && grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -q '"min": "9.9.8"' "$LOG" && echo 1 || echo 0)" "$out"
+
 	# THE ISOLATION CHECK MUST BE ABLE TO FAIL. The recording stub answers the
 	# full and lite endpoints with the same (empty) body before and after, so
 	# a check that compared nothing would pass there too. Here the stub's full
@@ -818,6 +839,7 @@ STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
 case "\$*" in
+	*http_code*variant=notes*) echo 200 ;;
 	*variant=notes*) cat "$TMP/notes-ota.json" ;;
 	*variant=lite*) [ "$which" = lite ] && { n=\$(( \$(cat "$TMP/reads" 2>/dev/null || echo 0) + 1 )); echo \$n > "$TMP/reads"; echo "{\"version\":\"9.9.\$n\",\"variant\":\"lite\"}"; } ;;
 	*mobile-updates/check*) [ "$which" = full ] && { n=\$(( \$(cat "$TMP/reads" 2>/dev/null || echo 0) + 1 )); echo \$n > "$TMP/reads"; echo "{\"version\":\"9.9.\$n\"}"; } ;;
