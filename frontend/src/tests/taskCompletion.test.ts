@@ -79,4 +79,59 @@ describe('planToggle — the one completion path', () => {
         await planToggle([t], t, false, { canEdit: true }).send();
         expect(patchTaskTiming).toHaveBeenCalledWith(t, { is_completed: false });
     });
+
+    describe('ticking a PARENT never ends a series below it (the server sweeps the subtree)', () => {
+        const weekly = serializeSchedule({ ...daily, rrule: 'FREQ=WEEKLY' });
+        const NOW = T('2026-10-05T12:00:00Z');
+
+        it('a plain parent with a repeating child is refused, nothing changes, nothing is sent', async () => {
+            const parent = mk(1);
+            const kid = mk(2, { parent_id: 1, description: 'Water the plants', schedule: weekly, due_at: '2026-10-05T09:00:00.000Z' });
+            const p = planToggle([parent, kid], parent, true, { canEdit: true, now: NOW });
+            expect(p.next).toEqual([parent, kid]);
+            await expect(p.send()).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Water the plants.*repeats/) });
+            expect(patchTaskTiming).not.toHaveBeenCalled();
+        });
+
+        it('a GRANDCHILD that repeats blocks too, and so does a one-off parent (its own schedule completes)', async () => {
+            const oneOff = mk(1, { schedule: serializeSchedule({ ...daily, rrule: undefined }) });
+            const mid = mk(2, { parent_id: 1 });
+            const grand = mk(3, { parent_id: 2, schedule: weekly });
+            await expect(planToggle([oneOff, mid, grand], oneOff, true, { canEdit: true, now: NOW }).send()).rejects.toBeInstanceOf(ApiError);
+            expect(patchTaskTiming).not.toHaveBeenCalled();
+        });
+
+        it('a descendant schedule this device cannot read blocks (it may repeat)', async () => {
+            const parent = mk(1);
+            const kid = mk(2, { parent_id: 1, schedule: '[Encrypted — key unavailable]' });
+            await expect(planToggle([parent, kid], parent, true, { canEdit: true, now: NOW }).send()).rejects.toThrow(/can’t read/);
+            expect(patchTaskTiming).not.toHaveBeenCalled();
+        });
+
+        it('positive controls: a one-off child, a finished series, an already-done child and UN-ticking all go through', async () => {
+            const parent = mk(1);
+            const oneOffKid = mk(2, { parent_id: 1, schedule: serializeSchedule({ ...daily, rrule: undefined }) });
+            await planToggle([parent, oneOffKid], parent, true, { canEdit: true, now: NOW }).send();
+            const endedKid = mk(3, { parent_id: 1, schedule: serializeSchedule({ ...daily, rrule: 'FREQ=DAILY;COUNT=1', doneThrough: '2026-10-05T09:00' }) });
+            await planToggle([parent, endedKid], parent, true, { canEdit: true, now: NOW }).send();
+            const doneKid = mk(4, { parent_id: 1, schedule: weekly, is_completed: true });
+            await planToggle([parent, doneKid], parent, true, { canEdit: true, now: NOW }).send();
+            const openKid = mk(5, { parent_id: 1, schedule: weekly });
+            await planToggle([{ ...parent, is_completed: true }, openKid], { ...parent, is_completed: true }, false, { canEdit: true, now: NOW }).send();
+            expect(patchTaskTiming).toHaveBeenCalledTimes(4);
+            // An unrelated repeating item elsewhere in the list does not block.
+            const other = mk(6, { schedule: weekly });
+            await planToggle([parent, other], parent, true, { canEdit: true, now: NOW }).send();
+            expect(patchTaskTiming).toHaveBeenCalledTimes(5);
+        });
+
+        it('a repeating PARENT still advances (reopening its subtree, never sweeping it)', async () => {
+            const parent = mk(1, { schedule: weekly, due_at: '2026-10-05T09:00:00.000Z' });
+            const kid = mk(2, { parent_id: 1, schedule: weekly });
+            const p = planToggle([parent, kid], parent, true, { canEdit: true, now: NOW });
+            expect(p.advanced).toBe(true);
+            await p.send();
+            expect(patchTaskTiming.mock.calls[0][1]).toMatchObject({ reopen_subtree: true });
+        });
+    });
 });
