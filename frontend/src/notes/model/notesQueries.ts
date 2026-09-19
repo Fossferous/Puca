@@ -639,8 +639,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
         // A note with text or pictures goes through the content path: its
         // uploads cannot wait for a connection, so it never queues (it says
-        // so when it fails) and it carries no item timing (docs/NOTES.md).
-        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra);
+        // so when it fails). Its items keep their timing, as here — a copy
+        // of a text note keeps its items' dates and repeats.
+        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra, timing);
         // Timing rides with its item through the blank-dropping clean.
         const timingOf = new Map<number, NewTaskTiming | undefined>();
         const cleanItems = cleanQuickItems(items.filter((raw, i) => {

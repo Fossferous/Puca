@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import {
+    type NewTaskTiming,
     type Task,
     type TaskAttachmentRef,
     type TaskList,
@@ -49,6 +50,7 @@ import {
 import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
+import { pokeTaskReminders } from '../../api/taskReminders';
 import { type NoteRef, cleanQuickItems } from './notesModel';
 import { deriveContentTitle } from './noteContent';
 
@@ -117,7 +119,8 @@ export interface ListContentActions {
     /** What the server supports, asking it now if that is not known yet;
      *  null when it cannot be reached. A delete must never guess. */
     ensureFeatures: () => Promise<ListFeatures | null>;
-    createContentNote: (title: string, items: string[], extra: NoteExtras) => Promise<NoteRef | null>;
+    /** `timing[i]` is item i's date & repeat (a copy of a note keeps them). */
+    createContentNote: (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
     setBody: (listId: number, body: string) => Promise<boolean>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
@@ -143,8 +146,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => prev?.map(l => (l.id === id ? fn(l) : l)));
     }, [qc]);
 
-    const createContentNote = useCallback(async (title: string, items: string[], extra: NoteExtras): Promise<NoteRef | null> => {
-        const cleanItems = cleanQuickItems(items);
+    const createContentNote = useCallback(async (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
+        // Each item's timing rides with it through the blank-dropping clean.
+        const entries = items
+            .map((raw, i) => ({ text: cleanQuickItems([raw])[0], timing: timing?.[i] }))
+            .filter((e): e is { text: string; timing: NewTaskTiming | undefined } => e.text !== undefined);
+        const cleanItems = entries.map(e => e.text);
         const body = extra.body?.replace(/\s+$/, '') ?? '';
         let refs: TaskAttachmentRef[] = [];
         try {
@@ -173,13 +180,16 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         const ref: NoteRef = { kind: 'list', id: list.id };
         const created: Task[] = [];
-        for (const text of cleanItems) {
+        let timed = false;
+        for (const e of entries) {
             try {
-                created.push(await createListTask(list.id, text));
+                created.push(await createListTask(list.id, e.text, undefined, e.timing));
+                if (e.timing) timed = true;
             } catch (err) {
                 explain('create item failed', err);
             }
         }
+        if (timed) pokeTaskReminders();
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
         return ref;
