@@ -19,8 +19,10 @@ import java.util.List;
  * written. A renewed token in `x-renewed-token` is kept (never a staler one —
  * {@link JwtClaims#newer}) and handed back to the page on its next start.
  *
- * On 401/403 the session is dead (expired past its 30-day cap, signed out
- * everywhere, password changed): the token is dropped, the job is cancelled —
+ * On 401 — and only 401 ({@link ReminderRules#refreshOutcome}; a 403 or a 5xx
+ * is a failed look, retried next period) — the session is dead (expired, past
+ * its 30-day cap, signed out everywhere, password changed): the token is
+ * dropped, the job is cancelled —
  * never retried in a loop — reminders whose time has already passed are
  * dropped (they may be done by now and nothing can check), and ONE
  * content-free notice asks the user to open the app. Future reminders stay
@@ -28,9 +30,9 @@ import java.util.List;
  */
 final class ReminderRefresh {
 
-    static final int OK = 0;
-    static final int AUTH_DEAD = 1;
-    static final int FAILED = 2;
+    static final int OK = ReminderRules.OK;
+    static final int AUTH_DEAD = ReminderRules.AUTH_DEAD;
+    static final int FAILED = ReminderRules.FAILED;
     static final int NO_SESSION = 3;
 
     private static final int MAX_BODY = 2 * 1024 * 1024;
@@ -74,11 +76,12 @@ final class ReminderRefresh {
             if (c != null) c.disconnect();
         }
 
-        if (status == 401 || status == 403) {
+        int outcome = ReminderRules.refreshOutcome(status);
+        if (outcome == AUTH_DEAD) {
             authDead(ctx, token);
             return AUTH_DEAD;
         }
-        if (status != 200 || body == null) {
+        if (outcome != OK || body == null) {
             android.util.Log.i(TAG, "refresh: HTTP " + status);
             return FAILED;
         }
@@ -102,6 +105,8 @@ final class ReminderRefresh {
                         JwtClaims.newer(ReminderStore.token(ctx), renewed));
             }
             ReminderStore.setEntries(ctx, ReminderMerge.merge(ReminderStore.entries(ctx), rows));
+            // Freshness for ReminderOwnerProvider: the feed was really read.
+            ReminderStore.setLastSync(ctx, System.currentTimeMillis());
         }
         ReminderAlarms.arm(ctx);
         return OK;

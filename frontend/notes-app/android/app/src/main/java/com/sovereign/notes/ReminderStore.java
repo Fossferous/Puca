@@ -41,6 +41,10 @@ final class ReminderStore {
     private static final String K_API = "apiBase";
     private static final String K_TOKEN = "token";
     private static final String K_STALE_POSTED = "staleNoticePosted";
+    /** When the reminder feed was last read successfully (the job's refresh,
+     *  or the open page handing over a fresh fetch) — ReminderOwnerProvider's
+     *  "is Notes keeping up?" input. */
+    private static final String K_LAST_SYNC = "lastSyncMs";
 
     private ReminderStore() {}
 
@@ -66,6 +70,14 @@ final class ReminderStore {
 
     static void setStaleNoticePosted(Context ctx, boolean posted) {
         p(ctx).edit().putBoolean(K_STALE_POSTED, posted).commit();
+    }
+
+    static long lastSync(Context ctx) {
+        return p(ctx).getLong(K_LAST_SYNC, 0L);
+    }
+
+    static void setLastSync(Context ctx, long ms) {
+        p(ctx).edit().putLong(K_LAST_SYNC, ms).commit();
     }
 
     /** A different account (or none) replaces EVERYTHING: the next account
