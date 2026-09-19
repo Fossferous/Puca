@@ -473,18 +473,35 @@ export function snoozeMovedDue(dueAt: string | null, s: Snooze | null): boolean 
 }
 
 /**
+ * May this user change the snooze at all? Not when an editor's snooze has
+ * MOVED due_at and this user may not edit the item's time (a member with the
+ * completion right only). Unsnoozing that needs due_at put back, which the
+ * server gives to editors alone — a sealed-only `{snooze: null}` would leave
+ * due_at at the snooze instant and lose the item's real time for good. A
+ * re-snooze has no form that works either: sealed against the old time it
+ * would not match due_at (inert), sealed against the current one it would
+ * overwrite the pushed-back time an editor's Unsnooze restores. So the
+ * control is hidden (Reminders, both calendar menus) and snoozePatch refuses.
+ */
+export function snoozeLocked(task: { due_at: string | null; snooze?: string | null }, canMoveDue: boolean): boolean {
+    if (canMoveDue || !task.due_at) return false;
+    return snoozeMovedDue(task.due_at, activeSnooze(task.due_at, task.snooze));
+}
+
+/**
  * The PATCH a snooze (untilMs) or an unsnooze (null) sends. With `canMoveDue`
  * (the snoozer may edit the item's time: its creator, a task manager, any
  * personal list) the plaintext due_at moves to the snooze instant — and back
  * to the pushed-back time on an unsnooze — guarded by expect_due_at so a
  * snooze racing another device's edit loses cleanly (409). Without it only
  * the sealed snooze changes (the server gives due_at to editors alone).
- * Null when there is nothing to snooze (no due_at: a private-timing item).
+ * Null when there is nothing to snooze (no due_at: a private-timing item), or
+ * when this user may not touch an editor's moved snooze (snoozeLocked).
  */
 export function snoozePatch(
     task: { due_at: string | null; snooze?: string | null }, untilMs: number | null, canMoveDue: boolean,
 ): { snooze: string | null; due_at?: string; expect_due_at?: string } | null {
-    if (!task.due_at) return null;
+    if (!task.due_at || snoozeLocked(task, canMoveDue)) return null;
     const cur = activeSnooze(task.due_at, task.snooze);
     const base = cur && snoozeMovedDue(task.due_at, cur) ? cur.forDue : task.due_at;
     if (untilMs === null) {

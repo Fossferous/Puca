@@ -628,6 +628,10 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   sealed snooze keeps the time it pushed back, which Unsnooze restores. A
   member who may only tick gets a sealed snooze alone, which applies while
   `due_at` is unchanged. Either way it lapses by itself when the item moves.
+  Once an editor's snooze has moved `due_at`, such a member is not offered
+  Snooze or Unsnooze on that item (`taskSchedule.snoozeLocked`): putting
+  `due_at` back needs the edit right, and a sealed-only re-snooze would
+  either not apply or overwrite the time Unsnooze restores.
   Every reminder engine reads the same entries, `{id, at, mark, due}`
   (`frontend/src/api/reminderFeed.ts`): `at` is the snooze time while one is in
   force, `mark` changes whenever the item must fire again, and `due` is the raw

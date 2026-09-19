@@ -15,7 +15,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { type CalendarEntry, type CalendarSource, entriesInRange, groupByDay, layoutDay } from '../../api/taskCalendar';
-import { type SnoozePreset, activeSnooze } from '../../api/taskSchedule';
+import { type SnoozePreset, activeSnooze, snoozeLocked } from '../../api/taskSchedule';
 import { formatDateKey, formatTime } from '../../api/scheduleFormat';
 import {
     type WeekStart, addDaysToKey, gridOpenHour, localDayKey, minutesIntoDay, monthMatrix, parseWall, viewerZone, weekOf,
@@ -498,8 +498,11 @@ function EntryMenu({
     }, [onClose]);
     const t = entry.source.task;
     // A snooze rides the completion right on the server: never offer it to a
-    // member who would only be refused (a 403 the menu cannot explain).
-    const canSnooze = !!onSnooze && !!t.due_at && !entry.completed && entry.source.canComplete !== false;
+    // member who would only be refused (a 403 the menu cannot explain) — nor
+    // to one who may not edit its time once an editor's snooze has moved
+    // due_at (taskSchedule.snoozeLocked: no change they could make works).
+    const canSnooze = !!onSnooze && !!t.due_at && !entry.completed && entry.source.canComplete !== false
+        && !snoozeLocked(t, entry.source.canEdit);
     const snoozed = activeSnooze(t.due_at, t.snooze);
     const act = (fn: () => void) => () => { onClose(); fn(); };
     return createPortal(

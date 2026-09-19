@@ -16,7 +16,7 @@ import {
     MAX_ENTRIES_PER_ITEM, OCCURRENCE_HORIZON_MS, planEntries, toReminderEntries, type OpenedReminder,
 } from '../api/reminderFeed';
 import {
-    activeSnooze, effectiveReminderMs, parseSnooze, serializeSchedule, serializeSnooze, snoozeMovedDue, snoozePatch, type EventSchedule,
+    activeSnooze, effectiveReminderMs, parseSnooze, serializeSchedule, serializeSnooze, snoozeLocked, snoozeMovedDue, snoozePatch, type EventSchedule,
 } from '../api/taskSchedule';
 
 const T = (s: string) => Date.parse(s);
@@ -53,6 +53,27 @@ describe('(a) a snooze moves the plaintext due_at', () => {
         // Positive controls: a stale snooze is not active; nothing to snooze without a due time.
         expect(activeSnooze('2026-10-12T19:00:00Z', moved.snooze)).toBeNull();
         expect(snoozePatch({ due_at: null }, until, true)).toBeNull();
+    });
+
+    it('a member who may only complete cannot re-snooze or unsnooze an editor’s MOVED snooze', () => {
+        const moved = { due_at: '2026-10-05T20:00:00.000Z', snooze: serializeSnooze({ forDue: DUE, until: '2026-10-05T20:00:00.000Z' }) };
+        expect(snoozeLocked(moved, false)).toBe(true);
+        // Unsnooze: {snooze:null} alone would strand due_at at the snooze instant and lose DUE.
+        expect(snoozePatch(moved, null, false)).toBeNull();
+        // Re-snooze: sealed against DUE it would not match due_at (inert); against due_at it would lose DUE.
+        expect(snoozePatch(moved, T('2026-10-06T09:00:00Z'), false)).toBeNull();
+        // Positive controls: the editor still can; the same member can on a
+        // sealed-only snooze and on an unsnoozed item.
+        expect(snoozeLocked(moved, true)).toBe(false);
+        expect(snoozePatch(moved, null, true)).not.toBeNull();
+        const sealedOnly = { due_at: DUE, snooze: serializeSnooze({ forDue: DUE, until: '2026-10-05T20:00:00.000Z' }) };
+        expect(snoozeLocked(sealedOnly, false)).toBe(false);
+        expect(snoozePatch(sealedOnly, null, false)).toEqual({ snooze: null });
+        const again = snoozePatch(sealedOnly, T('2026-10-06T09:00:00Z'), false)!;
+        expect(parseSnooze(again.snooze)?.forDue).toBe(DUE);
+        expect(snoozeLocked({ due_at: DUE, snooze: null }, false)).toBe(false);
+        // A lapsed moved snooze (due_at since edited) locks nothing.
+        expect(snoozeLocked({ due_at: '2026-10-12T19:00:00Z', snooze: moved.snooze }, false)).toBe(false);
     });
 
     it('the feed fires a moved snooze at the snooze instant, with due_at as its mark', () => {

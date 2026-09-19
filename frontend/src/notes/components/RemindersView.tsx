@@ -5,7 +5,8 @@
  */
 import { type ReactNode } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
-import { canCompleteTasks, formatDueShort } from '../../api/tasks';
+import { canCompleteTasks, canEditTask, formatDueShort } from '../../api/tasks';
+import { snoozeLocked } from '../../api/taskSchedule';
 import { PlaceReminders } from '../native/PlaceReminders';
 import { type PlaceItem } from '../native/useNotesPlaces';
 import { BellIcon } from '../../components/Icons';
@@ -36,6 +37,15 @@ function remindsSomeoneElse(item: DueItem, me: number | null): boolean {
     return item.note.ref.kind === 'channel' && me !== null && item.task.created_by !== me;
 }
 
+/** Snooze rides the completion right; an editor's MOVED snooze is further
+ *  off-limits to a member who may not edit the item's time
+ *  (taskSchedule.snoozeLocked). A personal note is always yours. */
+function mayChangeSnooze(item: DueItem): boolean {
+    if (item.note.ref.kind === 'list') return true;
+    if (!canCompleteTasks(item.note.myPerms)) return false;
+    return !snoozeLocked(item.task, canEditTask(item.task, currentUserIdFromToken() ?? undefined, item.note.myPerms));
+}
+
 function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem; actions: NoteActions; now: number; onOpen: (c: NoteCard) => void; canSnooze?: boolean }) {
     return (
         <div className="notes-reminder-row" role="button" tabIndex={0}
@@ -58,7 +68,7 @@ function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem;
             <ReminderTimingMarks slot={item.slot} />
             <span className="notes-reminder-note">{item.note.title}</span>
             <span className="notes-reminder-when" title={new Date(item.at).toLocaleString()}>{formatDueShort(new Date(item.at).toISOString(), now)}</span>
-            {canSnooze && (item.note.ref.kind === 'list' || canCompleteTasks(item.note.myPerms)) && <SnoozeControl item={item} actions={actions} now={now} />}
+            {canSnooze && mayChangeSnooze(item) && <SnoozeControl item={item} actions={actions} now={now} />}
         </div>
     );
 }

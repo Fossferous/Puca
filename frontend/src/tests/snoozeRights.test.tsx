@@ -15,6 +15,7 @@ import { ApiError } from '../api/client';
 import { toastRefusal } from '../api/refusalToast';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { PERM } from '../api/permissionBits';
+import { serializeSnooze } from '../api/taskSchedule';
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -39,8 +40,9 @@ const task: Task = {
     created_at: '2030-09-01T00:00:00Z', created_by: 2, attachments: null, due_at: DUE,
 };
 
-function openMenu(canComplete: boolean | undefined) {
-    const src: CalendarSource = { task, noteKey: 'channel:9', noteTitle: '#home', canEdit: false, ...(canComplete === undefined ? {} : { canComplete }) };
+function openMenu(canComplete: boolean | undefined, over: { t?: Task; canEdit?: boolean } = {}) {
+    const t = over.t ?? task;
+    const src: CalendarSource = { task: t, noteKey: 'channel:9', noteTitle: '#home', canEdit: over.canEdit ?? false, ...(canComplete === undefined ? {} : { canComplete }) };
     const el = mount(
         <Calendar
             sources={[src]} view="day" date="2030-10-07" onNavigate={() => {}} showCompleted={false} showPlain
@@ -48,11 +50,23 @@ function openMenu(canComplete: boolean | undefined) {
             onOpen={() => {}} onMove={() => {}} onAdd={() => {}} onToggleDone={() => {}} onSnooze={() => {}}
         />,
     );
-    const more = [...el.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === 'More for Bins out');
+    const more = [...el.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === `More for ${t.description}`);
     expect(more).toBeTruthy();
     act(() => more!.click());
     return document.body.querySelector('.cal-menu-snooze');
 }
+
+const card = (myPerms: number | undefined, kind: 'list' | 'channel', t: Task = task): NoteCard => ({
+    key: `${kind}:9`, ref: { kind, id: 9 }, title: 'home', tasks: [t], pinned: false, color: 'default', labels: [], archived: false,
+    total: 1, completed: 0, myPerms,
+} as unknown as NoteCard);
+const reminders = (c: NoteCard, t: Task = task) => mount(
+    <RemindersView
+        groups={{ overdue: [], today: [], upcoming: [{ task: t, note: c, at: Date.parse(t.due_at!) }] }}
+        actions={{} as NoteActions} now={Date.parse('2030-10-01T00:00:00Z')} onOpen={() => {}}
+        notificationsState="granted" onEnableNotifications={() => {}} canSnooze
+    />,
+);
 
 describe('Snooze needs the completion right', () => {
     it('the calendar menu hides Snooze from a member without COMPLETE_TASKS', () => {
@@ -65,17 +79,6 @@ describe('Snooze needs the completion right', () => {
         expect(openMenu(undefined)).not.toBeNull();
     });
 
-    const card = (myPerms: number | undefined, kind: 'list' | 'channel'): NoteCard => ({
-        key: `${kind}:9`, ref: { kind, id: 9 }, title: 'home', tasks: [task], pinned: false, color: 'default', labels: [], archived: false,
-        total: 1, completed: 0, myPerms,
-    } as unknown as NoteCard);
-    const reminders = (c: NoteCard) => mount(
-        <RemindersView
-            groups={{ overdue: [], today: [], upcoming: [{ task, note: c, at: Date.parse(DUE) }] }}
-            actions={{} as NoteActions} now={Date.parse('2030-10-01T00:00:00Z')} onOpen={() => {}}
-            notificationsState="granted" onEnableNotifications={() => {}} canSnooze
-        />,
-    );
     it('Notes’ Reminders row hides it in a shared note without the right', () => {
         const el = reminders(card(PERM.VIEW_CHANNEL, 'channel'));
         expect(el.querySelector('.notes-snooze')).toBeNull();
@@ -85,6 +88,35 @@ describe('Snooze needs the completion right', () => {
         act(() => root?.unmount());
         document.body.innerHTML = '';
         expect(reminders(card(undefined, 'list')).querySelector('.notes-snooze')).not.toBeNull();
+    });
+});
+
+// An editor's snooze MOVED due_at to the snooze instant. A member who may
+// complete but not edit the item's time can neither unsnooze it (due_at is
+// the editor's to put back) nor re-snooze it (taskSchedule.snoozeLocked), so
+// neither surface offers it to them.
+describe('an editor’s moved snooze is not a tick-only member’s to change', () => {
+    const MOVED = '2030-10-07T10:00:00.000Z';
+    const moved: Task = { ...task, description: 'Moved bins', due_at: MOVED, snooze: serializeSnooze({ forDue: DUE, until: MOVED }) };
+    it('the calendar menu hides Snooze from a member who may complete but not edit', () => {
+        expect(openMenu(true, { t: moved, canEdit: false })).toBeNull();
+    });
+    it('positive control: an editor is offered it, and the same member is offered it on an unsnoozed item', () => {
+        expect(openMenu(true, { t: moved, canEdit: true })).not.toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(openMenu(true, { t: { ...moved, snooze: null }, canEdit: false })).not.toBeNull();
+    });
+    it('Notes’ Reminders row hides it from a COMPLETE-only member of a shared note', () => {
+        const el = reminders(card(PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS, 'channel', moved), moved);
+        expect(el.querySelector('.notes-reminder-row')).not.toBeNull();
+        expect(el.querySelector('.notes-snooze')).toBeNull();
+    });
+    it('positive control: a task manager, and a personal note, still get it', () => {
+        expect(reminders(card(PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS, 'channel', moved), moved).querySelector('.notes-snooze')).not.toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(reminders(card(undefined, 'list', moved), moved).querySelector('.notes-snooze')).not.toBeNull();
     });
 });
 
