@@ -44,7 +44,6 @@ import {
     orderTaskTabs,
     isFavoriteTab,
     buildPrefsForOrder,
-    toggleFavoritePrefs,
     taskTabKey,
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
@@ -59,6 +58,10 @@ import { useContextMenu } from './contextMenuUtils';
 import { ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
+import { ListContentBlock, TasksTrash } from './ListContentBlock';
+import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
+import { keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
 import './ServerTasksBoard.css';
@@ -123,6 +126,10 @@ export function TasksView() {
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const currentUserId = tokenUserId();
     const notesHref = notesUrl();
+    // Púca Notes' text/photo notes and the trash, where the server has them.
+    const support = useListContentSupport();
+    const qc = useQueryClient();
+    const patchList = (id: number, patch: Partial<TaskList>) => setLists(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
     // Read at async completion time (the reparent refetch guard) — the load
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
@@ -190,7 +197,8 @@ export function TasksView() {
     };
 
     const toggleFavorite = (tab: BarTab) => {
-        savePrefs(toggleFavoritePrefs(orderedTabs, prefs, tab));
+        // A trashed list keeps its slot in the saved order (api/listContent.ts).
+        savePrefs(toggleFavoriteKeepingHidden(orderedTabs, prefs, tab, support.trashedKeys));
     };
 
     // Tab drag: mouse drags after a small threshold; touch long-presses to
@@ -207,7 +215,7 @@ export function TasksView() {
             const newKeys = [...order];
             newKeys.splice(insertAt, 0, key);
             const newOrder = newKeys.map(k => byKey.get(k)).filter((t): t is BarTab => !!t);
-            savePrefs(buildPrefsForOrder(newOrder, prefs));
+            savePrefs(buildPrefsForOrder(keepHiddenSlots(newOrder, prefs, support.trashedKeys), prefs));
         },
     });
 
@@ -302,6 +310,24 @@ export function TasksView() {
     };
 
     const handleDeleteList = async (list: TaskList) => {
+        if (support.trashEnabled) {
+            const days = support.features.trashRetentionDays;
+            if (!confirm(`Move "${list.title}" to the trash? ${days > 0 ? `You can restore it for ${days} days` : 'You can restore it'} from the Trash below the All tasks board, or in Púca Notes.`)) return;
+            const original = lists;
+            setLists(prev => prev.filter(l => l.id !== list.id));
+            if (selected?.kind === 'list' && selected.id === list.id) setSelected(null);
+            try {
+                await trashTaskList(list.id);
+                qc.setQueryData<TaskList[]>(listContentQueryKeys.trash, prev => [{ ...list, trashed_at: new Date().toISOString() }, ...(prev ?? []).filter(l => l.id !== list.id)]);
+                void qc.invalidateQueries({ queryKey: listContentQueryKeys.trash });
+                pokeTaskReminders();
+            } catch (err) {
+                console.error('Failed to move list to the trash:', err);
+                if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
+                setLists(original);
+            }
+            return;
+        }
         if (!confirm(`Delete list "${list.title}" and all its tasks?`)) return;
         const original = lists;
         setLists(prev => prev.filter(l => l.id !== list.id));
@@ -493,7 +519,7 @@ export function TasksView() {
                     },
                     {
                         id: 'delete-list',
-                        label: 'Delete List',
+                        label: support.trashEnabled ? 'Move to trash' : 'Delete List',
                         icon: 'trash',
                         danger: true,
                         onClick: () => handleDeleteList(list),
@@ -549,6 +575,7 @@ export function TasksView() {
                             : list && list.total_tasks > 0 ? `${list.completed_tasks}/${list.total_tasks}` : ''}
                     </span>
                 </header>
+                {tab.kind === 'list' && listBodySnippet(list) && <p className="tasks-card-body">{listBodySnippet(list)}</p>}
                 {tab.kind === 'list' ? (
                     <ChecklistBody
                         listId={tab.id}
@@ -701,12 +728,19 @@ export function TasksView() {
                         )}
                         <button
                             className="tasks-editor-delete"
-                            title="Delete this list"
+                            title={support.trashEnabled ? 'Move this list to the trash' : 'Delete this list'}
                             onClick={() => handleDeleteList(selectedList)}
                         >
                             <TrashIcon />
                         </button>
                     </div>
+
+                    <ListContentBlock
+                        list={selectedList}
+                        features={support.features}
+                        onPatch={patchList}
+                        coarse={isMobile() || window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches}
+                    />
 
                     <form className="tasks-add" onSubmit={handleAddTask}>
                         <input
@@ -740,6 +774,14 @@ export function TasksView() {
                     <div className="tasks-empty-icon"><FileTextIcon size={40} /></div>
                     <p>That checklist is gone. Pick another above.</p>
                 </div>
+            )}
+
+            {selected === null && !loading && (
+                <TasksTrash
+                    features={support.features}
+                    trashed={support.trashed}
+                    onRestored={l => setLists(prev => (prev.some(x => x.id === l.id) ? prev : [...prev, l]))}
+                />
             )}
 
             {contextMenu && (
