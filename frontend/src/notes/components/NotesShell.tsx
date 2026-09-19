@@ -11,6 +11,7 @@ import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import { notificationPermission } from '../../api/desktopNotify';
 import { startTaskReminders } from '../../api/taskReminders';
+import { useTaskFeature } from '../../api/taskFeatures';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
 import { useContextMenu } from '../../components/contextMenuUtils';
 import { IdentityBanner } from '../../components/IdentityBanner';
@@ -23,7 +24,7 @@ import {
 } from '../model/notesModel';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
-import { downloadTextFile, fileStamp, noteToMarkdown, notesToJson, notesToMarkdown, openItemsOf } from '../model/noteText';
+import { downloadTextFile, fileStamp, noteToMarkdown, notesToJson, notesToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
 import { AccountMenu } from './AccountMenu';
 import { ColorPicker } from './ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
@@ -73,6 +74,7 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     if (sort === 'puca') return cards;
     const out = [...cards];
     if (sort === 'title') out.sort((a, b) => a.title.localeCompare(b.title));
+    else if (sort === 'edited') out.sort((a, b) => (Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0) - (Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0));
     else out.sort((a, b) => (Date.parse(b.createdAt ?? '') || 0) - (Date.parse(a.createdAt ?? '') || 0));
     return out;
 }
@@ -96,6 +98,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const local = useNotesPrefs();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
+    const canSnooze = useTaskFeature('snooze') === true;
+    const scheduleOnServer = useTaskFeature('schedule') === true;
 
     const [drawer, setDrawer] = useState(false);
     const [popup, setPopup] = useState<Popup | null>(null);
@@ -215,7 +219,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         }
     };
     const duplicate = async (card: NoteCard) => {
-        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card));
+        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card), scheduleOnServer ? openItemTimingOf(card) : undefined);
         if (ref) {
             pushMessageToast({ title: 'Copied — open items only, un-nested' });
             setParams(p => { p.set('note', `${ref.kind}:${ref.id}`); return p; });
@@ -367,6 +371,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 onOpen={openNote}
                                 notificationsState={notif}
                                 onEnableNotifications={() => { void enableNotifications(); }}
+                                canSnooze={canSnooze}
                             />
                         ) : (
                             <>

@@ -37,6 +37,9 @@ import { listServers, listChannels, listMembersWithRoles, type Channel, type Mem
 import { ApiError } from '../../api/client';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { planToggle } from '../../api/taskCompletion';
+import { patchTaskTiming } from '../../api/tasks';
+import { serializeSnooze } from '../../api/taskSchedule';
+import { type NewTaskTiming } from '../../api/tasks';
 import { canEditTask } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { pushMessageToast } from '../../components/messageToastBus';
@@ -171,6 +174,7 @@ function listSource(l: TaskList): NoteSource {
         totalTasks: l.total_tasks,
         completedTasks: l.completed_tasks,
         createdAt: l.created_at,
+        updatedAt: l.updated_at,
     };
 }
 
@@ -303,11 +307,15 @@ export interface NoteActions {
     moveTaskIn: (note: NoteRef, task: Task, direction: 'up' | 'down') => Promise<void>;
     reorderTaskIn: (note: NoteRef, task: Task, afterId: number | null, reparent?: { parentId: number | null }) => Promise<void>;
     setDue: (note: NoteRef, task: Task, dueAt: string | null) => Promise<void>;
+    /** Date & repeat (plaintext schedule, null removes) with its derived due_at. */
+    setSchedule: (note: NoteRef, task: Task, schedule: string | null, dueAt: string | null) => Promise<void>;
+    /** Snooze the item's current reminder until an instant (null = unsnooze). */
+    snoozeTask: (note: NoteRef, task: Task, until: number | null) => Promise<void>;
     setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
      *  and null only when nothing was saved. */
-    createNote: (title: string, items: string[]) => Promise<NoteRef | null>;
+    createNote: (title: string, items: string[], timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
     renameNote: (note: NoteRef, title: string) => Promise<boolean>;
     deleteNote: (note: NoteRef) => Promise<boolean>;
     togglePin: (note: NoteRef) => void;
@@ -460,6 +468,32 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
+    const setSchedule = useCallback(async (note: NoteRef, task: Task, schedule: string | null, dueAt: string | null) => {
+        const original = await snapshot(note);
+        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, schedule, due_at: dueAt } : t)));
+        try {
+            await patchTaskTiming(task, { schedule, due_at: dueAt });
+            pokeTaskReminders();
+        } catch (err) {
+            explain('schedule failed', err);
+            restore(note, original);
+        }
+    }, [snapshot, setTasks, restore]);
+
+    const snoozeTask = useCallback(async (note: NoteRef, task: Task, until: number | null) => {
+        if (!task.due_at) return;   // nothing to snooze: the reminder has no time on the server
+        const original = await snapshot(note);
+        const snooze = until === null ? null : serializeSnooze({ forDue: task.due_at, until: new Date(until).toISOString() });
+        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, snooze } : t)));
+        try {
+            await patchTaskTiming(task, { snooze });
+            pokeTaskReminders();
+        } catch (err) {
+            explain('snooze failed', err);
+            restore(note, original);
+        }
+    }, [snapshot, setTasks, restore]);
+
     const setAttachments = useCallback(async (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => {
         const original = await snapshot(note);
         try {
@@ -473,8 +507,14 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
-    const createNote = useCallback(async (title: string, items: string[]): Promise<NoteRef | null> => {
-        const cleanItems = cleanQuickItems(items);
+    const createNote = useCallback(async (title: string, items: string[], timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
+        // Timing rides with its item through the blank-dropping clean.
+        const timingOf = new Map<number, NewTaskTiming | undefined>();
+        const cleanItems = cleanQuickItems(items.filter((raw, i) => {
+            const keep = cleanQuickItems([raw]).length > 0;
+            if (keep) timingOf.set(timingOf.size, timing?.[i]);
+            return keep;
+        }));
         let list: TaskList;
         try {
             list = await createTaskList(deriveQuickTitle(title, cleanItems));
@@ -487,9 +527,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const missing: string[] = [];
         // Sequential so positions follow the typed order. An item that fails
         // does not lose the note: the list exists, the rest is reported.
-        for (const text of cleanItems) {
+        for (const [i, text] of cleanItems.entries()) {
             try {
-                created.push(await createListTask(list.id, text));
+                created.push(await createListTask(list.id, text, undefined, timingOf.get(i)));
             } catch (err) {
                 explain('create item failed', err);
                 missing.push(text);
@@ -581,11 +621,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [qc]);
 
     return useMemo(() => ({
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
         createNote, renameNote, deleteNote, togglePin, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
         createNote, renameNote, deleteNote, togglePin, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);

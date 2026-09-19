@@ -49,6 +49,8 @@ import {
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { planToggle } from '../api/taskCompletion';
+import { useTaskFeature } from '../api/taskFeatures';
+import { useScheduleSetter } from './schedule/useScheduleSetter';
 import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
 import { isMobile, isTauri } from '../api/platform';
@@ -439,6 +441,10 @@ export function TasksView() {
         }
     };
 
+    // Date & repeat: only against a server that stores it (taskFeatures).
+    const scheduleOn = useTaskFeature('schedule') === true;
+    const handleSetSchedule = useScheduleSetter(tasks, setTasks);
+
     const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
         const original = tasks;
         try {
@@ -731,6 +737,7 @@ export function TasksView() {
                         onMove={handleMove}
                         onReorder={handleReorder}
                         onSetDue={handleSetDue}
+                        onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
                         onSetAttachments={handleSetAttachments}
                     />
                 </div>

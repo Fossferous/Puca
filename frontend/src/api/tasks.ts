@@ -76,6 +76,8 @@ export interface TaskList {
     created_at: string;
     total_tasks: number;
     completed_tasks: number;
+    /** Last edit of the list or any item in it (066+ servers). */
+    updated_at?: string;
     /** E2EE state of `title` as the server stores it, set by listTaskLists:
      *  `legacy` = held as plaintext. Púca Notes shows a "Not encrypted" flag on
      *  the card headline for that, the way TaskTree flags a plaintext item

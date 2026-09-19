@@ -1072,6 +1072,35 @@ export const MapPinIcon = makeIcon('MapPinIcon', <>
     <circle cx="12" cy="10.5" r="2.5" />
 </>);
 
+/** The calendar (Notes' Calendar view, an item's date & repeat). */
+export const CalendarIcon = makeIcon('CalendarIcon', <>
+    <rect x="3.75" y="5" width="16.5" height="15.25" rx="2.25" />
+    <path d="M3.75 9.75h16.5" />
+    <path d="M8 3.25v3.5" />
+    <path d="M16 3.25v3.5" />
+</>);
+
+/** An item that repeats (a recurrence rule), not a refresh. */
+export const RepeatIcon = makeIcon('RepeatIcon', <>
+    <path d="M4.75 11.25V10a4 4 0 0 1 4-4h10.5" />
+    <path d="m16.25 3 3 3-3 3" />
+    <path d="M19.25 12.75V14a4 4 0 0 1-4 4H4.75" />
+    <path d="m7.75 21-3-3 3-3" />
+</>);
+
+/** Snooze a reminder: the alarm clock (ClockIcon is a plain due time). */
+export const SnoozeIcon = makeIcon('SnoozeIcon', <>
+    <circle cx="12" cy="13" r="7.25" />
+    <path d="M12 9.5V13l2.25 1.5" />
+    <path d="M4.25 5.25 6.5 3.25" />
+    <path d="M19.75 5.25 17.5 3.25" />
+</>);
+
+/** Previous period (the calendar's back step); mirrors ChevronRightIcon. */
+export const ChevronLeftIcon = makeIcon('ChevronLeftIcon', <>
+    <path d="m14.75 5.75-6.25 6.25 6.25 6.25" />
+</>);
+
 export const LeafIcon = makeIcon('LeafIcon', <>
     <path d="M20.25 4.25c0 8.5-4.35 12.75-10.25 12.75a5.75 5.75 0 0 1-1.9-11.2c3.5-1.3 8.15-1.55 12.15-1.55Z" />
     <path d="M14.75 9.75c-4.25 1.5-7.5 4.75-10.5 10.5" />
@@ -1269,6 +1298,10 @@ export const ICONS = {
     lightbulb: LightbulbIcon,
     clock: ClockIcon,
     'map-pin': MapPinIcon,
+    calendar: CalendarIcon,
+    repeat: RepeatIcon,
+    snooze: SnoozeIcon,
+    'chevron-left': ChevronLeftIcon,
     leaf: LeafIcon,
     food: FoodIcon,
     activity: ActivityIcon,

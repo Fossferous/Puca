@@ -63,6 +63,7 @@ export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExport
                     <option value="puca">Púca order</option>
                     <option value="title">Title</option>
                     <option value="created">Newest first</option>
+                    <option value="edited">Recently edited</option>
                 </select>
             </div>
             <div className="notes-menu-sep" />

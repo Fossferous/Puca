@@ -28,6 +28,8 @@ import {
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
+import { useTaskFeature } from '../../api/taskFeatures';
+import { EditedStamp } from './EditedStamp';
 
 interface NoteEditorProps {
     card: NoteCard;
@@ -66,6 +68,11 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
     const titleUnreadable = isUndecryptable(card.title);
+    // Date & repeat only against a server that stores it (an older one would
+    // drop the field silently); unknown = hidden.
+    const onSetSchedule = useTaskFeature('schedule')
+        ? (t: Task, schedule: string | null, due: string | null) => void actions.setSchedule(ref, t, schedule, due)
+        : undefined;
 
     // useLayoutEffect, not useEffect: the listener must exist the moment the
     // dialog is in the DOM. A keyboard user who opened the note with Enter can
@@ -140,6 +147,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     {card.archived && <span className="notes-chip archived"><ArchiveIcon /> archived</span>}
                     {card.labels.map(l => <span key={l} className="notes-chip"><TagIcon /> {l}</span>)}
                     {card.createdAt && <span>Created {new Date(card.createdAt).toLocaleDateString()}</span>}
+                    <EditedStamp createdAt={card.createdAt} updatedAt={card.updatedAt} />
                     {tasksQuery.isFetching && <span className="notes-spinner" aria-label="Refreshing" />}
                 </div>
 
@@ -174,6 +182,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onMove={(t, dir) => void actions.moveTaskIn(ref, t, dir)}
                             onReorder={(t, afterId, reparent) => void actions.reorderTaskIn(ref, t, afterId, reparent)}
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
+                            onSetSchedule={onSetSchedule}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
                             myPerms={card.myPerms}
                             currentUserId={currentUserId}
@@ -190,6 +199,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onMove={(t, dir) => void actions.moveTaskIn(ref, t, dir)}
                             onReorder={(t, afterId, reparent) => void actions.reorderTaskIn(ref, t, afterId, reparent)}
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
+                            onSetSchedule={onSetSchedule}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
                         />
                     )}

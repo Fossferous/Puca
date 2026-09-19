@@ -1,0 +1,28 @@
+/* Púca Notes — snooze controls, timing marks and the "Edited" stamp
+ * (SnoozeControl.tsx, EditedStamp.tsx). Phone rules at the bottom. */
+.notes-snooze { position: relative; display: inline-flex; align-items: center; flex-shrink: 0; }
+.notes-snooze-menu {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: 4px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--bg-floating);
+    border: 1px solid var(--border-subtle);
+}
+.notes-snooze-menu .notes-textbtn { padding: 4px 8px; font-size: 12px; }
+.notes-reminder-marks { display: inline-flex; gap: 2px; color: var(--text-muted); flex-shrink: 0; }
+.notes-edited { color: var(--text-muted); }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .notes-snooze-menu {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        z-index: 20;
+        flex-direction: column;
+        margin-left: 0;
+        max-width: calc(100vw - 16px);
+    }
+    .notes-snooze-menu .notes-textbtn { min-height: 44px; min-width: 96px; font-size: 15px; }
+}

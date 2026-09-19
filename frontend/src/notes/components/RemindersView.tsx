@@ -5,6 +5,7 @@
  */
 import { formatDueShort } from '../../api/tasks';
 import { BellIcon } from '../../components/Icons';
+import { ReminderTimingMarks, SnoozeControl } from './SnoozeControl';
 import { type DueItem, type NoteCard, type ReminderGroups } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 
@@ -16,9 +17,11 @@ interface RemindersViewProps {
     /** Whether the browser will show OS notifications for due items. */
     notificationsState: 'granted' | 'denied' | 'default' | 'unsupported';
     onEnableNotifications: () => void;
+    /** The server stores snoozes (taskFeatures). */
+    canSnooze?: boolean;
 }
 
-function Row({ item, actions, now, onOpen }: { item: DueItem; actions: NoteActions; now: number; onOpen: (c: NoteCard) => void }) {
+function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem; actions: NoteActions; now: number; onOpen: (c: NoteCard) => void; canSnooze?: boolean }) {
     return (
         <div className="notes-reminder-row" role="button" tabIndex={0}
             onClick={() => onOpen(item.note)}
@@ -32,13 +35,15 @@ function Row({ item, actions, now, onOpen }: { item: DueItem; actions: NoteActio
                 onChange={() => void actions.toggleTask(item.note.ref, item.task, true)}
             />
             <span className="notes-reminder-text">{item.task.description}</span>
+            <ReminderTimingMarks slot={item.slot} />
             <span className="notes-reminder-note">{item.note.title}</span>
-            <span className="notes-reminder-when" title={new Date(item.at).toLocaleString()}>{formatDueShort(item.task.due_at!, now)}</span>
+            <span className="notes-reminder-when" title={new Date(item.at).toLocaleString()}>{formatDueShort(new Date(item.at).toISOString(), now)}</span>
+            {canSnooze && <SnoozeControl item={item} actions={actions} now={now} />}
         </div>
     );
 }
 
-export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications }: RemindersViewProps) {
+export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, canSnooze = false }: RemindersViewProps) {
     const total = groups.overdue.length + groups.today.length + groups.upcoming.length;
     return (
         <div className="notes-reminders">
@@ -58,19 +63,19 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
                     {groups.overdue.length > 0 && (
                         <section className="notes-reminder-group overdue" aria-label="Overdue">
                             <h2 className="notes-section-title">Overdue</h2>
-                            {groups.overdue.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} />)}
+                            {groups.overdue.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
                         </section>
                     )}
                     {groups.today.length > 0 && (
                         <section className="notes-reminder-group" aria-label="Today">
                             <h2 className="notes-section-title">Today</h2>
-                            {groups.today.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} />)}
+                            {groups.today.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
                         </section>
                     )}
                     {groups.upcoming.length > 0 && (
                         <section className="notes-reminder-group" aria-label="Upcoming">
                             <h2 className="notes-section-title">Upcoming</h2>
-                            {groups.upcoming.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} />)}
+                            {groups.upcoming.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
                         </section>
                     )}
                 </>

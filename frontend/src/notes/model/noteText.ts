@@ -6,11 +6,18 @@
 import { type Task, buildTaskTree, type TaskNode, parseTaskAttachments } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from './notesModel';
+import { scheduleForExport } from './notesTiming';
+import { type NewTaskTiming } from '../../api/tasks';
+import { newUid, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
+import { describeSchedule } from '../../api/scheduleFormat';
 
 function lines(nodes: TaskNode[], depth: number, out: string[]): void {
     for (const n of nodes) {
         const box = n.task.is_completed ? '[x]' : '[ ]';
-        const due = n.task.due_at ? `  (due ${n.task.due_at})` : '';
+        const sched = parseSchedule(n.task.schedule);
+        const due = sched.state === 'ok'
+            ? (() => { const d = describeSchedule(sched.schedule, Date.now()); return `  (${d.when}${d.repeat ? `, ${d.repeat}` : ''}${sched.schedule.location ? `, at ${sched.schedule.location}` : ''})`; })()
+            : n.task.due_at ? `  (due ${n.task.due_at})` : '';
         out.push(`${'  '.repeat(depth)}- ${box} ${n.task.description}${due}`);
         const refs = parseTaskAttachments(n.task.attachments);
         for (const r of refs) out.push(`${'  '.repeat(depth + 1)}- attachment: ${r.name}`);
@@ -64,6 +71,8 @@ export function notesToJson(cards: NoteCard[], exportedAt: string): string {
             completed: t.is_completed,
             position: t.position,
             dueAt: t.due_at,
+            schedule: scheduleForExport(t),
+            updatedAt: t.updated_at ?? null,
             createdAt: t.created_at,
             attachments: parseTaskAttachments(t.attachments).map(r => r.name),
         })),
@@ -79,6 +88,29 @@ export function openItemsOf(card: NoteCard): string[] {
         for (const n of nodes) {
             if (n.task.is_completed || isUndecryptable(n.task.description)) continue;
             out.push(n.task.description);
+            walk(n.children);
+        }
+    };
+    walk(buildTaskTree(card.tasks ?? []));
+    return out;
+}
+
+/** The timing of each item openItemsOf returns, in the same order, for
+ *  "Make a copy": a scheduled item keeps its schedule — under a NEW uid, as
+ *  a copy is a new event, not the same one twice — and its next reminder; a plain
+ *  item's due time is not copied, as before. A schedule this device cannot
+ *  read is not copied. */
+export function openItemTimingOf(card: NoteCard): (NewTaskTiming | undefined)[] {
+    const out: (NewTaskTiming | undefined)[] = [];
+    const walk = (nodes: TaskNode[]) => {
+        for (const n of nodes) {
+            if (n.task.is_completed || isUndecryptable(n.task.description)) continue;
+            const p = parseSchedule(n.task.schedule);
+            let schedule: string | null = null;
+            if (p.state === 'ok') {
+                try { schedule = serializeSchedule({ ...p.schedule, uid: newUid(), doneThrough: undefined }, p.raw); } catch { schedule = null; }
+            }
+            out.push(schedule ? { dueAt: n.task.due_at, schedule } : undefined);
             walk(n.children);
         }
     };

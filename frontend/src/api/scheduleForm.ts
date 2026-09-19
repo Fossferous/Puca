@@ -1,0 +1,198 @@
+/**
+ * The schedule editor's form ⇄ EventSchedule, pure and tested. The editor
+ * component only renders this state; everything that decides what gets
+ * sealed lives here.
+ */
+import { parseRRule, serializeRRule, type RRule } from './recurrence';
+import { type EventSchedule, type ScheduleKind, newUid } from './taskSchedule';
+import { addDays, daysInMonth, instantToWall, parseWall, viewerZone, wallToInstant, weekdayOf, type Wall } from '../utils/calendarMath';
+
+export type RepeatPreset = 'none' | 'daily' | 'weekdays' | 'weekly' | 'monthly-day' | 'monthly-nth' | 'monthly-last' | 'yearly' | 'custom';
+export type EndsMode = 'never' | 'count' | 'until';
+
+export interface ScheduleForm {
+    kind: ScheduleKind;
+    date: string;           // YYYY-MM-DD
+    allDay: boolean;
+    startTime: string;      // HH:mm
+    endTime: string;        // HH:mm or ''
+    endDate: string;        // all-day: YYYY-MM-DD (inclusive, as people say it) or ''
+    repeat: RepeatPreset;
+    /** The rule kept verbatim when `repeat` is custom (an import). */
+    customRule: string;
+    ends: EndsMode;
+    count: number;
+    until: string;          // YYYY-MM-DD
+    location: string;
+    /** Alert minutes as a single choice; 'keep' = leave imported alerts. */
+    alert: string;
+    privateTiming: boolean;
+    /** The zone a timed schedule is in (the event's own, or this device's
+     *  for a new one). */
+    tz: string;
+}
+
+const DAY = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+
+export function nthOfMonth(d: number): number {
+    return Math.ceil(d / 7);
+}
+
+export function isLastWeekdayOfMonth(y: number, m: number, d: number): boolean {
+    return d + 7 > daysInMonth(y, m);
+}
+
+/** The rule a preset means for a given start date (no COUNT/UNTIL). */
+export function presetRule(preset: RepeatPreset, date: string): string | null {
+    const p = parseWall(date);
+    if (!p) return null;
+    const { y, m, d } = p.wall;
+    const wd = DAY[weekdayOf(y, m, d)];
+    switch (preset) {
+        case 'none': case 'custom': return null;
+        case 'daily': return 'FREQ=DAILY';
+        case 'weekdays': return 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR';
+        case 'weekly': return `FREQ=WEEKLY;BYDAY=${wd}`;
+        case 'monthly-day': return `FREQ=MONTHLY;BYMONTHDAY=${d}`;
+        case 'monthly-nth': return `FREQ=MONTHLY;BYDAY=${nthOfMonth(d)}${wd}`;
+        case 'monthly-last': return `FREQ=MONTHLY;BYDAY=-1${wd}`;
+        case 'yearly': return 'FREQ=YEARLY';
+    }
+}
+
+/** Which preset an existing rule is, for the start date (COUNT/UNTIL aside). */
+export function detectPreset(rrule: string | undefined, date: string): { preset: RepeatPreset; ends: EndsMode; count: number; untilKey: string } {
+    const none = { preset: 'none' as RepeatPreset, ends: 'never' as EndsMode, count: 10, untilKey: '' };
+    if (!rrule) return none;
+    const r = parseRRule(rrule);
+    if (!r.ok) return { ...none, preset: 'custom' };
+    const bare: RRule = { ...r.rule, count: undefined, until: undefined };
+    const text = serializeRRule(bare);
+    const ends: EndsMode = r.rule.count !== undefined ? 'count' : r.rule.until ? 'until' : 'never';
+    const untilKey = r.rule.until ? `${r.rule.until.slice(0, 4)}-${r.rule.until.slice(4, 6)}-${r.rule.until.slice(6, 8)}` : '';
+    for (const preset of ['daily', 'weekdays', 'weekly', 'monthly-day', 'monthly-nth', 'monthly-last', 'yearly'] as RepeatPreset[]) {
+        if (presetRule(preset, date) === text) return { preset, ends, count: r.rule.count ?? 10, untilKey };
+    }
+    return { preset: 'custom', ends, count: r.rule.count ?? 10, untilKey };
+}
+
+export const TIMED_ALERTS: { value: string; label: string }[] = [
+    { value: 'none', label: 'No reminder' },
+    { value: '0', label: 'At the start' },
+    { value: '10', label: '10 minutes before' },
+    { value: '30', label: '30 minutes before' },
+    { value: '60', label: '1 hour before' },
+    { value: '1440', label: '1 day before' },
+];
+export const ALLDAY_ALERTS: { value: string; label: string }[] = [
+    { value: 'none', label: 'No reminder' },
+    { value: '-540', label: 'On the day at 09:00' },
+    { value: '900', label: 'The day before at 09:00' },
+];
+
+function pad(n: number): string {
+    return String(n).padStart(2, '0');
+}
+
+/** A fresh form for a new schedule on `date` (defaults: 09:00, the next full
+ *  hour when the date is today). */
+export function newForm(kind: ScheduleKind, date: string, nowMs: number, time?: string, tz: string = viewerZone()): ScheduleForm {
+    const now = instantToWall(nowMs, tz);
+    const today = `${now.y}-${pad(now.m)}-${pad(now.d)}`;
+    const start = time ?? (date === today ? `${pad(Math.min(23, now.hh + 1))}:00` : '09:00');
+    const [hh, mm] = start.split(':').map(Number);
+    const end = `${pad(Math.min(23, hh + 1))}:${pad(mm)}`;
+    return {
+        kind, date, allDay: false, startTime: start, endTime: kind === 'event' ? end : '', endDate: '',
+        repeat: 'none', customRule: '', ends: 'never', count: 10, until: '', location: '',
+        alert: kind === 'event' ? '10' : '0', privateTiming: false, tz,
+    };
+}
+
+/** An existing schedule as a form. */
+export function formFromSchedule(s: EventSchedule): ScheduleForm {
+    const start = parseWall(s.start)!;
+    const date = s.start.slice(0, 10);
+    const det = detectPreset(s.rrule, date);
+    let endTime = '';
+    let endDate = '';
+    if (s.end) {
+        const e = parseWall(s.end)!;
+        if (s.allDay) endDate = formatKey(addDays(e.wall, -1));   // exclusive → inclusive
+        else endTime = `${pad(e.wall.hh)}:${pad(e.wall.mm)}`;
+    }
+    const alerts = s.alerts ?? (s.kind === 'task' ? [0] : []);
+    const alert = alerts.length === 0 ? 'none' : alerts.length === 1 ? String(alerts[0]) : 'keep';
+    return {
+        kind: s.kind, date, allDay: s.allDay,
+        startTime: s.allDay ? '09:00' : `${pad(start.wall.hh)}:${pad(start.wall.mm)}`,
+        endTime, endDate,
+        repeat: det.preset, customRule: det.preset === 'custom' ? (s.rrule ?? '') : '',
+        ends: det.ends, count: det.count, until: det.untilKey,
+        location: s.location ?? '', alert, privateTiming: s.privateTiming === true,
+        tz: s.tz ?? viewerZone(),
+    };
+}
+
+function formatKey(w: Pick<Wall, 'y' | 'm' | 'd'>): string {
+    return `${w.y}-${pad(w.m)}-${pad(w.d)}`;
+}
+
+/**
+ * The schedule a form describes, merged over `base` (an existing schedule:
+ * its uid, exdates, doneThrough and any fields this build does not edit are
+ * kept). Returns an error string for a form that cannot be saved.
+ */
+export function scheduleFromForm(f: ScheduleForm, base?: EventSchedule): EventSchedule | string {
+    const date = parseWall(f.date);
+    if (!date || !date.dateOnly) return 'Pick a date';
+    const out: EventSchedule = {
+        ...(base ?? {}),
+        v: 1, kind: f.kind, uid: base?.uid ?? newUid(), allDay: f.allDay,
+        start: f.allDay ? f.date : `${f.date}T${f.startTime}`,
+    } as EventSchedule;
+    delete out.end; delete out.tz; delete out.alertTz; delete out.rrule; delete out.location; delete out.alerts; delete out.privateTiming;
+    if (!f.allDay) {
+        if (!/^\d{2}:\d{2}$/.test(f.startTime)) return 'Pick a start time';
+        out.tz = f.tz;
+        if (f.endTime) {
+            if (!/^\d{2}:\d{2}$/.test(f.endTime)) return 'Pick an end time';
+            // An end at or before the start runs past midnight (23:00–01:00).
+            const endDay = f.endTime <= f.startTime ? formatKey(addDays(date.wall, 1)) : f.date;
+            out.end = `${endDay}T${f.endTime}`;
+        }
+    } else {
+        out.alertTz = base?.alertTz ?? f.tz;
+        if (f.endDate) {
+            const e = parseWall(f.endDate);
+            if (!e) return 'Pick an end date';
+            if (e.wall.y * 10000 + e.wall.m * 100 + e.wall.d < date.wall.y * 10000 + date.wall.m * 100 + date.wall.d) return 'The end date is before the start';
+            if (f.endDate !== f.date) out.end = formatKey(addDays(e.wall, 1));   // inclusive → exclusive
+        }
+    }
+    let rule: string | null = f.repeat === 'custom' ? f.customRule || null : presetRule(f.repeat, f.date);
+    if (rule && f.repeat !== 'custom') {
+        if (f.ends === 'count') {
+            if (!Number.isInteger(f.count) || f.count < 1 || f.count > 1000) return 'Repeat between 1 and 1000 times';
+            rule += `;COUNT=${f.count}`;
+        } else if (f.ends === 'until') {
+            const u = parseWall(f.until);
+            if (!u) return 'Pick the last date';
+            if (f.allDay) rule += `;UNTIL=${f.until.replace(/-/g, '')}`;
+            else {
+                // Through the end of that day in the event's zone, as UTC.
+                const endOfDay = wallToInstant({ ...u.wall, hh: 23, mm: 59 }, f.tz);
+                rule += `;UNTIL=${new Date(endOfDay).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`;
+            }
+        }
+    }
+    if (rule) out.rrule = rule;
+    if (!rule) { delete out.exdates; delete out.doneThrough; }
+    if (f.kind === 'event' && f.location.trim()) out.location = f.location.trim().slice(0, 500);
+    if (f.alert === 'keep' && base?.alerts) out.alerts = base.alerts;
+    else if (f.alert === 'none') out.alerts = [];
+    else if (f.alert !== 'keep') out.alerts = [Number(f.alert)];
+    if (f.privateTiming) out.privateTiming = true;
+    if (f.kind !== 'task') delete out.doneThrough;
+    return out;
+}

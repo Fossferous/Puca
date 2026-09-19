@@ -336,6 +336,17 @@ export function deriveDueAt(s: EventSchedule, nowMs: number): string | null {
     return t === null ? null : new Date(t).toISOString();
 }
 
+/** The occurrence a key names (an EXDATE / doneThrough key). */
+export function occurrenceOf(s: EventSchedule, key: string): Occurrence | null {
+    const p = parseWall(key);
+    return p ? toOccurrence(s, p.wall, key) : null;
+}
+
+/** A schedule's FIRST occurrence (DTSTART), whatever the time now. */
+export function firstOccurrence(s: EventSchedule): Occurrence {
+    return toOccurrence(s, parseWall(s.start)!.wall, s.start);
+}
+
 /** The first occurrence starting at or after `fromMs` (the "next time" to
  *  show), skipping done ones for a repeating task. */
 export function nextOccurrence(s: EventSchedule, fromMs: number): Occurrence | null {
