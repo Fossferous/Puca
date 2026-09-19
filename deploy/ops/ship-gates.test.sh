@@ -599,7 +599,10 @@ PYEOF
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.8 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "mobile-notes REFUSES a manifest version the bundle was not built as" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: the manifest says 9.9.8 but')" = 1 ] && echo 1 || echo 0)" "$out"
 
-	rm -f "$TMP/notes-ota.json"
+	# What a backend from before the notes route answers on ?variant=notes:
+	# Púca's FULL manifest, untagged, for the SAME release number — so the
+	# version alone would read as a successful ship. Only the tag tells.
+	printf '{"version":"9.9.9","url":"x"}\n' > "$TMP/notes-ota.json"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-min 9.9.9 --native-version 9.9.9)"; rc=$?
 	check "a good Notes bundle passes every gate and is uploaded" "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'PASS  OK ')" = 1 ] && grep -q 'puca-notes-web-9.9.9.enc.zip' "$LOG" && echo 1 || echo 0)" "$out"
 	check "its manifest is mobile-update-notes.json, tagged notes, with the native block" "$(grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -q '"variant": "notes"' "$LOG" && grep -q '"min": "9.9.9"' "$LOG" && grep -q '"download_url": "https://dl.invalid/#notes-app"' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
