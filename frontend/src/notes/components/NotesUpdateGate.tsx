@@ -52,18 +52,40 @@ export function NotesUpdateGate({ children, native = isMobile() }: NotesUpdateGa
     const [requiredDismissed, setRequiredDismissed] = useState(false);
     const [nudgeDismissed, setNudgeDismissed] = useState<string | null>(readNudgeDismissal);
     const prompt = useSyncExternalStore(subscribeNativePrompt, getNativePrompt, getNativePrompt);
-    const inFlight = useRef<Promise<OtaOutcome> | null>(null);
+    const inFlight = useRef<{ promise: Promise<OtaOutcome>; abandon: () => void } | null>(null);
+
+    /**
+     * Let go of the run in flight: its later state changes, its onManifest
+     * and its outcome are all ignored from here on, and whoever awaits it
+     * (the menu's "Check for updates") is answered 'failed' now.
+     *
+     * Only the error screen's buttons call this, and they are only on screen
+     * once the engine has handed control to the user — a failed verify (the
+     * run already ended) or a STALL, where the download promise is still
+     * pending and may never settle. Sharing that run, as the one-at-a-time
+     * rule below otherwise would, left Retry on "Checking for updates…" with
+     * no control for good, and every later menu check with it.
+     */
+    const abandonRun = useCallback(() => {
+        const cur = inFlight.current;
+        inFlight.current = null;
+        cur?.abandon();
+    }, []);
 
     const run = useCallback((): Promise<OtaOutcome> => {
         // One run at a time: StrictMode's double mount, or a menu click while
         // the launch check is still going, shares the run already in flight.
-        if (inFlight.current) return inFlight.current;
-        const p = runCapacitorOta({
+        if (inFlight.current) return inFlight.current.promise;
+        let live = true;
+        let answerAbandoned: (o: OtaOutcome) => void = () => {};
+        const abandoned = new Promise<OtaOutcome>(resolve => { answerAbandoned = resolve; });
+        const engine = runCapacitorOta({
             channel: 'notes',
-            setState: setOta,
+            setState: update => { if (live) setOta(update); },
             verifyFailedMessage: VERIFY_FAILED,
             logTag: '[NotesUpdate]',
             onManifest: (manifest, ctx) => {
+                if (!live) return false;
                 const next = nativePromptFor(manifest.native, ctx.nativeVersion, ctx.answeringBase);
                 setNativePrompt(next);
                 if (next?.kind === 'required') {
@@ -77,20 +99,26 @@ export function NotesUpdateGate({ children, native = isMobile() }: NotesUpdateGa
             // A failed apply leaves its error screen up (Continue shows the
             // app); an applying one is about to reload. Everything else
             // ends in the app.
-            if (outcome !== 'failed' && outcome !== 'applying') setLaunchDone(true);
+            if (live && outcome !== 'failed' && outcome !== 'applying') setLaunchDone(true);
             return outcome;
         }, (err: unknown) => {
             // The engine bounds everything after its first line; this is the
             // import of the plugin's JS itself failing. Never hold the app.
             console.error('[NotesUpdate] update check could not start:', err);
-            setOta(s => ({ ...s, status: 'upToDate' }));
-            setLaunchDone(true);
+            if (live) {
+                setOta(s => ({ ...s, status: 'upToDate' }));
+                setLaunchDone(true);
+            }
             return 'unreachable' as OtaOutcome;
-        }).finally(() => {
-            inFlight.current = null;
         });
-        inFlight.current = p;
-        return p;
+        const entry = {
+            promise: Promise.race([engine, abandoned]).finally(() => {
+                if (inFlight.current === entry) inFlight.current = null;
+            }),
+            abandon: () => { live = false; answerAbandoned('failed'); },
+        };
+        inFlight.current = entry;
+        return entry.promise;
     }, []);
 
     useEffect(() => {
@@ -107,10 +135,12 @@ export function NotesUpdateGate({ children, native = isMobile() }: NotesUpdateGa
     }, [native, run]);
 
     const retry = () => {
+        abandonRun();
         setOta({ status: launchDone ? 'upToDate' : 'checking', progress: 0, version: null, error: null });
         void run();
     };
     const continueAnyway = () => {
+        abandonRun();
         setOta(s => ({ ...s, status: 'upToDate' }));
         setLaunchDone(true);
     };

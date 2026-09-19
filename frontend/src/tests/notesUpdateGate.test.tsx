@@ -16,13 +16,18 @@ const h = vi.hoisted(() => ({
     downloadCalls: [] as Record<string, unknown>[],
     downloadImpl: null as null | (() => Promise<{ version: string }>),
     setCalls: [] as unknown[],
+    /** Every 'download' progress listener, in the order runs added them. */
+    listeners: [] as Array<(info: { percent?: number }) => void>,
 }));
 
 vi.mock('@capgo/capacitor-updater', () => ({
     CapacitorUpdater: {
         notifyAppReady: async () => ({}),
         current: async () => h.current,
-        addListener: async () => ({ remove: async () => {} }),
+        addListener: async (_ev: string, cb: (info: { percent?: number }) => void) => {
+            h.listeners.push(cb);
+            return { remove: async () => {} };
+        },
         download: (opts: Record<string, unknown>) => {
             h.downloadCalls.push(opts);
             return h.downloadImpl ? h.downloadImpl() : new Promise<{ version: string }>(() => { /* pending */ });
@@ -32,6 +37,7 @@ vi.mock('@capgo/capacitor-updater', () => ({
 }));
 
 import { NotesUpdateGate } from '../notes/components/NotesUpdateGate';
+import { CHECKING_DEADLINE_MS, DOWNLOAD_STALL_MS } from '../api/mobileOta';
 import { checkNotesForUpdates, downloadPage, nativePromptFor, setNativePrompt } from '../notes/model/notesUpdate';
 import { useState } from 'react';
 
@@ -80,6 +86,7 @@ beforeEach(() => {
     h.downloadCalls = [];
     h.downloadImpl = null;
     h.setCalls = [];
+    h.listeners = [];
     fetched = [];
     setNativePrompt(null);
     // setup.ts replaces localStorage with vi.fn()s: getItem answers undefined.
@@ -172,6 +179,121 @@ describe('the notes channel', () => {
         await advance(100);
         expect(app()).toBeTruthy();
         expect(h.downloadCalls).toHaveLength(0);
+    });
+});
+
+/** Past the stall watchdog: it samples every 5 s, so one extra period. */
+const STALLED = DOWNLOAD_STALL_MS + 6_000;
+const STALL_TEXT = 'The update download stalled';
+const clickGate = async (label: string) => {
+    const b = [...container.querySelectorAll('[role="dialog"] button')].find(x => x.textContent === label) as HTMLButtonElement | undefined;
+    expect(b, `the gate shows a "${label}" button`).toBeTruthy();
+    await act(async () => { b!.click(); });
+};
+
+describe('a stalled download never holds the app — including after Retry', () => {
+    // The review's case: the first run stalls (status 'error', Retry shown)
+    // but its download promise is still pending. Retry used to hand back THAT
+    // run (the one-at-a-time dedupe), so the gate sat on "Checking for
+    // updates…" with no control, for good.
+    it('Retry after a stall starts a fresh check, and the app appears within the check deadline', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        expect(container.textContent).toContain(STALL_TEXT);
+        serve(undefined, 404); // the server now has nothing for us
+        await clickGate('Retry');
+        await advance(CHECKING_DEADLINE_MS);
+        expect(fetched, 'Retry asked the server again').toHaveLength(2);
+        expect(app(), 'the app is shown, not a spinner with no control').toBeTruthy();
+        expect(container.textContent).not.toContain('Checking for updates');
+    });
+
+    it('Retry into a server that still stalls ends in a control again, never a bare spinner', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        await clickGate('Retry');
+        await advance(STALLED);
+        expect(h.downloadCalls, 'the retry downloaded again').toHaveLength(2);
+        expect(gateButtons()).toEqual(['Retry', 'Continue anyway']);
+    });
+
+    it('the abandoned run’s progress events do not move the retried run’s bar', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        await clickGate('Retry');
+        await advance(100);
+        expect(h.listeners).toHaveLength(2);
+        await act(async () => { h.listeners[1]({ percent: 20 }); });
+        expect(container.textContent, 'positive control: the live run moves the bar').toContain('20% downloaded');
+        await act(async () => { h.listeners[0]({ percent: 90 }); });
+        expect(container.textContent).toContain('20% downloaded');
+    });
+
+    it('after Retry, the new run is still the only one: a menu check shares it', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        await clickGate('Retry');
+        await advance(100);
+        expect(fetched).toHaveLength(2);
+        await act(async () => { void checkNotesForUpdates(); });
+        await advance(100);
+        expect(fetched, 'no second, concurrent check').toHaveLength(2);
+        expect(h.downloadCalls).toHaveLength(2);
+    });
+
+    it('the first, stalled download finishing late does not yank the retried run into a reload', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const late: Array<(v: { version: string }) => void> = [];
+        h.downloadImpl = () => new Promise(r => { late.push(r); });
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        serve(undefined, 404);
+        await clickGate('Retry');
+        await advance(100);
+        expect(app()).toBeTruthy();
+        await act(async () => { late[0]({ version: '99.0.0' }); });
+        await advance(100);
+        expect(h.setCalls, 'an abandoned run never applies').toEqual([]);
+        expect(app()).toBeTruthy();
+        expect(container.textContent).not.toContain('Update failed');
+    });
+
+    it('Continue anyway after a stall leaves "Check for updates" working', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        await clickGate('Continue anyway');
+        expect(app()).toBeTruthy();
+        serve(undefined, 404);
+        let outcome: unknown = 'pending';
+        await act(async () => { void checkNotesForUpdates().then(o => { outcome = o; }); });
+        await advance(100);
+        expect(outcome, 'a fresh check ran, instead of handing back the stalled one').toBe('nothing');
+    });
+
+    it('a manual check whose download stalls reports an outcome once the user moves on', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve(undefined, 404);
+        await mountGate();
+        await advance(100);
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        let outcome: unknown = 'pending';
+        await act(async () => { void checkNotesForUpdates().then(o => { outcome = o; }); });
+        await advance(STALLED);
+        expect(container.textContent).toContain(STALL_TEXT);
+        await clickGate('Continue anyway');
+        await advance(10);
+        expect(outcome, 'the menu is not left on "Checking…" forever').toBe('failed');
     });
 });
 
