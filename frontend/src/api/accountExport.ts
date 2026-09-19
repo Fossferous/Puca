@@ -21,7 +21,7 @@ import { decryptChannelContent } from './servers';
 import { decryptDMContent } from './dms';
 import { openChannelTaskText, openSelfTaskText } from './tasks';
 import { isUndecryptable } from './decryptMarkers';
-import { parseEnvelopeEx } from './e2ee';
+import { getActiveIdentity, openAccountBlob, parseEnvelopeEx } from './e2ee';
 import { isMobile } from './platform';
 import { saveAttachment, type SaveResult } from './saveAttachment';
 
@@ -99,6 +99,8 @@ export interface ExportReaders {
     dmMessage: (content: string, partnerUserId: number, senderId: number) => Promise<string>;
     channelTask: (channelId: number, stored: string, kind: 'chan-task' | 'chan-taskatt', ownerId: number) => Promise<string>;
     selfText: (stored: string) => Promise<string>;
+    /** A sealed-to-self account blob (migration 067); null = cannot open. */
+    accountBlob?: (name: string, stored: string, userId: number) => Promise<string | null>;
 }
 
 const appReaders: ExportReaders = {
@@ -106,6 +108,10 @@ const appReaders: ExportReaders = {
     dmMessage: decryptDMContent,
     channelTask: openChannelTaskText,
     selfText: openSelfTaskText,
+    accountBlob: async (name, stored, userId) => {
+        const id = getActiveIdentity();
+        return id ? openAccountBlob(id, userId, name, stored) : null;
+    },
 };
 
 export function envelopeMeta(content: string): EnvelopeMeta | null {
@@ -225,12 +231,25 @@ export async function openExport(
         tick();
     }
 
+    // Sealed account blobs have their OWN envelope (not a message envelope),
+    // so they are opened here rather than through open().
+    const sealed_blobs = [];
+    const readBlob = readers.accountBlob ?? appReaders.accountBlob!;
+    for (const b of Array.isArray(raw.sealed_blobs) ? raw.sealed_blobs as { name: string; blob_ciphertext: string }[] : []) {
+        stats.sealed++;
+        let text: string | null = null;
+        try { text = await readBlob(b.name, b.blob_ciphertext, me); } catch { text = null; }
+        if (text === null) stats.unreadable++; else stats.opened++;
+        sealed_blobs.push({ ...b, text, unreadable: text === null ? '[Encrypted — could not be opened on this device]' : null });
+    }
+
     const doc: Record<string, unknown> = {
         ...raw,
         channel_messages,
         dm_messages,
         tasks,
         task_lists,
+        sealed_blobs,
         opened_on: {
             at: new Date().toISOString(),
             sealed_bodies: stats.sealed,

@@ -41,7 +41,7 @@ import {
     type NoteCard, type NoteRef, type NoteSource,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
 } from './notesModel';
-import { getNotesPrefs, subscribeNotesPrefs, pruneNotesPrefs, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
+import { getNotesPrefs, subscribeNotesPrefs, forgetNoteKeys, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
  *  unlike Púca's shared client which has a socket for that. */
@@ -103,13 +103,6 @@ export function useTabPrefsQuery() {
         },
     });
 }
-
-/**
- * List-level mutations in flight (a delete's optimistic removal). The
- * device-local prune must not run while one is: the note is gone from the
- * cache but may come back on rollback, and a pruned label cannot.
- */
-let listMutationsInFlight = 0;
 
 export function useServersQuery() {
     return useQuery({ queryKey: notesKeys.servers, queryFn: listServers });
@@ -261,7 +254,7 @@ export function useNoteCards(): {
     error: unknown;
     tasksPending: boolean;
 } {
-    const { sources, loading, error, complete } = useNoteSources();
+    const { sources, loading, error } = useNoteSources();
     const prefsQuery = useTabPrefsQuery();
     const prefsData = prefsQuery.data;
     const prefs = useMemo(() => prefsData ?? [], [prefsData]);
@@ -271,14 +264,10 @@ export function useNoteCards(): {
         () => buildNoteCards(sources, tasks.byKey, prefs, local),
         [sources, tasks.byKey, prefs, local],
     );
-    useEffect(() => {
-        // Only against a COMPLETE, SETTLED set: a failed server query must not
-        // look like a deleted note, and neither must a delete whose request
-        // is still in flight (it comes back on rollback; a pruned label does
-        // not). The rollback changes `sources`, so this re-runs then.
-        if (!complete || listMutationsInFlight > 0) return;
-        pruneNotesPrefs(new Set(sources.map(s => noteKey(s.ref))));
-    }, [complete, sources]);
+    // No automatic prune: colour, labels and archive are shared across the
+    // account's devices now (notesPrefsSync.ts), and a note THIS device has
+    // not loaded yet — created elsewhere a second ago, or trashed — is not a
+    // deleted note. They are forgotten on an explicit delete (deleteNote).
     return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending };
 }
 
@@ -516,18 +505,16 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const deleteNote = useCallback(async (note: NoteRef): Promise<boolean> => {
         if (note.kind !== 'list') return false;
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
-        listMutationsInFlight++;   // holds the device-local prune off until this settles
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.filter(l => l.id !== note.id));
         try {
             await deleteTaskList(note.id);
             qc.removeQueries({ queryKey: notesKeys.tasks(note) });
+            forgetNoteKeys([noteKey(note)]);
             return true;
         } catch (err) {
             explain('delete list failed', err);
             qc.setQueryData(notesKeys.lists, prev);
             return false;
-        } finally {
-            listMutationsInFlight--;
         }
     }, [qc]);
 

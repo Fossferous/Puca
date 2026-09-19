@@ -37,6 +37,8 @@ import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
+import { useNotesPrefsSync } from '../model/notesPrefsSync';
+import { PrefsSyncBanner } from './SyncBanners';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -94,6 +96,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const { cards: allCards, prefs, prefsReady, loading, error, tasksPending } = useNoteCards();
     const actions = useNoteActions(allCards, prefs, prefsReady);
     const local = useNotesPrefs();
+    const prefsSync = useNotesPrefsSync();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
 
@@ -353,6 +356,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
                             </div>
                         )}
+                        <PrefsSyncBanner status={prefsSync} />
                         {error != null && !offline && (
                             <div className="notes-status error" role="alert">
                                 <WarningIcon /> Couldn’t load your notes: {error instanceof Error ? error.message : String(error)}
