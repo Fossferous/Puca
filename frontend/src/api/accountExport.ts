@@ -20,7 +20,8 @@ import { requestAccountExport } from './auth';
 import { decryptChannelContent } from './servers';
 import { decryptDMContent } from './dms';
 import { openChannelTaskText, openSelfTaskText } from './tasks';
-import { isUndecryptable } from './decryptMarkers';
+import { openSelfField } from './listSeal';
+import { TASK_DECRYPT_FAILED, isUndecryptable } from './decryptMarkers';
 import { parseEnvelopeEx } from './e2ee';
 import { isMobile } from './platform';
 import { saveAttachment, type SaveResult } from './saveAttachment';
@@ -99,6 +100,9 @@ export interface ExportReaders {
     dmMessage: (content: string, partnerUserId: number, senderId: number) => Promise<string>;
     channelTask: (channelId: number, stored: string, kind: 'chan-task' | 'chan-taskatt', ownerId: number) => Promise<string>;
     selfText: (stored: string) => Promise<string>;
+    /** A personal list's note text / picture sidecar (migration 065): the
+     *  STRICT self reader — those fields never held plaintext. */
+    listField?: (stored: string) => Promise<string>;
 }
 
 const appReaders: ExportReaders = {
@@ -106,7 +110,24 @@ const appReaders: ExportReaders = {
     dmMessage: decryptDMContent,
     channelTask: openChannelTaskText,
     selfText: openSelfTaskText,
+    listField: openSelfField,
 };
+
+/** A list's `body` / `attachments` for the file: absent stays absent (an
+ *  older server), none is null, and a value that is not an envelope is
+ *  reported unreadable rather than written out as if it were the owner's
+ *  text — these fields never held plaintext (api/listSeal.ts). */
+async function openListField(stored: unknown, readers: ExportReaders, stats: OpenStats): Promise<OpenedText | null | undefined> {
+    if (stored === undefined) return undefined;
+    if (typeof stored !== 'string' || stored === '') return null;
+    if (envelopeMeta(stored) === null) {
+        stats.sealed++;
+        stats.unreadable++;
+        return { content_ciphertext: stored, envelope: null, text: null, unreadable: TASK_DECRYPT_FAILED };
+    }
+    const read = readers.listField ?? readers.selfText;
+    return open(stored, () => read(stored), stats);
+}
 
 export function envelopeMeta(content: string): EnvelopeMeta | null {
     const parsed = parseEnvelopeEx(content);
@@ -220,8 +241,13 @@ export async function openExport(
     }
     const task_lists = [];
     for (const l of raw.task_lists) {
-        const { title, ...rest } = l;
-        task_lists.push({ ...rest, title: await open(title, () => readers.selfText(title), stats) });
+        const { title, body, attachments, ...rest } = l;
+        const extra: Record<string, OpenedText | null> = {};
+        const openedBody = await openListField(body, readers, stats);
+        if (openedBody !== undefined) extra.body = openedBody;
+        const openedAtt = await openListField(attachments, readers, stats);
+        if (openedAtt !== undefined) extra.attachments = openedAtt;
+        task_lists.push({ ...rest, title: await open(title, () => readers.selfText(title), stats), ...extra });
         tick();
     }
 

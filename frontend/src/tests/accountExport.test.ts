@@ -156,6 +156,40 @@ describe('openExport', () => {
     });
 });
 
+describe('openExport — a note’s text and pictures (migration 065)', () => {
+    const lists = (l: Record<string, unknown>): AccountExportRaw => ({ ...raw, channel_messages: [], dm_messages: [], tasks: [], task_lists: [{ id: 5, title: SELF('t'), ...l }] });
+    const withListField: ExportReaders = { ...readers, listField: async stored => `field:${JSON.parse(stored).ct}` };
+
+    it('opens a sealed body and sidecar with the list-field reader, keeping the ciphertext', async () => {
+        const { doc, stats } = await openExport(lists({ body: SELF('b'), attachments: SELF('a'), trashed_at: '2026-09-01T00:00:00Z' }), withListField);
+        const l = (doc.task_lists as Array<Record<string, { text: string | null; content_ciphertext: string } | string>>)[0];
+        expect((l.body as { text: string }).text).toBe('field:b');
+        expect((l.attachments as { text: string }).text).toBe('field:a');
+        expect((l.body as { content_ciphertext: string }).content_ciphertext).toBe(SELF('b'));
+        expect(l.trashed_at).toBe('2026-09-01T00:00:00Z');
+        expect(stats).toEqual({ sealed: 3, opened: 3, unreadable: 0 });
+    });
+
+    it('reports a NON-envelope body as unreadable instead of exporting it as the owner’s text', async () => {
+        const { doc, stats } = await openExport(lists({ body: 'planted by the server', attachments: null }), withListField);
+        const l = (doc.task_lists as Array<Record<string, { text: string | null; unreadable: string | null } | null>>)[0];
+        expect(l.body!.text).toBeNull();
+        expect(l.body!.unreadable).toBeTruthy();
+        expect(l.attachments).toBeNull();
+        expect(stats.unreadable).toBe(1);
+        // POSITIVE CONTROL: the same value as a TITLE is legacy plaintext and passes through.
+        const { doc: d2 } = await openExport({ ...raw, channel_messages: [], dm_messages: [], tasks: [], task_lists: [{ id: 6, title: 'planted by the server' }] }, withListField);
+        expect((d2.task_lists as Array<Record<string, { text: string }>>)[0].title.text).toBe('planted by the server');
+    });
+
+    it('a server older than 065 sends no such fields, and the file gains none', async () => {
+        const { doc } = await openExport(lists({}), withListField);
+        const l = (doc.task_lists as Array<Record<string, unknown>>)[0];
+        expect('body' in l).toBe(false);
+        expect('attachments' in l).toBe(false);
+    });
+});
+
 describe('envelopeMeta', () => {
     it('describes a sealed body without opening it, and null for plaintext', () => {
         expect(envelopeMeta(CH('x', 12))).toEqual({ version: 3, type: 'ch', epoch: 12 });
