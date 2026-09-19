@@ -489,6 +489,18 @@ mod db_tests {
         age(&pool, Some(c), None).await;
         assert_eq!(patch(&state, &claims, c, json!({ "due_at": "2030-01-01T09:00:00Z" })).await, StatusCode::OK);
         assert!(fresh(row(&pool, c).await.4));
+        // … but a SNOOZE that moves a plain task's due_at to the snooze
+        // instant (and an unsnooze moving it back) is not an edit.
+        age(&pool, Some(c), Some(list)).await;
+        assert_eq!(patch(&state, &claims, c, json!({ "snooze": SNZ, "due_at": "2030-01-01T10:00:00Z", "expect_due_at": "2030-01-01T09:00:00Z" })).await, StatusCode::OK);
+        assert_eq!(row(&pool, c).await.3.unwrap().to_rfc3339(), "2030-01-01T10:00:00+00:00", "the snooze moved due_at");
+        assert!(!fresh(row(&pool, c).await.4), "a snooze moving due_at is not an edit");
+        assert!(!fresh(list_stamp(&pool, list).await));
+        assert_eq!(patch(&state, &claims, c, json!({ "snooze": "", "due_at": "2030-01-01T09:00:00Z" })).await, StatusCode::OK);
+        assert!(!fresh(row(&pool, c).await.4), "nor is the unsnooze moving it back");
+        // Positive control on the same row: due_at alone moving is still an edit.
+        assert_eq!(patch(&state, &claims, c, json!({ "due_at": "2030-01-02T09:00:00Z" })).await, StatusCode::OK);
+        assert!(fresh(row(&pool, c).await.4));
 
         // Deleting an item touches the list.
         age(&pool, None, Some(list)).await;

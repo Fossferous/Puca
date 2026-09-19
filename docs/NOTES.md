@@ -203,13 +203,25 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   (`frontend/src/api/taskCompletion.ts`). The server refuses (409 "update the
   app") when an older app tries to complete an item, or a parent of one, that
   carries a schedule. Otherwise that app would end a repeating series without
-  knowing it was one.
+  knowing it was one. This app refuses the same thing itself: ticking a parent
+  whose subtree holds an open item that still repeats (or whose schedule it
+  cannot read) says so and changes nothing — tick the repeating item on its
+  own, or remove its repeat.
 - **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from Reminders and from
-  the calendar. The snooze is sealed and applies only to the `due_at` it was
-  made for, so it lapses by itself when the item moves. Every reminder engine
-  reads the same entries, `{id, at, mark}`
+  the calendar, for anyone who may tick the item. When the snoozer may also
+  edit the item's time (its creator, a task manager, any personal note), the
+  snooze **moves the plaintext `due_at` to the snooze instant** — the server,
+  and a phone reminding with Notes closed, see the next reminder — and the
+  sealed snooze keeps the time it pushed back, which Unsnooze restores. A
+  member who may only tick gets a sealed snooze alone, which applies while
+  `due_at` is unchanged. Either way it lapses by itself when the item moves.
+  Every reminder engine reads the same entries, `{id, at, mark, due}`
   (`frontend/src/api/reminderFeed.ts`): `at` is the snooze time while one is in
-  force. `mark` changes whenever the item must fire again.
+  force, `mark` changes whenever the item must fire again, and `due` is the raw
+  server `due_at` the entry came from. A repeating item also gets an entry for
+  each of its reminders in the next 14 days (capped at 24), same id, each
+  marked with that instant — what `due_at` will read once advanced there — and
+  an engine fires only the latest past entry of an id.
 - **Calendar**: in the rail at `/calendar`, the view and day in the URL (never
   a title). **Month**: on a phone it shows dots and the chosen day's list.
   **Week** and **Day** are time grids off the phone, opening on working hours

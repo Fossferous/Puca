@@ -38,7 +38,7 @@ import { ApiError } from '../../api/client';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { planToggle } from '../../api/taskCompletion';
 import { patchTaskTiming } from '../../api/tasks';
-import { serializeSnooze } from '../../api/taskSchedule';
+import { snoozePatch } from '../../api/taskSchedule';
 import { type NewTaskTiming } from '../../api/tasks';
 import { canEditTask } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
@@ -486,16 +486,23 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [snapshot, setTasks, restore]);
 
     const snoozeTask = useCallback(async (note: NoteRef, task: Task, until: number | null) => {
-        if (!task.due_at) return;   // nothing to snooze: the reminder has no time on the server
+        // A snooze moves the item's plaintext due_at to the snooze instant
+        // when this user may edit its time (taskSchedule.snoozePatch), so a
+        // phone reminding with Notes closed fires it then, not at the old time.
+        const card = cardsRef.current.find(c => c.ref.kind === note.kind && c.ref.id === note.id);
+        const canMoveDue = note.kind === 'list' || canEditTask(task, currentUserIdFromToken() ?? undefined, card?.myPerms);
+        const patch = snoozePatch(task, until, canMoveDue);
+        if (!patch) return;   // nothing to snooze: the reminder has no time on the server
         const original = await snapshot(note);
-        const snooze = until === null ? null : serializeSnooze({ forDue: task.due_at, until: new Date(until).toISOString() });
-        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, snooze } : t)));
+        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, snooze: patch.snooze, ...(patch.due_at !== undefined ? { due_at: patch.due_at } : {}) } : t)));
         try {
-            await patchTaskTiming(task, { snooze });
+            await patchTaskTiming(task, patch);
             pokeTaskReminders();
         } catch (err) {
             explain('snooze failed', err);
             restore(note, original);
+            // Lost a race with another device's edit or advance: show the truth.
+            if (err instanceof ApiError && err.status === 409) restore(note, await fetchTasksFor(note).catch(() => original));
         }
     }, [snapshot, setTasks, restore]);
 

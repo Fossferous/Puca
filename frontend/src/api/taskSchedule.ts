@@ -423,8 +423,8 @@ export function planCompletion(schedule: EventSchedule | null, completed: boolea
 
 export interface Snooze {
     k: 'snooze/1';
-    /** The due_at this snooze was taken against (ISO) — a snooze applies only
-     *  while due_at is still that value; an edit or an advance voids it. */
+    /** The due_at this snooze was taken against (ISO): the item's own time
+     *  before the snooze. */
     forDue: string;
     /** When to remind instead (ISO). */
     until: string;
@@ -446,11 +446,56 @@ export function serializeSnooze(s: Omit<Snooze, 'k'>): string {
     return padToBucket({ k: 'snooze/1', forDue: s.forDue, until: s.until }, [SNOOZE_BYTES]);
 }
 
-/** A snooze still in force for this due_at (compared as instants). */
+/**
+ * A snooze still in force for this due_at (compared as instants). Two forms:
+ *
+ *  - MOVED (what a snooze writes when the snoozer may edit the item): the
+ *    plaintext due_at itself is moved to `until`, so the server — and a
+ *    phone's reminder engine running while the app is closed, which cannot
+ *    open the sealed snooze — sees the next reminder instant (the owner's
+ *    rule for timing). The sealed snooze keeps what the UI needs: that it is
+ *    a snooze, and the time it pushed back (`forDue`).
+ *  - SEALED-ONLY (a member who may complete but not edit): due_at stays, and
+ *    the snooze applies while due_at is still `forDue`.
+ *
+ * Either way an edit or an advance of due_at voids it.
+ */
 export function activeSnooze(dueAt: string | null, snoozePlain: string | null | undefined): Snooze | null {
     const s = parseSnooze(snoozePlain);
     if (!s || !dueAt) return null;
-    return Date.parse(s.forDue) === Date.parse(dueAt) ? s : null;
+    const d = Date.parse(dueAt);
+    return Date.parse(s.forDue) === d || Date.parse(s.until) === d ? s : null;
+}
+
+/** Is this active snooze the MOVED form (due_at already carries `until`)? */
+export function snoozeMovedDue(dueAt: string | null, s: Snooze | null): boolean {
+    return !!s && !!dueAt && Date.parse(s.until) === Date.parse(dueAt) && Date.parse(s.forDue) !== Date.parse(dueAt);
+}
+
+/**
+ * The PATCH a snooze (untilMs) or an unsnooze (null) sends. With `canMoveDue`
+ * (the snoozer may edit the item's time: its creator, a task manager, any
+ * personal list) the plaintext due_at moves to the snooze instant — and back
+ * to the pushed-back time on an unsnooze — guarded by expect_due_at so a
+ * snooze racing another device's edit loses cleanly (409). Without it only
+ * the sealed snooze changes (the server gives due_at to editors alone).
+ * Null when there is nothing to snooze (no due_at: a private-timing item).
+ */
+export function snoozePatch(
+    task: { due_at: string | null; snooze?: string | null }, untilMs: number | null, canMoveDue: boolean,
+): { snooze: string | null; due_at?: string; expect_due_at?: string } | null {
+    if (!task.due_at) return null;
+    const cur = activeSnooze(task.due_at, task.snooze);
+    const base = cur && snoozeMovedDue(task.due_at, cur) ? cur.forDue : task.due_at;
+    if (untilMs === null) {
+        if (cur && snoozeMovedDue(task.due_at, cur) && canMoveDue) {
+            return { snooze: null, due_at: base, expect_due_at: task.due_at };
+        }
+        return { snooze: null };
+    }
+    const until = new Date(untilMs).toISOString();
+    const snooze = serializeSnooze({ forDue: base, until });
+    return canMoveDue ? { snooze, due_at: until, expect_due_at: task.due_at } : { snooze };
 }
 
 /** When the item actually reminds: the snooze's time if one is in force,

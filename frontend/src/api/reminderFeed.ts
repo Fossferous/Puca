@@ -6,13 +6,26 @@
  * engine shares — the web/desktop loop here and the native Notes alarm
  * engine alike:
  *
- *     { id, at, mark }
+ *     { id, at, mark, due }
  *       at   = when to remind, ms epoch: the snooze's time while a snooze is
  *              in force for the current due_at, else due_at
  *       mark = changes whenever the item must fire again: due_at alone when
  *              nothing is snoozed (so fired-markers written before snoozes
  *              existed stay valid and nothing re-fires on upgrade), else
- *              `${due_at}|${until}`
+ *              `${due_at}|${until}`; for a REPEATING item, the canonical ISO
+ *              of the reminder instant (see below)
+ *       due  = the server's raw due_at the entry was derived from, so a
+ *              native background refresh can tell "unchanged" from "moved
+ *              on another device" (Púca Notes' ReminderMerge.java)
+ *
+ * A REPEATING item (a sealed rrule, time not private) also gets one entry per
+ * upcoming reminder within OCCURRENCE_HORIZON_MS, same id, each with its own
+ * mark = that instant's ISO string — exactly the string due_at will hold once
+ * the item is advanced there, so an occurrence a phone fired while Notes was
+ * closed does not fire again when the advance lands. The native engine can
+ * then arm them with the app closed; it cannot open the sealed rule itself.
+ * Several entries share an id, so a planner must fire only the LATEST past
+ * entry per id (planEntries does).
  *
  * Opening FAILS OPEN: a snooze that cannot be read means "remind at due_at",
  * never "stay quiet".
@@ -25,7 +38,7 @@
  * expect_due_at so two devices advancing at once cannot both win.
  */
 import { type TaskReminder, openReminderTiming, patchTaskTiming } from './tasks';
-import { activeSnooze, nextReminderAfter, parseSchedule } from './taskSchedule';
+import { activeSnooze, nextReminderAfter, parseSchedule, snoozeMovedDue } from './taskSchedule';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { ApiError } from './client';
 
@@ -33,7 +46,17 @@ export interface ReminderEntry {
     id: number;
     at: number;
     mark: string;
+    /** The server's raw due_at this entry came from. */
+    due?: string;
 }
+
+/** How far ahead a repeating item's later reminders are handed out. */
+export const OCCURRENCE_HORIZON_MS = 14 * 86_400_000;
+/** At most this many entries per item (an hourly rule would be 336). */
+export const MAX_ENTRIES_PER_ITEM = 24;
+/** Later occurrences are looked for from no earlier than this before now: an
+ *  item not advanced for weeks must not spend its budget on the past. */
+const OCCURRENCE_LOOKBACK_MS = 86_400_000;
 
 export interface OpenedReminder extends TaskReminder {
     /** Opened (plaintext) timing, when the server sent any. */
@@ -62,17 +85,33 @@ export async function openReminderFeed(rows: TaskReminder[]): Promise<OpenedRemi
     }));
 }
 
-/** The shared {id, at, mark} contract. */
-export function toReminderEntries(rows: OpenedReminder[]): ReminderEntry[] {
+/** The shared {id, at, mark, due} contract. */
+export function toReminderEntries(rows: OpenedReminder[], nowMs: number = Date.now()): ReminderEntry[] {
     const out: ReminderEntry[] = [];
     for (const r of rows) {
         const due = parseServerTimestamp(r.due_at);
         if (!Number.isFinite(due)) continue;
         const s = activeSnooze(r.due_at, r.openSnooze);
-        const until = s ? Date.parse(s.until) : NaN;
-        out.push(Number.isFinite(until)
-            ? { id: r.id, at: until, mark: reminderMark(r.due_at, s!.until) }
-            : { id: r.id, at: due, mark: reminderMark(r.due_at, null) });
+        // MOVED form: due_at already IS the snooze instant (taskSchedule).
+        const moved = snoozeMovedDue(r.due_at, s);
+        const until = s && !moved ? Date.parse(s.until) : NaN;
+        const parsed = parseSchedule(r.openSchedule);
+        const series = parsed.state === 'ok' && parsed.schedule.rrule && !parsed.schedule.privateTiming ? parsed.schedule : null;
+        const primary: ReminderEntry = Number.isFinite(until)
+            ? { id: r.id, at: until, mark: reminderMark(r.due_at, s!.until), due: r.due_at }
+            : { id: r.id, at: due, mark: series ? new Date(due).toISOString() : reminderMark(r.due_at, null), due: r.due_at };
+        out.push(primary);
+        if (!series) continue;
+        // The series' later reminders, from the item's own time (a snooze
+        // pushed one reminder back, not the series).
+        const base = moved ? Date.parse(s!.forDue) : due;
+        let t = Math.max(Number.isFinite(base) ? base : due, nowMs - OCCURRENCE_LOOKBACK_MS);
+        for (let n = 1; n < MAX_ENTRIES_PER_ITEM; n++) {
+            const next = nextReminderAfter(series, t);
+            if (next === null || next > nowMs + OCCURRENCE_HORIZON_MS) break;
+            if (next !== primary.at) out.push({ id: r.id, at: next, mark: new Date(next).toISOString(), due: r.due_at });
+            t = next;
+        }
     }
     return out;
 }
@@ -84,19 +123,27 @@ export interface EntryPlan {
 }
 
 /** planReminders' rule over entries: fire what is due and not yet fired for
- *  this exact mark; prune markers of vanished items. */
+ *  this exact mark; prune markers of vanished items. An id may have several
+ *  entries (a repeating item's occurrences): only its LATEST past one counts,
+ *  or two past occurrences would take turns overwriting the one marker and
+ *  fire again on every pass. */
 export function planEntries(entries: ReminderEntry[], fired: Record<string, string>, now: number): EntryPlan {
-    const toFire: ReminderEntry[] = [];
-    const prunedFired: Record<string, string> = {};
+    const latestPast = new Map<number, ReminderEntry>();
     let nextAt: number | null = null;
     for (const e of entries) {
-        const key = String(e.id);
         if (e.at <= now) {
-            if (fired[key] !== e.mark) toFire.push(e);
-            prunedFired[key] = e.mark;
+            const cur = latestPast.get(e.id);
+            if (!cur || e.at > cur.at) latestPast.set(e.id, e);
         } else if (nextAt === null || e.at < nextAt) {
             nextAt = e.at;
         }
+    }
+    const toFire: ReminderEntry[] = [];
+    const prunedFired: Record<string, string> = {};
+    for (const e of latestPast.values()) {
+        const key = String(e.id);
+        if (fired[key] !== e.mark) toFire.push(e);
+        prunedFired[key] = e.mark;
     }
     return { toFire, nextAt, prunedFired };
 }

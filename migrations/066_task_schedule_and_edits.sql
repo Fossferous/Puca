@@ -30,6 +30,9 @@ ALTER TABLE task_lists ALTER COLUMN updated_at SET DEFAULT NOW();
 -- item), and updated_at itself. For a SCHEDULED item due_at is derived — the
 -- reminder loop advances it after an alert fires — so due_at alone changing
 -- on a scheduled row is not an edit either; a schedule change still is.
+-- Nor is due_at moving in the SAME update as the snooze: a snooze moves the
+-- plaintext due_at to the snooze instant (and an unsnooze moves it back), so
+-- the server sees the next reminder — that is the snooze, not an edit.
 -- to_jsonb keeps this column-agnostic: columns added later count as content
 -- unless they are listed here.
 CREATE OR REPLACE FUNCTION puca_task_content_changed(old_row channel_tasks, new_row channel_tasks)
@@ -38,7 +41,8 @@ DECLARE
     o JSONB := to_jsonb(old_row) - 'position' - 'updated_at' - 'snooze';
     n JSONB := to_jsonb(new_row) - 'position' - 'updated_at' - 'snooze';
 BEGIN
-    IF new_row.schedule IS NOT NULL AND new_row.schedule IS NOT DISTINCT FROM old_row.schedule THEN
+    IF (new_row.schedule IS NOT NULL AND new_row.schedule IS NOT DISTINCT FROM old_row.schedule)
+       OR new_row.snooze IS DISTINCT FROM old_row.snooze THEN
         o := o - 'due_at';
         n := n - 'due_at';
     END IF;

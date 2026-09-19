@@ -23,19 +23,19 @@ beforeEach(() => { openReminderTiming.mockReset(); patchTaskTiming.mockReset(); 
 
 describe('the {id, at, mark} contract', () => {
     it('an unsnoozed row: at = due_at, mark = due_at (so pre-snooze fired markers stay valid)', () => {
-        expect(toReminderEntries([row()])).toEqual([{ id: 7, at: T(due), mark: due }]);
+        expect(toReminderEntries([row()])).toEqual([{ id: 7, at: T(due), mark: due, due }]);
     });
 
     it('a snooze in force moves `at` and changes the mark', () => {
         const until = '2026-10-05T20:00:00.000Z';
         const [e] = toReminderEntries([row({ openSnooze: serializeSnooze({ forDue: due, until }) })]);
-        expect(e).toEqual({ id: 7, at: T(until), mark: reminderMark(due, until) });
+        expect(e).toEqual({ id: 7, at: T(until), mark: reminderMark(due, until), due });
         expect(e.mark).not.toBe(due);
     });
 
     it('a stale snooze (taken against an older due_at) is ignored', () => {
         const stale = serializeSnooze({ forDue: '2026-09-28T19:00:00.000Z', until: '2026-09-28T20:00:00.000Z' });
-        expect(toReminderEntries([row({ openSnooze: stale })])).toEqual([{ id: 7, at: T(due), mark: due }]);
+        expect(toReminderEntries([row({ openSnooze: stale })])).toEqual([{ id: 7, at: T(due), mark: due, due }]);
     });
 
     it('fire once per mark; a new snooze time fires again', () => {
@@ -56,7 +56,7 @@ describe('opening the feed fails OPEN', () => {
     it('a row whose timing cannot be opened keeps its plain due_at', async () => {
         openReminderTiming.mockRejectedValueOnce(new Error('no key'));
         const [r] = await openReminderFeed([row({ snooze: '{"v":2,"t":"self","ct":"x"}' })]);
-        expect(toReminderEntries([r])).toEqual([{ id: 7, at: T(due), mark: due }]);
+        expect(toReminderEntries([r])).toEqual([{ id: 7, at: T(due), mark: due, due }]);
     });
 
     it('a row from an older server is not opened at all', async () => {

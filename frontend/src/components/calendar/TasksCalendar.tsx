@@ -17,7 +17,7 @@ import {
 } from '../../api/tasks';
 import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
-import { parseSchedule, serializeSnooze, snoozeUntil } from '../../api/taskSchedule';
+import { parseSchedule, snoozePatch, snoozeUntil } from '../../api/taskSchedule';
 import { planToggle } from '../../api/taskCompletion';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { useTaskFeature } from '../../api/taskFeatures';
@@ -125,9 +125,10 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     };
     const onSnooze = (e: CalendarEntry, preset: 'tomorrow' | '10m' | '1h') => {
         const t = e.source.task;
-        if (!t.due_at) return;
-        const snooze = serializeSnooze({ forDue: t.due_at, until: new Date(snoozeUntil(preset, Date.now())).toISOString() });
-        void run(e, () => patchTaskTiming(t, { snooze }));
+        // Moves the plaintext due_at too when this user may edit its time
+        // (taskSchedule.snoozePatch): the server sees the next reminder.
+        const patch = snoozePatch(t, snoozeUntil(preset, Date.now()), e.source.canEdit);
+        if (patch) void run(e, () => patchTaskTiming(t, patch));
     };
 
     const targets = [

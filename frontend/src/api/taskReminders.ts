@@ -107,7 +107,7 @@ export function startTaskReminders(): () => void {
         const opened = await openReminderFeed(reminders);
         if (stopped) return;
         const now = Date.now();
-        const plan = planEntries(toReminderEntries(opened), loadFired(), now);
+        const plan = planEntries(toReminderEntries(opened, now), loadFired(), now);
         saveFired(plan.prunedFired);
         if (plan.toFire.length > 0) notifyTasksDue(plan.toFire.length);
         const { advances, nextCheckAt } = planAdvances(opened, now);
