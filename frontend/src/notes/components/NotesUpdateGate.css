@@ -1,0 +1,163 @@
+/*
+ * Púca Notes' update gate and APK strip (NotesUpdateGate.tsx). Only ever
+ * rendered inside the Notes Android app; theme tokens only, so every theme
+ * and the high-contrast modifier apply.
+ *
+ * The gate is a full-screen surface above everything Notes draws (Notes has no
+ * panel machine; its own popovers and dialogs sit below 1000). The strip is a
+ * fixed card under the notch, above the top bar, until dismissed.
+ */
+.notes-update-gate {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--safe-area-top, 0px) 16px var(--safe-area-bottom, 0px);
+    background: var(--bg-primary);
+    color: var(--text-normal);
+    overflow-y: auto;
+}
+
+.notes-update-gate-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    max-width: 420px;
+    padding: 32px 8px;
+    text-align: center;
+}
+
+.notes-update-logo {
+    color: var(--brand-primary);
+    line-height: 0;
+}
+
+.notes-update-gate h2 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--header-primary);
+}
+
+.notes-update-gate p {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+.notes-update-gate p.notes-update-error {
+    color: var(--text-danger);
+}
+
+.notes-update-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--border-faint);
+    border-top-color: var(--brand-primary);
+    border-radius: 50%;
+    animation: notes-update-spin 0.9s linear infinite;
+}
+
+@keyframes notes-update-spin { to { transform: rotate(360deg); } }
+
+.notes-update-progress {
+    width: 100%;
+    max-width: 300px;
+    height: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+}
+
+.notes-update-progress-bar {
+    height: 100%;
+    background: var(--brand-primary);
+    transition: width 0.3s ease-out;
+}
+
+.notes-update-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.notes-update-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 10px 20px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-normal);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.notes-update-btn.primary {
+    border-color: transparent;
+    background: var(--brand-primary);
+    color: #fff;
+}
+
+.notes-update-strip {
+    position: fixed;
+    top: calc(var(--safe-area-top, 0px) + 8px);
+    left: 8px;
+    right: 8px;
+    z-index: 1100;
+    max-width: 560px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: var(--bg-floating);
+    color: var(--text-normal);
+    box-shadow: var(--shadow-md);
+    font-size: 14px;
+}
+
+.notes-update-strip-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.notes-update-strip-btn {
+    min-height: 36px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 8px;
+    background: var(--brand-primary);
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.notes-update-strip-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .notes-update-spinner { animation: none; }
+    .notes-update-progress-bar { transition: none; }
+}
