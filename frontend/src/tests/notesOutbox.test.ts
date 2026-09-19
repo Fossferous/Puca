@@ -193,6 +193,28 @@ describe('replay', () => {
         expect(h.ran).toEqual([{ k: 'updateTask', ids: [1, 3] }]);
     });
 
+    it('cold start: an online op sent BEFORE the persisted queue has loaded still waits behind it', async () => {
+        const h = harness();
+        const first = h.make();
+        h.setOnline(false);
+        await first.send(ops.toggle(LIST, task(3), true));    // left queued by the previous page
+        h.setOnline(true);
+        const second = h.make();                            // the page reloaded; nobody called load() yet
+        const r = await second.send(ops.toggle(LIST, task(4), true));
+        expect(r.queued).toBe(true);                         // did not overtake the queued op
+        expect(h.ran).toEqual([]);
+        await vi.waitFor(() => expect(second.pending()).toBe(0));   // the replay it scheduled
+        expect(h.ran).toEqual([{ k: 'updateTask', ids: [1, 3] }, { k: 'updateTask', ids: [1, 4] }]);
+    });
+
+    it('positive control: with nothing persisted, a cold-start online op runs straight away', async () => {
+        const h = harness();
+        const fresh = h.make();
+        const r = await fresh.send(ops.toggle(LIST, task(4), true));
+        expect(r.queued).toBe(false);
+        expect(h.ran).toEqual([{ k: 'updateTask', ids: [1, 4] }]);
+    });
+
     it('another account’s seed cannot open the queue', async () => {
         const h = harness();
         const mine = h.make();

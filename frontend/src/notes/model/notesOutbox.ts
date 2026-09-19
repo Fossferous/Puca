@@ -34,6 +34,18 @@
  * elsewhere in the meantime (docs/NOTES.md says so). Pins and order are
  * replayed as intents against the server's CURRENT set, never as a stale
  * full replace.
+ *
+ * CREATES ARE AT-LEAST-ONCE. The create routes take no client op id, so a
+ * create the server COMMITTED whose answer was lost (the connection dropped
+ * mid-response) looks exactly like one that never arrived: it is queued, or
+ * kept, and replayed — and the note or item then exists twice. Deletes,
+ * ticks and edits replay harmlessly (the same end state); a duplicate create
+ * is visible and the user can delete it. Closing that needs a server-side
+ * idempotency key on POST /task-lists and the task create routes (docs/NOTES.md).
+ *
+ * COLD START. `send` waits for the persisted queue to load before deciding
+ * whether an op may run straight away: an op sent in the moment before the
+ * load finished would otherwise overtake what a previous page left queued.
  */
 import { useEffect, useSyncExternalStore } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
@@ -354,24 +366,43 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         retryTimer = setTimeout(() => { retryTimer = null; void outbox.replay(); }, ms);
     };
 
+    // Which account's persisted queue `view` reflects, and the load under
+    // way. Until the queue is loaded `view` is EMPTY, and an online op sent in
+    // that window must not run ahead of ops a previous page left queued.
+    let loadedFor: number | null = null;
+    let loading: { sub: number; p: Promise<void> } | null = null;
+    const ensureLoaded = (sub: number): Promise<void> => {
+        if (loadedFor === sub) return Promise.resolve();
+        if (loading && loading.sub === sub) return loading.p;
+        return outbox.load();
+    };
+
     const outbox: Outbox = {
         pending: () => view.queue.length,
         queuedKeys: () => queuedKeysOf(view),
         subscribe: cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
         realId: tempId => view.ids[String(tempId)],
 
-        async load() {
+        load() {
             const c = ctx();
-            if (!c || !c.kv) { publish(EMPTY); return; }
+            if (!c || !c.kv) { publish(EMPTY); loadedFor = c ? c.sub : null; return Promise.resolve(); }
             const kv = c.kv;
-            try {
-                publish(await deps.lock(`pucaNotesOutbox:${c.sub}`, () => read(c.sub, c.id, kv)) ?? EMPTY);
-            } catch {
-                publish(EMPTY);
-            }
+            const sub = c.sub;
+            const p = (async () => {
+                try {
+                    publish(await deps.lock(`pucaNotesOutbox:${sub}`, () => read(sub, c.id, kv)) ?? EMPTY);
+                } catch {
+                    publish(EMPTY);
+                }
+                loadedFor = sub;
+            })().finally(() => { if (loading?.p === p) loading = null; });
+            loading = { sub, p };
+            return p;
         },
 
         async send<T>(op: NoteOp) {
+            const c0 = ctx();
+            if (c0) await ensureLoaded(c0.sub);
             const mustQueue = view.queue.length > 0 || referencesTemp(op) || !deps.online();
             if (mustQueue) {
                 await mutate(s => ({ ...s, queue: [...s.queue, op] }));
