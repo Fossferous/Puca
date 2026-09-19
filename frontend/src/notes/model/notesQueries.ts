@@ -38,7 +38,7 @@ import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import {
     type NoteCard, type NoteRef, type NoteSource,
-    buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder,
+    buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder, withCreatedList,
 } from './notesModel';
 import { useTaskEventsLive } from './taskEvents';
 import { ops, sendCreateList, sendCreateTask, sendNoteOp, type PrefsIntent } from './notesOutbox';
@@ -58,6 +58,7 @@ export function makeNotesQueryClient(): QueryClient {
                 // them, and the replay re-reads everything when it is done.
                 refetchOnWindowFocus: () => !anythingQueued(),
                 refetchOnReconnect: () => !anythingQueued(),
+                refetchOnMount: () => !anythingQueued(),
             },
         },
     });
@@ -483,10 +484,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             }
         }
         qc.setQueryData<Task[]>(notesKeys.tasks(ref), created);
-        qc.setQueryData<TaskList[]>(notesKeys.lists, prev => [
-            ...(prev ?? []),
-            { ...list, total_tasks: created.length, completed_tasks: 0 },
-        ]);
+        qc.setQueryData<TaskList[]>(notesKeys.lists, prev => withCreatedList(prev, { ...list, total_tasks: created.length, completed_tasks: 0 }));
         if (missing.length > 0) {
             pushMessageToast({
                 title: `Note saved, but ${missing.length} item${missing.length === 1 ? '' : 's'} didn’t — add again: ${missing.join(', ').slice(0, 120)}`,

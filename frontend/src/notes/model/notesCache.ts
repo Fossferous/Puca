@@ -161,6 +161,11 @@ export async function hydrateNotesCache(
         qc.setQueryData(c.k, c.d, { updatedAt: typeof c.t === 'number' ? c.t : 0 });
         n++;
     }
+    // Shown at once, but not TRUSTED: events raised while this page was closed
+    // never arrived (a first hello does not resync). Stale, so every query
+    // refetches as it mounts (not while offline edits are queued; see
+    // makeNotesQueryClient) and an offline start keeps the cached data.
+    if (n > 0) void qc.invalidateQueries({ queryKey: ['notes'], refetchType: 'none' });
     return n;
 }
 

@@ -182,3 +182,18 @@ describe('events -> queries', () => {
         expect(spy).toHaveBeenCalledWith({ queryKey: ['notes'] });
     });
 });
+
+describe('a create racing the stream', () => {
+    it('a note the stream already refetched is not added a second time', async () => {
+        const { withCreatedList } = await import('../notes/model/notesModel');
+        const created = { id: 4, title: 'Groceries', total_tasks: 3 };
+        // The {"t":"lists"} refetch landed between the create and the write.
+        const refetched = [{ id: 1, title: 'Old', total_tasks: 0 }, { id: 4, title: 'Groceries', total_tasks: 0 }];
+        const out = withCreatedList(refetched, created);
+        expect(out.filter(l => l.id === 4)).toEqual([created]);
+        expect(out.map(l => l.id)).toEqual([1, 4]);
+        // Positive control: with no refetch in between it is simply appended.
+        expect(withCreatedList([{ id: 1, title: 'Old', total_tasks: 0 }], created).map(l => l.id)).toEqual([1, 4]);
+        expect(withCreatedList(undefined, created)).toEqual([created]);
+    });
+});

@@ -56,6 +56,13 @@ describe('persist, then hydrate on a cold start', () => {
         expect(await hydrateNotesCache(b, { sub: 7, identity: me, store })).toBe(2);
         expect(b.getQueryData(['notes', 'tasks', 'list', 1])).toEqual(tasks);
         expect(b.getQueryData(['notes', 'lists'])).toEqual([{ id: 1, title: 'Groceries' }]);
+        // Shown, but not trusted: stale, so each query refetches as it mounts
+        // (events raised while the page was closed never arrived).
+        expect(b.getQueryState(['notes', 'lists'])?.isInvalidated).toBe(true);
+        expect(b.getQueryState(['notes', 'tasks', 'list', 1])?.isInvalidated).toBe(true);
+        // Positive control: data written by the page itself is not.
+        a.setQueryData(['notes', 'x'], 1);
+        expect(a.getQueryState(['notes', 'x'])?.isInvalidated).toBe(false);
 
         // Another account's seed on this browser opens nothing.
         const c = new QueryClient();

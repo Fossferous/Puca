@@ -457,3 +457,13 @@ export function bulkPinOrder(fullKeys: readonly string[], selected: ReadonlySet<
         : [...fullKeys];
     return { order, overrides };
 }
+
+/**
+ * Put a just-created note into the cached list set exactly once. The live
+ * event stream can refetch the set between the create and this write, so the
+ * note may already be there; appending again showed it twice (and the sealed
+ * cache kept the duplicate across a reload).
+ */
+export function withCreatedList<L extends { id: number }>(prev: readonly L[] | undefined, created: L): L[] {
+    return [...(prev ?? []).filter(l => l.id !== created.id), created];
+}
