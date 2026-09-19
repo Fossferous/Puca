@@ -2158,7 +2158,18 @@ const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     // after deletion should hold nothing that could ever be replayed
     // (0.9.810 audit, C-02; SECURITY_MODEL.md §11 says the material is gone).
     "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
+    // Sealed-to-self account blobs (migration 067; Púca Notes' colours,
+    // labels and archive flags). Ciphertext nothing can open once the seed is
+    // gone, and the tombstone UPDATE never fires the FK cascade.
+    "DELETE FROM user_sealed_blobs WHERE user_id = $1",
 ];
+
+/// The cleanup statements, for tests outside this module that run them
+/// against a real database (sealed_blob_handlers).
+#[cfg(test)]
+pub(crate) fn account_delete_cleanup() -> &'static [&'static str] {
+    ACCOUNT_DELETE_CLEANUP
+}
 
 /// DELETE /account — tombstone the account.
 ///
@@ -2602,6 +2613,7 @@ mod account_deletion_residue_tests {
             "DELETE FROM channel_keys WHERE recipient_id = $1",
             "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
             "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
+            "DELETE FROM user_sealed_blobs WHERE user_id = $1",
         ];
         assert_eq!(
             ACCOUNT_DELETE_CLEANUP, expected,

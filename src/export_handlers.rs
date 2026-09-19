@@ -239,6 +239,12 @@ const SESSIONS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM 
     SELECT device_id, created_at, last_seen_at, revoked_at, (sid = $2::text) AS is_this_session \
     FROM token_sessions WHERE user_id = $1::bigint ORDER BY created_at, sid) t";
 
+/// Sealed-to-self account blobs (migration 067): the ciphertext as stored,
+/// with its revision. The app opens the ones it knows (accountExport.ts).
+const SEALED_BLOBS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM ( \
+    SELECT name, rev, blob AS blob_ciphertext, updated_at \
+    FROM user_sealed_blobs WHERE user_id = $1::bigint ORDER BY name) t";
+
 const NOTIFICATION_PREFS_SQL: &str = "SELECT COALESCE((SELECT row_to_json(t) FROM ( \
     SELECT push_enabled, push_messages, push_mentions, push_dms, push_friend_requests, \
            quiet_hours_start, quiet_hours_end, updated_at \
@@ -278,6 +284,7 @@ pub(crate) async fn build_export(pool: &PgPool, claims: &Claims) -> Result<Value
         serde_json::from_str(&text).unwrap_or(Value::Null)
     };
     let notification_preferences = section(&mut tx, NOTIFICATION_PREFS_SQL, uid).await?;
+    let sealed_blobs = section(&mut tx, SEALED_BLOBS_SQL, uid).await?;
     tx.commit().await?;
 
     Ok(json!({
@@ -300,6 +307,7 @@ pub(crate) async fn build_export(pool: &PgPool, claims: &Claims) -> Result<Value
         "devices": devices,
         "sessions": sessions,
         "notification_preferences": notification_preferences,
+        "sealed_blobs": sealed_blobs,
     }))
 }
 
@@ -391,6 +399,10 @@ mod tests {
             .bind(&sid).bind(alice).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO friends (user1_id, user2_id) VALUES ($1, $2)")
             .bind(alice as i64).bind(bob as i64).execute(&pool).await.unwrap();
+        for (who, blob) in [(alice, format!("alice-blob-{tag}")), (bob, format!("bob-blob-{tag}"))] {
+            sqlx::query("INSERT INTO user_sealed_blobs (user_id, name, rev, blob) VALUES ($1, 'notes-prefs', 3, $2)")
+                .bind(who as i64).bind(blob).execute(&pool).await.unwrap();
+        }
 
         let claims = Claims {
             sub: alice as UserId,
@@ -437,6 +449,10 @@ mod tests {
         assert_eq!(doc["uploaded_files"][0]["size_bytes"], 1234);
         assert_eq!(doc["task_lists"][0]["title"], format!("list-{tag}"));
         assert_eq!(doc["sessions"][0]["is_this_session"], true);
+        // The sealed blob as ciphertext with its revision, and only Alice's.
+        assert_eq!(doc["sealed_blobs"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(doc["sealed_blobs"][0]["blob_ciphertext"], format!("alice-blob-{tag}"));
+        assert_eq!(doc["sealed_blobs"][0]["rev"], 3);
         // Times are UTC and say so — the naive TIMESTAMP columns were converted.
         let created = doc["channel_messages"][0]["created_at"].as_str().unwrap_or("");
         assert!(created.ends_with("+00:00") || created.ends_with('Z'), "timestamps must carry a UTC offset, got {created}");
