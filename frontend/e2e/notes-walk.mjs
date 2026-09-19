@@ -8,7 +8,10 @@
 // origin storage); a note created in Notes is a list with items on the server;
 // the editor is Púca's TaskTree (toggle, subtask, due, Escape inside an item
 // edit does not close the note); colour/labels/pin/search/reminders/archive/
-// delete-with-undo; a Notes sign-out lands the main app's tab on its login
+// move-to-trash with undo, the Trash view (restore, delete forever); text
+// notes, photo notes and drawing notes (sealed on the server — the database
+// check reads the stored envelope); the text shown AND edited in Púca's own
+// Tasks view; a Notes sign-out lands the main app's tab on its login
 // (sessionSync); a plaintext row injected in the database is flagged "Not
 // encrypted"; and on the phone — one column, no horizontal overflow, every
 // tap target at size, 16px inputs, the FAB composer, the drawer, a popover
@@ -40,6 +43,8 @@ function sql(statement) {
 fs.mkdirSync(outdir, { recursive: true });
 
 const username = 'notes_' + Math.random().toString(36).slice(2, 8);
+// A real (tiny) PNG for the photo note: 8x8, opaque red.
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC', 'base64');
 const password = 'Password123!';
 
 let fail = 0;
@@ -49,6 +54,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browser = await chromium.launch();
 const errors = [];
 const watch = page => {
+    page.on('dialog', d => { void d.accept(); });
     page.on('pageerror', e => { errors.push(String(e)); console.log('[pageerror]', String(e).slice(0, 300)); });
     page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 200)); });
 };
@@ -60,6 +66,15 @@ const shotOf = page => async name => {
     console.log('SHOT', f);
 };
 
+/** Open the inline composer and wait for it to settle: it focuses its first
+ *  item on the next animation frame, and a fill that starts before that
+ *  lands half in the title and half in the item (a walk race, not a product
+ *  bug — a person does not type within one frame of the click). */
+const openComposerOn = page => async () => {
+    await page.click('.notes-quickadd-collapsed');
+    await page.waitForFunction(() => document.activeElement?.closest('.notes-quickadd-item') != null, null, { timeout: 5000 }).catch(() => {});
+};
+
 // =============================================================================
 // Desktop
 // =============================================================================
@@ -67,6 +82,7 @@ const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, b
 const page = await ctx.newPage();
 watch(page);
 const shot = shotOf(page);
+const openComposer = openComposerOn(page);
 
 // ---- 1. Notes before any sign-in: its OWN login card, not the main app ----------
 await page.goto('/notes/');
@@ -96,7 +112,7 @@ ck('notes: fresh account shows the empty state', /Take a note/.test(await page.l
 await shot('notes-empty');
 
 // ---- 4. Take a note… ---------------------------------------------------------------
-await page.click('.notes-quickadd-collapsed');
+await openComposer();
 await page.fill('.notes-quickadd-title', 'Groceries');
 const item = i => page.locator('.notes-quickadd-item input').nth(i);
 await item(0).fill('Milk');
@@ -112,10 +128,71 @@ await page.waitForFunction(() => document.querySelectorAll('.notes-card-item').l
 ck('quick add: three items in typed order', (await page.locator('.notes-card-item-text').allInnerTexts()).join(',') === 'Milk,Bread,Eggs');
 await shot('one-card');
 
+// ---- 4b. Text, photo and drawing notes -----------------------------------------------
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Poem');
+await page.click('.notes-quickadd-foot button[aria-label="Text note"]');
+await page.fill('.notes-quickadd-body', 'Roses are red\nViolets are blue');
+await page.getByRole('button', { name: 'Done' }).click();
+const poem = () => page.locator('.notes-card', { hasText: 'Poem' });
+await page.waitForSelector('.notes-card:has-text("Poem") .notes-card-body', { timeout: 15000 });
+ck('text note: the card shows the text, not "Empty note"', /Roses are red/.test(await poem().locator('.notes-card-body').innerText()) && await poem().locator('.notes-card-empty').count() === 0);
+
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Holiday photo');
+await page.locator('.notes-quickadd-foot input[type="file"]').first().setInputFiles({ name: 'beach.png', mimeType: 'image/png', buffer: PNG });
+await page.waitForSelector('.notes-quickadd-media img', { timeout: 5000 });
+ck('photo note: the picked photo previews in the composer', true);
+await page.getByRole('button', { name: 'Done' }).click();
+await page.waitForFunction(() => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Holiday photo') && c.querySelector('.notes-card-hero img[src^="blob:"]')?.naturalWidth > 0), null, { timeout: 20000 })
+    .then(() => ck('photo note: the card leads with the decrypted photo', true))
+    .catch(() => ck('photo note: the card leads with the decrypted photo', false));
+
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Sketch');
+await page.click('.notes-quickadd-foot button[aria-label="Draw"]');
+await page.waitForSelector('.notes-draw-canvas', { timeout: 5000 });
+const cb = await page.locator('.notes-draw-canvas').boundingBox();
+await page.mouse.move(cb.x + cb.width * 0.2, cb.y + cb.height * 0.3);
+await page.mouse.down();
+for (let i = 1; i <= 10; i++) await page.mouse.move(cb.x + cb.width * (0.2 + i * 0.05), cb.y + cb.height * (0.3 + i * 0.03));
+await page.mouse.up();
+await shot('drawing-editor');
+await page.getByRole('button', { name: 'Save drawing' }).click();
+await page.waitForSelector('.notes-draw-canvas', { state: 'detached', timeout: 5000 });
+ck('drawing: saving returns to the composer with the drawing attached', await page.locator('.notes-quickadd-media img').count() === 1);
+await page.getByRole('button', { name: 'Done' }).click();
+await page.waitForFunction(() => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Sketch') && c.querySelector('.notes-card-hero img.drawing[src^="blob:"]')), null, { timeout: 20000 })
+    .then(() => ck('drawing note: the card shows the drawing', true))
+    .catch(() => ck('drawing note: the card shows the drawing', false));
+// Reopen it: the strokes come back into the editor (the canvas is not blank).
+await page.locator('.notes-card', { hasText: 'Sketch' }).click();
+await page.waitForSelector('.notes-editor .ni-item.drawing button[aria-label="Edit drawing"]', { timeout: 15000 });
+await page.click('.notes-editor .ni-item.drawing button[aria-label="Edit drawing"]');
+await page.waitForSelector('.notes-draw-canvas', { timeout: 10000 });
+await sleep(300);
+const inked = await page.evaluate(() => {
+    const c = document.querySelector('.notes-draw-canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let dark = 0;
+    for (let i = 0; i < d.length; i += 16) if (d[i] < 128 && d[i + 1] < 128 && d[i + 2] < 128) dark++;
+    return dark;
+});
+ck('drawing: reopening restores the strokes for editing', inked > 50, `dark samples=${inked}`);
+await page.getByRole('button', { name: 'Cancel' }).click();
+await page.waitForSelector('.notes-draw-canvas', { state: 'detached', timeout: 5000 });
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+await shot('text-photo-drawing-cards');
+
 // ---- 5. The editor is Púca's TaskTree ----------------------------------------------
-await page.click('.notes-card');
+await page.locator('.notes-card', { hasText: 'Groceries' }).click();
 await page.waitForSelector('.notes-editor .task-tree', { timeout: 15000 });
 ck('editor: three TaskTree rows', await page.locator('.notes-editor .tt-item').count() === 3);
+// The note's own text, above its items; it saves itself.
+await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday');
+await sleep(1500);
+ck('editor: note text saves without a button', await page.locator('.notes-editor .nb-status.failed').count() === 0);
 // toggle Milk. click(), not check(): the box is a CONTROLLED input whose DOM
 // state React restores until the optimistic update commits a frame later,
 // and check() asserts the flip synchronously — the completed section is the
@@ -190,27 +267,44 @@ ck('editor: Escape (outside inputs) closes the note', await page.locator('.notes
 
 // ---- 6. Card state, labels rail, filter ------------------------------------------------
 ck('card: carries the colour', await page.locator('.notes-card[data-color="mint"]').count() === 1);
-ck('card: shows the label chip and progress', /Errands/.test(await page.locator('.notes-card-foot').innerText()) && /1\/5/.test(await page.locator('.notes-card-foot').innerText()));
+const groceries = () => page.locator('.notes-card', { hasText: 'Groceries' });
+ck('card: shows the label chip and progress', /Errands/.test(await groceries().locator('.notes-card-foot').innerText()) && /1\/5/.test(await groceries().locator('.notes-card-foot').innerText()));
+ck('card: shows the note text above the items', /Buy before Friday/.test(await groceries().locator('.notes-card-body').innerText()));
 ck('rail: the label appears', await page.locator('.notes-rail-item', { hasText: 'Errands' }).count() === 1);
 await page.locator('.notes-rail-item', { hasText: 'Errands' }).click();
 await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
 // textContent, not innerText: the heading is CSS-uppercased and innerText returns the rendered case.
 ck('label view: filtered heading + the one card', /Label: Errands/.test(await page.locator('h1.notes-section-title').textContent()) && await page.locator('.notes-card').count() === 1);
+// Text ⇄ checklist on the text note, both ways.
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await poem().click();
+await page.waitForSelector('.notes-editor .notes-convert-row', { timeout: 10000 });
+await page.getByRole('button', { name: 'Show checkboxes' }).click();
+await page.waitForFunction(() => document.querySelectorAll('.notes-editor .tt-item').length === 2, null, { timeout: 10000 })
+    .then(() => ck('show checkboxes: each line became an item', true))
+    .catch(() => ck('show checkboxes: each line became an item', false));
+await page.waitForFunction(() => document.querySelector('.notes-editor textarea.nb-text')?.value === '', null, { timeout: 10000 }).catch(() => {});
+ck('show checkboxes: the text moved out of the text field', (await page.locator('.notes-editor textarea.nb-text').inputValue()) === '');
+await page.getByRole('button', { name: 'Hide checkboxes' }).click();
+await page.waitForFunction(() => document.querySelectorAll('.notes-editor .tt-item').length === 0 && document.querySelector('.notes-editor textarea.nb-text')?.value !== '', null, { timeout: 10000 }).catch(() => {});
+ck('hide checkboxes: the items became lines of text again', (await page.locator('.notes-editor textarea.nb-text').inputValue()) === 'Roses are red\nViolets are blue');
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
 // ---- 7. Pin ------------------------------------------------------------------------------------
-await page.locator('.notes-card').first().hover();
-await page.click('.notes-card-pin');
+await groceries().hover();
+await groceries().locator('.notes-card-pin').click();
 await page.waitForSelector('section[aria-label="Pinned notes"]', { timeout: 10000 });
 ck('pin: the card moves to the Pinned section', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 // Keyboard: Enter on a control INSIDE the card activates that control (unpin),
 // it must not open the note.
-await page.locator('.notes-card').first().locator('.notes-card-pin').focus();
+await groceries().locator('.notes-card-pin').focus();
 await page.keyboard.press('Enter');
 await page.waitForSelector('section[aria-label="Pinned notes"]', { state: 'detached', timeout: 10000 }).catch(() => {});
 ck('keyboard: Enter on the pin button unpins and does NOT open the editor',
     await page.locator('section[aria-label="Pinned notes"]').count() === 0 && await page.locator('.notes-editor').count() === 0);
-await page.locator('.notes-card').first().locator('.notes-card-pin').focus();
+await groceries().locator('.notes-card-pin').focus();
 await page.keyboard.press('Enter');
 await page.waitForSelector('section[aria-label="Pinned notes"]', { timeout: 10000 });
 ck('keyboard: Enter again re-pins', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
@@ -223,34 +317,37 @@ await page.keyboard.press('Escape');
 await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 
 // ---- 8. Second note, search, move -----------------------------------------------------------
-await page.click('.notes-quickadd-collapsed');
+await openComposer();
 await page.fill('.notes-quickadd-title', 'Packing');
 await page.locator('.notes-quickadd-item input').first().fill('Socks');
 await page.getByRole('button', { name: 'Done' }).click();
-await page.waitForFunction(() => document.querySelectorAll('.notes-card').length === 2, null, { timeout: 15000 });
-await page.click('.notes-quickadd-collapsed');
+await page.waitForFunction(() => document.querySelectorAll('.notes-card').length === 5, null, { timeout: 15000 });
+await openComposer();
 await page.fill('.notes-quickadd-title', 'Reading');
 await page.locator('.notes-quickadd-item input').first().fill('Dune');
 await page.getByRole('button', { name: 'Done' }).click();
-await page.waitForFunction(() => document.querySelectorAll('.notes-card').length === 3, null, { timeout: 15000 });
+await page.waitForFunction(() => document.querySelectorAll('.notes-card').length === 6, null, { timeout: 15000 });
 const othersTitles = async () => (await page.locator('section[aria-label="Other notes"] .notes-card-title').allInnerTexts()).map(t => t.trim());
-ck('others: natural order Packing, Reading', (await othersTitles()).join(',') === 'Packing,Reading');
+ck('others: natural order Poem, Holiday photo, Sketch, Packing, Reading', (await othersTitles()).join(',') === 'Poem,Holiday photo,Sketch,Packing,Reading', (await othersTitles()).join(','));
 await page.locator('.notes-card', { hasText: 'Reading' }).hover();
 await page.locator('.notes-card', { hasText: 'Reading' }).locator('button[aria-label="More actions"]').click();
 await page.waitForSelector('.context-menu', { timeout: 5000 });
 await page.locator('.context-menu-item', { hasText: 'Move to top' }).click();
 await sleep(400);
-ck('move: "Move to top" reorders the others (and never touches the pinned one)', (await othersTitles()).join(',') === 'Reading,Packing' && await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
+ck('move: "Move to top" reorders the others (and never touches the pinned one)', (await othersTitles()).join(',') === 'Reading,Poem,Holiday photo,Sketch,Packing' && await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 await shot('three-cards');
 await page.fill('.notes-search input', 'bread');
 await sleep(300);
 ck('search: matches an item inside a note', await page.locator('.notes-card').count() === 1 && /Groceries/.test(await page.locator('.notes-card-title').first().innerText()));
+await page.fill('.notes-search input', 'violets');
+await sleep(300);
+ck('search: matches a note\'s text', await page.locator('.notes-card').count() === 1 && /Poem/.test(await page.locator('.notes-card-title').first().innerText()));
 await page.fill('.notes-search input', 'zzzz');
 await sleep(300);
 ck('search: no match shows the empty state', await page.locator('.notes-empty').count() === 1);
 await page.click('button[aria-label="Clear search"]');
 await sleep(200);
-ck('search: cleared', await page.locator('.notes-card').count() === 3);
+ck('search: cleared', await page.locator('.notes-card').count() === 6);
 
 // ---- 9. Reminders view -----------------------------------------------------------------------------
 await page.locator('.notes-rail-item', { hasText: 'Reminders' }).click();
@@ -276,25 +373,49 @@ await sleep(300);
 ck('archive view: the archived card is there with its chip', await packing().count() === 1 && /archived/.test(await packing().locator('.notes-card-foot').innerText()));
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
-// ---- 11. Delete with undo (server-side only on expiry) -----------------------------------------------
+// ---- 11. Move to trash with undo (the server keeps it restorable) ------------------------------------
 const reading = () => page.locator('.notes-card', { hasText: 'Reading' });
 await reading().hover();
 await reading().locator('button[aria-label="More actions"]').click();
-await page.locator('.context-menu-item', { hasText: 'Delete note' }).click();
-await page.waitForSelector('.notes-undo', { timeout: 5000 });
-ck('delete: hidden at once, undo offered', await reading().count() === 0);
+await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
+// The archive step's undo bar may still be up; wait for THIS one.
+await page.waitForSelector('.notes-undo-text:has-text("to the trash")', { timeout: 5000 });
+ck('trash: hidden at once, undo offered', await reading().count() === 0 && /trash/.test(await page.locator('.notes-undo-text').innerText()));
 await page.locator('.notes-undo button').click();
-await sleep(200);
-ck('delete: Undo restores it', await reading().count() === 1);
+await sleep(600);
+ck('trash: Undo restores it', await reading().count() === 1);
 await reading().hover();
 await reading().locator('button[aria-label="More actions"]').click();
-await page.locator('.context-menu-item', { hasText: 'Delete note' }).click();
+await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
 await page.waitForSelector('.notes-undo', { timeout: 5000 });
 await page.waitForSelector('.notes-undo', { state: 'detached', timeout: 12000 });
 await page.keyboard.press('r');   // refresh from the server
 await sleep(1500);
-ck('delete: gone from the view after the undo window', await reading().count() === 0);
-await shot('after-delete');
+ck('trash: gone from the notes after the undo window', await reading().count() === 0);
+await shot('after-trash');
+
+// ---- 11b. The Trash view: restore, then delete forever ---------------------------------------------------
+await page.locator('.notes-rail-item', { hasText: 'Trash' }).click();
+await page.waitForSelector('.notes-trash-row', { timeout: 10000 });
+ck('trash view: the note is listed with its purge date', await page.locator('.notes-trash-row', { hasText: 'Reading' }).count() === 1 && /deleted forever/.test(await page.locator('.notes-trash-row').first().innerText()));
+ck('trash view: says how long the server keeps trash', /deleted forever after 30 days/.test(await page.locator('.notes-trash-copy').innerText()));
+await shot('trash-view');
+await page.locator('.notes-trash-row', { hasText: 'Reading' }).getByRole('button', { name: 'Restore' }).click();
+await page.waitForSelector('.notes-trash-row', { state: 'detached', timeout: 10000 }).catch(() => {});
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await page.waitForSelector('.notes-card:has-text("Reading")', { timeout: 10000 })
+    .then(() => ck('trash view: Restore brings the note back', true))
+    .catch(() => ck('trash view: Restore brings the note back', false));
+await reading().hover();
+await reading().locator('button[aria-label="More actions"]').click();
+await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
+await page.waitForSelector('.notes-undo', { timeout: 5000 });
+await page.locator('.notes-rail-item', { hasText: 'Trash' }).click();
+await page.waitForSelector('.notes-trash-row:has-text("Reading")', { timeout: 10000 });
+await page.locator('.notes-trash-row', { hasText: 'Reading' }).getByRole('button', { name: 'Delete forever' }).click();
+await page.waitForSelector('.notes-trash-row', { state: 'detached', timeout: 10000 }).catch(() => {});
+ck('trash view: Delete forever empties it', await page.locator('.notes-trash-row').count() === 0 && await page.locator('.notes-trash .notes-empty').count() === 1);
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
 // ---- 12. Server-side truth via the database ----------------------------------------------------------
 if (psqlDsn) {
@@ -303,7 +424,14 @@ if (psqlDsn) {
         // per run, and MIN(id) over everything would tamper with somebody else's row.
         const mine = `SELECT l.id FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`;
         const lists = sql(`SELECT count(*) FROM (${mine}) x`);
-        ck('database: the deleted note is gone from the server (2 lists remain)', lists === '2', lists);
+        ck('database: the note deleted forever is gone from the server (5 lists remain)', lists === '5', lists);
+        const trashedRows = sql(`SELECT count(*) FROM task_lists WHERE id IN (${mine}) AND trashed_at IS NOT NULL`);
+        ck('database: nothing left in the trash', trashedRows === '0', trashedRows);
+        // E2EE: the note text and the photo/drawing refs are envelopes; the words are nowhere.
+        const bodies = sql(`SELECT string_agg(coalesce(body,'') || '|' || coalesce(attachments,''), E'\n') FROM task_lists WHERE id IN (${mine})`);
+        ck('database: note text is stored sealed', /"t":"self"/.test(bodies) && !/Roses|Violets|Friday|beach\.png|drawing-1/.test(bodies), bodies.slice(0, 120));
+        const nonEnvelope = sql(`SELECT count(*) FROM task_lists WHERE id IN (${mine}) AND ((body IS NOT NULL AND body NOT LIKE '{%') OR (attachments IS NOT NULL AND attachments NOT LIKE '{%'))`);
+        ck('database: no note text or sidecar is anything but an envelope', nonEnvelope === '0', nonEnvelope);
         // An OPEN top-level row of the FIRST list (Groceries, still in the main
         // view): the card preview folds completed rows away ("1 completed"), and
         // Packing is archived at this point, so a badge on either would be
@@ -322,6 +450,44 @@ if (psqlDsn) {
         ck('database checks ran', false, String(e).slice(0, 200));
     }
 }
+
+// ---- 12b. Púca's own Tasks view: the same note text, read AND edited there ----------------------------
+await page.goto('/chat');
+await page.waitForSelector('.chat-container', { timeout: 20000 });
+try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+await page.click('.server-icon.home-button');
+await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
+await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
+ck('púca: the board card shows a text note\'s text', /Roses are red/.test(await page.locator('.checklist-card', { hasText: 'Poem' }).locator('.tasks-card-body').innerText().catch(() => '')));
+ck('púca: the board card says a photo note has a picture', /1 picture/.test(await page.locator('.checklist-card', { hasText: 'Holiday photo' }).locator('.tasks-card-body').innerText().catch(() => '')));
+await page.locator('.tasks-tab', { hasText: 'Poem' }).click();
+await page.waitForSelector('.list-content-block textarea.nb-text', { timeout: 10000 });
+ck('púca: the list editor shows the note text', /Roses are red/.test(await page.locator('.list-content-block textarea.nb-text').inputValue()));
+await page.fill('.list-content-block textarea.nb-text', 'Roses are red\nViolets are blue\nEdited in Púca');
+await sleep(1500);
+await page.locator('.tasks-tab', { hasText: 'Holiday photo' }).click();
+await page.waitForFunction(() => document.querySelector('.list-content-block .ni-open img')?.naturalWidth > 0, null, { timeout: 15000 })
+    .then(() => ck('púca: a photo note shows its photo', true))
+    .catch(() => ck('púca: a photo note shows its photo', false));
+await shot('puca-tasks-photo-note');
+// Move to trash from Púca: the list leaves the bar and the Trash section offers it back.
+await page.locator('.tasks-tab', { hasText: 'Packing' }).click({ button: 'right' });
+await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
+await page.waitForFunction(() => ![...document.querySelectorAll('.tasks-tab')].some(t => t.textContent.includes('Packing')), null, { timeout: 10000 }).catch(() => {});
+await page.locator('.tasks-tab-all').click();
+await page.waitForSelector('.tasks-trash-toggle', { timeout: 10000 });
+await page.click('.tasks-trash-toggle');
+ck('púca: the trashed list is in the Trash section', await page.locator('.tasks-trash-row', { hasText: 'Packing' }).count() === 1);
+await shot('puca-tasks-trash');
+await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button', { name: 'Restore' }).click();
+await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
+    .then(() => ck('púca: Restore puts it back in the bar', true))
+    .catch(() => ck('púca: Restore puts it back in the bar', false));
+await page.goto('/notes/');
+await page.waitForSelector('.notes-card:has-text("Poem")', { timeout: 15000 });
+ck('notes: the text edited in Púca shows on the card', /Edited in Púca/.test(await poem().locator('.notes-card-body').innerText()));
+ck('notes: Packing kept its archive flag through Púca\'s trash and restore', await page.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText() === '1');
 
 // ---- 13. Cross-tab: a Notes sign-out lands the main app's tab on its login ---------------------------
 const page2 = await ctx.newPage();
@@ -376,7 +542,7 @@ const audit = () => m.evaluate(() => {
     const ghosts = [...document.querySelectorAll('button, input, a')].filter(el => vis(el) && parseFloat(getComputedStyle(el).opacity) === 0).map(el => el.className);
     const cards = [...document.querySelectorAll('.notes-card')].map(c => Math.round(c.getBoundingClientRect().left));
     const fonts = {};
-    for (const sel of ['.notes-search input', '.notes-editor-add input', '.notes-editor-title', '.notes-quickadd-title', '.notes-quickadd-item input', '.tt-edit-input']) {
+    for (const sel of ['.notes-search input', '.notes-editor-add input', '.notes-editor-title', '.notes-quickadd-title', '.notes-quickadd-item input', '.tt-edit-input', '.nb-text', '.notes-quickadd-body']) {
         const el = document.querySelector(sel);
         if (el) fonts[sel] = parseFloat(getComputedStyle(el).fontSize);
     }
@@ -429,6 +595,43 @@ ck('phone: Done stays reachable under a 15-item list (the sheet scrolls)', db &&
 await done.tap();
 await m.waitForSelector('.notes-card:has-text("Phone note")', { timeout: 15000 });
 ck('phone: the FAB composer creates a note', true);
+// The composer's text mode, camera and drawing on a phone.
+await m.tap('.notes-fab');
+await m.waitForSelector('.notes-quickadd.sheet', { timeout: 5000 });
+ck('phone: the composer offers the camera directly', await m.locator('.notes-quickadd-foot button[aria-label="Take photo"]').count() === 1
+    && await m.locator('.notes-quickadd-foot input[capture]').count() === 1);
+await m.tap('.notes-quickadd-foot button[aria-label="Text note"]');
+r = await audit();
+ck('phone: composer text field ≥ 16px, footer targets at size', r.fonts['.notes-quickadd-body'] >= 16 && r.under.length === 0, JSON.stringify({ f: r.fonts['.notes-quickadd-body'], u: r.under }));
+await m.tap('.notes-quickadd-foot button[aria-label="Draw"]');
+await m.waitForSelector('.notes-draw', { timeout: 5000 });
+const dbx = await m.locator('.notes-draw').boundingBox();
+const mvh = await m.evaluate(() => window.innerHeight);
+r = await audit();
+ck('phone: the drawing editor is full-screen with tools at size', dbx && dbx.width >= 389 && dbx.height >= mvh - 2 && r.under.length === 0 && !r.bodyScrollsHorizontally, JSON.stringify({ dbx, u: r.under }));
+ck('phone: the canvas takes touch as drawing, not scrolling', await m.evaluate(() => getComputedStyle(document.querySelector('.notes-draw-canvas')).touchAction) === 'none');
+await mshot('phone-drawing');
+await m.getByRole('button', { name: 'Cancel' }).tap();
+await m.waitForSelector('.notes-draw', { state: 'detached', timeout: 5000 });
+await m.locator('.notes-quickadd.sheet button[aria-label="Discard note"]').tap();
+await m.waitForSelector('.notes-quickadd.sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
+// The Trash at phone size.
+await m.goto('/notes/#/trash');
+await m.waitForSelector('.notes-trash', { timeout: 10000 });
+r = await audit();
+ck('phone: the Trash view fits, targets at size', !r.bodyScrollsHorizontally && r.under.length === 0, JSON.stringify(r.under));
+await mshot('phone-trash');
+await m.goto('/notes/');
+await m.waitForSelector('.notes-card', { timeout: 20000 });
+// A photo note's editor: gallery controls and the text field.
+await m.tap('.notes-card:has-text("Holiday photo")');
+await m.waitForSelector('.notes-editor .note-images', { timeout: 15000 });
+r = await audit();
+ck('phone: photo note editor — picture controls at size, text ≥ 16px', r.under.length === 0 && r.fonts['.nb-text'] >= 16, JSON.stringify({ u: r.under, f: r.fonts['.nb-text'] }));
+await mshot('phone-photo-note');
+await m.getByRole('button', { name: 'Close', exact: true }).tap();
+await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+
 // The account menu's selects must not trigger the iOS zoom.
 await m.tap('button[aria-label="Account and settings"]');
 await m.waitForSelector('.notes-menu-row select', { timeout: 5000 });

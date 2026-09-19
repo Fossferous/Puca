@@ -12,7 +12,7 @@ const browser = await chromium.launch();
 const ctx = await browser.newContext({
     ...iphone,
     defaultBrowserType: undefined,
-    baseURL: 'http://localhost:5173',
+    baseURL: (process.env.WALK_BASE_URL || 'http://localhost:5173'),
 });
 const page = await ctx.newPage();
 page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 300)); });
