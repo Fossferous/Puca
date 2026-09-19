@@ -30,12 +30,15 @@ import {
     listTasks, createTask, updateChannelTask, updateChannelTaskAttachments,
     updateTask, deleteTask, moveTask, reorderTask,
     getTaskTabPrefs, putTaskTabPrefs,
-    applyToggle, applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
+    applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
     buildPrefsForOrder, toggleFavoritePrefs,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
 import { ApiError } from '../../api/client';
 import { pokeTaskReminders } from '../../api/taskReminders';
+import { planToggle } from '../../api/taskCompletion';
+import { canEditTask } from '../../api/tasks';
+import { currentUserIdFromToken } from '../../api/auth';
 import { pushMessageToast } from '../../components/messageToastBus';
 import {
     type NoteCard, type NoteRef, type NoteSource,
@@ -354,15 +357,21 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const toggleTask = useCallback(async (note: NoteRef, task: Task, completed: boolean) => {
         const original = await snapshot(note);
-        const next = applyToggle(original, task, completed);
+        // One completion path (taskCompletion.ts): a repeating task advances.
+        const card = cardsRef.current.find(c => c.ref.kind === note.kind && c.ref.id === note.id);
+        const canEdit = note.kind === 'list' || canEditTask(task, currentUserIdFromToken() ?? undefined, card?.myPerms);
+        const plan = planToggle(original, task, completed, { canEdit });
+        const next = plan.next;
         restore(note, next);
         syncListCounts(note, next);
         try {
-            await updateTask(task.id, { is_completed: completed });
+            await plan.send();
         } catch (err) {
             explain('toggle failed', err);
             restore(note, original);
             syncListCounts(note, original);
+            // A lost race with another device's advance: show the truth.
+            if (err instanceof ApiError && err.status === 409) restore(note, await fetchTasksFor(note).catch(() => original));
         }
     }, [snapshot, restore, syncListCounts]);
 

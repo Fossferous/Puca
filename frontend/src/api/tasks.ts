@@ -45,6 +45,14 @@ export interface Task {
      *  position — the server learns WHEN so reminders can exist, never WHAT
      *  (the description stays E2EE). */
     due_at: string | null;
+    /** Sealed EventSchedule on the wire; OPENED (plaintext JSON, or a
+     *  decrypt-failure marker) after listTasks/listListTasks. Absent from an
+     *  older server. Parse with taskSchedule.parseSchedule. */
+    schedule?: string | null;
+    /** Sealed snooze on the wire; opened like schedule. */
+    snooze?: string | null;
+    /** When the content last changed (066+ servers). */
+    updated_at?: string;
     /** E2EE state of `description`, set by listTasks/listListTasks. `legacy`
      *  (server stored plaintext) is flagged in the UI so an injected cleartext
      *  checklist item can't pose as an encrypted one (audit H-1). */
@@ -147,19 +155,22 @@ export async function listTasks(channelId: number): Promise<Task[]> {
             ...t,
             description,
             attachments: t.attachments ? await openChannel(channelId, t.attachments, 'chan-taskatt', t.created_by) : null,
+            ...await openTaskTiming(t),
             descEncState: messageEncState(wire, description),
         };
     }));
 }
 
-export async function createTask(channelId: number, description: string, parentId?: number): Promise<Task> {
+export async function createTask(channelId: number, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task> {
     const me = currentUserIdFromToken();
     if (me === null) throw new Error('Signed out; cannot store checklist item');
     const created: Task = await apiClient.post(`/channels/${channelId}/tasks`, {
         description: await sealChannel(channelId, description, 'chan-task', me),
         parent_id: parentId ?? null,
+        ...(timing ? await timingForCreate(timing, { channelId, ownerId: me }) : {}),
     });
-    return { ...created, description }; // show the plaintext locally
+    // Show the plaintext locally — the timing too, never the sealed copy.
+    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
 }
 
 /** Update a channel checklist task; a changed description is re-encrypted under
@@ -260,6 +271,11 @@ export interface TaskReminder {
     channel_id: number | null;
     list_id: number | null;
     due_at: string;
+    /** 066+ servers: the creator (the sealed fields' AAD owner) and the
+     *  sealed timing, opened by the reminder loop (reminderFeed.ts). */
+    created_by?: number;
+    schedule?: string | null;
+    snooze?: string | null;
 }
 
 export function listTaskReminders(): Promise<TaskReminder[]> {
@@ -343,17 +359,19 @@ export async function listListTasks(listId: number): Promise<Task[]> {
             ...t,
             description,
             attachments: t.attachments ? await openSelf(t.attachments) : null,
+            ...await openTaskTiming(t),
             descEncState: messageEncState(wire, description),
         };
     }));
 }
 
-export async function createListTask(listId: number, description: string, parentId?: number): Promise<Task> {
+export async function createListTask(listId: number, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task> {
     const created: Task = await apiClient.post(`/task-lists/${listId}/tasks`, {
         description: await sealSelf(description),
         parent_id: parentId ?? null,
+        ...(timing ? await timingForCreate(timing, null) : {}),
     });
-    return { ...created, description };
+    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
 }
 
 /** Update a personal-list task; descriptions are re-encrypted to self.
@@ -808,3 +826,86 @@ export function applyToggle(tasks: Task[], toggled: Task, completed: boolean): T
         })();
     return tasks.map(t => (sweep.has(t.id) ? { ...t, is_completed: completed } : t));
 }
+
+// --- Task timing: the sealed schedule and snooze (migration 066) ------------------------
+//
+// These two never had a plaintext era, so their READ path is stricter than a
+// description's: a non-envelope value from the server is NOT passed through
+// as "legacy plaintext" (a compromised server could otherwise inject a fake
+// event) — it opens to a failure marker, which taskSchedule.parseSchedule
+// treats as read-only and parseSnooze as "no snooze" (fail open).
+
+/** What a new task may be created with, as PLAINTEXT (sealed here). */
+export interface NewTaskTiming {
+    dueAt?: string | null;
+    /** Serialized EventSchedule (taskSchedule.serializeSchedule). */
+    schedule?: string | null;
+}
+
+type TimingScope = { channelId: number; ownerId: number } | null;
+
+function timingScopeOf(task: Pick<Task, 'channel_id' | 'created_by'>): TimingScope {
+    return task.channel_id !== null ? { channelId: task.channel_id, ownerId: task.created_by } : null;
+}
+
+async function sealTiming(plain: string, kind: 'chan-taskevt' | 'chan-tasksnz', scope: TimingScope): Promise<string> {
+    return scope ? sealChannel(scope.channelId, plain, kind, scope.ownerId) : sealSelf(plain);
+}
+
+/** Open one sealed timing value, refusing anything that is not an envelope. */
+async function openTimingValue(stored: string, kind: 'chan-taskevt' | 'chan-tasksnz', scope: TimingScope): Promise<string> {
+    if (parseEnvelopeEx(stored).kind === 'plaintext') return DECRYPT_FAILED;
+    return scope ? openChannel(scope.channelId, stored, kind, scope.ownerId) : openSelf(stored);
+}
+
+/** The opened timing fields of a wire task (only the keys the server sent,
+ *  so an older server's task stays without them). */
+export async function openTaskTiming(
+    t: Pick<Task, 'channel_id' | 'created_by'> & { schedule?: string | null; snooze?: string | null },
+): Promise<{ schedule?: string | null; snooze?: string | null }> {
+    const scope = timingScopeOf(t);
+    const out: { schedule?: string | null; snooze?: string | null } = {};
+    if (t.schedule !== undefined) out.schedule = t.schedule ? await openTimingValue(t.schedule, 'chan-taskevt', scope) : null;
+    if (t.snooze !== undefined) out.snooze = t.snooze ? await openTimingValue(t.snooze, 'chan-tasksnz', scope) : null;
+    return out;
+}
+
+async function timingForCreate(timing: NewTaskTiming, scope: TimingScope): Promise<Record<string, string | null>> {
+    const out: Record<string, string | null> = {};
+    if (timing.dueAt !== undefined) out.due_at = timing.dueAt;
+    if (timing.schedule) out.schedule = await sealTiming(timing.schedule, 'chan-taskevt', scope);
+    return out;
+}
+
+/** A timing edit. Plaintext in; schedule/snooze sealed here ('' / null clears). */
+export interface TaskTimingPatch {
+    schedule?: string | null;
+    snooze?: string | null;
+    due_at?: string | null;
+    expect_due_at?: string | null;
+    is_completed?: boolean;
+    reopen_subtree?: boolean;
+}
+
+/**
+ * PATCH a task's timing, in either scope. Always says `recurrence_aware`
+ * (this client understands schedules) and `reads_up_to`. A null/'' value
+ * clears; an undefined one is left alone.
+ */
+export async function patchTaskTiming(
+    task: Pick<Task, 'id' | 'channel_id' | 'created_by'>, patch: TaskTimingPatch,
+): Promise<void> {
+    const scope = timingScopeOf(task);
+    const body: Record<string, unknown> = { recurrence_aware: true, reads_up_to: MAX_READABLE_ENVELOPE_VERSION };
+    if (patch.schedule !== undefined) body.schedule = patch.schedule ? await sealTiming(patch.schedule, 'chan-taskevt', scope) : '';
+    if (patch.snooze !== undefined) body.snooze = patch.snooze ? await sealTiming(patch.snooze, 'chan-tasksnz', scope) : '';
+    if (patch.due_at !== undefined) body.due_at = patch.due_at ?? '';
+    if (patch.expect_due_at !== undefined) body.expect_due_at = patch.expect_due_at ?? '';
+    if (patch.is_completed !== undefined) body.is_completed = patch.is_completed;
+    if (patch.reopen_subtree) body.reopen_subtree = true;
+    return apiClient.patch(`/tasks/${task.id}`, body);
+}
+
+/** The reminder loop's opener for a feed row (reminderFeed.ts). */
+export const openReminderTiming = (r: TaskReminder): Promise<{ schedule?: string | null; snooze?: string | null }> =>
+    openTaskTiming({ channel_id: r.channel_id, created_by: r.created_by ?? -1, schedule: r.schedule, snooze: r.snooze });

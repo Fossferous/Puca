@@ -36,7 +36,6 @@ import {
     reorderTask,
     getTaskTabPrefs,
     putTaskTabPrefs,
-    applyToggle,
     applyMove,
     applyReorder,
     collectSubtreeIds,
@@ -49,6 +48,7 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
+import { planToggle } from '../api/taskCompletion';
 import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
 import { isMobile, isTauri } from '../api/platform';
@@ -359,13 +359,16 @@ export function TasksView() {
     const handleToggle = async (task: Task, completed: boolean) => {
         if (selectedList === null) return;
         const original = tasks;
-        const next = applyToggle(tasks, task, completed);
+        // One completion path (taskCompletion.ts): a repeating task advances.
+        const plan = planToggle(tasks, task, completed, { canEdit: true });
+        const next = plan.next;
         setTasks(next);
         syncListCounts(selectedList.id, next);
         try {
-            await updateListTask(task.id, { is_completed: completed });
+            await plan.send();
         } catch (err) {
             console.error('Failed to update task:', err);
+            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
             syncListCounts(selectedList.id, original);
         }
