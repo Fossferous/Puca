@@ -1081,13 +1081,24 @@ cmd_installer_lite() {
 # tolerates it. A migration the tarball DOES carry must still byte-match: that
 # check is what stops the crash-loop above, and ignore_missing does not relax
 # it. See "Rolling back the backend" in deploy/ops/README.md.
+#
+# Both files are read the same way: `//` comments are cut first, so neither a
+# commented-out set_ignore_missing nor a comment naming app_migrator() counts
+# (that binary would refuse the newer database and crash-loop). ONE awk over
+# the file, no pipe: `grep -v … | grep -q` under pipefail ends in 141 when -q
+# stops reading before the writer is done (the real main.rs is past 50 KB), and
+# that refused every legitimate rollback. The patterns say [(] rather than \(
+# so awk -v's escape processing leaves them alone.
+code_names() { # <file> <ERE> -> how many lines name it outside // comments
+	awk -v re="$2" '{ sub(/\/\/.*/, "") } $0 ~ re { n++ } END { print n + 0 }' "$1"
+}
 tarball_tolerates_newer_db() { # <tarball> <extract-dir>
 	local tarball="$1" tmp="$2"
 	tar xzf "$tarball" -C "$tmp" src/migrator.rs 2>/dev/null || return 1
 	tar xzf "$tarball" -C "$tmp" src/main.rs 2>/dev/null || return 1
-	grep -q 'set_ignore_missing(true)' "$tmp/src/migrator.rs" || return 1
+	[ "$(code_names "$tmp/src/migrator.rs" 'set_ignore_missing[(]true[)]')" -gt 0 ] || return 1
 	# The binary must actually USE that migrator (not a comment naming it).
-	grep -v '^[[:space:]]*//' "$tmp/src/main.rs" | grep -q 'app_migrator()' || return 1
+	[ "$(code_names "$tmp/src/main.rs" 'app_migrator[(][)]')" -gt 0 ] || return 1
 }
 
 verify_migrations_against() {

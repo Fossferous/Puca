@@ -563,6 +563,19 @@ mksrc() { # <dir> <tolerant 0|1|comment|noflag>
 		   printf 'fn main() {\n    // one day: migrator::app_migrator()\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
 		noflag) printf 'pub fn app_migrator() { sqlx::migrate!("./migrations") }\n' > "$d/src/migrator.rs"
 		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		# The flag only in a comment: that binary still refuses a newer database.
+		commentflag) printf 'pub fn app_migrator() {\n    let mut m = sqlx::migrate!("./migrations");\n    // m.set_ignore_missing(true);\n    m\n}\n' > "$d/src/migrator.rs"
+		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		# What is actually in this tree: the check must pass its own source.
+		real) cp "$REPO/src/migrator.rs" "$REPO/src/main.rs" "$d/src/" ;;
+		# The real main.rs is past 50 KB with app_migrator() early in it. A
+		# reader that stops at the first match while a writer still has most
+		# of the file to send dies of SIGPIPE under pipefail, so this one is
+		# padded to ~300 KB AFTER the call (well past a 64 KB pipe buffer).
+		big) printf 'pub fn app_migrator() { let mut m = sqlx::migrate!("./migrations"); m.set_ignore_missing(true); }\n' > "$d/src/migrator.rs"
+		   { printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n'
+		     local i; for i in $(seq 1 3000); do printf '    let padding_%05d = "the rest of a large main.rs, kept going well past the pipe buffer";\n' "$i"; done
+		     printf '}\n'; } > "$d/src/main.rs" ;;
 		*) printf 'fn main() {\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
 	esac
 	tar czf "$d.tgz" -C "$d" migrations src
@@ -576,6 +589,9 @@ mksrc "$TMP/src-new" 1
 mksrc "$TMP/src-old" 0
 mksrc "$TMP/src-comment" comment
 mksrc "$TMP/src-noflag" noflag
+mksrc "$TMP/src-commentflag" commentflag
+mksrc "$TMP/src-big" big
+mksrc "$TMP/src-real" real
 S1="$(sum_of "$TMP/src-new/migrations/001_a.sql")"; S2="$(sum_of "$TMP/src-new/migrations/002_b.sql")"
 
 printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
@@ -592,6 +608,22 @@ out="$(preflight "$TMP/src-comment.tgz")"; rc=$?
 check "and one whose main.rs only NAMES app_migrator in a comment" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
 out="$(preflight "$TMP/src-noflag.tgz")"; rc=$?
 check "and one whose app_migrator does not set ignore_missing" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
+out="$(preflight "$TMP/src-commentflag.tgz")"; rc=$?
+check "and one whose set_ignore_missing is commented out" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'no migration file for applied version 3')" = 1 ] && echo 1 || echo 0)" "$out"
+# A pipe race passes most runs and fails some, so one green run proves little:
+# the same rollback, twenty times in a row, with a main.rs far past 64 KB.
+big_ok=0; big_last=""
+for _ in $(seq 1 20); do
+	out="$(preflight "$TMP/src-big.tgz")"; rc=$?
+	if [ $rc -eq 0 ] && [ "$(has "$out" 'NOTE  sandbox: applied version 3 is newer than this tarball')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ]; then
+		big_ok=$((big_ok + 1))
+	else
+		big_last="$out"
+	fi
+done
+check "ROLLBACK with a main.rs well past 64 KB passes 20 runs in a row ($big_ok/20)" "$([ "$big_ok" = 20 ] && echo 1 || echo 0)" "$big_last"
+out="$(preflight "$TMP/src-real.tgz")"; rc=$?
+check "ROLLBACK with this tree's own src/main.rs and src/migrator.rs passes" "$([ $rc -eq 0 ] && [ "$(has "$out" 'NOTE  sandbox: applied version 3 is newer than this tarball')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
 
 printf '1|%s\n2|%s\n3|%s\n' "$S1" "0000" "$S2" > "$TMP/sqlx_rows"
 out="$(preflight "$TMP/src-new.tgz")"; rc=$?
