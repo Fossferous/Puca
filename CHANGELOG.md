@@ -4,6 +4,22 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Changed
+- **DeepFilter rides out CPU spikes instead of giving up.** When a busy
+  moment left DeepFilter about half a second behind, the app rebuilt your
+  microphone on RNNoise and kept it there until you restarted Púca (the
+  notice said "for this call", but later calls stayed on RNNoise too), and
+  the rebuild itself was audible to the room. Now an RNNoise copy runs
+  beside DeepFilter and covers any moment it falls behind, lined up to the
+  sample, without rebuilding your microphone; DeepFilter takes over again
+  as soon as it catches up. Before, those moments went out with no noise
+  suppression at all. Only a device that stays behind (15 seconds, or four
+  times in three minutes) is switched to RNNoise for the call, and the
+  voice panel then offers **Try DeepFilter again**. The next call starts on
+  DeepFilter as usual.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the

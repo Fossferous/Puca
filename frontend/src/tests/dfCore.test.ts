@@ -60,6 +60,10 @@ class Rig {
     paused = false;
     respond = true;
     dryFlag = false;
+    /** What input 1 (the RNNoise bridge) carries at timeline index i; null =
+     *  nothing connected. Set it to model a bridge that is live, not loaded
+     *  yet, or dies. */
+    bridgeFn: ((i: number) => number) | null = null;
 
     constructor(
         private transform: (x: number) => number = (x) => x * 0.5,
@@ -67,6 +71,7 @@ class Rig {
         private modelDelayHops = 0,
         coreModelDelay = modelDelayHops * HOP,
         latency = LATENCY + coreModelDelay,
+        bridgeDelay: number | null = null,
     ) {
         for (let i = 0; i < modelDelayHops; i++) this.modelQueue.push(new Float32Array(HOP));
         this.core = new DfCore(HOP, latency, (hopView: Float32Array) => {
@@ -75,7 +80,7 @@ class Rig {
             this.modelQueue.push(new Float32Array(hopView));
             const answers = this.modelQueue.shift()!;
             this.pending.push({ deliverAt: this.quantum + this.delayQuanta, data: answers });
-        }, coreModelDelay);
+        }, coreModelDelay, bridgeDelay);
     }
 
     private deliverDue() {
@@ -90,13 +95,17 @@ class Rig {
     pump(quanta: number, gen: Signal | null) {
         const inBuf = new Float32Array(QUANTUM);
         const outBuf = new Float32Array(QUANTUM);
+        const bridgeBuf = new Float32Array(QUANTUM);
         for (let q = 0; q < quanta; q++) {
             this.deliverDue();
+            const base = this.input.length;
             if (gen) {
-                const base = this.input.length;
                 for (let i = 0; i < QUANTUM; i++) inBuf[i] = gen(base + i);
             }
-            this.core.processQuantum(gen ? inBuf : null, outBuf);
+            if (this.bridgeFn) {
+                for (let i = 0; i < QUANTUM; i++) bridgeBuf[i] = this.bridgeFn(base + i);
+            }
+            this.core.processQuantum(gen ? inBuf : null, outBuf, this.bridgeFn ? bridgeBuf : null);
             for (let i = 0; i < QUANTUM; i++) {
                 this.input.push(gen ? inBuf[i] : 0);
                 this.output.push(outBuf[i]);
@@ -342,6 +351,251 @@ describe('DfCore with a delayed model (DFN3: 3 hops)', () => {
         const late = new Rig((x) => x * 0.5, 8, D);
         late.pump(800, noiseSig);
         expect(late.core.stats().drySamples).toBeGreaterThan(0);
+    });
+});
+
+// The RNNoise worklet's latency (rnnoiseNode.ts): its output at timeline index
+// i renders the input at i − 992. The scripted bridge below renders 0.25×, so
+// every sample says which source produced it: 0.5× DeepFilter, 0.25× bridge,
+// 1× raw.
+const BRIDGE_DELAY = 992;
+const BRIDGE_WARMUP = 1920; // mirrors dfWorklet.js
+const liveBridge = (rig: Rig, from = 0, until = Infinity) => (i: number) =>
+    i >= from && i < until && i >= BRIDGE_DELAY ? 0.25 * rig.input[i - BRIDGE_DELAY] : 0;
+const bridgedRig = () => new Rig((x) => x * 0.5, 0, 0, 0, LATENCY, BRIDGE_DELAY);
+
+describe('DfCore RNNoise bridge', () => {
+    it('covers a stalled worker with the bridge, sample-aligned, and hands back exactly', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = liveBridge(rig);
+        rig.pump(400, sineSig);
+        rig.paused = true;
+        rig.pump(40, sineSig);
+        rig.paused = false;
+        rig.pump(400, sineSig);
+
+        const s = rig.core.stats();
+        expect(s.flips).toBe(3); // processed → bridge → processed
+        expect(s.bridgeSamples).toBeGreaterThan(0);
+        expect(s.drySamples).toBe(0); // not one unsuppressed sample
+        expect(maxStep(rig.output, LATENCY + FADE)).toBeLessThan(0.06);
+
+        // The stall interior is the bridge's rendering of the SAME instant.
+        const stallEnd = 440 * QUANTUM;
+        for (let p = stallEnd - 20 * QUANTUM; p < stallEnd; p++) {
+            expect(rig.output[p]).toBe(0.25 * rig.input[p - LATENCY]);
+        }
+        // ...and DeepFilter is back, exactly, once the worker catches up.
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(0.5 * rig.input[p - LATENCY]);
+        }
+    });
+
+    it('positive control: the oracle tells the three sources apart', () => {
+        const x = sineSig(1000);
+        expect(new Set([x, 0.5 * x, 0.25 * x]).size).toBe(3);
+    });
+
+    it('a bridge that has produced nothing (wasm still loading) is not trusted: raw covers', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = () => 0; // exactly what the RNNoise node emits before it loads
+        rig.pump(400, sineSig);
+        rig.paused = true;
+        rig.pump(40, sineSig);
+        const s = rig.core.stats();
+        expect(s.bridgeSamples).toBe(0);
+        expect(s.drySamples).toBeGreaterThan(0);
+        expect(s.bridgeLive).toBe(false);
+        const end = rig.output.length;
+        for (let p = end - 20 * QUANTUM; p < end; p++) {
+            expect(rig.output[p]).toBe(rig.input[p - LATENCY]);
+        }
+    });
+
+    it('a bridge that dies mid-stall hands over to raw at the last instant it rendered', () => {
+        const rig = bridgedRig();
+        const dies = 53_000; // inside the stall below
+        rig.bridgeFn = liveBridge(rig, 0, dies);
+        rig.pump(400, sineSig);
+        rig.paused = true;
+        rig.pump(40, sineSig);
+
+        // The bridge's last non-zero sample is at dies − 1 (the sine is not 0
+        // there), so it renders every e with e + 992 ≤ dies − 1 and no later.
+        const lastRendered = dies - 1 - BRIDGE_DELAY; // the last e it covers
+        const flipAt = lastRendered + 1 + LATENCY; // first p on raw
+        for (let p = flipAt - 400; p < flipAt; p++) {
+            expect(rig.output[p]).toBe(0.25 * rig.input[p - LATENCY]);
+        }
+        for (let p = flipAt + FADE; p < flipAt + 1000; p++) {
+            expect(rig.output[p]).toBe(rig.input[p - LATENCY]);
+        }
+        // Never a stretch of silence in between: dead RNNoise output is zeros.
+        expect(maxStep(rig.output, LATENCY + FADE)).toBeLessThan(0.06);
+    });
+
+    it('waits out the RNNoise warm-up after it starts producing', () => {
+        const rig = bridgedRig();
+        const loads = 52_000; // the bridge comes alive during the stall
+        rig.bridgeFn = liveBridge(rig, loads);
+        rig.pump(400, sineSig);
+        rig.paused = true;
+        rig.pump(40, sineSig);
+        // bridgeFirst is the first non-zero sample at or after `loads`.
+        const firstUsableE = loads + BRIDGE_WARMUP - BRIDGE_DELAY;
+        const p0 = firstUsableE + LATENCY;
+        expect(rig.output[p0 - FADE - 1]).toBe(rig.input[p0 - FADE - 1 - LATENCY]); // still raw
+        for (let p = p0 + FADE; p < p0 + 1000; p++) {
+            expect(rig.output[p]).toBe(0.25 * rig.input[p - LATENCY]);
+        }
+    });
+
+    it('an unconnected bridge input leaves the raw fallback exactly as it was', () => {
+        const rig = bridgedRig(); // bridge configured, nothing plugged into input 1
+        rig.pump(400, sineSig);
+        rig.paused = true;
+        rig.pump(40, sineSig);
+        expect(rig.core.stats().bridgeSamples).toBe(0);
+        const end = rig.output.length;
+        for (let p = end - 20 * QUANTUM; p < end; p++) {
+            expect(rig.output[p]).toBe(rig.input[p - LATENCY]);
+        }
+    });
+});
+
+describe('DfCore overload episodes', () => {
+    const stallUntilOverloaded = (rig: Rig) => {
+        rig.paused = true;
+        while (rig.core.stats().outstanding < 50) rig.pump(1, sineSig);
+    };
+
+    it('an episode starts at 50 hops in flight and ends only after a second caught up', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = liveBridge(rig);
+        rig.pump(100, sineSig);
+        expect(rig.core.stats().overloaded).toBe(false);
+
+        stallUntilOverloaded(rig);
+        expect(rig.core.stats().overloaded).toBe(true);
+        expect(rig.core.stats().overloadEpisodes).toBe(1);
+
+        rig.paused = false;
+        rig.pump(1, sineSig); // the whole backlog lands at once
+        expect(rig.core.stats().outstanding).toBeLessThanOrEqual(4);
+        rig.pump(370, sineSig); // 0.99 s caught up: not yet
+        expect(rig.core.stats().overloaded).toBe(true);
+        rig.pump(10, sineSig); // past 48 000 samples
+        expect(rig.core.stats().overloaded).toBe(false);
+
+        // The next stall is a NEW episode. The old design latched once.
+        stallUntilOverloaded(rig);
+        expect(rig.core.stats().overloaded).toBe(true);
+        expect(rig.core.stats().overloadEpisodes).toBe(2);
+    });
+
+    it('a backlog that keeps building again does not end the episode', () => {
+        const rig = bridgedRig();
+        rig.pump(100, sineSig);
+        stallUntilOverloaded(rig);
+        // Catch up for half a second, stall again for 0.1 s, repeatedly: each
+        // stall pushes more than 4 hops back in flight.
+        for (let k = 0; k < 6; k++) {
+            rig.paused = false;
+            rig.pump(190, sineSig);
+            rig.paused = true;
+            rig.pump(40, sineSig);
+        }
+        expect(rig.core.stats().overloaded).toBe(true);
+        expect(rig.core.stats().overloadEpisodes).toBe(1);
+    });
+
+    it('standby over a dead bridge reports it once the raw mic has been on air for 100 ms', () => {
+        const rig = bridgedRig();
+        const dies = 60_000;
+        rig.bridgeFn = liveBridge(rig, 0, dies);
+        rig.pump(400, sineSig);
+        rig.core.enterStandby();
+        rig.pump(20, sineSig); // bridge still live: it carries the call
+        expect(rig.core.bridgeFailed()).toBe(false);
+        rig.pump(200, sineSig); // bridge died at 60 000: raw on air
+        expect(rig.core.stats().rawUncovered).toBeGreaterThanOrEqual(4800);
+        expect(rig.core.bridgeFailed()).toBe(true);
+    });
+
+    it('positive control: a live bridge in standby, or a silent mic, never reports it', () => {
+        const live = bridgedRig();
+        live.bridgeFn = liveBridge(live);
+        live.pump(400, sineSig);
+        live.core.enterStandby();
+        live.pump(400, sineSig);
+        expect(live.core.bridgeFailed()).toBe(false);
+
+        const muted = bridgedRig();
+        muted.bridgeFn = liveBridge(muted, 0, 40_000);
+        muted.pump(400, sineSig);
+        muted.core.enterStandby();
+        muted.pump(400, () => 0); // OS-muted mic: zeros in, zeros from both
+        expect(muted.core.stats().inputLive).toBe(false);
+        expect(muted.core.bridgeFailed()).toBe(false);
+    });
+
+    it('a bridge that dies DURING an episode (no standby yet) is reported too', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = liveBridge(rig, 0, 60_000);
+        rig.pump(400, sineSig); // to 51 200
+        stallUntilOverloaded(rig); // bridge still live and covering
+        expect(rig.core.bridgeFailed()).toBe(false);
+        rig.pump(120, sineSig); // past 60 000 plus 100 ms of raw on air
+        expect(rig.core.stats().standby).toBe(false);
+        expect(rig.core.bridgeFailed()).toBe(true);
+    });
+
+    it('positive control: a live bridge through a long episode never reports', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = liveBridge(rig);
+        rig.pump(400, sineSig);
+        stallUntilOverloaded(rig);
+        rig.pump(400, sineSig);
+        expect(rig.core.stats().overloaded).toBe(true);
+        expect(rig.core.stats().bridgeSamples).toBeGreaterThan(0);
+        expect(rig.core.bridgeFailed()).toBe(false);
+    });
+
+    it('judges the mic over the window the bridge has rendered, so a sound onset is not a dead bridge', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = liveBridge(rig);
+        const onset = 60_000;
+        const sig: Signal = (i) => (i < onset ? 0 : sineSig(i));
+        rig.pump(Math.ceil(onset / QUANTUM) + 4, sig); // ~500 samples past the onset
+        const s = rig.core.stats();
+        // The bridge has not rendered the onset yet (992 behind), so it is
+        // silent, and so is the mic over the window it HAS rendered.
+        expect(s.bridgeLive).toBe(false);
+        expect(s.inputLive).toBe(false);
+        // POSITIVE CONTROL: the unshifted window does hold sound already, so
+        // judging it there would have called a healthy bridge dead.
+        const recent = rig.input.slice(-500);
+        expect(recent.some((v) => v !== 0)).toBe(true);
+        // Once RNNoise's output reaches the onset, both are live.
+        rig.pump(20, sig);
+        expect(rig.core.stats().bridgeLive).toBe(true);
+        expect(rig.core.stats().inputLive).toBe(true);
+    });
+
+    it('standby stops feeding the worker and the bridge carries everything after', () => {
+        const rig = bridgedRig();
+        rig.bridgeFn = liveBridge(rig);
+        rig.pump(400, sineSig);
+        const sent = rig.core.stats().hopsSent;
+        rig.core.enterStandby();
+        rig.pump(400, sineSig);
+        const s = rig.core.stats();
+        expect(s.hopsSent).toBe(sent);
+        expect(s.standby).toBe(true);
+        expect(s.drySamples).toBe(0);
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(0.25 * rig.input[p - LATENCY]);
+        }
     });
 });
 

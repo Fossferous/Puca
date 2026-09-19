@@ -16,7 +16,7 @@ One setting, two pickers (this one and the dropdown in the voice panel), applied
 - **No suppression** — the raw mic.
 - **Standard** — the browser's built-in filter described below (the "Browser Noise Suppression" checkbox turns it on/off in this mode only).
 - **RNNoise (ML)** — a small neural model in an audio worklet; better on keyboards, fans and background voices, ~10 ms of delay.
-- **DeepFilter (Max)** — the heaviest model (DeepFilterNet 3), best quality, real CPU cost, ~60 ms of delay; shown after enabling it under Advanced → Experimental. Falls back to RNNoise if it cannot start or keep up.
+- **DeepFilter (Max)** — the heaviest model (DeepFilterNet 3), best quality, real CPU cost, ~60 ms of delay; shown after enabling it under Advanced → Experimental. Falls back to RNNoise if it cannot start. When a CPU spike leaves it behind, an RNNoise copy running beside it covers those moments and it takes over again once it catches up; if it stays behind for 15 s, or falls behind 4 times in 3 minutes, RNNoise takes over for the call, with a button to try DeepFilter again (restarting the mic gives it another try too).
 
 Use the **Mic Test** below to hear a take through each mode.
 
