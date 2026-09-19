@@ -51,6 +51,7 @@ final class ReminderAlarms {
         PendingIntent pi = pending(ctx);
         if (at < 0) {
             am.cancel(pi);
+            pi.cancel(); // and the record, so present() reads "no alarm"
             return;
         }
         try {
@@ -65,8 +66,22 @@ final class ReminderAlarms {
         }
     }
 
+    /**
+     * Is this app's alarm PendingIntent alive? A force-stop cancels every
+     * PendingIntent the app owns (and with them its alarms), so "absent while
+     * something is owed" means the alarm cannot fire. Every cancel here also
+     * cancels the PendingIntent, so present() is false after one of ours too.
+     */
+    static boolean present(Context ctx) {
+        Intent i = new Intent(ctx, ReminderReceiver.class).setAction(ReminderReceiver.ACTION_FIRE);
+        return PendingIntent.getBroadcast(ctx, REQUEST_CODE, i,
+                PendingIntent.FLAG_NO_CREATE | PendingIntent.FLAG_IMMUTABLE) != null;
+    }
+
     static void cancel(Context ctx) {
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
-        if (am != null) am.cancel(pending(ctx));
+        PendingIntent pi = pending(ctx);
+        if (am != null) am.cancel(pi);
+        pi.cancel();
     }
 }

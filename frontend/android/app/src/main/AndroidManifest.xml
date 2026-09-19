@@ -150,13 +150,18 @@
         </receiver>
     </application>
 
-    <!-- Package visibility (Android 11+) for ONE package: Púca Notes. When
-         it is installed it owns due-item reminders and Púca stays quiet for
-         them (SovereignAppPlugin.notesInstalled; docs/NOTES.md). Nothing else
-         about installed apps is visible to Púca. -->
+    <!-- Package visibility (Android 11+) for ONE package: Púca Notes, so
+         Púca can ask its ReminderOwnerProvider whether Notes owns due-item
+         reminders on this phone right now (Púca stays quiet only on a yes;
+         SovereignAppPlugin.notesOwnsDueReminders, docs/NOTES.md). Nothing
+         else about installed apps is visible to Púca. -->
     <queries>
         <package android:name="com.sovereign.notes" />
     </queries>
+    <!-- The signature permission that provider is guarded by (declared in
+         Púca Notes' manifest): granted only because both apps are signed
+         with the same Púca key. -->
+    <uses-permission android:name="com.sovereign.notes.permission.DUE_REMINDER_OWNER" />
 
     <!-- Permissions -->
     <uses-permission android:name="android.permission.CAMERA" />

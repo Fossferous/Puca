@@ -76,6 +76,16 @@
             android:permission="android.permission.BIND_JOB_SERVICE"
             android:exported="false" />
 
+        <!-- Púca asks here whether Notes owns due-item reminders on this
+             phone (one row, 1 or 0; ReminderOwnerProvider). Exported, but
+             only to an app holding DUE_REMINDER_OWNER below, which Android
+             grants solely to an app signed with the same key: Púca. -->
+        <provider
+            android:name=".ReminderOwnerProvider"
+            android:authorities="com.sovereign.notes.reminderowner"
+            android:exported="true"
+            android:permission="com.sovereign.notes.permission.DUE_REMINDER_OWNER" />
+
         <!-- Location reminders: type location ONLY, running exactly while
              there are saved-place fences and a location grant. -->
         <service
@@ -83,6 +93,14 @@
             android:foregroundServiceType="location"
             android:exported="false" />
     </application>
+
+    <!-- Who may ask ReminderOwnerProvider: apps signed with the SAME key as
+         Púca Notes, i.e. Púca (both release-sign with the Púca keystore;
+         frontend/android/app/build.gradle and this app's build.gradle).
+         Púca requests it with <uses-permission>. -->
+    <permission
+        android:name="com.sovereign.notes.permission.DUE_REMINDER_OWNER"
+        android:protectionLevel="signature" />
 
     <!-- Permissions -->
 

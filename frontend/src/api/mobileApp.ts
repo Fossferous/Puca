@@ -85,9 +85,10 @@ interface SovereignAppPlugin {
     pipSupported(): Promise<{ supported: boolean }>;
     enterPip(opts: { width: number; height: number }): Promise<{ ok: boolean; reason?: string }>;
     exitPip(): Promise<{ ok: boolean }>;
-    /** Is Púca Notes (com.sovereign.notes) installed? APKs with the method
-     *  and the manifest's <queries> entry only; older ones reject. */
-    notesInstalled(): Promise<{ installed: boolean }>;
+    /** Does Púca Notes (com.sovereign.notes) own due-item reminders for
+     *  `account` right now (its signature-guarded ReminderOwnerProvider says
+     *  yes)? APKs with the method only; older ones reject. */
+    notesOwnsDueReminders(opts: { account: string }): Promise<{ owns: boolean }>;
     addListener(
         eventName: 'navigate',
         listener: (data: { target: string }) => void,
@@ -359,25 +360,30 @@ export async function openMobileAppSettings(): Promise<boolean> {
     }
 }
 
-/** Whether notesInstalled exists natively. Its own latch, like the others. */
-let notesProbeSupported: boolean | null = null;
+/** Whether notesOwnsDueReminders exists natively. Its own latch, like the
+ *  others: a rejection here must not blind anything else. */
+let notesOwnerProbeSupported: boolean | null = null;
 
 /**
- * Is Púca Notes installed on this phone? When it is, Notes owns due-item
- * reminders (native exact alarms, open or closed) and Púca stays quiet for
- * them — owner decision, docs/NOTES.md. null = not Android, or an APK
- * without the method: the caller keeps today's behaviour (Púca notifies).
- * Asked at every due-reminder fire, not cached: Notes can be installed or
- * removed while Púca runs.
+ * Does Púca Notes own due-item reminders on this phone, for this account,
+ * right now? Owner decision (docs/NOTES.md): when Notes is installed AND able
+ * to deliver them — signed in to the same account, keeping up with the feed,
+ * notifications allowed, its alarm set — it does, and Púca stays quiet so one
+ * due item is one notification, never zero. true ONLY on Notes' own yes.
+ * false = Notes said no, is not installed, or predates the question.
+ * null = not Android, or a Púca APK without the method: the caller keeps
+ * today's behaviour (Púca notifies). Asked at every due-reminder fire, not
+ * cached: Notes' answer changes as it signs in and out.
  */
-export async function notesAppInstalled(): Promise<boolean | null> {
-    if (!android() || usable === false || notesProbeSupported === false) return null;
+export async function notesOwnsDueReminders(account: string | null): Promise<boolean | null> {
+    if (!android() || usable === false || notesOwnerProbeSupported === false) return null;
+    if (!account) return false;
     try {
-        const r = await App.notesInstalled();
-        notesProbeSupported = true;
-        return r.installed === true;
+        const r = await App.notesOwnsDueReminders({ account });
+        notesOwnerProbeSupported = true;
+        return r.owns === true;
     } catch {
-        if (notesProbeSupported === null) notesProbeSupported = false;
+        if (notesOwnerProbeSupported === null) notesOwnerProbeSupported = false;
         return null;
     }
 }

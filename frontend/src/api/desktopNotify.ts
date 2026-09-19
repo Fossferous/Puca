@@ -14,7 +14,8 @@
 import { loadSettings } from '../components/settingsStore';
 import { appIsForeground, isMobile, isTauri } from './platform';
 import { isBadgeWorthy, setUnreadBadge } from './unreadBadge';
-import { mobileAppAvailable, notesAppInstalled, postMobileNotification, requestMobileNotificationPermission } from './mobileApp';
+import { mobileAppAvailable, notesOwnsDueReminders, postMobileNotification, requestMobileNotificationPermission } from './mobileApp';
+import { currentUserIdFromToken } from './auth';
 
 export type NotifyDecision =
     | { fire: true }
@@ -292,30 +293,32 @@ export function notifyTasksDue(count: number): void {
     // Logged on the same buffer as messages, and that comparison is the point:
     // a task entry beside NO message entries proves the two paths diverge
     // before this module, not inside it.
-    recordNotify({
-        at: new Date().toISOString(),
-        kind: 'task',
-        key: 'tasks-due',
-        outcome: isMobile() && !mobileNative ? 'mobile' : !setting ? 'setting-off' : 'fired',
-    });
-    if (isMobile() && !mobileNative) return;
-    if (!setting) return;
+    const record = (outcome: string) => recordNotify({ at: new Date().toISOString(), kind: 'task', key: 'tasks-due', outcome });
+    if (isMobile() && !mobileNative) { record('mobile'); return; }
+    if (!setting) { record('setting-off'); return; }
 
     const body = count === 1 ? 'A task is due' : `${count} tasks are due`;
 
     if (isMobile() && mobileNative) {
         void (async () => {
-            // Púca Notes installed: it owns due-item reminders (its own
-            // alarms fire them, open or closed), so Púca stays quiet and one
-            // due item is one notification. Unknown (older APK) = notify.
-            if (await notesAppInstalled() === true) {
-                recordNotify({ at: new Date().toISOString(), kind: 'task', key: 'tasks-due', outcome: 'notes-app-owns' });
+            // Púca Notes on this phone AND able to deliver (its own answer:
+            // same account, keeping up, notifications on, alarm set): it owns
+            // due-item reminders, so Púca stays quiet and one due item is one
+            // notification. Anything else — no, not installed, an older Notes
+            // or an older Púca APK that cannot ask — Púca notifies. ONE
+            // diagnostics entry, written once the gate has answered, so the
+            // buffer never says 'fired' for something that was not posted.
+            const uid = currentUserIdFromToken();
+            if (await notesOwnsDueReminders(uid === null ? null : String(uid)) === true) {
+                record('notes-app-owns');
                 return;
             }
+            record('fired');
             await postMobileNotification('tasks-due', 'Púca Tasks', body, 'tasks');
         })();
         return;
     }
+    record('fired');
 
     if (isTauri()) {
         void (async () => {

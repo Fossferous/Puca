@@ -140,6 +140,10 @@ public class NotesNativePlugin extends Plugin {
         synchronized (ReminderStore.LOCK) {
             ReminderStore.bindAccount(getContext(), account);
             ReminderStore.setEntries(getContext(), entries);
+            // The page only calls this with a feed it just fetched
+            // (startTaskReminders' onFeed): that counts as keeping up, for
+            // ReminderOwnerProvider, exactly like the job's own refresh.
+            ReminderStore.setLastSync(getContext(), System.currentTimeMillis());
         }
         ReminderAlarms.arm(getContext());
         JSObject ret = new JSObject();
