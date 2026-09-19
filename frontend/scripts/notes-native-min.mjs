@@ -24,8 +24,9 @@
  * SURFACE — the Capacitor packages notes-app/package.json lists, the
  * @CapacitorPlugin classes under notes-app/android/app/src/main/java, and the
  * <uses-permission> entries in its AndroidManifest.xml. checkNativeMin fails
- * (check-lite-identity.mjs in `npm run build`, build-notes-app.mjs, and
- * src/tests/notesNativeMin.test.ts against the real tree) whenever the
+ * (src/tests/notesNativeMin.test.ts against the real tree in every vitest
+ * run, build-notes-app.mjs in every Notes build, and check-lite-identity.mjs
+ * in the lite builds) whenever the
  * surface changes and the record does not, so the change that adds a plugin
  * cannot land without someone deciding what `min` must now be.
  */

@@ -198,8 +198,9 @@ launch — on **its own channel**:
   `native` block: an APK older than `native.min` does not apply the bundle and
   shows *Install the new Púca Notes app* with a Download button to the download
   page's `#notes-app` section (same-site HTTPS only); a newer `native.version`
-  (`dual-ship.sh mobile-notes ... --native-version <v>`) is a strip in the app,
-  dismissable once per version.
+  (`dual-ship.sh mobile-notes ... --native-version <v>`) is a strip in its own
+  row below the top bar (never over it: the account button there is the way to
+  *Check for updates*), dismissable once per version.
 - **`native.min` is a floor that lives in the tree**:
   `frontend/notes-app/native-min.json`. It only goes up. The Notes build writes
   it into `version.json`, `encrypt-bundle.mjs --notes` copies it into the
@@ -210,8 +211,8 @@ launch — on **its own channel**:
   no floor, and old APKs applied web code calling plugins they lacked.) The same
   file records the APK's native surface — Capacitor packages,
   `@CapacitorPlugin` classes, `<uses-permission>` entries — and
-  `scripts/notes-native-min.mjs` fails `npm run build` and
-  `build-notes-app.mjs` when the surface changes and the record does not: a
+  `scripts/notes-native-min.mjs` fails vitest (`notesNativeMin.test.ts`, on
+  the real tree) and `build-notes-app.mjs` when the surface changes and the record does not: a
   change that adds a plugin or permission the web code calls raises `min` to
   the release that first ships it, then re-records the surface.
 - The account menu shows the running version and a **Check for updates** that

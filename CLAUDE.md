@@ -204,8 +204,8 @@ directory; the Notes APK embeds only the public half), built with
 verifies under the key the TARGET app embeds (`deploy/mobile/verify-bundle.mjs`)
 and refuses the other app's `<bundle>.channel`. A change that adds a native
 plugin or permission to the Notes app raises `min` in
-`frontend/notes-app/native-min.json` (the build fails until its recorded
-surface matches); every `mobile-notes` then publishes that floor, never lower
+`frontend/notes-app/native-min.json` (vitest and `build-notes-app.mjs` fail
+until its recorded surface matches); every `mobile-notes` then publishes that floor, never lower
 than a host already serves, so older APKs prompt for the new install instead of
 applying a bundle they cannot run; `check-versions.sh` FAILS until the page
 links an APK at least that new. The download page
