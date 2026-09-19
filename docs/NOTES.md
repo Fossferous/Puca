@@ -44,7 +44,10 @@ Púca's reminders. Anything you do in one is what you see in the other.
   Markdown or JSON from the account menu: a download in the browser, a file in
   `Documents/Puca Notes/` (name plus a timestamp) in the Android app, which
   also offers **Share** for every note or one note through Android's share
-  sheet. Either way the copy is plaintext, and the app says so.
+  sheet. Either way the copy is plaintext, and the app says so. Each share
+  writes its own cache copy, so a second share cannot pull the file out from
+  under an app still uploading the first; copies older than 15 minutes go at
+  the next share, and signing out removes them all.
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable** — a web app manifest lets a browser add Notes to the home
   screen or desktop. Deliberately no service worker: the main app's OTA and
@@ -157,7 +160,9 @@ the exact-alarm grant, and a time that passed while the phone was off fires
 at the next arm. Tapping the notification opens Reminders. Just before firing,
 the alarm asks the server once (a few seconds, no retries), so an item
 completed or re-timed on another device since the last look is not
-announced; offline, it fires from what it has.
+announced; offline, it fires from what it has. If that check finds the session
+has ended (401), the items the alarm woke up for are still announced — a lost
+session is no reason to swallow a reminder that is already due.
 
 **Background refresh.** While signed in, the app keeps a copy of the session
 token in its private, backup-excluded storage (`allowBackup=false` plus the
@@ -165,16 +170,27 @@ include-only backup and data-extraction rules copied from Púca) and a
 JobScheduler job refreshes the reminder feed about once an hour, with any
 network, while Notes is closed — so a due time set on the desktop reaches the
 phone without opening Notes. A renewed token the server hands back is kept,
-and adopted by the page on its next start (same account, longer life only).
+and adopted by the page (same account, longer life only) — at launch, each
+time the page comes back into view, and before it would treat a 401 as the end
+of the session, so a Notes process that slept in the background for a day
+does not wake on the sign-in screen.
 Android decides when the job really runs: roughly hourly for an app in use,
 much less often for one left unopened for days, so a due time set elsewhere
-less than about an hour ahead can arrive late. When the session dies (the
-30-day cap, *Sign out of every device*, a password change) the job gets 401:
-it stops for good, drops the reminders whose time has already passed (they
-may be done by now), keeps the future ones armed, and posts ONE "Open Púca
-Notes to keep reminders up to date". Signing out, a soft expiry and an
-account switch clear every alarm, marker, token, job and location fence on
-the phone.
+less than about an hour ahead can arrive late. (Holding an exact-alarm
+permission keeps Notes out of the deepest standby buckets: on the Android 16
+emulator, `am set-standby-bucket com.sovereign.notes rare` was refused and the
+app stayed in *working set*.) When the session dies (expiry, the 30-day cap,
+*Sign out of every device*, a password change) the job or the pre-fire check
+gets **401** — only 401 counts; a 403, a 5xx or a proxy's error page is a
+failed look, retried next period. Then it stops for good, drops the
+reminders whose time has already passed (they may be done by now — except
+the ones the firing alarm is announcing), keeps the future ones armed, and
+posts ONE "Sign in again to keep getting reminders" on its own *Sign-in
+needed* channel at default importance (it sounds: from here on Notes cannot
+see new due times, and Púca only stays quiet while Notes can). Its tap and
+its **Sign in** button open Notes, which checks its own session and lands on
+sign-in if it is dead. Signing out, a soft expiry and an account switch clear
+every alarm, marker, token, job and location fence on the phone.
 
 **Honest status.** The Reminders view says what will actually happen: an
 **Enable** banner while notifications can still be asked for, **Open
@@ -183,11 +199,35 @@ alarms are not allowed, and "Android may hold reminders back" while the app is
 battery-optimised (a force-stopped app, and some vendors' battery managers,
 cancel alarms until Notes is next opened — nothing but that line can fix it).
 
-**Púca stays quiet.** With Púca Notes installed, Púca's own due-item
-notification is skipped (`SovereignAppPlugin.notesInstalled`, through a
-`<queries>` entry for this one package), so one due item is one notification.
-The cost: with Notes installed but signed out, neither app announces due
-items. An older Púca APK without the method keeps notifying as before.
+**Púca stays quiet — only when Notes can deliver.** One due item is one
+notification, never zero. Before posting a due-item notification on Android,
+Púca asks Púca Notes (`SovereignAppPlugin.notesOwnsDueReminders` →
+`ReminderOwnerProvider`, a read-only, one-row content provider) and stays
+quiet **only on its yes**, which Notes gives while ALL of these hold
+(`ReminderRules.ownsDueReminders`, JUnit-tested): a live session, signed in to
+the **same account** Púca names; the reminder feed read successfully within
+the last **three hours** (the hourly job, or the open page's own poll);
+notifications allowed (permission, app switch and Reminders channel); and its
+alarm set whenever something is owed. Anything else — Notes not installed, a
+Notes APK from before the provider, signed out, another account, a job
+Android has not run for hours, notifications off, an error — and Púca
+notifies. The provider is guarded by
+`com.sovereign.notes.permission.DUE_REMINDER_OWNER` with
+`protectionLevel="signature"`, declared by Notes and requested by Púca, so
+only an app signed with the same key can ask — both APKs release-sign with
+the Púca keystore — and all it learns is that one bit. On the Android 16
+emulator the grant also arrived when Notes was installed AFTER Púca. An older
+Púca APK without the method keeps notifying as before (both apps alert until
+it is updated).
+
+**Ship order: the Notes APK with or before the Púca APK.** `dual-ship.sh apk`
+and `apk-notes` go out in the same release. If they ever have to be
+staggered, ship Notes first: its worst case against an older Púca is a
+second notification for an item, never none. (The capability check keeps the
+opposite order safe too — a new Púca with an old Notes gets no yes and
+notifies — but that is the fallback, not the plan.) Upgrading from a Notes
+APK that predates its reminders also needs the user to allow Notes'
+notifications once; until then Notes answers no and Púca keeps notifying.
 
 **Location reminders.** The account menu's *Location reminders (this phone)*
 is the same feature as Púca's (disclosure first, then foreground location,

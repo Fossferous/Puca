@@ -14,7 +14,8 @@ one-line summary; this file is the full story. Versions follow
   on your other devices, so they reach the phone without opening Notes (a
   time set less than about an hour ahead can arrive late, and a phone that
   has not opened Notes in days checks less often). If your session ends, one
-  notice asks you to open the app. The Reminders view says plainly when
+  notice asks you to sign in again, and a reminder that was due at that
+  moment still arrives. The Reminders view says plainly when
   notifications are off, when Android may delay them, and how to fix it.
 - **Location reminders in Púca Notes.** The account menu can turn on
   reminders for when this phone arrives at a place you save, as in Púca.
@@ -24,8 +25,13 @@ one-line summary; this file is the full story. Versions follow
   through Android's share sheet. Exports are plaintext, and the app says so.
 
 ### Changed
-- **One notification per due item when both apps are installed.** With Púca
-  Notes on the phone, Púca no longer notifies for due items; Notes does.
+- **One notification per due item when both apps are installed.** When
+  Púca Notes on the phone is signed in to the same account, keeping up with
+  your reminders and allowed to notify, Púca leaves due items to it; in every
+  other case (Notes signed out, out of date, stopped, muted, or an older
+  version) Púca notifies as before, so an item is never left unannounced.
+  Ship the Púca Notes APK with or before the Púca APK; if you update Notes
+  from an older version, allow its notifications once.
 
 ### Fixed
 - **Saving an attachment on Android saves it.** In both apps the Save button
