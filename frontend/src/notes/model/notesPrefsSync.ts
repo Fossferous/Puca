@@ -44,6 +44,7 @@ import { currentUserIdFromToken } from '../../api/auth';
 import { getActiveIdentity, openAccountBlob, sealAccountBlob, type Identity } from '../../api/e2ee';
 import { isNetworkError } from '../../api/client';
 import { getSealedBlob, putSealedBlob, type GetBlobResult, type PutBlobResult } from '../../api/sealedBlobs';
+import { writeNotesUnsynced } from '../../api/notesCacheScrub';
 import { MAX_LABELS_PER_NOTE, type NotesNoteState } from './notesModel';
 import { dedupeLabels, getNotesPrefs, parseNotesPrefs, replaceNoteState, subscribeNotesPrefs } from './notesPrefs';
 
@@ -201,11 +202,16 @@ export interface PrefsSync {
     unsynced(): boolean;
     status(): PrefsSyncStatus;
     subscribe(cb: () => void): () => void;
+    /** Called after EVERY operation settles, whether or not the status
+     *  changed ('synced' -> 'synced' still moves `base`, which is what
+     *  unsynced() compares against). */
+    subscribeSettled(cb: () => void): () => void;
 }
 
 export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
     let current: PrefsSyncStatus = 'idle';
     const listeners = new Set<() => void>();
+    const settledListeners = new Set<() => void>();
     const set = (s: PrefsSyncStatus): PrefsSyncStatus => {
         if (s !== current) { current = s; for (const cb of listeners) cb(); }
         return s;
@@ -302,6 +308,8 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
             return await fn(uid, id);
         } catch (err) {
             return fail(err);
+        } finally {
+            for (const cb of settledListeners) cb();
         }
     });
 
@@ -347,6 +355,7 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
         },
         status: () => current,
         subscribe: cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
+        subscribeSettled: cb => { settledListeners.add(cb); return () => { settledListeners.delete(cb); }; },
     };
 }
 
@@ -382,6 +391,25 @@ export function acceptServerNotesPrefs(): void {
  *  confirm asks about these (NotesApp.tsx). */
 export function prefsUnsynced(): boolean {
     return appSync.unsynced();
+}
+
+/**
+ * Keep Púca's view of "what a Notes sign-out would lose" current
+ * (api/notesCacheScrub.ts): republished on every local write and after every
+ * sync operation — a push that lands leaves the status at 'synced' as it
+ * was, so the status alone cannot say the flag is stale.
+ */
+export function useNotesUnsyncedFlag(outboxPending: number): void {
+    useEffect(() => {
+        const publish = () => {
+            const uid = currentUserIdFromToken();
+            if (uid !== null) writeNotesUnsynced(uid, { ops: outboxPending, prefs: appSync.unsynced() });
+        };
+        publish();
+        const offSettled = appSync.subscribeSettled(publish);
+        const offLocal = subscribeNotesPrefs(publish);
+        return () => { offSettled(); offLocal(); };
+    }, [outboxPending]);
 }
 
 /**

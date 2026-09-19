@@ -61,7 +61,7 @@ export async function trashOrDeleteList(listId: number): Promise<ListDeleteOutco
  * a trash time are dropped: a server that ignores `?trashed=true` would
  * otherwise hand back every live list.
  */
-export async function trashedListIds(): Promise<Set<number>> {
+export async function trashedListIds(): Promise<number[]> {
     const lists: Array<Pick<TaskList, 'id'> & { trashed_at?: string | null }> = await apiClient.get('/task-lists?trashed=true');
-    return new Set(lists.filter(l => typeof l.trashed_at === 'string' && l.trashed_at !== '').map(l => l.id));
+    return lists.filter(l => typeof l.trashed_at === 'string' && l.trashed_at !== '').map(l => l.id);
 }

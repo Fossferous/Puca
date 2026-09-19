@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { currentUserIdFromToken, decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
+import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import { notificationPermission } from '../../api/desktopNotify';
@@ -37,8 +37,7 @@ import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
-import { flushNotesPrefs, prefsUnsynced, useNotesPrefsSync } from '../model/notesPrefsSync';
-import { writeNotesUnsynced } from '../../api/notesCacheScrub';
+import { flushNotesPrefs, prefsUnsynced, useNotesPrefsSync, useNotesUnsyncedFlag } from '../model/notesPrefsSync';
 import { useTaskEvents } from '../model/taskEvents';
 import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
 import { useNotesOutbox, useOutboxPending } from '../model/notesOutbox';
@@ -106,11 +105,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const prefsSync = useNotesPrefsSync();
     // What a sign-out would lose, published for PÚCA's sign-out to ask about
     // too (api/notesCacheScrub.ts): a sign-out in either tab deletes it.
-    const outboxPending = useOutboxPending();
-    useEffect(() => {
-        const uid = currentUserIdFromToken();
-        if (uid !== null) writeNotesUnsynced(uid, { ops: outboxPending, prefs: prefsUnsynced() });
-    }, [outboxPending, prefsSync, local]);
+    useNotesUnsyncedFlag(useOutboxPending());
     useTaskEvents();
     useNotesCachePersistence();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);

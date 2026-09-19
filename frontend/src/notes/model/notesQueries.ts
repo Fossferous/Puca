@@ -301,7 +301,9 @@ export async function confirmGone(qc: QueryClient, keys: string[]): Promise<stri
     if (lists.length === 0) return keys;
     try {
         if (!(await listTrashSupported())) return keys;
-        const trashed = await qc.fetchQuery({ queryKey: ['notes', 'trashed-ids'], queryFn: trashedListIds, staleTime: 0 });
+        // Outside the ['notes'] namespace: never persisted to the device
+        // cache, and always fetched fresh for this one decision.
+        const trashed = new Set(await qc.fetchQuery({ queryKey: ['notes-prune', 'trashed-ids'], queryFn: trashedListIds, staleTime: 0, gcTime: 0 }));
         return keys.filter(k => !k.startsWith('list:') || !trashed.has(Number(k.slice(5))));
     } catch {
         return keys.filter(k => !k.startsWith('list:'));
