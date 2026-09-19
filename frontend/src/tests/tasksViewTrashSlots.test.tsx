@@ -192,4 +192,20 @@ describe('Púca Tasks view: Notes to self and the trash', () => {
         expect(await menuFor('List 1')).not.toContain('Move to trash');
         expect(await menuFor('List 2')).toContain('Move to trash');
     });
+
+    it('a refusal from the server is shown in its words, and the list comes back', async () => {
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        post.mockRejectedValueOnce(new ApiError('Notes to self can’t be moved to the trash', 400));
+        await mount();
+        const tab = [...container.querySelectorAll<HTMLElement>('.tasks-tab')].find(t => t.textContent?.includes('List 2'));
+        await act(async () => { tab!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); });
+        await settle();
+        const item = [...document.querySelectorAll<HTMLElement>('.context-menu-item')].find(b => b.textContent?.trim() === 'Move to trash');
+        await act(async () => { item!.click(); });
+        await settle();
+        expect(post).toHaveBeenCalledWith('/task-lists/2/trash', {});
+        expect(toasts).toEqual(['Notes to self can’t be moved to the trash']);
+        expect([...container.querySelectorAll('.tasks-tab')].some(t => t.textContent?.includes('List 2'))).toBe(true);
+        vi.restoreAllMocks();
+    });
 });

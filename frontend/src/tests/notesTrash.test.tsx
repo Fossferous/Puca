@@ -314,6 +314,15 @@ describe('a failed trash is reported ONCE, in the right words', () => {
         await settle();
         expect(toasts).toEqual(['This note is in the trash — restore it to change it']);
     });
+
+    it('a 400 (a server refusing Notes to self the client did not know about) shows the server’s words', async () => {
+        await mount();
+        post.mockRejectedValueOnce(new ApiError('Notes to self can’t be moved to the trash', 400));
+        await act(async () => { await latest!.actions.deleteNote({ kind: 'list', id: 2 }); });
+        await settle();
+        expect(toasts).toEqual(['Notes to self can’t be moved to the trash']);
+        expect(latest!.keys).toContain('list:2');
+    });
 });
 
 describe('a trash waits for the text still being saved', () => {
