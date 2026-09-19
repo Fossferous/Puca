@@ -205,10 +205,10 @@ cd ..
 node deploy/mobile/encrypt-bundle.mjs --notes \
     frontend/notes-ota/puca-notes-web-<ver>.zip <keys dir>/notes-updater-rsa.key \
     frontend/notes-ota/puca-notes-web-<ver>.enc.zip frontend/dist-notes-app/version.json
-                         # prints {ivSessionKey, checksum}; writes .version and
-                         # .channel (= notes) beside the bundle
+                         # prints {ivSessionKey, checksum}; writes .version,
+                         # .channel (= notes) and .native-min beside the bundle
 deploy/ops/dual-ship.sh mobile-notes frontend/notes-ota/puca-notes-web-<ver>.enc.zip <ver> \
-    <ivSessionKey> <checksum> [--native-min <v>] [--native-version <v>]
+    <ivSessionKey> <checksum> [--native-version <v>] [--lower-native-min]
 deploy/ops/dual-ship.sh apk-notes <Puca-Notes-<ver>.apk> <ver>   # every release too
 ```
 
@@ -220,13 +220,19 @@ host — a backend from before the route answers with Púca's manifest, so **shi
 the backend first**. It proves the full and lite endpoints did not change.
 `mobile` and `mobile-lite` refuse a Notes bundle the same way.
 
-`--native-min <v>`: the oldest Notes APK that can run this bundle. Raise it in
-any release that adds a native plugin, permission or manifest entry the new
-web code needs; older APKs then show *Install the new Púca Notes app* (linking
-`https://<download host>/#notes-app`) instead of applying a bundle they cannot
-run. `--native-version <v>`: nudge (once per version) about a newer APK.
-Neither is signed — a hostile manifest host could withhold updates or nag, not
-deliver an APK (Android refuses one signed with another key).
+`native.min`, the oldest Notes APK that can run this bundle, is NOT a flag: it
+is `frontend/notes-app/native-min.json`, carried by the build's `version.json`
+into the bundle's `.native-min` sidecar, and `mobile-notes` publishes it on
+every release (older APKs then show *Install the new Púca Notes app*, linking
+`https://<download host>/#notes-app`, instead of applying a bundle they cannot
+run). Raise it in the file — to the release that first ships the plugin,
+permission or manifest entry the web code needs — never on the command line.
+`mobile-notes` refuses a floor newer than the release, and one lower than what
+any host already serves unless `--lower-native-min` is passed (for a floor
+raised by mistake). `--native-version <v>`: nudge (once per version) about a
+newer APK; never newer than the release. Neither is signed — a hostile manifest
+host could withhold updates or nag, not deliver an APK (Android refuses one
+signed with another key).
 
 **Existing installs need one manual install.** Notes APKs up to 0.9.815 carry
 no updater; they update only by installing the first OTA-capable APK from the

@@ -23,6 +23,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkDesktopDist, checkNotesOta } from './notes-ota-identity.mjs';
+import { checkNativeMin, readNativeMin } from './notes-native-min.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tauriDir = join(here, '..', 'src-tauri');
@@ -107,6 +108,16 @@ if (!existsSync(notesGradle)) {
         notesPkg: JSON.parse(readFileSync(join(frontendDir, 'notes-app', 'package.json'), 'utf8')),
         frontendUpdaterVersion: lock?.packages?.['node_modules/@capgo/capacitor-updater']?.version ?? null,
     });
+    ok.push(...r.ok);
+    r.failures.forEach(fail);
+}
+
+// Púca Notes' native floor (notes-app/native-min.json) still describes the
+// APK's native surface — a new plugin or permission cannot land without a
+// decision about native.min. scripts/notes-native-min.mjs has the reasons.
+{
+    const { record, surface } = readNativeMin(join(here, '..'));
+    const r = checkNativeMin(record, surface);
     ok.push(...r.ok);
     r.failures.forEach(fail);
 }

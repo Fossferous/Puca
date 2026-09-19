@@ -169,14 +169,30 @@ export const liteAliases = RC_ENABLED ? [] : [
  * directory — dist/notes/, the web page with base /notes/ and no CSP — from
  * ever being published as a Notes OTA. An absent `app` (every bundle built
  * before this field existed) means "puca".
+ *
+ * A Notes bundle also carries `nativeMin`: the oldest Notes APK it can run on,
+ * from the tracked notes-app/native-min.json (scripts/notes-native-min.mjs has
+ * why it lives in the tree). encrypt-bundle.mjs --notes refuses a bundle
+ * without it and copies it into the `.native-min` sidecar that
+ * dual-ship.sh mobile-notes publishes as native.min on every release.
  */
 export function emitVersionJson(app: 'puca' | 'notes'): Plugin {
   return {
     name: 'puca-version-json',
     generateBundle() {
-      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ version: APP_VERSION, app }) + '\n' })
+      const body = app === 'notes' ? { version: APP_VERSION, app, nativeMin: notesNativeMin() } : { version: APP_VERSION, app }
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify(body) + '\n' })
     },
   }
+}
+
+/** notes-app/native-min.json's `min`; a Notes build with no valid floor fails. */
+function notesNativeMin(): string {
+  const min: unknown = JSON.parse(readFileSync(new URL('./notes-app/native-min.json', import.meta.url), 'utf8'))?.min
+  if (typeof min !== 'string' || !/^\d+\.\d+\.\d+$/.test(min)) {
+    throw new Error(`notes-app/native-min.json "min" is ${JSON.stringify(min)}, not MAJOR.MINOR.PATCH — a Notes bundle must carry its native floor`)
+  }
+  return min
 }
 
 /** The two compile-time literals every build injects. */

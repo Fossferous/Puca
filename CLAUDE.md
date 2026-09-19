@@ -202,11 +202,13 @@ directory; the Notes APK embeds only the public half), built with
 `node scripts/build-notes-app.mjs --ota` and signed with
 `encrypt-bundle.mjs --notes`. Every mobile subcommand now proves the bundle
 verifies under the key the TARGET app embeds (`deploy/mobile/verify-bundle.mjs`)
-and refuses the other app's `<bundle>.channel`. A release that adds a native
-plugin or permission to the Notes app passes `--native-min <that version>` to
-`mobile-notes`, so older APKs prompt for the new install instead of applying a
-bundle they cannot run; `check-versions.sh` then FAILS until the page links an
-APK at least that new. The download page
+and refuses the other app's `<bundle>.channel`. A change that adds a native
+plugin or permission to the Notes app raises `min` in
+`frontend/notes-app/native-min.json` (the build fails until its recorded
+surface matches); every `mobile-notes` then publishes that floor, never lower
+than a host already serves, so older APKs prompt for the new install instead of
+applying a bundle they cannot run; `check-versions.sh` FAILS until the page
+links an APK at least that new. The download page
 (`deploy/download-site/index.html`) understands `?variant=lite` too, so the
 client's own "no update path" fallback (`api/appVersion.ts`'s
 `openDownloadPage`, which appends `?variant=lite` when `RC_ENABLED` is false)

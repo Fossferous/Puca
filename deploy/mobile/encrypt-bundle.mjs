@@ -28,6 +28,8 @@
  * puca), and a bundle for the other app is refused either way. The chosen
  * channel is written to `<out>.channel`, which dual-ship.sh reads: `mobile` /
  * `mobile-lite` refuse a notes bundle and `mobile-notes` refuses anything else.
+ * A Notes bundle's native floor (version.json "nativeMin") goes to
+ * `<out>.native-min`, which `mobile-notes` publishes as native.min.
  */
 import { createCipheriv, privateEncrypt, randomBytes, createHash, constants } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -81,6 +83,40 @@ if (!NOTES && builtApp !== 'puca') {
             ? 'A Púca Notes bundle is signed with --notes and the NOTES key, and shipped with dual-ship.sh mobile-notes.'
             : 'Rebuild from frontend/ (npm run build) and stage from dist/.',
     ]);
+}
+
+/** a > b over the first three numeric parts. */
+const versionGt = (a, b) => {
+    const pa = a.split('.').map(n => parseInt(n, 10) || 0);
+    const pb = b.split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] > pb[i];
+    return false;
+};
+
+// A Notes bundle's NATIVE FLOOR: the oldest Notes APK it can run on, from the
+// tracked frontend/notes-app/native-min.json via the build's version.json
+// (frontend/scripts/notes-native-min.mjs has why the tree holds it). Written
+// to `<out>.native-min`, which dual-ship.sh mobile-notes publishes as the
+// manifest's native.min on EVERY release — so a floor cannot silently drop
+// off the release after the one that raised it. Refused when absent (a build
+// from before the field, or a hand-made version.json) and when newer than
+// the bundle's own version: every Notes install would then refuse it.
+let nativeMin = '';
+if (NOTES) {
+    nativeMin = typeof parsedVersion?.nativeMin === 'string' ? parsedVersion.nativeMin.trim() : '';
+    if (!/^\d+\.\d+\.\d+$/.test(nativeMin)) {
+        refuse([
+            `${versionJsonPath} carries no usable nativeMin (${JSON.stringify(parsedVersion?.nativeMin)}).`,
+            'The Notes native build writes it from frontend/notes-app/native-min.json: rebuild with',
+            'cd frontend && node scripts/build-notes-app.mjs --ota',
+        ]);
+    }
+    if (versionGt(nativeMin, builtVersion)) {
+        refuse([
+            `${versionJsonPath} says nativeMin ${nativeMin}, newer than the bundle itself (${builtVersion}):`,
+            'every Púca Notes install would refuse this update. Fix frontend/notes-app/native-min.json or bump the release.',
+        ]);
+    }
 }
 
 // The central directory, walked from the End Of Central Directory record —
@@ -177,6 +213,7 @@ if (!NOTES) {
     if (!inZip) problems.push('there is no readable version.json at the zip root — only the Notes native build emits one with app "notes"');
     else if (inZip.app !== 'notes') problems.push(`the zip's own version.json says app ${JSON.stringify(inZip.app ?? 'puca')}, not "notes"`);
     else if (String(inZip.version ?? '').trim() !== builtVersion) problems.push(`the zip's own version.json says ${inZip.version}, but ${versionJsonPath} says ${builtVersion}`);
+    else if (String(inZip.nativeMin ?? '').trim() !== nativeMin) problems.push(`the zip's own version.json says nativeMin ${JSON.stringify(inZip.nativeMin)}, but ${versionJsonPath} says ${nativeMin}`);
     if (index) {
         let html = '';
         try { html = readEntry(plaintext, index).toString('utf8'); } catch (e) { problems.push(`index.html cannot be read (${e.message})`); }
@@ -205,6 +242,7 @@ const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
 writeFileSync(outPath, encrypted);
 writeFileSync(`${outPath}.version`, `${builtVersion}\n`);
 writeFileSync(`${outPath}.channel`, `${NOTES ? 'notes' : 'puca'}\n`);
+if (NOTES) writeFileSync(`${outPath}.native-min`, `${nativeMin}\n`);
 
 // RSA private-encrypt the AES key (client public-decrypts it).
 const encAesKey = privateEncrypt({ key: privateKey, padding: constants.RSA_PKCS1_PADDING }, aesKey);

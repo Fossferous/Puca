@@ -85,7 +85,7 @@ function sign(zip: string, key: string, versionJson: string, notes: boolean) {
     const out = path.join(tmp, path.basename(zip, '.zip') + (notes ? '.notes' : '.puca') + '.enc.zip');
     // A previous case may have signed the same fixture: "nothing written" must
     // mean THIS run wrote nothing.
-    for (const f of [out, `${out}.version`, `${out}.channel`]) fs.rmSync(f, { force: true });
+    for (const f of [out, `${out}.version`, `${out}.channel`, `${out}.native-min`]) fs.rmSync(f, { force: true });
     const r = spawnSync(process.execPath, [ENCRYPT, ...(notes ? ['--notes'] : []), zip, key, out, versionJson], { encoding: 'utf8' });
     return { status: r.status, stderr: r.stderr, stdout: r.stdout, out };
 }
@@ -102,14 +102,14 @@ beforeAll(() => {
 });
 afterAll(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
 
-const notesVersion = () => write('notes-version.json', '{"version":"1.2.3","app":"notes"}\n');
+const notesVersion = () => write('notes-version.json', '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}\n');
 const pucaVersion = () => write('puca-version.json', '{"version":"1.2.3","app":"puca"}\n');
 const legacyVersion = () => write('legacy-version.json', '{"version":"1.2.3"}\n');
 
 describe('encrypt-bundle --notes: only the Notes native build', () => {
     const goodNotesZip = () => write('notes-good.zip', makeZip({
         'index.html': NATIVE_INDEX,
-        'version.json': '{"version":"1.2.3","app":"notes"}\n',
+        'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}\n',
         'assets/index-a1.js': 'console.log(1)',
         'manifest.webmanifest': '{}',
     }));
@@ -127,7 +127,7 @@ describe('encrypt-bundle --notes: only the Notes native build', () => {
     it('stored (not deflated) entries are read too', () => {
         const zip = write('notes-stored.zip', makeZip({
             'index.html': NATIVE_INDEX,
-            'version.json': '{"version":"1.2.3","app":"notes"}\n',
+            'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}\n',
         }, false));
         expect(sign(zip, notesKey, notesVersion(), true).status).toBe(0);
     });
@@ -151,19 +151,19 @@ describe('encrypt-bundle --notes: only the Notes native build', () => {
             'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"puca"}',
         }, /says app "puca", not "notes"/],
         ['a zip whose own version.json names another version', {
-            'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.4","app":"notes"}',
+            'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.4","app":"notes","nativeMin":"1.2.0"}',
         }, /says 1\.2\.4/],
         ['no CSP meta', {
-            'index.html': '<!doctype html><html><head></head></html>', 'version.json': '{"version":"1.2.3","app":"notes"}',
+            'index.html': '<!doctype html><html><head></head></html>', 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}',
         }, /0 Content-Security-Policy metas/],
         ['two CSP metas', {
-            'index.html': `<html><head>${CSP}${CSP}</head></html>`, 'version.json': '{"version":"1.2.3","app":"notes"}',
+            'index.html': `<html><head>${CSP}${CSP}</head></html>`, 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}',
         }, /2 Content-Security-Policy metas/],
         ['the directory zipped instead of its contents', {
-            'dist-notes-app/index.html': NATIVE_INDEX, 'dist-notes-app/version.json': '{"version":"1.2.3","app":"notes"}',
+            'dist-notes-app/index.html': NATIVE_INDEX, 'dist-notes-app/version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}',
         }, /no index.html at the zip root/],
         ['a second HTML page', {
-            'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes"}', 'notes/index.html': '<html></html>',
+            'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}', 'notes/index.html': '<html></html>',
         }, /second HTML entry point \(notes\/index.html\)/],
     ])('REFUSES %s', (_n, entries, msg) => {
         const zip = write(`notes-bad-${Math.random().toString(36).slice(2)}.zip`, makeZip(entries as Record<string, string>));
@@ -175,13 +175,57 @@ describe('encrypt-bundle --notes: only the Notes native build', () => {
     });
 });
 
+describe('encrypt-bundle --notes: the native floor rides with the bundle', () => {
+    // The floor used to be a ship flag that only the release passing it
+    // carried. Now the build writes it (notes-app/native-min.json →
+    // version.json "nativeMin") and the signer hands it to dual-ship.sh in
+    // <out>.native-min, so every release publishes it.
+    const zipWith = (vj: string) => write(`floor-${Math.random().toString(36).slice(2)}.zip`, makeZip({ 'index.html': NATIVE_INDEX, 'version.json': vj }));
+    const GOOD = '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}';
+
+    it('writes <out>.native-min from the build (positive control), and a Púca bundle gets none', () => {
+        const r = sign(zipWith(GOOD), notesKey, notesVersion(), true);
+        expect(r.status, r.stderr).toBe(0);
+        expect(fs.readFileSync(`${r.out}.native-min`, 'utf8').trim()).toBe('1.2.0');
+        const p = sign(write('floor-puca.zip', makeZip({ 'index.html': '<html></html>', 'version.json': '{"version":"1.2.3","app":"puca"}' })), pucaKey, pucaVersion(), false);
+        expect(p.status, p.stderr).toBe(0);
+        expect(fs.existsSync(`${p.out}.native-min`)).toBe(false);
+    });
+
+    it('a floor EQUAL to the release is fine (positive control for the bound)', () => {
+        const vj = '{"version":"1.2.3","app":"notes","nativeMin":"1.2.3"}';
+        const r = sign(zipWith(vj), notesKey, write('eq.json', vj), true);
+        expect(r.status, r.stderr).toBe(0);
+        expect(fs.readFileSync(`${r.out}.native-min`, 'utf8').trim()).toBe('1.2.3');
+    });
+
+    it.each([
+        ['no nativeMin (a build from before the floor)', '{"version":"1.2.3","app":"notes"}', /no usable nativeMin/],
+        ['a malformed nativeMin', '{"version":"1.2.3","app":"notes","nativeMin":"1.2"}', /no usable nativeMin/],
+        ['a nativeMin NEWER than the bundle (the 1.2.30 typo)', '{"version":"1.2.3","app":"notes","nativeMin":"1.2.30"}', /newer than the bundle itself \(1\.2\.3\)/],
+        ['a nativeMin naming the NEXT release', '{"version":"1.2.3","app":"notes","nativeMin":"1.2.4"}', /newer than the bundle itself/],
+    ])('REFUSES %s, writing nothing', (_n, vj, msg) => {
+        const r = sign(zipWith(vj), notesKey, write(`floor-arg-${Math.random().toString(36).slice(2)}.json`, vj), true);
+        expect(r.status).toBe(2);
+        expect(r.stderr).toMatch(msg);
+        for (const f of [r.out, `${r.out}.native-min`, `${r.out}.channel`]) expect(fs.existsSync(f), f).toBe(false);
+    });
+
+    it('REFUSES when the zip\'s own floor disagrees with the build\'s', () => {
+        const r = sign(zipWith('{"version":"1.2.3","app":"notes","nativeMin":"1.1.0"}'), notesKey, notesVersion(), true);
+        expect(r.status).toBe(2);
+        expect(r.stderr).toMatch(/nativeMin "1\.1\.0", but .* says 1\.2\.0/);
+        expect(fs.existsSync(`${r.out}.native-min`)).toBe(false);
+    });
+});
+
 describe('scripts/zip-dir.mjs: the zip build-notes-app --ota writes', () => {
     it('zips a directory\'s CONTENTS, nested files included, and the signer accepts it', async () => {
         const { zipDirectory } = await import('../../scripts/zip-dir.mjs');
         const dir = path.join(tmp, 'dist-notes-app-fixture');
         fs.mkdirSync(path.join(dir, 'assets', 'deep'), { recursive: true });
         fs.writeFileSync(path.join(dir, 'index.html'), NATIVE_INDEX);
-        fs.writeFileSync(path.join(dir, 'version.json'), '{"version":"1.2.3","app":"notes"}\n');
+        fs.writeFileSync(path.join(dir, 'version.json'), '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}\n');
         fs.writeFileSync(path.join(dir, 'assets', 'deep', 'x.js'), 'x'.repeat(5000));
         const zip = write('zipdir.zip', zipDirectory(dir));
         const r = sign(zip, notesKey, notesVersion(), true);
@@ -217,7 +261,7 @@ describe('encrypt-bundle without a flag: Púca, as before', () => {
     });
 
     it('REFUSES a zip that is the Notes build even when the argument says Púca', () => {
-        const zip = write('puca-is-notes.zip', makeZip({ 'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes"}' }));
+        const zip = write('puca-is-notes.zip', makeZip({ 'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}' }));
         const r = sign(zip, pucaKey, pucaVersion(), false);
         expect(r.status).toBe(2);
         expect(r.stderr).toMatch(/is a Púca Notes bundle/);
@@ -239,7 +283,7 @@ describe('encrypt-bundle without a flag: Púca, as before', () => {
 
 describe('verify-bundle: the signature belongs to the TARGET app', () => {
     it('a Notes-signed bundle verifies under the Notes config and NOT under Púca\'s', () => {
-        const zip = write('v-notes.zip', makeZip({ 'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes"}' }));
+        const zip = write('v-notes.zip', makeZip({ 'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}' }));
         const r = sign(zip, notesKey, notesVersion(), true);
         const { ivSessionKey, checksum } = JSON.parse(r.stdout);
         const ok = verify(r.out, ivSessionKey, checksum, notesCfg);

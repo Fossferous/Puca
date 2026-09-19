@@ -162,10 +162,10 @@ Púca. The steady-state rule, every release:
    so a fresh install starts current rather than needing its first OTA.
 
 `check-versions.sh` asserts the notes OTA manifest carries the release once one
-is deployed; with a current notes OTA a trailing APK is INFO, except when the
-manifest's `native.min` is newer than the APK the page links (a fresh install
-would then refuse its own first update), which is a FAIL — as a trailing APK is
-whenever no current notes OTA exists.
+is deployed; with a current notes OTA a trailing APK is INFO, and with none it
+is a FAIL. Whatever the APK's version — the release's own included — a
+manifest `native.min` newer than the APK the page links (a fresh install would
+refuse its own first update) or newer than the manifest itself is a FAIL.
 
 ### Updates over the air
 
@@ -194,14 +194,26 @@ launch — on **its own channel**:
   in `src/api/mobileOta.ts`) may delay the app but never hold it, and
   `notes/main.tsx` blesses the running bundle first thing, so a bundle that
   never boots is rolled back.
-- **Native changes** still need a new APK. The manifest can say so in an
-  optional `native` block (`dual-ship.sh mobile-notes ... --native-min <v>
-  --native-version <v>`): an APK older than `native.min` does not apply the
-  bundle and shows *Install the new Púca Notes app* with a Download button to
-  the download page's `#notes-app` section (same-site HTTPS only); a newer
-  `native.version` is a dismissable strip, once per version. Raise
-  `--native-min` in any release that adds a native plugin, permission or
-  manifest entry the new web code depends on.
+- **Native changes** still need a new APK. Every notes manifest carries a
+  `native` block: an APK older than `native.min` does not apply the bundle and
+  shows *Install the new Púca Notes app* with a Download button to the download
+  page's `#notes-app` section (same-site HTTPS only); a newer `native.version`
+  (`dual-ship.sh mobile-notes ... --native-version <v>`) is a strip in the app,
+  dismissable once per version.
+- **`native.min` is a floor that lives in the tree**:
+  `frontend/notes-app/native-min.json`. It only goes up. The Notes build writes
+  it into `version.json`, `encrypt-bundle.mjs --notes` copies it into the
+  bundle's `.native-min` sidecar, and `mobile-notes` publishes it on EVERY
+  release — refusing one newer than the release, and one lower than what a host
+  already serves unless `--lower-native-min` says so. (It was a
+  `--native-min` flag once; the release after the one that passed it published
+  no floor, and old APKs applied web code calling plugins they lacked.) The same
+  file records the APK's native surface — Capacitor packages,
+  `@CapacitorPlugin` classes, `<uses-permission>` entries — and
+  `scripts/notes-native-min.mjs` fails `npm run build` and
+  `build-notes-app.mjs` when the surface changes and the record does not: a
+  change that adds a plugin or permission the web code calls raises `min` to
+  the release that first ships it, then re-records the surface.
 - The account menu shows the running version and a **Check for updates** that
   re-runs the check without closing an open note.
 
