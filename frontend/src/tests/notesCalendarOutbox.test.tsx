@@ -171,3 +171,23 @@ describe('the calendar\'s writes go through the outbox', () => {
         expect(qc.getQueryData<TaskList[]>(notesKeys.lists)!.map(l => l.id)).toEqual([-50]);
     });
 });
+
+describe('deleteTaskFrom says whether the item is gone', () => {
+    it('true when it ran or queued; false (and the item back) when the server refused it', async () => {
+        const qc = new QueryClient();
+        qc.setQueryData(notesKeys.tasks(LIST), [mk(5), mk(6)]);
+        const actions = mountActions(qc);
+        vi.mocked(sendNoteOp).mockResolvedValueOnce({ queued: false, value: undefined });
+        let r: boolean | undefined;
+        await act(async () => { r = await actions().deleteTaskFrom(LIST, 5); });
+        expect(r).toBe(true);
+        vi.mocked(sendNoteOp).mockResolvedValueOnce({ queued: true });
+        await act(async () => { r = await actions().deleteTaskFrom(LIST, 6); });
+        expect(r).toBe(true);                                    // queued: it replays
+        qc.setQueryData(notesKeys.tasks(LIST), [mk(7)]);
+        vi.mocked(sendNoteOp).mockRejectedValueOnce(new ApiError('Forbidden', 403));
+        await act(async () => { r = await actions().deleteTaskFrom(LIST, 7); });
+        expect(r).toBe(false);
+        expect(qc.getQueryData<Task[]>(notesKeys.tasks(LIST))!.map(t => t.id)).toEqual([7]);
+    });
+});

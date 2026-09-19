@@ -19,7 +19,11 @@
  * re-creates the items with those properties (so the attachment files are
  * kept while Undo is offered). Once the Undo window closes — it expires, a
  * newer Undo replaces it, or the note closes — nothing names those files any
- * more, and they are deleted rather than left on the server.
+ * more, and they are deleted rather than left on the server. Only the files
+ * of items whose delete actually went through, and never one a live item
+ * still names at that moment: an item whose delete failed is put back WITH
+ * its pictures, so it stays an item (the text gets only the lines that
+ * left), and its files are its own again.
  */
 import { useEffect, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
@@ -39,6 +43,11 @@ import { UndoBar } from './UndoBar';
 import '../noteContent.css';
 
 const COARSE = '(pointer: coarse) and (max-width: 1024px)';
+
+/** An item's attachment refs, when this device can read them. */
+function attachmentsOf(t: Task) {
+    return t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [];
+}
 
 interface Props {
     card: NoteCard;
@@ -60,6 +69,9 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
     const undoRef = useRef<Undo | null>(null);
+    // The items as they are NOW, for a commit that runs after they changed.
+    const tasksRef = useRef(tasks);
+    useEffect(() => { tasksRef.current = tasks; });
     /** Replace the pending Undo; the one replaced can no longer happen. */
     const setUndo = (next: Undo | null, committed = true) => {
         const prev = undoRef.current;
@@ -157,12 +169,24 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             return;
         }
         setConverting(true);
-        const snapshot = recreationOrder(tasks);
+        const all = recreationOrder(tasks);
         try {
             if (!await c.setBody(listId, next)) return;
-            for (const t of snapshot) if (t.parent_id === null) await actions.deleteTaskFrom(ref, t.id);
-            // The dropped items' uploads: kept for the Undo, deleted after it.
-            const orphaned = fileIdsOf(snapshot.flatMap(t => (t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [])));
+            // Deleting a top-level item takes its subtree with it.
+            const gone = new Set<number>();
+            for (const t of all) if (t.parent_id === null && await actions.deleteTaskFrom(ref, t.id)) gone.add(t.id);
+            for (const t of all) if (t.parent_id !== null && gone.has(t.parent_id)) gone.add(t.id);   // parents come first
+            const snapshot = all.filter(t => gone.has(t.id));
+            if (snapshot.length < all.length) {
+                // Some stayed items: the text gets only the lines that left.
+                const partial = [before, itemsToBody(snapshot)].filter(s => s !== '').join('\n');
+                await c.setBody(listId, partial);
+                pushMessageToast({ title: snapshot.length === 0 ? 'Couldn’t turn the checklist into text — the items are kept' : 'Not every item became text — the rest are still items' });
+                if (snapshot.length === 0) return;
+            }
+            // The dropped items' uploads: kept for the Undo, deleted after it —
+            // never one a live item names by then.
+            const orphaned = fileIdsOf(snapshot.flatMap(attachmentsOf));
             setUndo({
                 token: ++undoSeq,
                 message: 'Turned the checklist into text',
@@ -184,7 +208,11 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     }
                     await c.setBody(listId, before);
                 },
-                commit: orphaned.length > 0 ? () => { void deleteFiles(orphaned); } : undefined,
+                commit: orphaned.length > 0 ? () => {
+                    const named = new Set(fileIdsOf(tasksRef.current.flatMap(attachmentsOf)));
+                    const unused = orphaned.filter(id => !named.has(id));
+                    if (unused.length > 0) void deleteFiles(unused);
+                } : undefined,
             });
         } finally {
             setConverting(false);

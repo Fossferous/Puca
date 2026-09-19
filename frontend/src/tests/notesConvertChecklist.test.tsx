@@ -12,6 +12,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
+vi.mock('../api/listContent', async (orig) => {
+    const real = await orig<typeof import('../api/listContent')>();
+    return { ...real, deleteFiles: vi.fn(async () => {}) };
+});
 vi.mock('../notes/model/notesOutbox', async (orig) => {
     const real = await orig<typeof import('../notes/model/notesOutbox')>();
     return { ...real, pendingOutboxCount: vi.fn(() => 0) };
@@ -19,6 +23,8 @@ vi.mock('../notes/model/notesOutbox', async (orig) => {
 
 import { NoteContentSection } from '../notes/components/NoteContentSection';
 import { pendingOutboxCount } from '../notes/model/notesOutbox';
+import { deleteFiles } from '../api/listContent';
+import { UNDO_WINDOW_MS } from '../notes/components/UndoBar';
 import { setMessageToastSink } from '../components/messageToastBus';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
@@ -46,6 +52,7 @@ function fakeActions(opts: { setBodyOk?: (body: string) => boolean; refuseItem?:
 }
 
 let root: Root | null = null;
+let host: HTMLDivElement | null = null;
 let onLine = true;
 let spy: ReturnType<typeof vi.spyOn> | null = null;
 beforeEach(() => {
@@ -65,11 +72,11 @@ afterEach(() => {
 });
 
 async function convert(actions: NoteActions) {
-    const host = document.createElement('div');
+    host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
     act(() => { root!.render(<NoteContentSection card={card} actions={actions} tasks={[]} tasksLoaded />); });
-    const btn = [...host.querySelectorAll('button')].find(b => b.textContent === 'Show checkboxes')!;
+    const btn = [...host!.querySelectorAll('button')].find(b => b.textContent === 'Show checkboxes')!;
     expect(btn).toBeTruthy();
     await act(async () => { btn.click(); });
     for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); });
@@ -115,5 +122,70 @@ describe('Show checkboxes never half-applies', () => {
         expect(log).toEqual(['setBody("")', 'addTask(milk)', 'addTask(eggs)', 'setBody("milk\\neggs\\nbread")', 'delete(100)']);
         expect(toasts).toEqual(['Not every line became an item — the text is kept']);
         expect(document.querySelector('.notes-undo')).toBeNull();
+    });
+});
+
+describe('Hide checkboxes deletes only the files of items that actually left', () => {
+    const file = (id: string) => JSON.stringify([{ href: `sovereign-enc:${id}?k=KEY&m=image%2Fpng`, name: `${id}.png` }]);
+    const items = [
+        made(1, 'milk'), { ...made(2, 'eggs'), attachments: file('eggsfile') },
+        { ...made(3, 'bread'), attachments: file('breadfile') },
+    ];
+
+    function mountHide(actions: NoteActions, tasks: Task[]) {
+        host = document.createElement('div');
+        document.body.appendChild(host);
+        root = createRoot(host);
+        const noText = { ...card, body: null } as unknown as NoteCard;
+        act(() => { root!.render(<NoteContentSection card={noText} actions={actions} tasks={tasks} tasksLoaded />); });
+        return (next: Task[]) => act(() => { root!.render(<NoteContentSection card={noText} actions={actions} tasks={next} tasksLoaded />); });
+    }
+    async function hide() {
+        const btn = [...host!.querySelectorAll('button')].find(b => b.textContent === 'Hide checkboxes')!;
+        await act(async () => { btn.click(); });
+        for (let i = 0; i < 8; i++) await act(async () => { await Promise.resolve(); });
+    }
+
+    beforeEach(() => { vi.mocked(deleteFiles).mockClear(); vi.spyOn(window, 'confirm').mockReturnValue(true); });
+
+    it('one delete fails: that item keeps its file, stays an item, and the text gets only the others', async () => {
+        vi.useFakeTimers();
+        const f = fakeActions();
+        f.deleteTaskFrom.mockImplementation(async (_n: unknown, id: number) => { log.push(`delete(${id})`); return id !== 3; });
+        const rerender = mountHide(f.actions, items);
+        await hide();
+        expect(log.filter(l => l.startsWith('delete'))).toEqual(['delete(1)', 'delete(2)', 'delete(3)']);
+        expect(f.setBody.mock.calls.map(c => c[1]).at(-1)).toBe('milk\neggs');     // not "bread": it is still an item
+        expect(toasts).toEqual(['Not every item became text — the rest are still items']);
+        rerender([items[2]]);                                                          // bread is back, with its picture
+        await act(async () => { vi.advanceTimersByTime(UNDO_WINDOW_MS + 10); });
+        expect(deleteFiles).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(deleteFiles).mock.calls[0][0]).toEqual(['eggsfile']);
+        vi.useRealTimers();
+    });
+
+    it('a file a live item names again by the time the Undo closes is never deleted', async () => {
+        vi.useFakeTimers();
+        const f = fakeActions();
+        const rerender = mountHide(f.actions, items);
+        await hide();
+        // e.g. a refetch brought an item back that still names eggs' picture
+        rerender([{ ...made(9, 'eggs again'), attachments: file('eggsfile') }]);
+        await act(async () => { vi.advanceTimersByTime(UNDO_WINDOW_MS + 10); });
+        expect(vi.mocked(deleteFiles).mock.calls.map(c => c[0])).toEqual([['breadfile']]);
+        vi.useRealTimers();
+    });
+
+    it('POSITIVE CONTROL: every delete succeeds — every dropped file is deleted once the Undo closes', async () => {
+        vi.useFakeTimers();
+        const f = fakeActions();
+        const rerender = mountHide(f.actions, items);
+        await hide();
+        expect(f.setBody.mock.calls.map(c => c[1])).toEqual(['milk\neggs\nbread']);
+        expect(deleteFiles).not.toHaveBeenCalled();                                   // kept for the Undo
+        rerender([]);
+        await act(async () => { vi.advanceTimersByTime(UNDO_WINDOW_MS + 10); });
+        expect(vi.mocked(deleteFiles).mock.calls.map(c => [...c[0]].sort())).toEqual([['breadfile', 'eggsfile']]);
+        vi.useRealTimers();
     });
 });
