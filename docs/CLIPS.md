@@ -293,18 +293,32 @@ needs no picker).
   VoiceMoved (new room id) tries again, because the buffer must never span
   two rooms' rosters. `clipAutoArm.test.tsx`; the pre-0.8.106 checkbox
   `clipArmPromptOnJoin: true` loads as *Remind me*.
-- **Measured pacing (2026-08-20, 2560x1440 + NVENC, headless bench
-  `bench_clip_capture_encode_pacing` in `crates/puca-encode/tests/live_encode.rs`)**:
-  capture+convert+encode costs ~8 ms of ONE CPU thread per frame (mean 8.0,
-  p95 9.3) — ~40% of one core at the ~50 fps it achieves; the encoder is
-  fixed-function NVENC, so 3D-pipeline contention is minimal. The loop is
-  CPU-bound in the scalar BGRA→NV12 convert and CANNOT hold 60 fps at
-  1440p+ as written (it degrades to ~50 fps at 1440p, less at 4K — frames
-  just arrive slower; nothing queues). A 30 fps preset costs ~24% of one
-  core. Follow-up if 60 fps native matters: SIMD convert or the MFT's own
-  VideoProcessor. Relevant to the 2026-08-19 field report "puca was
-  making games choppy": the suspect there is the CURRENT WebCodecs path at
-  a heavy preset; whether native is lighter in-game is the A/B below.
+- **The frame rate is capped (2026-09-19).** Until then neither native loop
+  (the agent's `clip_host.rs`, the app's in-process fallback) capped
+  anything: `fps` set only the longest wait for a frame, and a frame arrives
+  on every present. Measured on the agent host itself (2560x1440 @ 165 Hz,
+  NVENC, `--fps 30 --bitrate 8000000`, a stream playing on that screen): the
+  shipped loop encoded **63-78 fps at 15-21 Mbit/s for 81-95% of one core**.
+  The bitrate follows the frame count because the encoder's sample clock
+  advances 1/fps per submitted frame. With `FramePacer`
+  (`crates/puca-clip-wire/src/pacer.rs`, shared by both loops): **29.9-30.0
+  fps, 7.1-7.2 Mbit/s, 36-39% of one core**, frame gaps p5 31 / p95 35 /
+  max 37 ms. (A first version that polled once per slot measured 29-29.6
+  fps, 6-7 Mbit/s and 33-36%, with gaps out to 104 ms: it re-sent more
+  stored frames, which are cheap, and caught fewer new ones.) What remains is per frame: the
+  GPU-to-CPU readback, the scalar BGRA→NV12 convert, and the encoder's short
+  wait for output. Each slot waits up to half a period for a new picture
+  rather than polling once, so content at exactly the asked-for rate is
+  captured once per frame instead of alternating duplicates and drops
+  (`pacer.rs` explains why).
+- **Superseded bench (2026-08-20, `bench_clip_capture_encode_pacing` in
+  `crates/puca-encode/tests/live_encode.rs`)**: ~8 ms per frame, "~50 fps",
+  "cannot hold 60 fps at 1440p", "~24% of a core at 30 fps". It timed
+  `encode_bgra` alone (no readback) on the uncapped loop, so treat those
+  figures as history, not as the cost of the current loop. Follow-up if the
+  per-frame cost matters: convert on the GPU (the MFT's VideoProcessor)
+  instead of on the CPU. Relevant to the 2026-08-19 field report "puca was
+  making games choppy"; whether native is lighter in-game is the A/B below.
 - **NEEDS an on-device Windows walk** before this is trusted in the field: a
   real fullscreen game picked correctly over the primary monitor, WASAPI
   desktop-audio loopback actually capturing game + voice audio, a screen
@@ -312,10 +326,14 @@ needs no picker).
   the clip buffer is separately armed, the tray tooltip appearing/clearing
   on arm/disarm, and **game frame-pacing A/B: the same game with the buffer
   armed via the WebCodecs path vs the native path vs disarmed** (the field
-  report above is the reason). None of the native Rust capture loops have
-  been exercised against real hardware — only unit tests (pure logic), a
-  headless-browser e2e that stands in a real WebCodecs Annex-B stream for
-  the Rust encoder's output, and the headless pacing bench.
+  report above is the reason). The agent's `clip_host.rs` loop has been
+  measured on real hardware for frame rate, bitrate and CPU (2026-09-19,
+  above: a desktop showing a stream, not a game). Everything else in this
+  list is still unwalked, and so is the app's in-process Lite loop
+  (`clip_capture.rs`). The evidence for those is unit tests (pure logic,
+  including `pacer.rs`), a headless-browser e2e that stands in a real
+  WebCodecs Annex-B stream for the Rust encoder's output, and the superseded
+  encode bench.
 
 ## Phase 2 — the consent protocol
 

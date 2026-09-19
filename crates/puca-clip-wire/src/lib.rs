@@ -12,6 +12,12 @@
 //! The stream is: `MAGIC` once, then records of
 //! `flags:u8, ts_us:u64, dur_us:u64, len:u32, payload[len]`, little-endian.
 //! The payload is one H.264 access unit in Annex-B.
+//!
+//! It also holds [`FramePacer`], the frame cadence both clip loops share (see
+//! `pacer.rs` for why it lives here).
+
+mod pacer;
+pub use pacer::FramePacer;
 
 /// Written once, after capture AND the encoder have both opened successfully.
 ///

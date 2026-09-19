@@ -4,6 +4,21 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Clip recording uses about a third of the CPU it did.** With clips armed,
+  the screen recorder ignored its own frame rate: on a high-refresh monitor
+  showing anything that moves (a stream, a game) it captured and encoded
+  every frame the screen drew, 63 to 78 a second when the preset asked for
+  30, at more than twice the bitrate. Measured on a 2560x1440 165 Hz screen,
+  it now records at the rate your preset sets: 30 frames a second at about
+  7 Mbit/s, for 36-39% of one CPU core instead of 81-95%, and it takes
+  proportionally less of the graphics card's video encoder. The same number
+  of seconds now takes less than half the memory. Clips of fast content
+  that matches the frame rate are also steadier: each new picture is
+  captured once instead of sometimes twice with the next one skipped.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the

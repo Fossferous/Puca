@@ -41,9 +41,14 @@
 //! member gets roughly the budget their preset's label promised. Before that,
 //! "1080p60 — about 9 Mbps" on a 2560x1440 monitor meant a 2560x1440 60 fps
 //! 16 Mbps encode: 1.78x the work asked for, measured at 73-92% of a core on
-//! a real machine, against docs/CLIPS.md's own bench of ~40% at ~50 fps. That
-//! document already said this loop cannot hold 60 fps at 1440p or above, so
-//! the frames were being dropped regardless; the cadence is now honest.
+//! a real machine.
+//!
+//! That fold only lowered the NUMBER it passed on. Until 2026-09-19 neither
+//! capture loop enforced it: `fps` set how long an acquire would wait, and an
+//! acquire returns on every present, so a busy 165 Hz screen was encoded at
+//! 63-78 fps whatever fps said. Both loops now wait for a
+//! `puca_clip_wire::FramePacer` slot before acquiring, and that is what makes
+//! the cadence real.
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -284,10 +289,9 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
 /// 2560x1440 at 60 fps, and `scale_bitrate` raised the promised ~9 Mbps to
 /// exactly 16 Mbps to match the extra pixels. Cost is pixels x fps, so that is
 /// 1.78x what the member asked for, sustained, for as long as the buffer is
-/// armed. Measured on such a host: 73-92% of a core, against a documented
-/// bench of ~40% at ~50 fps — and docs/CLIPS.md already says the loop cannot
-/// hold 60 fps at 1440p or above as written. It was dropping frames anyway;
-/// this makes the cadence honest instead of aspirational.
+/// armed. Measured on such a host: 73-92% of a core. (The fps this returns is
+/// only a request until the capture loop's `FramePacer` holds it; before
+/// 2026-09-19 nothing did, and a busy 165 Hz screen ran at 63-78 fps anyway.)
 ///
 /// A CPU downscale would be the wrong answer even though it sounds like the
 /// obvious one: the resize runs AFTER the full GPU-to-staging readback, so it
@@ -875,13 +879,18 @@ fn in_process_capture_loop(
     // caller repeats the PREVIOUS frame rather than treating that as "no
     // output": the ring only closes/evicts GOPs on a video keyframe
     // (replayWorker.ts), so silence here would let audio grow the open GOP
-    // unbounded for as long as the screen doesn't change. Re-submit at most
-    // once per frame period so a long static stretch costs one cheap
-    // re-encode per tick, not a frame-rate encode of nothing.
+    // unbounded for as long as the screen doesn't change. The stored frame is
+    // re-submitted once per slot. That is not free (a full colour conversion
+    // and an encode), but it is the frame rate that was asked for and no more.
     let mut last_frame: Option<puca_capture::Frame> = None;
-    let mut last_emit_at = std::time::Instant::now();
-    let frame_timeout_ms = ((1000 / fps.max(1)) as u32).max(15);
-    let frame_period = std::time::Duration::from_millis(frame_timeout_ms as u64);
+    // Only for the wait before the FIRST frame. After that the pacer decides
+    // when to look and for how long.
+    let first_frame_timeout_ms = ((1000 / fps.max(1)) as u32).max(15);
+    // THE CAP, shared with the agent's clip host so the two cannot drift
+    // again. `fps` used to set only how long an acquire would wait, and an
+    // acquire returns on every present, so a busy high-refresh screen was
+    // encoded at whatever rate it composed (see puca-clip-wire's pacer.rs).
+    let mut pacer = puca_clip_wire::FramePacer::new(fps);
     // AccessLost can be continuous (a sleeping/disconnected display) — the
     // crate rebuilds duplication on every call with no wait of its own, so
     // without a backoff this would peg a core for as long as the condition
@@ -899,13 +908,41 @@ fn in_process_capture_loop(
         // a per-frame clone of a 4K BGRA buffer is a ~33 MB memcpy at up to
         // 60 Hz, pure waste. The Timeout branch then re-encodes the same
         // stored frame, which is the whole reason it is kept.
-        match capture.next_frame(frame_timeout_ms) {
+        //
+        // Wait for the slot BEFORE acquiring: presents that land meanwhile
+        // are folded into the next acquire by DXGI, so they are never read
+        // back, converted or encoded. At most one period, and then round
+        // again so the stop signal is re-checked before the acquire.
+        let wait = pacer.wait(std::time::Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+            continue;
+        }
+        let slot_at = std::time::Instant::now();
+        let had_frame = last_frame.is_some();
+        let acquired = if had_frame {
+            // Returns at once if a present is pending; otherwise waits for one
+            // for the first half of the slot (pacer.rs: a plain poll stutters
+            // when the frame rate matches the content's). About half a period
+            // is also all the stop signal can be kept waiting: the OS may round
+            // the wait up to its ~15.6 ms timer tick, which the grid absorbs
+            // because the slot is spent as of when it opened.
+            pacer.acquire_within(
+                slot_at,
+                |ms| capture.next_frame(ms),
+                |e| matches!(e, CaptureError::Timeout),
+            )
+        } else {
+            capture.next_frame(first_frame_timeout_ms)
+        };
+        match acquired {
             Ok(f) => { access_lost_streak = 0; last_frame = Some(f); }
             Err(CaptureError::Timeout) => {
-                if last_emit_at.elapsed() < frame_period || last_frame.is_none() {
-                    continue; // paced, or nothing captured yet at all
+                if last_frame.is_none() {
+                    continue; // nothing captured yet at all
                 }
-                // fall through and re-encode the stored frame
+                // No new picture within this slot's window (or only the
+                // pointer moved): re-encode the stored frame, once per slot.
             }
             Err(CaptureError::AccessLost) => {
                 access_lost_streak += 1;
@@ -915,6 +952,12 @@ fn in_process_capture_loop(
             Err(CaptureError::Failed(e)) => return Err(format!("capture failed: {e}")),
         }
         let frame = last_frame.as_ref().expect("guarded above");
+        // Spend the slot on the SUBMISSION, whatever the encoder answers (an
+        // async encoder can take the frame and still say "need more input"),
+        // and as of the instant it OPENED, so a slow readback does not restart
+        // the grid from its own end. Not for the very first frame: that
+        // acquire blocked, so the second frame would follow it at once.
+        pacer.take(if had_frame { slot_at } else { std::time::Instant::now() });
         let ts_us = start.elapsed().as_micros();
         let force_key = ts_us as i128 - last_key_us >= gop_us as i128;
         if force_key {
@@ -980,7 +1023,6 @@ fn in_process_capture_loop(
         if app.emit("clip-video-chunk", event).is_err() {
             break; // the window is gone — nothing left to stream to
         }
-        last_emit_at = std::time::Instant::now();
         frames_encoded += 1;
         bytes_emitted += emitted_bytes;
         if last_beat.elapsed() >= HEARTBEAT {

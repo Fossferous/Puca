@@ -268,9 +268,13 @@ fn the_encoder_keeps_up_at_capture_cadence() {
     );
 }
 
-/// Pacing bench for the CLIP AUTO-ARM path (frontend/src-tauri/src/clip_capture.rs
-/// runs exactly this loop): how much CPU does capture+convert+encode of the
-/// real desktop cost per frame, and can it hold the target fps? Prints
+/// Pacing bench for the CLIP AUTO-ARM path, as that loop was before
+/// 2026-09-19: uncapped, encoding every frame the desktop delivers. The real
+/// loops (puca-agent's clip_host.rs, the app's clip_capture.rs) now wait for a
+/// `puca_clip_wire::FramePacer` slot before each acquire, so this no longer
+/// models their frame rate, and `encode_ms` below times `encode_bgra` alone,
+/// not the readback. How much CPU does convert+encode of the real desktop
+/// cost per frame? Prints
 /// numbers; the only assertion is that it ran. Requested by the 2026-08-19
 /// field report "puca was making games choppy" — the suspect is the
 /// armed buffer's continuous encode, and this measures the native path's
