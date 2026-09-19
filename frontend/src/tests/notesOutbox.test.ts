@@ -153,6 +153,8 @@ describe('replay', () => {
         const s = await ob.replay();
         expect(s?.dropped.map(o => o.k)).toEqual(['createTask', 'updateTask']);
         expect(h.ran).toEqual([{ k: 'updateTask', ids: [1, 9] }]);   // the unrelated one still went
+        // The dependant was never even attempted (it would have gone out with a dead id).
+        expect(h.exec.mock.calls.map(c => (c[0] as NoteOp).label)).toEqual([create.label, ops.toggle(LIST, task(9), true).label]);
         expect(h.summaries).toHaveLength(1);
     });
 

@@ -126,6 +126,7 @@ describe('the /notes/ worker cannot shadow anything else', () => {
     it('never answers for the API host, the main app, its updater, or a non-GET', () => {
         const w = loadWorker();
         expect(w.fetchEvent('https://chat.example.com/task-lists')).toBeNull();          // the API (cross-origin)
+        expect(w.fetchEvent('https://chat.example.com/notes/anything')).toBeNull();      // ...whatever its path
         expect(w.fetchEvent('https://app.example.com/', { mode: 'navigate' })).toBeNull(); // Púca itself
         expect(w.fetchEvent('https://app.example.com/assets/index-main.js')).toBeNull();
         expect(w.fetchEvent('https://app.example.com/app-version.json')).toBeNull();
