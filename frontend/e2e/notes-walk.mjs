@@ -12,7 +12,9 @@
 // (sessionSync); a plaintext row injected in the database is flagged "Not
 // encrypted"; and on the phone — one column, no horizontal overflow, every
 // tap target at size, 16px inputs, the FAB composer, the drawer, a popover
-// inside the viewport, the full-screen editor with the grip and arrows.
+// inside the viewport, the full-screen editor with the grip and arrows. Then
+// the calendar (notes-walk-calendar.mjs): Dublin/en-GB and New York/en-US
+// with a fixed clock beside a DST change, and the phone gate.
 //
 // Usage: node e2e/notes-walk.mjs [outdir] [baseURL] [psql-dsn]
 //   baseURL  default http://127.0.0.1:5176 — `PORT=5176 node e2e/serve-dist.mjs`
@@ -21,6 +23,7 @@
 import { chromium, devices } from '@playwright/test';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { calendarWalk } from './notes-walk-calendar.mjs';
 
 const outdir = process.argv[2] || 'e2e/shots-notes';
 const baseURL = process.argv[3] || 'http://127.0.0.1:5176';
@@ -96,6 +99,7 @@ ck('notes: fresh account shows the empty state', /Take a note/.test(await page.l
 await shot('notes-empty');
 
 // ---- 4. Take a note… ---------------------------------------------------------------
+const notesCreatedAt = Date.now();
 await page.click('.notes-quickadd-collapsed');
 await page.fill('.notes-quickadd-title', 'Groceries');
 const item = i => page.locator('.notes-quickadd-item input').nth(i);
@@ -484,6 +488,9 @@ for (const [name, patch] of [
     await mshot(`phone-${name}`);
 }
 ck('phone: no page errors', errors.length === 0, errors[0]);
+
+// ---- 15. Calendar (pinned zones, locales and a fixed clock) — notes-walk-calendar.mjs ----------
+await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql: psqlDsn ? sql : null, errors, notesCreatedAt });
 
 await browser.close();
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);
