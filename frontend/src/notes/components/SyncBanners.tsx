@@ -6,6 +6,8 @@
  */
 import { WarningIcon } from '../../components/Icons';
 import { overwriteServerNotesPrefs, type PrefsSyncStatus } from '../model/notesPrefsSync';
+import { useOutboxPending } from '../model/notesOutbox';
+import '../sync.css';
 
 export function PrefsSyncBanner({ status }: { status: PrefsSyncStatus }) {
     switch (status) {
@@ -31,4 +33,26 @@ export function PrefsSyncBanner({ status }: { status: PrefsSyncStatus }) {
         default:
             return null;
     }
+}
+
+/** Edits made offline that have not reached the server yet. */
+export function OutboxBanner() {
+    const pending = useOutboxPending();
+    if (pending === 0) return null;
+    return (
+        <div className="notes-status offline" role="status" data-sync="pending">
+            <WarningIcon /> {pending} change{pending === 1 ? '' : 's'} not synced yet — kept on this device and sent when the connection is back.
+        </div>
+    );
+}
+
+/** The session ran out while the device was offline: Notes keeps showing
+ *  what this device last saw instead of throwing the user out to a sign-in
+ *  screen that cannot work without a connection. */
+export function ExpiredOfflineBanner() {
+    return (
+        <div className="notes-status error" role="status" data-sync="expired-offline">
+            <WarningIcon /> Your session has expired. You’re offline, so this is what this device last saw — sign in again when you’re back online to sync.
+        </div>
+    );
 }

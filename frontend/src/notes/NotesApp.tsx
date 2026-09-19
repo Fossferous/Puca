@@ -18,6 +18,9 @@ import { NotesLogin } from './components/NotesLogin';
 import { NotesShell } from './components/NotesShell';
 import { invalidateNotesPrefs } from './model/notesPrefs';
 import { notesKeys } from './model/notesQueries';
+import { pendingOutboxCount } from './model/notesOutbox';
+import { deleteNotesCaches, notesCacheDbName } from '../api/notesCacheScrub';
+import { currentUserIdFromToken } from '../api/auth';
 
 export function NotesApp() {
     return (
@@ -31,6 +34,10 @@ function SessionGate() {
     const navigate = useNavigate();
     const qc = useQueryClient();
     const [signedIn, setSignedIn] = useState(isAuthenticated());
+    // The token ran out while OFFLINE: signing in is impossible right now, so
+    // keep the cached notes on screen (and queue edits) instead of a sign-in
+    // screen that cannot work; the real expiry runs once the network is back.
+    const [expiredOffline, setExpiredOffline] = useState(false);
 
     /** Land on the login screen without touching the keys (App.tsx's rule:
      *  a re-authentication must never risk the E2EE identity). */
@@ -52,10 +59,19 @@ function SessionGate() {
     // A token we can SEE has expired will never work; go straight to sign-in.
     useEffect(() => {
         const t = getToken();
-        if (signedIn && t && isTokenExpired(t)) expire(true);
+        if (signedIn && t && isTokenExpired(t)) {
+            if (navigator.onLine === false) setExpiredOffline(true);
+            else expire(true);
+        }
         // Mount-time check only.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+    useEffect(() => {
+        if (!expiredOffline) return;
+        const back = () => { setExpiredOffline(false); expire(true); };
+        window.addEventListener('online', back);
+        return () => window.removeEventListener('online', back);
+    }, [expiredOffline, expire]);
 
     // The Púca tab (or another Notes tab) signed out, soft-expired, switched
     // accounts, or signed in. Shared caches are cleared inside sessionSync.
@@ -105,6 +121,8 @@ function SessionGate() {
     }), [navigate, qc]);
 
     const signOut = useCallback(() => {
+        const unsynced = pendingOutboxCount();
+        if (unsynced > 0 && !window.confirm(`${unsynced} change${unsynced === 1 ? '' : 's'} made offline ${unsynced === 1 ? 'has' : 'have'} not synced yet and will be lost if you sign out now. Sign out anyway?`)) return;
         // logout() clears the token, the seed, the DM/channel/blob caches and
         // scrubs the per-account device-local stores (Notes' included). It
         // also revokes this browser's DEVICE enrolment: the id is derived from
@@ -121,6 +139,11 @@ function SessionGate() {
 
     const onLoginSuccess = useCallback(() => {
         resetAuthExpiredFlag();   // a later expiry must signal again
+        // Another account's on-device copy (sealed under a seed this browser
+        // no longer holds) is dead weight: drop it. This account's is kept,
+        // with any edits it queued while signed out.
+        const sub = currentUserIdFromToken();
+        deleteNotesCaches(sub === null ? undefined : notesCacheDbName(sub));
         invalidateNotesPrefs();    // the account may differ from the last one
         setSignedIn(true);
         navigate('/', { replace: true });
@@ -134,7 +157,7 @@ function SessionGate() {
             />
             <Route
                 path="/*"
-                element={signedIn ? <NotesShell onSignOut={signOut} /> : <Navigate to="/login" replace />}
+                element={signedIn ? <NotesShell onSignOut={signOut} expiredOffline={expiredOffline} /> : <Navigate to="/login" replace />}
             />
         </Routes>
     );

@@ -386,6 +386,7 @@ import { thisDeviceId, clearThisDeviceId } from './thisDevice';
 import { peekWebDevicePublic, WEB_KEY_STORAGE } from './deviceIdentity/deviceKey';
 import { deriveDeviceId } from './deviceIdentity/identity';
 import { API_BASE_URL } from './config';
+import { deleteNotesCaches } from './notesCacheScrub';
 
 // ============ Public API ============
 
@@ -1229,6 +1230,10 @@ export function logout(): void {
             }
         }
     } catch { /* private mode */ }
+    // Púca Notes' on-device cache and offline edit queue (IndexedDB, sealed
+    // under a seed-derived key): gone with the account's sign-out, from
+    // either page.
+    deleteNotesCaches();
     resetIceConfigCache(); // Don't reuse this user's TURN credentials post-logout
     clearBlobCache(); // Revoke decrypted-attachment object URLs (shared-session hygiene)
     // Feature-owned teardown, reached through a registry rather than by

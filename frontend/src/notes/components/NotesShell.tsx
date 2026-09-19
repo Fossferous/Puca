@@ -39,7 +39,9 @@ import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
 import { useNotesPrefsSync } from '../model/notesPrefsSync';
 import { useTaskEvents } from '../model/taskEvents';
-import { PrefsSyncBanner } from './SyncBanners';
+import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
+import { useNotesOutbox } from '../model/notesOutbox';
+import { useNotesCachePersistence } from '../model/notesCache';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -82,9 +84,11 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
 
 interface NotesShellProps {
     onSignOut: () => void;
+    /** The token expired while offline: keep showing the cached notes. */
+    expiredOffline?: boolean;
 }
 
-export function NotesShell({ onSignOut }: NotesShellProps) {
+export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProps) {
     const location = useLocation();
     const navigate = useNavigate();
     const [params, setParams] = useSearchParams();
@@ -99,6 +103,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const local = useNotesPrefs();
     const prefsSync = useNotesPrefsSync();
     useTaskEvents();
+    useNotesCachePersistence();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
 
@@ -163,6 +168,11 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const closeNote = useCallback(() => {
         setParams(p => { p.delete('note'); return p; });
     }, [setParams]);
+    // A note created offline replayed: keep it open under its real id.
+    const noteMoved = useCallback((from: string, to: string) => {
+        setParams(p => { if (p.get('note') === from) p.set('note', to); return p; }, { replace: true });
+    }, [setParams]);
+    useNotesOutbox(noteMoved);
 
     // --- Reminders loop + notifications -------------------------------------------------
     useEffect(() => startTaskReminders(), []);
@@ -359,6 +369,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                             </div>
                         )}
                         <PrefsSyncBanner status={prefsSync} />
+                        {expiredOffline && <ExpiredOfflineBanner />}
+                        <OutboxBanner />
                         {error != null && !offline && (
                             <div className="notes-status error" role="alert">
                                 <WarningIcon /> Couldn’t load your notes: {error instanceof Error ? error.message : String(error)}

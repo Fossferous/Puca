@@ -22,6 +22,7 @@ import {
 } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
+import { useNoteUnsynced } from '../model/notesOutbox';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
@@ -66,6 +67,7 @@ function NoteCardImpl({
     card, actions, now, onOpen, onMenu, onPickColor, onPickLabels, onLabelClick, onArchive, compactTools, registerEl,
 }: NoteCardProps) {
     const elRef = useRef<HTMLElement | null>(null);
+    const unsynced = useNoteUnsynced(card.key);
     // No observer (an old WebView, jsdom) → decrypt right away rather than never.
     const [onScreen, setOnScreen] = useState(() => typeof IntersectionObserver === 'undefined');
 
@@ -202,6 +204,7 @@ function NoteCardImpl({
                 )}
                 {anyLocked && <span className="notes-chip" title="Some attachments can't be read yet (key unavailable)"><LockIcon /> locked</span>}
                 {card.archived && <span className="notes-chip archived"><ArchiveIcon /> archived</span>}
+                {unsynced && <span className="notes-chip unsynced" title="Changed while offline — sends when the connection is back">Not synced</span>}
                 {card.total > 0 && <span className="notes-chip progress" title="Completed / total">{card.completed}/{card.total}</span>}
                 {card.labels.map(l => (
                     <span

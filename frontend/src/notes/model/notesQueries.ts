@@ -25,13 +25,12 @@ import {
     type TaskAttachmentRef,
     type TaskList,
     type TaskTabPref,
-    listTaskLists, createTaskList, renameTaskList, deleteTaskList,
-    listListTasks, createListTask, updateListTask, updateListTaskAttachments,
-    listTasks, createTask, updateChannelTask, updateChannelTaskAttachments,
-    updateTask, deleteTask, moveTask, reorderTask,
-    getTaskTabPrefs, putTaskTabPrefs,
+    listTaskLists,
+    listListTasks, updateListTaskAttachments,
+    listTasks, updateChannelTaskAttachments,
+    getTaskTabPrefs,
     applyToggle, applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
-    buildPrefsForOrder, toggleFavoritePrefs,
+    buildPrefsForOrder, toggleFavoritePrefs, isFavoriteTab,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
 import { ApiError } from '../../api/client';
@@ -42,6 +41,8 @@ import {
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
 } from './notesModel';
 import { useTaskEventsLive } from './taskEvents';
+import { ops, sendCreateList, sendCreateTask, sendNoteOp, type PrefsIntent } from './notesOutbox';
+import { anythingQueued } from './noteBusy';
 import { getNotesPrefs, subscribeNotesPrefs, forgetNoteKeys, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
@@ -53,8 +54,10 @@ export function makeNotesQueryClient(): QueryClient {
                 staleTime: 30_000,
                 gcTime: 30 * 60_000,
                 retry: 1,
-                refetchOnWindowFocus: true,
-                refetchOnReconnect: true,
+                // Not while offline edits are queued: the server's copy lacks
+                // them, and the replay re-reads everything when it is done.
+                refetchOnWindowFocus: () => !anythingQueued(),
+                refetchOnReconnect: () => !anythingQueued(),
             },
         },
     });
@@ -199,7 +202,8 @@ export function useNoteTasks(ref: NoteRef | null, opts: { live?: boolean } = {})
     return useQuery({
         queryKey: ref ? notesKeys.tasks(ref) : ['notes', 'tasks', 'none'],
         queryFn: () => fetchTasksFor(ref!),
-        enabled: ref !== null,
+        // A note created offline (negative id) exists only here until it syncs.
+        enabled: ref !== null && ref.id > 0,
         refetchInterval: opts.live && ref?.kind === 'channel' && !streamLive ? SHARED_NOTE_POLL_MS : false,
     });
 }
@@ -225,6 +229,7 @@ export function useAllNoteTasks(sources: NoteSource[]): { byKey: Map<string, Tas
         queries: sources.map(s => ({
             queryKey: notesKeys.tasks(s.ref),
             queryFn: () => fetchTasksFor(s.ref),
+            enabled: s.ref.id > 0,
         })),
         combine: combineTaskResults,
     });
@@ -350,7 +355,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         restore(note, next);
         syncListCounts(note, next);
         try {
-            await updateTask(task.id, { is_completed: completed });
+            await sendNoteOp(ops.toggle(note, task, completed));
         } catch (err) {
             explain('toggle failed', err);
             restore(note, original);
@@ -362,8 +367,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const original = await snapshot(note);
         setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, description } : t)));
         try {
-            if (note.kind === 'channel') await updateChannelTask(note.id, task.id, { description }, task.created_by);
-            else await updateListTask(task.id, { description });
+            await sendNoteOp(ops.editTask(note, task, description));
         } catch (err) {
             explain('edit failed', err);
             restore(note, original);
@@ -372,9 +376,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const addTask = useCallback(async (note: NoteRef, description: string, parentId?: number): Promise<Task | null> => {
         try {
-            const created = note.kind === 'channel'
-                ? await createTask(note.id, description, parentId)
-                : await createListTask(note.id, description, parentId);
+            const created = await sendCreateTask(note, description, parentId, () => qc.getQueryData<Task[]>(notesKeys.tasks(note)) ?? []);
             const next = [...await snapshot(note), created];
             restore(note, next);
             syncListCounts(note, next);
@@ -383,7 +385,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             explain('add failed', err);
             return null;
         }
-    }, [snapshot, restore, syncListCounts]);
+    }, [qc, snapshot, restore, syncListCounts]);
 
     const deleteTaskFrom = useCallback(async (note: NoteRef, taskId: number) => {
         const original = await snapshot(note);
@@ -392,7 +394,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         restore(note, next);
         syncListCounts(note, next);
         try {
-            await deleteTask(taskId);
+            await sendNoteOp(ops.deleteTask(note, taskId, original.find(t => t.id === taskId)?.description ?? ''));
         } catch (err) {
             explain('delete failed', err);
             restore(note, original);
@@ -406,7 +408,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         if (next === original) return;
         restore(note, next);
         try {
-            await moveTask(task.id, direction);
+            await sendNoteOp(ops.move(note, task, direction));
         } catch (err) {
             explain('move failed', err);
             restore(note, original);
@@ -421,10 +423,10 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         if (next === original) return;
         restore(note, next);
         try {
-            await reorderTask(task.id, afterId, reparent);
+            const sent = await sendNoteOp(ops.reorder(note, task, afterId, reparent));
             // A reparent re-reads from truth on success (ChecklistBody's rule:
             // the one old-server frame that 200s is healed by this read).
-            if (reparent) restore(note, await fetchTasksFor(note));
+            if (reparent && !sent.queued) restore(note, await fetchTasksFor(note));
         } catch (err) {
             explain('reorder failed', err);
             restore(note, original);
@@ -435,8 +437,8 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const original = await snapshot(note);
         setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, due_at: dueAt } : t)));
         try {
-            await updateTask(task.id, { due_at: dueAt ?? '' });   // '' clears server-side
-            pokeTaskReminders();
+            const sent = await sendNoteOp(ops.setDue(note, task, dueAt));   // '' clears server-side
+            if (!sent.queued) pokeTaskReminders();
         } catch (err) {
             explain('due time failed', err);
             restore(note, original);
@@ -460,7 +462,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const cleanItems = cleanQuickItems(items);
         let list: TaskList;
         try {
-            list = await createTaskList(deriveQuickTitle(title, cleanItems));
+            list = await sendCreateList(deriveQuickTitle(title, cleanItems));
         } catch (err) {
             explain('create failed', err);
             return null;   // nothing landed: the caller keeps the draft
@@ -472,7 +474,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         // does not lose the note: the list exists, the rest is reported.
         for (const text of cleanItems) {
             try {
-                created.push(await createListTask(list.id, text));
+                created.push(await sendCreateTask(ref, text, undefined, () => created));
             } catch (err) {
                 explain('create item failed', err);
                 missing.push(text);
@@ -496,7 +498,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.map(l => (l.id === note.id ? { ...l, title } : l)));
         try {
-            await renameTaskList(note.id, title);
+            await sendNoteOp(ops.renameList(note.id, title));
             return true;
         } catch (err) {
             explain('rename failed', err);
@@ -510,7 +512,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.filter(l => l.id !== note.id));
         try {
-            await deleteTaskList(note.id);
+            await sendNoteOp(ops.deleteList(note.id, prev?.find(l => l.id === note.id)?.title ?? ''));
             qc.removeQueries({ queryKey: notesKeys.tasks(note) });
             forgetNoteKeys([noteKey(note)]);
             return true;
@@ -521,7 +523,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [qc]);
 
-    const savePrefs = useCallback((next: TaskTabPref[]) => {
+    const savePrefs = useCallback((next: TaskTabPref[], intent: PrefsIntent) => {
         // Never PUT a set built on prefs that were never read: it is a full
         // replace of the row Púca's Tasks tab bar renders from.
         if (!prefsReadyRef.current) {
@@ -531,7 +533,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         const before = prefsRef.current;
         const seq = ++prefSeq.current;
         qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, next);
-        putTaskTabPrefs(next).catch(err => {
+        sendNoteOp(ops.prefs(next, intent)).catch(err => {
             console.error('[notes] saving pins/order failed:', err);
             pushMessageToast({ title: 'Couldn’t save the pin or order — check your connection' });
             if (prefSeq.current === seq) qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, before);
@@ -541,13 +543,14 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const orderedTabs = useCallback(() => cardsRef.current.map(c => ({ kind: c.ref.kind, id: c.ref.id })), []);
 
     const togglePin = useCallback((note: NoteRef) => {
-        savePrefs(toggleFavoritePrefs(orderedTabs(), prefsRef.current, { kind: note.kind, id: note.id }));
+        const tab = { kind: note.kind, id: note.id };
+        savePrefs(toggleFavoritePrefs(orderedTabs(), prefsRef.current, tab), { type: 'pin', tab, favorite: !isFavoriteTab(prefsRef.current, tab) });
     }, [savePrefs, orderedTabs]);
 
     const reorderNotes = useCallback((orderedKeys: string[]) => {
         const byKey = new Map(cardsRef.current.map(c => [c.key, c]));
         const tabs = orderedKeys.map(k => byKey.get(k)).filter((c): c is NoteCard => !!c).map(c => ({ kind: c.ref.kind, id: c.ref.id }));
-        savePrefs(buildPrefsForOrder(tabs, prefsRef.current));
+        savePrefs(buildPrefsForOrder(tabs, prefsRef.current), { type: 'order', keys: orderedKeys });
     }, [savePrefs]);
 
     const setColor = useCallback((note: NoteRef, color: Parameters<typeof setNoteColor>[1]) => setNoteColor(noteKey(note), color), []);

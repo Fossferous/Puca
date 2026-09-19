@@ -1,0 +1,7 @@
+/* Púca Notes — sync state: the "Not synced" chip and the selection bar.
+   Imported by the components that use it (after notes.css and mobile.css in
+   the cascade), so every coarse-pointer rule here is written out explicitly
+   rather than relying on mobile.css's blanket rules. */
+
+.notes-chip.unsynced { color: var(--text-warning); border: 1px dashed currentColor; }
+[data-theme="light"] .notes-chip.unsynced { color: #8a5a00; }
