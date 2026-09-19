@@ -383,10 +383,13 @@ import { clearBlobCache } from './attachments';
 import { runLogoutCleanups } from './logoutHooks';
 import { isTauri, isMobile } from './platform';
 import { thisDeviceId, clearThisDeviceId } from './thisDevice';
-import { peekWebDevicePublic, WEB_KEY_STORAGE } from './deviceIdentity/deviceKey';
+import { peekWebDevicePublic } from './deviceIdentity/deviceKey';
+import {
+    clearPendingRevoke, forgetKeyForPendingRevoke, readPendingRevoke, sendDeviceRevoke, writePendingRevoke,
+} from './deviceIdentity/pendingRevoke';
 import { deriveDeviceId } from './deviceIdentity/identity';
 import { API_BASE_URL } from './config';
-import { deleteNotesCaches } from './notesCacheScrub';
+import { deleteNotesCaches, NOTES_UNSYNCED_PREFIX } from './notesCacheScrub';
 
 // ============ Public API ============
 
@@ -1095,7 +1098,7 @@ export function softExpireSession(): void {
 }
 
 /** The device revoke the last sign-out started, settled either way (never
- *  rejects). Púca Notes awaits it, bounded, before it leaves the page. */
+ *  rejects). Exported for tests and for a caller that wants to wait on it. */
 let lastDeviceRevoke: Promise<void> = Promise.resolve();
 export function pendingDeviceRevoke(): Promise<void> {
     return lastDeviceRevoke;
@@ -1103,34 +1106,33 @@ export function pendingDeviceRevoke(): Promise<void> {
 
 /**
  * DELETE this browser's device row with a token captured before logout()
- * drops it, and remove the web key ONLY on a 2xx. Raw fetch, not apiClient:
- * a refusal here must not raise the app-wide auth-expired signal in the middle
- * of a sign-out. `keepalive` so a tab closed straight after still sends it.
+ * drops it, and remove the web key ONLY on a 2xx. The intent is written down
+ * first (deviceIdentity/pendingRevoke.ts): if the answer never arrives — the
+ * tab closed, or the connection dropped after the server committed — the
+ * next sign-in on this browser finishes it instead of being refused as a
+ * revoked device for good.
  */
-export async function revokeWebDeviceAndScrubKey(devId: string, token: string): Promise<'revoked' | 'kept'> {
-    let keyAtStart: string | null = null;
-    try { keyAtStart = localStorage.getItem(WEB_KEY_STORAGE); } catch { /* private mode */ }
-    let ok = false;
-    try {
-        const res = await fetch(`${API_BASE_URL}/devices/${encodeURIComponent(devId)}`, {
-            method: 'DELETE',
-            headers: { Authorization: `Bearer ${token}` },
-            keepalive: true,
-        });
-        ok = res.ok;
-    } catch {
-        ok = false;   // offline: keep the key, the next sign-in re-attests as this device
-    }
-    if (!ok) return 'kept';
-    try {
+export async function revokeWebDeviceAndScrubKey(devId: string, token: string, uid: number | null = null): Promise<'revoked' | 'kept'> {
+    writePendingRevoke(devId, uid);
+    const outcome = await sendDeviceRevoke(devId, token);
+    const m = readPendingRevoke();
+    if (outcome === 'revoked') {
         // Only the key the revoked id was derived from — never one written
         // since (a fresh sign-in on this browser in the meantime).
-        if (keyAtStart !== null && localStorage.getItem(WEB_KEY_STORAGE) === keyAtStart) {
-            localStorage.removeItem(WEB_KEY_STORAGE);
-        }
-    } catch { /* private mode */ }
-    return 'revoked';
+        if (m && m.devId === devId) forgetKeyForPendingRevoke(m);
+        return 'revoked';
+    }
+    // 404: not this account's row (another account's enrolment on a shared
+    // browser) — nothing to finish later, and the key must stay. Anything
+    // else keeps the marker for the next sign-in.
+    if (outcome === 'not-found' && m && m.devId === devId) clearPendingRevoke();
+    return 'kept';
 }
+
+/** How long a sign-out waits for the device revoke before it revokes the
+ *  session anyway (the two are ordered, but a hung DELETE must not keep a
+ *  signed-out session alive). */
+export const SESSION_REVOKE_MAX_WAIT_MS = 1500;
 
 export function logout(): void {
     // Revoke this BROWSER's device row before the token goes, then forget the id.
@@ -1158,32 +1160,58 @@ export function logout(): void {
     // opens the socket, signs out this browser's enrolment the same way. The
     // key is scrubbed only once the server CONFIRMS the row is revoked (2xx).
     // A 404 keeps it (that key may be another account's enrolment on this
-    // shared browser, whose row must stay reachable), and so does a failure
-    // (offline: the next sign-in re-attests as the SAME device, no ghost).
+    // shared browser, whose row must stay reachable). Any other outcome —
+    // offline, the tab closed, the answer lost after the server committed —
+    // keeps the key AND a local marker, and the next sign-in on this browser
+    // finishes the revoke before it enrols (deviceIdentity/pendingRevoke.ts).
     const tokenAtLogout = getToken();
+    const uidAtLogout = currentUserIdFromToken();
     let deviceRevoke: Promise<unknown> = Promise.resolve();
     if (!isTauri() && !isMobile()) {
         const attested = thisDeviceId();
         const pub = attested ? null : peekWebDevicePublic();
         const devId = attested ?? (pub ? deriveDeviceId(pub.device_pub, pub.sign_pub) : null);
         if (devId && tokenAtLogout) {
-            deviceRevoke = revokeWebDeviceAndScrubKey(devId, tokenAtLogout);
+            deviceRevoke = revokeWebDeviceAndScrubKey(devId, tokenAtLogout, uidAtLogout);
         }
         clearThisDeviceId();
     }
     lastDeviceRevoke = deviceRevoke.then(() => undefined, () => undefined);
     // Revoke THIS session server-side (per-session: other devices stay signed
-    // in) — AFTER the device revoke, which needs this session to be alive to
-    // be authorised; sent concurrently, the two raced and a lost race left the
-    // device row behind. Best effort, with the token captured above.
+    // in) — AFTER the device revoke, which needs this session alive to be
+    // authorised; sent concurrently, the two raced. But never ONLY after it:
+    // a page that goes away (pagehide / hidden) or a revoke that has not
+    // answered within SESSION_REVOKE_MAX_WAIT_MS sends it anyway, or a
+    // signed-out session would stay valid (and renewable) for up to a day. A
+    // device revoke that loses that race is not lost: its marker is finished
+    // at the next sign-in (deviceIdentity/pendingRevoke.ts).
     if (tokenAtLogout) {
         const token = tokenAtLogout;
-        void lastDeviceRevoke.then(() => fetch(`${API_BASE_URL}/auth/logout-session`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: '{}',
-            keepalive: true,
-        })).catch(() => { /* best effort */ });
+        let sent = false;
+        const onHidden = () => { if (document.visibilityState === 'hidden') sendSessionRevoke(); };
+        const sendSessionRevoke = () => {
+            if (sent) return;
+            sent = true;
+            clearTimeout(timer);   // only ever called asynchronously, after `timer` is set below
+            try {
+                window.removeEventListener('pagehide', sendSessionRevoke);
+                document.removeEventListener('visibilitychange', onHidden);
+            } catch { /* no DOM */ }
+            try {
+                void fetch(`${API_BASE_URL}/auth/logout-session`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: '{}',
+                    keepalive: true,
+                }).catch(() => { /* best effort */ });
+            } catch { /* best effort */ }
+        };
+        try {
+            window.addEventListener('pagehide', sendSessionRevoke);
+            document.addEventListener('visibilitychange', onHidden);
+        } catch { /* no DOM */ }
+        const timer = setTimeout(sendSessionRevoke, SESSION_REVOKE_MAX_WAIT_MS);
+        void lastDeviceRevoke.then(sendSessionRevoke);
     }
     localStorage.removeItem('auth_token');
     // An explicit sign-out has to remove this, or it is not a sign-out. Login's
@@ -1225,7 +1253,7 @@ export function logout(): void {
     // Púca tab must scrub what the Notes tab wrote.
     try {
         for (const k of Object.keys(localStorage)) {
-            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign') || k.startsWith('pucaNotesPrefs')) {
+            if (k.startsWith('sovereignTaskPlaces') || k.startsWith('sovereignTaskPlaceAssign') || k.startsWith('pucaNotesPrefs') || k.startsWith(NOTES_UNSYNCED_PREFIX)) {
                 localStorage.removeItem(k);
             }
         }

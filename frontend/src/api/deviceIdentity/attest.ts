@@ -19,6 +19,9 @@ import { isMobile, isTauri } from '../platform';
 import { wsClient } from '../websocket';
 import { thisDeviceId, setThisDeviceId, clearThisDeviceId } from '../thisDevice';
 import { ensureDeviceKey, signWithDeviceKey } from './deviceKey';
+import {
+    clearPendingRevoke, forgetKeyForPendingRevoke, pendingRevokeMatches, readPendingRevoke, settlePendingDeviceRevoke,
+} from './pendingRevoke';
 import { attestationMessage, buildAuthRecord, signAuthRecord, type DevicePlatform } from './identity';
 
 /** Shape of a device row as the server returns it. */
@@ -121,9 +124,16 @@ export function isThisDeviceRevoked(): boolean {
  * than throwing, because it runs opportunistically at startup and a user who
  * has not completed E2EE setup is a normal state, not an error.
  */
-export async function enrolThisDevice(userId: number, name?: string): Promise<DeviceRow | null> {
+export async function enrolThisDevice(userId: number, name?: string, retried = false): Promise<DeviceRow | null> {
     const identity = getActiveIdentity();
     if (!identity) return null;
+
+    // A web sign-out whose revoke was never confirmed is finished FIRST
+    // (deviceIdentity/pendingRevoke.ts). Before enrolling, not after: the
+    // DELETE revokes every session that proved the old device, and this one
+    // proves it only once enrolled.
+    const web = !isTauri() && !isMobile();
+    if (web) await settlePendingDeviceRevoke(getToken(), userId);
 
     const keys = await ensureDeviceKey();
     const { canonical, deviceId } = buildAuthRecord({
@@ -165,6 +175,16 @@ export async function enrolThisDevice(userId: number, name?: string): Promise<De
         // itself: it must be cleared deliberately (device_key_forget) from that
         // machine. That is the correct direction for the failure to point.
         if (String((e as Error)?.message ?? '').includes('device_revoked')) {
+            // The ONE exception: this browser itself asked for exactly this
+            // revoke at a sign-out whose answer it never saw (the marker is
+            // written locally before the DELETE, never by the server). Then
+            // the refusal is the confirmation that went missing, so the key
+            // goes and this browser enrols as a new device, once.
+            const m = web ? readPendingRevoke() : null;
+            if (m && !retried && pendingRevokeMatches(m, deviceId, userId)) {
+                forgetKeyForPendingRevoke(m);
+                return enrolThisDevice(userId, name, true);
+            }
             clearThisDeviceId();
             thisDeviceRevoked = true;
             console.warn(
@@ -177,6 +197,13 @@ export async function enrolThisDevice(userId: number, name?: string): Promise<De
     }
     setThisDeviceId(deviceId);
     thisDeviceRevoked = false;
+    // Enrolled as a LIVE device with the key a pending revoke names: the
+    // user signed in again here before that revoke could land, and this
+    // enrolment supersedes it (sending it now would revoke THIS session).
+    if (web) {
+        const m = readPendingRevoke();
+        if (m && m.devId === deviceId) clearPendingRevoke();
+    }
     // Anything that should follow a successful enrolment (publishing the
     // account signing key for device shares, say) registers a hook rather
     // than being called from here, so optional features do not become part
