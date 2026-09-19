@@ -21,9 +21,21 @@ import { isMobile, isTauri } from './platform';
 import { saveAttachment } from './saveAttachment';
 import { chooseSavePath } from './savePath';
 
+/**
+ * EXACTLY the shape Púca Notes' plugin reads (NotesNativePlugin.java, and the
+ * native branch's notes/native/notesNative.ts wrappers): shareText takes
+ * {filename, mime, text, subject} — any other key is ignored by the Java,
+ * which then shares "notes.txt" as text/plain — and both methods RESOLVE
+ * {ok:false, reason} on failure rather than rejecting.
+ */
+export interface NotesShareArgs { filename: string; mime: string; text: string; subject?: string }
+export interface PhoneCalendarArgs { title: string; beginMs: number; endMs?: number; allDay?: boolean; location?: string }
+type NativeOutcome = { ok?: boolean; reason?: string } | null | undefined;
+
 interface NotesNativePlugin {
-    shareText?: (o: { text: string; title?: string; fileName?: string; mimeType?: string }) => Promise<unknown>;
-    addToPhoneCalendar?: (o: { title: string; beginMs: number; endMs?: number; allDay?: boolean; location?: string }) => Promise<unknown>;
+    info: () => Promise<{ api?: number; features?: string[] }>;
+    shareText: (o: NotesShareArgs) => Promise<NativeOutcome>;
+    addToPhoneCalendar: (o: PhoneCalendarArgs) => Promise<NativeOutcome>;
 }
 
 async function notesNative(): Promise<NotesNativePlugin | null> {
@@ -36,16 +48,57 @@ async function notesNative(): Promise<NotesNativePlugin | null> {
     }
 }
 
+/** What the installed APK says it can do. A Capacitor plugin proxy answers
+ *  `typeof x === 'function'` for ANY name, so that test detects nothing:
+ *  the plugin's own info().features is the only honest answer (an APK
+ *  without info() is older than both methods). */
+async function nativeFeatures(p: NotesNativePlugin): Promise<string[]> {
+    try {
+        const r = await p.info();
+        return Array.isArray(r?.features) ? r.features : [];
+    } catch {
+        return [];
+    }
+}
+
+/** A resolved {ok:false} is a failure with the plugin's reason. */
+function outcomeError(r: NativeOutcome, fallback: string): Error | null {
+    if (r && r.ok === true) return null;
+    return new Error(r && typeof r.reason === 'string' && r.reason ? r.reason : fallback);
+}
+
 /** Is "Add to phone calendar" available in this shell? */
 export async function canAddToPhoneCalendar(): Promise<boolean> {
     const p = await notesNative();
-    return !!p && typeof p.addToPhoneCalendar === 'function';
+    return !!p && (await nativeFeatures(p)).includes('calendar');
 }
 
-export async function addToPhoneCalendar(o: { title: string; beginMs: number; endMs?: number; allDay?: boolean; location?: string }): Promise<void> {
+/**
+ * The phone-calendar arguments for an entry. An ALL-DAY item is a floating
+ * date, and Android's calendar reads an all-day begin/end as UTC midnight:
+ * sending local midnight put it on the previous day anywhere east of UTC
+ * (Dublin in summer is UTC+1). So all-day sends Date.UTC of its first day
+ * and of the day after its last.
+ */
+export function phoneCalendarArgs(e: {
+    title: string; startMs: number; endMs: number; allDay: boolean; dayKeys: string[]; location?: string;
+}): PhoneCalendarArgs {
+    const base = { title: e.title, ...(e.location ? { location: e.location } : {}) };
+    if (e.allDay && e.dayKeys.length > 0) {
+        const utc = (key: string, plusDays = 0) => {
+            const [y, m, d] = key.split('-').map(Number);
+            return Date.UTC(y, m - 1, d + plusDays);
+        };
+        return { ...base, allDay: true, beginMs: utc(e.dayKeys[0]), endMs: utc(e.dayKeys[e.dayKeys.length - 1], 1) };
+    }
+    return { ...base, allDay: false, beginMs: e.startMs, ...(e.endMs > e.startMs ? { endMs: e.endMs } : {}) };
+}
+
+export async function addToPhoneCalendar(o: PhoneCalendarArgs): Promise<void> {
     const p = await notesNative();
-    if (!p || typeof p.addToPhoneCalendar !== 'function') throw new Error('This app cannot add to the phone calendar — update Púca Notes');
-    await p.addToPhoneCalendar(o);
+    if (!p) throw new Error('This app cannot add to the phone calendar — update Púca Notes');
+    const err = outcomeError(await p.addToPhoneCalendar(o), 'Could not open the phone calendar');
+    if (err) throw err;
 }
 
 export interface DeliverResult {
@@ -55,14 +108,21 @@ export interface DeliverResult {
 
 export async function deliverIcs(fileName: string, text: string): Promise<DeliverResult> {
     const native = await notesNative();
-    if (native && typeof native.shareText === 'function') {
+    if (native && (await nativeFeatures(native)).includes('share')) {
+        let r: NativeOutcome;
         try {
-            await native.shareText({ text, title: fileName, fileName, mimeType: 'text/calendar' });
-            return { how: 'shared' };
+            r = await native.shareText({ filename: fileName, mime: 'text/calendar', text, subject: fileName });
         } catch (err) {
-            // A plugin that exists but lacks the method rejects "not
-            // implemented": fall through to the other ways out.
+            // A bridge that rejects outright: fall through to the other ways out.
             console.warn('[ics] share failed, falling back:', err);
+            r = undefined;
+        }
+        if (r !== undefined) {
+            // It answered: {ok:false} is the plugin saying it could not —
+            // report that, never "Exported".
+            const err = outcomeError(r, 'Could not open the share sheet');
+            if (err) throw err;
+            return { how: 'shared' };
         }
     }
     if (isTauri()) {

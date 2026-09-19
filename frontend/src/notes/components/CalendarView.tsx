@@ -19,7 +19,7 @@ import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozeUntil } from '../../api/taskSchedule';
 import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
 import { currentIcsUid } from '../../api/icsUid';
-import { addToPhoneCalendar, canAddToPhoneCalendar, deliverIcs } from '../../api/icsDelivery';
+import { addToPhoneCalendar, canAddToPhoneCalendar, deliverIcs, phoneCalendarArgs } from '../../api/icsDelivery';
 import { canEditTask, createListTask, createTaskList } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { useTaskFeature } from '../../api/taskFeatures';
@@ -194,10 +194,8 @@ export function CalendarView({ cards, actions, now, coarse, onOpenNote, shortcut
                     if (!ok) return;
                     setCalendarPrefs({ phoneCalendarNoticeSeen: true });
                 }
-                void addToPhoneCalendar({
-                    title: e.source.task.description, beginMs: e.startMs, endMs: e.endMs > e.startMs ? e.endMs : undefined,
-                    allDay: e.allDay, location: e.location,
-                }).catch(err => pushMessageToast({ title: err instanceof Error ? err.message : 'Could not open the phone calendar' }));
+                void addToPhoneCalendar(phoneCalendarArgs({ ...e, title: e.source.task.description }))
+                    .catch(err => pushMessageToast({ title: err instanceof Error ? err.message : 'Could not open the phone calendar' }));
             },
         }];
     };
