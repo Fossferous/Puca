@@ -57,7 +57,7 @@ export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
                 <kbd>k</kbd><span>Previous (also <kbd>p</kbd>)</span>
                 <kbd>m</kbd><span>Month · <kbd>w</kbd> week · <kbd>d</kbd> day · <kbd>a</kbd> agenda</span>
                 <kbd>c</kbd><span>Add on the selected day (instead of a new note)</span>
-                <kbd>←</kbd><span>Arrows, Home/End, PageUp/PageDown move around the month; Enter picks the day</span>
+                <kbd>Arrows</kbd><span>Home/End and PageUp/PageDown too: move around the month; Enter picks the day</span>
                 <kbd>[</kbd><span>On a focused item: move it a day earlier (<kbd>]</kbd> later)</span>
             </div>
             <p className="notes-labels-hint">

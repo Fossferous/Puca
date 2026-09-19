@@ -30,6 +30,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   Upcoming; tick it done from there. Notes runs Púca's reminder loop, so a due
   item notifies while Notes is the app you have open (allow notifications from
   the Reminders view).
+- **Calendar, repeats, snooze, Edited** — a Calendar in the rail, dates and
+  repeat rules on items, snoozing reminders, and an Edited time on every note
+  (see *Calendar, repeats and snooze* below).
 - **Colour, labels, archive** — Notes' own organisation (see *What stays on the
   device* below).
 - **Undo** — archive and delete show an Undo snackbar; a delete reaches the
@@ -52,6 +55,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Items, nesting, completed, due times, attachments | The tasks (`channel_tasks`), through `frontend/src/api/tasks.ts` |
 | Pin | `task_tab_prefs.is_favorite` — the same favourite as the Tasks tab bar |
 | Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
+| An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
+| Edited | `updated_at` on the list and its items (066) |
 | Reminders | `due_at` + `frontend/src/api/taskReminders.ts` |
 | Colour, labels, archive, grid/list, sort | Device-local (below) |
 
@@ -163,8 +168,82 @@ ship refuses until it is), and asserted by `check-versions.sh`.
   Notes gives a six-second Undo instead.
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
-- **Photo/drawing notes, recurring or snoozable reminders, bulk selection,
-  edited-at.** No source in the task API yet.
+- **Photo/drawing notes, bulk selection.** No source in the task API yet.
+  (Repeating and snoozable reminders and Edited are built — next section.)
+
+## Calendar, repeats and snooze
+
+Migration 066 gives every item two optional sealed fields and an edit time.
+The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
+§2 says what it can see). Nothing here appears until the server answers
+`GET /task-features`. On an older server every screen behaves as it did before.
+
+- **Schedule** (`frontend/src/api/taskSchedule.ts`, EventSchedule v1). An item
+  is an **event** (it happens: never "overdue", and ticking it is not the
+  point) or a **to-do** with a date. Either can be all-day or timed (with its
+  time zone), have an end, a place, up to five alerts, skipped dates, and a
+  repeat rule from a tested subset of RFC 5545 RRULE
+  (`frontend/src/api/recurrence.ts`: daily, weekly on days, monthly on a date or
+  "the 2nd Tuesday", yearly; every N; until or N times). The parser is strict,
+  keeps keys a newer build added, and goes **read-only** ("update the app to
+  edit this") on a newer version or an unreadable value. It never rewrites
+  either. Time zones follow RFC 5545: a local time the clocks skip takes the
+  offset from before the change. Every view shows times in the **viewer's** zone. The
+  editor shows the event's own zone.
+- **due_at is the next reminder.** For an item with a schedule, `due_at` is
+  derived on the device: by an editor when it saves the schedule, and moved on
+  by the reminder loop only after an alert has fired and 15 minutes have
+  passed, with `expect_due_at` so that two devices cannot both move it. Opening
+  a note never moves it. **Keep the time private from the server** (per item,
+  off by default) keeps `due_at` empty. The item still shows in the calendar
+  but gets no reminders from the feed. An item with a schedule never shows the
+  raw due editor or a "Due" chip: its date chip says when it is.
+- **Ticking a repeating to-do** moves it to its next occurrence and reopens its
+  subtasks. It does not end the series. Every view ticks through one path
+  (`frontend/src/api/taskCompletion.ts`). The server refuses (409 "update the
+  app") when an older app tries to complete an item, or a parent of one, that
+  carries a schedule. Otherwise that app would end a repeating series without
+  knowing it was one.
+- **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from Reminders and from
+  the calendar. The snooze is sealed and applies only to the `due_at` it was
+  made for, so it lapses by itself when the item moves. Every reminder engine
+  reads the same entries, `{id, at, mark}`
+  (`frontend/src/api/reminderFeed.ts`): `at` is the snooze time while one is in
+  force. `mark` changes whenever the item must fire again.
+- **Calendar**: in the rail at `/calendar`, the view and day in the URL (never
+  a title). **Month**: on a phone it shows dots and the chosen day's list.
+  **Week** and **Day** are time grids off the phone. One gate,
+  `components/calendar/calendarGate.ts`, is shared with the CSS. **Agenda**
+  lists what is coming. Drag an item to another day, or use *Move to date…*
+  (tap), or `[` / `]` (keyboard). Tap a day to add: the item and its timing go
+  in one request. *Skip this time* skips one occurrence. *Show completed* and
+  *Show plain reminders* are switches. Shared notes on the calendar refresh
+  every 30 seconds. Púca's Tasks view pins the same component as a
+  **Calendar** tab.
+- **Reminders** lists events by their next occurrence and never calls them
+  overdue, so a calendar of past appointments does not flood Overdue or the
+  badge. The server's `/task-reminders` returns recent past items and upcoming
+  ones separately, so old items cannot push future ones out.
+- **.ics**: export writes RFC 5545 (VERSION, PRODID, DTSTAMP, CRLF, folding,
+  VTIMEZONE). Its UIDs are deterministic: the schedule's own uid, or an HMAC of
+  the task id under a key derived from your identity key. Exporting twice
+  therefore updates the same events rather than duplicating them. The file is
+  plaintext, and the app says so first. It goes out through the share sheet in
+  Púca Notes on Android (when the installed app has `NotesNative.shareText`),
+  through the Save As dialog on the desktop, or as a download in a browser.
+  **Import** is into personal notes only. It shows a preview that lists
+  everything it cannot represent. It skips events whose UID is already there,
+  and paces itself under the rate limiter, retrying after a 429 and able to
+  resume. It starts a new note before one reaches the 2000-item cap. **Add to
+  phone calendar** (Púca Notes on Android, when the app has
+  `NotesNative.addToPhoneCalendar`) hands one event to the phone's calendar app,
+  after a one-time notice that the phone may sync it.
+- **Edited**: `updated_at` changes when an item's content changes. A reorder,
+  a snooze or the reminder loop moving a derived `due_at` does not count. A
+  personal note's time is the newest of its list and its items. A shared note
+  has no list row, so its time is the newest item's, and a deleted item there
+  leaves no trace. The editor shows it beside Created, and the sort menu has
+  *Recently edited*.
 
 ## Verifying
 

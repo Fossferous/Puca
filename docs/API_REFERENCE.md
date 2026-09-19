@@ -220,6 +220,23 @@ boundary rules added in 0.9.5.
 
 ---
 
+## Task timing (calendar, repeats, snooze)
+
+Migration 066. `schedule` and `snooze` are client-sealed envelopes (never
+plaintext — a non-envelope value is 400) with the same three-state contract as
+`attachments`: absent = keep, `""` = clear, value = set. Every task response
+carries `schedule`, `snooze` and `updated_at` keys (null when unset). What the
+server can see of them is in `docs/SECURITY_MODEL.md` §2.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/task-features` | ✅ | `{"version":1,"features":["schedule","snooze","updated_at","expect_due_at","recurrence_aware","reopen_subtree","reminder_feed_v2"]}`. Static. A server older than 066 answers 404, which clients read as "none of these" — the probe works for a note with no tasks, where a `[]` list response carries no keys to detect. |
+| PATCH | `/tasks/:task_id` | ✅ | Adds `schedule` (creator or MANAGE_TASKS, like the description; sealed cap 16 KiB), `snooze` (COMPLETE_TASKS or MANAGE_TASKS, like ticking; cap 1 KiB), `expect_due_at` (compare-and-swap on `due_at`: `""` = expect NULL; a mismatch is 409 and nothing is written), `recurrence_aware` (default false: completing an item whose subtree carries any schedule is **409** without it, so an older client cannot silently end a repeating series) and `reopen_subtree` (reopens everything under the item). The envelope downgrade guard covers `schedule` and `snooze`. |
+| POST | `/task-lists/:list_id/tasks` | ✅ | Also accepts `schedule` (as does `POST /channels/:channel_id/tasks`), so an item and its timing land in one request. |
+| GET | `/task-reminders` | ✅ | Each row adds `created_by` and its sealed `schedule` and `snooze`. The 100 most recent past-due rows and the 400 soonest upcoming ones are selected separately, so a pile of never-ticked past items cannot push every future reminder out of the feed. |
+
+---
+
 ## WebSocket
 
 **URL:** `ws://localhost:3000/ws`, authenticated with the WebSocket

@@ -100,6 +100,51 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   older than 0.9.0 must update), so nothing new can land in a log this way.
   Existing log files, of course, still contain what they already captured.
 
+### Tasks, Púca Notes and the calendar: what the server sees of the timing
+
+Item text, attachments, and (since migration 066) each item's **schedule**
+(event or to-do, all-day, start/end, time zone, repeat rule, skipped dates,
+place, alerts) and **snooze time** are sealed on the device. The server stores
+them and cannot read them. What it CAN see, per task:
+
+- **`due_at`, in plaintext.** For a plain dated item that is its due time, as it
+  always was. For an item with a schedule it is the **next reminder instant**,
+  so reminders reach your other devices. A calendar full of events is therefore
+  a server-visible list of timestamps — and a round local time such as 09:00
+  also reveals your UTC offset. The per-item switch **Keep the time private from
+  the server** (off by default) keeps `due_at` NULL. The item then shows in the
+  calendar but cannot notify from the server's reminder feed.
+- **That a schedule exists, and its size bucket.** The client pads the sealed
+  plaintext to 256, 1024, 4096 or 8192 bytes, so the server learns roughly how
+  large it is (for example, many skipped dates or a long place name), not what is in it.
+  Whether a schedule repeats is not visible, and neither is its zone.
+- **That a snooze exists** (it is padded to one fixed size), and **when** it was
+  set, because the write is a PATCH at that moment.
+- **`updated_at`** on every task and personal list: when its content last
+  changed (a reorder, a snooze or a reminder advancing does not count). The
+  server already saw these writes arrive. Now it also stores the time.
+- **The timing pattern of writes.** A repeating event's `due_at` is advanced by
+  a PATCH shortly after each alert fires (15 minutes after, with a
+  compare-and-swap), and ticking a repeating to-do moves its `due_at` forward
+  rather than completing it. An observer of writes can tell those items recur
+  even though the rule is sealed.
+
+**Swaps the server could make.** A checklist item's schedule and snooze bind the
+channel, epoch and creator into their tag (`chan-taskevt`, `chan-tasksnz`,
+`docs/E2EE.md`) but not the task id. For personal lists, both are self
+envelopes with no bound context. So a malicious server could move one item's
+schedule onto another item of the same owner, or replay an older one. It still
+cannot read or forge one. A plaintext value in either column is never opened as
+one: the client treats it as unreadable.
+
+**Leaving the encrypted boundary on purpose.** An **.ics export** is a
+plaintext file (titles, times, places), and the app says so before writing
+it. Its event UIDs are an HMAC of the task id under a key derived from your
+identity key, so they name neither the server, the user nor the task. **Add to
+phone calendar** (Púca Notes on Android) hands one event's title, time and
+place to the phone's calendar app, which may sync it to its own provider. The
+app says this once, before the first use.
+
 ### Can do
 
 **Mint a valid session token for any user, at any time.** The JWT is a symmetric HMAC; the
