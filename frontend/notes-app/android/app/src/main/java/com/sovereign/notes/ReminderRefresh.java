@@ -34,6 +34,8 @@ final class ReminderRefresh {
     static final int NO_SESSION = 3;
 
     private static final int MAX_BODY = 2 * 1024 * 1024;
+    /** Logs say what happened, never a token, a URL or any reminder data. */
+    private static final String TAG = "NotesReminders";
 
     private ReminderRefresh() {}
 
@@ -64,7 +66,10 @@ final class ReminderRefresh {
             renewed = c.getHeaderField("x-renewed-token");
             if (status == 200) body = readCapped(c.getInputStream());
         } catch (Exception e) {
-            return FAILED; // offline, DNS, TLS, timeout — try again next period
+            // offline, DNS, TLS, timeout — try again next period. The class
+            // name only: a message can carry the URL, never anything else.
+            android.util.Log.i(TAG, "refresh: no response (" + e.getClass().getSimpleName() + ")");
+            return FAILED;
         } finally {
             if (c != null) c.disconnect();
         }
@@ -73,18 +78,23 @@ final class ReminderRefresh {
             authDead(ctx, token);
             return AUTH_DEAD;
         }
-        if (status != 200 || body == null) return FAILED;
+        if (status != 200 || body == null) {
+            android.util.Log.i(TAG, "refresh: HTTP " + status);
+            return FAILED;
+        }
 
         List<ReminderMerge.FeedRow> rows;
         try {
             rows = ReminderMerge.parseFeed(body);
         } catch (Exception e) {
+            android.util.Log.i(TAG, "refresh: the body was not a reminder feed");
             return FAILED; // not a feed: never read as "nothing is due"
         }
         synchronized (ReminderStore.LOCK) {
             // The session may have moved while the request was out (sign-out,
             // account switch). Only fold into the store it was made for.
             if (!account.equals(ReminderStore.account(ctx)) || ReminderStore.token(ctx) == null) {
+                android.util.Log.i(TAG, "refresh: the session changed while the request was out");
                 return FAILED;
             }
             if (renewed != null && !renewed.isEmpty()) {

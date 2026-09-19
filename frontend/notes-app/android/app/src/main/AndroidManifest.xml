@@ -97,6 +97,10 @@
          is asked from a banner, never on its own. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- The refresh job's "any network" constraint: JobScheduler refuses to
+         schedule a job with a connectivity constraint without it (found on
+         the emulator — a SecurityException, not a lint warning). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission
         android:name="android.permission.SCHEDULE_EXACT_ALARM"
         android:maxSdkVersion="32" />
