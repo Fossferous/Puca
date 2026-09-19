@@ -82,6 +82,8 @@ type OpBody =
     | { k: 'restoreList'; listId: number }
     | { k: 'createTask'; note: NoteRef; tempId: number; description: string; parentId?: number; timing?: NewTaskTiming }
     | { k: 'editTask'; note: NoteRef; taskId: number; description: string; createdBy: number }
+    // A due time (setDue). Ticks are `timing` ops: a plain is_completed
+    // update is refused for a scheduled item by migration 066's guard.
     | { k: 'updateTask'; note: NoteRef; taskId: number; updates: { is_completed?: boolean; due_at?: string } }
     // A tick, a date & repeat, or a snooze (api/tasks.ts patchTaskTiming):
     // sealed for the server when it RUNS, like every other op, and always
@@ -123,8 +125,6 @@ export const ops = {
         withMeta({ k: 'createTask', note, tempId, description, parentId, ...(timing ? { timing } : {}) }, `new item ${q(description)}`),
     editTask: (note: NoteRef, task: Task, description: string) =>
         withMeta({ k: 'editTask', note, taskId: task.id, description, createdBy: task.created_by }, `edit ${q(description)}`),
-    toggle: (note: NoteRef, task: Task, completed: boolean) =>
-        withMeta({ k: 'updateTask', note, taskId: task.id, updates: { is_completed: completed } }, `${completed ? 'tick' : 'untick'} ${q(task.description)}`),
     setDue: (note: NoteRef, task: Task, dueAt: string | null) =>
         withMeta({ k: 'updateTask', note, taskId: task.id, updates: { due_at: dueAt ?? '' } }, `due time on ${q(task.description)}`),
     move: (note: NoteRef, task: Task, direction: 'up' | 'down') =>
