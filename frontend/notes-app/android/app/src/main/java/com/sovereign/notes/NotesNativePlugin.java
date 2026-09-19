@@ -404,8 +404,10 @@ public class NotesNativePlugin extends Plugin {
     @PluginMethod
     public void addToPhoneCalendar(PluginCall call) {
         String title = call.getString("title", "");
-        Double begin = call.getDouble("beginMs");
-        Double end = call.getDouble("endMs");
+        // Not call.getDouble: an epoch-ms number arrives as a Long, which
+        // getDouble answers null for (PluginArgs).
+        Long begin = PluginArgs.millis(call.getData().opt("beginMs"));
+        Long end = PluginArgs.millis(call.getData().opt("endMs"));
         boolean allDay = Boolean.TRUE.equals(call.getBoolean("allDay", false));
         String location = call.getString("location");
         JSObject ret = new JSObject();
