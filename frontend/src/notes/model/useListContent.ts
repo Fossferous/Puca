@@ -16,9 +16,11 @@
  *    saves go through `keepHiddenSlots` with the trashed keys, and wait until
  *    the trash has been read (`trashSettled`).
  *
- * Delete and its Undo (move to the trash, restore) are notesQueries.ts's
- * deleteNote/restoreNote, through the offline outbox; `trash`/`restore` here
- * are the direct calls the Trash view's own buttons use.
+ * Delete, its Undo and the Trash view's Restore are notesQueries.ts's
+ * deleteNote/restoreNote, through the offline outbox, so a restore can never
+ * overtake a trash still queued. What stays here is what only the Trash view
+ * does, as direct calls: `deleteForever` and `emptyTrash` (the view disables
+ * them for a note whose move to the trash is still queued).
  */
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
@@ -40,7 +42,6 @@ import {
     fetchListFeatures,
     listTrashedTaskLists,
     listsDueForClientPurge,
-    restoreTaskList,
     serverNowFrom,
     setTaskListAttachments,
     setTaskListBody,
@@ -48,7 +49,6 @@ import {
 import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
-import { pokeTaskReminders } from '../../api/taskReminders';
 import { type NoteRef, cleanQuickItems } from './notesModel';
 import { deriveContentTitle } from './noteContent';
 
@@ -121,11 +121,10 @@ export interface ListContentActions {
     setBody: (listId: number, body: string) => Promise<boolean>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
-    /** The Trash view's own Restore (a direct call: the Undo of a delete is
-     *  notesQueries.ts restoreNote, through the offline outbox). */
-    restore: (listId: number) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
-    emptyTrash: () => Promise<void>;
+    /** Every trashed note but `keep` (whose move to the trash is still
+     *  queued: deleting it now would run before that move). */
+    emptyTrash: (keep?: ReadonlySet<number>) => Promise<void>;
 }
 
 export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: NoteRef) => QueryKey }): ListContentActions {
@@ -249,9 +248,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         return ok;
     }, [lists, setNoteAttachments]);
 
-    // Restore moves the note between the two caches in ONE step, before the
-    // request: a moment where it is in neither is a moment the prune could
-    // read as "deleted" (see the header).
     const ensureFeatures = useCallback(async (): Promise<ListFeatures | null> => {
         try {
             return await qc.fetchQuery({ queryKey: listContentKeys.features, queryFn: fetchListFeatures, staleTime: 10 * 60_000 });
@@ -259,28 +255,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             return null;
         }
     }, [qc]);
-
-    const restore = useCallback(async (listId: number): Promise<boolean> => {
-        await qc.cancelQueries({ queryKey: keysRef.current.lists });
-        await qc.cancelQueries({ queryKey: listContentKeys.trash });
-        const trashBefore = qc.getQueryData<TaskList[]>(listContentKeys.trash);
-        const listsBefore = lists();
-        const list = trashBefore?.find(l => l.id === listId);
-        if (list) qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => (prev?.some(l => l.id === listId) ? prev : [...(prev ?? []), { ...list, trashed_at: null }]));
-        qc.setQueryData<TaskList[]>(listContentKeys.trash, prev => prev?.filter(l => l.id !== listId));
-        try {
-            await restoreTaskList(listId);
-            void qc.invalidateQueries({ queryKey: keysRef.current.lists });
-            void qc.invalidateQueries({ queryKey: listContentKeys.trash });
-            pokeTaskReminders();
-            return true;
-        } catch (err) {
-            if (!explain('restoring failed', err)) pushMessageToast({ title: 'Couldn’t restore the note — check your connection' });
-            qc.setQueryData(listContentKeys.trash, trashBefore);
-            qc.setQueryData(keysRef.current.lists, listsBefore);
-            return false;
-        }
-    }, [qc, lists]);
 
     /** Delete one trashed list for good; the error, when there is one, is
      *  the caller's to report. */
@@ -304,8 +278,8 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         return !err;
     }, [deleteOne]);
 
-    const emptyTrash = useCallback(async () => {
-        const all = qc.getQueryData<TaskList[]>(listContentKeys.trash) ?? [];
+    const emptyTrash = useCallback(async (keep?: ReadonlySet<number>) => {
+        const all = (qc.getQueryData<TaskList[]>(listContentKeys.trash) ?? []).filter(l => !keep?.has(l.id));
         let first: unknown = null;
         for (const l of all) {
             // One note that cannot go must not keep the rest: try every one,
@@ -346,6 +320,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const trashEnabled = known && features.trash;
     return useMemo(() => ({
         features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures,
-        createContentNote, setBody, setNoteAttachments, addNoteMedia, restore, deleteForever, emptyTrash,
-    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, restore, deleteForever, emptyTrash]);
+        createContentNote, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash,
+    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
 }

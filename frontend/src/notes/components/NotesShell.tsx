@@ -49,7 +49,7 @@ import { NativeReminderBanners } from '../native/NativeReminderBanners';
 import { flushNotesPrefs, prefsUnsynced, useNotesPrefsSync, useNotesUnsyncedFlag } from '../model/notesPrefsSync';
 import { useTaskEvents } from '../model/taskEvents';
 import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
-import { useNotesOutbox, useOutboxPending } from '../model/notesOutbox';
+import { useNotesOutbox, useOutboxPending, useQueuedListDeletes } from '../model/notesOutbox';
 import { useNotesCachePersistence } from '../model/notesCache';
 import { isGridPath, useBulkPending, useNoteSelection } from './useNoteSelection';
 
@@ -117,6 +117,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     // What a sign-out would lose, published for PÚCA's sign-out to ask about
     // too (api/notesCacheScrub.ts): a sign-out in either tab deletes it.
     useNotesUnsyncedFlag(useOutboxPending());
+    const queuedDeletes = useQueuedListDeletes();
     useTaskEvents();
     useNotesCachePersistence();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
@@ -429,7 +430,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                             </div>
                         )}
                         {trashView ? (
-                            <TrashView content={actions.content} />
+                            <TrashView content={actions.content} restoreNote={actions.restoreNote} queuedDeletes={queuedDeletes} />
                         ) : remindersView ? (
                             <RemindersView
                                 groups={reminders}
