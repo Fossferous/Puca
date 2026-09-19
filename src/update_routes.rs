@@ -38,6 +38,13 @@
 //! phone from being served the full remote-control bundle was for it to
 //! receive NO updates at all (see frontend's bundleVariantMatches, which
 //! still fails closed if this ever regresses to serving one file for both).
+//!
+//! `?variant=notes` serves a THIRD manifest, for Púca Notes' Android app
+//! (`com.sovereign.notes`) — a different app, not a variant, whose bundles are
+//! signed with a different key. An old server answers `?variant=notes` with
+//! the full manifest; the Notes client refuses anything not tagged
+//! `"variant": "notes"` (frontend `otaChannelMatches`), so that skew leaves
+//! Notes un-updated, never running Púca's bundle.
 
 use axum::{
     extract::Query, http::StatusCode, response::IntoResponse, routing::get, Router,
@@ -55,16 +62,17 @@ fn version_file_path() -> String {
 /// `variant` is read from the query string, not trusted otherwise — it
 /// selects between two ENV-VAR-CONFIGURED filenames, never becomes part of a
 /// path itself, so there is nothing here for a caller to path-traverse with.
-/// Anything other than exactly "lite" (including absent, empty, "full", or a
-/// typo) resolves to the full manifest — fail toward the artifact that has
-/// always been safe to serve broadly, not toward one that was just carved out
-/// for a narrower audience.
+/// Anything other than exactly "lite" or exactly "notes" (including absent,
+/// empty, "full", or a typo) resolves to the full manifest — fail toward the
+/// artifact that has always been safe to serve broadly, not toward one that
+/// was just carved out for a narrower audience.
 fn mobile_update_file_path(variant: Option<&str>) -> String {
-    if variant == Some("lite") {
-        std::env::var("MOBILE_UPDATE_FILE_LITE")
-            .unwrap_or_else(|_| "mobile-update-lite.json".to_string())
-    } else {
-        std::env::var("MOBILE_UPDATE_FILE").unwrap_or_else(|_| "mobile-update.json".to_string())
+    match variant {
+        Some("lite") => std::env::var("MOBILE_UPDATE_FILE_LITE")
+            .unwrap_or_else(|_| "mobile-update-lite.json".to_string()),
+        Some("notes") => std::env::var("MOBILE_UPDATE_FILE_NOTES")
+            .unwrap_or_else(|_| "mobile-update-notes.json".to_string()),
+        _ => std::env::var("MOBILE_UPDATE_FILE").unwrap_or_else(|_| "mobile-update.json".to_string()),
     }
 }
 
@@ -90,7 +98,11 @@ async fn app_version() -> impl IntoResponse {
 
 async fn mobile_update_check(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
     let variant = params.get("variant").map(String::as_str);
-    let label = if variant == Some("lite") { "mobile-update (lite)" } else { "mobile-update" };
+    let label = match variant {
+        Some("lite") => "mobile-update (lite)",
+        Some("notes") => "mobile-update (notes)",
+        _ => "mobile-update",
+    };
     serve_json_file(mobile_update_file_path(variant), label).await
 }
 
@@ -110,7 +122,7 @@ where
 mod tests {
     use super::mobile_update_file_path;
 
-    // Deliberately does NOT set MOBILE_UPDATE_FILE/MOBILE_UPDATE_FILE_LITE:
+    // Deliberately does NOT set MOBILE_UPDATE_FILE{,_LITE,_NOTES}:
     // std::env::set_var is process-wide and other tests in this binary run in
     // parallel, so mutating it here would be a race against them, not a proof
     // of anything. These pin the DEFAULTS every real deployment relies on
@@ -122,13 +134,30 @@ mod tests {
         assert_eq!(mobile_update_file_path(Some("lite")), "mobile-update-lite.json");
     }
 
+    /// Púca Notes' own manifest, asked for with exactly `?variant=notes`.
+    #[test]
+    fn notes_variant_gets_its_own_file() {
+        assert_eq!(mobile_update_file_path(Some("notes")), "mobile-update-notes.json");
+    }
+
     /// The safety property the whole endpoint exists for: anything that is
-    /// NOT exactly "lite" resolves to the manifest that has always been safe
-    /// to serve broadly. A query string typo, an absent parameter, or a
-    /// literal "full" must never accidentally select the narrower one.
+    /// NOT exactly "lite" or "notes" resolves to the manifest that has always
+    /// been safe to serve broadly. A query string typo, an absent parameter,
+    /// or a literal "full" must never accidentally select a narrower one.
     #[test]
     fn everything_else_fails_toward_full() {
-        for v in [None, Some(""), Some("full"), Some("Lite"), Some("lite "), Some("lite2")] {
+        for v in [
+            None,
+            Some(""),
+            Some("full"),
+            Some("Lite"),
+            Some("lite "),
+            Some("lite2"),
+            Some("Notes"),
+            Some("notes "),
+            Some("notes2"),
+            Some("puca-notes"),
+        ] {
             assert_eq!(mobile_update_file_path(v), "mobile-update.json", "variant={v:?}");
         }
     }
