@@ -71,23 +71,56 @@ export function useBulkPending(actions: NoteActions) {
 
 export type BulkPendingApi = ReturnType<typeof useBulkPending>;
 
+/** Whether a route shows the note grid. Reminders, Trash and Calendar do
+ *  not, and bulk selection exists only on the grid: those views fall back to
+ *  the "all notes" filter underneath, so a selection there would be of notes
+ *  that are not on screen — and its Delete would trash every one of them. */
+export function isGridPath(path: string): boolean {
+    return path !== '/reminders' && path !== '/trash' && path !== '/calendar';
+}
+
 interface SelectionOptions {
     visible: NoteCard[];
     actions: NoteActions;
     labels: string[];
     bulk: BulkPendingApi;
-    /** Keyboard selection only while the grid is what the user is looking at. */
+    /** The grid is the view on screen (isGridPath). Off it nothing is
+     *  selected, no bar or Undo renders, a selection made on the grid is
+     *  dropped, and a bulk delete still waiting out its Undo commits — as
+     *  leaving the shell does. */
+    grid: boolean;
+    /** Keyboard selection (Ctrl/Cmd+A, Esc): on the grid with no note open. */
     enabled: boolean;
 }
 
-export function useNoteSelection({ visible, actions, labels, bulk, enabled }: SelectionOptions) {
+const NOTHING: ReadonlySet<string> = new Set();
+
+export function useNoteSelection({ visible, actions, labels, bulk, grid, enabled }: SelectionOptions) {
     const [raw, setRaw] = useState<Set<string>>(() => new Set());
     const anchor = useRef<string | null>(null);
+    // Leaving the grid drops the selection, so coming back does not revive it.
+    const [wasGrid, setWasGrid] = useState(grid);
+    if (wasGrid !== grid) {
+        setWasGrid(grid);
+        if (!grid) setRaw(new Set());
+    }
+    useEffect(() => { if (!grid) anchor.current = null; }, [grid]);
+    // A bulk delete waiting out its Undo is the grid's: leaving commits it (the
+    // Undo would otherwise hang, its notes hidden, on a view without it).
+    const { commit, setPending, pendingRef } = bulk;
+    useEffect(() => {
+        if (grid || !pendingRef.current) return;
+        const p = pendingRef.current;
+        pendingRef.current = null;
+        commit(p);
+        setPending(null);
+    }, [grid, commit, setPending, pendingRef]);
     const visibleKeys = useMemo(() => visible.map(c => c.key), [visible]);
     // Only what is on screen can be selected: a filter change, a search or a
     // note deleted elsewhere quietly drops the rest.
-    const selected = useMemo(() => keepVisible(raw, visibleKeys), [raw, visibleKeys]);
+    const selected = useMemo(() => (grid ? keepVisible(raw, visibleKeys) : NOTHING), [grid, raw, visibleKeys]);
     const active = selected.size > 0;
+    const keys = grid && enabled;
 
     const clear = useCallback(() => { setRaw(new Set()); anchor.current = null; }, []);
     const onSelect = useCallback((card: NoteCard, e?: { shiftKey?: boolean }) => {
@@ -99,7 +132,7 @@ export function useNoteSelection({ visible, actions, labels, bulk, enabled }: Se
     }, [visibleKeys]);
 
     useEffect(() => {
-        if (!enabled) return;
+        if (!keys) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.defaultPrevented || isEditableTarget(e.target)) return;
             if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'a') {
@@ -112,13 +145,13 @@ export function useNoteSelection({ visible, actions, labels, bulk, enabled }: Se
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [enabled, visibleKeys, active, clear]);
+    }, [keys, visibleKeys, active, clear]);
 
     const cards = useMemo(() => visible.filter(c => selected.has(c.key)), [visible, selected]);
     const bar = active ? (
         <SelectionBar cards={cards} actions={actions} labels={labels} bulk={bulk} onClear={clear} onSelectAll={() => setRaw(new Set(visibleKeys))} allSelected={selected.size === visibleKeys.length} />
     ) : null;
-    const undo = bulk.pending ? (
+    const undo = grid && bulk.pending ? (
         <UndoBar
             token={bulk.pending.token}
             message={bulk.pending.kind === 'delete'

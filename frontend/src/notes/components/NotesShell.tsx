@@ -51,7 +51,7 @@ import { useTaskEvents } from '../model/taskEvents';
 import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
 import { useNotesOutbox, useOutboxPending } from '../model/notesOutbox';
 import { useNotesCachePersistence } from '../model/notesCache';
-import { useBulkPending, useNoteSelection } from './useNoteSelection';
+import { isGridPath, useBulkPending, useNoteSelection } from './useNoteSelection';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -166,7 +166,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const labels = useMemo(() => allLabels(cards), [cards]);
     // Bulk selection over what the grid shows, in the order it shows it.
     const gridOrder = useMemo(() => [...pinned, ...others], [pinned, others]);
-    const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, enabled: !remindersView && !openKey });
+    const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, grid: isGridPath(path), enabled: !openKey });
     const reminders = useMemo(() => groupReminders(cards, now), [cards, now]);
     const counts = useMemo(() => ({
         notes: cards.filter(c => !c.archived).length,
