@@ -69,6 +69,37 @@ pub fn validate_sealed<'a>(
     Ok(Some(raw))
 }
 
+/// `validate_sealed` for a task in a known scope. A CHANNEL task's timing must
+/// be a v3 channel envelope: v3 binds the channel, epoch, creator and the
+/// value's kind (chan-taskevt / chan-tasksnz) into the tag, and these two
+/// kinds were born v3 — no honest writer ever produced a v2 one. Refusing
+/// anything older here keeps an unbound value (which could be lifted from
+/// one item onto another and still open) out of the column altogether; the
+/// client refuses to open one as well (tasks.ts openTimingValue). Personal
+/// items are sealed to self and have no channel to bind.
+pub fn validate_sealed_scoped<'a>(
+    raw: &'a str,
+    max: usize,
+    what: &'static str,
+    in_channel: bool,
+) -> Result<Option<&'a str>, (StatusCode, &'static str)> {
+    let v = validate_sealed(raw, max, what)?;
+    if let (Some(env), true) = (v, in_channel) {
+        let bound = serde_json::from_str::<serde_json::Value>(env)
+            .ok()
+            .map(|j| j.get("t").and_then(|t| t.as_str()) == Some("ch"))
+            .unwrap_or(false)
+            && crate::envelope_version::envelope_version(env).is_some_and(|n| n >= 3);
+        if !bound {
+            return Err((StatusCode::BAD_REQUEST, match what {
+                "schedule" => "A shared item's schedule must be sealed to its channel — update the app",
+                _ => "A shared item's snooze must be sealed to its channel — update the app",
+            }));
+        }
+    }
+    Ok(v)
+}
+
 /// Does the task, or any task under it (the rows a completion sweeps), carry
 /// a schedule? Same depth bound as the completion sweep in update_task.
 pub const SUBTREE_HAS_SCHEDULE_SQL: &str = "WITH RECURSIVE sub AS ( \
@@ -135,6 +166,24 @@ mod tests {
         );
         assert!(validate_sealed("tomorrow", MAX_SNOOZE_LEN, "snooze").is_err());
         assert!(validate_sealed("{\"k\":\"snooze/1\"}", MAX_SNOOZE_LEN, "snooze").is_err());
+    }
+
+    #[test]
+    fn a_channel_item_takes_only_a_v3_channel_envelope() {
+        let v3 = r#"{"v":3,"t":"ch","epoch":2,"ct":"QUJD"}"#;
+        let v2 = r#"{"v":2,"t":"ch","epoch":2,"ct":"QUJD"}"#;
+        // Positive control: v3 in a channel, and anything sealed in a personal list.
+        assert_eq!(validate_sealed_scoped(v3, MAX_SCHEDULE_LEN, "schedule", true), Ok(Some(v3)));
+        assert_eq!(validate_sealed_scoped(v2, MAX_SCHEDULE_LEN, "schedule", false), Ok(Some(v2)));
+        assert_eq!(validate_sealed_scoped(SEALED, MAX_SNOOZE_LEN, "snooze", false), Ok(Some(SEALED)));
+        // Unbound or wrong-kind envelopes in a channel are refused.
+        assert_eq!(validate_sealed_scoped(v2, MAX_SCHEDULE_LEN, "schedule", true).unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(validate_sealed_scoped(v2, MAX_SNOOZE_LEN, "snooze", true).is_err());
+        assert!(validate_sealed_scoped(SEALED, MAX_SNOOZE_LEN, "snooze", true).is_err());
+        let self_v3 = r#"{"v":3,"t":"self","ct":"QUJD"}"#;
+        assert!(validate_sealed_scoped(self_v3, MAX_SCHEDULE_LEN, "schedule", true).is_err());
+        // Clearing is still a clear.
+        assert_eq!(validate_sealed_scoped("", MAX_SCHEDULE_LEN, "schedule", true), Ok(None));
     }
 
     #[test]
@@ -489,6 +538,16 @@ mod db_tests {
         assert!(row(&pool, task).await.1.is_some());
         // The creator may.
         assert_eq!(patch(&state, &owner_claims, task, json!({ "schedule": ch })).await, StatusCode::OK);
+        // … but never with an unbound (v2) or self envelope: a shared item's
+        // timing is v3-only, on create and on edit, schedule and snooze alike.
+        let v2 = r#"{"v":2,"t":"ch","epoch":1,"ct":"bGlmdGVk"}"#;
+        for body_ in [json!({ "schedule": v2 }), json!({ "snooze": v2 }), json!({ "schedule": S1, "reads_up_to": 4 })] {
+            assert_eq!(patch(&state, &owner_claims, task, body_).await, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(row(&pool, task).await.1.as_deref(), Some(ch), "a refused v2 write leaves the v3 value alone");
+        let r = create_task(State(state.clone()), Path(channel as i64), Extension(owner_claims.clone()), Json(create(json!({ "description": ch, "schedule": v2 }))))
+            .await.into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         // Without COMPLETE_TASKS a snooze and a reopen are refused.
         sqlx::query("UPDATE server_roles SET permissions = $1 WHERE id = $2")
             .bind(crate::permissions::Permissions::VIEW_CHANNEL.bits() as i64).bind(role)

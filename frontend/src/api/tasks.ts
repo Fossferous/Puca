@@ -854,9 +854,15 @@ async function sealTiming(plain: string, kind: 'chan-taskevt' | 'chan-tasksnz', 
     return scope ? sealChannel(scope.channelId, plain, kind, scope.ownerId) : sealSelf(plain);
 }
 
-/** Open one sealed timing value, refusing anything that is not an envelope. */
+/** Open one sealed timing value, refusing anything that is not an envelope.
+ *  In a channel, ONLY a v3 envelope: v2 binds nothing, so a server could
+ *  move one member's sealed schedule onto another item (or swap a snooze in
+ *  as a schedule) and it would open. These kinds were born v3; no honest
+ *  writer ever produced a v2 one, so refusing it costs nothing. */
 async function openTimingValue(stored: string, kind: 'chan-taskevt' | 'chan-tasksnz', scope: TimingScope): Promise<string> {
-    if (parseEnvelopeEx(stored).kind === 'plaintext') return DECRYPT_FAILED;
+    const parsed = parseEnvelopeEx(stored);
+    if (parsed.kind === 'plaintext') return DECRYPT_FAILED;
+    if (scope && parsed.kind === 'envelope' && parsed.env.v !== 3) return MARKERS.ENC_CONTEXT_MISMATCH;
     return scope ? openChannel(scope.channelId, stored, kind, scope.ownerId) : openSelf(stored);
 }
 

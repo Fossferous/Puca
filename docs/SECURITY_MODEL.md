@@ -135,7 +135,9 @@ channel, epoch and creator into their tag (`chan-taskevt`, `chan-tasksnz`,
 envelopes with no bound context. So a malicious server could move one item's
 schedule onto another item of the same owner, or replay an older one. It still
 cannot read or forge one. A plaintext value in either column is never opened as
-one: the client treats it as unreadable.
+one: the client treats it as unreadable. Nor is an unbound v2 channel envelope:
+a shared item's timing opens only from v3, and the server refuses anything
+older for those two columns.
 
 **Leaving the encrypted boundary on purpose.** An **.ics export** is a
 plaintext file (titles, times, places), and the app says so before writing

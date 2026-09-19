@@ -447,7 +447,7 @@ async fn insert_task(
         }
     }
     let schedule = match payload.schedule.as_deref() {
-        Some(raw) => crate::task_timing::validate_sealed(raw, MAX_SCHEDULE_LEN, "schedule")?,
+        Some(raw) => crate::task_timing::validate_sealed_scoped(raw, MAX_SCHEDULE_LEN, "schedule", channel_id.is_some())?,
         None => None,
     };
     if let Some(pid) = payload.parent_id {
@@ -635,14 +635,14 @@ pub async fn update_task(
 
     // Schedule and snooze: sealed envelopes or "" (clear), nothing else.
     let new_schedule = match payload.schedule.as_deref() {
-        Some(raw) => match crate::task_timing::validate_sealed(raw, MAX_SCHEDULE_LEN, "schedule") {
+        Some(raw) => match crate::task_timing::validate_sealed_scoped(raw, MAX_SCHEDULE_LEN, "schedule", channel_id.is_some()) {
             Ok(v) => v,
             Err(e) => return e.into_response(),
         },
         None => None,
     };
     let new_snooze = match payload.snooze.as_deref() {
-        Some(raw) => match crate::task_timing::validate_sealed(raw, MAX_SNOOZE_LEN, "snooze") {
+        Some(raw) => match crate::task_timing::validate_sealed_scoped(raw, MAX_SNOOZE_LEN, "snooze", channel_id.is_some()) {
             Ok(v) => v,
             Err(e) => return e.into_response(),
         },

@@ -477,6 +477,37 @@ async function main() {
     check('timing/an outsider cannot write a schedule', cSched.status === 403 || cSched.status === 404, `status=${cSched.status}`);
     const awareTick = await api('PATCH', `/tasks/${ev.id}`, { is_completed: true, recurrence_aware: true }, A.t);
     check('timing/a schedule-aware client completes it', awareTick.status === 200, `status=${awareTick.status}`);
+    // A plain parent with a scheduled child: the server can refuse only a
+    // client that does not know about schedules (it cannot see whether the
+    // child repeats). An aware client's completion sweeps the child, which
+    // is why the CLIENT refuses it when the child repeats
+    // (taskCompletion.subtreeCompletionBlock; notes-walk-calendar proves the
+    // built client does).
+    const pParent = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'plain parent' }, A.t);
+    const pKid = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'weekly kid', parent_id: pParent.id, schedule: SCHED, due_at: dueSoon }, A.t);
+    const oldParent = await api('PATCH', `/tasks/${pParent.id}`, { is_completed: true }, A.t);
+    check('timing/an old client ticking a PLAIN parent of a scheduled child → 409', oldParent.status === 409, `status=${oldParent.status}`);
+    const awareParent = await api('PATCH', `/tasks/${pParent.id}`, { is_completed: true, recurrence_aware: true }, A.t);
+    const kidAfter = (await must('GET', `/task-lists/${rl.id}/tasks`, null, A.t)).find(t => t.id === pKid.id);
+    check('timing/an aware completion of the parent sweeps the scheduled child (the server cannot tell it repeats)', awareParent.status === 200 && kidAfter?.is_completed === true, `status=${awareParent.status} kid=${JSON.stringify(kidAfter)}`);
+    // A SHARED item's timing must be a v3 channel envelope (bound to the
+    // channel, epoch, creator and kind); an unbound v2 or a self envelope is
+    // refused on create and on edit — with the v3 positive control.
+    const CH_V3 = '{"v":3,"t":"ch","epoch":1,"ct":"c2NoZWR1bGU="}';
+    const CH_V2 = '{"v":2,"t":"ch","epoch":1,"ct":"c2NoZWR1bGU="}';
+    const chV2 = await api('POST', `/channels/${clc.id}/tasks`, { description: CH_V3, schedule: CH_V2 }, A.t);
+    check('timing/a shared item created with a v2 channel schedule → 400', chV2.status === 400, `status=${chV2.status}`);
+    const chV3 = await api('POST', `/channels/${clc.id}/tasks`, { description: CH_V3, schedule: CH_V3 }, A.t);
+    check('timing/positive control: the same item with a v3 channel schedule → 200', chV3.status === 200, `status=${chV3.status}`);
+    if (chV3.status === 200) {
+        const chSnzV2 = await api('PATCH', `/tasks/${chV3.body.id}`, { snooze: CH_V2 }, A.t);
+        const chSnzSelf = await api('PATCH', `/tasks/${chV3.body.id}`, { snooze: SNOOZE }, A.t);
+        const chSnzV3 = await api('PATCH', `/tasks/${chV3.body.id}`, { snooze: CH_V3 }, A.t);
+        check('timing/a shared item refuses a v2 or self snooze and takes a v3 one', chSnzV2.status === 400 && chSnzSelf.status === 400 && chSnzV3.status === 200,
+            `v2=${chSnzV2.status} self=${chSnzSelf.status} v3=${chSnzV3.status}`);
+    } else {
+        check('timing/a shared item refuses a v2 or self snooze and takes a v3 one', false, 'SKIPPED: the v3 create failed, nothing to patch');
+    }
 
     section('INPUT CAPS (DoS hardening)');
     const big = 'x'.repeat(9000);
