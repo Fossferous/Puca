@@ -80,6 +80,14 @@ const ICS_IN = [
 export async function calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql, errors, notesCreatedAt = 0 }) {
     const mine = `SELECT l.id FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`;
     const dialogs = [];
+    // A database proof without a DSN must SAY it did not run — never vanish
+    // and leave "ALL PASS" standing for checks that never happened.
+    let skipped = 0;
+    const db = (name, fn) => {
+        if (sql) { fn(); return; }
+        skipped++;
+        console.log(`SKIP  ${name}  — no psql DSN given (pass one to run the database proofs)`);
+    };
 
     // =========================================================================
     // Desktop, Europe/Dublin, en-GB
@@ -104,8 +112,11 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     await c.locator('.cal-daylist-head button', { hasText: 'Add' }).click();
     await fillAddSheet(c, { title: 'Standup', time: '09:00', target: 'new' });
     const cell = day => c.locator(`.cal-cell[data-drop-target="${day}"]`);
-    await cell('2026-03-28').locator('.cal-chip', { hasText: 'Standup' }).waitFor({ timeout: 10000 });
-    ck('tap-to-add: the event is on the 28th', true);
+    await cell('2026-03-28').locator('.cal-chip', { hasText: 'Standup' }).waitFor({ timeout: 10000 }).catch(() => {});
+    ck('tap-to-add: the event is on the 28th (and only there)',
+        await cell('2026-03-28').locator('.cal-chip', { hasText: 'Standup' }).count() === 1
+        && await c.locator('.cal-chip', { hasText: 'Standup' }).count() === 1,
+        await c.locator('.cal-chip', { hasText: 'Standup' }).count());
 
     // ---- make it repeat daily ---------------------------------------------------------
     await cell('2026-03-28').locator('.cal-chip', { hasText: 'Standup' }).click();
@@ -121,6 +132,11 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     // ---- DST: 09:00 on both sides of the change, in the week grid ------------------------
     await c.click('.cal-viewbtn.view-week');
     await c.waitForSelector('.cal-timegrid.cols-7', { timeout: 5000 });
+    await sleep(200);
+    // Fixed clock: 10:00 in Dublin on the 28th, which is in this week, so the
+    // grid opens at 09:00 (an hour before now), i.e. 9 rows of 48 px down.
+    const opened = await c.locator('.cal-tg-body').evaluate(el => ({ top: el.scrollTop, hour: el.dataset.openHour ?? null, room: el.scrollHeight - el.clientHeight }));
+    ck('week grid: opens an hour before now, not at 00:00', opened.hour === '9' && Math.abs(opened.top - 9 * 48) <= 2, JSON.stringify(opened));
     const offsetFromSlot = async (dayKey) => {
         const slot = await c.locator(`[data-drop-target="${dayKey}T09:00"]`).boundingBox();
         const colChips = c.locator('.cal-tg-col').filter({ has: c.locator(`[data-drop-target="${dayKey}T09:00"]`) }).locator('.cal-chip', { hasText: 'Standup' });
@@ -133,7 +149,7 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     ck('DST: …and still in the 09:00 row the day the clocks go forward', after !== null && Math.abs(after) <= 4, after);
     await shot('cal-week-dst');
 
-    if (sql) {
+    db('database: due_at is the next reminder instant, the schedule sealed and unreadable', () => {
         const row = sql(`SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI') || '|' || left(schedule, 12) || '|' || (schedule LIKE '%Standup%' OR schedule LIKE '%FREQ%' OR schedule LIKE '%Dublin%' OR schedule LIKE '%09:00%')::text FROM channel_tasks WHERE list_id IN (${mine}) AND schedule IS NOT NULL`);
         const [due, head, leaks] = row.split('|');
         // Next reminder: the 29th at 09:00 IST (UTC+1) less the 10-minute alert.
@@ -141,7 +157,7 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
         ck('database: due_at is the next reminder instant, DST-correct (07:50Z)', due === '2026-03-29T07:50', row);
         ck('database: the schedule is a sealed envelope', /^\{"v":\d/.test(head ?? ''), head);
         ck('database: nothing of the schedule is readable (title, rule, zone, time)', leaks === 'false', leaks);
-    }
+    });
 
     // ---- keyboard move + ticking a repeating to-do --------------------------------------
     await c.click('.cal-viewbtn.view-month');
@@ -167,13 +183,79 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     await c.waitForSelector('.cal-menu', { timeout: 5000 });
     await c.locator('.cal-menu-item', { hasText: 'Done — move to the next time' }).click();
     await sleep(1500);
+    // The weekly series draws Apr 7 whether or not the tick did anything, so
+    // Apr 7 alone proves nothing. The tick must have (a) taken Mar 31 off the
+    // calendar (done occurrences hide without "Show completed") AND (b) left
+    // the series alive (Apr 7 still there — a tick that COMPLETED the item
+    // would hide that too).
+    await c.goto('/notes/#/calendar?v=day&d=2026-03-31');
+    await c.waitForSelector('.cal.view-day', { timeout: 10000 });
+    // "Not there" means something only once the notes have loaded: the daily
+    // Standup is on the 31st too, so wait for IT before counting the plumber.
+    const loaded31 = await c.locator('.cal-chip', { hasText: 'Standup' }).first().waitFor({ timeout: 10000 }).then(() => true, () => false);
+    const mar31 = loaded31 ? await c.locator('.cal-chip', { hasText: 'Call plumber' }).count() : -1;
+    const dayGrid = await c.locator('.cal-tg-body').evaluate(el => el.dataset.openHour ?? null).catch(() => null);
+    ck('day grid: a day that is not today opens on the working day (08:00)', dayGrid === '8', dayGrid);
     await c.goto('/notes/#/calendar?v=day&d=2026-04-07');
     await c.waitForSelector('.cal.view-day', { timeout: 10000 });
-    ck('repeat tick: the weekly to-do moved on to the next week', await c.locator('.cal-chip', { hasText: 'Call plumber' }).count() >= 1);
-    if (sql) {
+    await c.locator('.cal-chip', { hasText: 'Call plumber' }).first().waitFor({ timeout: 10000 }).catch(() => {});
+    const apr7 = await c.locator('.cal-chip', { hasText: 'Call plumber' }).count();
+    ck('repeat tick: the ticked occurrence (Mar 31) is done, and the series goes on (Apr 7)', mar31 === 0 && apr7 === 1, `mar31=${mar31} apr7=${apr7}`);
+    db('database: ticking a repeating to-do left it OPEN with the next due', () => {
         const r = sql(`SELECT is_completed::text || '|' || to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI') FROM channel_tasks WHERE list_id IN (${mine}) AND schedule IS NOT NULL ORDER BY id DESC LIMIT 1`);
         ck('database: ticking a repeating to-do left it OPEN with the next due (Apr 7 11:00 IST)', r === 'false|2026-04-07T10:00', r);
-    }
+    });
+
+    // ---- a PLAIN parent of a repeating to-do: ticking it is refused ----------------------
+    // The server sweeps a completed item's subtree and cannot see whether a
+    // child repeats (the rule is sealed), so it lets this client through; the
+    // client itself must refuse (taskCompletion.subtreeCompletionBlock), or the
+    // child's series would silently end.
+    await c.goto('/notes/');
+    await c.waitForSelector('.notes-card', { timeout: 10000 });
+    await c.locator('.notes-card', { hasText: 'Phone note' }).first().click();
+    await c.waitForSelector('.notes-editor .task-tree', { timeout: 10000 });
+    await c.fill('.notes-editor-add input', 'Chores');
+    await c.press('.notes-editor-add input', 'Enter');
+    const choresRow = c.locator('.notes-editor .tt-item', { hasText: 'Chores' }).first();
+    await choresRow.waitFor({ timeout: 10000 });
+    await choresRow.hover();
+    await choresRow.locator('.tt-btn[title="Add subtask"]').click();
+    await c.fill('.notes-editor .tt-subtask-add input', 'Water plants');
+    await c.press('.notes-editor .tt-subtask-add input', 'Enter');
+    const plantsRow = c.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Water plants' }).first();
+    await plantsRow.waitFor({ timeout: 10000 });
+    await c.keyboard.press('Escape');
+    await sleep(150);
+    await plantsRow.hover();
+    await plantsRow.locator('button[aria-label="Add date & repeat"]').click();
+    await c.waitForSelector('.sched-dialog', { timeout: 5000 });
+    await c.selectOption('.sched-dialog select[aria-label="Repeat"]', 'weekly');
+    await c.click('.sched-dialog .sched-btn.primary');
+    await c.waitForSelector('.sched-dialog', { state: 'detached', timeout: 5000 });
+    await plantsRow.locator('.tt-sched').waitFor({ timeout: 10000 }).catch(() => {});
+    ck('parent tick: precondition — the subtask now repeats weekly', await plantsRow.locator('.tt-sched').count() === 1);
+    await choresRow.locator('input[type="checkbox"]').click();
+    const refusal = c.locator('.message-toast-title', { hasText: 'repeats' });
+    await refusal.first().waitFor({ timeout: 8000 }).catch(() => {});
+    await sleep(1000);
+    ck('parent tick: ticking a plain parent of a repeating to-do is REFUSED, with the reason', await refusal.count() >= 1,
+        (await c.locator('.message-toast-title').allInnerTexts()).join(' / ') || 'no toast');
+    ck('parent tick: …and nothing was ticked (parent and child still open)',
+        !(await choresRow.locator('input[type="checkbox"]').isChecked()) && !(await plantsRow.locator('input[type="checkbox"]').isChecked())
+        && await c.locator('.notes-editor .tt-completed-section').count() === 0);
+    db('database: the refused tick left the repeating child AND its parent open', () => {
+        const r = sql(`SELECT p.is_completed::text || '|' || k.is_completed::text || '|' || (k.schedule IS NOT NULL)::text FROM channel_tasks k JOIN channel_tasks p ON p.id = k.parent_id WHERE k.list_id IN (${mine}) AND k.schedule IS NOT NULL ORDER BY k.id DESC LIMIT 1`);
+        ck('database: the refused tick left the repeating child AND its parent open', r === 'false|false|true', r);
+    });
+    // Positive control, same note, same click: a plain item with no repeating
+    // child under it DOES tick.
+    await c.locator('.notes-editor .tt-item', { hasText: 'Charger' }).first().locator('input[type="checkbox"]').click();
+    await c.waitForSelector('.notes-editor .tt-completed-section', { timeout: 10000 }).catch(() => {});
+    ck('parent tick (positive control): a plain item ticks as before', await c.locator('.notes-editor .tt-completed-section').count() === 1);
+    await c.getByRole('button', { name: 'Close', exact: true }).click();
+    await c.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+    await shot('cal-parent-tick-refused');
 
     // ---- snooze from Reminders ----------------------------------------------------------
     await c.goto('/notes/#/reminders');
@@ -184,11 +266,16 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     await standupRow.locator('.notes-snooze-menu button', { hasText: 'Tomorrow' }).click();
     await standupRow.locator('[aria-label="snoozed"]').waitFor({ timeout: 10000 }).catch(() => {});
     ck('snooze: the row is marked snoozed', await standupRow.locator('[aria-label="snoozed"]').count() === 1);
-    if (sql) {
+    db('database: one sealed snooze, nothing readable in it', () => {
         const s = sql(`SELECT count(*) FILTER (WHERE snooze IS NOT NULL)::text || '|' || coalesce(bool_or(snooze LIKE '%until%' OR snooze LIKE '%forDue%')::text, 'none') || '|' || coalesce(max(left(snooze, 8)), '') FROM channel_tasks WHERE list_id IN (${mine})`);
         const [n, leak, head] = s.split('|');
         ck('database: one sealed snooze, nothing readable in it', n === '1' && leak === 'false' && head.startsWith('{"v":'), s);
-    }
+        // L15 on the phone: the snooze moved the plaintext due_at to the snooze
+        // instant (tomorrow 09:00 Dublin = 2026-03-29T08:00Z, IST), so a phone
+        // reminding with Notes closed fires it then.
+        const moved = sql(`SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI') FROM channel_tasks WHERE list_id IN (${mine}) AND snooze IS NOT NULL`);
+        ck('database: the snooze moved due_at to the snooze instant (tomorrow 09:00 IST)', moved === '2026-03-29T08:00', moved);
+    });
     await shot('cal-reminders-snoozed');
 
     // ---- Edited + the Recently-edited sort ---------------------------------------------
@@ -287,10 +374,10 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     const again = await c.locator('.ics-progress').innerText();
     ck('import again: every event already there is skipped', /0 imported/.test(again) && /3 already there/.test(again), again);
     await c.locator('.ics-actions button', { hasText: 'Close' }).click();
-    if (sql) {
+    db('database: imported events are sealed', () => {
         const leaks = sql(`SELECT count(*) FROM channel_tasks WHERE list_id IN (${mine}) AND (schedule LIKE '%Terminal%' OR schedule LIKE '%walk.test%' OR description LIKE '%Flight%')`);
         ck('database: imported events are sealed (no title, place or UID in the clear)', leaks === '0', leaks);
-    }
+    });
     await shot('cal-imported');
     await ctx.close();
 
@@ -314,10 +401,10 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     // before the gap (EST, -5) → 07:30Z → 03:30 EDT on the wall.
     const gapTime = (await gapChip.locator('.cal-chip-time').innerText()).trim();
     ck('DST gap (RFC 5545): 02:30 on the spring-forward day shows as 3:30 AM', gapTime === '3:30 AM', gapTime);
-    if (sql) {
+    db('database: the gap event reminds 10 minutes before 07:30Z', () => {
         const due = sql(`SELECT to_char(t.due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI') FROM channel_tasks t WHERE t.list_id IN (${mine}) AND t.schedule IS NOT NULL ORDER BY t.id DESC LIMIT 1`);
         ck('database: the gap event reminds 10 minutes before 07:30Z', due === '2026-03-08T07:20', due);
-    }
+    });
     await uctx.close();
 
     // =========================================================================
@@ -360,8 +447,21 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     ck('phone calendar: ?v=week renders the day view, never a 7-column grid (JS gate = CSS gate)',
         await m.locator('.cal.view-day').count() === 1 && await m.locator('.cal-timegrid.cols-7').count() === 0);
     await mshot('phone-calendar-week-url');
+    // Day on a phone is the day's LIST, with no time grid under it.
+    await m.goto('/notes/#/calendar?v=day&d=2026-03-08');
+    await m.waitForSelector('.cal.view-day', { timeout: 10000 });
+    await m.locator('.cal-daylist .cal-row', { hasText: 'Gap check' }).waitFor({ timeout: 10000 }).catch(() => {});
+    const phoneDay = await m.evaluate(() => ({
+        grid: document.querySelectorAll('.cal-timegrid').length,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    }));
+    ck('phone Day (390x844): the day list, and NO time grid', phoneDay.grid === 0 && await m.locator('.cal-daylist .cal-row', { hasText: 'Gap check' }).count() === 1, JSON.stringify(phoneDay));
+    ck('phone Day: no horizontal overflow', !phoneDay.overflow);
+    await mshot('phone-calendar-day');
     await mctx.close();
     ck('calendar: no page errors', errors.length === 0, errors[0]);
+    if (skipped) console.log(`SKIP  calendar: ${skipped} database proof(s) did not run — no psql DSN`);
+    return { skipped };
 }
 
 // ---- Standalone -------------------------------------------------------------------------
@@ -410,8 +510,8 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     }
     const state = await ctx.storageState();
     await ctx.close();
-    await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql, errors, notesCreatedAt });
+    const { skipped } = await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql, errors, notesCreatedAt });
     await browser.close();
-    console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);
+    console.log(fail === 0 ? `\nALL PASS${skipped ? ` — ${skipped} database proof(s) SKIPPED (no DSN)` : ''}` : `\n${fail} FAILED`);
     process.exit(fail === 0 ? 0 : 1);
 }

@@ -5,7 +5,9 @@ import { chromium } from '@playwright/test';
 const username = 'desk_' + Math.random().toString(36).slice(2, 8);
 const outdir = process.argv[2] || 'desktop-shots';
 
-const browser = await chromium.launch();
+// APP=<origin> points it at a throwaway static server; default is the dev server.
+const BASE = process.env.APP || 'http://localhost:5173';
+const browser = await chromium.launch({ args: ['--mute-audio'] });   // a walk never makes a sound
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false });
 const page = await ctx.newPage();
 page.on('pageerror', e => console.log('[pageerror]', String(e).slice(0, 300)));
@@ -19,8 +21,16 @@ const shot = async (label) => {
 const tryStep = async (name, fn) => {
     try { await fn(); return true; } catch (e) { console.log(`STEP-FAIL ${name}:`, String(e).split('\n')[0]); return false; }
 };
+// A step whose failure FAILS the run (exit 1). tryStep alone logs and moves
+// on, which is right for a layout probe and wrong for an assertion.
+const mustFails = [];
+const mustStep = async (name, fn) => {
+    const ok = await tryStep(name, fn);
+    if (!ok) mustFails.push(name);
+    return ok;
+};
 
-await page.goto('http://localhost:5173/');
+await page.goto(`${BASE}/`);
 await page.waitForURL('**/login');
 console.log('coarse-pointer matches (should be false):', await page.evaluate(() => matchMedia('(pointer: coarse) and (max-width: 1024px)').matches));
 console.log('bottom-nav present (should be false pre-login):', await page.evaluate(() => !!document.querySelector('.mobile-bottom-nav')));
@@ -94,7 +104,7 @@ console.log('emoji-picker width (should be 352px, not stretched):', await page.e
 // Púca's Tasks view with schedules: the date & repeat editor on a TaskTree
 // row, the row then showing its date chip INSTEAD of the raw due editor, and
 // the pinned Calendar tab with its desktop Week grid.
-await tryStep('tasks-schedule', async () => {
+await mustStep('tasks-schedule', async () => {
     await page.keyboard.press('Escape');   // the emoji picker from the step above
     await page.waitForTimeout(300);
     await page.locator('.server-icon.notes-self').click({ timeout: 4000 });
@@ -108,23 +118,44 @@ await tryStep('tasks-schedule', async () => {
     const row = page.locator('.tt-item', { hasText: 'Pay rent' }).first();
     await row.waitFor({ timeout: 5000 });
     await row.hover();
+    // Positive control: a PLAIN row offers the raw due editor, so "hidden"
+    // below means the schedule hid it, not that the selector never matched.
+    const rawBefore = await row.locator('.tt-btn[title="Add due time"]').count();
+    if (rawBefore !== 1) throw new Error(`plain row: expected the raw due editor, found ${rawBefore}`);
     await row.locator('.tt-btn[title="Add date & repeat"]').click({ timeout: 4000 });
     await page.selectOption('select[aria-label="Repeat"]', 'monthly-day');
     await page.click('.sched-dialog .sched-btn.primary');
     await row.locator('.tt-sched').waitFor({ timeout: 5000 });
     await row.hover();
     const rawDue = await row.locator('.tt-btn[title="Add due time"], .tt-btn[title="Edit due time"]').count();
-    console.log('scheduled row: date chip shown, raw due editor hidden (should be true):', await row.locator('.tt-sched').count() === 1 && rawDue === 0);
+    const ok = await row.locator('.tt-sched').count() === 1 && rawDue === 0;
+    console.log('scheduled row: date chip shown, raw due editor hidden (should be true):', ok);
+    if (!ok) throw new Error(`scheduled row: chip/raw-due wrong (rawDue=${rawDue})`);
 });
 await shot('tasks-scheduled-row');
-await tryStep('tasks-calendar-tab', async () => {
+await mustStep('tasks-calendar-tab', async () => {
     await page.locator('.tasks-tab-calendar').click({ timeout: 4000 });
     await page.locator('.tasks-calendar .cal-month').waitFor({ timeout: 5000 });
-    console.log('tasks calendar: Week offered on desktop (should be true):', await page.locator('.tasks-calendar .cal-viewbtn.view-week').isVisible());
+    const weekOffered = await page.locator('.tasks-calendar .cal-viewbtn.view-week').isVisible();
+    console.log('tasks calendar: Week offered on desktop (should be true):', weekOffered);
+    if (!weekOffered) throw new Error('desktop: no Week button');
     await page.locator('.tasks-calendar .cal-viewbtn.view-week').click();
-    console.log('tasks calendar: 7-column week grid (should be true):', await page.locator('.tasks-calendar .cal-timegrid.cols-7').count() === 1);
+    await page.waitForTimeout(300);
+    const grid = await page.locator('.tasks-calendar .cal-timegrid.cols-7').count() === 1;
+    console.log('tasks calendar: 7-column week grid (should be true):', grid);
+    if (!grid) throw new Error('desktop: no 7-column week grid');
+    // The week grid opens on working hours (or just before now), not 00:00
+    // (before 01:00 "an hour before now" IS 00:00, the one honest zero).
+    const open = await page.locator('.tasks-calendar .cal-tg-body').evaluate(el => ({ top: el.scrollTop, hour: el.dataset.openHour ?? null }));
+    const opened = open.hour !== null && (Number(open.hour) > 0 ? open.top > 0 : new Date().getHours() < 1);
+    console.log('tasks calendar: the week grid opens on working hours / now (should be true):', opened, JSON.stringify(open));
+    if (!opened) throw new Error(`week grid opened at ${JSON.stringify(open)}`);
 });
 await shot('tasks-calendar-week');
 
 console.log('DONE user=', username);
 await browser.close();
+if (mustFails.length) {
+    console.log(`FAILED: ${mustFails.length} required step(s): ${mustFails.join(', ')}`);
+    process.exit(1);
+}

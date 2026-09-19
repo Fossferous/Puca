@@ -490,8 +490,8 @@ for (const [name, patch] of [
 ck('phone: no page errors', errors.length === 0, errors[0]);
 
 // ---- 15. Calendar (pinned zones, locales and a fixed clock) — notes-walk-calendar.mjs ----------
-await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql: psqlDsn ? sql : null, errors, notesCreatedAt });
+const calendar = await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql: psqlDsn ? sql : null, errors, notesCreatedAt });
 
 await browser.close();
-console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);
+console.log(fail === 0 ? `\nALL PASS${calendar.skipped ? ` — ${calendar.skipped} calendar database proof(s) SKIPPED (no DSN)` : ''}` : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);
