@@ -9,7 +9,7 @@
  *  - the settled-absence prune (notes/model/notesPrune.ts).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act } from 'react';
+import { act, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
@@ -46,16 +46,19 @@ const list = (id: number): TaskList => ({ id, title: `n${id}`, created_at: '', t
 const card = (id: number) => ({ key: `list:${id}`, ref: { kind: 'list' as const, id } }) as unknown as NoteCard;
 const pref = (id: number, fav = false): TaskTabPref => ({ kind: 'list', ref_id: id, is_favorite: fav });
 
+function Probe({ cards, prefs, onActions }: { cards: NoteCard[]; prefs: TaskTabPref[]; onActions: (a: NoteActions) => void }) {
+    const actions = useNoteActions(cards, prefs, true);
+    useEffect(() => { onActions(actions); }, [actions, onActions]);
+    return null;
+}
+
 function mountActions(qc: QueryClient, cards: NoteCard[], prefs: TaskTabPref[]): () => NoteActions {
-    let current: NoteActions | null = null;
-    function Probe() {
-        current = useNoteActions(cards, prefs, true);
-        return null;
-    }
+    const box: { current: NoteActions | null } = { current: null };
+    const onActions = (a: NoteActions) => { box.current = a; };
     const host = document.createElement('div');
     document.body.appendChild(host);
-    act(() => { createRoot(host).render(<QueryClientProvider client={qc}><Probe /></QueryClientProvider>); });
-    return () => current!;
+    act(() => { createRoot(host).render(<QueryClientProvider client={qc}><Probe cards={cards} prefs={prefs} onActions={onActions} /></QueryClientProvider>); });
+    return () => box.current!;
 }
 
 beforeEach(() => { vi.clearAllMocks(); resetListTrashProbe(); });
