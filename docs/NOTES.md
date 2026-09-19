@@ -177,7 +177,9 @@ Migration 065 gives a personal list three nullable columns, and
   (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`notes/model/drawing.ts`). On a phone, *Photo* offers the
-  camera (`<input accept="image/*" capture>`).
+  camera (`<input accept="image/*" capture>`); on Android that needs the
+  `IMAGE_CAPTURE` entry under `<queries>` in each app's manifest, so the
+  camera arrives with a new APK of each app, not with an OTA.
 - **`trashed_at`** — *Move to trash* (`POST /task-lists/:id/trash`) hides the
   note from every listing and from the reminder feed, and makes it read-only
   (every write is a 409) until it is restored. The Trash view (rail, in
@@ -193,23 +195,46 @@ server that has one. A client decides all of this from
 older server answers it with an error and every client behaves exactly as it
 did before 065. An older client on a newer server keeps working: it never
 sees trashed lists, its title-only rename leaves text and pictures alone, and
-its *Delete* is still the immediate delete it always was.
+its *Delete* is still the immediate delete it always was. What an older
+client does NOT do is keep a trashed note whole:
+
+- **An older Púca Notes** (0.9.815 or earlier — and Notes has no updater, so
+  it stays old until the new APK is installed) sees a trashed note as
+  deleted, and prunes this device's colour, labels and archive flag for it.
+  Restoring the note brings its text, items and pictures back, but not those.
+- **Any older Púca or Notes** that saves the pin/order row (a pin, a move, a
+  favourite, a tab drag) saves a full replace without the trashed notes, so a
+  note restored after that returns at the end of the order, not in its slot.
+
+So update Púca Notes on every phone before using the trash — install the new
+APK from the download page — and update Púca's desktop app with it; the web
+app and Púca's mobile app update themselves.
 
 **Trash keeps what is on the device.** A trashed note is gone from the default
 listing, but its colour, labels and archive flag are kept (the device-local
-prune counts the trash as live), and so is its slot in the saved order: a pin
-or a reorder made while it is in the trash saves it back where it was
-(`keepHiddenSlots` in `api/listContent.ts`), so a restored note returns to its
-place.
+prune counts the trash as live, and a note missing from both the listing and
+the cached trash is pruned only after a fresh read of the trash — it may have
+been trashed in Púca or on another device a moment ago), and so is its slot in
+the saved order: a pin or a reorder made while it is in the trash saves it
+back where it was (`keepHiddenSlots` in `api/listContent.ts`), and neither
+front door saves the order before it has read the trash, so a restored note
+returns to its place. *Notes to self* cannot be trashed and is not offered for
+it.
 
 **What the server cannot clean up.** The uploads behind a note's pictures and
 item attachments are named only inside sealed sidecars, so the server cannot
 tell which files a note used. *Delete forever* and *Empty trash* delete the
-files first, then the note. Púca Notes also purges its own expired trash,
-files first, during the last day of the window whenever it is open. A note
-whose window runs out while no Notes is open is deleted by the server's sweep
-and its uploads stay behind, counted against your quota — the same as any
-delete made by a client older than this, or by Púca's own immediate delete.
+files first, then the note — and refuse, deleting nothing, when this device
+cannot name every file (its items cannot be listed, or a sidecar cannot be
+read yet); try again once Púca is unlocked and online. Púca Notes also purges
+its own expired trash, files first, during the last day of the window
+whenever it is open, measured on the server's clock (a phone whose clock is
+wrong must not delete early), skipping any note whose files it cannot name.
+A note whose window runs out while no Notes is open is deleted by the
+server's sweep and its uploads stay behind, counted against your quota — the
+same as any delete made by a client older than this, or by Púca's own
+immediate delete. *Hide checkboxes* deletes the files of items it drops once
+its Undo is gone.
 
 ## Not built (and why)
 

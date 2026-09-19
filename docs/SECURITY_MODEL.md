@@ -74,6 +74,9 @@ whether the tool fits your threat model.
   has not read it. The DM v4 design shipped in 0.9.3 is days old.
 - **The Windows build is not code-signed** until the operator buys a certificate; the
   pipeline is in place and idle (`docs/CODE_SIGNING.md`).
+- **Personal notes' sealed fields are not bound to where they are stored.** The operator
+  can move or replay your own note text and picture lists between your own notes without
+  the client noticing, though never read them (§2, "Can do").
 
 ---
 
@@ -119,6 +122,18 @@ additional check is `token_version`, a plain integer in their own database
 This does not give them your keys — the identity seed is stored only wrapped
 (§7) — but it does mean **any username you see could have been chosen by the operator**.
 That matters most in §5.
+
+**Move your own sealed personal-note fields between your own rows.** A personal note's
+title, text (`body`) and pictures sidecar (`attachments`, migration 065) — like a personal
+task's text — are encrypt-to-self envelopes with no context bound into them: nothing in
+the ciphertext names the note or the field it belongs to (`encryptSelf`, a constant key
+derivation and no associated data). The operator cannot read or forge them, but can
+rearrange them undetected: show one note's text on another, replay an older version of a
+note's text, put a note's pictures sidecar (which holds its files' keys) into a text
+field, where it would open and display as text, or copy another note's sidecar into a
+trashed note so that *Delete forever* deletes files a live note still uses. The planned
+fix is a v3 self envelope that binds (list id, field) as associated data, so a moved or
+replayed field fails to open instead of opening in the wrong place.
 
 ---
 

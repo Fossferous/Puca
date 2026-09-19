@@ -39,7 +39,13 @@ one-line summary; this file is the full story. Versions follow
   refuses to ship them over one.
 - Apps older than this release keep working against the new server: they do
   not show trashed notes, renaming a note in them leaves its text and
-  pictures alone, and their Delete still deletes at once.
+  pictures alone, and their Delete still deletes at once. But they do not
+  keep a trashed note whole: an older Púca Notes forgets a trashed note's
+  colour, labels and archive flag, and a pin or reorder saved from any older
+  app puts a restored note at the end instead of its old place. **Install
+  the new Púca Notes APK on every phone before using the trash** (Notes has
+  no automatic updates); the camera button also needs the new APKs of both
+  apps.
 
 ## 0.9.815 — 2026-09-19
 
