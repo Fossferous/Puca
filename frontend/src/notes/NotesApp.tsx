@@ -19,7 +19,9 @@ import { NotesShell } from './components/NotesShell';
 import { invalidateNotesPrefs } from './model/notesPrefs';
 import { notesKeys } from './model/notesQueries';
 import { pendingOutboxCount } from './model/notesOutbox';
-import { deleteNotesCaches, notesCacheDbName } from '../api/notesCacheScrub';
+import { flushNotesPrefs, prefsUnsynced } from './model/notesPrefsSync';
+import { settlePendingDeviceRevoke } from '../api/deviceIdentity/pendingRevoke';
+import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api/notesCacheScrub';
 import { currentUserIdFromToken } from '../api/auth';
 
 export function NotesApp() {
@@ -120,9 +122,20 @@ function SessionGate() {
         },
     }), [navigate, qc]);
 
-    const signOut = useCallback(() => {
-        const unsynced = pendingOutboxCount();
-        if (unsynced > 0 && !window.confirm(`${unsynced} change${unsynced === 1 ? '' : 's'} made offline ${unsynced === 1 ? 'has' : 'have'} not synced yet and will be lost if you sign out now. Sign out anyway?`)) return;
+    // A web sign-out whose device revoke was never confirmed is finished with
+    // this session (api/deviceIdentity/pendingRevoke.ts). Notes never enrols
+    // a device, so there is no enrolment for the revoke to race.
+    useEffect(() => {
+        if (signedIn) void settlePendingDeviceRevoke(getToken(), currentUserIdFromToken());
+    }, [signedIn]);
+
+    const signOut = useCallback(async () => {
+        // Sign-out deletes this browser's copy of everything Notes keeps, so
+        // nothing that has not reached the server may go without a question.
+        // Colours and labels get one last push first (bounded).
+        const prefsLeft = prefsUnsynced() ? await flushNotesPrefs() : false;
+        const warning = notesSignOutWarning({ ops: pendingOutboxCount(), prefs: prefsLeft });
+        if (warning !== null && !window.confirm(warning)) return;
         // logout() clears the token, the seed, the DM/channel/blob caches and
         // scrubs the per-account device-local stores (Notes' included). It
         // also revokes this browser's DEVICE enrolment: the id is derived from

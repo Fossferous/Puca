@@ -67,3 +67,45 @@ export function deleteNotesCaches(keep?: string): void {
         done();
     }
 }
+
+// --- What a sign-out would lose ---------------------------------------------------------
+
+/**
+ * Púca Notes keeps two things on this browser that may not have reached the
+ * server yet: queued offline edits (the outbox) and colours/labels/archive
+ * not yet in the account's sealed document. A sign-out deletes both. Notes'
+ * own sign-out asks first; this flag lets PÚCA's sign-out ask too, since a
+ * sign-out in either tab scrubs what Notes kept. Notes writes it whenever
+ * either count changes and clears it once both are synced; it holds counts
+ * only, never content, and is scrubbed with the rest at sign-out.
+ */
+export const NOTES_UNSYNCED_PREFIX = 'pucaNotesUnsynced:';
+
+export interface NotesUnsynced { ops: number; prefs: boolean }
+
+export function writeNotesUnsynced(uid: number, u: NotesUnsynced): void {
+    try {
+        if (u.ops <= 0 && !u.prefs) localStorage.removeItem(`${NOTES_UNSYNCED_PREFIX}${uid}`);
+        else localStorage.setItem(`${NOTES_UNSYNCED_PREFIX}${uid}`, JSON.stringify({ ops: Math.max(0, Math.floor(u.ops)), prefs: u.prefs }));
+    } catch { /* private mode */ }
+}
+
+export function readNotesUnsynced(uid: number | null): NotesUnsynced {
+    if (uid === null) return { ops: 0, prefs: false };
+    try {
+        const raw = localStorage.getItem(`${NOTES_UNSYNCED_PREFIX}${uid}`);
+        const o = raw ? JSON.parse(raw) as Partial<NotesUnsynced> : {};
+        return { ops: typeof o.ops === 'number' && o.ops > 0 ? Math.floor(o.ops) : 0, prefs: o.prefs === true };
+    } catch {
+        return { ops: 0, prefs: false };
+    }
+}
+
+/** The sign-out question, or null when nothing would be lost. */
+export function notesSignOutWarning(u: NotesUnsynced): string | null {
+    const parts: string[] = [];
+    if (u.ops > 0) parts.push(`${u.ops} change${u.ops === 1 ? '' : 's'} made offline`);
+    if (u.prefs) parts.push('colours, labels or archive changes');
+    if (parts.length === 0) return null;
+    return `Púca Notes has ${parts.join(' and ')} on this device that ${u.ops === 1 && !u.prefs ? 'has' : 'have'} not synced yet. Signing out deletes them. Sign out anyway?`;
+}

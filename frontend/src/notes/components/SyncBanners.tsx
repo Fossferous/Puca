@@ -5,7 +5,7 @@
  * then stay on this device, which is what they always did).
  */
 import { WarningIcon } from '../../components/Icons';
-import { overwriteServerNotesPrefs, type PrefsSyncStatus } from '../model/notesPrefsSync';
+import { acceptServerNotesPrefs, overwriteServerNotesPrefs, type PrefsSyncStatus } from '../model/notesPrefsSync';
 import { useOutboxPending } from '../model/notesOutbox';
 import '../sync.css';
 
@@ -25,9 +25,19 @@ export function PrefsSyncBanner({ status }: { status: PrefsSyncStatus }) {
                 </div>
             );
         case 'rollback':
+            // Usually an operator restoring a backup. Without a way out every
+            // device that saw a newer copy would stop syncing for good.
             return (
-                <div className="notes-status error" role="alert" data-sync="rollback">
-                    <WarningIcon /> The server offered an older copy of your colours and labels than this device has already seen, so it was not applied.
+                <div className="notes-status error notes-status-choice" role="alert" data-sync="rollback">
+                    <WarningIcon />
+                    <span className="notes-status-text">
+                        The server has an older copy of your colours, labels and archive than this device has already seen (a restored backup, perhaps), so it was not applied, and they are not syncing until you choose.
+                        {' '}<em>Use the server’s copy</em> replaces this device’s with it; <em>Keep this device’s</em> replaces the server’s, on every device.
+                    </span>
+                    <span className="notes-status-actions">
+                        <button type="button" data-action="accept-server" onClick={acceptServerNotesPrefs}>Use the server’s copy</button>
+                        <button type="button" data-action="keep-mine" onClick={overwriteServerNotesPrefs}>Keep this device’s</button>
+                    </span>
                 </div>
             );
         default:

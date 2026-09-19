@@ -186,8 +186,16 @@ export interface PrefsSyncDeps {
 export interface PrefsSync {
     pull(): Promise<PrefsSyncStatus>;
     push(): Promise<PrefsSyncStatus>;
-    /** Replace the server's (unreadable) document with this device's copy. */
+    /** Replace the server's document (unreadable, or an older revision than
+     *  this device has seen) with this device's copy. A user action. */
     overwriteServer(): Promise<PrefsSyncStatus>;
+    /** Take the server's document as it is (a refused rollback: the operator
+     *  restored a backup) — this device's copy is replaced by it. A user
+     *  action. */
+    acceptServer(): Promise<PrefsSyncStatus>;
+    /** Whether this device holds colours, labels or archive flags the
+     *  account's document does not (a sign-out would lose them). */
+    unsynced(): boolean;
     status(): PrefsSyncStatus;
     subscribe(cb: () => void): () => void;
 }
@@ -248,8 +256,12 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
             }
             const opened = await open(id, uid, cur.rev, cur.blob, rec);
             if ('bad' in opened) return set(opened.bad!);
-            const merged = threeWayMerge(rec.base, local, opened.state);
-            if (!sameNoteState(merged, local)) deps.writeLocal(merged);
+            // Re-read: `local` was taken before three awaits (seal, PUT,
+            // open), and an edit made during that round trip must be merged,
+            // not written over.
+            const live = deps.readLocal();
+            const merged = threeWayMerge(rec.base, live, opened.state);
+            if (!sameNoteState(merged, live)) deps.writeLocal(merged);
             rec = { rev: cur.rev, base: opened.state, maxRev: Math.max(rec.maxRev, cur.rev) };
             deps.records.save(uid, rec);
         }
@@ -296,12 +308,40 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
         overwriteServer: () => guarded(async (uid, id) => {
             const res = await deps.get();
             if (res.kind === 'unsupported') return set('local-only');
-            const rec = deps.records.load(uid);
             // Adopt the server's revision with an EMPTY base, so the whole
             // local copy counts as this device's change and goes up as is.
-            deps.records.save(uid, { rev: res.doc.rev, base: EMPTY_NOTE_STATE, maxRev: Math.max(rec?.maxRev ?? 0, res.doc.rev) });
+            // maxRev restarts at the server's revision: the user has chosen
+            // this lineage, and keeping a higher one would refuse this very
+            // write's successor as a rollback forever.
+            deps.records.save(uid, { rev: res.doc.rev, base: EMPTY_NOTE_STATE, maxRev: res.doc.rev });
             return pushOnce(uid, id);
         }),
+        acceptServer: () => guarded(async (uid, id) => {
+            const res = await deps.get();
+            if (res.kind === 'unsupported') return set('local-only');
+            const { rev, blob } = res.doc;
+            if (rev === 0) {
+                // Nothing there at all: there is no "server's copy" to take.
+                deps.records.save(uid, { rev: 0, base: EMPTY_NOTE_STATE, maxRev: 0 });
+                return pushOnce(uid, id);
+            }
+            // Opened WITHOUT the rollback check (that is the point), but it
+            // must still be a real, current document for this account.
+            const opened = await open(id, uid, rev, blob, null);
+            if ('bad' in opened) return set(opened.bad!);
+            deps.writeLocal(opened.state);
+            deps.records.save(uid, { rev, base: opened.state, maxRev: rev });
+            return set('synced');
+        }),
+        unsynced: () => {
+            const uid = deps.uid();
+            if (uid === null) return false;
+            const local = deps.readLocal();
+            if (sameNoteState(local, EMPTY_NOTE_STATE)) return false;
+            if (current === 'unreadable' || current === 'rollback' || current === 'local-only') return true;
+            const rec = deps.records.load(uid);
+            return !rec || rec.base === null || !sameNoteState(local, rec.base);
+        },
         status: () => current,
         subscribe: cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
     };
@@ -324,9 +364,31 @@ export function pullNotesPrefs(): void {
     void appSync.pull();
 }
 
-/** Replace an unreadable server copy with this device's (a user action). */
+/** Replace the server's copy with this device's (a user action). */
 export function overwriteServerNotesPrefs(): void {
     void appSync.overwriteServer();
+}
+
+/** Take the server's copy as it is (a user action after a refused rollback). */
+export function acceptServerNotesPrefs(): void {
+    void appSync.acceptServer();
+}
+
+/** Colours, labels or archive flags on this device that the account's
+ *  document does not hold. A sign-out deletes the local copy, so the sign-out
+ *  confirm asks about these (NotesApp.tsx). */
+export function prefsUnsynced(): boolean {
+    return appSync.unsynced();
+}
+
+/**
+ * Push what is pending now, bounded: a sign-out's last chance to save it.
+ * Resolves with whether anything is STILL unsynced afterwards.
+ */
+export async function flushNotesPrefs(timeoutMs = 3000): Promise<boolean> {
+    if (!appSync.unsynced()) return false;
+    await Promise.race([appSync.push(), new Promise(r => setTimeout(r, timeoutMs))]);
+    return appSync.unsynced();
 }
 
 /**

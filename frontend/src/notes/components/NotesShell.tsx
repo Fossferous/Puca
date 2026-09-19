@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
+import { currentUserIdFromToken, decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import { notificationPermission } from '../../api/desktopNotify';
@@ -37,10 +37,11 @@ import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
-import { useNotesPrefsSync } from '../model/notesPrefsSync';
+import { flushNotesPrefs, prefsUnsynced, useNotesPrefsSync } from '../model/notesPrefsSync';
+import { writeNotesUnsynced } from '../../api/notesCacheScrub';
 import { useTaskEvents } from '../model/taskEvents';
 import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
-import { useNotesOutbox } from '../model/notesOutbox';
+import { useNotesOutbox, useOutboxPending } from '../model/notesOutbox';
 import { useNotesCachePersistence } from '../model/notesCache';
 import { useBulkPending, useNoteSelection } from './useNoteSelection';
 
@@ -103,6 +104,13 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const actions = useNoteActions(allCards, prefs, prefsReady);
     const local = useNotesPrefs();
     const prefsSync = useNotesPrefsSync();
+    // What a sign-out would lose, published for PÚCA's sign-out to ask about
+    // too (api/notesCacheScrub.ts): a sign-out in either tab deletes it.
+    const outboxPending = useOutboxPending();
+    useEffect(() => {
+        const uid = currentUserIdFromToken();
+        if (uid !== null) writeNotesUnsynced(uid, { ops: outboxPending, prefs: prefsUnsynced() });
+    }, [outboxPending, prefsSync, local]);
     useTaskEvents();
     useNotesCachePersistence();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
@@ -326,6 +334,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     })();
     const signOutEverywhere = async () => {
         if (!window.confirm('Sign out of every device? Every phone and computer signed in to this account will need to sign in again.')) return;
+        // Last chance for colours and labels while this session still works.
+        if (prefsUnsynced()) await flushNotesPrefs();
         try {
             await logoutEverywhere();
         } catch {

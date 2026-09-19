@@ -94,3 +94,12 @@
        text and Make copies stay on each card's More menu. */
     .notes-selectbar-extra { display: none; }
 }
+
+/* ---------- A sync banner that asks for a choice (rollback) ------------------------ */
+.notes-status-choice { flex-wrap: wrap; }
+.notes-status-choice .notes-status-text { flex: 1 1 260px; min-width: 0; }
+.notes-status-choice .notes-status-actions { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.notes-status-choice .notes-status-actions button { margin-left: 0; }
+@media (pointer: coarse) {
+    .notes-status-choice .notes-status-actions button { min-height: 44px; padding: 6px 14px; font-size: 16px; }
+}

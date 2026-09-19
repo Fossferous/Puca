@@ -187,6 +187,116 @@ describe('two devices, one account', () => {
     });
 });
 
+describe('nothing is lost in a slow conflict, and a rollback has a way out', () => {
+    it('an edit made DURING a slow 409 round trip survives the merge', async () => {
+        const server = new FakeServer();
+        const a = device(server);
+        const b = device(server);
+        await a.sync.pull();
+        await b.sync.pull();
+        a.edit(s => ({ ...s, colors: { 'list:1': 'coral' } }));
+        await a.sync.push();                                        // B is now one revision behind
+        b.edit(s => ({ ...s, labels: { 'list:2': ['First'] } }));
+        // The server answers B's PUT slowly; while it is out, B edits again.
+        const realPut = server.put.bind(server);
+        let releases = 0;
+        server.put = async (expected, blob) => {
+            const r = await realPut(expected, blob);
+            if (r.kind === 'conflict' && releases++ === 0) {
+                await new Promise(res => setTimeout(res, 20));
+                b.edit(s => ({ ...s, colors: { ...s.colors, 'list:3': 'sage' } }));   // typed during the round trip
+            }
+            return r;
+        };
+        expect(await b.sync.push()).toBe('synced');
+        expect(b.local.colors['list:3']).toBe('sage');              // not written over by the merge
+        expect(b.local.colors['list:1']).toBe('coral');             // and the other device's change arrived
+        expect(b.local.labels['list:2']).toEqual(['First']);
+        // The late edit goes up with the next push (it is this device's change).
+        expect(await b.sync.push()).toBe('synced');
+        expect((await server.state())!.colors).toEqual({ 'list:1': 'coral', 'list:3': 'sage' });
+    });
+
+    async function rolledBack() {
+        const server = new FakeServer();
+        const a = device(server, st({ colors: { 'list:1': 'mint' } }));
+        await a.sync.pull();
+        const old = { ...server.doc };                              // revision 1: mint
+        a.edit(s => ({ ...s, colors: { 'list:1': 'dusk' } }));
+        await a.sync.push();                                        // revision 2: dusk
+        a.edit(s => ({ ...s, colors: { ...s.colors, 'list:2': 'sand' } }));
+        await a.sync.push();                                        // revision 3
+        server.doc = old;                                           // a restored backup
+        expect(await a.sync.pull()).toBe('rollback');
+        return { server, a };
+    }
+
+    it('rollback -> "use the server’s copy" takes it, and syncing resumes', async () => {
+        const { server, a } = await rolledBack();
+        expect(await a.sync.acceptServer()).toBe('synced');
+        expect(a.local.colors).toEqual({ 'list:1': 'mint' });
+        // Resumed: a later edit syncs, and a later pull is not refused.
+        a.edit(s => ({ ...s, colors: { 'list:1': 'coral' } }));
+        expect(await a.sync.push()).toBe('synced');
+        expect(await a.sync.pull()).toBe('synced');
+        expect((await server.state())!.colors).toEqual({ 'list:1': 'coral' });
+    });
+
+    it('rollback -> "keep this device’s" replaces the server’s, and syncing resumes', async () => {
+        const { server, a } = await rolledBack();
+        expect(await a.sync.overwriteServer()).toBe('synced');
+        expect((await server.state())!.colors).toEqual({ 'list:1': 'dusk', 'list:2': 'sand' });
+        expect(await a.sync.pull()).toBe('synced');                 // not refused as a rollback again
+        const b = device(server);
+        expect(await b.sync.pull()).toBe('synced');
+        expect(b.local.colors).toEqual({ 'list:1': 'dusk', 'list:2': 'sand' });
+    });
+
+    it('accepting the server’s copy still refuses one that will not open', async () => {
+        const { server, a } = await rolledBack();
+        server.doc = { rev: 1, blob: await sealAccountBlob(makeIdentity(new Uint8Array(32).fill(3)), UID, 'notes-prefs', encodePrefsDoc(1, st({}))) };
+        expect(await a.sync.acceptServer()).toBe('unreadable');
+        expect(a.local.colors).toEqual({ 'list:1': 'dusk', 'list:2': 'sand' });
+    });
+});
+
+describe('what a sign-out would lose', () => {
+    it('unsynced(): a local change not yet in the account’s document', async () => {
+        const server = new FakeServer();
+        const a = device(server);
+        expect(a.sync.unsynced()).toBe(false);                      // empty: nothing to lose
+        a.edit(s => ({ ...s, labels: { 'list:1': ['Mine'] } }));
+        expect(a.sync.unsynced()).toBe(true);                       // never synced
+        expect(await a.sync.pull()).toBe('synced');
+        expect(a.sync.unsynced()).toBe(false);                      // positive control: in the document now
+        a.edit(s => ({ ...s, colors: { 'list:1': 'mint' } }));
+        expect(a.sync.unsynced()).toBe(true);                       // edited since
+        server.maxBytes = 10;
+        expect(await a.sync.push()).toBe('too-large');
+        expect(a.sync.unsynced()).toBe(true);                       // kept here only
+        server.maxBytes = 1 << 20;
+        expect(await a.sync.push()).toBe('synced');
+        expect(a.sync.unsynced()).toBe(false);
+    });
+
+    it('unsynced(): a refused rollback or an old backend counts even when local equals the last base', async () => {
+        const server = new FakeServer();
+        server.supported = false;
+        const a = device(server, st({ colors: { 'list:1': 'mint' } }));
+        expect(await a.sync.pull()).toBe('local-only');
+        expect(a.sync.unsynced()).toBe(true);
+        const s2 = new FakeServer();
+        const b = device(s2, st({ colors: { 'list:1': 'mint' } }));
+        await b.sync.pull();
+        const old = { ...s2.doc };
+        b.edit(s => ({ ...s, colors: { 'list:1': 'dusk' } }));
+        await b.sync.push();
+        s2.doc = old;
+        expect(await b.sync.pull()).toBe('rollback');
+        expect(b.sync.unsynced()).toBe(true);
+    });
+});
+
 describe('the envelope', () => {
     it('opens only its own account, name and key — never plaintext', async () => {
         const blob = await sealAccountBlob(identity, UID, 'notes-prefs', 'secret');
