@@ -28,7 +28,7 @@ vi.mock('../notes/native/notesNative', () => ({
     nativeNotificationStatus: async () => (available ? notif : null),
     nativeExactAlarmStatus: async () => (available ? exact : null),
     nativeBatteryStatus: async () => (available ? battery : null),
-    requestNativeNotificationPermission: vi.fn(async () => true),
+    requestNativeNotificationPermission: vi.fn(async () => false),
     openNativeNotificationSettings: vi.fn(async () => true),
     openNativeExactAlarmSettings: vi.fn(async () => true),
     requestNativeBatteryExemption: vi.fn(async () => true),
@@ -101,6 +101,22 @@ describe('NativeReminderBanners', () => {
         await settle();
         expect(container.querySelector('[data-native-banner="enable"]')?.textContent).toMatch(/even when Notes is closed/);
         expect(container.querySelector('[data-native-banner="blocked"]')).toBeNull();
+    });
+    it('Android 13+ shape: ungranted reads as disabled too, and is still askable', async () => {
+        notif = { granted: false, needsRequest: true, blocked: true };
+        act(() => root.render(<NativeReminderBanners />));
+        await settle();
+        expect(container.querySelector('[data-native-banner="enable"]')).not.toBeNull();
+        expect(container.querySelector('[data-native-banner="blocked"]')).toBeNull();
+    });
+    it('an Enable tap that stays ungranted (two-denial lockout) turns into Open settings', async () => {
+        notif = { granted: false, needsRequest: true, blocked: true };
+        act(() => root.render(<NativeReminderBanners />));
+        await settle();
+        (container.querySelector('[data-native-banner="enable"] button') as HTMLButtonElement).click();
+        await settle();
+        expect(container.querySelector('[data-native-banner="enable"]')).toBeNull();
+        expect(container.querySelector('[data-native-banner="blocked"]')).not.toBeNull();
     });
     it('routes to settings when notifications are blocked', async () => {
         notif = { granted: true, needsRequest: false, blocked: true };

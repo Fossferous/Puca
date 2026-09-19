@@ -30,7 +30,16 @@ async function readStatus(): Promise<Status> {
 
 export function NativeReminderBanners() {
     const [s, setS] = useState<Status | null>(null);
+    // Set once an Enable tap came back still ungranted: after two denials
+    // Android makes the request a silent no-op, and only Settings can help.
+    const [asked, setAsked] = useState(false);
     const refresh = useCallback(() => { void readStatus().then(setS); }, []);
+    const enable = useCallback(() => {
+        void requestNativeNotificationPermission().then(granted => {
+            if (!granted) setAsked(true);
+            refresh();
+        });
+    }, [refresh]);
 
     useEffect(() => {
         if (!notesNativeAvailable()) return;
@@ -44,13 +53,18 @@ export function NativeReminderBanners() {
 
     if (!s || !s.notif) return null;
     const { notif } = s;
-    const off = notif.blocked || (!notif.granted && !notif.needsRequest);
+    // On 13+ an ungranted permission also reads as "notifications disabled"
+    // (blocked), so ASKABLE is decided by needsRequest alone; blocked matters
+    // once the permission is granted (the app or its channel switched off).
+    const askable = notif.needsRequest && !asked;
+    const off = !askable && (!notif.granted || notif.blocked);
+    const working = notif.granted && !notif.blocked;
     return (
         <>
-            {notif.needsRequest && !notif.blocked && (
+            {askable && (
                 <div className="notes-status offline" data-native-banner="enable">
                     <BellIcon /> Get a notification when an item comes due, even when Notes is closed.
-                    <button type="button" onClick={() => { void requestNativeNotificationPermission().then(refresh); }}>Enable</button>
+                    <button type="button" onClick={enable}>Enable</button>
                 </div>
             )}
             {off && (
@@ -59,13 +73,13 @@ export function NativeReminderBanners() {
                     <button type="button" onClick={() => { void openNativeNotificationSettings(); }}>Open settings</button>
                 </div>
             )}
-            {notif.granted && !off && s.exact === false && (
+            {working && s.exact === false && (
                 <div className="notes-status offline" data-native-banner="exact">
                     <ClockIcon /> Reminders may arrive a few minutes late.
                     <button type="button" onClick={() => { void openNativeExactAlarmSettings(); }}>Allow exact timing</button>
                 </div>
             )}
-            {notif.granted && !off && s.battery === false && (
+            {working && s.battery === false && (
                 <div className="notes-status offline" data-native-banner="battery">
                     <WarningIcon /> Android may hold reminders back while Notes is closed.
                     <button type="button" onClick={() => { void requestNativeBatteryExemption(); }}>Let it run</button>
