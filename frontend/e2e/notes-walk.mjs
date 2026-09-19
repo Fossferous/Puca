@@ -17,6 +17,10 @@
 // tap target at size, 16px inputs, the FAB composer, the drawer, a popover
 // inside the viewport, the full-screen editor with the grip and arrows.
 //
+// Every check is ck(): a precondition that did not happen (nothing to measure,
+// an element not found) is a FAIL line, never a silent pass, and any FAIL
+// makes the walk exit 1.
+//
 // Usage: node e2e/notes-walk.mjs [outdir] [baseURL] [psql-dsn]
 //   baseURL  default http://127.0.0.1:5176 — `PORT=5176 node e2e/serve-dist.mjs`
 //   psql-dsn optional, e.g. postgres://postgres:testpw@127.0.0.1:55433/puca_keep_e2e
@@ -480,6 +484,23 @@ await page.waitForSelector('.tasks-trash-toggle', { timeout: 10000 });
 await page.click('.tasks-trash-toggle');
 ck('púca: the trashed list is in the Trash section', await page.locator('.tasks-trash-row', { hasText: 'Packing' }).count() === 1);
 await shot('puca-tasks-trash');
+// Notes loads (and runs its device-local prune) WHILE Púca holds Packing in the
+// trash — so the archive-flag check after the restore below can fail: a prune
+// that took the trashed note for deleted would erase the flag right here.
+const np = await ctx.newPage();
+watch(np);
+await np.goto('/notes/#/trash');
+const packingInNotesTrash = await np.waitForSelector('.notes-trash-row:has-text("Packing")', { timeout: 15000 }).then(() => true).catch(() => false);
+await np.waitForSelector('.notes-rail-item', { timeout: 5000 }).catch(() => {});
+await sleep(1500);   // the prune (and any fresh read of the trash it asks for) settles
+const archivedWhileTrashed = await np.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText().catch(() => '?');
+ck('notes (second tab): opened while Púca holds Packing in the trash — it is in the Notes trash, not counted as archived', packingInNotesTrash && archivedWhileTrashed === '0', `inTrash=${packingInNotesTrash} archived=${archivedWhileTrashed}`);
+await np.close();
+// Púca asks, 3 s after it mounts, about a recovery code generated at sign-up and
+// never confirmed; the walk above outlasts that. Answer it (it is not under test).
+await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* not shown */ });
 await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button', { name: 'Restore' }).click();
 await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
     .then(() => ck('púca: Restore puts it back in the bar', true))
@@ -615,12 +636,70 @@ await m.getByRole('button', { name: 'Cancel' }).tap();
 await m.waitForSelector('.notes-draw', { state: 'detached', timeout: 5000 });
 await m.locator('.notes-quickadd.sheet button[aria-label="Discard note"]').tap();
 await m.waitForSelector('.notes-quickadd.sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
-// The Trash at phone size.
+// The Trash at phone size — with a note in it, or there is nothing to measure.
+const phoneNote = m.locator('.notes-card', { hasText: 'Phone note' });
+await phoneNote.locator('button[aria-label="More actions"]').tap().catch(() => {});
+await m.locator('.context-menu-item', { hasText: 'Move to trash' }).tap({ timeout: 5000 }).catch(() => {});
+await m.waitForSelector('.notes-undo-text:has-text("to the trash")', { timeout: 8000 }).catch(() => {});
 await m.goto('/notes/#/trash');
 await m.waitForSelector('.notes-trash', { timeout: 10000 });
+await m.waitForSelector('.notes-trash-row', { timeout: 10000 }).catch(() => {});
+const trashRows = await m.locator('.notes-trash-row').count();
+const trashRowButtons = await m.locator('.notes-trash-row button').count();
+ck('phone: the Trash has a note in it to measure (moved there from the phone)', trashRows >= 1 && trashRowButtons >= 2, `rows=${trashRows} buttons=${trashRowButtons}`);
+const phoneTrashMeta = await m.locator('.notes-trash-row', { hasText: 'Phone note' }).locator('.notes-trash-meta').innerText().catch(() => '');
+ck('phone: a note trashed just now counts down the full 30 days (not 31)', /deleted forever in 30 days/.test(phoneTrashMeta), phoneTrashMeta);
 r = await audit();
-ck('phone: the Trash view fits, targets at size', !r.bodyScrollsHorizontally && r.under.length === 0, JSON.stringify(r.under));
+ck('phone: the Trash view fits, its row controls and Empty trash at size', trashRows >= 1 && !r.bodyScrollsHorizontally && r.under.length === 0, JSON.stringify({ rows: trashRows, under: r.under }));
 await mshot('phone-trash');
+
+// Púca's Tasks view at 390x844: the Trash section at the end of the All tasks
+// board (above the bottom nav) and a photo note's text and picture controls.
+const pucaAudit = scope => m.evaluate(sel => {
+    const root = document.querySelector(sel);
+    if (!root) return { missing: sel, buttons: 0, under: [], textPx: 0, overflow: true };
+    const vis = el => { const b = el.getBoundingClientRect(); const st = getComputedStyle(el); return b.width > 0 && b.height > 0 && st.visibility !== 'hidden' && st.display !== 'none'; };
+    const btns = [...root.querySelectorAll('button')].filter(vis).filter(b => !b.matches('.ni-open'));
+    const under = btns.map(b => [b, b.getBoundingClientRect()]).filter(([, b]) => b.width < 43.5 || b.height < 43.5).map(([el, b]) => `${el.className || el.tagName} ${Math.round(b.width)}x${Math.round(b.height)}`);
+    const ta = root.querySelector('textarea');
+    return { buttons: btns.length, under, textPx: ta ? parseFloat(getComputedStyle(ta).fontSize) : 0, overflow: document.documentElement.scrollWidth > window.innerWidth + 1 };
+}, scope);
+await m.goto('/chat');
+await m.waitForSelector('.chat-container', { timeout: 20000 }).catch(() => {});
+try { await m.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+await m.locator('.mobile-nav-btn').nth(0).tap().catch(() => {});
+await m.locator('.server-icon.notes-self').tap({ timeout: 5000 }).catch(() => {});
+await m.waitForSelector('.tasks-tabbar', { timeout: 15000 }).catch(() => {});
+const trashToggle = m.locator('.tasks-trash-toggle');
+await trashToggle.waitFor({ timeout: 10000 }).catch(() => {});
+const hasTrashSection = await trashToggle.count() === 1;
+ck('phone púca: the All tasks board has its Trash section (a note is in the trash)', hasTrashSection);
+if (hasTrashSection) {
+    await trashToggle.scrollIntoViewIfNeeded();
+    await trashToggle.tap();
+    await m.waitForSelector('.tasks-trash-row', { timeout: 5000 }).catch(() => {});
+}
+let pr = await pucaAudit('.tasks-trash');
+ck('phone púca: the Trash section lists the note trashed on the phone', await m.locator('.tasks-trash-row', { hasText: 'Phone note' }).count() === 1);
+ck('phone púca: Trash controls at size, nothing overflows', pr.buttons >= 3 && pr.under.length === 0 && !pr.overflow, JSON.stringify(pr));
+const trashTitleBox = await m.locator('.tasks-trash-row', { hasText: 'Phone note' }).locator('.tasks-trash-title').boundingBox().catch(() => null);
+ck('phone púca: a trashed list’s title gets a line of its own, not a letter per line', !!trashTitleBox && trashTitleBox.width >= 200 && trashTitleBox.height <= 48, JSON.stringify(trashTitleBox));
+const lastTrashBtn = m.locator('.tasks-trash-row button').last();
+let reachable = false, lastBox = null, navTop = null;
+if (await lastTrashBtn.count() === 1) {
+    await lastTrashBtn.scrollIntoViewIfNeeded();
+    lastBox = await lastTrashBtn.boundingBox();
+    navTop = await m.evaluate(() => { const n = document.querySelector('.mobile-bottom-nav'); return n ? n.getBoundingClientRect().top : window.innerHeight; });
+    reachable = !!lastBox && lastBox.y >= 0 && lastBox.y + lastBox.height <= navTop + 0.5;
+}
+ck('phone púca: the last Trash button scrolls clear of the bottom nav', reachable, JSON.stringify({ lastBox, navTop }));
+await mshot('phone-puca-tasks-trash');
+const photoTab = m.locator('.tasks-tab', { hasText: 'Holiday photo' });
+await photoTab.tap({ timeout: 5000 }).catch(() => {});
+await m.waitForSelector('.list-content-block .ni-actions', { timeout: 10000 }).catch(() => {});
+pr = await pucaAudit('.list-content-block');
+ck('phone púca: a photo note — text field ≥ 16px, picture controls at size, no overflow', pr.buttons >= 1 && pr.under.length === 0 && pr.textPx >= 16 && !pr.overflow, JSON.stringify(pr));
+await mshot('phone-puca-photo-list');
 await m.goto('/notes/');
 await m.waitForSelector('.notes-card', { timeout: 20000 });
 // A photo note's editor: gallery controls and the text field.
