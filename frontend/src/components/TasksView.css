@@ -110,6 +110,15 @@
     margin-right: 4px;
 }
 
+/* The pinned Calendar tab: beside All tasks and, like it, never squeezed to
+   an ellipsis. On a phone it is its icon alone (aria-label names it), so the
+   list tabs keep the width. */
+.tasks-tab-calendar { flex-shrink: 0; }
+@media (pointer: coarse) and (max-width: 1024px) {
+    .tasks-tab-calendar { min-width: 44px; justify-content: center; }
+    .tasks-tab-calendar .tasks-tab-title { display: none; }
+}
+
 /* --- All-tasks board cards --- */
 .tasks-card-sub {
     margin-left: 8px;

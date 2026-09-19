@@ -91,5 +91,40 @@ console.log('emoji-picker width (should be 352px, not stretched):', await page.e
     return el ? getComputedStyle(el).width : null;
 }));
 
+// Púca's Tasks view with schedules: the date & repeat editor on a TaskTree
+// row, the row then showing its date chip INSTEAD of the raw due editor, and
+// the pinned Calendar tab with its desktop Week grid.
+await tryStep('tasks-schedule', async () => {
+    await page.keyboard.press('Escape');   // the emoji picker from the step above
+    await page.waitForTimeout(300);
+    await page.locator('.server-icon.notes-self').click({ timeout: 4000 });
+    await page.waitForTimeout(800);
+    await page.locator('.tasks-tabbar-actions .tasks-tab-icon[title="New list"]').click({ timeout: 4000 });
+    await page.locator('.tasks-tab-newform input').fill('Bills');
+    await page.locator('.tasks-tab-newform input').press('Enter');
+    await page.waitForTimeout(800);
+    await page.locator('.tasks-add input').fill('Pay rent');
+    await page.locator('.tasks-add button[type="submit"]').click();
+    const row = page.locator('.tt-item', { hasText: 'Pay rent' }).first();
+    await row.waitFor({ timeout: 5000 });
+    await row.hover();
+    await row.locator('.tt-btn[title="Add date & repeat"]').click({ timeout: 4000 });
+    await page.selectOption('select[aria-label="Repeat"]', 'monthly-day');
+    await page.click('.sched-dialog .sched-btn.primary');
+    await row.locator('.tt-sched').waitFor({ timeout: 5000 });
+    await row.hover();
+    const rawDue = await row.locator('.tt-btn[title="Add due time"], .tt-btn[title="Edit due time"]').count();
+    console.log('scheduled row: date chip shown, raw due editor hidden (should be true):', await row.locator('.tt-sched').count() === 1 && rawDue === 0);
+});
+await shot('tasks-scheduled-row');
+await tryStep('tasks-calendar-tab', async () => {
+    await page.locator('.tasks-tab-calendar').click({ timeout: 4000 });
+    await page.locator('.tasks-calendar .cal-month').waitFor({ timeout: 5000 });
+    console.log('tasks calendar: Week offered on desktop (should be true):', await page.locator('.tasks-calendar .cal-viewbtn.view-week').isVisible());
+    await page.locator('.tasks-calendar .cal-viewbtn.view-week').click();
+    console.log('tasks calendar: 7-column week grid (should be true):', await page.locator('.tasks-calendar .cal-timegrid.cols-7').count() === 1);
+});
+await shot('tasks-calendar-week');
+
 console.log('DONE user=', username);
 await browser.close();

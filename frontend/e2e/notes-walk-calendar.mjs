@@ -385,7 +385,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     };
     let n = 0;
     const shotOf = page => async name => { n++; const f = `${outdir}/${String(n).padStart(2, '0')}-${name}.png`; await page.screenshot({ path: f }); console.log('SHOT', f); };
-    const browser = await chromium.launch();
+    const browser = await chromium.launch({ args: ['--mute-audio'] });   // a walk never makes a sound
     const username = 'notescal_' + Math.random().toString(36).slice(2, 8);
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL });
     const page = await ctx.newPage();

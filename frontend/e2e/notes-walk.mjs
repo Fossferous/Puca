@@ -49,7 +49,7 @@ let fail = 0;
 const ck = (n, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${detail !== undefined ? '  — ' + detail : ''}`); if (!ok) fail++; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--mute-audio'] });   // a walk never makes a sound
 const errors = [];
 const watch = page => {
     page.on('pageerror', e => { errors.push(String(e)); console.log('[pageerror]', String(e).slice(0, 300)); });

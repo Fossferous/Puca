@@ -613,6 +613,7 @@ export function TasksView() {
                         className={`tasks-tab tasks-tab-calendar ${selected?.kind === 'calendar' ? 'active' : ''}`}
                         onClick={() => setSelected({ kind: 'calendar', id: 0 })}
                         title="Calendar — every dated item"
+                        aria-label="Calendar"
                     >
                         <CalendarIcon className="tasks-tab-kind" />
                         <span className="tasks-tab-title">Calendar</span>

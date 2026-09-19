@@ -183,6 +183,21 @@ await tryStep('tasks-all-board', async () => {
     await page.waitForTimeout(1200);
 });
 await shot('tasks-all-board');
+// The pinned Calendar tab (the same component as Notes' /calendar) on the
+// phone gate: no Week button, dots in the month, nothing wider than the screen.
+await tryStep('tasks-calendar-tab', async () => {
+    await page.locator('.tasks-tab-calendar').tap({ timeout: 3000 });
+    await page.locator('.tasks-calendar .cal-month').waitFor({ timeout: 5000 });
+    const r = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        week: (() => { const b = document.querySelector('.tasks-calendar .cal-viewbtn.view-week'); return !!b && getComputedStyle(b).display !== 'none'; })(),
+        // The pinned tab is a whole tap target, not squeezed to "C…".
+        tabW: Math.round(document.querySelector('.tasks-tab-calendar')?.getBoundingClientRect().width ?? 0),
+    }));
+    console.log('tasks calendar (phone): no overflow, no Week button, tab >= 44px (should be true):', !r.overflow && !r.week && r.tabW >= 44, r.tabW);
+    if (r.overflow || r.week || r.tabW < 44) throw new Error(`phone calendar gate: ${JSON.stringify(r)}`);
+});
+await shot('tasks-calendar-phone');
 // A server checklist opened as its own tab (channel tabs carry the kind glyph).
 await tryStep('tasks-channel-tab', async () => {
     await page.locator('.tasks-tab.tasks-tab-channel').first().tap({ timeout: 3000 });
