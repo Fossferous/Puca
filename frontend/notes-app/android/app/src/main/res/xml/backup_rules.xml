@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Auto Backup rules (API 30 and below; 31+ reads data_extraction_rules.xml).
+     Copied from the Púca app, for the same reason.
+
+     Backup is DISABLED outright by android:allowBackup="false" in the
+     manifest, so these rules are not consulted today. They are INCLUDE-ONLY
+     with nothing included as a second line of defence: if anyone flips
+     allowBackup back on, nothing is copied — not the WebView profile (the
+     E2EE identity seed, the session token) and not the reminder store, which
+     holds a copy of the session token for the background refresh. -->
+<full-backup-content>
+    <!-- Intentionally empty: include-only with no includes backs up nothing. -->
+    <include domain="root" path="backup-nothing-placeholder" />
+</full-backup-content>

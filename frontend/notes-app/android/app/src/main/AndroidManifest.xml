@@ -5,9 +5,16 @@
          profile (app_webview) holds the E2EE identity seed and the session
          token, and Auto Backup / device-to-device transfer would copy it to
          Google's backup service. Nothing needs backing up — a device
-         re-derives its state by signing in. -->
+         re-derives its state by signing in. The reminder store now also holds
+         a copy of the session token (the background refresh), so the
+         include-only rule files are carried too, as in Púca: re-enabling
+         backup later still copies nothing. requestLegacyExternalStorage lets
+         Android 10 write an export into Documents (ignored from 11 on). -->
     <application
         android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="${notesCleartext}"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -39,9 +46,81 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- The due-reminder alarm lands here. Not exported: only this app's
+             own PendingIntent can reach it. -->
+        <receiver
+            android:name=".ReminderReceiver"
+            android:exported="false" />
+
+        <!-- Re-arms after a reboot, an update, a clock or time-zone change,
+             or the exact-alarm grant changing. Exported because system
+             broadcasts must reach it; each action is protected (or, for
+             MY_PACKAGE_REPLACED, delivered only to this app). -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- The ~hourly reminder-feed refresh while Notes is closed. Only the
+             system's job scheduler may bind it. -->
+        <service
+            android:name=".ReminderRefreshJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
+
+        <!-- Location reminders: type location ONLY, running exactly while
+             there are saved-place fences and a location grant. -->
+        <service
+            android:name=".NotesGeofenceService"
+            android:foregroundServiceType="location"
+            android:exported="false" />
     </application>
 
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Due reminders (docs/NOTES.md, "The Android app"). Notifications are a
+         runtime ask on 13+, from the Reminders view's banner. Exact alarms:
+         USE_EXACT_ALARM on 13+ (granted at install; fine for a sideloaded
+         reminder app, would need Play's declaration if Notes were ever listed
+         there), SCHEDULE_EXACT_ALARM on 12-12L only. BOOT_COMPLETED re-arms
+         the alarm and keeps the persisted refresh job. The battery exemption
+         is asked from a banner, never on its own. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission
+        android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Location reminders (opt-in per phone, OFF by default). Coordinates
+         never leave the device: fences are {taskId, lat, lon, r} in app
+         prefs, evaluated on-device, no Play Services, no network call.
+         BACKGROUND_LOCATION lets the watch start again after a reboot and is
+         asked as Android requires (foreground first, then "Allow all the
+         time"); FOREGROUND_SERVICE_LOCATION pairs with the service type. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <!-- Export into Documents on Android 10 and older (11+ needs no grant for
+         a file the app creates there). -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 </manifest>
