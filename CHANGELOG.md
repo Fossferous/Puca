@@ -20,7 +20,11 @@ one-line summary; this file is the full story. Versions follow
   devices. A per-item *Keep the time private from the server* switch hides that
   too, and then the item gets no reminders.
 - **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
-  morning.
+  morning. The reminder time the server holds moves with the snooze, so a
+  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
+  is only offered to people allowed to tick the item.
+- **Ticking an item with a repeating to-do under it** is refused with a
+  reason instead of quietly ending the repeat.
 - **Edited.** Notes show when they were last changed, and can be sorted by it.
 - **Your data export includes dates, repeats and snoozes**, opened like the rest
   of your items.

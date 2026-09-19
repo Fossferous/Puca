@@ -223,7 +223,9 @@ boundary rules added in 0.9.5.
 ## Task timing (calendar, repeats, snooze)
 
 Migration 066. `schedule` and `snooze` are client-sealed envelopes (never
-plaintext — a non-envelope value is 400) with the same three-state contract as
+plaintext — a non-envelope value is 400; on a checklist-channel item only a
+v3 channel envelope, `"t":"ch"` with `v` ≥ 3, is accepted — an unbound v2 or
+a self envelope is 400) with the same three-state contract as
 `attachments`: absent = keep, `""` = clear, value = set. Every task response
 carries `schedule`, `snooze` and `updated_at` keys (null when unset). What the
 server can see of them is in `docs/SECURITY_MODEL.md` §2.
