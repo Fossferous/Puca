@@ -211,10 +211,10 @@ mod db_tests {
     use crate::state::AppState;
     use crate::task_handlers::{
         create_list_task, create_task, list_list_tasks, list_task_lists, list_task_reminders, reorder_task,
-        update_task, CreateTaskRequest, ReorderTaskRequest, UpdateTaskRequest,
+        update_task, CreateTaskRequest, ReorderTaskRequest, TaskListsQuery, UpdateTaskRequest,
     };
     use axum::{
-        extract::{Json, Path, State},
+        extract::{Json, Path, Query, State},
         http::StatusCode,
         response::{IntoResponse, Response},
         Extension,
@@ -509,7 +509,7 @@ mod db_tests {
 
         // The list responses carry updated_at; deleting a whole list with
         // items in it still works with the AFTER DELETE trigger in place.
-        let lists = body(list_task_lists(State(state.clone()), Extension(claims.clone())).await.into_response()).await;
+        let lists = body(list_task_lists(State(state.clone()), Extension(claims.clone()), Query(TaskListsQuery::default())).await.into_response()).await;
         assert!(lists[0]["updated_at"].as_str().is_some_and(|s| s.ends_with('Z')), "{lists}");
         let tasks = body(list_list_tasks(State(state.clone()), Path(list), Extension(claims.clone())).await.into_response()).await;
         assert!(tasks.as_array().unwrap().iter().all(|t| t.get("schedule").is_some() && t.get("updated_at").is_some()));
