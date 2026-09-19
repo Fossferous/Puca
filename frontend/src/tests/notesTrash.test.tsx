@@ -333,6 +333,26 @@ describe('a trash waits for the text still being saved', () => {
     });
 });
 
+describe('Empty trash', () => {
+    it('one note that cannot go does not keep the rest, and it is reported once', async () => {
+        server.live = [1];
+        server.trashed = [4, 5, 6];
+        const base = get.getMockImplementation()!;
+        get.mockImplementation(async (path: string) => {
+            if (path === '/task-lists/4/tasks') throw new TypeError('Failed to fetch');   // its files cannot be named
+            return base(path);
+        });
+        await mount();
+        await act(async () => { await latest!.actions.content.emptyTrash(); });
+        await settle();
+        const deleted = del.mock.calls.map(c => c[0]);
+        expect(deleted).not.toContain('/task-lists/4');
+        expect(deleted).toEqual(expect.arrayContaining(['/task-lists/5', '/task-lists/6']));
+        expect(toasts).toHaveLength(1);
+        expect(toasts[0]).toMatch(/can’t be read here yet/);
+    });
+});
+
 describe('when the server cannot be reached', () => {
     it('a delete does NOTHING — it is never mistaken for an old server and made permanent', async () => {
         const base = get.getMockImplementation()!;

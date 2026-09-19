@@ -384,7 +384,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const emptyTrash = useCallback(async () => {
         const all = qc.getQueryData<TaskList[]>(listContentKeys.trash) ?? [];
         let first: unknown = null;
-        for (const l of all) first = first ?? await deleteOne(l);   // one toast for the lot
+        for (const l of all) {
+            // One note that cannot go must not keep the rest: try every one,
+            // and report once for the lot.
+            const err = await deleteOne(l);
+            if (err && !first) first = err;
+        }
         if (first) reportDeleteFailure(first, all.length > 1);
     }, [qc, deleteOne]);
 
