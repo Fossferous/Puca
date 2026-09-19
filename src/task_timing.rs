@@ -6,7 +6,9 @@
 //! EventSchedule (all-day, start/end, time zone, repeat rule, skipped dates,
 //! location, alerts, "keep time private"); `snooze` is a client-sealed
 //! {forDue, until}. What the server CAN see: whether each is present, its
-//! (bucket-padded) size, due_at as before, and edit times. That is what
+//! (bucket-padded) size, due_at as before, and edit times. An editor's
+//! snooze also moves the plaintext due_at to the snooze instant (the next
+//! reminder), so only the pushed-back time stays sealed. That is what
 //! docs/SECURITY_MODEL.md states.
 //!
 //! Because the rule inside `schedule` is invisible here, the guard that stops

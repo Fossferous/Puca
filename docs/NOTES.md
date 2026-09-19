@@ -667,7 +667,12 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   `NotesNative.addToPhoneCalendar`) hands one event to the phone's calendar app,
   after a one-time notice that the phone may sync it.
 - **Edited**: `updated_at` changes when an item's content changes. A reorder,
-  a snooze or the reminder loop moving a derived `due_at` does not count. A
+  a snooze or the reminder loop moving a derived `due_at` does not count.
+  Known looseness: the server cannot open the snooze, so migration 066's
+  trigger ignores any `due_at` change made in the same UPDATE as a snooze
+  change. A client that bundled a real due-time edit with a snooze toggle
+  would not stamp Edited. This client never does, and Edited is a display
+  hint, not a security boundary. A
   personal note's time is the newest of its list and its items. A shared note
   has no list row, so its time is the newest item's, and a deleted item there
   leaves no trace. The editor shows it beside Created, and the sort menu has

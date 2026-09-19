@@ -156,8 +156,8 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 
 Item text, attachments, and (since migration 066) each item's **schedule**
 (event or to-do, all-day, start/end, time zone, repeat rule, skipped dates,
-place, alerts) and **snooze time** are sealed on the device. The server stores
-them and cannot read them. What it CAN see, per task:
+place, alerts) and **snooze record** are sealed on the device. The server
+stores them and cannot read them. What it CAN see, per task:
 
 - **`due_at`, in plaintext.** For a plain dated item that is its due time, as it
   always was. For an item with a schedule it is the **next reminder instant**,
@@ -170,6 +170,16 @@ them and cannot read them. What it CAN see, per task:
   plaintext to 256, 1024, 4096 or 8192 bytes, so the server learns roughly how
   large it is (for example, many skipped dates or a long place name), not what is in it.
   Whether a schedule repeats is not visible, and neither is its zone.
+- **When a snoozed item will remind, in most cases.** A snooze by someone who
+  may edit the item's time (its creator, a task manager, anyone in their own
+  personal notes) moves the plaintext `due_at` to the **snooze instant** — the
+  same rule as above: the server sees the next reminder instant, so a phone
+  reminding with Púca Notes closed goes off at the snoozed time. The server
+  already knew the time it replaced. What stays sealed is only the time the
+  snooze pushed back (which Unsnooze restores) and the fact that this new
+  `due_at` is a snooze rather than an edit. A member who may only tick the
+  item gets a sealed snooze alone: `due_at` does not move, and the server
+  cannot read that snooze's time.
 - **That a snooze exists** (it is padded to one fixed size), and **when** it was
   set, because the write is a PATCH at that moment.
 - **`updated_at`** on every task and personal list: when its content last

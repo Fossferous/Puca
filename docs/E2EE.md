@@ -124,7 +124,9 @@ DM                     puca/v3/dm/<sender_id>/<recipient_id>      (directional)
 
 `chan-taskevt` and `chan-tasksnz` (migration 066) seal a checklist item's
 EventSchedule and snooze, so neither opens as the other, as a description or
-as a message. They bind the channel, epoch and creator but **not the task id**:
+as a message. Sealing a snooze does not hide when the item will remind: an
+editor's snooze also moves the plaintext `due_at` to the snooze instant, and
+only the pushed-back time stays sealed (`docs/SECURITY_MODEL.md` §2). They bind the channel, epoch and creator but **not the task id**:
 the server could move one item's schedule onto another item by the same
 creator in the same channel. Personal-list items seal both to self (v2, no
 associated data); there the plaintexts carry their own type tag (`"v":1` +

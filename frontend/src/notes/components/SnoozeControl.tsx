@@ -1,7 +1,8 @@
 /**
  * Snooze for a reminder row (Reminders view, the calendar's day list):
- * 10 minutes, an hour, or tomorrow at 09:00 — sealed on the device, the
- * server stores only that a snooze exists (task_timing.rs). Only an item
+ * 10 minutes, an hour, or tomorrow at 09:00. The snooze record is sealed on
+ * the device; an editor's snooze also moves the plaintext due_at to the
+ * snooze instant (taskSchedule.snoozePatch, docs/SECURITY_MODEL.md §2). Only an item
  * whose reminder has a time on the server (due_at) can be snoozed: a
  * private-timing item has nothing to push back.
  *
