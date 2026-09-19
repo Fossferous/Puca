@@ -53,6 +53,8 @@ const password = 'Password123!';
 let fail = 0;
 const ck = (n, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${detail !== undefined ? '  — ' + detail : ''}`); if (!ok) fail++; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+let skipped = 0;
+const skip = why => { skipped++; console.log(`SKIP  ${why}`); };
 
 const browser = await chromium.launch();
 const errors = [];
@@ -335,7 +337,7 @@ if (psqlDsn) {
         ck('database checks ran', false, String(e).slice(0, 200));
     }
 } else {
-    console.log('SKIP  database checks (no psql DSN given)');
+    skip('database checks (no psql DSN given)');
 }
 
 // ---- 12b. Export and share on the web ---------------------------------------------------------------
@@ -562,7 +564,7 @@ const onTop = (pg, sel) => pg.evaluate(sel => {
 // a shared note that ANOTHER member set reminds them, not this user, and the
 // Reminders row says so — on a second line, at desktop size and at 390x844.
 if (!psqlDsn) {
-    console.log('SKIP  shared-item hint (no psql DSN: the walk cannot seed a shared note)');
+    skip('shared-item hint (no psql DSN: the walk cannot seed a shared note)');
 } else {
     try {
         // A second account, registered like the first.
@@ -706,7 +708,7 @@ function installFakeAndroid() {
             return id;
         },
     };
-    window.__fakeAndroid = { calls, listeners };
+    window.__fakeAndroid = { calls, listeners, answers };
 }
 
 try {
@@ -792,6 +794,31 @@ try {
     const shared = (await a.evaluate(() => window.__fakeAndroid.calls)).filter(c => c.method === 'shareText').pop();
     ck('android shell: Share hands the note to the share sheet as a .md file', !!shared && /^Groceries\.md$/.test(shared.options.filename) && /Bread/.test(shared.options.text),
         shared ? shared.options.filename : 'no shareText call');
+    // The other two status lines: notifications on, but exact alarms refused
+    // (Android 12-12L lets the user revoke them) and battery-optimised. The
+    // native side of those states cannot be produced on an API 36 emulator
+    // (USE_EXACT_ALARM is granted at install), so the page's half is walked here.
+    await a.evaluate(() => {
+        const n = window.__fakeAndroid.answers.NotesNative;
+        n.notificationStatus = () => ({ granted: true, needsRequest: false, blocked: false });
+        n.exactAlarmStatus = () => ({ exact: false });
+        n.batteryStatus = () => ({ ignoring: false });
+    });
+    await a.tap('.notes-menu-btn');
+    await a.waitForSelector('.notes-rail.open', { timeout: 5000 });
+    await a.locator('.notes-rail-item', { hasText: 'Reminders' }).tap();
+    await a.waitForSelector('[data-native-banner="exact"]', { timeout: 10000 }).catch(() => {});
+    await closedDrawer(a);
+    const banners = await a.evaluate(() => [...document.querySelectorAll('[data-native-banner]')].map(b => {
+        const btn = b.querySelector('button');
+        const r = btn ? btn.getBoundingClientRect() : null;
+        return { kind: b.getAttribute('data-native-banner'), clipped: btn ? btn.scrollWidth > btn.clientWidth + 1 : null, h: r ? r.height : 0, right: r ? r.right : 0, barRight: b.getBoundingClientRect().right };
+    }));
+    ck('android shell: exact alarms refused and battery-optimised → both status lines, and no "enable" line',
+        JSON.stringify(banners.map(b => b.kind).sort()) === JSON.stringify(['battery', 'exact']), JSON.stringify(banners));
+    ck('android shell (390x844): their buttons hold their labels and are full tap targets',
+        banners.length === 2 && banners.every(b => b.clipped === false && b.h >= 43.5 && b.right <= b.barRight + 0.5), JSON.stringify(banners));
+    await shotOf(a)('android-shell-exact-battery');
     ck('android shell: no page errors', errors.length === aErrors, errors[aErrors]);
     await actx.close();
 } catch (e) {
@@ -799,5 +826,5 @@ try {
 }
 
 await browser.close();
-console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);
+console.log(fail === 0 ? `\nALL PASS${skipped ? ` (${skipped} section(s) SKIPPED: give the psql DSN to run them)` : ''}` : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);
