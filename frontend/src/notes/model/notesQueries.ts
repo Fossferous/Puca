@@ -41,6 +41,7 @@ import {
     type NoteCard, type NoteRef, type NoteSource,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
 } from './notesModel';
+import { useTaskEventsLive } from './taskEvents';
 import { getNotesPrefs, subscribeNotesPrefs, forgetNoteKeys, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
@@ -191,13 +192,15 @@ function fetchTasksFor(ref: NoteRef): Promise<Task[]> {
     return ref.kind === 'list' ? listListTasks(ref.id) : listTasks(ref.id);
 }
 
-/** The tasks of one note. `live` polls shared notes while the editor is open. */
+/** The tasks of one note. `live` polls shared notes while the editor is open
+ *  — unless the live event stream is up (taskEvents.ts), which makes it moot. */
 export function useNoteTasks(ref: NoteRef | null, opts: { live?: boolean } = {}) {
+    const streamLive = useTaskEventsLive();
     return useQuery({
         queryKey: ref ? notesKeys.tasks(ref) : ['notes', 'tasks', 'none'],
         queryFn: () => fetchTasksFor(ref!),
         enabled: ref !== null,
-        refetchInterval: opts.live && ref?.kind === 'channel' ? SHARED_NOTE_POLL_MS : false,
+        refetchInterval: opts.live && ref?.kind === 'channel' && !streamLive ? SHARED_NOTE_POLL_MS : false,
     });
 }
 

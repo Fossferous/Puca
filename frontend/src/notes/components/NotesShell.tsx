@@ -38,6 +38,7 @@ import { RemindersView } from './RemindersView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
 import { useNotesPrefsSync } from '../model/notesPrefsSync';
+import { useTaskEvents } from '../model/taskEvents';
 import { PrefsSyncBanner } from './SyncBanners';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
@@ -97,6 +98,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const actions = useNoteActions(allCards, prefs, prefsReady);
     const local = useNotesPrefs();
     const prefsSync = useNotesPrefsSync();
+    useTaskEvents();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
 
