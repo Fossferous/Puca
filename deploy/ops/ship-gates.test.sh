@@ -456,7 +456,7 @@ echo "--- dual-ship.sh backend: the migration pre-flight, including a rollback -
 # stub ssh (above) answers the _sqlx_migrations query from $TMP/sqlx_rows, so each
 # case is "what this host's database has applied". DUAL_SHIP_PREFLIGHT_ONLY
 # stops after the pre-flight: nothing here builds or copies anything.
-mksrc() { # <dir> <tolerant 0|1|comment>
+mksrc() { # <dir> <tolerant 0|1|comment|noflag>
 	local d="$1"; rm -rf "$d" "$d.tgz"; mkdir -p "$d/migrations" "$d/src"
 	printf 'CREATE TABLE a (id INT);\n' > "$d/migrations/001_a.sql"
 	printf 'CREATE TABLE b (id INT);\n' > "$d/migrations/002_b.sql"
@@ -465,6 +465,8 @@ mksrc() { # <dir> <tolerant 0|1|comment>
 		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
 		comment) printf 'pub fn app_migrator() { let mut m = sqlx::migrate!("./migrations"); m.set_ignore_missing(true); }\n' > "$d/src/migrator.rs"
 		   printf 'fn main() {\n    // one day: migrator::app_migrator()\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		noflag) printf 'pub fn app_migrator() { sqlx::migrate!("./migrations") }\n' > "$d/src/migrator.rs"
+		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
 		*) printf 'fn main() {\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
 	esac
 	tar czf "$d.tgz" -C "$d" migrations src
@@ -477,6 +479,7 @@ preflight() { # <tarball>
 mksrc "$TMP/src-new" 1
 mksrc "$TMP/src-old" 0
 mksrc "$TMP/src-comment" comment
+mksrc "$TMP/src-noflag" noflag
 S1="$(sum_of "$TMP/src-new/migrations/001_a.sql")"; S2="$(sum_of "$TMP/src-new/migrations/002_b.sql")"
 
 printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
@@ -491,6 +494,8 @@ out="$(preflight "$TMP/src-old.tgz")"; rc=$?
 check "the same database REFUSES a tarball whose migrator predates ignore_missing" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'no migration file for applied version 3')" = 1 ] && [ "$(has "$out" 'needs the database dump')" = 1 ] && echo 1 || echo 0)" "$out"
 out="$(preflight "$TMP/src-comment.tgz")"; rc=$?
 check "and one whose main.rs only NAMES app_migrator in a comment" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
+out="$(preflight "$TMP/src-noflag.tgz")"; rc=$?
+check "and one whose app_migrator does not set ignore_missing" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
 
 printf '1|%s\n2|%s\n3|%s\n' "$S1" "0000" "$S2" > "$TMP/sqlx_rows"
 out="$(preflight "$TMP/src-new.tgz")"; rc=$?
