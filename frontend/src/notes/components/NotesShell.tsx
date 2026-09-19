@@ -29,6 +29,7 @@ import { ColorPicker } from './ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
 import { NotesRail } from './NotesRail';
 import { NotesTopBar } from './NotesTopBar';
+import { NotesUpdateStripSlot } from './NotesUpdateGate';
 import { LabelPicker } from './LabelPicker';
 import { NoteEditor } from './NoteEditor';
 import { NoteGrid } from './NoteGrid';
@@ -334,6 +335,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                 accountInitial={username.slice(0, 1)}
                 onAccount={anchor => setPopup({ kind: 'account', anchor })}
             />
+            {/* The Android app's "new app" strip: its own row, never over the top bar. */}
+            <NotesUpdateStripSlot />
             <div className="notes-body">
                 <NotesRail
                     filter={remindersView ? { kind: 'reminders' } : filter}

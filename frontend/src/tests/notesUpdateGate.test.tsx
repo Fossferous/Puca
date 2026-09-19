@@ -10,6 +10,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const h = vi.hoisted(() => ({
     current: { bundle: { id: 'builtin', version: 'builtin' }, native: '0.9.815' } as unknown,
@@ -36,7 +39,7 @@ vi.mock('@capgo/capacitor-updater', () => ({
     },
 }));
 
-import { NotesUpdateGate } from '../notes/components/NotesUpdateGate';
+import { NotesUpdateGate, NotesUpdateStripSlot } from '../notes/components/NotesUpdateGate';
 import { CHECKING_DEADLINE_MS, DOWNLOAD_STALL_MS } from '../api/mobileOta';
 import { checkNotesForUpdates, downloadPage, nativePromptFor, setNativePrompt } from '../notes/model/notesUpdate';
 import { useState } from 'react';
@@ -57,10 +60,17 @@ function serve(body: unknown, status = 200): void {
     }) as unknown as typeof fetch);
 }
 
-/** A child with state, so a test can tell "still mounted" from "remounted". */
+/** A child with state, so a test can tell "still mounted" from "remounted".
+ *  Laid out like NotesShell: a top bar, then the strip's slot, then content. */
 function Counter() {
     const [n, setN] = useState(0);
-    return <button type="button" data-testid="app" onClick={() => setN(n + 1)}>count {n}</button>;
+    return (
+        <div className="notes-app">
+            <header data-testid="topbar" />
+            <NotesUpdateStripSlot />
+            <button type="button" data-testid="app" onClick={() => setN(n + 1)}>count {n}</button>
+        </div>
+    );
 }
 
 async function mountGate(native = true): Promise<void> {
@@ -345,6 +355,43 @@ describe('the APK prompts (the manifest\'s native block)', () => {
         await act(async () => { close.click(); });
         expect(container.textContent).not.toContain('is available');
         expect(localStorage.setItem).toHaveBeenCalledWith('pucaNotesNativeNudgeDismissed', '99.1.0');
+    });
+
+    it('the strip is its own row BELOW the top bar, not laid over it', async () => {
+        // It was position:fixed over the top of the app and covered the top
+        // bar's account button. Now the gate renders it only through the
+        // slot the shell places after its top bar.
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', native: { min: '99.0.0', download_url: PAGE }, ...SIGNED });
+        await mountGate();
+        await advance(100);
+        await clickGate('Continue');
+        const strips = container.querySelectorAll('.notes-update-strip');
+        expect(strips, 'exactly one strip, from the slot').toHaveLength(1);
+        expect(strips[0].previousElementSibling?.getAttribute('data-testid')).toBe('topbar');
+        expect(strips[0].parentElement?.className).toBe('notes-app');
+    });
+
+    it('a gate with no slot in its tree shows no strip (it never floats over the app)', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', native: { min: '99.0.0', download_url: PAGE }, ...SIGNED });
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        await act(async () => {
+            root = createRoot(container);
+            root.render(<NotesUpdateGate native><p data-testid="bare">app</p></NotesUpdateGate>);
+        });
+        await advance(100);
+        await clickGate('Continue');
+        expect(container.querySelector('[data-testid="bare"]')).toBeTruthy();
+        expect(container.querySelector('.notes-update-strip')).toBeNull();
+    });
+
+    it('the stylesheet keeps the strip in flow (no fixed or absolute positioning)', () => {
+        const css = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'notes', 'components', 'NotesUpdateGate.css'), 'utf8');
+        const rule = /\.notes-update-strip\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+        expect(rule, 'the rule exists').toMatch(/display:\s*flex/);
+        expect(rule).not.toMatch(/position:\s*(fixed|absolute|sticky)/);
     });
 });
 

@@ -17,8 +17,9 @@
 // update check is ever made and the menu has no update rows; inside a FAKED
 // native shell (the updater plugin answered in-page, the manifest answered by
 // page.route) a bundle that needs a newer APK is not downloaded, the "install
-// the new app" screen and the strip fit the phone, and the account menu shows
-// the version and a working Check for updates.
+// the new app" screen and the strip fit the phone, the strip takes its own
+// row below the top bar with the account button still tappable, and the
+// account menu shows the version and a working Check for updates.
 //
 // Usage: node e2e/notes-walk.mjs [outdir] [baseURL] [psql-dsn]
 //   baseURL  default http://127.0.0.1:5176 — `PORT=5176 node e2e/serve-dist.mjs`
@@ -541,7 +542,9 @@ const nshot = shotOf(nm);
 const gateAudit = () => nm.evaluate(() => {
     const vw = window.innerWidth, vh = window.innerHeight;
     const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-    const within = sel => [...document.querySelectorAll(sel)].filter(vis).every(el => { const r = el.getBoundingClientRect(); return r.left >= -0.5 && r.right <= vw + 0.5 && r.top >= -0.5 && r.bottom <= vh + 0.5; });
+    // At least one must be SHOWN: "every one of none is inside" passed when
+    // the thing under test was not on screen at all.
+    const within = sel => { const els = [...document.querySelectorAll(sel)].filter(vis); return els.length > 0 && els.every(el => { const r = el.getBoundingClientRect(); return r.left >= -0.5 && r.right <= vw + 0.5 && r.top >= -0.5 && r.bottom <= vh + 0.5; }); };
     const small = [...document.querySelectorAll('.notes-update-gate button, .notes-update-strip button')].filter(vis)
         .map(b => b.getBoundingClientRect()).filter(r => r.width < 43.5 || r.height < 43.5).map(r => `${Math.round(r.width)}x${Math.round(r.height)}`);
     return { overflow: document.documentElement.scrollWidth > vw + 1, small,
@@ -570,6 +573,30 @@ ck('app: the strip keeps saying why', /needs Púca Notes 99\.0\.0/.test(await nm
 g = await gateAudit();
 await nshot('app-strip');
 ck('app: strip inside the viewport, buttons at size', g.stripInside && g.small.length === 0 && !g.overflow, JSON.stringify(g));
+// The strip is its own row BELOW the top bar. It used to lie over the top of
+// the app and cover the account button — the way to "Check for updates" — and
+// a 'required' strip comes back for every new version.
+const lay = await nm.evaluate(() => {
+    const s = document.querySelector('.notes-update-strip')?.getBoundingClientRect();
+    const t = document.querySelector('.notes-topbar')?.getBoundingClientRect();
+    const a = document.querySelector('button[aria-label="Account and settings"]');
+    const ar = a?.getBoundingClientRect();
+    const hit = ar ? document.elementFromPoint(ar.left + ar.width / 2, ar.top + ar.height / 2) : null;
+    return { strip: s ? { top: s.top, bottom: s.bottom } : null, topbarBottom: t ? t.bottom : null, accountOnTop: !!(a && hit && (hit === a || a.contains(hit))) };
+});
+ck('app: the strip sits below the top bar, not over it', !!lay.strip && lay.topbarBottom !== null && lay.strip.top >= lay.topbarBottom - 0.5, JSON.stringify(lay));
+ck('app: nothing covers the account button while the strip shows', lay.accountOnTop, JSON.stringify(lay));
+let menuWithStrip = 'the account button could not be tapped';
+try {
+    await nm.tap('button[aria-label="Account and settings"]', { timeout: 5000 });
+    await nm.waitForSelector('.notes-menu', { timeout: 5000 });
+    menuWithStrip = await nm.locator('.notes-update-strip').count() === 1 ? '' : 'the menu opened but the strip was gone';
+} catch (e) {
+    menuWithStrip += `: ${String(e).split('\n')[0]}`;
+}
+ck('app: the account menu opens with a tap WHILE the strip shows', menuWithStrip === '', menuWithStrip);
+await nm.keyboard.press('Escape');
+await nm.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
 
 // 2. The account menu: version + Check for updates, which re-runs the check
 //    without unmounting the app.

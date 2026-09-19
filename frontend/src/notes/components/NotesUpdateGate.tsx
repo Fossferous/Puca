@@ -18,12 +18,18 @@
  * "install the new app" screen says why; a newer APK on the download page is
  * a one-per-version strip.
  *
+ * The strip is rendered IN FLOW, below Notes' top bar, by NotesShell placing
+ * <NotesUpdateStripSlot /> — the gate owns its state and hands it down by
+ * context. It used to be position:fixed over the top of the app, where it
+ * covered the top bar and with it the account button, the only way to "Check
+ * for updates"; a 'required' strip returns for every new version.
+ *
  * The account menu's "Check for updates" re-runs the same check through
  * registerNotesUpdateRunner. Once the app has been shown it stays mounted: a
  * later download/error screen covers it rather than replacing it, so an open
  * note is not thrown away by asking.
  */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { isMobile } from '../../api/platform';
 import { runCapacitorOta, type OtaOutcome, type OtaUiState } from '../../api/mobileOta';
 import {
@@ -227,12 +233,24 @@ export function NotesUpdateGate({ children, native = isMobile() }: NotesUpdateGa
 
     if (!showApp) return <>{screen}</>;
     return (
-        <>
+        <StripContext.Provider value={strip}>
             {children}
-            {strip}
             {screen}
-        </>
+        </StripContext.Provider>
     );
+}
+
+/** The strip the gate wants shown, or null. Only the gate provides it. */
+const StripContext = createContext<ReactNode>(null);
+
+/**
+ * Where the "new app" strip goes: NotesShell renders this right below its top
+ * bar, so the strip takes its own row in the page instead of lying over the
+ * top bar's account button. Renders nothing in the browser, and nothing
+ * outside a gate.
+ */
+export function NotesUpdateStripSlot() {
+    return <>{useContext(StripContext)}</>;
 }
 
 function GateScreen({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {

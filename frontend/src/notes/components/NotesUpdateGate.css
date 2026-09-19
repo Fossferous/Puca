@@ -108,14 +108,16 @@
     color: #fff;
 }
 
+/* In flow, in its own row below the top bar (NotesShell places
+   NotesUpdateStripSlot there): never over the top bar, whose account button is
+   the way to "Check for updates". .notes-app is a flex column, so the row
+   below shrinks to make room rather than the page scrolling. */
 .notes-update-strip {
-    position: fixed;
-    top: calc(var(--safe-area-top, 0px) + 8px);
-    left: 8px;
-    right: 8px;
-    z-index: 1100;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    width: calc(100% - 16px);
     max-width: 560px;
-    margin: 0 auto;
+    margin: 8px auto 0;
     display: flex;
     align-items: center;
     gap: 8px;
