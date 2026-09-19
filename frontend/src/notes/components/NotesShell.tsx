@@ -36,6 +36,7 @@ import { NoteGrid } from './NoteGrid';
 import { Popover } from './Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
+import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
 
@@ -119,6 +120,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     // --- View --------------------------------------------------------------------
     const path = location.pathname;
     const remindersView = path === '/reminders';
+    const calendarView = path === '/calendar';
     const filter: NoteFilter = useMemo(() => {
         if (query.trim() && !remindersView) return { kind: 'search', query };
         if (path === '/archive') return { kind: 'archive' };
@@ -154,8 +156,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const go = useCallback((to: string) => { navigate(to); }, [navigate]);
     const setQuery = useCallback((q: string) => {
         setQueryState(q);
-        if (q && remindersView) navigate('/', { replace: true });
-    }, [navigate, remindersView]);
+        if (q && (remindersView || calendarView)) navigate('/', { replace: true });
+    }, [navigate, remindersView, calendarView]);
     const openNote = useCallback((card: NoteCard) => {
         setParams(p => { p.set('note', card.key); return p; });
     }, [setParams]);
@@ -340,7 +342,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
             />
             <div className="notes-body">
                 <NotesRail
-                    filter={remindersView ? { kind: 'reminders' } : filter}
+                    filter={remindersView ? { kind: 'reminders' } : calendarView ? { kind: 'calendar' } : filter}
                     labels={labels}
                     reminderBadge={reminderBadgeCount(reminders)}
                     counts={counts}
@@ -373,6 +375,15 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 onEnableNotifications={() => { void enableNotifications(); }}
                                 canSnooze={canSnooze}
                             />
+                        ) : calendarView ? (
+                            <CalendarView
+                                cards={cards}
+                                actions={actions}
+                                now={now}
+                                coarse={coarse}
+                                onOpenNote={key => setParams(p => { p.set('note', key); return p; })}
+                                shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu}
+                            />
                         ) : (
                             <>
                                 {filter.kind === 'all' && <QuickAdd onCreate={createNote} openSignal={quickSignal} />}
@@ -402,7 +413,7 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                 </main>
             </div>
 
-            {!remindersView && (
+            {!remindersView && !calendarView && (
                 <button type="button" className="notes-fab" aria-label="New note" title="New note" onClick={() => setSheet(true)}>
                     <PlusIcon />
                 </button>

@@ -26,3 +26,24 @@
     }
     .notes-snooze-menu .notes-textbtn { min-height: 44px; min-width: 96px; font-size: 15px; }
 }
+
+/* ---- Calendar (CalendarView.tsx) and .ics import -------------------------------- */
+.notes-calendar { display: flex; flex-direction: column; gap: 10px; padding-bottom: 88px; }
+.cal-weekstart { font-size: 12px; color: var(--text-muted); }
+.cal-weekstart label { display: inline-flex; align-items: center; gap: 6px; }
+.cal-weekstart select { background: var(--bg-tertiary); color: var(--text-normal); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 2px 6px; font: inherit; }
+.ics-import { display: flex; flex-direction: column; gap: 10px; max-width: 520px; }
+.ics-import p { margin: 0; }
+.ics-notes { font-size: 13px; color: var(--text-warning, #f0b232); max-height: 200px; overflow-y: auto; }
+.ics-notes ul, .ics-failed { margin: 4px 0 0; padding-left: 18px; color: var(--text-muted); }
+.ics-row { display: flex; align-items: center; gap: 10px; }
+.ics-row > span { width: 64px; color: var(--text-muted); font-size: 13px; }
+.ics-row select, .ics-row input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-tertiary); color: var(--text-normal); font: inherit; }
+.ics-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ics-progress progress { width: 100%; }
+.notes-textbtn.primary { color: var(--brand-primary); font-weight: 600; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .cal-weekstart select, .ics-row select, .ics-row input { font-size: 16px; min-height: 44px; }
+    .ics-actions .notes-textbtn { min-height: 44px; }
+}

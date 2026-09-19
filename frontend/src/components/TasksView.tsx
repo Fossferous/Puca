@@ -58,7 +58,8 @@ import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { TasksCalendar } from './calendar/TasksCalendar';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import './TasksView.css';
@@ -107,7 +108,8 @@ interface BarTab {
     resolveUserName?: (id: number) => string | undefined;
 }
 
-type Selected = { kind: TaskTabKind; id: number } | null;
+/** 'calendar' = the pinned Calendar tab (TasksCalendar), beside All tasks. */
+type Selected = { kind: TaskTabKind | 'calendar'; id: number } | null;
 
 export function TasksView() {
     // null = the pinned "All tasks" board (the default view).
@@ -607,6 +609,14 @@ export function TasksView() {
                         <TasksIcon className="tasks-tab-kind" />
                         <span className="tasks-tab-title">All tasks</span>
                     </button>
+                    <button
+                        className={`tasks-tab tasks-tab-calendar ${selected?.kind === 'calendar' ? 'active' : ''}`}
+                        onClick={() => setSelected({ kind: 'calendar', id: 0 })}
+                        title="Calendar — every dated item"
+                    >
+                        <CalendarIcon className="tasks-tab-kind" />
+                        <span className="tasks-tab-title">Calendar</span>
+                    </button>
                     {orderedTabs.map(renderTab)}
                     {addingList && (
                         <form className="tasks-tab-newform" onSubmit={handleCreateList}>
@@ -647,7 +657,16 @@ export function TasksView() {
                 </div>
             </div>
 
-            {selected === null ? (
+            {selected?.kind === 'calendar' ? (
+                <div className="server-tasks-scroll tasks-calendar-scroll">
+                    <TasksCalendar
+                        lists={lists}
+                        channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
+                        currentUserId={currentUserId}
+                        onOpen={(kind, id) => setSelected({ kind, id })}
+                    />
+                </div>
+            ) : selected === null ? (
                 // The All-tasks board: every list + channel checklist as a
                 // live card, in bar order (favourites lead after favouriting).
                 loading ? (

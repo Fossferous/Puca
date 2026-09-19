@@ -302,7 +302,7 @@ export interface NoteActions {
     /** Task-level edits on one note. */
     toggleTask: (note: NoteRef, task: Task, completed: boolean) => Promise<void>;
     editTask: (note: NoteRef, task: Task, description: string) => Promise<void>;
-    addTask: (note: NoteRef, description: string, parentId?: number) => Promise<Task | null>;
+    addTask: (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming) => Promise<Task | null>;
     deleteTaskFrom: (note: NoteRef, taskId: number) => Promise<void>;
     moveTaskIn: (note: NoteRef, task: Task, direction: 'up' | 'down') => Promise<void>;
     reorderTaskIn: (note: NoteRef, task: Task, afterId: number | null, reparent?: { parentId: number | null }) => Promise<void>;
@@ -395,11 +395,13 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
-    const addTask = useCallback(async (note: NoteRef, description: string, parentId?: number): Promise<Task | null> => {
+    const addTask = useCallback(async (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task | null> => {
         try {
+            // `timing` (a calendar tap-to-add) rides the same one POST.
             const created = note.kind === 'channel'
-                ? await createTask(note.id, description, parentId)
-                : await createListTask(note.id, description, parentId);
+                ? await createTask(note.id, description, parentId, timing)
+                : await createListTask(note.id, description, parentId, timing);
+            if (timing) pokeTaskReminders();
             const next = [...await snapshot(note), created];
             restore(note, next);
             syncListCounts(note, next);

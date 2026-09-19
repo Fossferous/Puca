@@ -80,7 +80,7 @@ function str(v: unknown, max: number): v is string {
 /** Validate a candidate schedule; null when it is valid, else why not. */
 export function validateSchedule(o: Record<string, unknown>): string | null {
     if (o.kind !== 'event' && o.kind !== 'task') return 'kind';
-    if (!str(o.uid, 200) || o.uid.length < 8 || /\s/.test(o.uid)) return 'uid';
+    if (!str(o.uid, 200) || o.uid.length < 1 || /\s/.test(o.uid)) return 'uid';
     if (typeof o.allDay !== 'boolean') return 'allDay';
     if (!str(o.start, 16)) return 'start';
     const start = parseWall(o.start);

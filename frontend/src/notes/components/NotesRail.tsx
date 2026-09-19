@@ -3,7 +3,7 @@
  * label, Archive, and the way back to Púca. A drawer on narrow windows and
  * phones (notes.css); the owner passes `open` and the scrim closes it.
  */
-import { ArchiveIcon, BellIcon, NoteIcon, PopOutIcon, TagIcon } from '../../components/Icons';
+import { ArchiveIcon, BellIcon, CalendarIcon, NoteIcon, PopOutIcon, TagIcon } from '../../components/Icons';
 import { isMobile } from '../../api/platform';
 import { type NoteFilter } from '../model/notesModel';
 
@@ -12,7 +12,7 @@ import { type NoteFilter } from '../model/notesModel';
 const NATIVE = isMobile();
 
 interface NotesRailProps {
-    filter: NoteFilter | { kind: 'reminders' };
+    filter: NoteFilter | { kind: 'reminders' } | { kind: 'calendar' };
     labels: string[];
     reminderBadge: number;
     counts: { notes: number; archived: number };
@@ -36,6 +36,9 @@ export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose
                 <button type="button" className={`notes-rail-item ${is('reminders') ? 'active' : ''}`} onClick={() => go('/reminders')}>
                     <BellIcon /><span className="notes-rail-label">Reminders</span>
                     {reminderBadge > 0 && <span className="notes-badge">{reminderBadge}</span>}
+                </button>
+                <button type="button" className={`notes-rail-item ${is('calendar') ? 'active' : ''}`} onClick={() => go('/calendar')}>
+                    <CalendarIcon /><span className="notes-rail-label">Calendar</span>
                 </button>
                 {labels.length > 0 && <div className="notes-rail-section">Labels</div>}
                 {labels.map(l => (
