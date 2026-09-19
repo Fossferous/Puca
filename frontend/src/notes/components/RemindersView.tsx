@@ -46,9 +46,13 @@ function Row({ item, actions, now, onOpen }: { item: DueItem; actions: NoteActio
                 onClick={e => e.stopPropagation()}
                 onChange={() => void actions.toggleTask(item.note.ref, item.task, true)}
             />
-            <span className="notes-reminder-text">{item.task.description}</span>
+            <span className="notes-reminder-text">
+                {item.task.description}
+                {/* A second line under the item, not a third column: the row
+                    keeps its shape at 390 px and on desktop. */}
+                {remindsSomeoneElse(item, currentUserIdFromToken()) && <span className="notes-reminder-sub">Reminds whoever set it</span>}
+            </span>
             <span className="notes-reminder-note">{item.note.title}</span>
-            {remindsSomeoneElse(item, currentUserIdFromToken()) && <span className="notes-reminder-note">Reminds whoever set it</span>}
             <span className="notes-reminder-when" title={new Date(item.at).toLocaleString()}>{formatDueShort(item.task.due_at!, now)}</span>
         </div>
     );

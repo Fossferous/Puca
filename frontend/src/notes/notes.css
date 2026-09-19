@@ -265,6 +265,13 @@
     border-radius: 6px;
     padding: 3px 10px;
     cursor: pointer;
+    /* The sentence beside it wraps; the button must not shrink under its own
+       label (at 390 px "Enable" ran out of its border). */
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+@media (pointer: coarse) {
+    .notes-status button { min-height: 44px; }
 }
 
 .notes-empty {
@@ -824,6 +831,7 @@
 .notes-reminder-row:hover { background: var(--bg-modifier-hover); }
 .notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
 .notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
+.notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
 .notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
 .notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
 .notes-reminder-group.overdue .notes-reminder-when { color: var(--text-danger); font-weight: 600; }

@@ -17,7 +17,15 @@
 // Usage: node e2e/notes-walk.mjs [outdir] [baseURL] [psql-dsn]
 //   baseURL  default http://127.0.0.1:5176 — `PORT=5176 node e2e/serve-dist.mjs`
 //   psql-dsn optional, e.g. postgres://postgres:testpw@127.0.0.1:55433/puca_keep_e2e
-//            (enables the injected-plaintext check; needs psql on PATH)
+//            (enables the injected-plaintext check and the shared-item hint
+//            walk; needs psql on PATH). Without it those sections print SKIP —
+//            never a silent PASS.
+//
+// The last section runs the page as the ANDROID APP sees it, through a fake
+// Capacitor bridge (window.androidBridge + NotesNative / SovereignLocation
+// answering from the walk): it is the positive control for every "not on the
+// web" check above — the banner, "At a place", the location toggle and Share
+// must APPEAR there, and the native side must be handed ids and times only.
 import { chromium, devices } from '@playwright/test';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -257,7 +265,8 @@ await page.locator('.notes-rail-item', { hasText: 'Reminders' }).click();
 await page.waitForSelector('.notes-reminders', { timeout: 5000 });
 ck('reminders: the due item is listed under Upcoming', await page.locator('.notes-reminder-row', { hasText: 'Eggs' }).count() === 1);
 // The Android app's status lines and "At a place" are app-only: a browser
-// has no alarms to describe and no place store to read.
+// has no alarms to describe and no place store to read. (Section 16 is the
+// positive control: the same page in the Android shell MUST show both.)
 ck('reminders (web): no native status banner', await page.locator('[data-native-banner]').count() === 0);
 ck('reminders (web): no "At a place" section', await page.locator('section[aria-label="At a place"]').count() === 0);
 await shot('reminders');
@@ -325,11 +334,14 @@ if (psqlDsn) {
     } catch (e) {
         ck('database checks ran', false, String(e).slice(0, 200));
     }
+} else {
+    console.log('SKIP  database checks (no psql DSN given)');
 }
 
 // ---- 12b. Export and share on the web ---------------------------------------------------------------
 // The Android app saves to Documents and offers Share and location reminders;
-// the browser keeps its download and shows neither app-only control.
+// the browser keeps its download and shows neither app-only control (section
+// 16 proves the controls do appear in the Android shell).
 await page.click('button[aria-label="Account and settings"]');
 await page.waitForSelector('.notes-menu', { timeout: 5000 });
 ck('web menu: no location-reminders toggle', await page.locator('#notes-location').count() === 0);
@@ -512,6 +524,279 @@ for (const [name, patch] of [
     await mshot(`phone-${name}`);
 }
 ck('phone: no page errors', errors.length === 0, errors[0]);
+await mctx.close();
+
+// Where the API lives, read off the page's own traffic (the dist was built
+// against it): the first /task-lists request's origin.
+async function apiBaseOf(pg) {
+    const url = await pg.evaluate(() => performance.getEntriesByType('resource').map(e => e.name).find(u => /\/task-lists(\?|$)/.test(u)));
+    return url ? url.replace(/\/task-lists.*$/, '') : null;
+}
+async function authed(pg, api, method, path, body) {
+    return pg.evaluate(async ([api, method, path, body]) => {
+        const r = await fetch(api + path, {
+            method,
+            headers: { Authorization: 'Bearer ' + localStorage.getItem('auth_token'), 'Content-Type': 'application/json' },
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        return { status: r.status, body: await r.text() };
+    }, [api, method, path, body]);
+}
+
+// The phone drawer closes with a 0.2 s slide: measure and shoot after it.
+async function closedDrawer(pg) {
+    await pg.waitForSelector('.notes-rail.open', { state: 'detached', timeout: 5000 }).catch(() => {});
+    await sleep(350);
+}
+/** Is the element's centre really showing IT (not a drawer or scrim on top)? */
+const onTop = (pg, sel) => pg.evaluate(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    const b = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    return !!hit && (hit === el || el.contains(hit));
+}, sel);
+
+// ---- 15. "Reminds whoever set it": a shared item someone else set -----------------------------------
+// GET /task-reminders covers only the caller's own channel tasks, so an item in
+// a shared note that ANOTHER member set reminds them, not this user, and the
+// Reminders row says so — on a second line, at desktop size and at 390x844.
+if (!psqlDsn) {
+    console.log('SKIP  shared-item hint (no psql DSN: the walk cannot seed a shared note)');
+} else {
+    try {
+        // A second account, registered like the first.
+        const bctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL });
+        const b = await bctx.newPage();
+        const username2 = username + 'b';
+        await b.goto('/login');
+        await b.waitForSelector('.toggle-mode', { timeout: 15000 });
+        await b.click('.toggle-mode');
+        await b.fill('#username', username2);
+        await b.fill('#password', password);
+        await b.click('button[type="submit"]');
+        await b.waitForURL('**/chat', { timeout: 30000 });
+        await bctx.close();
+
+        const hctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL, storageState: state });
+        const h = await hctx.newPage();
+        watch(h);
+        await h.goto('/notes/');
+        await h.waitForSelector('.notes-card', { timeout: 20000 });
+        const api = await apiBaseOf(h);
+        ck('hint setup: the API base was read off the page', !!api, String(api));
+        const created = await authed(h, api, 'POST', '/servers', { name: 'Walk shared' });
+        ck('hint setup: a server was created (positive control)', created.status >= 200 && created.status < 300, `${created.status} ${created.body.slice(0, 120)}`);
+        const serverId = JSON.parse(created.body).id;
+        const cid = sql(`SELECT id FROM channels WHERE server_id = '${serverId}' ORDER BY position, id LIMIT 1`);
+        const me = sql(`SELECT id FROM users WHERE username = '${username}'`);
+        const other = sql(`SELECT id FROM users WHERE username = '${username2}'`);
+        ck('hint setup: two distinct accounts and a channel', /^\d+$/.test(cid) && /^\d+$/.test(me) && /^\d+$/.test(other) && me !== other, `${cid} ${me} ${other}`);
+        sql(`UPDATE channels SET has_checklist = true WHERE id = ${cid}`);
+        const ins = sql(`INSERT INTO channel_tasks (channel_id, description, created_by, position, due_at) VALUES (${cid}, 'Shared errand', ${other}, 0, now() + interval '3 hours'), (${cid}, 'My shared errand', ${me}, 1, now() + interval '4 hours')`);
+        ck('hint setup: two due items in the shared note', ins === 'INSERT 0 2', ins);
+
+        await h.reload();
+        await h.waitForSelector('.notes-card', { timeout: 20000 });
+        await h.locator('.notes-rail-item', { hasText: 'Reminders' }).click();
+        await h.waitForSelector('.notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
+        const rowFacts = pg => pg.evaluate(() => [...document.querySelectorAll('.notes-reminder-row')].map(r => {
+            const text = r.querySelector('.notes-reminder-text');
+            const sub = text ? text.querySelector('.notes-reminder-sub') : null;
+            const when = r.querySelector('.notes-reminder-when');
+            const box = el => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right, t: b.top, b: b.bottom }; };
+            return {
+                label: text ? (text.firstChild ? text.firstChild.textContent : '').trim() : '',
+                cells: r.children.length,
+                hint: sub ? sub.textContent : null,
+                row: box(r), text: text ? box(text) : null, sub: sub ? box(sub) : null, when: when ? box(when) : null,
+            };
+        }));
+        let rows = await rowFacts(h);
+        let hinted = rows.find(x => x.label === 'Shared errand');
+        let mine = rows.find(x => x.label === 'My shared errand');
+        ck('desktop hint: the item someone else set says "Reminds whoever set it"', !!hinted && hinted.hint === 'Reminds whoever set it', JSON.stringify(hinted));
+        ck('desktop hint: my own shared item does not (control)', !!mine && mine.hint === null, JSON.stringify(mine));
+        ck('desktop hint: a second line inside the item cell, not a new column', !!hinted && !!hinted.sub && hinted.cells === 4 && hinted.sub.t >= hinted.text.t + 4 && hinted.sub.b <= hinted.row.b + 0.5, JSON.stringify(hinted));
+        await shotOf(h)('hint-desktop');
+        await hctx.close();
+
+        const pctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: state });
+        const pg = await pctx.newPage();
+        watch(pg);
+        await pg.goto('/notes/');
+        await pg.waitForSelector('.notes-card', { timeout: 20000 });
+        await pg.tap('.notes-menu-btn');
+        await pg.waitForSelector('.notes-rail.open', { timeout: 5000 });
+        await pg.locator('.notes-rail-item', { hasText: 'Reminders' }).tap();
+        await pg.waitForSelector('.notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
+        await closedDrawer(pg);
+        rows = await rowFacts(pg);
+        hinted = rows.find(x => x.label === 'Shared errand');
+        mine = rows.find(x => x.label === 'My shared errand');
+        const vw = await pg.evaluate(() => window.innerWidth);
+        const overflow = await pg.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+        ck('phone hint (390x844): shown under the item', !!hinted && hinted.hint === 'Reminds whoever set it' && !!hinted.sub && hinted.sub.t >= hinted.text.t + 4, JSON.stringify(hinted));
+        ck('phone hint: my own shared item has none (control)', !!mine && mine.hint === null);
+        ck('phone hint: the row, the hint and the due time stay inside 390 px', !!hinted && !!hinted.sub && !overflow
+            && hinted.row.r <= vw + 0.5 && hinted.sub.r <= hinted.row.r + 0.5 && hinted.when.r <= hinted.row.r + 0.5 && hinted.when.l >= hinted.text.r - 0.5,
+            JSON.stringify({ vw, overflow, hinted }));
+        ck('phone hint: nothing covers it', await onTop(pg, '.notes-reminder-sub'));
+        await shotOf(pg)('hint-phone');
+        await pctx.close();
+    } catch (e) {
+        ck('shared-item hint walk ran', false, String(e).slice(0, 300));
+    }
+}
+
+// ---- 16. The Android app's own controls, through a fake Capacitor bridge ---------------------------
+// Positive control for every web-absence check above: the SAME built page,
+// told it runs in the Púca Notes APK, must show the notification banner,
+// "At a place", the location toggle and Share — and must hand the native
+// side reminder ids and times, never an item's text.
+function installFakeAndroid() {
+    const calls = [];
+    const listeners = {};
+    let cb = 0;
+    const answers = {
+        NotesNative: {
+            info: () => ({ api: 1, features: ['reminders', 'backgroundRefresh', 'exactAlarm', 'battery', 'share', 'calendar', 'launchNav'] }),
+            syncReminders: o => ({ count: (o.entries || []).length }),
+            clearAll: () => ({}),
+            setBackgroundRefresh: () => ({ scheduled: true }),
+            takeRenewedToken: () => ({ token: null, account: null }),
+            notificationStatus: () => ({ granted: false, needsRequest: true, blocked: false }),
+            requestNotificationPermission: () => ({ granted: false }),
+            openNotificationSettings: () => ({}),
+            exactAlarmStatus: () => ({ exact: true }),
+            openExactAlarmSettings: () => ({}),
+            batteryStatus: () => ({ ignoring: true }),
+            requestIgnoreBatteryOptimizations: () => ({}),
+            shareText: () => ({ ok: true }),
+            addToPhoneCalendar: () => ({ ok: true }),
+            consumeLaunchNav: () => ({ target: null }),
+            removeListener: () => ({}),
+        },
+        SovereignLocation: {
+            status: () => ({ foreground: false, precise: false, background: false, locationOn: true }),
+            requestForegroundPermission: () => ({ granted: false, precise: false }),
+            requestBackgroundPermission: () => ({ granted: false }),
+            currentPosition: () => ({ lat: 51.5, lon: -0.12, accuracy: 10 }),
+            setFences: () => ({}),
+            openLocationSettings: () => ({}),
+        },
+    };
+    // Android's WebView has no Notification API; without this the page would
+    // also show the BROWSER's "blocked for this site" line, which the app never does.
+    try { delete window.Notification; } catch { /* non-configurable: leave it */ }
+    window.androidBridge = { postMessage() {} };
+    window.Capacitor = {
+        PluginHeaders: Object.entries(answers).map(([name, m]) => ({
+            name,
+            methods: [...Object.keys(m).map(k => ({ name: k, rtype: 'promise' })), { name: 'addListener', rtype: 'callback' }],
+        })),
+        nativePromise(plugin, method, options) {
+            calls.push({ plugin, method, options: JSON.parse(JSON.stringify(options ?? {})) });
+            const f = answers[plugin] && answers[plugin][method];
+            return f ? Promise.resolve(f(options ?? {})) : Promise.reject(new Error(`${plugin}.${method} not faked`));
+        },
+        nativeCallback(plugin, method, options, callback) {
+            const id = String(++cb);
+            if (method === 'addListener') (listeners[`${plugin}:${options.eventName}`] ||= []).push(callback);
+            return id;
+        },
+    };
+    window.__fakeAndroid = { calls, listeners };
+}
+
+try {
+    const actx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: state });
+    await actx.addInitScript(installFakeAndroid);
+    const a = await actx.newPage();
+    watch(a);
+    const aErrors = errors.length;
+    const taskRows = [];
+    a.on('response', async res => {
+        if (!/\/task-lists\/\d+\/tasks(\?|$)/.test(res.url())) return;
+        try { const j = await res.json(); if (Array.isArray(j)) taskRows.push(...j); } catch { /* not json */ }
+    });
+    await a.goto('/notes/');
+    await a.waitForSelector('.notes-card', { timeout: 20000 });
+    ck('android shell: the page believes it is the app (control for the fake bridge itself)',
+        await a.evaluate(() => window.Capacitor.getPlatform() === 'android' && window.Capacitor.isPluginAvailable('NotesNative')));
+    await a.waitForFunction(() => window.__fakeAndroid.calls.some(c => c.method === 'syncReminders'), null, { timeout: 15000 }).catch(() => {});
+    const calls = await a.evaluate(() => window.__fakeAndroid.calls);
+    const uid = await a.evaluate(() => JSON.parse(atob(localStorage.getItem('auth_token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub);
+    const syncs = calls.filter(c => c.plugin === 'NotesNative' && c.method === 'syncReminders');
+    const entries = syncs.length ? syncs[syncs.length - 1].options.entries : [];
+    ck('android shell: the reminder feed is handed to the native alarms', syncs.length > 0 && syncs.every(c => c.options.account === String(uid)) && entries.length >= 1,
+        JSON.stringify(syncs.map(c => c.options.account)));
+    const keysOk = entries.length > 0 && entries.every(e => Object.keys(e).every(k => ['id', 'at', 'mark', 'due'].includes(k)) && typeof e.id === 'number' && typeof e.at === 'number');
+    const leaked = JSON.stringify(calls.filter(c => c.method === 'syncReminders' || c.method === 'setBackgroundRefresh')).match(/Eggs|Milk|Bread|Groceries|Shared errand/);
+    ck('android shell: native gets ids and times only — no item text (E2EE)', keysOk && !leaked, leaked ? leaked[0] : JSON.stringify(entries[0]));
+    const refresh = calls.filter(c => c.method === 'setBackgroundRefresh').pop();
+    const pageToken = await a.evaluate(() => localStorage.getItem('auth_token'));
+    ck('android shell: the background refresh gets this session', !!refresh && refresh.options.account === String(uid)
+        && refresh.options.token === pageToken && /^https?:\/\//.test(refresh.options.apiBase));
+
+    // A saved place on this phone for one open item, then Reminders.
+    const open = taskRows.find(t => t && !t.is_completed && typeof t.id === 'number');
+    ck('android shell: an open item id was read off the page traffic', !!open, String(taskRows.length));
+    await a.evaluate(([uid, id]) => {
+        localStorage.setItem(`sovereignTaskPlaces:${uid}`, JSON.stringify([{ id: 'walkplace', label: 'Walk shop', lat: 51.5, lon: -0.12, radiusM: 150 }]));
+        localStorage.setItem(`sovereignTaskPlaceAssign:${uid}`, JSON.stringify({ [String(id)]: 'walkplace' }));
+    }, [uid, open ? open.id : -1]);
+    await a.reload();
+    await a.waitForSelector('.notes-card', { timeout: 20000 });
+    await a.tap('.notes-menu-btn');
+    await a.waitForSelector('.notes-rail.open', { timeout: 5000 });
+    await a.locator('.notes-rail-item', { hasText: 'Reminders' }).tap();
+    await a.waitForSelector('.notes-reminders', { timeout: 10000 });
+    await a.waitForSelector('[data-native-banner]', { timeout: 10000 }).catch(() => {});
+    await closedDrawer(a);
+    ck('android shell: the notification banner shows (control for "no native status banner")',
+        await a.locator('[data-native-banner="enable"]').count() === 1);
+    ck('android shell: "At a place" lists the item with its place (control)',
+        await a.locator('section[aria-label="At a place"] .notes-reminder-row', { hasText: 'Walk shop' }).count() === 1);
+    const btn = await a.evaluate(() => {
+        const b = document.querySelector('[data-native-banner="enable"] button');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        const bar = b.parentElement.getBoundingClientRect();
+        return { w: r.width, h: r.height, right: r.right, barRight: bar.right, clipped: b.scrollWidth > b.clientWidth + 1 };
+    });
+    ck('android shell (390x844): the banner button holds its label and is a full tap target',
+        !!btn && !btn.clipped && btn.right <= btn.barRight + 0.5 && btn.h >= 43.5, JSON.stringify(btn));
+    ck('android shell: the banner is not covered', await onTop(a, '[data-native-banner="enable"] button'));
+    await shotOf(a)('android-shell-reminders');
+
+    await a.tap('.notes-menu-btn');
+    await a.waitForSelector('.notes-rail.open', { timeout: 5000 });
+    await a.locator('.notes-rail-item', { hasText: 'Notes' }).first().tap();
+    await a.waitForSelector('.notes-card', { timeout: 10000 });
+    await a.tap('button[aria-label="Account and settings"]');
+    await a.waitForSelector('.notes-menu', { timeout: 5000 });
+    await a.waitForSelector('#notes-location', { timeout: 5000 }).catch(() => {});
+    ck('android shell: the location-reminders toggle is there (control)', await a.locator('#notes-location').count() === 1);
+    ck('android shell: "Share notes…" is there (control)', await a.getByRole('button', { name: /Share notes/ }).count() === 1);
+    await a.keyboard.press('Escape');
+    await a.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+    const card = a.locator('.notes-card', { hasText: 'Groceries' });
+    await card.locator('button[aria-label="More actions"]').tap();
+    await a.waitForSelector('.context-menu-item', { timeout: 5000 });
+    ck('android shell: the card menu offers "Share…" (control)', await a.locator('.context-menu-item', { hasText: 'Share…' }).count() === 1);
+    a.once('dialog', d => void d.accept());
+    await a.locator('.context-menu-item', { hasText: 'Share…' }).tap();
+    await a.waitForFunction(() => window.__fakeAndroid.calls.some(c => c.method === 'shareText'), null, { timeout: 5000 }).catch(() => {});
+    const shared = (await a.evaluate(() => window.__fakeAndroid.calls)).filter(c => c.method === 'shareText').pop();
+    ck('android shell: Share hands the note to the share sheet as a .md file', !!shared && /^Groceries\.md$/.test(shared.options.filename) && /Bread/.test(shared.options.text),
+        shared ? shared.options.filename : 'no shareText call');
+    ck('android shell: no page errors', errors.length === aErrors, errors[aErrors]);
+    await actx.close();
+} catch (e) {
+    ck('android-shell walk ran', false, String(e).slice(0, 300));
+}
 
 await browser.close();
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);
