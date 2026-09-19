@@ -4,6 +4,33 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Púca Notes
+- **Colours, labels and archive follow your account.** They used to live in one
+  browser and vanish when you signed out. They are now sealed with your own key
+  and synced, so every device you sign in on shows the same ones, and a sign-out
+  no longer loses them. The server stores them encrypted and cannot read them.
+  Grid or list view and the sort order still stay per device.
+- **Notes update live.** A change made on one device or by someone sharing a
+  checklist appears on your other open devices within a moment, with no
+  refresh. The server says only which note changed, never what it says.
+- **Notes work offline.** Your notes open with no connection, and changes you
+  make offline are kept, marked *Not synced*, and sent when you are back online.
+  If the server refuses one (for example a note deleted elsewhere), you are told
+  which. The copy on your device is encrypted with a key from your account.
+- **Select several notes at once** and pin, colour, label, archive, delete, copy
+  or duplicate them together: Ctrl-click, Shift-click or Ctrl+A on a computer,
+  a long press on a phone.
+- **Signing out of Notes now removes this browser from your Devices list**, as
+  signing out of Púca does, instead of leaving it enrolled.
+
+### For operators
+- Serve `/notes/sw.js` with `Cache-Control: no-cache` (two lines in the web app's
+  Caddy block, `deploy/webapp/README.md`). `check-versions.sh` fails until it is.
+- New optional setting `TASK_EVENTS_MAX_PER_IP` (default 32): live Notes streams
+  per address.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the
