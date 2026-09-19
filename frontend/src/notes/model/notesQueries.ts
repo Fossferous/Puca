@@ -152,7 +152,7 @@ export function useServersQuery() {
 /** One NoteSource per checklist channel across every joined server, plus
  *  whether any server's channel query is still pending or failed (a caller
  *  must not prune prefs against an INCOMPLETE set). */
-export function useChannelSources(): { sources: NoteSource[]; complete: boolean; updatedAt: number } {
+export function useChannelSources(): { sources: NoteSource[]; complete: boolean; updatedAt: number; oldestAt: number } {
     const { data: servers = [], isSuccess: serversDone, dataUpdatedAt: serversAt } = useServersQuery();
     const channelQueries = useQueries({
         queries: servers.map((s: Server) => ({
@@ -173,6 +173,9 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean;
     // When the channel set was last fetched: the prune's generation for
     // checklist notes (notesPrune.ts).
     const updatedAt = Math.max(serversAt, ...channelQueries.map(q => q.dataUpdatedAt));
+    // ...and the oldest fetch behind it: a view still holding a channel list
+    // hydrated from the device cache is not this page's own (notesPrune.ts).
+    const oldestAt = Math.min(serversAt, ...channelQueries.map(q => q.dataUpdatedAt));
     const memo = useMemo(() => {
         const sources: NoteSource[] = servers.flatMap((server: Server, i: number) => {
             const names = new Map(
@@ -195,7 +198,7 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean;
         // what matters, and react-query keeps THAT referentially stable.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [servers, serversDone, allChannelsSettled, ...channelData, ...memberData]);
-    return useMemo(() => ({ ...memo, updatedAt }), [memo, updatedAt]);
+    return useMemo(() => ({ ...memo, updatedAt, oldestAt }), [memo, updatedAt, oldestAt]);
 }
 
 function listSource(l: TaskList): NoteSource {
@@ -234,7 +237,7 @@ export function useNoteSources(): {
         loading: lists.isPending,
         error: lists.error,
         complete: lists.isSuccess && channels.complete,
-        gens: { list: lists.dataUpdatedAt, channel: channels.updatedAt },
+        gens: { list: lists.dataUpdatedAt, channel: channels.updatedAt, channelOldest: channels.oldestAt },
     };
 }
 
@@ -364,19 +367,19 @@ export async function confirmGone(qc: QueryClient, keys: string[]): Promise<stri
 
 function useSettledAbsencePrune(sources: NoteSource[], local: NotesNoteState, complete: boolean, gens: PruneGens, trashKeys: string[]): void {
     const qc = useQueryClient();
-    const { list, channel } = gens;
+    const { list, channel, channelOldest } = gens;
     useEffect(() => {
         if (!complete || anythingQueued() || pruneBlocked()) return;
         const present = new Set([...sources.map(s => noteKey(s.ref)), ...trashKeys]);
         const stored = new Set([...Object.keys(local.colors), ...Object.keys(local.labels), ...Object.keys(local.archived)]);
-        const due = pruneStep(prunes, { list, channel }, Date.now(), present, stored);
+        const due = pruneStep(prunes, { list, channel, channelOldest }, Date.now(), present, stored);
         if (due.length === 0) return;
         let cancelled = false;
         void confirmGone(qc, due).then(gone => {
             if (!cancelled && gone.length > 0 && !anythingQueued() && !pruneBlocked()) forgetNoteKeys(gone);
         });
         return () => { cancelled = true; };
-    }, [qc, sources, local, complete, list, channel, trashKeys]);
+    }, [qc, sources, local, complete, list, channel, channelOldest, trashKeys]);
 }
 
 // --- Mutations -------------------------------------------------------------------

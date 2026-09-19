@@ -130,7 +130,8 @@ step:
   permanent; a note moved to the trash keeps them for a restore. Notes deleted
   *outside* Notes (Púca's Tasks view, a removed checklist channel) are pruned
   only once they have been missing from two settled, complete fetches at least
-  a minute apart, never while offline edits are queued, and a personal list
+  a minute apart, both made by this page (a view rebuilt from the device cache
+  never counts), never while offline edits are queued, and a personal list
   only after the trash has been asked and does not hold it
   (`frontend/src/notes/model/notesPrune.ts`). One device's momentary view — a
   note created elsewhere a second ago, a channel query that failed — never

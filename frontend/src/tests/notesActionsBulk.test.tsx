@@ -186,27 +186,50 @@ describe('the settled-absence prune', () => {
     const present = new Set(['list:1']);
 
     it('never on the first sighting, nor on a second view of the SAME fetch', () => {
-        const s = newPruneState();
+        const s = newPruneState(0);
         expect(pruneStep(s, { list: 100, channel: 100 }, 0, present, stored)).toEqual([]);
         expect(pruneStep(s, { list: 100, channel: 100 }, PRUNE_GRACE_MS * 5, present, stored)).toEqual([]);
     });
 
     it('never within the grace period, even across two fetches', () => {
-        const s = newPruneState();
+        const s = newPruneState(0);
         pruneStep(s, { list: 100, channel: 100 }, 0, present, stored);
         expect(pruneStep(s, { list: 200, channel: 200 }, PRUNE_GRACE_MS - 1, present, stored)).toEqual([]);
     });
 
     it('missing across two fetches a grace period apart: forgotten, per kind of fetch', () => {
-        const s = newPruneState();
+        const s = newPruneState(0);
         pruneStep(s, { list: 100, channel: 100 }, 0, present, stored);
         // A new LIST fetch only: the list is due, the checklist waits for a channel fetch.
         expect(pruneStep(s, { list: 200, channel: 100 }, PRUNE_GRACE_MS, present, stored)).toEqual(['list:2']);
         expect(pruneStep(s, { list: 200, channel: 300 }, PRUNE_GRACE_MS, present, stored).sort()).toEqual(['channel:9', 'list:2']);
     });
 
+    it('a view built from the device cache (fetched before this page) never strikes', () => {
+        // notesCache.ts hydrates each query with its OLD fetch time. One cached
+        // view plus one fresh fetch a minute later must not be two strikes.
+        const since = 10_000;
+        const s = newPruneState(since);
+        expect(pruneStep(s, { list: 5_000, channel: 5_000 }, since, present, stored)).toEqual([]);
+        expect(pruneStep(s, { list: since + 1, channel: since + 1 }, since + PRUNE_GRACE_MS, present, stored)).toEqual([]);
+        // Positive control: the first FRESH fetch was the first strike; a second
+        // fresh one a grace period later forgets them.
+        expect(pruneStep(s, { list: since + 2, channel: since + 2 }, since + 2 * PRUNE_GRACE_MS, present, stored).sort()).toEqual(['channel:9', 'list:2']);
+    });
+
+    it('a checklist view still holding one cached channel query is not this page’s own', () => {
+        const since = 10_000;
+        const s = newPruneState(since);
+        // The newest channel fetch is fresh, the oldest is the cache's.
+        pruneStep(s, { list: since + 1, channel: since + 1, channelOldest: 5_000 }, since, present, stored);
+        expect(pruneStep(s, { list: since + 2, channel: since + 2, channelOldest: 5_000 }, since + PRUNE_GRACE_MS, present, stored)).toEqual(['list:2']);
+        // Once every channel query has been fetched here, it strikes (and prunes a grace later).
+        pruneStep(s, { list: since + 2, channel: since + 3, channelOldest: since + 3 }, since + PRUNE_GRACE_MS, present, stored);
+        expect(pruneStep(s, { list: since + 2, channel: since + 4, channelOldest: since + 4 }, since + 2 * PRUNE_GRACE_MS, present, stored).sort()).toEqual(['channel:9', 'list:2']);
+    });
+
     it('a note that reappears (created elsewhere, restored) loses its strike', () => {
-        const s = newPruneState();
+        const s = newPruneState(0);
         pruneStep(s, { list: 100, channel: 100 }, 0, present, stored);
         pruneStep(s, { list: 150, channel: 100 }, 10, new Set(['list:1', 'list:2']), stored);   // back
         expect(pruneStep(s, { list: 200, channel: 100 }, PRUNE_GRACE_MS * 2, present, stored)).toEqual([]);

@@ -13,7 +13,10 @@
  * list fetches, a checklist from two channel fetches), at least a grace
  * period apart — a fetch that began before a note existed cannot count
  * twice — and, for a personal list, once the trash has been asked and does
- * not hold it either (the caller confirms that; see useNoteCards).
+ * not hold it either (the caller confirms that; see useNoteCards). Only
+ * fetches made during this page's lifetime count: a view built from the
+ * device cache (notesCache.ts hydrates it with its OLD fetch time) is never
+ * a strike, so the first strike is always a fresh fetch.
  */
 
 export const PRUNE_GRACE_MS = 60_000;
@@ -21,10 +24,13 @@ export const PRUNE_GRACE_MS = 60_000;
 export interface PruneState {
     /** Key -> the fetch generation and time it was first seen missing. */
     strikes: Map<string, { gen: number; at: number }>;
+    /** When this page started (or the account changed): a view whose data
+     *  was fetched before this — the hydrated device cache — strikes nothing. */
+    since: number;
 }
 
-export function newPruneState(): PruneState {
-    return { strikes: new Map() };
+export function newPruneState(since: number = Date.now()): PruneState {
+    return { strikes: new Map(), since };
 }
 
 export interface PruneGens {
@@ -32,6 +38,9 @@ export interface PruneGens {
     list: number;
     /** When the checklist channels were last fetched (the newest of them). */
     channel: number;
+    /** The OLDEST fetch behind the checklist view (servers and every
+     *  channel query): the view is this page's own only once this is. */
+    channelOldest?: number;
 }
 
 /**
@@ -50,9 +59,15 @@ export function pruneStep(
         if (!stored.has(k) || present.has(k)) state.strikes.delete(k);
     }
     const out: string[] = [];
+    const fresh = {
+        list: gens.list >= state.since,
+        channel: (gens.channelOldest ?? gens.channel) >= state.since,
+    };
     for (const k of stored) {
         if (present.has(k)) continue;
-        const gen = k.startsWith('channel:') ? gens.channel : gens.list;
+        const isChannel = k.startsWith('channel:');
+        if (!fresh[isChannel ? 'channel' : 'list']) continue;   // cached, not fetched here
+        const gen = isChannel ? gens.channel : gens.list;
         const strike = state.strikes.get(k);
         if (!strike) {
             state.strikes.set(k, { gen, at: now });
