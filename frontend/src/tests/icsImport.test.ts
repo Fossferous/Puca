@@ -1,9 +1,9 @@
 // The paced .ics import: dedupe by UID, split before the per-list cap, back
 // off on 429 and resume exactly where it stopped, cancel cleanly.
 import { describe, expect, it, vi } from 'vitest';
-import { MAX_PER_LIST, PACE_MS, importSummary, runImport, type ImportIO } from '../api/icsImport';
+import { MAX_PER_LIST, MAX_RETRY_WAIT_MS, PACE_MS, importSummary, runImport, type ImportIO } from '../api/icsImport';
 import { type IcsImportItem } from '../api/ics';
-import { ApiError } from '../api/client';
+import { ApiError, apiClient, retryAfterMsOf } from '../api/client';
 import { parseSchedule } from '../api/taskSchedule';
 
 const item = (i: number, extra: Partial<IcsImportItem> = {}): IcsImportItem => ({
@@ -104,5 +104,109 @@ describe('runImport', () => {
         const s = await runImport([item(1), item(2), item(3)], { listId: 7, title: 'x', existingCount: 0, existingUids: new Set() }, f.io, { nowMs: NOW, signal: { cancelled: false } });
         expect(s.created).toBe(2);
         expect(s.failed).toEqual([{ summary: 'Event 2', reason: 'Task description too long' }]);
+    });
+});
+
+describe('Retry-After', () => {
+    it('a 429 that says how long to wait is waited THAT long, not the backoff', async () => {
+        const f = fakeIO();
+        const real = f.io.createTask;
+        let fails = 1;
+        f.io.createTask = vi.fn(async (...a: Parameters<ImportIO['createTask']>) => {
+            if (fails-- > 0) throw new ApiError('Too many requests', 429, 7000);
+            return real(...a);
+        });
+        const s = await runImport([item(1)], { listId: 7, title: 'x', existingCount: 0, existingUids: new Set() }, f.io, { nowMs: NOW, signal: { cancelled: false } });
+        expect(s.created).toBe(1);
+        expect(f.sleeps).toContain(7000);
+        expect(f.sleeps).not.toContain(2000);
+    });
+
+    it('an absurd Retry-After is capped; none falls back to the backoff (positive control)', async () => {
+        const f = fakeIO();
+        const real = f.io.createTask;
+        const waits = [3_600_000, undefined];
+        f.io.createTask = vi.fn(async (...a: Parameters<ImportIO['createTask']>) => {
+            if (waits.length) throw new ApiError('Too many requests', 429, waits.shift());
+            return real(...a);
+        });
+        await runImport([item(1)], { listId: 7, title: 'x', existingCount: 0, existingUids: new Set() }, f.io, { nowMs: NOW, signal: { cancelled: false } });
+        expect(f.sleeps.slice(0, 2)).toEqual([MAX_RETRY_WAIT_MS, 4000]);
+    });
+
+    it('retryAfterMsOf reads Retry-After seconds, an HTTP-date, the limiter header and a body', () => {
+        const now = Date.parse('2026-10-01T00:00:00Z');
+        expect(retryAfterMsOf(new Headers({ 'retry-after': '7' }), '', now)).toBe(7000);
+        expect(retryAfterMsOf(new Headers({ 'retry-after': 'Thu, 01 Oct 2026 00:00:12 GMT' }), '', now)).toBe(12_000);
+        expect(retryAfterMsOf(new Headers({ 'x-ratelimit-after': '2' }), '', now)).toBe(2000);
+        expect(retryAfterMsOf(new Headers(), '{"error":"rate_limited","retry_after_ms":1500}', now)).toBe(1500);
+        expect(retryAfterMsOf(new Headers(), 'Too Many Requests', now)).toBeUndefined();
+        expect(retryAfterMsOf(new Headers({ 'retry-after': 'soon' }), '', now)).toBeUndefined();
+    });
+
+    it('the API client carries a 429’s Retry-After on the ApiError it throws', async () => {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response('Too Many Requests', { status: 429, headers: { 'retry-after': '3' } }),
+        );
+        try {
+            const err = await apiClient.get('/task-features').catch((e: unknown) => e);
+            expect(err).toBeInstanceOf(ApiError);
+            expect((err as ApiError).status).toBe(429);
+            expect((err as ApiError).retryAfterMs).toBe(3000);
+        } finally {
+            fetchSpy.mockRestore();
+        }
+    });
+});
+
+describe('resuming never overruns a list or duplicates an item', () => {
+    it('the cap is checked against REAL per-list task counts across a stop and a resume', async () => {
+        // Every item brings a notes subtask: two tasks each. The old resume
+        // re-derived the count as existing + items created and under-counted.
+        const items = Array.from({ length: 10 }, (_, i) => item(i, { description: `notes ${i}` }));
+        const target = { listId: 7, title: 'Cal', existingCount: MAX_PER_LIST - 9, existingUids: new Set<string>() };
+        const f = fakeIO();
+        const real = f.io.createTask;
+        let calls = 0;
+        f.io.createTask = vi.fn(async (...a: Parameters<ImportIO['createTask']>) => {
+            if (++calls > 6) throw new ApiError('Too many requests', 429);   // stops after 3 whole items
+            return real(...a);
+        });
+        const stopped = await runImport(items, target, f.io, { nowMs: NOW, signal: { cancelled: false } });
+        expect(stopped.stoppedBy).toMatch(/Resume/);
+        expect(stopped.listCounts).toEqual([MAX_PER_LIST - 3]);
+        const g = fakeIO();
+        const resumed = await runImport(items, target, g.io, { nowMs: NOW, signal: { cancelled: false }, resume: stopped });
+        const inFirst = (MAX_PER_LIST - 9) + f.tasks.filter(t => t.listId === 7).length + g.tasks.filter(t => t.listId === 7).length;
+        expect(inFirst).toBeLessThanOrEqual(MAX_PER_LIST);
+        expect(resumed.listIds.length).toBe(2);
+        expect(resumed.created).toBe(10);
+        // Every item exactly once across both runs.
+        const titles = [...f.tasks, ...g.tasks].map(t => t.text).filter(t => t.startsWith('Event'));
+        expect(new Set(titles).size).toBe(10);
+        expect(titles).toHaveLength(10);
+    });
+
+    it('a stop between an item and its notes subtask resumes with ONLY the subtask', async () => {
+        const f = fakeIO();
+        const real = f.io.createTask;
+        f.io.createTask = vi.fn(async (listId, text, parentId, timing) => {
+            if (parentId !== undefined) throw new ApiError('Too many requests', 429);
+            return real(listId, text, parentId, timing);
+        });
+        const items = [item(1, { description: 'Bring cake' }), item(2)];
+        const target = { listId: 7, title: 'x', existingCount: 0, existingUids: new Set<string>() };
+        const stopped = await runImport(items, target, f.io, { nowMs: NOW, signal: { cancelled: false } });
+        expect(stopped.next).toBe(0);
+        expect(stopped.pendingDescription).toBeDefined();
+        const parentId = stopped.pendingDescription!.parentId;
+        expect(f.tasks.map(t => t.text)).toEqual(['Event 1']);
+        // The dialog re-reads the note, so the target now holds uid-1.
+        const g = fakeIO();
+        const resumed = await runImport(items, { ...target, existingCount: 1, existingUids: new Set(['uid-1']) }, g.io, { nowMs: NOW, signal: { cancelled: false }, resume: stopped });
+        expect(g.tasks.map(t => [t.text, t.parentId])).toEqual([['Bring cake', parentId], ['Event 2', undefined]]);
+        expect(resumed).toMatchObject({ created: 2, skipped: 0, next: 2 });
+        expect(resumed.pendingDescription).toBeUndefined();
+        expect(resumed.listCounts).toEqual([3]);
     });
 });

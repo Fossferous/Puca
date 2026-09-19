@@ -365,9 +365,13 @@ async fn main() -> anyhow::Result<()> {
             ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
-            .expose_headers([header::HeaderName::from_static(
-                crate::auth::RENEWED_TOKEN_HEADER,
-            )])
+            // A 429's wait (the limiter's x-ratelimit-after, or Retry-After) is
+            // exposed so a paced client can honour it (api/client.ts).
+            .expose_headers([
+                header::HeaderName::from_static(crate::auth::RENEWED_TOKEN_HEADER),
+                header::RETRY_AFTER,
+                header::HeaderName::from_static("x-ratelimit-after"),
+            ])
     } else if is_production {
         // Fail closed: a production server must name its allowed origins. Every
         // documented deploy sets CORS_ORIGINS (chat + app + tauri/capacitor
@@ -400,9 +404,13 @@ async fn main() -> anyhow::Result<()> {
             ])
             // Sliding-session renewal rides on a response header; without this
             // the browser hides it cross-origin and sessions still die at 24 h.
-            .expose_headers([header::HeaderName::from_static(
-                crate::auth::RENEWED_TOKEN_HEADER,
-            )])
+            // A 429's wait (the limiter's x-ratelimit-after, or Retry-After) is
+            // exposed so a paced client can honour it (api/client.ts).
+            .expose_headers([
+                header::HeaderName::from_static(crate::auth::RENEWED_TOKEN_HEADER),
+                header::RETRY_AFTER,
+                header::HeaderName::from_static("x-ratelimit-after"),
+            ])
     };
 
     // Routes that require JWT authentication

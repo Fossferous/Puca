@@ -460,6 +460,11 @@ async function main() {
     const SCHED = '{"v":2,"t":"self","ct":"c2NoZWR1bGU="}';
     const SNOOZE = '{"v":2,"t":"self","ct":"c25vb3pl"}';
     const feats = await must('GET', '/task-features', null, A.t);
+    // A 429's wait must be readable cross-origin, or the paced .ics import
+    // (api/icsImport.ts) can never honour it and falls back to guessing.
+    const corsRes = await fetch(`${API}/task-features`, { headers: { Origin: 'http://cors-check.invalid', Authorization: `Bearer ${A.t}` } });
+    const exposed = (corsRes.headers.get('access-control-expose-headers') ?? '').toLowerCase();
+    check('timing/CORS exposes retry-after and x-ratelimit-after', exposed.includes('retry-after') && exposed.includes('x-ratelimit-after'), `expose=${exposed}`);
     check('timing/GET /task-features names schedule + snooze', Array.isArray(feats.features) && feats.features.includes('schedule') && feats.features.includes('snooze'), JSON.stringify(feats));
     const ev = await must('POST', `/task-lists/${rl.id}/tasks`, { description: 'event', schedule: SCHED, due_at: dueSoon }, A.t);
     check('timing/create carries the sealed schedule in ONE request', ev.schedule === SCHED && 'snooze' in ev && typeof ev.updated_at === 'string', JSON.stringify(ev));
