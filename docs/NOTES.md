@@ -241,7 +241,9 @@ the key and a local marker written before the request
 (`frontend/src/api/deviceIdentity/pendingRevoke.ts`); the next sign-in on this
 browser sends the revoke again before it enrols (the server answers 200 for a
 row it already revoked) and then enrols as a new device, so the browser is
-never left refused as a revoked device. The session itself is revoked after the
+never left refused as a revoked device. A Púca tab and a Notes tab never both
+act on that marker: each takes one Web Locks lock (Púca across the revoke and
+its enrolment), and a tab that waited re-reads the marker first. The session itself is revoked after the
 device, but never only after it: leaving the page or 1.5 s without an answer
 sends it anyway.
 
