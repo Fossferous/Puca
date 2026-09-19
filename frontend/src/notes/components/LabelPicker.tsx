@@ -1,7 +1,7 @@
 /**
  * Toggle a note's labels among every label in use, or type a new one.
- * Labels are device-local (notesPrefs.ts) — the hint says so, once, where
- * the user is about to rely on them.
+ * Labels are sealed to the account and sync (notesPrefsSync.ts) — the hint
+ * says so, once, where the user is about to rely on them.
  */
 import { useState } from 'react';
 import { PlusIcon } from '../../components/Icons';
@@ -68,7 +68,7 @@ export function LabelPicker({ all, value, onChange }: LabelPickerProps) {
                 </button>
             </form>
             <div className="notes-labels-hint">
-                {full ? `Up to ${MAX_LABELS_PER_NOTE} labels per note.` : 'Labels and colours stay on this device; they are not sent to the server.'}
+                {full ? `Up to ${MAX_LABELS_PER_NOTE} labels per note.` : 'Labels and colours are encrypted on this device before they sync to your other devices.'}
             </div>
         </div>
     );

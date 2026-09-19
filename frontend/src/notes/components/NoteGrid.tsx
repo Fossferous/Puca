@@ -26,6 +26,9 @@ interface NoteGridProps {
     onLabelClick: (label: string) => void;
     onArchive: (card: NoteCardModel, archived: boolean) => void;
     registerEl: (key: string, el: HTMLElement | null) => void;
+    /** Bulk selection (optional). */
+    selected?: ReadonlySet<string>;
+    onSelect?: (card: NoteCardModel, e: { shiftKey: boolean }) => void;
 }
 
 function Empty({ filter }: { filter: NoteFilter }) {
@@ -58,6 +61,8 @@ export function NoteGrid(props: NoteGridProps) {
         onOpen: props.onOpen, onMenu: props.onMenu, onPickColor: props.onPickColor,
         onPickLabels: props.onPickLabels, onLabelClick: props.onLabelClick, onArchive: props.onArchive,
         registerEl: props.registerEl,
+        onSelect: props.onSelect,
+        selecting: (props.selected?.size ?? 0) > 0,
     };
     return (
         <>
@@ -65,7 +70,7 @@ export function NoteGrid(props: NoteGridProps) {
                 <section aria-label="Pinned notes">
                     <h2 className="notes-section-title">Pinned</h2>
                     <div className={`notes-grid ${view === 'list' ? 'list' : ''}`}>
-                        {pinned.map(c => <NoteCard key={c.key} card={c} {...cardProps} />)}
+                        {pinned.map(c => <NoteCard key={c.key} card={c} {...cardProps} selected={props.selected?.has(c.key) ?? false} />)}
                     </div>
                 </section>
             )}
@@ -73,7 +78,7 @@ export function NoteGrid(props: NoteGridProps) {
                 <section aria-label={pinned.length > 0 ? 'Other notes' : 'Notes'}>
                     {pinned.length > 0 && <h2 className="notes-section-title">Others</h2>}
                     <div className={`notes-grid ${view === 'list' ? 'list' : ''}`}>
-                        {others.map(c => <NoteCard key={c.key} card={c} {...cardProps} />)}
+                        {others.map(c => <NoteCard key={c.key} card={c} {...cardProps} selected={props.selected?.has(c.key) ?? false} />)}
                     </div>
                 </section>
             )}

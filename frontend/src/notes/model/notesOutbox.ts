@@ -56,6 +56,7 @@ import { noteKey, type NoteRef } from './notesModel';
 
 export type PrefsIntent =
     | { type: 'pin'; tab: TaskTabRef; favorite: boolean }
+    | { type: 'pins'; tabs: TaskTabRef[]; favorite: boolean }
     | { type: 'order'; keys: string[] };
 
 type OpBody =
@@ -109,7 +110,7 @@ export const ops = {
     deleteTask: (note: NoteRef, taskId: number, description: string) =>
         withMeta({ k: 'deleteTask', note, taskId }, `delete ${q(description)}`),
     prefs: (prefs: TaskTabPref[], intent: PrefsIntent) =>
-        withMeta({ k: 'prefs', prefs, intent }, intent.type === 'pin' ? (intent.favorite ? 'pin a note' : 'unpin a note') : 'reorder notes'),
+        withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes' : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
 };
 
 /** Which busy key (noteBusy.ts) an op holds. */
@@ -129,7 +130,7 @@ function idsOf(op: OpBody): number[] {
         case 'createTask': return [op.note.id, ...(op.parentId !== undefined ? [op.parentId] : [])];
         case 'editTask': case 'updateTask': case 'moveTask': case 'deleteTask': return [op.note.id, op.taskId];
         case 'reorderTask': return [op.note.id, op.taskId, ...(op.afterId !== null ? [op.afterId] : []), ...(op.reparent?.parentId != null ? [op.reparent.parentId] : [])];
-        case 'prefs': return op.intent.type === 'pin' ? [op.intent.tab.id] : [];
+        case 'prefs': return op.intent.type === 'pin' ? [op.intent.tab.id] : op.intent.type === 'pins' ? op.intent.tabs.map(t => t.id) : [];
     }
 }
 
@@ -208,6 +209,15 @@ export function applyPrefsIntent(current: TaskTabPref[], intent: PrefsIntent, id
         return real === undefined ? null : { kind: t.kind, id: real };
     };
     const ordered: TaskTabRef[] = current.map(p => ({ kind: p.kind, id: p.ref_id }));
+    if (intent.type === 'pins') {
+        let next: TaskTabPref[] = current;
+        let changed = false;
+        for (const tab of intent.tabs) {
+            const r = applyPrefsIntent(next, { type: 'pin', tab, favorite: intent.favorite }, idMap);
+            if (r) { next = r; changed = true; }
+        }
+        return changed ? next : null;
+    }
     if (intent.type === 'pin') {
         const tab = realTab(intent.tab);
         if (!tab) return null;

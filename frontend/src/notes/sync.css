@@ -5,3 +5,80 @@
 
 .notes-chip.unsynced { color: var(--text-warning); border: 1px dashed currentColor; }
 [data-theme="light"] .notes-chip.unsynced { color: #8a5a00; }
+
+/* ---------- Bulk selection --------------------------------------------------------- */
+.notes-card.selected { outline: 2px solid var(--brand-primary); outline-offset: -1px; }
+.notes-card-select {
+    position: absolute;
+    top: -10px;
+    left: -10px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-floating);
+    color: var(--text-muted);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    opacity: 0;
+    z-index: 2;
+    font-size: 16px;
+}
+.notes-card:hover .notes-card-select,
+.notes-card:focus-within .notes-card-select,
+.notes-card-select.shown,
+.notes-card-select.on { opacity: 1; }
+.notes-card-select.on { color: var(--brand-primary); }
+
+/* Over the top bar while anything is selected (below popovers at 1000). */
+.notes-selectbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 950;
+    height: var(--notes-topbar-height, 56px);
+    padding: 0 8px;
+    padding-top: var(--safe-area-top, 0px);
+    box-sizing: content-box;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--bg-floating);
+    color: var(--text-normal);
+    border-bottom: 1px solid var(--border-separator);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.notes-selectbar .spacer { flex: 1; min-width: 4px; }
+.notes-selectbar-count {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    margin: 0 4px;
+}
+.notes-selectbar .notes-iconbtn.active { color: var(--brand-primary); }
+.notes-selectbar .notes-iconbtn.active .svrn-icon { fill: currentColor; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* Touch: the checkbox appears once selecting (a long press starts it), and
+       is big enough to hit. */
+    .notes-card-select { width: 36px; height: 36px; top: -8px; left: -8px; min-width: 0; min-height: 0; }
+    .notes-card:hover .notes-card-select:not(.shown):not(.on) { opacity: 0; }
+    /* A dense icon row: 40px targets (DESIGN_PHILOSOPHY §5 allows a scoped
+       exception down to ~30px), no gap, so all actions fit at 390px. */
+    .notes-selectbar { padding: 0 4px; padding-top: var(--safe-area-top, 0px); gap: 0; }
+    .notes-selectbar .notes-iconbtn { width: 40px; height: 40px; min-width: 40px; min-height: 40px; flex-shrink: 0; }
+    .notes-selectbar-all { display: none; }
+    .notes-selectbar-count { font-size: 15px; }
+}
+@media (pointer: coarse) and (max-width: 420px) {
+    /* The two least-used actions give way on the narrowest phones; Copy as
+       text and Make copies stay on each card's More menu. */
+    .notes-selectbar-extra { display: none; }
+}

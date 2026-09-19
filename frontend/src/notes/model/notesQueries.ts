@@ -38,7 +38,7 @@ import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import {
     type NoteCard, type NoteRef, type NoteSource,
-    buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
+    buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder,
 } from './notesModel';
 import { useTaskEventsLive } from './taskEvents';
 import { ops, sendCreateList, sendCreateTask, sendNoteOp, type PrefsIntent } from './notesOutbox';
@@ -305,6 +305,8 @@ export interface NoteActions {
     renameNote: (note: NoteRef, title: string) => Promise<boolean>;
     deleteNote: (note: NoteRef) => Promise<boolean>;
     togglePin: (note: NoteRef) => void;
+    /** Pin or unpin several notes in ONE save (bulk selection). */
+    setPinnedMany: (notes: NoteRef[], pinned: boolean) => void;
     reorderNotes: (orderedKeys: string[]) => void;
     /** Device-local. */
     setColor: (note: NoteRef, color: Parameters<typeof setNoteColor>[1]) => void;
@@ -547,6 +549,14 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         savePrefs(toggleFavoritePrefs(orderedTabs(), prefsRef.current, tab), { type: 'pin', tab, favorite: !isFavoriteTab(prefsRef.current, tab) });
     }, [savePrefs, orderedTabs]);
 
+    const setPinnedMany = useCallback((notes: NoteRef[], pinned: boolean) => {
+        const selected = new Set(notes.map(noteKey));
+        const { order, overrides } = bulkPinOrder(cardsRef.current.map(c => c.key), selected, pinned);
+        const byKey = new Map(cardsRef.current.map(c => [c.key, c]));
+        const tabs = order.map(k => byKey.get(k)).filter((c): c is NoteCard => !!c).map(c => ({ kind: c.ref.kind, id: c.ref.id }));
+        savePrefs(buildPrefsForOrder(tabs, prefsRef.current, overrides), { type: 'pins', tabs: notes.map(n => ({ kind: n.kind, id: n.id })), favorite: pinned });
+    }, [savePrefs]);
+
     const reorderNotes = useCallback((orderedKeys: string[]) => {
         const byKey = new Map(cardsRef.current.map(c => [c.key, c]));
         const tabs = orderedKeys.map(k => byKey.get(k)).filter((c): c is NoteCard => !!c).map(c => ({ kind: c.ref.kind, id: c.ref.id }));
@@ -566,11 +576,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     return useMemo(() => ({
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
-        createNote, renameNote, deleteNote, togglePin, reorderNotes,
+        createNote, renameNote, deleteNote, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
-        createNote, renameNote, deleteNote, togglePin, reorderNotes,
+        createNote, renameNote, deleteNote, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);
 }

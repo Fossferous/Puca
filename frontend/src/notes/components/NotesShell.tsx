@@ -42,6 +42,7 @@ import { useTaskEvents } from '../model/taskEvents';
 import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
 import { useNotesOutbox } from '../model/notesOutbox';
 import { useNotesCachePersistence } from '../model/notesCache';
+import { useBulkPending, useNoteSelection } from './useNoteSelection';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -134,14 +135,20 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     }, [path, query, remindersView]);
 
     // A delete waits in the undo window; until it commits the note is hidden.
+    const bulk = useBulkPending(actions);
+    const bulkHidden = bulk.hiddenKeys;
     const cards = useMemo(
-        () => (pending?.kind === 'delete' ? allCards.filter(c => c.key !== pending.key) : allCards),
-        [allCards, pending],
+        () => (pending?.kind === 'delete' ? allCards.filter(c => c.key !== pending.key) : allCards)
+            .filter(c => !bulkHidden.has(c.key)),
+        [allCards, pending, bulkHidden],
     );
     const cardsByKey = useMemo(() => new Map(cards.map(c => [c.key, c])), [cards]);
     const visible = useMemo(() => sortCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
     const { pinned, others } = useMemo(() => splitPinned(visible), [visible]);
     const labels = useMemo(() => allLabels(cards), [cards]);
+    // Bulk selection over what the grid shows, in the order it shows it.
+    const gridOrder = useMemo(() => [...pinned, ...others], [pinned, others]);
+    const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, enabled: !remindersView && !openKey });
     const reminders = useMemo(() => groupReminders(cards, now), [cards, now]);
     const counts = useMemo(() => ({
         notes: cards.filter(c => !c.archived).length,
@@ -408,6 +415,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                     onLabelClick={onLabelClick}
                                     onArchive={archiveWithUndo}
                                     registerEl={registerEl}
+                                    selected={selection.selected}
+                                    onSelect={selection.onSelect}
                                 />
                             </>
                         )}
@@ -476,6 +485,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onExpire={expirePending}
                 />
             )}
+            {selection.bar}
+            {selection.undo}
             <MessageToasts />
         </div>
     );
