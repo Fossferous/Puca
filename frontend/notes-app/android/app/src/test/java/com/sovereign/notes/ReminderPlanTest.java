@@ -84,6 +84,59 @@ public class ReminderPlanTest {
         assertEquals(Collections.singletonList(1L), r.dueNow);
     }
 
+    // --- several entries per id: a repeating item's occurrences ---------------
+
+    private static final long DAY = 86_400_000L;
+
+    @Test
+    public void onlyTheLatestPastEntryOfAnIdCountsAndItFiresOnce() {
+        // last week's occurrence (A) and today's (B) are both past; C is next week
+        List<ReminderPlan.Entry> entries = Arrays.asList(
+                e(1, NOW - 7 * DAY, "A"), e(1, NOW - 1000, "B"), e(1, NOW + 7 * DAY, "C"));
+        ReminderPlan.Result first = ReminderPlan.plan(entries, new HashMap<>(), NOW);
+        assertEquals(Collections.singletonList(1L), first.dueNow);
+        assertEquals("the marker is the LATEST past occurrence", "B", first.prunedFired.get("1"));
+        assertEquals(NOW + 7 * DAY, first.nextAtMs);
+        // The next arm: nothing owed. With every past entry counted, A and B
+        // took turns in the one marker and every arm fired the item again.
+        ReminderPlan.Result again = ReminderPlan.plan(entries, first.prunedFired, NOW + 1000);
+        assertTrue("occurrences of one id must not re-fire each other", again.dueNow.isEmpty());
+        assertEquals(NOW + 7 * DAY, ReminderPlan.alarmAt(again, NOW + 1000));
+    }
+
+    @Test
+    public void theLatestIsByTimeNotByTheOrderEntriesArrive() {
+        List<ReminderPlan.Entry> entries = Arrays.asList(e(1, NOW - 1000, "B"), e(1, NOW - 7 * DAY, "A"));
+        Map<String, String> fired = new HashMap<>();
+        fired.put("1", "B");
+        ReminderPlan.Result r = ReminderPlan.plan(entries, fired, NOW);
+        assertTrue(r.dueNow.isEmpty());
+        assertEquals("B", r.prunedFired.get("1"));
+    }
+
+    @Test
+    public void theNextOccurrenceFiresExactlyOnceWhenItComes() {
+        // Last week's reminder fired (marker A); this week's is a minute away.
+        List<ReminderPlan.Entry> entries = Arrays.asList(e(1, NOW - 7 * DAY, "A"), e(1, NOW + 60_000, "B"));
+        Map<String, String> fired = new HashMap<>();
+        fired.put("1", "A");
+        ReminderPlan.Result before = ReminderPlan.plan(entries, fired, NOW);
+        assertTrue("nothing owed before it comes", before.dueNow.isEmpty());
+        assertEquals(NOW + 60_000, ReminderPlan.alarmAt(before, NOW));
+        ReminderPlan.Result at = ReminderPlan.plan(entries, before.prunedFired, NOW + 60_000);
+        assertEquals(Collections.singletonList(1L), at.dueNow);
+        ReminderPlan.Result after = ReminderPlan.plan(entries, at.prunedFired, NOW + 61_000);
+        assertTrue(after.dueNow.isEmpty());
+        assertEquals("no alarm left: the series is re-armed by the next sync", -1, ReminderPlan.alarmAt(after, NOW + 61_000));
+    }
+
+    @Test
+    public void idsAreIndependent() {
+        // positive control: the per-id rule must not swallow a different id
+        List<ReminderPlan.Entry> entries = Arrays.asList(e(1, NOW - 2000, "a"), e(2, NOW - 1000, "b"));
+        assertEquals(Arrays.asList(1L, 2L), ReminderPlan.plan(entries, new HashMap<>(), NOW).dueNow);
+    }
+
     @Test
     public void textIsACountNeverContent() {
         assertEquals("An item is due", ReminderPlan.dueText(1));

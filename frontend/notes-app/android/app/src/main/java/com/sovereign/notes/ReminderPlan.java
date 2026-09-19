@@ -2,6 +2,7 @@ package com.sovereign.notes;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -9,7 +10,7 @@ import java.util.Map;
  * The due-reminder decision core: which items fire NOW, and when to wake next.
  *
  * Pure Java (no android.*, no org.json) so it runs under plain JUnit — the
- * JS twin is planReminders in frontend/src/api/taskReminders.ts, and this
+ * JS twin is planEntries in frontend/src/api/reminderFeed.ts, and this
  * keeps its rules:
  *
  *  - an item fires once per MARK: the fired map holds id -> the mark it last
@@ -20,9 +21,10 @@ import java.util.Map;
  *  - a time already in the past fires on the next arm, which is what makes a
  *    phone that was off (or dozing) at the due time still say something.
  *
- * The mark is OPAQUE here on purpose. Today it is the server's due_at; the
- * task-timing work makes it "due|snooze". Keying on an opaque string is what
- * lets that change land in JS alone, with no new APK.
+ * The mark is OPAQUE here on purpose: the server's due_at, "due|snooze" while
+ * a snooze is in force, or a repeating item's occurrence instant — whatever
+ * the page decides (frontend/src/api/reminderFeed.ts). Keying on an opaque
+ * string is what lets such a change land in JS alone, with no new APK.
  *
  * Content-free by contract: an entry is an id, a time and a mark. No title,
  * no item text — this class could not leak what it never holds.
@@ -64,19 +66,33 @@ public final class ReminderPlan {
         }
     }
 
+    /**
+     * An id may have SEVERAL entries — a repeating item's upcoming reminders,
+     * which the page precomputes because this side cannot open the sealed
+     * rule (frontend/src/api/reminderFeed.ts). Only its LATEST past entry
+     * counts: with two past entries of one id, each would overwrite the one
+     * fired marker in turn and every arm would fire the item again. The JS
+     * twin (planEntries) applies the same rule.
+     */
     public static Result plan(List<Entry> entries, Map<String, String> fired, long now) {
-        List<Long> dueNow = new ArrayList<>();
-        Map<String, String> pruned = new HashMap<>();
+        // Insertion order kept, so dueNow follows the order entries arrived in.
+        Map<Long, Entry> latestPast = new LinkedHashMap<>();
         long next = -1;
         for (Entry e : entries) {
-            String key = Long.toString(e.id);
             if (e.atMs <= now) {
-                String prev = fired == null ? null : fired.get(key);
-                if (!e.mark.equals(prev)) dueNow.add(e.id);
-                pruned.put(key, e.mark);
+                Entry cur = latestPast.get(e.id);
+                if (cur == null || e.atMs > cur.atMs) latestPast.put(e.id, e);
             } else if (next < 0 || e.atMs < next) {
                 next = e.atMs;
             }
+        }
+        List<Long> dueNow = new ArrayList<>();
+        Map<String, String> pruned = new HashMap<>();
+        for (Entry e : latestPast.values()) {
+            String key = Long.toString(e.id);
+            String prev = fired == null ? null : fired.get(key);
+            if (!e.mark.equals(prev)) dueNow.add(e.id);
+            pruned.put(key, e.mark);
         }
         return new Result(dueNow, next, pruned);
     }

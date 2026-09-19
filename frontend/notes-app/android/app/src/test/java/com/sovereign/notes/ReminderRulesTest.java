@@ -78,6 +78,23 @@ public class ReminderRulesTest {
         assertTrue(ReminderPlan.plan(fire, fired, NOW).dueNow.isEmpty());
     }
 
+    @Test
+    public void aDeadSessionStillAnnouncesTheOccurrenceFiringNowWhenLaterOnesStayArmed() {
+        // A weekly item: last week's reminder fired, this week's is firing
+        // now, next week's survives the dead-session drop. Matching the put-back
+        // on the id alone saw next week's entry and announced nothing.
+        long day = 86_400_000L;
+        ReminderPlan.Entry lastWeek = new ReminderPlan.Entry(1, NOW - 7 * day, "w1", "d");
+        ReminderPlan.Entry thisWeek = new ReminderPlan.Entry(1, NOW - 1000, "w2", "d");
+        ReminderPlan.Entry nextWeek = new ReminderPlan.Entry(1, NOW + 7 * day, "w3", "d");
+        List<ReminderPlan.Entry> before = Arrays.asList(lastWeek, thisWeek, nextWeek);
+        List<ReminderPlan.Entry> after = ReminderMerge.dropPassed(before, NOW);
+        List<ReminderPlan.Entry> fire = ReminderRules.entriesToFire(before, after, ReminderRules.AUTH_DEAD, NOW);
+        HashMap<String, String> fired = new HashMap<>();
+        fired.put("1", "w1");
+        assertEquals(Collections.singletonList(1L), ReminderPlan.plan(fire, fired, NOW).dueNow);
+    }
+
     // --- may Púca stay quiet? -------------------------------------------------
 
     private static ReminderRules.OwnerState owner(boolean token, String account, long lastSync,

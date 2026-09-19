@@ -51,12 +51,19 @@ public final class ReminderRules {
             List<ReminderPlan.Entry> before, List<ReminderPlan.Entry> after, int outcome, long now) {
         if (outcome != AUTH_DEAD) return after;
         List<ReminderPlan.Entry> out = new ArrayList<>(after);
-        Set<Long> have = new HashSet<>();
-        for (ReminderPlan.Entry e : after) have.add(e.id);
+        // Per ENTRY, not per id: a repeating item keeps its FUTURE
+        // occurrences through the drop, and matching on the id alone would
+        // then skip the occurrence that is firing now.
+        Set<String> have = new HashSet<>();
+        for (ReminderPlan.Entry e : after) have.add(entryKey(e));
         for (ReminderPlan.Entry e : before) {
-            if (e.atMs <= now && !have.contains(e.id)) out.add(e);
+            if (e.atMs <= now && !have.contains(entryKey(e))) out.add(e);
         }
         return out;
+    }
+
+    private static String entryKey(ReminderPlan.Entry e) {
+        return e.id + "|" + e.atMs + "|" + e.mark;
     }
 
     /** How recently the reminder feed must have been read (the hourly job, or
