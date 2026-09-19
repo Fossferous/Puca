@@ -21,6 +21,9 @@
 #   dual-ship.sh installer     <setup.exe> <sig-file> <version> <notes>
 #   dual-ship.sh installer-lite <setup.exe> <sig-file> <version> <notes>
 #   dual-ship.sh backend       <src-tarball.tar.gz>
+#   DUAL_SHIP_PREFLIGHT_ONLY=1 dual-ship.sh backend <src-tarball.tar.gz>
+#                              (only the migration pre-flight: a rollback check
+#                               that builds and ships nothing — README.md)
 #   dual-ship.sh apk           <Puca-x.y.z.apk> <version>
 #   dual-ship.sh apk-lite      <Puca-Lite-x.y.z.apk> <version>
 #   dual-ship.sh apk-notes     <Puca-Notes-x.y.z.apk> <version>
@@ -834,11 +837,37 @@ cmd_installer_lite() {
 # 14+ mismatched and the primary crash-looped until a binary rollback. Only a tree
 # that byte-matches every host's recorded checksums may ship; this makes that
 # a hard gate instead of tribal knowledge (see .gitattributes for the history).
+#
+# ROLLBACKS. A database a NEWER release migrated has applied versions an older
+# tarball does not carry. A backend whose startup migrator sets
+# ignore_missing (src/migrator.rs, every release after 0.9.815) boots over
+# that, so such a version is allowed — but only when it is newer than every
+# migration the tarball carries (a gap in the middle is a different lineage,
+# not a rollback) and only when the tarball's own source says its migrator
+# tolerates it. A migration the tarball DOES carry must still byte-match: that
+# check is what stops the crash-loop above, and ignore_missing does not relax
+# it. See "Rolling back the backend" in deploy/ops/README.md.
+tarball_tolerates_newer_db() { # <tarball> <extract-dir>
+	local tarball="$1" tmp="$2"
+	tar xzf "$tarball" -C "$tmp" src/migrator.rs 2>/dev/null || return 1
+	tar xzf "$tarball" -C "$tmp" src/main.rs 2>/dev/null || return 1
+	grep -q 'set_ignore_missing(true)' "$tmp/src/migrator.rs" || return 1
+	# The binary must actually USE that migrator (not a comment naming it).
+	grep -v '^[[:space:]]*//' "$tmp/src/main.rs" | grep -q 'app_migrator()' || return 1
+}
+
 verify_migrations_against() {
 	local entry="$1" tarball="$2"
 	local label; label="$(label_of "$entry")"
 	local tmp; tmp="$(mktemp -d)"
 	tar xzf "$tarball" -C "$tmp" migrations
+	local tolerant=0 newest=0 v
+	if tarball_tolerates_newer_db "$tarball" "$tmp"; then tolerant=1; fi
+	for v in "$tmp"/migrations/[0-9]*_*.sql; do
+		[ -e "$v" ] || continue
+		v="$(basename "$v")"; v="${v%%_*}"; v=$((10#$v))
+		if [ "$v" -gt "$newest" ]; then newest="$v"; fi
+	done
 	local recorded
 	recorded="$(ssh_to "$entry" "sudo -u postgres psql -d $DB_NAME -t -A -c \"SELECT version, encode(checksum,'hex') FROM _sqlx_migrations ORDER BY version\"")"
 	local fails=0 ver sum f local_sum
@@ -846,7 +875,16 @@ verify_migrations_against() {
 		[ -n "$ver" ] || continue
 		f="$(ls "$tmp"/migrations/"$(printf '%03d' "$ver")"_*.sql 2>/dev/null | head -1)"
 		if [ -z "$f" ]; then
+			if [ "$ver" -gt "$newest" ] && [ "$tolerant" = 1 ]; then
+				echo "NOTE  $label: applied version $ver is newer than this tarball (a rollback); its migrator tolerates that (ignore_missing)"
+				continue
+			fi
 			echo "FAIL  $label: no migration file for applied version $ver in the tarball"
+			if [ "$ver" -gt "$newest" ]; then
+				echo "      This tarball's migrator does not tolerate a newer database (it predates"
+				echo "      ignore_missing, src/migrator.rs): it would refuse to start. Rolling back to"
+				echo "      it needs the database dump taken before the newer release shipped."
+			fi
 			fails=1
 			continue
 		fi
@@ -875,11 +913,16 @@ cmd_backend() {
 		fi
 	done
 	if [ "$preflight_failed" -ne 0 ]; then
-		echo "REFUSING to ship: the backend would crash-loop on VersionMismatch at startup."
-		echo "Build the tarball from a tree whose migrations byte-match production"
-		echo "(the long-lived main checkout — NOT a fresh clone/worktree, which"
-		echo "re-materialises line endings)."
+		echo "REFUSING to ship: the backend would crash-loop at startup (VersionMismatch or VersionMissing)."
+		echo "A checksum FAIL: build the tarball from a tree whose migrations byte-match"
+		echo "production (the long-lived main checkout — NOT a fresh clone/worktree, which"
+		echo "re-materialises line endings). A missing-version FAIL: see 'Rolling back the"
+		echo "backend' in deploy/ops/README.md."
 		exit 1
+	fi
+	if [ "${DUAL_SHIP_PREFLIGHT_ONLY:-0}" = 1 ]; then
+		echo "PASS  pre-flight only (DUAL_SHIP_PREFLIGHT_ONLY=1): nothing was built or shipped."
+		exit 0
 	fi
 
 	echo "=== building ONCE on $primary_label, then copying the binary ==="

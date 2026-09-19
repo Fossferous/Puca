@@ -298,6 +298,8 @@ cat > "$TMP/bin/ssh" <<STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
 case "\$*" in *SHA256SUMS.txt*curl*|*curl*SHA256SUMS.txt*) cat "$TMP/served-sums" 2>/dev/null ;; esac
+# ...and a backend pre-flight's migration query with $TMP/sqlx_rows.
+case "\$*" in *_sqlx_migrations*) cat "$TMP/sqlx_rows" 2>/dev/null ;; esac
 exit 0
 STUB
 chmod +x "$TMP/bin/ssh"
@@ -446,6 +448,60 @@ check "REFUSES a Notes page built against localhost" "$([ $rc -ne 0 ] && [ "$(ha
 mkweb "$TMP/web-good" 1 "api.invalid"
 out="$(ship webapp "$TMP/web-good.tgz")"
 check "a tarball with a production Notes page passes the preflight (positive control)" "$([ "$(has "$out" 'PASS  bundle preflight: Notes entry notes/assets/index-n0tes1.js')" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
+echo "--- dual-ship.sh backend: the migration pre-flight, including a rollback ---"
+# A backend source tarball: migrations 001-002, and a migrator that does or
+# does not tolerate a newer database (src/migrator.rs, ignore_missing). The
+# stub ssh (above) answers the _sqlx_migrations query from $TMP/sqlx_rows, so each
+# case is "what this host's database has applied". DUAL_SHIP_PREFLIGHT_ONLY
+# stops after the pre-flight: nothing here builds or copies anything.
+mksrc() { # <dir> <tolerant 0|1|comment>
+	local d="$1"; rm -rf "$d" "$d.tgz"; mkdir -p "$d/migrations" "$d/src"
+	printf 'CREATE TABLE a (id INT);\n' > "$d/migrations/001_a.sql"
+	printf 'CREATE TABLE b (id INT);\n' > "$d/migrations/002_b.sql"
+	case "$2" in
+		1) printf 'pub fn app_migrator() { let mut m = sqlx::migrate!("./migrations"); m.set_ignore_missing(true); }\n' > "$d/src/migrator.rs"
+		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		comment) printf 'pub fn app_migrator() { let mut m = sqlx::migrate!("./migrations"); m.set_ignore_missing(true); }\n' > "$d/src/migrator.rs"
+		   printf 'fn main() {\n    // one day: migrator::app_migrator()\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		*) printf 'fn main() {\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
+	esac
+	tar czf "$d.tgz" -C "$d" migrations src
+}
+sum_of() { sha384sum "$1" | cut -d' ' -f1; }
+preflight() { # <tarball>
+	: > "$LOG"
+	( cd "$TMP/deploy/ops" && PATH="$TMP/bin:$PATH" DUAL_SHIP_PREFLIGHT_ONLY=1 bash ./dual-ship.sh backend "$1" 2>&1 )
+}
+mksrc "$TMP/src-new" 1
+mksrc "$TMP/src-old" 0
+mksrc "$TMP/src-comment" comment
+S1="$(sum_of "$TMP/src-new/migrations/001_a.sql")"; S2="$(sum_of "$TMP/src-new/migrations/002_b.sql")"
+
+printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "a database at the tarball's own level passes (positive control)" "$([ $rc -eq 0 ] && [ "$(has "$out" 'PASS  sandbox migrations byte-match')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
+check "and the pre-flight-only run touches nothing past the query" "$([ "$(grep -c '^scp' "$LOG")" = 0 ] && echo 1 || echo 0)" "$(cat "$LOG")"
+
+printf '1|%s\n2|%s\n3|%s\n' "$S1" "$S2" "$S2" > "$TMP/sqlx_rows"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "ROLLBACK: a newer applied version passes when the tarball's migrator tolerates it" "$([ $rc -eq 0 ] && [ "$(has "$out" 'NOTE  sandbox: applied version 3 is newer than this tarball')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
+out="$(preflight "$TMP/src-old.tgz")"; rc=$?
+check "the same database REFUSES a tarball whose migrator predates ignore_missing" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'no migration file for applied version 3')" = 1 ] && [ "$(has "$out" 'needs the database dump')" = 1 ] && echo 1 || echo 0)" "$out"
+out="$(preflight "$TMP/src-comment.tgz")"; rc=$?
+check "and one whose main.rs only NAMES app_migrator in a comment" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
+
+printf '1|%s\n2|%s\n3|%s\n' "$S1" "0000" "$S2" > "$TMP/sqlx_rows"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "a tolerant tarball still REFUSES a checksum mismatch" "$([ $rc -ne 0 ] && [ "$(has "$out" 'migration v2 (002_b.sql) does not byte-match')" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
+
+rm -f "$TMP/src-new/migrations/002_b.sql"
+printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
+printf 'CREATE TABLE c (id INT);\n' > "$TMP/src-new/migrations/003_c.sql"; tar czf "$TMP/src-gap.tgz" -C "$TMP/src-new" migrations src
+out="$(preflight "$TMP/src-gap.tgz")"; rc=$?
+check "a missing version BELOW the tarball's newest is refused even when tolerant (not a rollback)" "$([ $rc -ne 0 ] && [ "$(has "$out" 'no migration file for applied version 2')" = 1 ] && echo 1 || echo 0)" "$out"
+rm -f "$TMP/sqlx_rows"
 
 echo
 echo "--- encrypt-bundle.mjs: a bundle that still carries notes/ is never signed ---"

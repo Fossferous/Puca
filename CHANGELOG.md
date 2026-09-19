@@ -29,10 +29,14 @@ one-line summary; this file is the full story. Versions follow
 ### Changed
 - **Rolling back the server no longer needs a database restore — from this
   release on.** The server now starts on a database that a newer release has
-  already updated, so going back to this release or any later one is just
-  reinstalling the older program. Going back to **0.9.815 or earlier** still
-  needs the database backup taken before the update, because those releases
-  refuse to start on a newer database.
+  already updated, and the release script's safety check now lets such a
+  rollback through (server owners: build the older release's backend and ship
+  it with `dual-ship.sh backend` as usual; `deploy/ops/README.md`, "Rolling
+  back the backend"). This holds as long as every update in between only
+  added to the database, which is the rule for Púca's migrations. Going back
+  to **0.9.815 or earlier** still needs the database backup taken before the
+  update: those releases refuse to start on a newer database, and the script
+  refuses to ship them over one.
 - Apps older than this release keep working against the new server: they do
   not show trashed notes, renaming a note in them leaves its text and
   pictures alone, and their Delete still deletes at once.
