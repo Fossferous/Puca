@@ -31,6 +31,7 @@ mod source_offer;
 mod key_handlers;
 mod message_handlers;
 mod middleware;
+mod migrator;
 mod models;
 mod moderation_handlers;
 mod permissions;
@@ -287,8 +288,12 @@ async fn main() -> anyhow::Result<()> {
     // dormant landmines that are documented there rather than patched.
     // Non-.sql files in that directory are ignored by the resolver, which is
     // what makes the README safe to keep next to them.
+    //
+    // migrator::app_migrator() tolerates APPLIED versions this binary does not
+    // embed, so a later rollback to this build boots over a newer database
+    // (the module header says why that is safe, and what it cannot fix).
     tracing::info!("Running database migrations...");
-    sqlx::migrate!("./migrations")
+    migrator::app_migrator()
         .run(&pool)
         .await
         .expect("Failed to run database migrations");
