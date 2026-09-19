@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vite
 const listTaskReminders = vi.fn();
 const notifyTasksDue = vi.fn();
 vi.mock('../api/tasks', () => ({ listTaskReminders: () => listTaskReminders() }));
-vi.mock('../api/desktopNotify', () => ({ notifyTasksDue: (n: number) => notifyTasksDue(n) }));
+vi.mock('../api/desktopNotify', () => ({ notifyTasksDue: (...a: unknown[]) => notifyTasksDue(...a) }));
 
 const { startTaskReminders } = await import('../api/taskReminders');
 
@@ -41,7 +41,8 @@ describe('startTaskReminders', () => {
         listTaskReminders.mockResolvedValue([{ id: 1, channel_id: null, list_id: 2, due_at: PAST }]);
         stop = startTaskReminders();
         await settle();
-        expect(notifyTasksDue).toHaveBeenCalledWith(1);
+        // the count, and exactly which reminders: what Púca asks Notes about
+        expect(notifyTasksDue).toHaveBeenCalledWith(1, [{ id: 1, mark: PAST }]);
         expect(firedWrites().some(c => String(c[1]).includes(PAST))).toBe(true);
     });
 
@@ -70,7 +71,7 @@ describe('startTaskReminders', () => {
         listTaskReminders.mockResolvedValue([{ id: 1, channel_id: null, list_id: 2, due_at: PAST }]);
         stop = startTaskReminders({ onFeed: () => { throw new Error('bad consumer'); } });
         await settle();
-        expect(notifyTasksDue).toHaveBeenCalledWith(1);
+        expect(notifyTasksDue).toHaveBeenCalledTimes(1);
     });
 
     it('a failed fetch calls nothing', async () => {

@@ -22,9 +22,12 @@ import java.util.Map;
  * stays quiet, so one due item is one notification, never zero.
  *
  * READ-ONLY and one row: {@code ownsDueReminders} = 1 or 0, from
- * {@link ReminderRules#ownsDueReminders} (live session, the same account Púca
- * names in the {@code account} query parameter, the feed read within three
- * hours, notifications allowed, the alarm set when something is owed).
+ * {@link ReminderRules#ownsDueReminders}: a live session (its JWT not about to
+ * lapse), the same account AND server Púca names in the {@code account} and
+ * {@code server} query parameters, the feed read within three hours,
+ * notifications allowed, the alarm set when something is owed, and every item
+ * in the {@code due} parameter (a JSON array of {id, mark}: the reminders Púca
+ * is about to announce) armed here under the same mark.
  *
  * Only Púca can ask: the provider is guarded by a permission with
  * protectionLevel="signature", granted by Android solely to an app signed with
@@ -50,8 +53,9 @@ public class ReminderOwnerProvider extends ContentProvider {
         boolean owns = false;
         if (ctx != null) {
             try {
-                owns = ReminderRules.ownsDueReminders(state(ctx), uri.getQueryParameter("account"),
-                        System.currentTimeMillis());
+                ReminderRules.Ask ask = new ReminderRules.Ask(uri.getQueryParameter("account"),
+                        uri.getQueryParameter("server"), ReminderRules.parseDue(uri.getQueryParameter("due")));
+                owns = ReminderRules.ownsDueReminders(state(ctx), ask, System.currentTimeMillis());
             } catch (Exception e) {
                 owns = false; // never "yes" on a failure: Púca then notifies
             }
@@ -65,20 +69,22 @@ public class ReminderOwnerProvider extends ContentProvider {
     static ReminderRules.OwnerState state(Context ctx) {
         String token;
         String account;
+        String apiBase;
         long lastSync;
         List<ReminderPlan.Entry> entries;
         Map<String, String> fired;
         synchronized (ReminderStore.LOCK) {
             token = ReminderStore.token(ctx);
             account = ReminderStore.account(ctx);
+            apiBase = ReminderStore.apiBase(ctx);
             lastSync = ReminderStore.lastSync(ctx);
             entries = ReminderStore.entries(ctx);
             fired = ReminderStore.fired(ctx);
         }
         long now = System.currentTimeMillis();
         boolean alarmNeeded = ReminderPlan.alarmAt(ReminderPlan.plan(entries, fired, now), now) >= 0;
-        return new ReminderRules.OwnerState(token != null, account, lastSync,
-                notificationsAllowed(ctx), alarmNeeded, ReminderAlarms.present(ctx));
+        return new ReminderRules.OwnerState(token != null, JwtClaims.expMs(token), account, apiBase, lastSync,
+                notificationsAllowed(ctx), alarmNeeded, ReminderAlarms.present(ctx), entries);
     }
 
     /** The runtime permission (13+), the app-level switch, and the Reminders

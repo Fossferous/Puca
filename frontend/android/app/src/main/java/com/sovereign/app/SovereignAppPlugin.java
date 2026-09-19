@@ -732,13 +732,15 @@ public class SovereignAppPlugin extends Plugin {
             android.net.Uri.parse("content://com.sovereign.notes.reminderowner/owner");
 
     /**
-     * Does Púca Notes OWN due-item reminders on this phone right now — for
-     * this account? Owner decision: when Notes is installed AND able to
-     * deliver them, it does, and Púca stays quiet so one due item is one
-     * notification; otherwise Púca notifies. So the answer is true ONLY on
-     * Notes' own positive answer (signed in to the same account, feed read
-     * within three hours, notifications allowed, alarm set — Notes'
-     * ReminderRules.ownsDueReminders). Everything else is false: Notes not
+     * Does Púca Notes OWN these due reminders on this phone right now — for
+     * this account on this server? Owner decision: when Notes is installed
+     * AND able to deliver them, it does, and Púca stays quiet so one due item
+     * is one notification; otherwise Púca notifies. So the answer is true
+     * ONLY on Notes' own positive answer (signed in to the same account on
+     * the same server with a session not about to lapse, feed read within
+     * three hours, notifications allowed, alarm set, and every item in `due`
+     * — [{id, mark}], the reminders about to be announced — armed there
+     * under the same mark: Notes' ReminderRules.ownsDueReminders). Everything else is false: Notes not
      * installed, a Notes APK from before the provider existed, a signature
      * that does not match (the provider is signature-guarded), a stopped or
      * failing provider. Needs the <queries> entry and the
@@ -748,9 +750,18 @@ public class SovereignAppPlugin extends Plugin {
     @PluginMethod
     public void notesOwnsDueReminders(PluginCall call) {
         String account = call.getString("account");
+        String server = call.getString("server");
+        com.getcapacitor.JSArray due = call.getArray("due");
         boolean owns = false;
-        if (account != null && !account.isEmpty()) {
-            android.net.Uri uri = NOTES_OWNER_URI.buildUpon().appendQueryParameter("account", account).build();
+        if (account != null && !account.isEmpty() && server != null && !server.isEmpty()
+                && due != null && due.length() > 0) {
+            // Ids and marks (times) only — what the server already holds in
+            // clear — and only to Notes, over the signature-guarded provider.
+            android.net.Uri uri = NOTES_OWNER_URI.buildUpon()
+                    .appendQueryParameter("account", account)
+                    .appendQueryParameter("server", server)
+                    .appendQueryParameter("due", due.toString())
+                    .build();
             try (android.database.Cursor c = getContext().getContentResolver().query(uri, null, null, null, null)) {
                 if (c != null && c.moveToFirst()) {
                     int col = c.getColumnIndex("ownsDueReminders");

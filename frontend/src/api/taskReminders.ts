@@ -131,7 +131,9 @@ export function startTaskReminders(opts: TaskReminderOptions = {}): () => void {
         const plan = planEntries(entries, notify ? loadFired() : {}, now);
         if (notify) {
             saveFired(plan.prunedFired);
-            if (plan.toFire.length > 0) notifyTasksDue(plan.toFire.length);
+            if (plan.toFire.length > 0) {
+                notifyTasksDue(plan.toFire.length, plan.toFire.map(e => ({ id: e.id, mark: e.mark })));
+            }
         }
         const { advances, nextCheckAt } = planAdvances(opened, now);
         if (advances.length > 0) void applyAdvances(advances);
