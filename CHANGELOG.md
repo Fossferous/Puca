@@ -40,7 +40,9 @@ one-line summary; this file is the full story. Versions follow
 - **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
   morning. The reminder time the server holds moves with the snooze, so a
   phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
-  is only offered to people allowed to tick the item.
+  is only offered to people allowed to tick the item, and a snooze set by
+  someone who may edit the item cannot be changed or undone by someone who
+  may only tick it.
 - **Edited.** Notes show when they were last changed, and can be sorted by it.
 - **.ics export and import.** Export gives your dated items as a standard
   calendar file. The file is not encrypted, and the app says so first. Import
