@@ -348,9 +348,15 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
             const uid = deps.uid();
             if (uid === null) return false;
             const local = deps.readLocal();
-            if (sameNoteState(local, EMPTY_NOTE_STATE)) return false;
-            if (current === 'unreadable' || current === 'rollback' || current === 'local-only') return true;
             const rec = deps.records.load(uid);
+            if (sameNoteState(local, EMPTY_NOTE_STATE)) {
+                // Nothing held here — unless the last synced copy held
+                // something: clearing the last colour or label offline is a
+                // change too, and a sign-out would lose it (the old ones
+                // come back at the next sign-in).
+                return !!rec && rec.base !== null && !sameNoteState(rec.base, EMPTY_NOTE_STATE);
+            }
+            if (current === 'unreadable' || current === 'rollback' || current === 'local-only') return true;
             return !rec || rec.base === null || !sameNoteState(local, rec.base);
         },
         status: () => current,

@@ -279,6 +279,27 @@ describe('what a sign-out would lose', () => {
         expect(a.sync.unsynced()).toBe(false);
     });
 
+    it('unsynced(): clearing the LAST colour or label is a change a sign-out would lose', async () => {
+        const server = new FakeServer();
+        const a = device(server, st({ colors: { 'list:1': 'mint' } }));
+        expect(await a.sync.pull()).toBe('synced');
+        expect(a.sync.unsynced()).toBe(false);
+        a.edit(() => st({}));                                       // offline: the copy is now empty
+        expect(a.sync.unsynced()).toBe(true);                       // the document still holds 'mint'
+        expect(await a.sync.push()).toBe('synced');
+        expect(await server.state()).toEqual(st({}));
+        expect(a.sync.unsynced()).toBe(false);                      // positive control: the removal landed
+        // An empty copy against an empty document, or never synced (an old backend), is nothing.
+        const b = device(new FakeServer());
+        expect(await b.sync.pull()).toBe('synced');
+        expect(b.sync.unsynced()).toBe(false);
+        const old = new FakeServer();
+        old.supported = false;
+        const c = device(old);
+        expect(await c.sync.pull()).toBe('local-only');
+        expect(c.sync.unsynced()).toBe(false);
+    });
+
     it('unsynced(): a refused rollback or an old backend counts even when local equals the last base', async () => {
         const server = new FakeServer();
         server.supported = false;
