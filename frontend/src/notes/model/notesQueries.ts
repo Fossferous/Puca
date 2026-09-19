@@ -31,7 +31,7 @@ import {
     updateTask, deleteTask, moveTask, reorderTask,
     getTaskTabPrefs, putTaskTabPrefs,
     applyToggle, applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
-    buildPrefsForOrder, toggleFavoritePrefs,
+    buildPrefsForOrder,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
 import { ApiError } from '../../api/client';
@@ -42,6 +42,8 @@ import {
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
 } from './notesModel';
 import { getNotesPrefs, subscribeNotesPrefs, pruneNotesPrefs, setNoteArchived, setNoteColor, setNoteLabels } from './notesPrefs';
+import { keepHiddenSlots, toggleFavoriteKeepingHidden } from '../../api/listContent';
+import { type ListContentActions, type NoteExtras, hasExtras, useListContentActions, useTrashedKeys } from './useListContent';
 
 /** Notes' own client: it WANTS refetch-on-focus (that is its live sync),
  *  unlike Púca's shared client which has a socket for that. */
@@ -168,6 +170,8 @@ function listSource(l: TaskList): NoteSource {
         totalTasks: l.total_tasks,
         completedTasks: l.completed_tasks,
         createdAt: l.created_at,
+        body: l.body,
+        noteAttachments: l.attachments,
     };
 }
 
@@ -267,6 +271,9 @@ export function useNoteCards(): {
     const prefs = useMemo(() => prefsData ?? [], [prefsData]);
     const local = useNotesPrefs();
     const tasks = useAllNoteTasks(sources);
+    // A trashed note is not deleted: its colour, labels and archive flag must
+    // survive the prune so a restore brings it back whole (useListContent.ts).
+    const trash = useTrashedKeys();
     const cards = useMemo(
         () => buildNoteCards(sources, tasks.byKey, prefs, local),
         [sources, tasks.byKey, prefs, local],
@@ -276,9 +283,9 @@ export function useNoteCards(): {
         // look like a deleted note, and neither must a delete whose request
         // is still in flight (it comes back on rollback; a pruned label does
         // not). The rollback changes `sources`, so this re-runs then.
-        if (!complete || listMutationsInFlight > 0) return;
-        pruneNotesPrefs(new Set(sources.map(s => noteKey(s.ref))));
-    }, [complete, sources]);
+        if (!complete || !trash.settled || listMutationsInFlight > 0) return;
+        pruneNotesPrefs(new Set([...sources.map(s => noteKey(s.ref)), ...trash.keys]));
+    }, [complete, sources, trash.settled, trash.keys]);
     return { cards, sources, prefs, prefsReady: prefsData !== undefined, loading, error, tasksPending: tasks.anyPending };
 }
 
@@ -304,9 +311,15 @@ export interface NoteActions {
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
      *  and null only when nothing was saved. */
-    createNote: (title: string, items: string[]) => Promise<NoteRef | null>;
+    createNote: (title: string, items: string[], extra?: NoteExtras) => Promise<NoteRef | null>;
     renameNote: (note: NoteRef, title: string) => Promise<boolean>;
+    /** Moves the note to the trash where the server has one
+     *  (`content.trashEnabled`), else deletes it for good. */
     deleteNote: (note: NoteRef) => Promise<boolean>;
+    /** Out of the trash (the Undo of deleteNote when it trashed). */
+    restoreNote: (note: NoteRef) => Promise<boolean>;
+    /** Note text, photos, drawings and the trash (useListContent.ts). */
+    content: ListContentActions;
     togglePin: (note: NoteRef) => void;
     reorderNotes: (orderedKeys: string[]) => void;
     /** Device-local. */
@@ -331,6 +344,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     useEffect(() => { cardsRef.current = cards; prefsRef.current = prefs; prefsReadyRef.current = prefsReady; });
     // Sequenced pref saves: only the LATEST save may roll back (TasksView's rule).
     const prefSeq = useRef(0);
+    const content = useListContentActions(notesKeys);
+    const contentRef = useRef(content);
+    useEffect(() => { contentRef.current = content; });
 
     const setTasks = useCallback((note: NoteRef, fn: (prev: Task[]) => Task[]) => {
         qc.setQueryData<Task[]>(notesKeys.tasks(note), prev => fn(prev ?? []));
@@ -464,7 +480,8 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
-    const createNote = useCallback(async (title: string, items: string[]): Promise<NoteRef | null> => {
+    const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras): Promise<NoteRef | null> => {
+        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra);
         const cleanItems = cleanQuickItems(items);
         let list: TaskList;
         try {
@@ -515,6 +532,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const deleteNote = useCallback(async (note: NoteRef): Promise<boolean> => {
         if (note.kind !== 'list') return false;
+        if (contentRef.current.trashEnabled) return contentRef.current.trash(note.id);
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
         listMutationsInFlight++;   // holds the device-local prune off until this settles
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.filter(l => l.id !== note.id));
@@ -530,6 +548,10 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             listMutationsInFlight--;
         }
     }, [qc]);
+
+    const restoreNote = useCallback((note: NoteRef): Promise<boolean> => (
+        note.kind === 'list' ? contentRef.current.restore(note.id) : Promise.resolve(false)
+    ), []);
 
     const savePrefs = useCallback((next: TaskTabPref[]) => {
         // Never PUT a set built on prefs that were never read: it is a full
@@ -550,14 +572,15 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const orderedTabs = useCallback(() => cardsRef.current.map(c => ({ kind: c.ref.kind, id: c.ref.id })), []);
 
+    // Trashed notes keep their slot in the saved order (api/listContent.ts).
     const togglePin = useCallback((note: NoteRef) => {
-        savePrefs(toggleFavoritePrefs(orderedTabs(), prefsRef.current, { kind: note.kind, id: note.id }));
+        savePrefs(toggleFavoriteKeepingHidden(orderedTabs(), prefsRef.current, { kind: note.kind, id: note.id }, contentRef.current.trashedKeys));
     }, [savePrefs, orderedTabs]);
 
     const reorderNotes = useCallback((orderedKeys: string[]) => {
         const byKey = new Map(cardsRef.current.map(c => [c.key, c]));
         const tabs = orderedKeys.map(k => byKey.get(k)).filter((c): c is NoteCard => !!c).map(c => ({ kind: c.ref.kind, id: c.ref.id }));
-        savePrefs(buildPrefsForOrder(tabs, prefsRef.current));
+        savePrefs(buildPrefsForOrder(keepHiddenSlots(tabs, prefsRef.current, contentRef.current.trashedKeys), prefsRef.current));
     }, [savePrefs]);
 
     const setColor = useCallback((note: NoteRef, color: Parameters<typeof setNoteColor>[1]) => setNoteColor(noteKey(note), color), []);
@@ -575,9 +598,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
         createNote, renameNote, deleteNote, togglePin, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
+        restoreNote, content,
     }), [
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setAttachments,
         createNote, renameNote, deleteNote, togglePin, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
+        restoreNote, content,
     ]);
 }

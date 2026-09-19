@@ -3,7 +3,7 @@
  * label, Archive, and the way back to Púca. A drawer on narrow windows and
  * phones (notes.css); the owner passes `open` and the scrim closes it.
  */
-import { ArchiveIcon, BellIcon, NoteIcon, PopOutIcon, TagIcon } from '../../components/Icons';
+import { ArchiveIcon, BellIcon, NoteIcon, PopOutIcon, TagIcon, TrashIcon } from '../../components/Icons';
 import { isMobile } from '../../api/platform';
 import { type NoteFilter } from '../model/notesModel';
 
@@ -12,7 +12,9 @@ import { type NoteFilter } from '../model/notesModel';
 const NATIVE = isMobile();
 
 interface NotesRailProps {
-    filter: NoteFilter | { kind: 'reminders' };
+    filter: NoteFilter | { kind: 'reminders' } | { kind: 'trash' };
+    /** The server has a trash (useListContent.ts): show its entry. */
+    trashEnabled?: boolean;
     labels: string[];
     reminderBadge: number;
     counts: { notes: number; archived: number };
@@ -22,7 +24,7 @@ interface NotesRailProps {
     version: string;
 }
 
-export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose, onNavigate, version }: NotesRailProps) {
+export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose, onNavigate, version, trashEnabled = false }: NotesRailProps) {
     const go = (to: string) => { onNavigate(to); onClose(); };
     const is = (k: string) => filter.kind === k;
     return (
@@ -53,6 +55,11 @@ export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose
                     <ArchiveIcon /><span className="notes-rail-label">Archive</span>
                     <span className="notes-rail-count">{counts.archived}</span>
                 </button>
+                {trashEnabled && (
+                    <button type="button" className={`notes-rail-item ${is('trash') ? 'active' : ''}`} onClick={() => go('/trash')}>
+                        <TrashIcon /><span className="notes-rail-label">Trash</span>
+                    </button>
+                )}
                 {!NATIVE && (
                     <a className="notes-rail-item" href="/" target="_blank" rel="noopener">
                         <PopOutIcon /><span className="notes-rail-label">Open Púca</span>

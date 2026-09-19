@@ -28,6 +28,7 @@ import {
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
+import { NoteContentSection } from './NoteContentSection';
 
 interface NoteEditorProps {
     card: NoteCard;
@@ -148,6 +149,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                 )}
 
                 <div className="notes-editor-body">
+                    <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} />
                     {canCreate && (
                         <form className="notes-editor-add" onSubmit={addItem}>
                             <input

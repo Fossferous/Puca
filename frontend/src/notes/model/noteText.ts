@@ -3,7 +3,7 @@
  * offers. Pure over the decrypted cards the grid already holds; nothing here
  * talks to the server, and the download is a Blob the browser saves.
  */
-import { type Task, buildTaskTree, type TaskNode, parseTaskAttachments } from '../../api/tasks';
+import { type Task, buildTaskTree, type TaskNode, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from './notesModel';
 
@@ -29,10 +29,14 @@ export function noteToMarkdown(card: NoteCard): string {
     if (card.labels.length) meta.push(`labels: ${card.labels.join(', ')}`);
     if (meta.length) out.push(`_${meta.join(' · ')}_`);
     out.push('');
+    // The note's own text and pictures (a marker is written as itself, as
+    // an unreadable item is — the export does not pretend to know it).
+    if (card.body) out.push(card.body, '');
+    for (const r of parseTaskAttachments(isAttachmentsLocked(card.noteAttachments ?? null) ? null : card.noteAttachments ?? null)) out.push(`- attachment: ${r.name}`);
     if (card.tasks === null) {
         out.push('_(items not loaded)_');
     } else if (card.tasks.length === 0) {
-        out.push('_(empty)_');
+        if (!card.body && !card.noteAttachments) out.push('_(empty)_');
     } else {
         lines(buildTaskTree(card.tasks), 0, out);
     }
@@ -56,6 +60,9 @@ export function notesToJson(cards: NoteCard[], exportedAt: string): string {
         color: c.color,
         labels: c.labels,
         createdAt: c.createdAt ?? null,
+        text: c.body ?? null,
+        textUnreadable: !!c.body && isUndecryptable(c.body),
+        pictures: parseTaskAttachments(isAttachmentsLocked(c.noteAttachments ?? null) ? null : c.noteAttachments ?? null).map(r => r.name),
         items: (c.tasks ?? []).map((t: Task) => ({
             id: t.id,
             parentId: t.parent_id,
