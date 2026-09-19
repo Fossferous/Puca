@@ -10,18 +10,26 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 const decryptSelf = vi.fn(async () => 'OPENED');
 const decryptChannelMessage = vi.fn(async () => 'OPENED-CH');
-vi.mock('../api/e2ee', async importOriginal => ({
-    ...(await importOriginal<typeof import('../api/e2ee')>()),
-    getActiveIdentity: () => ({ publicKey: new Uint8Array(32), privateKey: new Uint8Array(32) }),
-    decryptSelf: (...a: unknown[]) => decryptSelf(...(a as [])),
-    decryptChannelMessage: (...a: unknown[]) => decryptChannelMessage(...(a as [])),
-}));
+// Pass-through by default; one test stands in a future build that can read a
+// v4 channel envelope.
+const parseOverride = vi.hoisted(() => ({ fn: null as ((c: string) => unknown) | null }));
+vi.mock('../api/e2ee', async importOriginal => {
+    const real = await importOriginal<typeof import('../api/e2ee')>();
+    return {
+        ...real,
+        parseEnvelopeEx: (c: string) => (parseOverride.fn ? parseOverride.fn(c) : real.parseEnvelopeEx(c)),
+        getActiveIdentity: () => ({ publicKey: new Uint8Array(32), privateKey: new Uint8Array(32) }),
+        decryptSelf: (...a: unknown[]) => decryptSelf(...(a as [])),
+        decryptChannelMessage: (...a: unknown[]) => decryptChannelMessage(...(a as [])),
+    };
+});
 vi.mock('../api/channelKeys', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/channelKeys')>()),
     getChannelKeyForEpoch: async () => new Uint8Array(32),
 }));
 
 import { openTaskTiming } from '../api/tasks';
+import * as MARKERS from '../api/decryptMarkers';
 import { isUndecryptable } from '../api/decryptMarkers';
 import { parseSchedule, parseSnooze } from '../api/taskSchedule';
 
@@ -29,7 +37,7 @@ const PLAIN_SCHEDULE = JSON.stringify({ v: 1, kind: 'event', uid: 'x', allDay: t
 const PLAIN_SNOOZE = JSON.stringify({ k: 'snooze/1', forDue: '2030-01-01T09:00:00Z', until: '2030-01-01T10:00:00Z' });
 const SEALED = '{"v":2,"t":"self","ct":"AAAA"}';
 
-beforeEach(() => { decryptSelf.mockClear(); decryptChannelMessage.mockClear(); });
+beforeEach(() => { decryptSelf.mockClear(); decryptChannelMessage.mockClear(); parseOverride.fn = null; });
 
 describe('openTaskTiming refuses plaintext in the sealed timing columns', () => {
     it('a plaintext schedule from the server opens to a failure marker, and reads as read-only', async () => {
@@ -80,6 +88,27 @@ describe('a CHANNEL task’s timing opens only from a v3 (bound) envelope', () =
         expect(out).toEqual({ schedule: 'OPENED-CH', snooze: 'OPENED-CH' });
         const kinds = decryptChannelMessage.mock.calls.map(c => (c as unknown[])[2]).map(ctx => (ctx as { kind: string }).kind);
         expect(kinds.sort()).toEqual(['chan-taskevt', 'chan-tasksnz']);
+    });
+
+    // The server stores a channel item's timing at v3 OR NEWER
+    // (task_timing::validate_sealed_scoped); the reader must apply the same
+    // rule, or a newer writer's value is stored and then called misplaced.
+    it('a channel envelope newer than this build says "update the app", not "does not belong here"', async () => {
+        const V4 = '{"v":4,"t":"ch","epoch":1,"ct":"AAAA"}';
+        const out = await openTaskTiming({ channel_id: 7, created_by: 1, schedule: V4, snooze: V4 });
+        expect(out).toEqual({ schedule: MARKERS.ENC_UNSUPPORTED_VERSION, snooze: MARKERS.ENC_UNSUPPORTED_VERSION });
+    });
+
+    it('a build that can read v4 channel envelopes opens one: the rule is "at least v3", not "exactly v3"', async () => {
+        const V4 = '{"v":4,"t":"ch","epoch":1,"ct":"AAAA"}';
+        parseOverride.fn = c => ({ kind: 'envelope', env: JSON.parse(c) });
+        const out = await openTaskTiming({ channel_id: 7, created_by: 1, schedule: V4 });
+        expect(out.schedule).toBe('OPENED-CH');
+        // Control under the same stand-in: v2 is still refused before any decrypt.
+        decryptChannelMessage.mockClear();
+        const old = await openTaskTiming({ channel_id: 7, created_by: 1, schedule: '{"v":2,"t":"ch","epoch":1,"ct":"AAAA"}' });
+        expect(old.schedule).toBe(MARKERS.ENC_CONTEXT_MISMATCH);
+        expect(decryptChannelMessage).not.toHaveBeenCalled();
     });
 
     it('a personal item keeps its self envelope (self binds nothing either way)', async () => {

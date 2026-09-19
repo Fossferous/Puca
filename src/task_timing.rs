@@ -72,7 +72,8 @@ pub fn validate_sealed<'a>(
 }
 
 /// `validate_sealed` for a task in a known scope. A CHANNEL task's timing must
-/// be a v3 channel envelope: v3 binds the channel, epoch, creator and the
+/// be a channel envelope of v3 OR NEWER — the same rule the client reads by
+/// (tasks.ts openTimingValue; docs/E2EE.md): v3 binds the channel, epoch, creator and the
 /// value's kind (chan-taskevt / chan-tasksnz) into the tag, and these two
 /// kinds were born v3 — no honest writer ever produced a v2 one. Refusing
 /// anything older here keeps an unbound value (which could be lifted from
@@ -176,6 +177,10 @@ mod tests {
         let v2 = r#"{"v":2,"t":"ch","epoch":2,"ct":"QUJD"}"#;
         // Positive control: v3 in a channel, and anything sealed in a personal list.
         assert_eq!(validate_sealed_scoped(v3, MAX_SCHEDULE_LEN, "schedule", true), Ok(Some(v3)));
+        // The rule is "v3 or newer", the client's too (tasks.ts openTimingValue):
+        // a newer writer's value is stored, and an older reader says "update".
+        let v4 = r#"{"v":4,"t":"ch","epoch":2,"ct":"QUJD"}"#;
+        assert_eq!(validate_sealed_scoped(v4, MAX_SNOOZE_LEN, "snooze", true), Ok(Some(v4)));
         assert_eq!(validate_sealed_scoped(v2, MAX_SCHEDULE_LEN, "schedule", false), Ok(Some(v2)));
         assert_eq!(validate_sealed_scoped(SEALED, MAX_SNOOZE_LEN, "snooze", false), Ok(Some(SEALED)));
         // Unbound or wrong-kind envelopes in a channel are refused.

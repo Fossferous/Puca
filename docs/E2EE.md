@@ -135,10 +135,13 @@ the other's, so a swap between the two columns reads as "no value" — but a
 swap between two of your own items is not detected. `docs/SECURITY_MODEL.md` §2
 states this. Neither field ever had a plaintext era, so a non-envelope value
 from the server is treated as unreadable, never as plaintext. In a channel
-they are **v3-only**: these kinds were born v3, so a v2 (unbound) channel
+they are **v3 or newer**: these kinds were born v3, so a v2 (unbound) channel
 envelope in either column opens to a failure marker on the client
 (`tasks.ts` `openTimingValue`) and is refused by the server on create and
-edit (`task_timing::validate_sealed_scoped`).
+edit (`task_timing::validate_sealed_scoped`). Both sides apply that same rule,
+"at least v3", so a future version is stored by the server and read by an
+older client as "unsupported version, update the app", never as a value
+that does not belong there.
 
 Every field is a token from a closed set or a non-negative integer, so the
 grammar needs no escaping. What it buys: a v3 body re-attributed to another

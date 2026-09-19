@@ -881,7 +881,11 @@ async function sealTiming(plain: string, kind: 'chan-taskevt' | 'chan-tasksnz', 
 async function openTimingValue(stored: string, kind: 'chan-taskevt' | 'chan-tasksnz', scope: TimingScope): Promise<string> {
     const parsed = parseEnvelopeEx(stored);
     if (parsed.kind === 'plaintext') return DECRYPT_FAILED;
-    if (scope && parsed.kind === 'envelope' && parsed.env.v !== 3) return MARKERS.ENC_CONTEXT_MISMATCH;
+    // One rule, the server's too (task_timing::validate_sealed_scoped): a
+    // channel item's timing is v3 OR NEWER. Older is unbound and refused; a
+    // version this build cannot read reaches openChannel, which says "update
+    // the app" rather than calling it misplaced (docs/E2EE.md).
+    if (scope && parsed.kind === 'envelope' && parsed.env.v < 3) return MARKERS.ENC_CONTEXT_MISMATCH;
     return scope ? openChannel(scope.channelId, stored, kind, scope.ownerId) : openSelf(stored);
 }
 
