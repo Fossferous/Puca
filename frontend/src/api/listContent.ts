@@ -231,6 +231,17 @@ export function listsDueForClientPurge<T extends Pick<TaskList, 'trashed_at'>>(l
     });
 }
 
+/** "in 3 days" / "within a day" / "any time now" until the server deletes a
+ *  trashed note. `now` may run up to `quantumMs` behind the real time (a
+ *  clock that ticks once a minute), so the count starts from the latest it
+ *  could be: a note trashed seconds ago reads "in 30 days", never 31. */
+export function purgeCountdown(at: number, now: number, quantumMs = 0): string {
+    const days = Math.ceil((at - now - quantumMs) / DAY_MS);
+    if (days <= 0) return 'any time now';
+    if (days === 1) return 'within a day';
+    return `in ${days} days`;
+}
+
 // --- Keeping a trashed note's place in the saved tab order ---------------------------------
 
 /**

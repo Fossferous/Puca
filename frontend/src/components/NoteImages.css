@@ -174,7 +174,9 @@
     border-radius: 8px;
     background: var(--bg-secondary);
 }
-.tasks-trash-title { flex: 1; min-width: 0; font-size: 14px; color: var(--text-normal); word-break: break-word; }
+/* A basis, not 0: a row too narrow for title and buttons wraps the buttons
+   to the next line instead of squeezing the title to a letter per line. */
+.tasks-trash-title { flex: 1 1 10em; min-width: 0; font-size: 14px; color: var(--text-normal); word-break: break-word; }
 .tasks-trash-when { font-size: 12px; color: var(--text-muted); }
 .tasks-trash-btn {
     border: 1px solid var(--border-subtle);
@@ -191,4 +193,5 @@
 @media (pointer: coarse) and (max-width: 1024px) {
     .tasks-trash-toggle, .tasks-trash-btn { min-height: 44px; font-size: 15px; }
     .tasks-trash-btn { padding: 8px 14px; }
+    .tasks-trash-title { flex-basis: 100%; font-size: 15px; }
 }

@@ -10,7 +10,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { type TaskList } from '../../api/tasks';
-import { serverNowFrom, trashPurgeAt } from '../../api/listContent';
+import { purgeCountdown, serverNowFrom, trashPurgeAt } from '../../api/listContent';
 import { galleryItems } from '../../api/noteMedia';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseServerTimestamp } from '../../utils/serverTime';
@@ -24,14 +24,6 @@ function subscribeMinute(cb: () => void): () => void {
 }
 function minuteNow(): number {
     return Math.floor(Date.now() / 60_000) * 60_000;
-}
-
-/** "in 3 days" / "today" / "any time now" for a purge time. */
-function purgeLabel(at: number, now: number): string {
-    const days = Math.ceil((at - now) / 86_400_000);
-    if (days <= 0) return 'any time now';
-    if (days === 1) return 'within a day';
-    return `in ${days} days`;
 }
 
 function retentionCopy(days: number): string {
@@ -50,7 +42,7 @@ function TrashRow({ list, content, now }: { list: TaskList; content: ListContent
     if (pictures > 0) parts.push(`${pictures} picture${pictures === 1 ? '' : 's'}`);
     if (Number.isFinite(trashed)) parts.push(`trashed ${new Date(trashed).toLocaleDateString()}`);
     // Counted on the server's clock when it gave one: it is the server that deletes.
-    if (purge !== null) parts.push(`deleted forever ${purgeLabel(purge, serverNowFrom(content.features, now) ?? now)}`);
+    if (purge !== null) parts.push(`deleted forever ${purgeCountdown(purge, serverNowFrom(content.features, now) ?? now, 60_000)}`);
     return (
         <li className="notes-trash-row" data-list-id={list.id}>
             <div className="notes-trash-main">

@@ -13,7 +13,7 @@ vi.mock('../api/client', async () => {
 
 import { ApiError } from '../api/client';
 import {
-    NO_LIST_FEATURES, parseListFeatures, fetchListFeatures, listTrashedTaskLists, keepHiddenSlots, serverNowFrom, NoteFilesUnreadableError,
+    NO_LIST_FEATURES, parseListFeatures, fetchListFeatures, listTrashedTaskLists, keepHiddenSlots, serverNowFrom, NoteFilesUnreadableError, purgeCountdown,
     trashPurgeAt, listsDueForClientPurge, toggleFavoriteKeepingHidden, noteFileIds, deleteListForever, setTaskListBody,
     setTaskListAttachments, createTaskListWithContent, bodyBytes, MAX_BODY_BYTES,
 } from '../api/listContent';
@@ -134,6 +134,20 @@ describe('expiry is measured on the SERVER’s clock', () => {
         expect(serverNowFrom(parseListFeatures({ trash: true }))).toBeNull();
         expect(serverNowFrom(parseListFeatures({ trash: true, server_now_ms: 'soon' }))).toBeNull();
         expect(serverNowFrom(NO_LIST_FEATURES)).toBeNull();
+    });
+});
+
+describe('the countdown the Trash view shows', () => {
+    const day = 86_400_000;
+    it('a note trashed seconds ago reads the full window, even on a clock that ticks once a minute', () => {
+        const trashed = Date.parse('2026-09-19T12:00:30Z');
+        const minuteClock = Date.parse('2026-09-19T12:00:00Z');   // up to 59 s behind
+        expect(purgeCountdown(trashed + 30 * day, minuteClock, 60_000)).toBe('in 30 days');
+        // POSITIVE CONTROL: counted from the quantized clock as-is, it overstates.
+        expect(purgeCountdown(trashed + 30 * day, minuteClock)).toBe('in 31 days');
+        expect(purgeCountdown(trashed + 30 * day, trashed + 28.5 * day, 60_000)).toBe('in 2 days');
+        expect(purgeCountdown(trashed + 30 * day, trashed + 29.5 * day, 60_000)).toBe('within a day');
+        expect(purgeCountdown(trashed + 30 * day, trashed + 31 * day, 60_000)).toBe('any time now');
     });
 });
 
