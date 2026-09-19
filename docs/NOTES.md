@@ -6,8 +6,9 @@ channels — its own page, its own shape. It lives at **`/notes/`** on the web
 app's origin (`https://app.example.com/notes/`), and Púca's Tasks view links to
 it from the tab bar.
 
-There is nothing new on the server. A Notes **note** is a Púca **personal task
-list**; a **shared note** is a **checklist channel** from one of your servers;
+Almost nothing new on the server (migration 065 adds a note's sealed text,
+its pictures and the trash — *Text, pictures and the trash* below). A Notes
+**note** is a Púca **personal task list**; a **shared note** is a **checklist channel** from one of your servers;
 the rows in a note are the tasks themselves. Pinning a note favourites the tab
 in Púca; reordering notes reorders Púca's tab bar; a due time set in Notes fires
 Púca's reminders. Anything you do in one is what you see in the other.
@@ -19,7 +20,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   progress, the next due time, image thumbnails, labels and (for a shared note)
   the server it belongs to.
 - **Take a note…** — a title and items, Enter for the next item; on a phone the
-  `+` button opens the same composer as a sheet.
+  `+` button opens the same composer as a sheet. Where the server has
+  migration 065 the composer also takes free text, photos (the camera on a
+  phone) and a drawing.
 - **Open a note** — Púca's own task tree: inline edit, subtasks, drag to reorder
   and to nest, due times, attachments, the collapsible Completed section. It is
   the same component Púca renders, so a note lays out exactly as it does in the
@@ -32,8 +35,10 @@ Púca's reminders. Anything you do in one is what you see in the other.
   the Reminders view).
 - **Colour, labels, archive** — Notes' own organisation (see *What stays on the
   device* below).
-- **Undo** — archive and delete show an Undo snackbar; a delete reaches the
-  server only when it expires.
+- **Undo** — archive and delete show an Undo snackbar. Against a server with
+  the trash, *Move to trash* happens at once and Undo restores the note;
+  against an older server a delete reaches the server only when the snackbar
+  expires, as before.
 - **Copy as text / Make a copy / Export** — a note as a Markdown checklist to
   the clipboard, a copy as a fresh note, or every note as Markdown or JSON from
   the account menu (in the browser; the Android app has no file export yet).
@@ -50,6 +55,7 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Note | Personal task list (`task_lists`; title encrypt-to-self) |
 | Shared note | Checklist channel (`has_checklist`), sealed under the channel key; your channel permissions apply |
 | Items, nesting, completed, due times, attachments | The tasks (`channel_tasks`), through `frontend/src/api/tasks.ts` |
+| A note's text, photos and drawings; the Trash | `task_lists.body` / `.attachments` (encrypt-to-self) and `.trashed_at` — personal notes only (below) |
 | Pin | `task_tab_prefs.is_favorite` — the same favourite as the Tasks tab bar |
 | Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
 | Reminders | `due_at` + `frontend/src/api/taskReminders.ts` |
@@ -154,17 +160,64 @@ with the same keystore as Púca, uploaded by `deploy/ops/dual-ship.sh apk-notes`
 under `APK_PREFIX_NOTES` from `hosts.conf`, linked from the download page (the
 ship refuses until it is), and asserted by `check-versions.sh`.
 
+## Text, pictures and the trash
+
+Migration 065 gives a personal list three nullable columns, and
+`src/list_content.rs` owns them:
+
+- **`body`** — the note's free text, sealed to the owner exactly like the
+  title (an encrypt-to-self envelope). A note can be text only, items only, or
+  both. The server refuses a value that is not an envelope, and the client
+  reads these fields STRICTLY (`frontend/src/api/listSeal.ts`): unlike titles,
+  they never held plaintext, so a non-envelope value shows as unreadable
+  instead of as your own words.
+- **`attachments`** — the note's own photos and drawings, the same sealed
+  sidecar a task item carries, pointing at ordinary end-to-end encrypted
+  uploads. Photos are shrunk on the device before encryption
+  (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
+  that every card and Púca's gallery show, and its strokes, so it can be
+  edited again (`notes/model/drawing.ts`). On a phone, *Photo* offers the
+  camera (`<input accept="image/*" capture>`).
+- **`trashed_at`** — *Move to trash* (`POST /task-lists/:id/trash`) hides the
+  note from every listing and from the reminder feed, and makes it read-only
+  (every write is a 409) until it is restored. The Trash view (rail, in
+  Notes; the end of the All tasks board, in Púca) lists it with *Restore* and
+  *Delete forever*. The server deletes a trashed note for good after
+  `NOTES_TRASH_RETENTION_DAYS` (default 30; 0 keeps it until you empty the
+  trash).
+
+**Both front doors agree.** Púca's Tasks view shows and edits a personal
+list's text and photos, and its *Delete list* becomes *Move to trash* on a
+server that has one. A client decides all of this from
+`GET /task-lists/features`, which does not depend on having any lists; an
+older server answers it with an error and every client behaves exactly as it
+did before 065. An older client on a newer server keeps working: it never
+sees trashed lists, its title-only rename leaves text and pictures alone, and
+its *Delete* is still the immediate delete it always was.
+
+**Trash keeps what is on the device.** A trashed note is gone from the default
+listing, but its colour, labels and archive flag are kept (the device-local
+prune counts the trash as live), and so is its slot in the saved order: a pin
+or a reorder made while it is in the trash saves it back where it was
+(`keepHiddenSlots` in `api/listContent.ts`), so a restored note returns to its
+place.
+
+**What the server cannot clean up.** The uploads behind a note's pictures and
+item attachments are named only inside sealed sidecars, so the server cannot
+tell which files a note used. *Delete forever* and *Empty trash* delete the
+files first, then the note. Púca Notes also purges its own expired trash,
+files first, during the last day of the window whenever it is open. A note
+whose window runs out while no Notes is open is deleted by the server's sweep
+and its uploads stay behind, counted against your quota — the same as any
+delete made by a client older than this, or by Púca's own immediate delete.
+
 ## Not built (and why)
 
-- **Free-text notes.** Every note is a checklist: the schema's only text is a
-  task's description. A paragraph note needs a sealed body column first.
 - **Server-synced colour, labels, archive.** See above.
-- **Trash.** Púca deletes lists server-side with a cascade and no history;
-  Notes gives a six-second Undo instead.
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
-- **Photo/drawing notes, recurring or snoozable reminders, bulk selection,
-  edited-at.** No source in the task API yet.
+- **Recurring or snoozable reminders, bulk selection, edited-at.** No source
+  in the task API yet.
 
 ## Verifying
 

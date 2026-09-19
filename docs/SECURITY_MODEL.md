@@ -89,6 +89,14 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Who talks to whom, and when
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events
+- For a personal note (Púca Notes, migration 065): whether it has text or
+  pictures and roughly how much (the sealed envelopes' sizes, which also hint
+  at how many pictures), the encrypted uploads themselves as it sees any
+  upload, and when you moved the note to the trash and restored it
+  (`trashed_at`, plaintext timing like a due time). The text, the pictures and
+  WHICH uploads a note uses stay sealed — which is also why the server cannot
+  delete a note's uploads itself when its trash time runs out
+  (`docs/NOTES.md`).
 - IP addresses and device tokens
 
   This used to say the session token lands in every proxy access log too, because
@@ -724,7 +732,10 @@ restore your old grants — an Admin role included — if the account ever rejoi
 
 - **Your messages and tasks**, as ciphertext attributed to the tombstone. They
   are other people's conversations too, and the server cannot read them to
-  decide otherwise.
+  decide otherwise. Your personal notes' sealed text and picture refs
+  (migration 065) are the exception: nobody else could ever open them, so
+  they are nulled (`ACCOUNT_DELETE_CLEANUP`); the list rows stay, like the
+  items in them.
 - **Your enrolled devices**, REVOKED rather than deleted, because device shares
   reference those rows and "a revoked device stays revoked" is what stops a
   machine that still holds its Ed25519 key from minting fresh account tokens.

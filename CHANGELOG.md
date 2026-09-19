@@ -4,6 +4,39 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
+  free text as well as (or instead of) items, and its own photos and
+  drawings: take a picture with the phone's camera or pick one, or draw with
+  a pen and eraser; a drawing can be opened and changed again. Photos are
+  made smaller on your device before they are encrypted and uploaded. The
+  text and pictures are end-to-end encrypted like everything else in a note,
+  and Púca's Tasks view shows and edits the same text and photos, so both
+  apps agree.
+- **A Trash.** Deleting a note, in Púca Notes or in Púca's Tasks view, now
+  moves it to the Trash (in Púca Notes, Undo brings it straight back). From the Trash you can
+  restore a note or delete it forever. A note in the trash does not remind
+  you and cannot be changed until you restore it; it keeps its colour, labels
+  and place in the order. The server deletes trashed notes for good after 30
+  days (server owners: `NOTES_TRASH_RETENTION_DAYS`, 0 keeps them until the
+  trash is emptied). Deleting forever also deletes the note's photos,
+  drawings and attachments; Púca Notes does the same for notes about to
+  expire when it is open in the last day, but a note that expires while no
+  Púca Notes is open leaves its uploaded files behind on the server.
+
+### Changed
+- **Rolling back the server no longer needs a database restore — from this
+  release on.** The server now starts on a database that a newer release has
+  already updated, so going back to this release or any later one is just
+  reinstalling the older program. Going back to **0.9.815 or earlier** still
+  needs the database backup taken before the update, because those releases
+  refuse to start on a newer database.
+- Apps older than this release keep working against the new server: they do
+  not show trashed notes, renaming a note in them leaves its text and
+  pictures alone, and their Delete still deletes at once.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the
