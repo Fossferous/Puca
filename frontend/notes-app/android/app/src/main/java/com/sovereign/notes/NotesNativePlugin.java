@@ -175,9 +175,7 @@ public class NotesNativePlugin extends Plugin {
     }
 
     static void clearShareCache(Context ctx) {
-        File[] old = shareDir(ctx).listFiles();
-        if (old != null) for (File f : old) //noinspection ResultOfMethodCallIgnored
-            f.delete();
+        ShareCache.wipe(shareDir(ctx));
     }
 
     // --- background refresh ------------------------------------------------------
@@ -355,12 +353,13 @@ public class NotesNativePlugin extends Plugin {
             return;
         }
         try {
-            File dir = shareDir(getContext());
-            if (!dir.exists() && !dir.mkdirs()) throw new Exception("no cache directory");
-            // One outgoing file at a time: the previous share's copy is not
-            // left lying in the cache.
-            clearShareCache(getContext());
-            File out = new File(dir, filename);
+            File root = shareDir(getContext());
+            if (!root.exists() && !root.mkdirs()) throw new Exception("no cache directory");
+            // Earlier shares stay readable for a while (the app they went to
+            // may still be uploading them); only old copies go (ShareCache).
+            long now = System.currentTimeMillis();
+            ShareCache.pruneOlderThan(root, now, ShareCache.KEEP_MS);
+            File out = new File(ShareCache.newShareDir(root, now), filename);
             try (FileOutputStream fos = new FileOutputStream(out)) {
                 fos.write(text.getBytes(StandardCharsets.UTF_8));
             }
@@ -410,8 +409,8 @@ public class NotesNativePlugin extends Plugin {
         String title = call.getString("title", "");
         // Not call.getDouble: an epoch-ms number arrives as a Long, which
         // getDouble answers null for (PluginArgs).
-        Long begin = PluginArgs.millis(call.getData().opt("beginMs"));
-        Long end = PluginArgs.millis(call.getData().opt("endMs"));
+        Long begin = PluginArgs.millis(call, "beginMs");
+        Long end = PluginArgs.millis(call, "endMs");
         boolean allDay = Boolean.TRUE.equals(call.getBoolean("allDay", false));
         String location = call.getString("location");
         JSObject ret = new JSObject();
