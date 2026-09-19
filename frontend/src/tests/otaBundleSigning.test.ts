@@ -162,6 +162,9 @@ describe('encrypt-bundle --notes: only the Notes native build', () => {
         ['the directory zipped instead of its contents', {
             'dist-notes-app/index.html': NATIVE_INDEX, 'dist-notes-app/version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}',
         }, /no index.html at the zip root/],
+        ['the web page’s service worker', {
+            'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}', 'sw.js': 'self.addEventListener("fetch", () => {})',
+        }, /carries a service worker \(sw\.js\)/],
         ['a second HTML page', {
             'index.html': NATIVE_INDEX, 'version.json': '{"version":"1.2.3","app":"notes","nativeMin":"1.2.0"}', 'notes/index.html': '<html></html>',
         }, /second HTML entry point \(notes\/index.html\)/],

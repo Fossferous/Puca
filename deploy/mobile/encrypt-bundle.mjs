@@ -209,6 +209,11 @@ if (!NOTES) {
     if (!index) problems.push('there is no index.html at the zip root (zip the CONTENTS of dist-notes-app/, not the directory)');
     const nested = bundleNames.filter(n => /\/index\.html$/i.test(bare(n)));
     if (nested.length) problems.push(`it carries a second HTML entry point (${nested[0]}) — a nested page gets no CSP here`);
+    // The /notes/ service worker is the WEB page's (scripts/notes-sw.mjs,
+    // vite.notes.config.ts enables it only when NOTES_TARGET is not native):
+    // the app serves its page from the APK and must never carry one.
+    const worker = bundleNames.find(n => /(^|\/)sw\.js$/i.test(bare(n)));
+    if (worker) problems.push(`it carries a service worker (${worker}) — that is the web page's; the Notes app registers none`);
     const inZip = zipVersionJson();
     if (!inZip) problems.push('there is no readable version.json at the zip root — only the Notes native build emits one with app "notes"');
     else if (inZip.app !== 'notes') problems.push(`the zip's own version.json says app ${JSON.stringify(inZip.app ?? 'puca')}, not "notes"`);

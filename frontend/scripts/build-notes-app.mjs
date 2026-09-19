@@ -117,6 +117,9 @@ if (ota) {
     if (vj?.app !== 'notes') problems.push(`dist-notes-app/version.json says app ${JSON.stringify(vj?.app)}, not "notes"`);
     if (vj?.version !== tauriVersion) problems.push(`dist-notes-app/version.json says ${vj?.version}, tauri.conf.json says ${tauriVersion}`);
     if (existsSync(join(out, 'notes'))) problems.push('dist-notes-app/ contains a notes/ directory');
+    // The web page's offline worker (scripts/notes-sw.mjs) is never emitted
+    // for the native target; one here means the build ran as the web build.
+    if (existsSync(join(out, 'sw.js'))) problems.push('dist-notes-app/ contains sw.js — the /notes/ service worker is web-only');
     // The native floor rides every bundle (scripts/notes-native-min.mjs): the
     // build must have written the tree's, and it cannot be newer than the
     // release itself — every Notes install would then refuse this update.
