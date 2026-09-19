@@ -160,7 +160,20 @@ public class NotesNativePlugin extends Plugin {
         GeofenceStore.save(ctx, new org.json.JSONArray());
         NotesGeofenceService.stop(ctx);
         NotesNotifier.cancelSessionNotices(ctx);
+        // The last share's plaintext copy is not left behind for the next
+        // account (the share target has long since read it).
+        clearShareCache(ctx);
         call.resolve();
+    }
+
+    private static File shareDir(Context ctx) {
+        return new File(ctx.getCacheDir(), "share");
+    }
+
+    static void clearShareCache(Context ctx) {
+        File[] old = shareDir(ctx).listFiles();
+        if (old != null) for (File f : old) //noinspection ResultOfMethodCallIgnored
+            f.delete();
     }
 
     // --- background refresh ------------------------------------------------------
@@ -338,13 +351,11 @@ public class NotesNativePlugin extends Plugin {
             return;
         }
         try {
-            File dir = new File(getContext().getCacheDir(), "share");
+            File dir = shareDir(getContext());
             if (!dir.exists() && !dir.mkdirs()) throw new Exception("no cache directory");
             // One outgoing file at a time: the previous share's copy is not
             // left lying in the cache.
-            File[] old = dir.listFiles();
-            if (old != null) for (File f : old) //noinspection ResultOfMethodCallIgnored
-                f.delete();
+            clearShareCache(getContext());
             File out = new File(dir, filename);
             try (FileOutputStream fos = new FileOutputStream(out)) {
                 fos.write(text.getBytes(StandardCharsets.UTF_8));
