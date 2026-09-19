@@ -19,6 +19,10 @@ export const PEN_COLORS = ['#202124', '#d93025', '#1a73e8', '#188038', '#f29900'
 export const PEN_WIDTHS = [4, 10, 24] as const;
 const MAX_STROKES = 5000;
 const MAX_POINTS = 200_000;
+/** Largest logical side a strokes file may ask for. The editor's canvas is
+ *  this size in pixels: 10,000 x 10,000 would be ~400 MB of bitmap on a
+ *  phone; 2400 x 2400 is ~23 MB. */
+export const MAX_DRAWING_SIDE = 2400;
 
 export interface Stroke {
     tool: 'pen' | 'eraser';
@@ -62,8 +66,9 @@ export function parseDrawing(text: string): DrawingDoc | null {
     if (typeof raw !== 'object' || raw === null) return null;
     const o = raw as Record<string, unknown>;
     if (o.v !== 1 || !Array.isArray(o.strokes)) return null;
-    const w = typeof o.w === 'number' && o.w > 0 && o.w <= 10_000 ? o.w : DRAWING_WIDTH;
-    const h = typeof o.h === 'number' && o.h > 0 && o.h <= 10_000 ? o.h : DRAWING_HEIGHT;
+    const side = (v: unknown, fallback: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(v, MAX_DRAWING_SIDE) : fallback);
+    const w = side(o.w, DRAWING_WIDTH);
+    const h = side(o.h, DRAWING_HEIGHT);
     const strokes: Stroke[] = [];
     let budget = MAX_POINTS;
     for (const s of o.strokes.slice(0, MAX_STROKES)) {

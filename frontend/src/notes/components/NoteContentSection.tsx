@@ -8,14 +8,16 @@
  *
  * Both conversions offer Undo. "Hide checkboxes" is lossy when items nest,
  * carry due times or attachments, or are done — it asks first, and its Undo
- * re-creates the items with those properties (the attachment files are never
- * deleted by a conversion, so their refs still open).
+ * re-creates the items with those properties (so the attachment files are
+ * kept while Undo is offered). Once the Undo window closes — it expires, a
+ * newer Undo replaces it, or the note closes — nothing names those files any
+ * more, and they are deleted rather than left on the server.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
-import { type GalleryItem, readStrokes, refsOfItem, withoutItem } from '../../api/noteMedia';
+import { type GalleryItem, fileIdsOf, readStrokes, refsOfItem, withoutItem } from '../../api/noteMedia';
 import { NoteBodyField } from '../../components/NoteBodyField';
-import { bodyBytes, MAX_BODY_BYTES } from '../../api/listContent';
+import { bodyBytes, deleteFiles, MAX_BODY_BYTES } from '../../api/listContent';
 import { NoteImages } from '../../components/NoteImages';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { isUndecryptable } from '../../api/decryptMarkers';
@@ -38,15 +40,26 @@ interface Props {
     tasksLoaded: boolean;
 }
 
-type Undo = { token: number; message: string; run: () => Promise<void> };
+/** `commit` runs when the Undo can no longer happen (see the header). */
+type Undo = { token: number; message: string; run: () => Promise<void>; commit?: () => void };
 let undoSeq = 0;
 
 export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props) {
     const c = actions.content;
     const [drawing, setDrawing] = useState<{ item?: GalleryItem; initial?: DrawingDoc } | null>(null);
     const [busy, setBusy] = useState(false);
-    const [undo, setUndo] = useState<Undo | null>(null);
+    const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
+    const undoRef = useRef<Undo | null>(null);
+    /** Replace the pending Undo; the one replaced can no longer happen. */
+    const setUndo = (next: Undo | null, committed = true) => {
+        const prev = undoRef.current;
+        undoRef.current = next;
+        setUndoState(next);
+        if (prev && prev !== next && committed) prev.commit?.();
+    };
+    // Closing the note ends the Undo too.
+    useEffect(() => () => { undoRef.current?.commit?.(); undoRef.current = null; }, []);
     if (card.ref.kind !== 'list') return null;
     const listId = card.ref.id;
     const ref = card.ref;
@@ -129,6 +142,8 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         try {
             if (!await c.setBody(listId, next)) return;
             for (const t of snapshot) if (t.parent_id === null) await actions.deleteTaskFrom(ref, t.id);
+            // The dropped items' uploads: kept for the Undo, deleted after it.
+            const orphaned = fileIdsOf(snapshot.flatMap(t => (t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [])));
             setUndo({
                 token: ++undoSeq,
                 message: 'Turned the checklist into text',
@@ -150,6 +165,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     }
                     await c.setBody(listId, before);
                 },
+                commit: orphaned.length > 0 ? () => { void deleteFiles(orphaned); } : undefined,
             });
         } finally {
             setConverting(false);
@@ -161,6 +177,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             {showBody && (
                 <NoteBodyField
                     key={card.key}
+                    listId={listId}
                     value={card.body}
                     onSave={t => c.setBody(listId, t)}
                     placeholder={tasks.length > 0 ? 'Add some text…' : 'Take a note…'}
@@ -202,7 +219,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                 <UndoBar
                     token={undo.token}
                     message={undo.message}
-                    onUndo={() => { const u = undo; setUndo(null); void u.run(); }}
+                    onUndo={() => { const u = undo; setUndo(null, false); void u.run(); }}
                     onExpire={() => setUndo(null)}
                 />
             )}

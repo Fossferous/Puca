@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { bodyToItems, itemsToBody, conversionLosses, describeLosses, deriveContentTitle, readableBody, recreationOrder } from '../notes/model/noteContent';
 import { galleryItems, withoutItem, nextDrawingName, heroItems, slotsNeeded, DRAWING_STROKES_MIME } from '../api/noteMedia';
-import { emptyDrawing, parseDrawing, serializeDrawing, toCanvasPoint, DRAWING_WIDTH } from '../notes/model/drawing';
+import { emptyDrawing, parseDrawing, serializeDrawing, toCanvasPoint, DRAWING_WIDTH, MAX_DRAWING_SIDE } from '../notes/model/drawing';
 import { fitWithin, shouldShrink } from '../api/imagePrep';
 import { buildNoteCards, noteMatches, type NoteSource } from '../notes/model/notesModel';
 import { noteToMarkdown, notesToJson } from '../notes/model/noteText';
@@ -133,6 +133,16 @@ describe('the drawing file', () => {
         expect(hostile!.w).toBe(DRAWING_WIDTH);
         expect(hostile!.strokes).toHaveLength(1);
         expect(hostile!.strokes[0]).toMatchObject({ tool: 'pen', color: '#202124', width: 4, points: [1, 2] });
+    });
+
+    it('clamps the canvas size a strokes file asks for (the editor allocates it)', () => {
+        const huge = parseDrawing(JSON.stringify({ v: 1, w: 10_000, h: 9_999, strokes: [] }))!;
+        expect(huge.w).toBe(MAX_DRAWING_SIDE);
+        expect(huge.h).toBe(MAX_DRAWING_SIDE);
+        expect(MAX_DRAWING_SIDE).toBeLessThanOrEqual(2400);
+        // POSITIVE CONTROL: an ordinary size is kept exactly.
+        const normal = parseDrawing(JSON.stringify({ v: 1, w: 1200, h: 900, strokes: [] }))!;
+        expect([normal.w, normal.h]).toEqual([1200, 900]);
     });
 
     it('bounds the total number of points', () => {
