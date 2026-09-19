@@ -171,6 +171,22 @@ describe('events -> queries', () => {
         expect(spy).toHaveBeenLastCalledWith({ queryKey: ['notes', 'tasks', 'list', 4] });
     });
 
+    it('a lists event refreshes the trash with the listing, in the same deferred refetch', () => {
+        const qc = new QueryClient();
+        const spy = vi.spyOn(qc, 'invalidateQueries');
+        applyTaskEvent(qc, { t: 'lists' }, false);
+        expect(spy.mock.calls.map(c => c[0])).toEqual([{ queryKey: ['notes', 'lists'] }, { queryKey: ['notes', 'trash'] }]);
+        spy.mockClear();
+        // While this page is creating/deleting a note, both wait for it...
+        const done = beginNoteWrite('lists');
+        applyTaskEvent(qc, { t: 'lists' }, false);
+        applyTaskEvent(qc, { t: 'lists' }, false);
+        expect(spy).not.toHaveBeenCalled();
+        done();
+        // ...and then both run, once each (one waiter per key must carry both).
+        expect(spy.mock.calls.map(c => c[0])).toEqual([{ queryKey: ['notes', 'lists'] }, { queryKey: ['notes', 'trash'] }]);
+    });
+
     it('re-reads everything on a resync and on a reconnect’s hello, not on the first hello', () => {
         const qc = new QueryClient();
         const spy = vi.spyOn(qc, 'invalidateQueries');
