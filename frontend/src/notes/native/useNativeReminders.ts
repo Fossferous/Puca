@@ -17,6 +17,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { currentUserIdFromToken, getToken } from '../../api/auth';
+import { probeSession, signalAuthExpired } from '../../api/client';
 import { API_BASE_URL } from '../../api/config';
 import { startTaskReminders } from '../../api/taskReminders';
 import {
@@ -35,6 +36,33 @@ export function pushNativeCredentials(): void {
     const acc = account();
     if (!token || !acc) return;
     void setNativeBackgroundRefresh({ apiBase: API_BASE_URL, token, account: acc });
+}
+
+/**
+ * Where a notification tap lands. 'reminders' opens Reminders. 'signin' comes
+ * from the "sign in again" notice (the background job got a 401): the page
+ * checks its OWN session first — dead, and the ordinary expiry path takes it
+ * to sign-in (after trying the job's renewed token, nativeSessionRescue);
+ * still good (the page holds a newer token than the job saw), and it re-arms
+ * the job with it and shows Reminders.
+ */
+export async function routeNativeTarget(
+    target: string | null,
+    navigate: (to: string) => void,
+    deps: { probe: typeof probeSession; expired: () => void; repush: () => void } =
+        { probe: probeSession, expired: signalAuthExpired, repush: pushNativeCredentials },
+): Promise<void> {
+    if (target === 'reminders') {
+        navigate('/reminders');
+    } else if (target === 'signin') {
+        const r = await deps.probe();
+        if (r === 'rejected') {
+            deps.expired();
+        } else {
+            deps.repush();
+            navigate('/reminders');
+        }
+    }
 }
 
 /** Mount once in the signed-in shell. `navigate` receives '/reminders' when
@@ -64,7 +92,7 @@ export function useNotesReminderLoop(navigate: (to: string) => void): void {
         if (!notesNativeAvailable()) return;
         let live = true;
         const go = (target: string | null) => {
-            if (live && target === 'reminders') navRef.current('/reminders');
+            if (live) void routeNativeTarget(target, to => { if (live) navRef.current(to); });
         };
         void consumeNativeLaunchNav().then(go);
         // The native side also keeps an event's target as the pending launch

@@ -27,10 +27,19 @@ final class NotesNotifier {
     static final String CH_REMINDERS = "notes_reminders";
     static final String CH_PLACES = "notes_places";
     static final String CH_STATUS = "notes_status";
+    /** The session ended: DEFAULT importance (it sounds and shows in the
+     *  shade), because until the user signs in again Notes cannot see new or
+     *  changed due times — and Púca is only quiet while Notes can. Its own
+     *  channel: a channel's importance cannot be raised after creation, and
+     *  the low-importance status channel must stay low for the ongoing
+     *  location notification. */
+    static final String CH_SESSION = "notes_session";
 
     /** Where a notification tap asks the page to land (NotesNativePlugin). */
     static final String EXTRA_NAV = "notes_nav";
     static final String NAV_REMINDERS = "reminders";
+    /** The page checks its own session and lands on sign-in if it is dead. */
+    static final String NAV_SIGNIN = "signin";
 
     static final int ID_DUE = 7401;
     static final int ID_STALE = 7402;
@@ -59,6 +68,13 @@ final class NotesNotifier {
             NotificationChannel ch = new NotificationChannel(
                     CH_PLACES, "Place reminders", NotificationManager.IMPORTANCE_HIGH);
             ch.setDescription("You arrived at a place an item is waiting for.");
+            ch.setShowBadge(true);
+            nm.createNotificationChannel(ch);
+        }
+        if (nm.getNotificationChannel(CH_SESSION) == null) {
+            NotificationChannel ch = new NotificationChannel(
+                    CH_SESSION, "Sign-in needed", NotificationManager.IMPORTANCE_DEFAULT);
+            ch.setDescription("Your session ended, so reminders set elsewhere cannot reach this phone until you sign in.");
             ch.setShowBadge(true);
             nm.createNotificationChannel(ch);
         }
@@ -114,20 +130,25 @@ final class NotesNotifier {
         }
     }
 
-    /** The background refresh lost its session (401): once, quietly. */
+    /** The session died (a 401 from the refresh or the pre-fire check):
+     *  once, at DEFAULT importance, and a tap (or its button) opens Notes on
+     *  sign-in. */
     static void postStale(Context ctx) {
         ensureChannels(ctx);
         NotificationManager nm = nm(ctx);
         if (nm == null) return;
+        PendingIntent signIn = openApp(ctx, ID_STALE, NAV_SIGNIN);
         try {
-            nm.notify(ID_STALE, new NotificationCompat.Builder(ctx, CH_STATUS)
+            nm.notify(ID_STALE, new NotificationCompat.Builder(ctx, CH_SESSION)
                     .setContentTitle("Púca Notes")
-                    .setContentText("Open Púca Notes to keep reminders up to date")
+                    .setContentText("Sign in again to keep getting reminders")
                     .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
-                    .setContentIntent(openApp(ctx, ID_STALE, NAV_REMINDERS))
+                    .setContentIntent(signIn)
+                    .addAction(0, "Sign in", signIn)
                     .setAutoCancel(true)
-                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                     .setCategory(NotificationCompat.CATEGORY_STATUS)
+                    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                     .build());
         } catch (SecurityException ignored) { /* as above */ }
     }
