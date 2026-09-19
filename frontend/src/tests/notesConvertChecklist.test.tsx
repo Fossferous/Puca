@@ -157,7 +157,9 @@ describe('Hide checkboxes deletes only the files of items that actually left', (
         expect(log.filter(l => l.startsWith('delete'))).toEqual(['delete(1)', 'delete(2)', 'delete(3)']);
         expect(f.setBody.mock.calls.map(c => c[1]).at(-1)).toBe('milk\neggs');     // not "bread": it is still an item
         expect(toasts).toEqual(['Not every item became text — the rest are still items']);
-        rerender([items[2]]);                                                          // bread is back, with its picture
+        // What the editor shows by then does not matter here: even with no
+        // live item naming it, bread's file is not the conversion's to delete.
+        rerender([]);
         await act(async () => { vi.advanceTimersByTime(UNDO_WINDOW_MS + 10); });
         expect(deleteFiles).toHaveBeenCalledTimes(1);
         expect(vi.mocked(deleteFiles).mock.calls[0][0]).toEqual(['eggsfile']);
