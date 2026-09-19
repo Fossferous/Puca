@@ -46,6 +46,12 @@ import { useNotesReminderLoop } from '../native/useNativeReminders';
 import { canShareNotes, exportNotes, shareNote, shareNotes } from '../native/notesExport';
 import { usePlaceReminderItems } from '../native/useNotesPlaces';
 import { NativeReminderBanners } from '../native/NativeReminderBanners';
+import { flushNotesPrefs, prefsUnsynced, useNotesPrefsSync, useNotesUnsyncedFlag } from '../model/notesPrefsSync';
+import { useTaskEvents } from '../model/taskEvents';
+import { ExpiredOfflineBanner, OutboxBanner, PrefsSyncBanner } from './SyncBanners';
+import { useNotesOutbox, useOutboxPending } from '../model/notesOutbox';
+import { useNotesCachePersistence } from '../model/notesCache';
+import { useBulkPending, useNoteSelection } from './useNoteSelection';
 
 // Shared 30-second clock for due styling (TaskTree's pattern): quantized so
 // the snapshot is referentially stable between ticks.
@@ -90,9 +96,11 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
 
 interface NotesShellProps {
     onSignOut: () => void;
+    /** The token expired while offline: keep showing the cached notes. */
+    expiredOffline?: boolean;
 }
 
-export function NotesShell({ onSignOut }: NotesShellProps) {
+export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProps) {
     const location = useLocation();
     const navigate = useNavigate();
     const [params, setParams] = useSearchParams();
@@ -105,6 +113,12 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const { cards: allCards, prefs, prefsReady, loading, error, tasksPending } = useNoteCards();
     const actions = useNoteActions(allCards, prefs, prefsReady);
     const local = useNotesPrefs();
+    const prefsSync = useNotesPrefsSync();
+    // What a sign-out would lose, published for PÚCA's sign-out to ask about
+    // too (api/notesCacheScrub.ts): a sign-out in either tab deletes it.
+    useNotesUnsyncedFlag(useOutboxPending());
+    useTaskEvents();
+    useNotesCachePersistence();
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
     const canSnooze = useTaskFeature('snooze') === true;
@@ -139,14 +153,20 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     }, [path, query, remindersView]);
 
     // A delete waits in the undo window; until it commits the note is hidden.
+    const bulk = useBulkPending(actions);
+    const bulkHidden = bulk.hiddenKeys;
     const cards = useMemo(
-        () => (pending?.kind === 'delete' ? allCards.filter(c => c.key !== pending.key) : allCards),
-        [allCards, pending],
+        () => (pending?.kind === 'delete' ? allCards.filter(c => c.key !== pending.key) : allCards)
+            .filter(c => !bulkHidden.has(c.key)),
+        [allCards, pending, bulkHidden],
     );
     const cardsByKey = useMemo(() => new Map(cards.map(c => [c.key, c])), [cards]);
     const visible = useMemo(() => sortCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
     const { pinned, others } = useMemo(() => splitPinned(visible), [visible]);
     const labels = useMemo(() => allLabels(cards), [cards]);
+    // Bulk selection over what the grid shows, in the order it shows it.
+    const gridOrder = useMemo(() => [...pinned, ...others], [pinned, others]);
+    const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, enabled: !remindersView && !openKey });
     const reminders = useMemo(() => groupReminders(cards, now), [cards, now]);
     const counts = useMemo(() => ({
         notes: cards.filter(c => !c.archived).length,
@@ -173,6 +193,11 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     const closeNote = useCallback(() => {
         setParams(p => { p.delete('note'); return p; });
     }, [setParams]);
+    // A note created offline replayed: keep it open under its real id.
+    const noteMoved = useCallback((from: string, to: string) => {
+        setParams(p => { if (p.get('note') === from) p.set('note', to); return p; }, { replace: true });
+    }, [setParams]);
+    useNotesOutbox(noteMoved);
 
     // --- Reminders loop + notifications -------------------------------------------------
     // Android app: native alarms own firing, open or closed (notes/native/).
@@ -203,7 +228,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
         // Where the server has a trash the move happens NOW and Undo restores;
         // otherwise the delete waits out the undo window, as before.
         if (actions.content.trashEnabled) {
-            // A failure is reported by the data layer, once (useListContent.ts).
+            // A failure is reported by the data layer, once (notesQueries.ts
+            // deleteNote); offline the move is queued and Undo queues behind it.
             void actions.deleteNote(card.ref).then(ok => {
                 if (ok) setPending({ kind: 'trash', key: card.key, ref: card.ref, title: card.title, token: ++tokenSeq.current });
             });
@@ -338,6 +364,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
     })();
     const signOutEverywhere = async () => {
         if (!window.confirm('Sign out of every device? Every phone and computer signed in to this account will need to sign in again.')) return;
+        // Last chance for colours and labels while this session still works.
+        if (prefsUnsynced()) await flushNotesPrefs();
         try {
             await logoutEverywhere();
         } catch {
@@ -391,6 +419,9 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                 <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
                             </div>
                         )}
+                        <PrefsSyncBanner status={prefsSync} />
+                        {expiredOffline && <ExpiredOfflineBanner />}
+                        <OutboxBanner />
                         {error != null && !offline && (
                             <div className="notes-status error" role="alert">
                                 <WarningIcon /> Couldn’t load your notes: {error instanceof Error ? error.message : String(error)}
@@ -441,6 +472,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                                     onLabelClick={onLabelClick}
                                     onArchive={archiveWithUndo}
                                     registerEl={registerEl}
+                                    selected={selection.selected}
+                                    onSelect={selection.onSelect}
                                 />
                             </>
                         )}
@@ -510,6 +543,8 @@ export function NotesShell({ onSignOut }: NotesShellProps) {
                     onExpire={expirePending}
                 />
             )}
+            {selection.bar}
+            {selection.undo}
             <MessageToasts />
         </div>
     );

@@ -13,7 +13,11 @@
 // check reads the stored envelope); the text shown AND edited in Púca's own
 // Tasks view; a Notes sign-out lands the main app's tab on its login
 // (sessionSync); a plaintext row injected in the database is flagged "Not
-// encrypted"; and on the phone — one column, no horizontal overflow, every
+// encrypted"; live updates reach a second device, colour and labels sync
+// (and survive a sign-out), bulk selection works by Ctrl-click and by long
+// press, the /notes/ worker plus the sealed cache open Notes offline and an
+// offline edit replays when the network returns; and on the phone — one
+// column, no horizontal overflow, every
 // tap target at size, 16px inputs, the FAB composer, the drawer, a popover
 // inside the viewport, the full-screen editor with the grip and arrows.
 // And the Notes Android app's updates (NotesUpdateGate): in the browser no
@@ -71,14 +75,18 @@ const password = 'Password123!';
 
 let fail = 0;
 const ck = (n, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${detail !== undefined ? '  — ' + detail : ''}`); if (!ok) fail++; };
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+/** A check that could not run (its precondition is missing): printed, never a PASS. */
 let skipped = 0;
-const skip = why => { skipped++; console.log(`SKIP  ${why}`); };
+const skip = (n, why) => { console.log(`SKIP  ${n}${why ? `  — ${why}` : ''}`); skipped++; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const browser = await chromium.launch({ args: ['--mute-audio'] });   // a walk never makes a sound
 const errors = [];
 const watch = page => {
-    page.on('dialog', d => { void d.accept(); });
+    // Accept a confirm (Delete forever, Empty trash) that nothing else is
+    // waiting for. A section that listens for its own question (the sign-out
+    // guards) answers it alone: answering twice throws.
+    page.on('dialog', d => { if (page.listenerCount('dialog') > 1) return; d.accept().catch(() => {}); });
     page.on('pageerror', e => { errors.push(String(e)); console.log('[pageerror]', String(e).slice(0, 300)); });
     page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 200)); });
 };
@@ -484,7 +492,7 @@ if (psqlDsn) {
         ck('database checks ran', false, String(e).slice(0, 200));
     }
 } else {
-    skip('database checks (no psql DSN given)');
+    skip('database: server-side truth (deleted note gone, injected plaintext flagged)', 'no psql DSN given');
 }
 
 // ---- 12b. Export and share on the web ---------------------------------------------------------------
@@ -566,19 +574,176 @@ await page.waitForSelector('.notes-card:has-text("Poem")', { timeout: 15000 });
 ck('notes: the text edited in Púca shows on the card', /Edited in Púca/.test(await poem().locator('.notes-card-body').innerText()));
 ck('notes: Packing kept its archive flag through Púca\'s trash and restore', await page.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText() === '1');
 
+// ---- 12d. Sync: live updates, labels across devices, bulk selection, offline ----------------------
+// A SECOND device: its own browser context (own storage, own event stream),
+// signed in with the same account.
+const ctxB = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL, storageState: await ctx.storageState() });
+const pageB = await ctxB.newPage();
+watch(pageB);
+const shotB = shotOf(pageB);
+const streamB = pageB.waitForResponse(res => res.url().includes('/events/tasks'), { timeout: 20000 }).catch(() => null);
+await pageB.goto('/notes/');
+await pageB.waitForSelector('.notes-card', { timeout: 20000 });
+const evB = await streamB;
+ck('live: device B opened the task-event stream', evB?.status() === 200, String(evB?.status()));
+// A creates a note; B must show it with NO refresh and no focus change (the
+// list set has no poll, so only the stream can bring it).
+await page.click('.notes-quickadd-collapsed');
+await page.fill('.notes-quickadd-title', 'Live note');
+await page.locator('.notes-quickadd-item input').first().fill('Arrives by itself');
+await page.getByRole('button', { name: 'Done' }).click();
+await page.waitForSelector('.notes-card:has-text("Live note")', { timeout: 15000 });
+const liveArrived = await pageB.waitForSelector('.notes-card:has-text("Live note")', { timeout: 10000 }).then(() => true, () => false);
+ck('live: a note created on A appears on B without a refresh', liveArrived);
+// A labels it; the sealed blob event brings the label to B.
+const liveCard = () => page.locator('.notes-card', { hasText: 'Live note' });
+await liveCard().hover();
+await liveCard().locator('button[aria-label="Labels"]').click();
+await page.waitForSelector('.notes-labels-new input', { timeout: 5000 });
+await page.fill('.notes-labels-new input', 'Synced');
+await page.press('.notes-labels-new input', 'Enter');
+await page.keyboard.press('Escape');
+const labelArrived = await pageB.waitForSelector('.notes-card:has-text("Live note") .notes-chip:has-text("Synced")', { timeout: 10000 }).then(() => true, () => false);
+ck('sync: a label set on A appears on B', labelArrived);
+await shotB('device-b-live');
+
+// Bulk selection on the desktop: Ctrl-click two cards, colour both at once.
+await page.locator('.notes-card', { hasText: 'Live note' }).click({ modifiers: ['Control'] });
+await page.locator('.notes-card', { hasText: 'Groceries' }).click({ modifiers: ['Control'] });
+await page.waitForSelector('.notes-selectbar', { timeout: 5000 });
+ck('bulk: Ctrl-click selects without opening', await page.locator('.notes-editor').count() === 0 && /2 selected/.test(await page.locator('.notes-selectbar-count').innerText()));
+await shot('bulk-selected');
+await page.click('.notes-selectbar button[aria-label="Colour selected"]');
+await page.click('.notes-popover .notes-swatch[data-color="sage"]');
+await page.keyboard.press('Escape');
+await sleep(300);
+ck('bulk: one colour for both', await page.locator('.notes-card[data-color="sage"]').count() === 2);
+await page.keyboard.press('Escape');
+await sleep(200);
+ck('bulk: Escape clears the selection', await page.locator('.notes-selectbar').count() === 0);
+const sageOnB = await pageB.waitForFunction(() => document.querySelectorAll('.notes-card[data-color="sage"]').length === 2, null, { timeout: 10000 }).then(() => true, () => false);
+ck('bulk: the colour change reached device B (one sealed write)', sageOnB);
+
+// Offline on A: the worker serves the page, the cache fills it, edits queue.
+const swReady = await page.evaluate(async () => {
+    if (!('serviceWorker' in navigator)) return 'no serviceWorker';
+    const reg = await Promise.race([navigator.serviceWorker.ready, new Promise(res => setTimeout(() => res(null), 10000))]);
+    return reg && reg.active ? 'active' : 'not active';
+});
+ck('offline: the /notes/ worker is active', swReady === 'active', swReady);
+const scopes = await page.evaluate(async () => (await navigator.serviceWorker.getRegistrations()).map(r => new URL(r.scope).pathname));
+ck('offline: the only worker is scoped to /notes/ (the main app is never controlled)', scopes.length === 1 && scopes[0] === '/notes/', JSON.stringify(scopes));
+await sleep(1500);   // the sealed cache write is debounced
+await ctx.setOffline(true);
+await page.reload();
+const offlineCards = await page.waitForSelector('.notes-card:has-text("Groceries")', { timeout: 20000 }).then(() => true, () => false);
+ck('offline: a reload with no network still shows the notes', offlineCards);
+await shot('offline-reload');
+const listsBeforeOffline = psqlDsn ? Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`)) : null;
+await page.click('.notes-quickadd-collapsed');
+await page.fill('.notes-quickadd-title', 'Offline note');
+await page.locator('.notes-quickadd-item input').first().fill('Written on a plane');
+await page.getByRole('button', { name: 'Done' }).click();
+await page.waitForSelector('.notes-card:has-text("Offline note")', { timeout: 10000 });
+ck('offline: the new note says Not synced', await page.locator('.notes-card:has-text("Offline note") .notes-chip.unsynced').count() === 1);
+ck('offline: the pending banner counts the queued changes', await page.locator('[data-sync="pending"]').count() === 1);
+await shot('offline-edit');
+await ctx.setOffline(false);
+const synced = await page.waitForSelector('[data-sync="pending"]', { state: 'detached', timeout: 20000 }).then(() => true, () => false);
+ck('offline: back online, the queue replays', synced);
+const offlineOnB = await pageB.waitForSelector('.notes-card:has-text("Offline note")', { timeout: 15000 }).then(() => true, () => false);
+ck('offline: the edit made offline reached the server and device B sees it', offlineOnB);
+const itemOnB = await pageB.waitForFunction(() => /Written on a plane/.test(document.body.innerText), null, { timeout: 10000 }).then(() => true, () => false);
+ck('offline: its item came through too (temp ids rewritten)', itemOnB);
+if (psqlDsn) {
+    try {
+        // EXACTLY one more than before it was written: not a lower bound the
+        // walk's earlier notes already satisfy, and not two (a replayed create).
+        const n = Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`));
+        ck('database: the offline note became exactly one real list on the server', n === listsBeforeOffline + 1, `before=${listsBeforeOffline} after=${n}`);
+        const blob = sql(`SELECT blob FROM user_sealed_blobs b JOIN users u ON u.id = b.user_id WHERE u.username = '${username}' AND b.name = 'notes-prefs'`);
+        ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|sage|mint/.test(blob), blob.slice(0, 60));
+    } catch (e) {
+        ck('database sync checks ran', false, String(e).slice(0, 200));
+    }
+} else {
+    skip('database: the offline note became exactly one real list; the prefs blob is ciphertext', 'no psql DSN given');
+}
+await ctxB.close();
+
 // ---- 13. Cross-tab: a Notes sign-out lands the main app's tab on its login ---------------------------
 const page2 = await ctx.newPage();
 watch(page2);
 await page2.goto('/chat');
 await page2.waitForSelector('.chat-container', { timeout: 20000 }).catch(() => {});
+const chatUp = await page2.locator('.chat-container').count() > 0;
+
+// A colour changed while OFFLINE has not reached the account: a sign-out would
+// delete it, so both sign-outs must ask (and cancelling must keep the session).
+await ctx.setOffline(true);
+await page.locator('.notes-card', { hasText: 'Groceries' }).click({ modifiers: ['Control'] });
+await page.waitForSelector('.notes-selectbar', { timeout: 5000 });
+await page.click('.notes-selectbar button[aria-label="Colour selected"]');
+await page.click('.notes-popover .notes-swatch[data-color="coral"]');
+await page.keyboard.press('Escape');
+await sleep(300);
+await page.keyboard.press('Escape');
+await sleep(1500);   // the push is debounced, then fails offline
+const flag = await page2.evaluate(() => Object.entries(localStorage).filter(([k]) => k.startsWith('pucaNotesUnsynced:')).map(([, v]) => v));
+ck('sign-out guard: Notes publishes the unsynced colour for Púca to see (counts only)', flag.length === 1 && JSON.parse(flag[0]).prefs === true && !/coral|Groceries/.test(flag[0]), JSON.stringify(flag));
+let askedNotes = null;
+page.once('dialog', d => { askedNotes = d.message(); void d.dismiss(); });
+await page.click('button[aria-label="Account and settings"]');
+await page.waitForSelector('.notes-menu', { timeout: 5000 });
+await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+await sleep(1500);
+ck('sign-out guard: Notes asks before deleting a colour change that never synced', askedNotes !== null && /colours, labels or archive/.test(askedNotes), askedNotes ?? 'no question asked');
+ck('sign-out guard: answering no keeps Notes signed in', await page.locator('.login-card').count() === 0 && await page.locator('.notes-card').count() > 0);
+if (chatUp) {
+    let askedPuca = null;
+    page2.once('dialog', d => { askedPuca = d.message(); void d.dismiss(); });
+    // A fresh account's first-run dialogs sit over the home view; move them
+    // aside (neither is what is being tested), then Settings -> Log Out.
+    await page2.getByRole('button', { name: 'Later', exact: true }).click({ timeout: 3000 }).catch(() => {});
+    await page2.locator('.welcome-popup-close').click({ timeout: 3000 }).catch(() => {});
+    await sleep(300);
+    const opened = await page2.locator('button[aria-label="Open settings"]').first().click({ timeout: 5000 }).then(() => true, e => { console.log('[walk] settings:', String(e).slice(0, 200)); return false; });
+    const clicked = opened && await page2.locator('.settings-nav-item.logout').click({ timeout: 5000 }).then(() => true, e => { console.log('[walk] log out:', String(e).slice(0, 200)); return false; });
+    await sleep(500);
+    if (!clicked) await page2.screenshot({ path: `${outdir}/puca-signout-unreachable.png` });
+    ck('sign-out guard: Púca\'s own sign-out asks about Notes\' unsynced changes too', clicked && askedPuca !== null && /Púca Notes has/.test(askedPuca), clicked ? (askedPuca ?? 'no question asked') : 'could not reach Púca\'s Log Out');
+    ck('sign-out guard: answering no keeps Púca signed in', !page2.url().includes('/login'), page2.url());
+    await page2.keyboard.press('Escape');
+} else {
+    skip('sign-out guard: Púca\'s own sign-out asks too', 'the main app tab did not load');
+}
+await ctx.setOffline(false);
+const flagCleared = await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith('pucaNotesUnsynced:')), null, { timeout: 20000 }).then(() => true, () => false);
+ck('sign-out guard: back online, the colour syncs and there is nothing left to ask about', flagCleared);
+
 await page.click('button[aria-label="Account and settings"]');
 await page.waitForSelector('.notes-menu', { timeout: 5000 });
 await shot('account-menu');
 ck('browser: the account menu has no update rows (they are the Android app\'s)', !/Check for updates/.test(await page.locator('.notes-menu').innerText()));
 ck('browser: Notes never asked for an OTA manifest', browserUpdateChecks.length === 0, JSON.stringify(browserUpdateChecks));
+let unexpectedQuestion = null;
+const onUnexpected = d => { unexpectedQuestion = d.message(); void d.accept(); };
+page.on('dialog', onUnexpected);
+const devicesBefore = psqlDsn ? sql(`SELECT count(*) FROM devices d JOIN users u ON u.id = d.user_id WHERE u.username = '${username}' AND d.revoked_at IS NULL`) : null;
 await page.getByRole('button', { name: 'Sign out', exact: true }).click();
 await page.waitForSelector('.login-card', { timeout: 10000 });
+page.off('dialog', onUnexpected);
 ck('sign out: Notes returns to its login', true);
+ck('sign out: nothing unsynced, so no question was asked', unexpectedQuestion === null, unexpectedQuestion ?? undefined);
+await sleep(1500);
+const marker = await page.evaluate(() => localStorage.getItem('pucaDeviceRevokePending'));
+ck('sign out: the revoke was confirmed, so no pending-revoke marker is left behind', marker === null, marker ?? undefined);
+if (psqlDsn) {
+    const after = sql(`SELECT count(*) FROM devices d JOIN users u ON u.id = d.user_id WHERE u.username = '${username}' AND d.revoked_at IS NULL`);
+    ck('sign out: this browser\'s device enrolment is revoked (no socket needed)', devicesBefore !== '0' && after === '0', `before=${devicesBefore} after=${after}`);
+} else {
+    skip('sign out: this browser\'s device enrolment is revoked', 'no psql DSN given');
+}
 await page2.waitForURL('**/login', { timeout: 8000 }).then(() => ck('sign out: the main app tab followed (sessionSync)', true)).catch(() => ck('sign out: the main app tab followed (sessionSync)', false, 'still on ' + page2.url()));
 await page2.close();
 
@@ -589,9 +754,11 @@ await page.click('.login-button');
 await page.waitForSelector('.notes-app', { timeout: 20000 });
 await page.waitForSelector('.notes-card', { timeout: 15000 });
 ck('sign in: Notes signs in with the Púca account and the notes are back', await page.locator('.notes-card').count() >= 1);
-// Labels/colours are DEVICE-LOCAL and sign-out scrubs them (documented): the
-// card must come back without them — anything else would mean the scrub failed.
-ck('sign in: device-local colour was scrubbed by the sign-out (as documented)', await page.locator('.notes-card[data-color="mint"]').count() === 0);
+// Colour and labels follow the ACCOUNT now (a sealed blob): the sign-out
+// scrubbed this browser's copy, and signing back in brings them back.
+const kept = await page.waitForSelector('.notes-card:has-text("Groceries") .notes-chip:has-text("Errands")', { timeout: 10000 }).then(() => true, () => false);
+ck('sign in: labels survive a sign-out and sign-in (synced, not device-local)', kept);
+ck('sign in: the colour came back too', await page.locator('.notes-card[data-color="sage"]').count() >= 1);
 await shot('signed-in-again');
 ck('desktop: no page errors', errors.length === 0, errors[0]);
 
@@ -752,6 +919,14 @@ if (await lastTrashBtn.count() === 1) {
 }
 ck('phone púca: the last Trash button scrolls clear of the bottom nav', reachable, JSON.stringify({ lastBox, navTop }));
 await mshot('phone-puca-tasks-trash');
+// Put Phone note back (Restore at phone size, in Púca): the calendar walk at
+// the end opens it as a live note.
+const phoneRestore = m.locator('.tasks-trash-row', { hasText: 'Phone note' }).getByRole('button', { name: 'Restore' });
+if (await phoneRestore.count() === 1) {
+    await phoneRestore.tap();
+    await m.waitForSelector('.tasks-trash-row:has-text("Phone note")', { state: 'detached', timeout: 10000 }).catch(() => {});
+}
+ck('phone púca: Restore takes Phone note out of the trash', await m.locator('.tasks-trash-row', { hasText: 'Phone note' }).count() === 0);
 const photoTab = m.locator('.tasks-tab', { hasText: 'Holiday photo' });
 await photoTab.tap({ timeout: 5000 }).catch(() => {});
 await m.waitForSelector('.list-content-block .ni-actions', { timeout: 10000 }).catch(() => {});
@@ -776,6 +951,26 @@ const selPx = await m.evaluate(() => parseFloat(getComputedStyle(document.queryS
 ck('phone: account-menu selects ≥ 16px', selPx >= 16, `${selPx}px`);
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 });
+
+// bulk selection by LONG PRESS (the phone's way in), then the bar at 390px.
+// Poem, not Phone note: that one is in the trash by now (the Trash section above).
+const target = m.locator('.notes-card', { hasText: 'Poem' });
+const tb = await target.boundingBox();
+await target.dispatchEvent('pointerdown', { pointerType: 'touch', isPrimary: true, clientX: tb.x + 20, clientY: tb.y + 20, bubbles: true });
+await sleep(700);
+await target.dispatchEvent('pointerup', { pointerType: 'touch', isPrimary: true, clientX: tb.x + 20, clientY: tb.y + 20, bubbles: true });
+const barUp = await m.waitForSelector('.notes-selectbar', { timeout: 5000 }).then(() => true, () => false);
+ck('phone: a long press starts a selection (and does not open the note)', barUp && await m.locator('.notes-editor').count() === 0);
+await m.tap('.notes-card:has-text("Groceries")');
+await sleep(200);
+ck('phone: while selecting, a tap adds to the selection', /2 selected/.test(await m.locator('.notes-selectbar-count').innerText()) && await m.locator('.notes-editor').count() === 0);
+r = await audit();
+const bar = await m.locator('.notes-selectbar').boundingBox();
+ck('phone: the selection bar fits the viewport', bar && bar.x >= 0 && bar.x + bar.width <= 390.5, JSON.stringify(bar));
+ck('phone: selecting — no overflow, targets at size, no ghosts', !r.bodyScrollsHorizontally && r.under.length === 0 && r.ghosts.length === 0, JSON.stringify({ under: r.under, ghosts: r.ghosts }));
+await mshot('phone-bulk-select');
+await m.tap('.notes-selectbar button[aria-label="Clear selection"]');
+await m.waitForSelector('.notes-selectbar', { state: 'detached', timeout: 5000 });
 
 // editor
 await m.tap('.notes-card:has-text("Groceries")');
@@ -917,7 +1112,10 @@ if (!psqlDsn) {
         let mine = rows.find(x => x.label === 'My shared errand');
         ck('desktop hint: the item someone else set says "Reminds whoever set it"', !!hinted && hinted.hint === 'Reminds whoever set it', JSON.stringify(hinted));
         ck('desktop hint: my own shared item does not (control)', !!mine && mine.hint === null, JSON.stringify(mine));
-        ck('desktop hint: a second line inside the item cell, not a new column', !!hinted && !!hinted.sub && hinted.cells === 4 && hinted.sub.t >= hinted.text.t + 4 && hinted.sub.b <= hinted.row.b + 0.5, JSON.stringify(hinted));
+        // No new column: the hinted row has exactly as many cells as the control row
+// beside it (checkbox, text, timing marks, note, time, snooze — the calendar
+// work added the last two, so a fixed count would only measure that).
+ck('desktop hint: a second line inside the item cell, not a new column', !!hinted && !!mine && !!hinted.sub && hinted.cells === mine.cells && hinted.sub.t >= hinted.text.t + 4 && hinted.sub.b <= hinted.row.b + 0.5, JSON.stringify({ hinted, mineCells: mine?.cells }));
         await shotOf(h)('hint-desktop');
         await hctx.close();
 
@@ -1264,6 +1462,9 @@ ck('app: no page errors', errors.length === 0, errors[0]);
 const calendar = await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql: psqlDsn ? sql : null, errors, notesCreatedAt });
 
 await browser.close();
-const skipNotes = [skipped ? `${skipped} section(s) SKIPPED: give the psql DSN to run them` : '', calendar.skipped ? `${calendar.skipped} calendar database proof(s) SKIPPED (no DSN)` : ''].filter(Boolean).join('; ');
-console.log(fail === 0 ? `\nALL PASS${skipNotes ? ` (${skipNotes})` : ''}` : `\n${fail} FAILED`);
+const skipNotes = [
+    skipped ? `${skipped} check(s) SKIPPED — see the SKIP lines above (most need the psql DSN)` : '',
+    calendar.skipped ? `${calendar.skipped} calendar database proof(s) SKIPPED (no DSN)` : '',
+].filter(Boolean).join('; ');
+console.log(fail === 0 ? `\nALL PASS${skipNotes ? ` (${skipNotes})` : ''}` : `\n${fail} FAILED${skipNotes ? `; ${skipNotes}` : ''}`);
 process.exit(fail === 0 ? 0 : 1);

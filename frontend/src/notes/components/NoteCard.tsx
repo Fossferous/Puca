@@ -18,13 +18,15 @@ import { parseEncAttachment, decryptToBlobUrl } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import {
-    ArchiveIcon, ClockIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
+    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
 import { heroItems } from '../../api/noteMedia';
 import { ScheduleChip } from '../../components/schedule/ScheduleChip';
+import { useNoteUnsynced } from '../model/notesOutbox';
+import { useLongPress } from './useLongPress';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
@@ -44,6 +46,10 @@ interface NoteCardProps {
     compactTools: boolean;
     /** The card registers its element so menus opened elsewhere can anchor to it. */
     registerEl: (key: string, el: HTMLElement | null) => void;
+    /** Bulk selection (useNoteSelection.tsx): absent = no selection UI. */
+    selected?: boolean;
+    selecting?: boolean;
+    onSelect?: (card: NoteCardModel, e: { shiftKey: boolean }) => void;
 }
 
 function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible: boolean }) {
@@ -67,8 +73,11 @@ function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible:
 
 function NoteCardImpl({
     card, actions, now, onOpen, onMenu, onPickColor, onPickLabels, onLabelClick, onArchive, compactTools, registerEl,
+    selected = false, selecting = false, onSelect,
 }: NoteCardProps) {
     const elRef = useRef<HTMLElement | null>(null);
+    const press = useLongPress(onSelect ? () => onSelect(card, { shiftKey: false }) : undefined);
+    const unsynced = useNoteUnsynced(card.key);
     // No observer (an old WebView, jsdom) → decrypt right away rather than never.
     const [onScreen, setOnScreen] = useState(() => typeof IntersectionObserver === 'undefined');
 
@@ -116,14 +125,21 @@ function NoteCardImpl({
     return (
         <article
             ref={el => { elRef.current = el; registerEl(card.key, el); }}
-            className={`notes-card ${card.pinned ? 'pinned' : ''}`}
+            className={`notes-card ${card.pinned ? 'pinned' : ''} ${selected ? 'selected' : ''}`}
+            data-selected={selected ? 'true' : undefined}
             data-color={card.color}
             data-note-key={card.key}
             tabIndex={0}
             role="button"
             aria-label={`${untitled ? 'Untitled note' : card.title}${card.pinned ? ', pinned' : ''}${card.archived ? ', archived' : ''}${colorName}`}
             title={card.color === 'default' ? undefined : `Colour: ${card.color}`}
-            onClick={() => onOpen(card)}
+            onClick={e => {
+                if (press.swallowClick()) return;
+                // While selecting (or with a modifier), a click selects instead of opening.
+                if (onSelect && (selecting || e.shiftKey || e.ctrlKey || e.metaKey)) { onSelect(card, { shiftKey: e.shiftKey }); return; }
+                onOpen(card);
+            }}
+            {...press.handlers}
             // The card itself only: Enter/Space on a control INSIDE it (pin,
             // a checkbox, a chip, the tools) bubbles here too, and must keep
             // its native activation rather than open the note.
@@ -131,8 +147,25 @@ function NoteCardImpl({
                 if (e.target !== e.currentTarget) return;
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(card); }
             }}
-            onContextMenu={e => onMenu(e, card, e.currentTarget)}
+            onContextMenu={e => {
+                // A long press on a touch screen is a selection, not the menu
+                // (the More button still opens that).
+                if (press.wasTouch()) { e.preventDefault(); press.fire(); return; }
+                onMenu(e, card, e.currentTarget);
+            }}
         >
+            {onSelect && (
+                <button
+                    type="button"
+                    className={`notes-card-select ${selected ? 'on' : ''} ${selecting ? 'shown' : ''}`}
+                    aria-pressed={selected}
+                    aria-label={selected ? 'Deselect note' : 'Select note'}
+                    title={selected ? 'Deselect' : 'Select'}
+                    onClick={e => { e.stopPropagation(); onSelect(card, { shiftKey: e.shiftKey }); }}
+                >
+                    {selected ? <CheckboxCheckedIcon /> : <CheckboxIcon />}
+                </button>
+            )}
             <NoteHero items={hero} visible={onScreen} />
             <div className="notes-card-head">
                 <h3 className={`notes-card-title ${untitled ? 'untitled' : ''}`}>
@@ -210,6 +243,7 @@ function NoteCardImpl({
                 )}
                 {anyLocked && <span className="notes-chip" title="Some attachments can't be read yet (key unavailable)"><LockIcon /> locked</span>}
                 {card.archived && <span className="notes-chip archived"><ArchiveIcon /> archived</span>}
+                {unsynced && <span className="notes-chip unsynced" title="Changed while offline — sends when the connection is back">Not synced</span>}
                 {card.total > 0 && <span className="notes-chip progress" title="Completed / total">{card.completed}/{card.total}</span>}
                 {card.labels.map(l => (
                     <span

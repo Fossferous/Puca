@@ -21,6 +21,11 @@ import { notesKeys } from './model/notesQueries';
 import { NativeTokenGate } from './native/NativeTokenGate';
 import { adoptFromNative, adoptOnResume, rescueOrExpire } from './native/nativeSessionRescue';
 import { useNotesNativeSession } from './native/useNotesNativeSession';
+import { pendingOutboxCount } from './model/notesOutbox';
+import { flushNotesPrefs, prefsUnsynced } from './model/notesPrefsSync';
+import { settlePendingDeviceRevoke } from '../api/deviceIdentity/pendingRevoke';
+import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api/notesCacheScrub';
+import { currentUserIdFromToken } from '../api/auth';
 
 export function NotesApp() {
     return (
@@ -38,6 +43,10 @@ function SessionGate() {
     const [signedIn, setSignedIn] = useState(isAuthenticated());
     // Android app: every way out of the session clears the native side too.
     useNotesNativeSession(signedIn);
+    // The token ran out while OFFLINE: signing in is impossible right now, so
+    // keep the cached notes on screen (and queue edits) instead of a sign-in
+    // screen that cannot work; the real expiry runs once the network is back.
+    const [expiredOffline, setExpiredOffline] = useState(false);
 
     /** Land on the login screen without touching the keys (App.tsx's rule:
      *  a re-authentication must never risk the E2EE identity). */
@@ -75,11 +84,24 @@ function SessionGate() {
     useEffect(() => {
         const t = getToken();
         if (signedIn && t && isTokenExpired(t)) {
-            void rescueOrExpire({ adopt: adoptFromNative, onAdopted, expire: () => expire(true) });
+            // The Android app first tries the job's renewed token. With none:
+            // OFFLINE, signing in is impossible right now, so the cached
+            // notes stay on screen (edits queue) until the network is back.
+            void rescueOrExpire({
+                adopt: adoptFromNative,
+                onAdopted,
+                expire: () => { if (navigator.onLine === false) setExpiredOffline(true); else expire(true); },
+            });
         }
         // Mount-time check only.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+    useEffect(() => {
+        if (!expiredOffline) return;
+        const back = () => { setExpiredOffline(false); expire(true); };
+        window.addEventListener('online', back);
+        return () => window.removeEventListener('online', back);
+    }, [expiredOffline, expire]);
 
     // The Púca tab (or another Notes tab) signed out, soft-expired, switched
     // accounts, or signed in. Shared caches are cleared inside sessionSync.
@@ -128,13 +150,26 @@ function SessionGate() {
         },
     }), [navigate, qc]);
 
-    const signOut = useCallback(() => {
+    // A web sign-out whose device revoke was never confirmed is finished with
+    // this session (api/deviceIdentity/pendingRevoke.ts). Notes never enrols
+    // a device, so there is no enrolment for the revoke to race.
+    useEffect(() => {
+        if (signedIn) void settlePendingDeviceRevoke(getToken(), currentUserIdFromToken());
+    }, [signedIn]);
+
+    const signOut = useCallback(async () => {
+        // Sign-out deletes this browser's copy of everything Notes keeps, so
+        // nothing that has not reached the server may go without a question.
+        // Colours and labels get one last push first (bounded).
+        const prefsLeft = prefsUnsynced() ? await flushNotesPrefs() : false;
+        const warning = notesSignOutWarning({ ops: pendingOutboxCount(), prefs: prefsLeft });
+        if (warning !== null && !window.confirm(warning)) return;
         // logout() clears the token, the seed, the DM/channel/blob caches and
-        // scrubs the per-account device-local stores (Notes' included). Note
-        // for a shared machine: this browser's DEVICE enrolment is not revoked
-        // from here — that needs the attested id only the Púca tab holds — so
-        // the next Púca sign-in re-attests as the same device (the same
-        // outcome as signing out of Púca before its socket attested).
+        // scrubs the per-account device-local stores (Notes' included). It
+        // also revokes this browser's DEVICE enrolment: the id is derived from
+        // the web key, so no socket is needed, and the key is dropped only
+        // once the server confirms (api/auth.ts revokeWebDeviceAndScrubKey).
+        // The revoke runs on after this page moves on (keepalive fetch).
         logout();
         clearSharedSessionCaches();
         qc.clear();
@@ -145,6 +180,11 @@ function SessionGate() {
 
     const onLoginSuccess = useCallback(() => {
         resetAuthExpiredFlag();   // a later expiry must signal again
+        // Another account's on-device copy (sealed under a seed this browser
+        // no longer holds) is dead weight: drop it. This account's is kept,
+        // with any edits it queued while signed out.
+        const sub = currentUserIdFromToken();
+        deleteNotesCaches(sub === null ? undefined : notesCacheDbName(sub));
         invalidateNotesPrefs();    // the account may differ from the last one
         setSignedIn(true);
         navigate('/', { replace: true });
@@ -158,7 +198,7 @@ function SessionGate() {
             />
             <Route
                 path="/*"
-                element={signedIn ? <NotesShell onSignOut={signOut} /> : <Navigate to="/login" replace />}
+                element={signedIn ? <NotesShell onSignOut={signOut} expiredOffline={expiredOffline} /> : <Navigate to="/login" replace />}
             />
         </Routes>
     );

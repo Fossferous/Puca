@@ -4,7 +4,8 @@ import { Login } from './components/Login';
 import { Chat } from './components/Chat';
 import ResetPassword from './components/ResetPassword';
 import VerifyEmail from './components/VerifyEmail';
-import { isAuthenticated, logout, getToken, softExpireSession, isTokenExpired } from './api/auth';
+import { isAuthenticated, logout, getToken, softExpireSession, isTokenExpired, currentUserIdFromToken } from './api/auth';
+import { notesSignOutWarning, readNotesUnsynced } from './api/notesCacheScrub';
 import { resetAuthExpiredFlag, probeSession } from './api/client';
 import { checkForNewVersion, openDownloadPage, type AppVersionInfo } from './api/appVersion';
 import { RETRY_DELAYS_MS, failureFor, type ConnectionFailure } from './appConnection.utils';
@@ -71,6 +72,11 @@ function App() {
 
   // Stable logout handler
   const handleLogout = () => {
+    // Púca Notes' unsent offline edits and unsynced colours/labels on this
+    // browser go with any sign-out (logout() scrubs them); ask first, as
+    // Notes' own sign-out does (api/notesCacheScrub.ts).
+    const notesWarning = notesSignOutWarning(readNotesUnsynced(currentUserIdFromToken()));
+    if (notesWarning !== null && !window.confirm(notesWarning)) return;
     // FIRST, before logout() drops the JWT: unregistering the push token needs
     // it. Fire-and-forget — the synchronous prefix captures the token, and the
     // server's FCM UNREGISTERED pruning is the backstop if the request loses.

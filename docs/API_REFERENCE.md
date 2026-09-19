@@ -191,6 +191,19 @@ boundary rules added in 0.9.5.
 
 ---
 
+## Notes sync
+
+Púca Notes' account-wide state and live updates ([`docs/NOTES.md`](NOTES.md)).
+Neither route carries content the server can read.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/sealed-blobs/:name` | ✅ | The caller's sealed-to-self document of that name: `{rev, blob}`. No document yet is `200 {"rev":0,"blob":null}`, never a 404 — a 404 means a server without this route, which the client treats as "stay local". The only name is `notes-prefs`; anything else is a 400. |
+| PUT | `/sealed-blobs/:name` | ✅ | Compare-and-swap: body `{expected_rev, blob}`. Writes only if `expected_rev` is the current revision (`0` = create) and answers `{rev}`; otherwise `409` with the current `{rev, blob}` so the client re-applies its change and retries. `blob` is ciphertext, at most 256 KiB (`413` above that, checked on the raw body before parsing); an empty blob or a NUL is a 400. |
+| GET | `/events/tasks` | ✅ | Server-Sent Events: "this changed" for the caller's task data, ids only — `{"t":"list","id":N}`, `{"t":"channel","id":N}` (only while the caller can VIEW that channel; a permission lookup that fails sends nothing), `{"t":"lists"}`, `{"t":"prefs"}`, `{"t":"blob","name":"notes-prefs"}`, `{"t":"resync"}` (events were dropped: re-read), plus `hello`, `evicted` and `bye` framing. A comment every 20 s keeps it open; it ends at the token's expiry and within 60 s of the session being revoked. At most 4 streams per user (a fifth evicts the oldest, which is told) and `TASK_EVENTS_MAX_PER_IP` per address (429). The token rides the `Authorization` header — the client reads it with `fetch`, not `EventSource`. |
+
+---
+
 ## Push Notifications (Mobile)
 
 | Method | Endpoint | Auth | Description |

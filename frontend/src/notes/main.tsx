@@ -49,8 +49,12 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { NotesApp } from './NotesApp'
 import { NotesUpdateGate } from './components/NotesUpdateGate'
 import { makeNotesQueryClient } from './model/notesQueries'
+import { bootNotesOffline } from './model/notesBoot'
 
 const queryClient = makeNotesQueryClient()
+// The sealed on-device cache and the web-only offline worker (never awaited:
+// the first render does not wait on IndexedDB).
+void bootNotesOffline(queryClient)
 
 createRoot(document.getElementById('root')!).render(
     <StrictMode>

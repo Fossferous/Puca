@@ -135,7 +135,9 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
         if (r.target === 'new') {
             const ref = await actions.createNote(`Calendar ${fileStamp(Date.now())}`, [r.title], undefined, [timing]);
             if (!ref) { pushMessageToast({ title: 'Couldn’t add it — check your connection' }); return false; }
-            setCalendarPrefs({ lastNote: `${ref.kind}:${ref.id}` });
+            // A note made offline has a temporary id until the outbox replays
+            // it (notesOutbox.ts): not one to remember as the next target.
+            if (ref.id > 0) setCalendarPrefs({ lastNote: `${ref.kind}:${ref.id}` });
             return true;
         }
         const ref = parseNoteKey(r.target);

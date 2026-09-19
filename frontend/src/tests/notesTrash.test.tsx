@@ -30,9 +30,10 @@ vi.mock('../api/auth', async () => {
 });
 
 import { ApiError } from '../api/client';
-import { registerBodyFlush } from '../api/listContent';
+import { registerBodyFlush, resetTrashProbe } from '../api/listContent';
 import { setMessageToastSink } from '../components/messageToastBus';
-import { useNoteActions, useNoteCards, type NoteActions } from '../notes/model/notesQueries';
+import { resetNotesPrune, useNoteActions, useNoteCards, type NoteActions } from '../notes/model/notesQueries';
+import { PRUNE_GRACE_MS } from '../notes/model/notesPrune';
 import { getNotesPrefs, invalidateNotesPrefs, setNoteColor, setNoteLabels } from '../notes/model/notesPrefs';
 import { type TaskTabPref } from '../api/tasks';
 
@@ -110,10 +111,20 @@ async function mount(): Promise<QueryClient> {
     return qc;
 }
 const trashReads = () => get.mock.calls.filter(c => c[0] === '/task-lists?trashed=true').length;
+/** The prune forgets a note only once it has been missing from two list
+ *  fetches a grace period apart (notesPrune.ts) — one view is never proof.
+ *  Runs that second fetch, the grace period later (Date must be faked). */
+async function listFetchAfterGrace(qc: QueryClient) {
+    vi.setSystemTime(Date.now() + PRUNE_GRACE_MS + 1);
+    await act(async () => { await qc.refetchQueries({ queryKey: ['notes', 'lists'], exact: true }); });
+    await settle();
+}
 
 beforeEach(() => {
     localStorage.clear();
     invalidateNotesPrefs();
+    resetTrashProbe();
+    resetNotesPrune();
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset(); put.mockReset();
     server = {
         live: [1, 2, 3],
@@ -162,10 +173,13 @@ describe('the trash keeps a note whole', () => {
     });
 
     it('POSITIVE CONTROL: a note that is really gone does lose its device-local state', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
         setNoteColor('list:2', 'mint');
         server.live = [1, 3];   // deleted elsewhere, not trashed
         server.prefs = server.prefs.filter(p => p.ref_id !== 2);
-        await mount();
+        const qc = await mount();
+        expect(getNotesPrefs().colors['list:2']).toBe('mint');   // one view is not proof
+        await listFetchAfterGrace(qc);
         expect(getNotesPrefs().colors['list:2']).toBeUndefined();
     });
 
@@ -200,6 +214,7 @@ describe('a note trashed ELSEWHERE keeps its device-local state', () => {
     // has a trash read from before: only the listing refetches (focus, the
     // 30-second staleness), and the note is missing from BOTH caches.
     it('the prune asks the trash again before it prunes, and keeps the colour', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
         setNoteColor('list:2', 'mint');
         setNoteLabels('list:2', ['Errands']);
         const qc = await mount();
@@ -208,19 +223,74 @@ describe('a note trashed ELSEWHERE keeps its device-local state', () => {
         server.trashed = [2];
         await act(async () => { await qc.refetchQueries({ queryKey: ['notes', 'lists'], exact: true }); });
         await settle();
+        await listFetchAfterGrace(qc);
         expect(latest!.keys).toEqual(['list:1', 'list:3']);
         expect(trashReads()).toBeGreaterThan(readsBefore);
         expect(getNotesPrefs().colors['list:2']).toBe('mint');
         expect(getNotesPrefs().labels['list:2']).toEqual(['Errands']);
     });
 
-    it('POSITIVE CONTROL: deleted elsewhere (not trashed), the same refetch does prune it', async () => {
+    it('a note already in the cached trash counts as live: never struck, never re-asked', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        setNoteColor('list:2', 'mint');
+        server.live = [1, 3];
+        server.trashed = [2];
+        const qc = await mount();
+        const readsBefore = trashReads();
+        await act(async () => { await qc.refetchQueries({ queryKey: ['notes', 'lists'], exact: true }); });
+        await settle();
+        await listFetchAfterGrace(qc);
+        expect(trashReads()).toBe(readsBefore);   // the prune had nothing to ask about
+        expect(getNotesPrefs().colors['list:2']).toBe('mint');
+    });
+
+    it('POSITIVE CONTROL: deleted elsewhere (not trashed), the same refetches do prune it', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
         setNoteColor('list:2', 'mint');
         const qc = await mount();
         server.live = [1, 3];   // gone for good
         await act(async () => { await qc.refetchQueries({ queryKey: ['notes', 'lists'], exact: true }); });
         await settle();
+        await listFetchAfterGrace(qc);
         expect(getNotesPrefs().colors['list:2']).toBeUndefined();
+    });
+});
+
+describe('a delete before the trash has been read', () => {
+    it('does not invent a trash cache: pins still wait for the real one', async () => {
+        let release!: () => void;
+        server.trashGate = new Promise<void>(r => { release = r; });
+        await mount();
+        await act(async () => { await latest!.actions.deleteNote({ kind: 'list', id: 2 }); });
+        await settle();
+        expect(post).toHaveBeenCalledWith('/task-lists/2/trash', {});
+        await act(async () => { latest!.actions.togglePin({ kind: 'list', id: 3 }); });
+        await settle();
+        expect(put).not.toHaveBeenCalled();
+        expect(toasts).toContain('Still loading the trash — try again in a moment');
+        await act(async () => { release(); server.trashGate = null; });
+        await settle();
+    });
+});
+
+describe('the prune waits for the trash to be read', () => {
+    it('while the trash has not answered, nothing is struck or asked about, however many fetches pass', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        setNoteColor('list:2', 'mint');
+        server.live = [1, 3];
+        server.trashed = [2];
+        let release!: () => void;
+        server.trashGate = new Promise<void>(r => { release = r; });
+        const qc = await mount();
+        expect(trashReads()).toBe(1);                 // the page's own read, still waiting
+        await act(async () => { await qc.refetchQueries({ queryKey: ['notes', 'lists'], exact: true }); });
+        await settle();
+        await listFetchAfterGrace(qc);
+        expect(trashReads()).toBe(1);                 // the prune asked nothing
+        expect(getNotesPrefs().colors['list:2']).toBe('mint');
+        await act(async () => { release(); server.trashGate = null; });
+        await settle();
+        expect(getNotesPrefs().colors['list:2']).toBe('mint');   // and once it answers, list:2 is live
     });
 });
 
@@ -363,6 +433,12 @@ describe('Empty trash', () => {
 });
 
 describe('when the server cannot be reached', () => {
+    // The delete runs through the outbox, which probes the trash when the op
+    // RUNS (api/listContent.ts trashOrDeleteList). A network failure there is
+    // never read as "no trash": signed in with an identity the op is queued
+    // and probed again at replay (notesOutbox.test.ts); here there is no
+    // identity to queue it under, so it is rolled back — either way, never a
+    // permanent delete.
     it('a delete does NOTHING — it is never mistaken for an old server and made permanent', async () => {
         const base = get.getMockImplementation()!;
         get.mockImplementation(async (path: string) => {

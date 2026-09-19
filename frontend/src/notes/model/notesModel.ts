@@ -432,3 +432,56 @@ export function allLabels(cards: NoteCard[]): string[] {
 export function noteRoute(ref: NoteRef): string {
     return `/n/${ref.kind}/${ref.id}`;
 }
+
+// --- Bulk selection (pure; notes/components/useNoteSelection.ts drives it) ------------
+
+/** Add or remove one note. */
+export function toggleInSelection(sel: ReadonlySet<string>, key: string): Set<string> {
+    const next = new Set(sel);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+}
+
+/** Shift-click: add every note between the anchor and `key` in the VISIBLE
+ *  order (inclusive). No usable anchor = a plain toggle. */
+export function rangeSelection(sel: ReadonlySet<string>, visibleKeys: readonly string[], anchor: string | null, key: string): Set<string> {
+    const a = anchor === null ? -1 : visibleKeys.indexOf(anchor);
+    const b = visibleKeys.indexOf(key);
+    if (a < 0 || b < 0) return toggleInSelection(sel, key);
+    const next = new Set(sel);
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) next.add(visibleKeys[i]);
+    return next;
+}
+
+/** A selection only ever holds notes the user can see (a filter change, a
+ *  search, a note deleted elsewhere drops the rest). */
+export function keepVisible(sel: ReadonlySet<string>, visibleKeys: readonly string[]): Set<string> {
+    const vis = new Set(visibleKeys);
+    const next = new Set([...sel].filter(k => vis.has(k)));
+    return next.size === sel.size ? (sel as Set<string>) : next;
+}
+
+/**
+ * The saved order after pinning or unpinning a selection — over the FULL
+ * order (every note, archived and filtered-out included), because the saved
+ * prefs are a full replace of Púca's Tasks tab bar (moveNoteInOrder has the
+ * story). Pinning pulls the selection to the front in its current order, the
+ * way a single favourite does; unpinning changes no order.
+ */
+export function bulkPinOrder(fullKeys: readonly string[], selected: ReadonlySet<string>, pin: boolean): { order: string[]; overrides: Map<string, boolean> } {
+    const overrides = new Map([...selected].filter(k => fullKeys.includes(k)).map(k => [k, pin] as [string, boolean]));
+    const order = pin
+        ? [...fullKeys.filter(k => selected.has(k)), ...fullKeys.filter(k => !selected.has(k))]
+        : [...fullKeys];
+    return { order, overrides };
+}
+
+/**
+ * Put a just-created note into the cached list set exactly once. The live
+ * event stream can refetch the set between the create and this write, so the
+ * note may already be there; appending again showed it twice (and the sealed
+ * cache kept the duplicate across a reload).
+ */
+export function withCreatedList<L extends { id: number }>(prev: readonly L[] | undefined, created: L): L[] {
+    return [...(prev ?? []).filter(l => l.id !== created.id), created];
+}

@@ -9,10 +9,11 @@
  * themselves. A card's tint, its labels and whether it is tucked into the
  * archive have no home in that schema, and inventing one means a migration
  * and a backend ship to both hosts. So they live here, in localStorage, the
- * same way saved places do (api/taskPlaces.ts) — and the honest cost is the
- * same: they do not follow the account to another device. The store is
- * shaped so a sealed-to-self server blob could replace it later without the
- * UI noticing.
+ * same way saved places do (api/taskPlaces.ts). SINCE MIGRATION 067 this
+ * store is the local copy of a sealed-to-self server blob: colour, labels and
+ * archive follow the account (notesPrefsSync.ts does the syncing; this module
+ * stays the synchronous snapshot the UI reads). The grid/list and sort
+ * choices are NOT synced — they are per device, on purpose.
  *
  * NAMESPACED PER ACCOUNT, deliberately, like taskPlaces: the key carries the
  * user id, so on a shared browser user B never sees user A's labels, and a
@@ -248,6 +249,26 @@ export function pruneNotesPrefs(liveKeys: ReadonlySet<string>): void {
     const filter = <T,>(o: Record<string, T>): Record<string, T> =>
         Object.fromEntries(Object.entries(o).filter(([k]) => liveKeys.has(k)));
     write({ ...p, colors: filter(p.colors), labels: filter(p.labels), archived: filter(p.archived) });
+}
+
+/** Replace the SYNCED part (colour, labels, archive) with what the account's
+ *  sealed blob says — notesPrefsSync.ts's one write path. View and sort are
+ *  per device and are left exactly as they are. */
+export function replaceNoteState(state: NotesNoteState): void {
+    const p = getNotesPrefs();
+    write({ ...p, colors: state.colors, labels: state.labels, archived: state.archived });
+}
+
+/** Forget these notes' colour, labels and archive flag — on an explicit
+ *  delete from Notes. (Nothing prunes from one device's view of the note set
+ *  any more: with the state shared across devices, a note this device has
+ *  not loaded yet is not a deleted note.) */
+export function forgetNoteKeys(keys: readonly string[]): void {
+    const p = getNotesPrefs();
+    if (!keys.some(k => k in p.colors || k in p.labels || k in p.archived)) return;
+    const drop = <T,>(o: Record<string, T>): Record<string, T> =>
+        Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
+    write({ ...p, colors: drop(p.colors), labels: drop(p.labels), archived: drop(p.archived) });
 }
 
 // Another tab (Púca, or a second Notes window) wrote our key: re-read so the

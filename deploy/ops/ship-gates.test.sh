@@ -314,6 +314,46 @@ out="$(versions)"
 check "FAILS when it is absent" "$(has "$out" 'FAIL  webapp CSP header')" "$out"
 
 echo
+echo "--- check-versions.sh: Notes' service worker must not be cacheable ---"
+# A CDN-cached /notes/sw.js pins installed Notes pages to an old build. The
+# stub answers the sw.js HEAD separately from the page, per case.
+serve_sw() { # <header lines for /notes/sw.js>
+	cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+cmd="\$*"
+case "\$cmd" in
+	*notes/sw.js*) printf '%b' "$1" ;;
+	*app.invalid*) echo '<script src="/assets/index-abc123.js"></script>'
+	                echo 'content-security-policy: default-src self' ;;
+	*latest-lite.json*) ;;
+	*latest.json*) echo '{"version":"9.9.9"}' ;;
+	*app-version*) echo '{"version":"9.9.9"}' ;;
+	*mobile-updates/check*) echo '{"version":"9.9.9"}' ;;
+	*http_code*) echo 200 ;;
+	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
+	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
+	              echo '<a href="/mobile/Puca-Notes-9.9.9.apk">c</a>'
+	              echo '<div class="meta">v9.9.9 &middot; Windows</div>' ;;
+esac
+exit 0
+STUB
+	chmod +x "$TMP/bin/ssh"
+}
+serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\ncache-control: no-cache\n'
+out="$(versions)"
+check "PASSES a no-cache worker" "$(has "$out" 'PASS  notes worker cache')" "$out"
+serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\ncache-control: max-age=14400\n'
+out="$(versions)"
+check "FAILS a cacheable worker" "$(has "$out" 'FAIL  notes worker cache')" "$out"
+check "and counts it in the verdict" "$([ "$(has "$out" 'sandbox/notes-sw-cache')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\n'
+out="$(versions)"
+check "FAILS a worker with no Cache-Control at all" "$(has "$out" 'FAIL  notes worker cache')" "$out"
+serve_sw 'HTTP/2 200\ncontent-type: text/html; charset=utf-8\n'
+out="$(versions)"
+check "an older webapp (SPA fallback HTML) is INFO, not FAIL" "$([ "$(has "$out" 'INFO  notes worker cache')" = 1 ] && [ "$(has "$out" 'notes-sw-cache')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
 echo "--- check-versions.sh: a page with NO version label at all ---"
 # Under `set -e` + pipefail an empty grep result aborts the script before the
 # FAIL branch can print, so a page with no label would report NOTHING rather

@@ -10,7 +10,7 @@
  * schedule is, so the server's guard (task_timing.rs) lets it complete a
  * scheduled item or a parent of one.
  */
-import { type Task, applyToggle, collectSubtreeIds, patchTaskTiming } from './tasks';
+import { type Task, type TaskTimingPatch, applyToggle, collectSubtreeIds, patchTaskTiming } from './tasks';
 import { currentOccurrenceKey, parseSchedule, planCompletion, serializeSchedule } from './taskSchedule';
 import { ApiError } from './client';
 import { pokeTaskReminders } from './taskReminders';
@@ -22,6 +22,10 @@ export interface TogglePlan {
     send: () => Promise<void>;
     /** Advanced a repeating task (the item stays open). */
     advanced: boolean;
+    /** The PATCH `send` makes, for a caller that sends it another way (Púca
+     *  Notes queues it while offline — notesOutbox.ts). Absent when the plan
+     *  is a refusal: `send` rejects without touching the network then. */
+    patch?: TaskTimingPatch;
 }
 
 /** A refusal shaped like the server's 409s, so every caller's existing
@@ -77,11 +81,13 @@ export function planToggle(
         if (block) return { next: tasks, advanced: false, send: refuse(block) };
     }
     if (plan.kind !== 'advance') {
+        const patch: TaskTimingPatch = { is_completed: completed };
         return {
             next: applyToggle(tasks, task, completed),
             advanced: false,
+            patch,
             send: async () => {
-                await patchTaskTiming(task, { is_completed: completed });
+                await patchTaskTiming(task, patch);
                 pokeTaskReminders();
             },
         };
@@ -99,19 +105,21 @@ export function planToggle(
         if (reopen.has(t.id)) return { ...t, is_completed: false };
         return t;
     });
+    const patch: TaskTimingPatch = {
+        schedule: scheduleText,
+        due_at: plan.dueAt,
+        // Against the due_at this device showed: a tick racing an
+        // advance from another device loses cleanly (409 → refetch).
+        expect_due_at: task.due_at,
+        ...(task.snooze ? { snooze: null } : {}),
+        reopen_subtree: true,
+    };
     return {
         next,
         advanced: true,
+        patch,
         send: async () => {
-            await patchTaskTiming(task, {
-                schedule: scheduleText,
-                due_at: plan.dueAt,
-                // Against the due_at this device showed: a tick racing an
-                // advance from another device loses cleanly (409 → refetch).
-                expect_due_at: task.due_at,
-                ...(task.snooze ? { snooze: null } : {}),
-                reopen_subtree: true,
-            });
+            await patchTaskTiming(task, patch);
             pokeTaskReminders();
         },
     };

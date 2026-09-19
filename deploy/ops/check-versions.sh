@@ -270,6 +270,25 @@ for entry in "${HOSTS[@]}"; do
 		FAILED+=("$label/webapp-csp")
 	fi
 
+	# Púca Notes' service worker (/notes/sw.js) must be served with
+	# Cache-Control: no-cache. Behind a CDN, a cached copy pins every
+	# installed Notes page to an old build until the edge lets go. Like the
+	# CSP, the header lives only in the Caddyfile (deploy/webapp/README.md), so
+	# it is probed. A webapp that predates the worker answers the path with the
+	# SPA fallback (HTML), which is INFO, not a failure.
+	sw_hdrs="$(ssh_to "$entry" "curl -s $CURL_TLS -I --resolve '$APP_HOST:443:127.0.0.1' 'https://$APP_HOST/notes/sw.js' --max-time 25" 2>/dev/null || true)"
+	sw_js="$(printf '%s\n' "$sw_hdrs" | grep -ci '^content-type:.*javascript' || true)"
+	sw_nc="$(printf '%s\n' "$sw_hdrs" | grep -ciE '^cache-control:.*(no-cache|no-store|max-age=0)' || true)"
+	if [ "${sw_js:-0}" -eq 0 ]; then
+		printf 'INFO  %-22s %s serves no /notes/sw.js (a webapp older than the Notes worker)\n' "notes worker cache" "$APP_HOST"
+	elif [ "${sw_nc:-0}" -gt 0 ]; then
+		printf 'PASS  %-22s /notes/sw.js is no-cache on %s\n' "notes worker cache" "$APP_HOST"
+	else
+		printf 'FAIL  %-22s /notes/sw.js on %s is cacheable (add the Cache-Control lines from deploy/webapp/README.md)\n' \
+			"notes worker cache" "$APP_HOST"
+		FAILED+=("$label/notes-sw-cache")
+	fi
+
 	# --- LITE surfaces (the build with no remote control) -------------------
 	# A deployment that never shipped lite is legitimate: absence of EVERY
 	# lite surface is INFO, not FAIL. But once lite IS deployed, the

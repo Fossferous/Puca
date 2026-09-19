@@ -43,10 +43,12 @@ mod reaction_handlers;
 mod recovery_handlers;
 mod retention;
 mod role_handlers;
+mod sealed_blob_handlers;
 mod server_handlers;
 mod sfu;
 mod signaling;
 mod state;
+mod task_events;
 mod task_handlers;
 mod task_timing;
 mod update_routes;
@@ -340,6 +342,9 @@ async fn main() -> anyhow::Result<()> {
         };
 
     let app_state = AppState::new(pool.clone(), jwt_secret, email_service, wake);
+    // Live task events for Púca Notes (src/task_events.rs): one dedicated
+    // LISTEN connection whose receive loop never awaits anything but itself.
+    task_events::spawn_pipeline(db_url.clone(), app_state.task_events.clone(), pool.clone());
 
     // CORS configuration - lockdown for production if CORS_ORIGINS is set
     let cors = if let Ok(origins_str) = std::env::var("CORS_ORIGINS") {
@@ -633,6 +638,20 @@ async fn main() -> anyhow::Result<()> {
         )
         // Which task-timing fields this server stores (schedule, snooze, ...)
         .route("/task-features", get(task_timing::task_features))
+        // Sealed-to-self account blobs (Púca Notes' colours/labels/archive):
+        // ciphertext + a revision for compare-and-swap. Body capped below
+        // the global limit; the handler checks the exact cap before parsing.
+        .route(
+            "/sealed-blobs/:name",
+            get(sealed_blob_handlers::get_sealed_blob)
+                .put(sealed_blob_handlers::put_sealed_blob)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    sealed_blob_handlers::MAX_SEALED_BLOB_BODY + 1,
+                )),
+        )
+        // Content-free "this changed" stream for task lists, checklists,
+        // pins/order and sealed blobs (Server-Sent Events; ids only).
+        .route("/events/tasks", get(task_events::stream_task_events))
         // Due-time reminders (ids + times only; content stays E2EE)
         .route(
             "/task-reminders",

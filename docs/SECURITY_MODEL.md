@@ -128,6 +128,30 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   older than 0.9.0 must update), so nothing new can land in a log this way.
   Existing log files, of course, still contain what they already captured.
 
+- **Púca Notes sync metadata.** A note's colour, labels and archive flag are one
+  document sealed to your own key (`/sealed-blobs/notes-prefs`, its own HKDF key
+  and an AAD naming your account and the document); the server stores ciphertext
+  and a revision number, and so learns its **size, how often and when it is
+  written** — roughly how much you organise, never what. The live-update stream
+  (`/events/tasks`) is held open per signed-in Notes page, so the server also
+  sees **when Notes is open** and which of your lists or checklists changed —
+  ids it already held, never a title, item, label or time. Neither route adds
+  anything about another user. The server cannot forge the prefs document, but
+  it could serve an OLDER one it kept: Notes refuses any revision below the
+  highest it has seen, and that memory is scrubbed at sign-out, so a replay
+  aimed at a fresh sign-in would be accepted (it can only bring back your own
+  earlier colours and labels). A refused older copy is shown, not applied, and
+  the user chooses: take it (a genuine restored backup) or overwrite it with
+  this device's.
+- **On your device, not the server:** Notes keeps an offline copy of your
+  decrypted notes and any edits made offline in IndexedDB, sealed with a key
+  derived from your identity seed (`sealLocal` in
+  [`frontend/src/api/e2ee.ts`](../frontend/src/api/e2ee.ts)). It is at rest under
+  the same trust as the seed itself, which already sits in this browser while
+  you are signed in, and sign-out deletes it. Edits made offline reach the
+  server when the queue replays: it sees them arrive together after the device
+  reconnects, stamped with the replay time, not when they were made.
+
 ### Tasks, Púca Notes and the calendar: what the server sees of the timing
 
 Item text, attachments, and (since migration 066) each item's **schedule**

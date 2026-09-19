@@ -232,3 +232,27 @@ describe('saving on a phone', () => {
         });
     });
 });
+
+describe('openExport — sealed account blobs (migration 067)', () => {
+    it('opens a blob this identity can read, reports one it cannot, and keeps both ciphertexts', async () => {
+        const withBlobs = {
+            ...raw,
+            sealed_blobs: [
+                { name: 'notes-prefs', rev: 3, blob_ciphertext: 'CT-OK' },
+                { name: 'notes-prefs', rev: 4, blob_ciphertext: 'CT-BAD' },
+            ],
+        } as AccountExportRaw;
+        const { doc, stats } = await openExport(withBlobs, {
+            ...readers,
+            accountBlob: async (name, stored, uid) => (stored === 'CT-OK' ? `${name}:${uid}:{"v":1}` : null),
+        });
+        const blobs = doc.sealed_blobs as Array<Record<string, unknown>>;
+        expect(blobs.map(b => b.text)).toEqual(['notes-prefs:7:{"v":1}', null]);
+        expect(blobs[1].unreadable).toMatch(/could not be opened/);
+        expect(blobs.map(b => b.blob_ciphertext)).toEqual(['CT-OK', 'CT-BAD']);
+        const { stats: base } = await openExport(raw, readers);
+        expect(stats.sealed - base.sealed).toBe(2);
+        expect(stats.opened - base.opened).toBe(1);
+        expect(stats.unreadable - base.unreadable).toBe(1);
+    });
+});

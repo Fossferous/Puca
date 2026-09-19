@@ -20,6 +20,7 @@ import {
     type TaskTabPref,
     type TaskTabRef,
     buildPrefsForOrder,
+    deleteTaskList,
     isFavoriteTab,
     listListTasks,
     openSelfTaskText,
@@ -136,18 +137,69 @@ export function restoreTaskList(listId: number): Promise<{ trashed_at: string | 
     return apiClient.post(`/task-lists/${listId}/restore`, {});
 }
 
-/** The trash, opened like the live listing. Rows without a trash time are
- *  dropped: a server that ignored `?trashed=true` would otherwise hand back
- *  every live list as "trash". */
+/** Only rows that really are in the trash: a server that ignored
+ *  `?trashed=true` would otherwise hand back every live list as "trash". */
+function onlyTrashed<T extends Pick<TaskList, 'trashed_at'>>(lists: T[]): T[] {
+    return lists.filter(l => typeof l.trashed_at === 'string' && l.trashed_at !== '');
+}
+
+/** The trash, opened like the live listing. */
 export async function listTrashedTaskLists(): Promise<TaskList[]> {
     const lists: TaskList[] = await apiClient.get('/task-lists?trashed=true');
-    const trashed = lists.filter(l => typeof l.trashed_at === 'string' && l.trashed_at !== '');
+    const trashed = onlyTrashed(lists);
     return Promise.all(trashed.map(async l => {
         const wire = l.title;
         // Same title rule as listTaskLists (titles predate encryption).
         const title = await openSelfTaskText(wire);
         return { ...l, title, titleEncState: messageEncState(wire, title), ...await openListContent(l) };
     }));
+}
+
+/** Just the ids in the trash, nothing opened — for Púca Notes' prune, which
+ *  must not forget a trashed note's colour and labels (notesQueries.ts). */
+export async function trashedTaskListIds(): Promise<number[]> {
+    const lists: Array<Pick<TaskList, 'id' | 'trashed_at'>> = await apiClient.get('/task-lists?trashed=true');
+    return onlyTrashed(lists).map(l => l.id);
+}
+
+// --- Delete: the trash where the server has one ------------------------------------------
+
+/** How long a delete trusts the last features answer (a queued delete
+ *  replays against whatever server answers when it runs). */
+const TRASH_PROBE_TTL_MS = 10 * 60_000;
+let trashProbe: { trash: boolean; at: number } | null = null;
+
+/** For tests: forget what the server said. */
+export function resetTrashProbe(): void {
+    trashProbe = null;
+}
+
+/** Whether the server has a trash, by `fetchListFeatures`' rule: only a
+ *  404/405 (or `trash: false`) is "no"; any other failure throws, so a bad
+ *  moment is never mistaken for an old server. */
+export async function serverHasTrash(now: number = Date.now()): Promise<boolean> {
+    if (trashProbe && now - trashProbe.at < TRASH_PROBE_TTL_MS) return trashProbe.trash;
+    const { trash } = await fetchListFeatures();
+    trashProbe = { trash, at: now };
+    return trash;
+}
+
+export type ListDeleteOutcome = 'trashed' | 'deleted';
+
+/**
+ * Púca Notes' Delete, as it reaches the server (notesOutbox.ts runs it, now
+ * or at replay): move the list to the trash, or — only on a server KNOWN to
+ * have none (404/405 on the probe, or `trash: false`) — delete it for good.
+ * A network error on the probe throws, so the outbox queues the delete and
+ * probes again when it replays; a 5xx throws and the caller rolls back.
+ */
+export async function trashOrDeleteList(listId: number): Promise<ListDeleteOutcome> {
+    if (await serverHasTrash()) {
+        await trashTaskList(listId);
+        return 'trashed';
+    }
+    await deleteTaskList(listId);
+    return 'deleted';
 }
 
 // --- Files a note names ------------------------------------------------------------------

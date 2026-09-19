@@ -94,10 +94,28 @@ for (const page of PAGES) {
     }
 }
 
+// 3. Púca Notes' offline worker (scripts/notes-sw.mjs) is there and belongs
+//    to THIS build: it must precache the page's current entry chunk, or an
+//    offline start would load a bundle that no longer exists.
+{
+    let sw = null;
+    let notesHtml = '';
+    try { sw = fs.readFileSync(path.join(DIST, 'notes', 'sw.js'), 'utf8'); } catch { /* reported below */ }
+    try { notesHtml = fs.readFileSync(path.join(DIST, 'notes', 'index.html'), 'utf8'); } catch { /* reported above */ }
+    const entry = ENTRY.exec(notesHtml)?.[0];
+    if (sw === null) {
+        problems.push('notes/sw.js: missing — the notes build did not run its service-worker plugin');
+    } else if (entry && !sw.includes(`/notes/${entry}`)) {
+        problems.push(`notes/sw.js: does not precache the current entry chunk ${entry} (stale worker?)`);
+    } else if (!sw.includes("url.origin !== self.location.origin") || !sw.includes("startsWith(PREFIX)")) {
+        problems.push('notes/sw.js: lost its scope guards (same-origin, /notes/ only)');
+    }
+}
+
 if (problems.length) {
     console.error('\ndist entries: ' + problems.length + ' problem(s)\n');
     for (const p of problems) console.error('  ' + p);
     console.error('');
     process.exit(1);
 }
-console.log(`dist entries: clean (${PAGES.length} pages name assets/index-*.js${skipHostCheck ? '; API-host check skipped (CI / local build)' : `; both load the API host ${host}`})`);
+console.log(`dist entries: clean (${PAGES.length} pages name assets/index-*.js; notes/sw.js precaches its entry${skipHostCheck ? '; API-host check skipped (CI / local build)' : `; both load the API host ${host}`})`);

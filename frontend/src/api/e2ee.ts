@@ -1809,6 +1809,57 @@ export async function openDeviceLan(identity: Identity, blob: string): Promise<s
     }
 }
 
+// --- Sealed-to-self account blobs + the local encrypted cache (Púca Notes) ---
+//
+// Each has its OWN key and binds WHERE it belongs as AAD. A plain self
+// envelope carries no context, so a server could swap one self-sealed field
+// for another (a list title for the prefs blob); a dedicated HKDF info plus an
+// AAD naming the account and the purpose makes such a swap fail to open.
+// Readers accept ONLY the envelope shape — these fields never had plaintext.
+
+/** Seal a named account blob (`sealed-blobs/:name`) to this identity. */
+export async function sealAccountBlob(identity: Identity, uid: number, name: string, plaintext: string): Promise<string> {
+    const key = hkdf(sha256, identity.privateKey, undefined, utf8(`puca-${name}-v1`), 32);
+    const ct = await aesEncrypt(key, plaintext, utf8(`puca/blob/${name}/${uid}`));
+    return JSON.stringify({ v: 1, t: name, ct });
+}
+
+/** Open one; null for anything that is not this identity's envelope for
+ *  this account and name (never a plaintext pass-through). */
+export async function openAccountBlob(identity: Identity, uid: number, name: string, stored: string): Promise<string | null> {
+    try {
+        const env = JSON.parse(stored) as { v?: unknown; t?: unknown; ct?: unknown };
+        if (!env || env.v !== 1 || env.t !== name || typeof env.ct !== 'string') return null;
+        const key = hkdf(sha256, identity.privateKey, undefined, utf8(`puca-${name}-v1`), 32);
+        return await aesDecrypt(key, env.ct, utf8(`puca/blob/${name}/${uid}`));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Seal for storage ON THIS DEVICE (the Notes offline cache and edit queue).
+ * Keyed from the seed with the account in the salt, so another account's
+ * seed cannot open it and a sign-out (which removes the seed) retires it
+ * cryptographically even if deleting the database never ran. `purpose` is
+ * bound as AAD, so one record cannot be moved into another's slot.
+ */
+export async function sealLocal(identity: Identity, sub: number, purpose: string, plaintext: string): Promise<string> {
+    return aesEncrypt(localKey(identity, sub), plaintext, utf8(`puca/notes-cache/v1/${sub}/${purpose}`));
+}
+
+export async function openLocal(identity: Identity, sub: number, purpose: string, sealed: string): Promise<string | null> {
+    try {
+        return await aesDecrypt(localKey(identity, sub), sealed, utf8(`puca/notes-cache/v1/${sub}/${purpose}`));
+    } catch {
+        return null;
+    }
+}
+
+function localKey(identity: Identity, sub: number): Uint8Array {
+    return hkdf(sha256, identity.privateKey, utf8(`puca-notes-cache${sub}`), utf8('puca/notes-cache/v1'), 32);
+}
+
 /** Clear identity material (on logout). */
 export function clearActiveIdentity(): void {
     currentIdentity = null;

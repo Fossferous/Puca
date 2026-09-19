@@ -2164,7 +2164,18 @@ const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     // removing. The list rows themselves stay, like the items in them (tasks
     // are content — see the header above and SECURITY_MODEL.md §11).
     "UPDATE task_lists SET body = NULL, attachments = NULL WHERE owner_id = $1",
+    // Sealed-to-self account blobs (migration 067; Púca Notes' colours,
+    // labels and archive flags). Ciphertext nothing can open once the seed is
+    // gone, and the tombstone UPDATE never fires the FK cascade.
+    "DELETE FROM user_sealed_blobs WHERE user_id = $1",
 ];
+
+/// The cleanup statements, for tests outside this module that run them
+/// against a real database (sealed_blob_handlers).
+#[cfg(test)]
+pub(crate) fn account_delete_cleanup() -> &'static [&'static str] {
+    ACCOUNT_DELETE_CLEANUP
+}
 
 /// DELETE /account — tombstone the account.
 ///
@@ -2609,6 +2620,7 @@ mod account_deletion_residue_tests {
             "UPDATE devices SET name = 'removed', lan_info = NULL WHERE user_id = $1",
             "UPDATE token_sessions SET revoked_at = COALESCE(revoked_at, NOW()), dm_pubkey = NULL, dm_pubkey_sig = NULL WHERE user_id = $1",
             "UPDATE task_lists SET body = NULL, attachments = NULL WHERE owner_id = $1",
+            "DELETE FROM user_sealed_blobs WHERE user_id = $1",
         ];
         assert_eq!(
             ACCOUNT_DELETE_CLEANUP, expected,

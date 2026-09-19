@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
 import { RC_ENABLED, defineFlags, emitVersionJson, liteAliases, rcExclusionGuard, vendorChunks } from './vite.shared'
+import { notesServiceWorkerPlugin } from './scripts/notes-sw.mjs'
 
 /**
  * Púca Notes — the notes front door, built as its OWN bundle into dist/notes/.
@@ -52,7 +53,16 @@ export default defineConfig({
   resolve: {
     alias: liteAliases,
   },
-  plugins: [react(), ...(NATIVE ? [emitVersionJson('notes')] : []), ...(RC_ENABLED ? [] : [rcExclusionGuard()])],
+  plugins: [
+    react(),
+    ...(NATIVE ? [emitVersionJson('notes')] : []),
+    ...(RC_ENABLED ? [] : [rcExclusionGuard()]),
+    // Web only: dist/notes/sw.js (scope /notes/, offline shell). The Android
+    // shell serves its page from the APK and registers no worker, so the
+    // native build (dist-notes-app/, which becomes the Notes APK and its OTA
+    // bundles) must never carry one — `enabled: !NATIVE`.
+    notesServiceWorkerPlugin({ outDir: here('./dist/notes'), enabled: !NATIVE }),
+  ],
   build: {
     outDir: NATIVE ? here('./dist-notes-app') : here('./dist/notes'),
     // The main build empties dist/ (dist/notes included) before this one runs;

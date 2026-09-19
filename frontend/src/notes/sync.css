@@ -1,0 +1,105 @@
+/* Púca Notes — sync state: the "Not synced" chip and the selection bar.
+   Imported by the components that use it (after notes.css and mobile.css in
+   the cascade), so every coarse-pointer rule here is written out explicitly
+   rather than relying on mobile.css's blanket rules. */
+
+.notes-chip.unsynced { color: var(--text-warning); border: 1px dashed currentColor; }
+[data-theme="light"] .notes-chip.unsynced { color: #8a5a00; }
+
+/* ---------- Bulk selection --------------------------------------------------------- */
+.notes-card.selected { outline: 2px solid var(--brand-primary); outline-offset: -1px; }
+.notes-card-select {
+    position: absolute;
+    top: -10px;
+    left: -10px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-floating);
+    color: var(--text-muted);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    opacity: 0;
+    z-index: 2;
+    font-size: 16px;
+}
+.notes-card:hover .notes-card-select,
+.notes-card:focus-within .notes-card-select,
+.notes-card-select.shown,
+.notes-card-select.on { opacity: 1; }
+.notes-card-select.on { color: var(--brand-primary); }
+
+/* Over the top bar while anything is selected (below popovers at 1000). */
+.notes-selectbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 950;
+    height: var(--notes-topbar-height, 56px);
+    padding: 0 8px;
+    padding-top: var(--safe-area-top, 0px);
+    box-sizing: content-box;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--bg-floating);
+    color: var(--text-normal);
+    border-bottom: 1px solid var(--border-separator);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.notes-selectbar .spacer { flex: 1; min-width: 4px; }
+.notes-selectbar-count {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    margin: 0 4px;
+}
+.notes-selectbar .notes-iconbtn.active { color: var(--brand-primary); }
+.notes-selectbar .notes-iconbtn.active .svrn-icon { fill: currentColor; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* Touch: the checkbox exists only once selecting (a long press starts it) —
+       display:none, never an invisible-but-tappable control (§5). When it
+       does, the TARGET is a full 44px but the visible disc stays 28px and
+       centred on the card's corner, so it never covers the title (a 44px
+       disc hid its first letters). A tap anywhere on a card toggles it while
+       selecting anyway, so the transparent margin takes nothing away. */
+    .notes-card-select { width: 44px; height: 44px; top: -16px; left: -16px; opacity: 1; background: transparent; box-shadow: none; }
+    .notes-card-select::before {
+        content: '';
+        position: absolute;
+        inset: 8px;
+        border-radius: 50%;
+        background: var(--bg-floating);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    }
+    .notes-card-select .svrn-icon { position: relative; }
+    .notes-card-select:not(.shown):not(.on) { display: none; }
+    /* Full 44px targets and no gap, so the five core actions fit at 390px. */
+    .notes-selectbar { padding: 0 4px; padding-top: var(--safe-area-top, 0px); gap: 0; }
+    .notes-selectbar .notes-iconbtn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; flex-shrink: 0; }
+    .notes-selectbar-all { display: none; }
+    .notes-selectbar-count { font-size: 15px; }
+}
+@media (pointer: coarse) and (max-width: 420px) {
+    /* The two least-used actions give way on the narrowest phones; Copy as
+       text and Make copies stay on each card's More menu. */
+    .notes-selectbar-extra { display: none; }
+}
+
+/* ---------- A sync banner that asks for a choice (rollback) ------------------------ */
+.notes-status-choice { flex-wrap: wrap; }
+.notes-status-choice .notes-status-text { flex: 1 1 260px; min-width: 0; }
+.notes-status-choice .notes-status-actions { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.notes-status-choice .notes-status-actions button { margin-left: 0; }
+@media (pointer: coarse) {
+    .notes-status-choice .notes-status-actions button { min-height: 44px; padding: 6px 14px; font-size: 16px; }
+}

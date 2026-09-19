@@ -37,9 +37,12 @@ Two things the operator must know:
   Tasks view, the download page and the web app manifest all link to that.
   Notes' own routes are hash routes and never reach the server.
 - Notes ships a web app manifest (`/notes/manifest.webmanifest`) so a browser
-  can install it to the home screen or desktop. There is deliberately no
-  service worker: the main app's OTA and updater model must not be shadowed
-  by a cache.
+  can install it to the home screen or desktop, and a service worker,
+  `/notes/sw.js`, so it opens offline. The worker's scope is `/notes/`: by the
+  service-worker spec it can never control `/` or anything else, so the main
+  app and its updater are untouched. It must be served with
+  `Cache-Control: no-cache` (step 3) — a copy cached at the CDN edge would pin
+  every installed Notes page to an old build.
 
 ## Deploy (on the server)
 1. On your machine: `cd frontend && npm run build`, then
@@ -57,6 +60,8 @@ Two things the operator must know:
        encode gzip
        try_files {path} {path}/ /index.html   # SPA routing; {path}/ serves /notes/
        file_server
+       @notesSw path /notes/sw.js
+       header @notesSw Cache-Control "no-cache"   # Notes' service worker: never cached at the edge
        header {
            Strict-Transport-Security "max-age=31536000; includeSubDomains"
            X-Content-Type-Options "nosniff"
@@ -93,7 +98,7 @@ requirement — run `check-versions.sh` after every push. This is decoupled from
 the desktop/mobile version line: it always serves whatever `dist` was last
 deployed here. The one-off exception is the release that introduced Púca Notes:
 re-apply the `try_files` line above once, or `/notes` and `/notes/` keep
-serving the main app (`/notes/index.html` works regardless).
-
-## Follow-ups (not done)
-- PWA manifest + service worker for installability/offline.
+serving the main app (`/notes/index.html` works regardless). The release that
+introduced Notes' offline worker needs the two `@notesSw` lines above added
+once; `check-versions.sh` fails on `notes-sw-cache` until they are live (and
+reports INFO while the deployed webapp has no worker yet).

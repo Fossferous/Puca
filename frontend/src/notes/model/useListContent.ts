@@ -7,18 +7,21 @@
  * TRASH AND DEVICE-LOCAL STATE. A trashed note leaves the default listing,
  * so to everything that reads "the live notes" it looks deleted. Two things
  * must not believe that, or restoring would bring a note back stripped:
- *  - the device-local prune (colour, labels, archive — notesPrefs.ts), which
- *    is why `useTrashAwarePrune` counts the trash as live, and prunes a note
- *    missing from BOTH only against a trash read that started after the
- *    listing it is missing from arrived (a note trashed in Púca or on
- *    another device leaves the listing before this device's cached trash
- *    knows it);
+ *  - the prune of colour, labels and archive (notesQueries.ts, with
+ *    notesPrune.ts), which counts the cached trash as live, waits until the
+ *    trash has been read, and asks the trash AFRESH before it forgets a
+ *    personal list (a note trashed in Púca or on another device leaves the
+ *    listing before this device's cached trash knows it);
  *  - the saved tab order, a full replace on every pin and move, which is why
  *    saves go through `keepHiddenSlots` with the trashed keys, and wait until
  *    the trash has been read (`trashSettled`).
+ *
+ * Delete and its Undo (move to the trash, restore) are notesQueries.ts's
+ * deleteNote/restoreNote, through the offline outbox; `trash`/`restore` here
+ * are the direct calls the Trash view's own buttons use.
  */
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useIsFetching, useQuery, useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import {
     type Task,
     type TaskAttachmentRef,
@@ -35,14 +38,12 @@ import {
     deleteFiles,
     deleteListForever,
     fetchListFeatures,
-    flushBodySave,
     listTrashedTaskLists,
     listsDueForClientPurge,
     restoreTaskList,
     serverNowFrom,
     setTaskListAttachments,
     setTaskListBody,
-    trashTaskList,
 } from '../../api/listContent';
 import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
 import { ApiError } from '../../api/client';
@@ -50,7 +51,6 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { type NoteRef, cleanQuickItems } from './notesModel';
 import { deriveContentTitle } from './noteContent';
-import { getNotesPrefs, pruneNotesPrefs } from './notesPrefs';
 
 export const listContentKeys = {
     features: ['notes', 'features'] as const,
@@ -73,62 +73,13 @@ export function useListFeatures(): { features: ListFeatures; known: boolean } {
     return { features: q.data ?? NO_LIST_FEATURES, known: q.isSuccess };
 }
 
-/** When the latest trash read that SUCCEEDED was sent (this device's clock,
- *  as react-query's dataUpdatedAt is), per query client. */
-const trashReadStartedAt = new WeakMap<QueryClient, number>();
-
 export function useTrashedLists() {
-    const qc = useQueryClient();
     const { features, known } = useListFeatures();
-    const queryFn = useCallback(async () => {
-        const started = Date.now();
-        const lists = await listTrashedTaskLists();
-        trashReadStartedAt.set(qc, started);
-        return lists;
-    }, [qc]);
-    const q = useQuery({ queryKey: listContentKeys.trash, queryFn, enabled: known && features.trash });
+    const q = useQuery({ queryKey: listContentKeys.trash, queryFn: listTrashedTaskLists, enabled: known && features.trash });
     const enabled = known && features.trash;
     // Known = a pin, a move or a prune may rely on it: an unread trash looks empty.
     const settled = known && (!enabled || q.isSuccess);
     return { ...q, enabled, settled, features, featuresKnown: known };
-}
-
-/**
- * Prune device-local state (colour, labels, archive) for notes that are
- * really gone, and never for one that is only in the trash. `liveKeys` is
- * the COMPLETE live set (`ready` false while it is not); `blocked` holds the
- * prune off while a delete's optimistic removal is in flight.
- *
- * A note missing from the listing AND from the cached trash is either
- * deleted or trashed after that trash was read — in Púca's Tasks view or on
- * another device, while this one's trash was still fresh. Only a trash read
- * that started after the listing arrived can tell them apart, so the prune
- * asks for one (once per listing) and waits for it; while either query is
- * fetching nothing is pruned at all.
- */
-export function useTrashAwarePrune(listsKey: QueryKey, liveKeys: string[], ready: boolean, blocked: () => boolean): { trashKeys: string[] } {
-    const qc = useQueryClient();
-    const t = useTrashedLists();
-    const data = t.data;
-    const trashKeys = useMemo(() => (data ?? []).map(l => `list:${l.id}`), [data]);
-    const listsFetching = useIsFetching({ queryKey: listsKey, exact: true }) > 0;
-    const asked = useRef(-1);
-    const { featuresKnown, enabled, isSuccess, isFetching } = t;
-    useEffect(() => {
-        if (!ready || !featuresKnown || listsFetching || blocked()) return;
-        const live = new Set([...liveKeys, ...trashKeys]);
-        if (!enabled) { pruneNotesPrefs(live); return; }
-        if (!isSuccess || isFetching) return;
-        const p = getNotesPrefs();
-        const gone = (o: Record<string, unknown>) => Object.keys(o).some(k => !live.has(k));
-        if (!gone(p.colors) && !gone(p.labels) && !gone(p.archived)) return;
-        const listsAt = qc.getQueryState(listsKey)?.dataUpdatedAt ?? 0;
-        if ((trashReadStartedAt.get(qc) ?? 0) >= listsAt) { pruneNotesPrefs(live); return; }
-        if (asked.current === listsAt) return;   // asked once for this listing; a failed read must not loop
-        asked.current = listsAt;
-        void qc.refetchQueries({ queryKey: listContentKeys.trash, exact: true });
-    }, [qc, listsKey, liveKeys, trashKeys, ready, blocked, featuresKnown, enabled, isSuccess, isFetching, listsFetching]);
-    return { trashKeys };
 }
 
 /** Log a failure, and show the server's own words when it gave a reason
@@ -170,8 +121,8 @@ export interface ListContentActions {
     setBody: (listId: number, body: string) => Promise<boolean>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
-    /** Resolves false on failure, having shown exactly ONE toast. */
-    trash: (listId: number) => Promise<boolean>;
+    /** The Trash view's own Restore (a direct call: the Undo of a delete is
+     *  notesQueries.ts restoreNote, through the offline outbox). */
     restore: (listId: number) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
     emptyTrash: () => Promise<void>;
@@ -215,6 +166,8 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 { body: body || undefined, refs },
             );
         } catch (err) {
+            // Never queued (its uploads could not wait): the composer says
+            // so when this resolves null, and keeps the draft.
             explain('create failed', err);
             await deleteFiles(fileIdsOf(refs));   // nothing names them now
             return null;
@@ -296,9 +249,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         return ok;
     }, [lists, setNoteAttachments]);
 
-    // Trash and restore move the note between the two caches in ONE step, both
-    // before the request: a moment where it is in neither is a moment the
-    // device-local prune reads as "deleted" (see the header).
+    // Restore moves the note between the two caches in ONE step, before the
+    // request: a moment where it is in neither is a moment the prune could
+    // read as "deleted" (see the header).
     const ensureFeatures = useCallback(async (): Promise<ListFeatures | null> => {
         try {
             return await qc.fetchQuery({ queryKey: listContentKeys.features, queryFn: fetchListFeatures, staleTime: 10 * 60_000 });
@@ -306,36 +259,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             return null;
         }
     }, [qc]);
-
-    const trash = useCallback(async (listId: number): Promise<boolean> => {
-        if (isSelfList(listId)) {
-            pushMessageToast({ title: 'Notes to self can’t be moved to the trash' });
-            return false;
-        }
-        // Text typed just before this is still on its way (NoteBodyField
-        // saves after a pause): let it land first, or the trash's 409 eats it.
-        await flushBodySave(listId);
-        // An in-flight refetch of either cache would land after this and put
-        // the note back where it was.
-        await qc.cancelQueries({ queryKey: keysRef.current.lists });
-        await qc.cancelQueries({ queryKey: listContentKeys.trash });
-        const listsBefore = lists();
-        const trashBefore = qc.getQueryData<TaskList[]>(listContentKeys.trash);
-        const list = listsBefore?.find(l => l.id === listId);
-        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => prev?.filter(l => l.id !== listId));
-        if (list) qc.setQueryData<TaskList[]>(listContentKeys.trash, prev => [{ ...list, trashed_at: new Date().toISOString() }, ...(prev ?? []).filter(l => l.id !== listId)]);
-        try {
-            await trashTaskList(listId);
-            void qc.invalidateQueries({ queryKey: listContentKeys.trash });
-            pokeTaskReminders();
-            return true;
-        } catch (err) {
-            if (!explain('moving to the trash failed', err)) pushMessageToast({ title: 'Couldn’t move the note to the trash — check your connection' });
-            qc.setQueryData(keysRef.current.lists, listsBefore);
-            qc.setQueryData(listContentKeys.trash, trashBefore);
-            return false;
-        }
-    }, [qc, lists, isSelfList]);
 
     const restore = useCallback(async (listId: number): Promise<boolean> => {
         await qc.cancelQueries({ queryKey: keysRef.current.lists });
@@ -352,7 +275,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             pokeTaskReminders();
             return true;
         } catch (err) {
-            explain('restoring failed', err);
+            if (!explain('restoring failed', err)) pushMessageToast({ title: 'Couldn’t restore the note — check your connection' });
             qc.setQueryData(listContentKeys.trash, trashBefore);
             qc.setQueryData(keysRef.current.lists, listsBefore);
             return false;
@@ -423,6 +346,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const trashEnabled = known && features.trash;
     return useMemo(() => ({
         features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures,
-        createContentNote, setBody, setNoteAttachments, addNoteMedia, trash, restore, deleteForever, emptyTrash,
-    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, trash, restore, deleteForever, emptyTrash]);
+        createContentNote, setBody, setNoteAttachments, addNoteMedia, restore, deleteForever, emptyTrash,
+    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, restore, deleteForever, emptyTrash]);
 }

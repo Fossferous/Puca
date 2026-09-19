@@ -69,6 +69,10 @@ app.example.com {
 	# the server.
 	try_files {path} {path}/ /index.html
 	file_server
+	# Púca Notes' service worker: never cached at a CDN edge, or installed
+	# Notes pages stay pinned to an old build (check-versions.sh probes it).
+	@notesSw path /notes/sw.js
+	header @notesSw Cache-Control "no-cache"
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

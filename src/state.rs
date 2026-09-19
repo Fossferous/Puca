@@ -887,6 +887,11 @@ pub struct AppState {
     pub ws_conns_by_ip: DashMap<IpAddr, usize>,
     /// In-flight `/upload` requests per IP (see [`IpSlotKind::Upload`]).
     pub upload_streams: DashMap<IpAddr, usize>,
+    /// Live `/events/tasks` streams per IP (see [`IpSlotKind::Events`]).
+    pub event_streams: DashMap<IpAddr, usize>,
+    /// Content-free task-change streams (src/task_events.rs). Its own
+    /// registry, deliberately NOT the WebSocket session table.
+    pub task_events: Arc<crate::task_events::TaskEventHub>,
 
     /// Live + reserved usage of LiveKit SFU rooms, keyed by room name
     /// ("sfu_<channel id>"). Fed by the /livekit/webhook event stream and by
@@ -1032,6 +1037,8 @@ pub enum IpSlotKind {
     /// without a ceiling a single authenticated client can hold an unbounded
     /// multiple of that resident simply by opening concurrent uploads.
     Upload,
+    /// Live `/events/tasks` streams (long-lived, one fd each).
+    Events,
 }
 
 /// RAII slot in a per-IP counter. Held for the lifetime of the resource it
@@ -1049,6 +1056,7 @@ impl Drop for IpSlotGuard {
             IpSlotKind::File => &self.state.file_streams,
             IpSlotKind::Ws => &self.state.ws_conns_by_ip,
             IpSlotKind::Upload => &self.state.upload_streams,
+            IpSlotKind::Events => &self.state.event_streams,
         };
         // Decrement under the shard lock, then prune at zero in a separate call
         // (holding the get_mut ref across remove_if would deadlock the shard).
@@ -1213,6 +1221,8 @@ impl AppState {
             file_streams: DashMap::new(),
             ws_conns_by_ip: DashMap::new(),
             upload_streams: DashMap::new(),
+            event_streams: DashMap::new(),
+            task_events: crate::task_events::TaskEventHub::new(),
             sfu_rooms: DashMap::new(),
             sfu_measured_egress_kbps: AtomicU64::new(0),
             sfu_measured_at: AtomicU64::new(0),
@@ -1333,6 +1343,7 @@ impl AppState {
                 IpSlotKind::File => &self.file_streams,
                 IpSlotKind::Ws => &self.ws_conns_by_ip,
                 IpSlotKind::Upload => &self.upload_streams,
+                IpSlotKind::Events => &self.event_streams,
             };
             let mut entry = map.entry(ip).or_insert(0);
             if *entry >= cap {

@@ -58,6 +58,26 @@ export function loadOrCreateWebKey(): Uint8Array {
     return material;
 }
 
+/**
+ * The web key's public halves WITHOUT creating a key — null when this browser
+ * holds none (or holds something malformed). For sign-out, which must name
+ * this browser's device row to revoke it but must never mint a key to do so.
+ * Web only by construction: it reads the localStorage slot the web key lives
+ * in, which the desktop and phone shells never use for their identity.
+ */
+export function peekWebDevicePublic(): DevicePublicIdentity | null {
+    let stored: string | null;
+    try { stored = localStorage.getItem(WEB_KEY_STORAGE); } catch { return null; }
+    if (!stored) return null;
+    let material: Uint8Array;
+    try { material = fromBase64(stored); } catch { return null; }
+    if (material.length !== 64) return null;
+    return {
+        device_pub: `x25519:${toBase64(x25519.getPublicKey(material.slice(0, 32)))}`,
+        sign_pub: `ed25519:${toBase64(ed25519.getPublicKey(material.slice(32)))}`,
+    };
+}
+
 /** This device's public identity, creating the keypair on first call. */
 export async function ensureDeviceKey(): Promise<DevicePublicIdentity> {
     if (isTauri()) return invokeTauri<DevicePublicIdentity>('device_key_ensure');

@@ -7,6 +7,70 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
+  free text as well as (or instead of) items, and its own photos and
+  drawings: take a picture with the phone's camera or pick one, or draw with
+  a pen and eraser; a drawing can be opened and changed again. Photos are
+  made smaller on your device before they are encrypted and uploaded. The
+  text and pictures are end-to-end encrypted like everything else in a note,
+  and Púca's Tasks view shows and edits the same text and photos, so both
+  apps agree.
+- **A Trash.** Deleting a note, in Púca Notes or in Púca's Tasks view, now
+  moves it to the Trash (in Púca Notes, Undo brings it straight back). From
+  the Trash you can restore a note or delete it forever. A note in the trash
+  does not remind you and cannot be changed until you restore it; it keeps
+  its colour, labels and place in the order. The server deletes trashed notes
+  for good after 30 days (server owners: `NOTES_TRASH_RETENTION_DAYS`, 0 keeps
+  them until the trash is emptied). Deleting forever also deletes the note's
+  photos, drawings and attachments; Púca Notes does the same for notes about
+  to expire when it is open in the last day, but a note that expires while no
+  Púca Notes is open leaves its uploaded files behind on the server.
+- **A calendar in Púca Notes, and the same calendar as a tab in Púca's Tasks
+  view.** Month, week, day and agenda views. On a phone, the month shows dots
+  and the chosen day's list. Drag an item to another day, or use *Move to
+  date…* or the `[` and `]` keys. Tap a day to add something to it.
+- **Dates that repeat.** An item can be an event or a to-do, all-day or at a
+  time in its own time zone, with an end, a place and reminders, repeating
+  daily, weekly, monthly or yearly. Ticking a repeating to-do moves it to the
+  next time and reopens its subtasks. It does not end the series. The date,
+  the repeat rule and the place are encrypted like the item itself. By default
+  the server sees the next reminder time, so reminders reach your other
+  devices. A per-item *Keep the time private from the server* switch hides that
+  too, and then the item gets no reminders.
+- **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
+  morning. The reminder time the server holds moves with the snooze, so a
+  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
+  is only offered to people allowed to tick the item.
+- **Edited.** Notes show when they were last changed, and can be sorted by it.
+- **.ics export and import.** Export gives your dated items as a standard
+  calendar file. The file is not encrypted, and the app says so first. Import
+  brings a calendar file into a personal note. It first lists anything it
+  cannot bring across, and it skips events it already has. In the Púca Notes
+  Android app, *Add to phone calendar* copies one event to your phone's
+  calendar.
+- **Colours, labels and archive follow your account.** They used to live in one
+  browser and vanish when you signed out. They are now sealed with your own key
+  and synced, so every device you sign in on shows the same ones and a new
+  sign-in brings them back. A sign-out still deletes this device's copy, so
+  changes that have not reached your account yet are pushed first, and if any
+  still have not, Notes (or Púca) asks before signing out. The server stores
+  them encrypted and cannot read them. Grid or list view and the sort order
+  still stay per device.
+- **Notes update live.** A change made on one device or by someone sharing a
+  checklist appears on your other open devices within a moment, with no
+  refresh. The server says only which note changed, never what it says.
+- **Notes work offline.** Your notes open with no connection, and changes you
+  make offline are kept, marked *Not synced*, and sent when you are back online
+  — ticks (a repeating item moves on when it syncs), dates, snoozes, items
+  added from the calendar, and moving a note to the trash (and its Undo)
+  included. If the server refuses one (for example a note deleted elsewhere,
+  or a repeating item another device already moved on), you are told which.
+  Adding photos or drawings, a note's text and a note made with text or
+  pictures need a connection, and the app says so when there is none. The
+  copy on your device is encrypted with a key from your account.
+- **Select several notes at once** and pin, colour, label, archive, move to
+  the trash, copy or duplicate them together: Ctrl-click, Shift-click or
+  Ctrl+A on a computer, a long press on a phone.
 - **Púca Notes on Android reminds you even when it is closed.** A due item
   now raises a notification from the Notes app itself — open or closed,
   after a restart of the phone too — saying only "An item is due"; tapping it
@@ -23,22 +87,6 @@ one-line summary; this file is the full story. Versions follow
 - **Save and share notes from the Android app.** Export now saves Markdown or
   JSON into Documents/Puca Notes, and Share sends every note or one note
   through Android's share sheet. Exports are plaintext, and the app says so.
-
-### Changed
-- **One notification per due item when both apps are installed.** When
-  Púca Notes on the phone is signed in to the same account, keeping up with
-  your reminders and allowed to notify, Púca leaves due items to it; in every
-  other case (Notes signed out, out of date, stopped, muted, or an older
-  version) Púca notifies as before, so an item is never left unannounced.
-  Ship the Púca Notes APK with or before the Púca APK; if you update Notes
-  from an older version, allow its notifications once.
-
-### Fixed
-- **Saving an attachment on Android saves it.** In both apps the Save button
-  on a file reported success without writing anything. Files now land in
-  Documents/Puca under a unique name, or you are told why they could not.
-  On Android 10 and older, Púca can write there once its next app update
-  (not an over-the-air update) is installed.
 - **Púca Notes on Android updates itself.** Like Púca, the Notes app now
   downloads each release's update when it starts, checks that it was signed
   for Notes (Notes has its own signing key, so it can never be handed Púca's
@@ -52,80 +100,60 @@ one-line summary; this file is the full story. Versions follow
   themselves.
 
 ### Changed
-- **The Windows installer no longer carries a copy of Púca Notes.** The
-  desktop app never opened it; Notes on a computer is the browser page, as
-  before.
-- **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
-  free text as well as (or instead of) items, and its own photos and
-  drawings: take a picture with the phone's camera or pick one, or draw with
-  a pen and eraser; a drawing can be opened and changed again. Photos are
-  made smaller on your device before they are encrypted and uploaded. The
-  text and pictures are end-to-end encrypted like everything else in a note,
-  and Púca's Tasks view shows and edits the same text and photos, so both
-  apps agree.
-- **A Trash.** Deleting a note, in Púca Notes or in Púca's Tasks view, now
-  moves it to the Trash (in Púca Notes, Undo brings it straight back). From the Trash you can
-  restore a note or delete it forever. A note in the trash does not remind
-  you and cannot be changed until you restore it; it keeps its colour, labels
-  and place in the order. The server deletes trashed notes for good after 30
-  days (server owners: `NOTES_TRASH_RETENTION_DAYS`, 0 keeps them until the
-  trash is emptied). Deleting forever also deletes the note's photos,
-  drawings and attachments; Púca Notes does the same for notes about to
-  expire when it is open in the last day, but a note that expires while no
-  Púca Notes is open leaves its uploaded files behind on the server.
-
-### Changed
-- **Rolling back the server no longer needs a database restore — from this
-  release on.** The server now starts on a database that a newer release has
-  already updated, and the release script's safety check now lets such a
-  rollback through (server owners: build the older release's backend and ship
-  it with `dual-ship.sh backend` as usual; `deploy/ops/README.md`, "Rolling
-  back the backend"). This holds as long as every update in between only
-  added to the database, which is the rule for Púca's migrations. Going back
-  to **0.9.815 or earlier** still needs the database backup taken before the
-  update: those releases refuse to start on a newer database, and the script
-  refuses to ship them over one.
+- **One notification per due item when both apps are installed.** When
+  Púca Notes on the phone is signed in to the same account, keeping up with
+  your reminders and allowed to notify, Púca leaves due items to it; in every
+  other case (Notes signed out, out of date, stopped, muted, or an older
+  version) Púca notifies as before, so an item is never left unannounced.
+  Ship the Púca Notes APK with or before the Púca APK; if you update Notes
+  from an older version, allow its notifications once.
+- **Signing out of Notes now removes this browser from your Devices list**, as
+  signing out of Púca does, instead of leaving it enrolled. If the tab closes
+  or the connection drops before the server answers, the next sign-in on that
+  browser finishes it, instead of the browser being refused as a signed-out
+  device.
+- **Ticking an item with a repeating to-do under it** is refused with a
+  reason instead of quietly ending the repeat.
+- An older app can no longer tick off an item that has a date or repeats; it
+  is told to update instead. It would otherwise have ended a repeating series
+  without knowing.
 - Apps older than this release keep working against the new server: they do
   not show trashed notes, renaming a note in them leaves its text and
   pictures alone, and their Delete still deletes at once. But they do not
   keep a trashed note whole: an older Púca Notes forgets a trashed note's
   colour, labels and archive flag, and a pin or reorder saved from any older
   app puts a restored note at the end instead of its old place. **Install
-  the new Púca Notes APK on every phone before using the trash** (Notes has
-  no automatic updates); the camera button also needs the new APKs of both
-  apps.
-- **A calendar in Púca Notes, and the same calendar as a tab in Púca's Tasks
-  view.** Month, week, day and agenda views. On a phone, the month shows dots
-  and the chosen day's list. Drag an item to another day, or use *Move to date…*
-  or the `[` and `]` keys. Tap a day to add something to it.
-- **Dates that repeat.** An item can be an event or a to-do, all-day or at a
-  time in its own time zone, with an end, a place and reminders, repeating
-  daily, weekly, monthly or yearly. Ticking a repeating to-do moves it to the
-  next time and reopens its subtasks. It does not end the series. The date,
-  the repeat rule and the place are encrypted like the item itself. By default
-  the server sees the next reminder time, so reminders reach your other
-  devices. A per-item *Keep the time private from the server* switch hides that
-  too, and then the item gets no reminders.
-- **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
-  morning. The reminder time the server holds moves with the snooze, so a
-  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
-  is only offered to people allowed to tick the item.
-- **Ticking an item with a repeating to-do under it** is refused with a
-  reason instead of quietly ending the repeat.
-- **Edited.** Notes show when they were last changed, and can be sorted by it.
-- **Your data export includes dates, repeats and snoozes**, opened like the rest
-  of your items.
-- **.ics export and import.** Export gives your dated items as a standard
-  calendar file. The file is not encrypted, and the app says so first. Import
-  brings a calendar file into a personal note. It first lists anything it
-  cannot bring across, and it skips events it already has. In the Púca Notes
-  Android app, *Add to phone calendar* copies one event to your phone's
-  calendar.
+  the new Púca Notes APK on every phone before using the trash**; the camera
+  button also needs the new APKs of both apps.
+- **Your data export includes everything above**: a note's text, pictures and
+  trash state, items' dates, repeats and snoozes (opened like the rest of
+  your items), and the encrypted colour/label document as ciphertext.
+- **The Windows installer no longer carries a copy of Púca Notes.** The
+  desktop app never opened it; Notes on a computer is the browser page, as
+  before.
 
-### Changed
-- An older app can no longer tick off an item that has a date or repeats; it
-  is told to update instead. It would otherwise have ended a repeating series
-  without knowing.
+### Fixed
+- **Saving an attachment on Android saves it.** In both apps the Save button
+  on a file reported success without writing anything. Files now land in
+  Documents/Puca under a unique name, or you are told why they could not.
+  On Android 10 and older, Púca can write there once its next app update
+  (not an over-the-air update) is installed.
+
+### For operators
+- **Rolling back the server no longer needs a database restore — from this
+  release on.** The server now starts on a database that a newer release has
+  already updated, and the release script's safety check now lets such a
+  rollback through (build the older release's backend and ship it with
+  `dual-ship.sh backend` as usual; `deploy/ops/README.md`, "Rolling back the
+  backend"). This holds as long as every update in between only added to the
+  database, which is the rule for Púca's migrations. Going back to **0.9.815
+  or earlier** still needs the database backup taken before the update: those
+  releases refuse to start on a newer database, and the script refuses to
+  ship them over one.
+- Serve `/notes/sw.js` with `Cache-Control: no-cache` (two lines in the web app's
+  Caddy block, `deploy/webapp/README.md`). `check-versions.sh` fails until it is.
+- New optional setting `TASK_EVENTS_MAX_PER_IP` (default 32): live Notes streams
+  per address.
 
 ## 0.9.815 — 2026-09-19
 
