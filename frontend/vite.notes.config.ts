@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
-import { RC_ENABLED, defineFlags, liteAliases, rcExclusionGuard, vendorChunks } from './vite.shared'
+import { RC_ENABLED, defineFlags, emitVersionJson, liteAliases, rcExclusionGuard, vendorChunks } from './vite.shared'
 
 /**
  * Púca Notes — the notes front door, built as its OWN bundle into dist/notes/.
@@ -12,10 +12,12 @@ import { RC_ENABLED, defineFlags, liteAliases, rcExclusionGuard, vendorChunks } 
  * A separate build, not a second entry of the main one: vite.shared.ts's
  * header has the two release-path reasons. The web deploy is the whole of
  * dist/ (deploy/webapp/README.md), so dist/notes/ ships with the webapp
- * tarball automatically; the native shells strip it back out
- * (scripts/strip-notes-from-native.mjs) because Notes is a browser surface —
- * the desktop and mobile shells run at their own origins where the session
- * and the E2EE seed are not shared with it.
+ * tarball automatically; Púca's phone shells strip it back out
+ * (scripts/strip-notes-from-native.mjs) and the desktop installer embeds a
+ * copy of dist/ without it (scripts/stage-desktop-dist.mjs), because in the
+ * browser Notes is a page of the web app's origin — Púca's shells run at their
+ * own origins, where the session and the E2EE seed are not shared with it.
+ * Notes' OWN Android app is the native build below.
  */
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
@@ -24,6 +26,10 @@ const here = (p: string) => fileURLToPath(new URL(p, import.meta.url))
  * (notes-app/): served from the WebView's root, so base is '/', and written
  * to its own dist-notes-app/ so the web tarball (dist/) is untouched. The
  * manifest and icons ride along there because nothing else supplies them.
+ * Only this build emits version.json ({"app": "notes"}): it is the one that
+ * becomes an OTA bundle for the Notes app (scripts/build-notes-app.mjs --ota),
+ * and encrypt-bundle.mjs --notes refuses anything that does not say "notes".
+ * The web build writes none, so dist/notes/ can never pass for a Notes bundle.
  */
 const NATIVE = process.env.NOTES_TARGET === 'native'
 
@@ -46,7 +52,7 @@ export default defineConfig({
   resolve: {
     alias: liteAliases,
   },
-  plugins: [react(), ...(RC_ENABLED ? [] : [rcExclusionGuard()])],
+  plugins: [react(), ...(NATIVE ? [emitVersionJson('notes')] : []), ...(RC_ENABLED ? [] : [rcExclusionGuard()])],
   build: {
     outDir: NATIVE ? here('./dist-notes-app') : here('./dist/notes'),
     // The main build empties dist/ (dist/notes included) before this one runs;

@@ -123,6 +123,12 @@ frontend/e2e/shots-notes/
 # The Púca Notes Android shell's web bundle (NOTES_TARGET=native build; see
 # frontend/scripts/build-notes-app.mjs) — a build output like dist/.
 frontend/dist-notes-app/
+# The desktop installer's copy of dist/ without Púca Notes
+# (frontend/scripts/stage-desktop-dist.mjs; tauri.conf.json's frontendDist).
+frontend/dist-desktop/
+# Púca Notes' OTA bundles (scripts/build-notes-app.mjs --ota) and their signed
+# copies — release artefacts, never source.
+frontend/notes-ota/
 
 # Deploy/build artifacts and debugging scratch from the 0.8.17/0.8.18 work.
 # ~55 MB of this sat untracked and un-ignored; one `git add .` away from

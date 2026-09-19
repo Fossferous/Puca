@@ -2,9 +2,10 @@
   "name": "puca-notes-app",
   "private": true,
   "version": "0.0.0",
-  "description": "The native shell for Púca Notes (Capacitor). It lists only the Capacitor packages the shell uses; run `npm install` here once so `cap sync` and Gradle can resolve @capacitor/android from this folder's node_modules.",
+  "description": "The native shell for Púca Notes (Capacitor). It lists only the Capacitor packages the shell uses; run `npm install` here once so `cap sync` and Gradle can resolve @capacitor/android from this folder's node_modules. @capgo/capacitor-updater is pinned EXACTLY to the version frontend/ resolves: the JS half of the plugin is bundled from frontend/node_modules and the native half from here, so the two must never drift.",
   "dependencies": {
     "@capacitor/android": "*",
-    "@capacitor/core": "*"
+    "@capacitor/core": "*",
+    "@capgo/capacitor-updater": "8.51.15"
   }
 }

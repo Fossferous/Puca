@@ -153,6 +153,32 @@ export const liteAliases = RC_ENABLED ? [] : [
   { find: /^(\.\/controlDc|(\.\.\/)+api\/rtc\/controlDc)$/, replacement: src('api/rtc/controlDc.lite.ts') },
 ]
 
+/**
+ * Emit `version.json` = `{ "version": "<tauri.conf.json version>", "app": "<app>" }`.
+ *
+ * The mobile OTA manifest's version is a hand-typed argument to dual-ship.sh
+ * with no tie to the bytes it points at, and the installed app used to record
+ * that label as "what I am running" — one slip locked every phone that took it
+ * out of OTA until an APK reinstall (0.9.810 audit, C-04). This file is the
+ * bundle's own word: encrypt-bundle.mjs copies it into a `<bundle>.version`
+ * sidecar and dual-ship.sh refuses a manifest that disagrees with it.
+ *
+ * `app` says WHICH app the bundle is: "puca" (the main build) or "notes" (the
+ * Púca Notes Android app's native build). encrypt-bundle.mjs refuses to sign a
+ * bundle for the other app's channel, which is what keeps a zip of the wrong
+ * directory — dist/notes/, the web page with base /notes/ and no CSP — from
+ * ever being published as a Notes OTA. An absent `app` (every bundle built
+ * before this field existed) means "puca".
+ */
+export function emitVersionJson(app: 'puca' | 'notes'): Plugin {
+  return {
+    name: 'puca-version-json',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ version: APP_VERSION, app }) + '\n' })
+    },
+  }
+}
+
 /** The two compile-time literals every build injects. */
 export const defineFlags = {
   __APP_VERSION__: JSON.stringify(APP_VERSION),
