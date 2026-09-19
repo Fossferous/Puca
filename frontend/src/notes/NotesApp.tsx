@@ -106,11 +106,11 @@ function SessionGate() {
 
     const signOut = useCallback(() => {
         // logout() clears the token, the seed, the DM/channel/blob caches and
-        // scrubs the per-account device-local stores (Notes' included). Note
-        // for a shared machine: this browser's DEVICE enrolment is not revoked
-        // from here — that needs the attested id only the Púca tab holds — so
-        // the next Púca sign-in re-attests as the same device (the same
-        // outcome as signing out of Púca before its socket attested).
+        // scrubs the per-account device-local stores (Notes' included). It
+        // also revokes this browser's DEVICE enrolment: the id is derived from
+        // the web key, so no socket is needed, and the key is dropped only
+        // once the server confirms (api/auth.ts revokeWebDeviceAndScrubKey).
+        // The revoke runs on after this page moves on (keepalive fetch).
         logout();
         clearSharedSessionCaches();
         qc.clear();

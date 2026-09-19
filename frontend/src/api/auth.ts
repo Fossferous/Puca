@@ -383,6 +383,9 @@ import { clearBlobCache } from './attachments';
 import { runLogoutCleanups } from './logoutHooks';
 import { isTauri, isMobile } from './platform';
 import { thisDeviceId, clearThisDeviceId } from './thisDevice';
+import { peekWebDevicePublic, WEB_KEY_STORAGE } from './deviceIdentity/deviceKey';
+import { deriveDeviceId } from './deviceIdentity/identity';
+import { API_BASE_URL } from './config';
 
 // ============ Public API ============
 
@@ -1090,6 +1093,44 @@ export function softExpireSession(): void {
     // every time their token aged out.
 }
 
+/** The device revoke the last sign-out started, settled either way (never
+ *  rejects). Púca Notes awaits it, bounded, before it leaves the page. */
+let lastDeviceRevoke: Promise<void> = Promise.resolve();
+export function pendingDeviceRevoke(): Promise<void> {
+    return lastDeviceRevoke;
+}
+
+/**
+ * DELETE this browser's device row with a token captured before logout()
+ * drops it, and remove the web key ONLY on a 2xx. Raw fetch, not apiClient:
+ * a refusal here must not raise the app-wide auth-expired signal in the middle
+ * of a sign-out. `keepalive` so a tab closed straight after still sends it.
+ */
+export async function revokeWebDeviceAndScrubKey(devId: string, token: string): Promise<'revoked' | 'kept'> {
+    let keyAtStart: string | null = null;
+    try { keyAtStart = localStorage.getItem(WEB_KEY_STORAGE); } catch { /* private mode */ }
+    let ok = false;
+    try {
+        const res = await fetch(`${API_BASE_URL}/devices/${encodeURIComponent(devId)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+            keepalive: true,
+        });
+        ok = res.ok;
+    } catch {
+        ok = false;   // offline: keep the key, the next sign-in re-attests as this device
+    }
+    if (!ok) return 'kept';
+    try {
+        // Only the key the revoked id was derived from — never one written
+        // since (a fresh sign-in on this browser in the meantime).
+        if (keyAtStart !== null && localStorage.getItem(WEB_KEY_STORAGE) === keyAtStart) {
+            localStorage.removeItem(WEB_KEY_STORAGE);
+        }
+    } catch { /* private mode */ }
+    return 'revoked';
+}
+
 export function logout(): void {
     // Revoke this BROWSER's device row before the token goes, then forget the id.
     //
@@ -1110,21 +1151,39 @@ export function logout(): void {
     // so a habitual sign-out/sign-in user walks toward the 64-device cap with a
     // Devices tab full of ghosts. A first cut gated the revoke on web-only but
     // left the scrub unconditional, which produced exactly that on iOS/Android.
-    let revokedThisDevice = false;
+    //
+    // The id is DERIVED from the web key (deviceIdentity/identity.ts), so it
+    // is known without the socket having attested: Púca Notes, which never
+    // opens the socket, signs out this browser's enrolment the same way. The
+    // key is scrubbed only once the server CONFIRMS the row is revoked (2xx).
+    // A 404 keeps it (that key may be another account's enrolment on this
+    // shared browser, whose row must stay reachable), and so does a failure
+    // (offline: the next sign-in re-attests as the SAME device, no ghost).
+    const tokenAtLogout = getToken();
+    let deviceRevoke: Promise<unknown> = Promise.resolve();
     if (!isTauri() && !isMobile()) {
-        const devId = thisDeviceId();
-        if (devId) {
-            // Fire-and-forget: the token is still valid on this line, and a
-            // failed revoke must not block the user from signing out.
-            void apiClient.delete(`/devices/${encodeURIComponent(devId)}`).catch(() => { /* best effort */ });
-            revokedThisDevice = true;
+        const attested = thisDeviceId();
+        const pub = attested ? null : peekWebDevicePublic();
+        const devId = attested ?? (pub ? deriveDeviceId(pub.device_pub, pub.sign_pub) : null);
+        if (devId && tokenAtLogout) {
+            deviceRevoke = revokeWebDeviceAndScrubKey(devId, tokenAtLogout);
         }
         clearThisDeviceId();
     }
+    lastDeviceRevoke = deviceRevoke.then(() => undefined, () => undefined);
     // Revoke THIS session server-side (per-session: other devices stay signed
-    // in). Fire-and-forget — the token is still valid on this line, and a
-    // failed revoke must not block the sign-out.
-    void apiClient.post('/auth/logout-session', {}).catch(() => { /* best effort */ });
+    // in) — AFTER the device revoke, which needs this session to be alive to
+    // be authorised; sent concurrently, the two raced and a lost race left the
+    // device row behind. Best effort, with the token captured above.
+    if (tokenAtLogout) {
+        const token = tokenAtLogout;
+        void lastDeviceRevoke.then(() => fetch(`${API_BASE_URL}/auth/logout-session`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: '{}',
+            keepalive: true,
+        })).catch(() => { /* best effort */ });
+    }
     localStorage.removeItem('auth_token');
     // An explicit sign-out has to remove this, or it is not a sign-out. Login's
     // mount effect replays the blob unconditionally, so clearing only the token
@@ -1147,16 +1206,13 @@ export function logout(): void {
     // key, and wiping them on every sign-out would hand a malicious server a
     // fresh substitution window at each login — the opposite of hygiene.
     const scrub = ['sovereignTaskPlaces', 'sovereignTaskPlaceAssign'];
-    // The device key goes only where the row above was revoked with it. On
-    // Tauri and Capacitor the enrolled device is the MACHINE and its identity
-    // must survive an ordinary sign-out, or the user's own remote-desktop host
-    // is torn down and needs physical access to restore.
-    // Only when the row was actually revoked with it. Signing out before the
-    // socket has attested leaves `thisDeviceId()` null and nothing to revoke —
-    // dropping the key there would strand the existing row and enrol a fresh one
-    // on the next sign-in, which is the very ghost this is meant to prevent.
-    // Keeping it lets the next session re-attest as the SAME device.
-    if (revokedThisDevice) scrub.push('sovereign_device_key_v1');
+    // The device key is NOT in this list: it goes only once the row above is
+    // confirmed revoked (revokeWebDeviceAndScrubKey). On Tauri and Capacitor
+    // the enrolled device is the MACHINE and its identity must survive an
+    // ordinary sign-out, or the user's own remote-desktop host is torn down
+    // and needs physical access to restore. Dropping the key while the row
+    // survives would strand that row and enrol a fresh one on the next
+    // sign-in, which is the very ghost the revoke exists to prevent.
     for (const k of scrub) {
         try { localStorage.removeItem(k); } catch { /* private mode */ }
     }
