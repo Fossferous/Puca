@@ -3,7 +3,7 @@
  * Upcoming. Ticking one completes it (the same cascade as everywhere else);
  * clicking a row opens its note.
  */
-import { formatDueShort } from '../../api/tasks';
+import { canCompleteTasks, formatDueShort } from '../../api/tasks';
 import { BellIcon } from '../../components/Icons';
 import { ReminderTimingMarks, SnoozeControl } from './SnoozeControl';
 import { type DueItem, type NoteCard, type ReminderGroups } from '../model/notesModel';
@@ -38,7 +38,7 @@ function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem;
             <ReminderTimingMarks slot={item.slot} />
             <span className="notes-reminder-note">{item.note.title}</span>
             <span className="notes-reminder-when" title={new Date(item.at).toLocaleString()}>{formatDueShort(new Date(item.at).toISOString(), now)}</span>
-            {canSnooze && <SnoozeControl item={item} actions={actions} now={now} />}
+            {canSnooze && (item.note.ref.kind === 'list' || canCompleteTasks(item.note.myPerms)) && <SnoozeControl item={item} actions={actions} now={now} />}
         </div>
     );
 }

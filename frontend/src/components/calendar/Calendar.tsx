@@ -497,7 +497,9 @@ function EntryMenu({
         return () => document.removeEventListener('keydown', onKey, true);
     }, [onClose]);
     const t = entry.source.task;
-    const canSnooze = !!onSnooze && !!t.due_at && !entry.completed;
+    // A snooze rides the completion right on the server: never offer it to a
+    // member who would only be refused (a 403 the menu cannot explain).
+    const canSnooze = !!onSnooze && !!t.due_at && !entry.completed && entry.source.canComplete !== false;
     const snoozed = activeSnooze(t.due_at, t.snooze);
     const act = (fn: () => void) => () => { onClose(); fn(); };
     return createPortal(

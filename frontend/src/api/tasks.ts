@@ -405,6 +405,13 @@ export function canEditTask(task: Task, userId: number | undefined, perms: numbe
     return hasPerm(perms, PERM.MANAGE_TASKS) || task.created_by === userId;
 }
 
+/** May this member tick, snooze or reopen items in a checklist? The server's
+ *  rule (task_handlers.rs update_task): COMPLETE_TASKS, or MANAGE_TASKS which
+ *  implies it. Personal lists pass undefined (always allowed). */
+export function canCompleteTasks(perms: number | null | undefined): boolean {
+    return hasPerm(perms, PERM.COMPLETE_TASKS) || hasPerm(perms, PERM.MANAGE_TASKS);
+}
+
 /** Parse an OPENED (plaintext) attachments sidecar into refs. Malformed JSON,
  *  non-arrays, and entries without string href/name all degrade to nothing —
  *  a corrupt sidecar must never crash the tree render. */

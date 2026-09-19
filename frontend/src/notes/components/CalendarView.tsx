@@ -21,7 +21,7 @@ import { parseSchedule, snoozeUntil } from '../../api/taskSchedule';
 import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
 import { currentIcsUid } from '../../api/icsUid';
 import { addToPhoneCalendar, canAddToPhoneCalendar, deliverIcs, phoneCalendarArgs } from '../../api/icsDelivery';
-import { canEditTask, createListTask, createTaskList } from '../../api/tasks';
+import { canCompleteTasks, canEditTask, createListTask, createTaskList } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { localDayKey, parseWall } from '../../utils/calendarMath';
@@ -87,6 +87,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
         noteTitle: c.title,
         serverName: c.serverName,
         canEdit: c.ref.kind === 'list' || canEditTask(t, me, c.myPerms),
+        canComplete: c.ref.kind === 'list' || canCompleteTasks(c.myPerms),
     }))), [cards, me]);
 
     // Shared notes on the calendar: poll, as an open shared note does.

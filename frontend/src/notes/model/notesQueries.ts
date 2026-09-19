@@ -43,6 +43,7 @@ import { type NewTaskTiming } from '../../api/tasks';
 import { canEditTask } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { pushMessageToast } from '../../components/messageToastBus';
+import { toastRefusal } from '../../api/refusalToast';
 import {
     type NoteCard, type NoteRef, type NoteSource,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle,
@@ -295,7 +296,9 @@ export function useNoteCards(): {
  *  refusal in its own words, so it is shown; everything else is logged. */
 function explain(what: string, err: unknown): void {
     console.error(`[notes] ${what}:`, err);
-    if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
+    // Every server refusal is the user's to see (a 403 on a snooze or a tick
+    // in a shared note used to roll back without a word).
+    toastRefusal(err);
 }
 
 export interface NoteActions {

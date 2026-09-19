@@ -13,7 +13,7 @@ import { effectiveWeekStart, setCalendarPrefs, useCalendarPrefs } from './calend
 import { useCoarseCalendar } from './calendarGate';
 import { ScheduleEditor } from '../schedule/ScheduleEditor';
 import {
-    type Task, type TaskList, canEditTask, createListTask, createTask, listListTasks, listTasks, patchTaskTiming,
+    type Task, type TaskList, canCompleteTasks, canEditTask, createListTask, createTask, listListTasks, listTasks, patchTaskTiming,
 } from '../../api/tasks';
 import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
@@ -25,7 +25,7 @@ import { buildIcs, type IcsItem } from '../../api/ics';
 import { currentIcsUid } from '../../api/icsUid';
 import { deliverIcs } from '../../api/icsDelivery';
 import { wsClient, type ServerMessage } from '../../api/websocket';
-import { ApiError } from '../../api/client';
+import { toastRefusal } from '../../api/refusalToast';
 import { pushMessageToast } from '../messageToastBus';
 import { localDayKey } from '../../utils/calendarMath';
 
@@ -84,6 +84,7 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
         ...lists.flatMap((l, i) => ((listData[i] as Task[] | undefined) ?? []).map(t => ({ task: t, noteKey: `list:${l.id}`, noteTitle: l.title, canEdit: true }))),
         ...channels.flatMap((c, i) => ((chanData[i] as Task[] | undefined) ?? []).map(t => ({
             task: t, noteKey: `channel:${c.id}`, noteTitle: `#${c.label}`, serverName: c.serverName, canEdit: canEditTask(t, currentUserId, c.myPerms),
+            canComplete: canCompleteTasks(c.myPerms),
         }))),
         // The query result arrays are new every render; their data is what matters.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -100,7 +101,8 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
             pokeTaskReminders();
         } catch (err) {
             console.error('[tasks-calendar]', err);
-            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
+            // Every refusal says why (a 403 used to vanish silently here).
+            toastRefusal(err);
         }
         await refetch(scopeOf(e));
     };
@@ -220,7 +222,7 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
                         setEditing(null);
                         void (async () => {
                             try { await patchTaskTiming(t, { schedule, due_at: dueAt }); pokeTaskReminders(); } catch (err) {
-                                if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
+                                toastRefusal(err);
                             }
                             await qc.invalidateQueries({ queryKey: key(editing.kind, editing.scope) });
                         })();

@@ -29,6 +29,9 @@ export interface CalendarSource {
     serverName?: string;
     /** May this viewer change its date (creator or MANAGE_TASKS)? */
     canEdit: boolean;
+    /** May this viewer tick or snooze it (COMPLETE_TASKS or MANAGE_TASKS)?
+     *  Omitted = yes (a personal list). */
+    canComplete?: boolean;
 }
 
 export type EntryKind = 'event' | 'task' | 'plain';
