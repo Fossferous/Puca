@@ -184,7 +184,9 @@ bundle reach the other is separate:
 
 - `notes-updater-rsa.key` (private) — in the same keys directory as Púca's,
   **backed up by `deploy/ops/backup-keys.sh`** (a missing one fails it). If lost,
-  Notes OTA stops until a Notes APK embedding a new key ships.
+  Notes OTA stops until a Notes APK embedding a new key ships. **Run
+  `backup-keys.sh`, and move both bundles off the machine, BEFORE the first
+  OTA-capable Notes APK is published**: from then on phones trust only this key.
 - `notes-updater-rsa.pub` — mirrored into `frontend/notes-app/capacitor.config.ts`
   (`CapacitorUpdater.publicKey`). `scripts/check-lite-identity.mjs` fails if it
   ever equals Púca's key.

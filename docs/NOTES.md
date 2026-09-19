@@ -435,7 +435,10 @@ launch — on **its own channel**:
   `"variant": "notes"` (`otaChannelMatches`), so that skew leaves Notes where it
   is rather than installing Púca into it.
 - Bundles are signed with a **separate Notes key** (`notes-updater-rsa.key` in
-  the keys directory, backed up by `deploy/ops/backup-keys.sh`); the APK embeds
+  the keys directory, backed up by `deploy/ops/backup-keys.sh` — **run it, and
+  store both bundles off the machine, before the first OTA-capable Notes APK
+  ships**: once phones embed its public half, losing the key freezes Notes
+  updates until everyone installs an APK with a new one); the APK embeds
   only its public half (`notes-app/capacitor.config.ts`). A Púca bundle cannot
   decrypt or verify inside Notes, nor a Notes bundle inside Púca, whatever an
   unsigned manifest claims. `deploy/mobile/verify-bundle.mjs` proves a bundle
