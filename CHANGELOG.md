@@ -15,9 +15,7 @@ one-line summary; this file is the full story. Versions follow
   it now records at the rate your preset sets: 30 frames a second at about
   7 Mbit/s, for 36-39% of one CPU core instead of 81-95%, and it takes
   proportionally less of the graphics card's video encoder. The same number
-  of seconds now takes less than half the memory. Clips of fast content
-  that matches the frame rate are also steadier: each new picture is
-  captured once instead of sometimes twice with the next one skipped.
+  of seconds now takes less than half the memory.
 
 ## 0.9.815 — 2026-09-19
 
