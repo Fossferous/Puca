@@ -19,7 +19,7 @@ import { NotesShell } from './components/NotesShell';
 import { invalidateNotesPrefs } from './model/notesPrefs';
 import { notesKeys } from './model/notesQueries';
 import { NativeTokenGate } from './native/NativeTokenGate';
-import { adoptFromNative, adoptOnResume, rescueOrExpire } from './native/nativeSessionRescue';
+import { adoptFromNative, adoptOnResume, rescueOrExpire, rescueWhenOnline } from './native/nativeSessionRescue';
 import { useNotesNativeSession } from './native/useNotesNativeSession';
 import { pendingOutboxCount } from './model/notesOutbox';
 import { flushNotesPrefs, prefsUnsynced } from './model/notesPrefsSync';
@@ -96,12 +96,16 @@ function SessionGate() {
         // Mount-time check only.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+    // Back online: the job may have renewed the session while we were
+    // offline, so rescue before expiring (nativeSessionRescue.ts).
     useEffect(() => {
         if (!expiredOffline) return;
-        const back = () => { setExpiredOffline(false); expire(true); };
-        window.addEventListener('online', back);
-        return () => window.removeEventListener('online', back);
-    }, [expiredOffline, expire]);
+        return rescueWhenOnline({
+            adopt: adoptFromNative,
+            onAdopted: () => { setExpiredOffline(false); onAdopted(); },
+            expire: () => { setExpiredOffline(false); expire(true); },
+        });
+    }, [expiredOffline, expire, onAdopted]);
 
     // The Púca tab (or another Notes tab) signed out, soft-expired, switched
     // accounts, or signed in. Shared caches are cleared inside sessionSync.

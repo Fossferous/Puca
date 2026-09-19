@@ -41,6 +41,26 @@ export async function rescueOrExpire(deps: RescueDeps): Promise<'adopted' | 'exp
     return 'expired';
 }
 
+/**
+ * The token ran out while OFFLINE (NotesApp keeps the cached notes on screen
+ * rather than a sign-in that cannot work). When the network comes back, the
+ * background job may have renewed the session meanwhile: rescue first, and
+ * expire only when there is nothing to adopt — the same order as every other
+ * way into expiry. One shot; returns an unsubscribe.
+ */
+export function rescueWhenOnline(deps: RescueDeps): () => void {
+    if (typeof window === 'undefined') return () => {};
+    let done = false;
+    const back = () => {
+        if (done) return;
+        done = true;
+        window.removeEventListener('online', back);
+        void rescueOrExpire(deps);
+    };
+    window.addEventListener('online', back);
+    return () => { done = true; window.removeEventListener('online', back); };
+}
+
 /** The real adoption, against the page's own token store. */
 export function adoptFromNative(): Promise<boolean> {
     return adoptNativeRenewedToken(getToken, storeRenewedToken);
