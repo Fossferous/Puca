@@ -243,9 +243,15 @@ describe('a revoke the server committed but this page never heard back from', ()
         stubEnrol(53);
         expect(await enrolThisDevice(53)).toBeNull();
         expect(store[WEB_KEY_STORAGE]).toBe(key);
-        // Nor a marker for ANOTHER device or account.
+        // Nor a marker for ANOTHER device or account. The settle DELETE fails
+        // (offline) so the marker SURVIVES into attest's own devId check —
+        // answered, it would 404 and clear the marker, and enrolment would
+        // never look at it.
         store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: 'someone-else', uid: 53, at: 1 });
+        stubFetch('offline');
         expect(await enrolThisDevice(53)).toBeNull();
+        expect(calls.some(c => c.method === 'DELETE' && c.url.endsWith('/devices/someone-else'))).toBe(true);
+        expect(store[PENDING_REVOKE_KEY]).toBeDefined();          // it reached attest
         expect(store[WEB_KEY_STORAGE]).toBe(key);
         store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: id, uid: 99, at: 1 });
         expect(await enrolThisDevice(53)).toBeNull();
