@@ -785,6 +785,33 @@ await ctxB.close();
     watch(spp);
     await spp.goto('/notes/');
     await spp.waitForSelector('.notes-card:has-text("Poem")', { timeout: 20000 });
+
+    // The open note's footer at phone width: eight buttons do not fit 390px, so
+    // "Open in Púca" is the one that goes. It is hidden by its OWN class now,
+    // not by a `> a` element selector, and Send must still be there — it is the
+    // Notes Android shell's only route into a conversation.
+    await spp.locator('.notes-card', { hasText: 'Poem' }).tap();
+    await spp.waitForSelector('.notes-editor', { timeout: 10000 });
+    ck('phone editor: "Send to Púca" is in the footer',
+        await spp.locator('.notes-editor-foot button[aria-label="Send to Púca"]').count() === 1);
+    // In the DOM but not visible — its own positive control: a missing class
+    // reads as count 0, a broken rule reads as visible, and both are red.
+    const openInPuca = spp.locator('.notes-editor-foot .notes-open-puca');
+    const openInPucaCount = await openInPuca.count();
+    ck('phone editor: "Open in Púca" is rendered but hidden by the phone rule (the card menu still offers it)',
+        openInPucaCount === 1 && (await openInPuca.isVisible()) === false, `count=${openInPucaCount}`);
+    ck('phone editor: the footer does not overflow 390px',
+        await spp.evaluate(() => {
+            const f = document.querySelector('.notes-editor-foot');
+            return !!f && f.scrollWidth <= f.clientWidth + 1;
+        }));
+    await shotOf(spp)('send-editor-foot-phone');
+    // Close it by the button, not Escape: the editor's Escape belongs to
+    // whatever has focus inside it (the title input just blurs), and an
+    // editor left open swallows every tap that follows.
+    await spp.locator('.notes-editor button[aria-label="Close note"]').tap();
+    ck('phone editor: it closes again', await spp.waitForSelector('.notes-editor', { state: 'detached', timeout: 10000 }).then(() => true, () => false));
+
     await spp.locator('.notes-card', { hasText: 'Poem' }).locator('button[aria-label="More actions"]').tap();
     await spp.waitForSelector('.context-menu', { timeout: 5000 });
     await spp.locator('.context-menu-item', { hasText: 'Send to Púca' }).tap();

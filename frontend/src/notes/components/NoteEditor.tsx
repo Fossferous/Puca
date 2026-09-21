@@ -219,7 +219,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="Refresh this note" title="Refresh" onClick={() => void actions.refreshNote(ref)}><RefreshIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label="Send to Púca" title="Send to Púca…" onClick={onSendToPuca}><SendIcon /></button>
                     {pucaHref && (
-                        <a className="notes-iconbtn" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
+                        <a className="notes-iconbtn notes-open-puca" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
                     )}
                     <span className="spacer" />
                     <button type="button" className="notes-iconbtn" aria-label="More actions" title="More" onClick={e => onMenu(e, card, e.currentTarget)}><MoreVerticalIcon /></button>

@@ -977,11 +977,13 @@
     .notes-editor-add input, .notes-quickadd-title, .notes-quickadd-item input, .notes-labels-new input { font-size: 16px; }
     .notes-editor-foot .notes-textbtn { padding: 10px 12px; }
     /* Seven 44px buttons plus Close do not fit 390px. "Open in Púca" is the
-       one to drop here: it is a plain link, the card menu still offers it,
-       and the Notes Android app never shows it at all. Wrapping is the
-       fallback if a future button pushes the row over anyway. */
+       one to drop here: it is a plain link, the card menu still offers it
+       (NotesShell's pucaHref), and the Notes Android app never shows it at
+       all. Named by its OWN class, not `> a`: a broad element selector would
+       silently swallow the next anchor anyone puts in this row. Wrapping is
+       the fallback if a future button pushes the row over anyway. */
     .notes-editor-foot { flex-wrap: wrap; }
-    .notes-editor-foot > a.notes-iconbtn { display: none; }
+    .notes-editor-foot > .notes-open-puca { display: none; }
 
     .notes-popover { left: 8px !important; right: 8px; max-width: none; top: auto !important; bottom: calc(8px + var(--safe-area-bottom, 0px)); }
     .notes-swatches { grid-template-columns: repeat(6, 1fr); }
