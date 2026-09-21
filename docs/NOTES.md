@@ -47,6 +47,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   (see *Calendar, repeats and snooze* below).
 - **Colour, labels, archive** — Notes' own organisation, sealed to your own
   key and synced across your devices (see *What follows the account* below).
+  *Edit labels* beside **Labels** in the rail renames, merges or deletes a
+  label across every note, the archived ones included (see *Managing
+  labels* below).
 - **Select several** — a checkbox on hover, Shift/Ctrl-click and Ctrl+A on a
   desktop, a long press on a phone (then taps add to the selection); `Esc`
   clears. The bar pins or unpins, colours, labels, archives, moves to the
@@ -151,6 +154,28 @@ Nothing here lets the operator read your notes (`docs/SECURITY_MODEL.md`):
 search is local, thumbnails are decrypted client-side as they are in Púca, and
 the prefs document is ciphertext. What the server does learn is the document's
 size and when it is written.
+
+### Managing labels
+
+The per-note pickers only reach notes the grid is showing, and a label view
+hides archived notes — so a label left on an archived note could not be
+renamed or cleared from anywhere. **Edit labels** (the pencil beside
+*Labels* in the rail) lists every label with how many notes carry it,
+**archived notes included**, and offers three things:
+
+- **Rename** it everywhere. A pure respelling counts: *home* to *Home*
+  rewrites every note.
+- **Merge**: renaming onto a label you already have asks first, then folds
+  the two together under the existing label's own spelling, so the account
+  is never left with two casings of one name.
+- **Delete** it from every note, after a confirmation that says how many
+  notes it will change. One **Undo** puts the whole label list back.
+
+Each of the three is a SINGLE change to the sealed document — one
+compare-and-swap write, the same write the server already sees when you
+tick a label on one note. Nothing new reaches the server: it learns that
+you organised, never what into. No migration and no new route were needed.
+If you are looking at the label you renamed, the view follows it.
 
 ## Live updates
 

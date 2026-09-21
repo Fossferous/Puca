@@ -131,6 +131,37 @@ describe('the live store', () => {
         expect(getNotesPrefs().labels).toEqual({ 'list:1': ['House'], 'list:2': ['House'], 'list:3': ['House'] });
     });
 
+    it('renameLabel is ONE write, however many notes carry the label', () => {
+        setNoteLabels('list:1', ['Home']);
+        setNoteLabels('list:2', ['Home']);
+        setNoteLabels('list:3', ['Home']);
+        (localStorage.setItem as Mock).mockClear();
+        renameLabel('Home', 'House');
+        // A per-note loop would be three writes — and three interleaving
+        // pushes, one of which could lose a 409 replay (notesPrefsSync.ts).
+        expect((localStorage.setItem as Mock).mock.calls.length).toBe(1);
+    });
+
+    it('renameLabel rewrites a pure respelling (same name, different case)', () => {
+        setNoteLabels('list:1', ['home']);
+        setNoteLabels('list:2', ['HOME']);
+        renameLabel('home', 'Home');
+        expect(getNotesPrefs().labels).toEqual({ 'list:1': ['Home'], 'list:2': ['Home'] });
+    });
+
+    it('a rename keeps the label in its own slot and never drops one at the cap', () => {
+        // MAX_LABELS_PER_NOTE is 8: a saturated note must come out with 8.
+        setNoteLabels('list:1', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+        renameLabel('c', 'zzz');
+        expect(getNotesPrefs().labels['list:1']).toEqual(['a', 'b', 'zzz', 'd', 'e', 'f', 'g', 'h']);
+    });
+
+    it('merging onto a label the note already carries leaves ONE entry, in the first slot', () => {
+        setNoteLabels('list:1', ['Work', 'Home']);
+        renameLabel('Home', 'Work');
+        expect(getNotesPrefs().labels['list:1']).toEqual(['Work']);
+    });
+
     it('pruneNotesPrefs forgets notes that are gone and is a no-op otherwise', () => {
         setNoteColor('list:1', 'mint');
         setNoteLabels('list:2', ['x']);

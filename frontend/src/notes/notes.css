@@ -220,6 +220,15 @@
     text-transform: uppercase;
     color: var(--text-faint);
 }
+.notes-rail-section.with-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-right: 8px;
+}
+.notes-rail-section.with-action .notes-iconbtn { color: var(--text-faint); }
+.notes-rail-section.with-action .notes-iconbtn:hover { color: var(--text-normal); }
 .notes-rail-spacer { flex: 1; }
 .notes-rail-foot {
     padding: 8px 14px;
@@ -639,6 +648,44 @@
 }
 .notes-labels-hint { font-size: 11px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
 
+/* ---------- Label manager (Edit labels) ------------------------------------
+   Rows are 44px even on a mouse: they carry two destructive-adjacent buttons
+   and the list can be long (docs/DESIGN_PHILOSOPHY.md §5). The body scrolls so
+   forty labels still fit a 390x844 screen. */
+.notes-labelmgr-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: min(52dvh, 420px);
+    overflow-y: auto;
+}
+.notes-labelmgr-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 2px 4px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.notes-labelmgr-row:hover { background: var(--bg-modifier-hover); }
+.notes-labelmgr-row > .svrn-icon { color: var(--text-muted); flex-shrink: 0; }
+.notes-labelmgr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notes-labelmgr-count { font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.notes-labelmgr-row .notes-iconbtn.danger { color: var(--text-danger); }
+.notes-labelmgr-row.editing input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    font-size: 13px;
+}
+.notes-labelmgr-row.confirm { flex-wrap: wrap; background: var(--bg-modifier-selected); padding: 8px 10px; }
+.notes-labelmgr-ask { flex: 1 1 100%; line-height: 1.4; color: var(--text-normal); }
+
 .notes-menu { display: flex; flex-direction: column; min-width: 220px; }
 .notes-menu-head {
     padding: 8px 10px 10px;
@@ -951,6 +998,10 @@
     .notes-grid { column-width: auto; column-count: 1; }
     .notes-quickadd { display: none; }   /* the FAB is the phone's composer */
     .notes-fab { display: inline-flex; }
+
+    /* The label manager: 16px inputs (no iOS zoom), rows already 44px. */
+    .notes-labelmgr-row.editing input { font-size: 16px; }
+    .notes-labelmgr-row { min-height: 48px; }
 
     .notes-card { padding: 14px 14px 8px; }
     .notes-card-pin { opacity: 1; }

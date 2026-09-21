@@ -415,6 +415,95 @@ await sleep(300);
 ck('archive view: the archived card is there with its chip', await packing().count() === 1 && /archived/.test(await packing().locator('.notes-card-foot').innerText()));
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
+// ---- 10b. Edit labels: rename, merge, delete everywhere --------------------------------------------
+// The POINT of this dialog is the note no other surface can reach: Packing is
+// archived now, and a label view excludes archived notes (filterNotes), so a
+// label stuck on it could not be renamed from the grid or the selection bar.
+// Label it here first, then prove the rename followed it.
+await page.locator('.notes-rail-item', { hasText: 'Archive' }).click();
+await sleep(300);
+await packing().click();
+await page.waitForSelector('.notes-editor-foot', { timeout: 10000 });
+await page.click('.notes-editor-foot button[aria-label="Labels"]');
+await page.waitForSelector('.notes-labels-new input', { timeout: 5000 });
+await page.fill('.notes-labels-new input', 'Trip');
+await page.press('.notes-labels-new input', 'Enter');
+await sleep(200);
+await page.keyboard.press('Escape');
+await page.locator('.notes-editor-foot').getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await sleep(300);
+
+ck('rail: the Labels heading offers Edit labels', await page.locator('.notes-rail button[aria-label="Edit labels"]').count() === 1);
+const openLabelMgr = async () => {
+    await page.click('.notes-rail button[aria-label="Edit labels"]');
+    await page.waitForSelector('.notes-labelmgr-row', { timeout: 5000 });
+};
+const mgrRows = () => page.locator('.notes-labelmgr-row').allInnerTexts();
+const mgrText = async () => (await mgrRows()).join(' | ');
+await openLabelMgr();
+// Trip is on an ARCHIVED note only — it is listed, and counted, here alone.
+ck('label manager: lists every label with its note count, archived included',
+    /Errands/.test(await mgrText()) && /Trip/.test(await mgrText())
+    && (await mgrRows()).filter(t => /1 note(?!s)/.test(t)).length >= 2,
+    await mgrText());
+await page.click('.notes-labelmgr-row button[aria-label="Rename Errands"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Chores');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(300);
+ck('label manager: a rename rewrites the card chip',
+    await page.locator('.notes-card', { hasText: 'Groceries' }).locator('.notes-chip', { hasText: 'Chores' }).count() === 1);
+ck('label manager: a rename rewrites the rail',
+    await page.locator('.notes-rail-item', { hasText: 'Chores' }).count() === 1
+    && await page.locator('.notes-rail-item', { hasText: 'Errands' }).count() === 0);
+ck('label manager: a rename offers an Undo', await page.locator('.notes-undo-text:has-text("Renamed")').count() === 1);
+// Merge: rename Trip onto Chores. It must ASK first, and must not have written.
+await page.click('.notes-labelmgr-row button[aria-label="Rename Trip"]');
+await page.fill('.notes-labelmgr-row.editing input', 'chores');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(200);
+ck('label manager: merging asks first', /Merge into/.test(await mgrText()), await mgrText());
+ck('label manager: the merge has not happened yet', await page.locator('.notes-rail-item', { hasText: 'Trip' }).count() === 1);
+await page.locator('.notes-labelmgr-row.confirm button', { hasText: 'Merge' }).click();
+await sleep(300);
+ck('label manager: merging leaves one label and one rail row',
+    await page.locator('.notes-rail-item', { hasText: 'Chores' }).count() === 1
+    && await page.locator('.notes-rail-item', { hasText: 'Trip' }).count() === 0);
+await shot('label-manager');
+// Delete everywhere, then Undo. The archived note is the one to watch.
+await page.click('.notes-labelmgr-row button[aria-label="Delete Chores"]');
+await sleep(150);
+ck('label manager: deleting asks first', /Remove/.test(await mgrText()), await mgrText());
+await page.locator('.notes-labelmgr-row.confirm button', { hasText: 'Remove' }).click();
+await sleep(300);
+ck('label manager: deleting removes the rail row and every chip',
+    await page.locator('.notes-rail-item', { hasText: 'Chores' }).count() === 0
+    && await page.locator('.notes-chip', { hasText: 'Chores' }).count() === 0);
+await page.locator('.notes-undo button').click();
+await sleep(400);
+ck('label manager: Undo brings the label back on every note',
+    await page.locator('.notes-card', { hasText: 'Groceries' }).locator('.notes-chip', { hasText: 'Chores' }).count() === 1);
+await page.keyboard.press('Escape');
+await sleep(200);
+ck('label manager: Escape closes the dialog', await page.locator('.notes-labelmgr-row').count() === 0);
+// The open label VIEW must follow a rename, or the grid empties under a stale heading.
+await page.locator('.notes-rail-item', { hasText: 'Chores' }).click();
+await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
+await openLabelMgr();
+await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Errands');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(400);
+ck('label manager: the open label view follows the rename',
+    /Label: Errands/.test(await page.locator('h1.notes-section-title').textContent())
+    && await page.locator('.notes-card').count() >= 1,
+    await page.locator('h1.notes-section-title').textContent());
+await page.keyboard.press('Escape');
+await sleep(200);
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await sleep(300);
+
 // ---- 11. Move to trash with undo (the server keeps it restorable) ------------------------------------
 const reading = () => page.locator('.notes-card', { hasText: 'Reading' });
 await reading().hover();
@@ -692,7 +781,7 @@ if (psqlDsn) {
         const n = Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`));
         ck('database: the offline note became exactly one real list on the server', n === listsBeforeOffline + 1, `before=${listsBeforeOffline} after=${n}`);
         const blob = sql(`SELECT blob FROM user_sealed_blobs b JOIN users u ON u.id = b.user_id WHERE u.username = '${username}' AND b.name = 'notes-prefs'`);
-        ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|sage|mint/.test(blob), blob.slice(0, 60));
+        ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|Chores|Trip|sage|mint/.test(blob), blob.slice(0, 60));
     } catch (e) {
         ck('database sync checks ran', false, String(e).slice(0, 200));
     }
@@ -981,6 +1070,29 @@ const selPx = await m.evaluate(() => parseFloat(getComputedStyle(document.queryS
 ck('phone: account-menu selects ≥ 16px', selPx >= 16, `${selPx}px`);
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 });
+
+// The label manager on a phone: reached through the drawer, which must get
+// out of the way (it is a fixed overlay at this width), and rows big enough
+// to tap without hitting Delete by mistake.
+await m.tap('.notes-menu-btn');
+await m.waitForSelector('.notes-rail.open', { timeout: 5000 });
+await m.tap('.notes-rail button[aria-label="Edit labels"]');
+await m.waitForSelector('.notes-labelmgr-row', { timeout: 5000 });
+ck('phone: opening the label manager closes the rail drawer', await m.locator('.notes-rail.open').count() === 0);
+const lmBox = await m.locator('.notes-dialog').boundingBox();
+ck('phone: the label manager fits the screen', !!lmBox && lmBox.x >= 0 && lmBox.x + lmBox.width <= 390.5, JSON.stringify(lmBox));
+const lmRow = await m.locator('.notes-labelmgr-row').first().boundingBox();
+ck('phone: label rows are tappable', !!lmRow && lmRow.height >= 44, JSON.stringify(lmRow));
+await m.tap('.notes-labelmgr-row button[aria-label="Rename Errands"]');
+await m.waitForSelector('.notes-labelmgr-row.editing input', { timeout: 5000 });
+const lmFont = await m.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.notes-labelmgr-row.editing input')).fontSize));
+ck('phone: the rename field is >= 16px (no iOS zoom)', lmFont >= 16, lmFont + 'px');
+r = await audit();
+ck('phone: label manager — no overflow, targets at size', !r.bodyScrollsHorizontally && r.under.length === 0, JSON.stringify({ widest: r.widest, under: r.under }));
+await mshot('phone-label-manager');
+await m.keyboard.press('Escape');
+await m.keyboard.press('Escape');
+await m.waitForSelector('.notes-dialog', { state: 'detached', timeout: 5000 });
 
 // bulk selection by LONG PRESS (the phone's way in), then the bar at 390px.
 // Poem, not Phone note: that one is in the trash by now (the Trash section above).
