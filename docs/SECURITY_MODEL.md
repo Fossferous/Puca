@@ -185,6 +185,21 @@ stores them and cannot read them. What it CAN see, per task:
 - **`updated_at`** on every task and personal list: when its content last
   changed (a reorder, a snooze or a reminder advancing does not count). The
   server already saw these writes arrive. Now it also stores the time.
+- **`content_rev`** on every personal list: how many times that note's own
+  text, title or pictures have been written (migration 069). Ticking or
+  reordering an item does not move it. It is what lets a save say which copy
+  it was based on, so two devices editing one note cannot silently overwrite
+  each other. The same class of fact as `updated_at`, and derivable from the
+  write times the server already sees — no content, and nothing about which
+  field changed.
+- **A short-lived create id** per note or item (`task_create_keys`, migration
+  070): a random value the client makes when you create something and repeats
+  if it has to send the create again, so a create whose answer was lost is not
+  made twice. It is never derived from what you wrote — a digest of a title
+  would be a fingerprint the operator could correlate across notes and
+  accounts — and the row is deleted after a window (default 24 hours,
+  `NOTES_OP_KEY_RETENTION_HOURS`; 0 keeps them). While it exists the server
+  holds: that one create happened, which row it made, and when.
 - **The timing pattern of writes.** A repeating event's `due_at` is advanced by
   a PATCH shortly after each alert fires (15 minutes after, with a
   compare-and-swap), and ticking a repeating to-do moves its `due_at` forward

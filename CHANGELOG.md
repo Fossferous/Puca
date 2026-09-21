@@ -7,6 +7,18 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Two devices, one note.** If a note's text, title or pictures were changed
+  somewhere else while you were writing, Púca Notes now tells you and shows
+  you both copies, with *Keep mine* and *Use theirs* — instead of quietly
+  replacing one with the other. Your words stay in the field until you
+  choose, and a title you are typing is no longer wiped by a rename arriving
+  from another device. Ticking an item or reordering a note is never treated
+  as a clash.
+- **A note or item created on a flaky connection can no longer appear twice.**
+  When Púca Notes sends a new note or item and the answer never arrives, it
+  sends it again — and the server now recognises the repeat and gives back
+  the note it already made, instead of making a second one. Duplicates used
+  to turn up with no way to tell which copy held your later edits.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with
