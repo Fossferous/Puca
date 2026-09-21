@@ -20,8 +20,8 @@ import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
 import { type ScheduleKind, deriveDueAt, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import {
-    ALLDAY_ALERTS, TIMED_ALERTS, type ScheduleForm, dueAtAfterRemoving, formFromSchedule, isLastWeekdayOfMonth, newForm, nthOfMonth,
-    removingRevealsPrivateTime, scheduleFromForm,
+    ALLDAY_ALERTS, TIMED_ALERTS, type ScheduleForm, dueAtAfterRemoving, endTimeAfterMovingStart, formFromSchedule,
+    isLastWeekdayOfMonth, newForm, nthOfMonth, removingRevealsPrivateTime, scheduleFromForm,
 } from '../../api/scheduleForm';
 import { formatDateKey } from '../../api/scheduleFormat';
 import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderTimes } from '../../api/reminderTimes';
@@ -148,8 +148,13 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                                             const at = new Date(presetInstant(times[p.value], Date.now()));
                                             // Coming off all-day also drops the all-day alert offset
                                             // (-540), which has no option in the timed list.
+                                            // An EVENT keeps its length: moving only the start would
+                                            // read as running past midnight (scheduleFromForm).
                                             set({
                                                 date: todayKey(at.getTime()), startTime: times[p.value], allDay: false,
+                                                ...(form.kind === 'event' && form.endTime
+                                                    ? { endTime: endTimeAfterMovingStart(form.startTime, form.endTime, times[p.value]) }
+                                                    : {}),
                                                 ...(form.allDay ? { alert: form.kind === 'event' ? '10' : '0' } : {}),
                                             });
                                         }}>

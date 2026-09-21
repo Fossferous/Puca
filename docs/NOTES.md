@@ -705,10 +705,13 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   and the time a new reminder starts at. Set them in the account menu
   (09:00 / 14:00 / 19:00, new reminders at 09:00, until you change them). An
   item's clock button then offers those three as one tap, the *Date & repeat*
-  dialog offers the same row, and Snooze's *Tomorrow* means your morning. A
-  preset lands on today if that time is still ahead and on tomorrow if it has
-  gone, by wall clock, so the day the clocks change still gives you the time
-  you asked for. The times follow your account in the sealed document above —
+  dialog offers the same row wherever it is opened from (a Reminders row, the
+  calendar, or the item inside its note), and Snooze's *Tomorrow* means your
+  morning. A preset lands on today if that time is still ahead and on tomorrow
+  if it has gone, by wall clock, so the day the clocks change still gives you
+  the time you asked for. On an **event** a preset moves the start and keeps
+  the length: a 09:00-10:00 hour tapped to *Evening* is 21:45-22:45, not an
+  event running to 10:00 the next day. The times follow your account in the sealed document above —
   the server never sees them — but a preset writes the same plaintext `due_at`
   any reminder does, so the per-item *Keep the time private from the server*
   switch is still the way to hide when something is. Púca's own Tasks view

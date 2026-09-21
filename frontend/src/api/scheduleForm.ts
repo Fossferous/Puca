@@ -150,6 +150,26 @@ function formatKey(w: Pick<Wall, 'y' | 'm' | 'd'>): string {
 }
 
 /**
+ * Where an event's END lands when its START moves to `next`: the same length
+ * of event, not the same end time. A one-tap preset (Morning / Afternoon /
+ * Evening) moves only the start, and scheduleFromForm reads an end at or
+ * before the start as running past midnight — so leaving a 09:00–10:00
+ * standup's end alone while the start jumps to 21:45 silently turns it into a
+ * 12h15 event, with no error, because that form is perfectly valid.
+ *
+ * An end equal to the start is a 24h event and stays one. Anything
+ * unparseable is left exactly as it was, which is what the editor already did.
+ */
+export function endTimeAfterMovingStart(startTime: string, endTime: string, next: string): string {
+    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (!hhmm.test(startTime) || !hhmm.test(endTime) || !hhmm.test(next)) return endTime;
+    const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+    const span = ((mins(endTime) - mins(startTime)) % 1440 + 1440) % 1440;
+    const at = (mins(next) + span) % 1440;
+    return `${pad(Math.floor(at / 60))}:${pad(at % 60)}`;
+}
+
+/**
  * The schedule a form describes, merged over `base` (an existing schedule:
  * its uid, exdates, doneThrough and any fields this build does not edit are
  * kept). Returns an error string for a form that cannot be saved.

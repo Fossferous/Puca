@@ -11,6 +11,7 @@ import { TaskTree } from '../components/TaskTree';
 import { ScheduleEditor } from '../components/schedule/ScheduleEditor';
 import { AccountMenu } from '../notes/components/AccountMenu';
 import { DEFAULT_REMINDER_TIMES, presetInstant, type ReminderTimes } from '../api/reminderTimes';
+import { serializeSchedule } from '../api/taskSchedule';
 import type { Task } from '../api/tasks';
 
 const TIMES: ReminderTimes = { morning: '07:30', afternoon: '13:15', evening: '21:45', default: '08:00' };
@@ -165,6 +166,37 @@ describe('the date & repeat dialog offers them too — with the privacy switch s
         act(() => (theirs.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
         expect(theirs.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value)
             .toBe(DEFAULT_REMINDER_TIMES.morning);
+    });
+
+    it('a preset moves an event without stretching it', () => {
+        // scheduleFromForm reads an end at or before the start as running past
+        // midnight, so moving ONLY the start turns a 09:00–10:00 standup into a
+        // 12h15 event — valid, silent, and not what the tap meant.
+        const onSave = vi.fn();
+        const event: Task = { ...task, schedule: serializeSchedule({ v: 1, kind: 'event', uid: 'uid-preset-len01', allDay: false, start: '2030-10-07T09:00', end: '2030-10-07T10:00', tz: 'UTC', alerts: [10] }) };
+        mount(<ScheduleEditor task={event} onSave={onSave} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="End time"]')!.value).toBe('10:00');
+
+        act(() => (dialog.querySelectorAll('.sched-presets button')[2] as HTMLButtonElement).click());   // Evening, 21:45
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value).toBe('21:45');
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="End time"]')!.value).toBe('22:45');
+
+        act(() => byText(dialog, 'Save')!.click());
+        const saved = JSON.parse(String(onSave.mock.calls[0][0])) as { start: string; end: string };
+        expect(saved.start.slice(11)).toBe('21:45');
+        expect(saved.end.slice(11)).toBe('22:45');
+        expect(saved.end.slice(0, 10)).toBe(saved.start.slice(0, 10));   // the same day, not past midnight
+    });
+
+    it('a to-do has no end to keep, and a preset leaves it that way (control)', () => {
+        const onSave = vi.fn();
+        mount(<ScheduleEditor task={task} onSave={onSave} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        expect(dialog.querySelector('input[aria-label="End time"]')).toBeNull();
+        act(() => (dialog.querySelectorAll('.sched-presets button')[2] as HTMLButtonElement).click());
+        act(() => byText(dialog, 'Save')!.click());
+        expect(JSON.parse(String(onSave.mock.calls[0][0])).end).toBeUndefined();
     });
 
     it('a new schedule with no preset tapped starts at the account’s "new reminders at" time', () => {
