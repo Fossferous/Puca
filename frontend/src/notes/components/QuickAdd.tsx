@@ -14,7 +14,11 @@
  * without them the note is titled "Voice note" with an empty body and search,
  * which reads text and never attachment names, can never find it again. The
  * transcript starts at *Keep* rather than at *Done*, so it is usually ready
- * by the time the note is saved; Done waits for it if it is not.
+ * by the time the note is saved; Done waits for it if it is not. That wait is
+ * real seconds with the composer still live underneath it, so the save reads
+ * the draft as it stands when the wait ENDS — a title typed meanwhile is in
+ * the note, and Discard pressed meanwhile cancels the save instead of being
+ * overtaken by it.
  */
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -85,6 +89,18 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     useEffect(() => () => { for (const p of picturesRef.current) URL.revokeObjectURL(p.url); }, []);
     const itemRefs = useRef<(HTMLInputElement | null)[]>([]);
     const rootRef = useRef<HTMLDivElement>(null);
+    /** The draft as the LAST render had it. `close()` waits for the phone to
+     *  finish writing a recording down before it creates the note, and a value
+     *  captured in the Done click's closure would be the one from before that
+     *  wait — so a title typed, an item added or a picture attached while
+     *  "Writing down what you said…" was on the screen would be read from a
+     *  dead render and silently dropped. Assigned during render rather than in
+     *  an effect, so it can never be a beat behind what is on the screen. */
+    const live = useRef({ title, items, mode, body, pictures, clip });
+    live.current = { title, items, mode, body, pictures, clip };
+    /** Bumped by anything that means "this draft is no longer being saved":
+     *  Discard pressed while a save is waiting must not create the note. */
+    const closeToken = useRef(0);
     const focusItem = (i: number) => requestAnimationFrame(() => itemRefs.current[i]?.focus());
 
     useEffect(() => {
@@ -125,18 +141,20 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     };
     const reset = () => {
         setTitle(''); setItems(['']); setBody(''); setMode('list');
-        for (const p of pictures) URL.revokeObjectURL(p.url);
+        // live, not the closure: reset() also runs after an await, and a
+        // picture added during that wait has a URL of its own to free.
+        for (const p of live.current.pictures) URL.revokeObjectURL(p.url);
         setPictures([]);
         dropClip();
     };
     /** Anything worth saving, transcript aside (a transcript only exists when
      *  a recording does, and a recording is content on its own). */
-    const hasContent = () => pictures.length > 0 || !!clip || (mode === 'text' && body.trim() !== '');
-    const extras = (): NoteExtras | undefined => {
-        const photos = pictures.flatMap(p => (p.photo ? [p.photo] : []));
-        const drawing = pictures.find(p => p.drawing)?.drawing;
-        const typed = mode === 'text' ? body.trim() : '';
-        const audio = clip ? [clip.file] : [];
+    const hasContent = (from = live.current) => from.pictures.length > 0 || !!from.clip || (from.mode === 'text' && from.body.trim() !== '');
+    const extras = (from = live.current): NoteExtras | undefined => {
+        const photos = from.pictures.flatMap(p => (p.photo ? [p.photo] : []));
+        const drawing = from.pictures.find(p => p.drawing)?.drawing;
+        const typed = from.mode === 'text' ? from.body.trim() : '';
+        const audio = from.clip ? [from.clip.file] : [];
         let text = typed;
         const heard = transcriptRef.current;
         if (heard) {
@@ -163,16 +181,23 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     });
     const hasDrawing = pictures.some(p => p.drawing);
 
+    /** The draft as it stands at this instant — what a save would create. */
+    const draftNow = () => {
+        const from = live.current;
+        const raw = from.mode === 'list' ? from.items : [];
+        return { from, raw, empty: from.title.trim() === '' && cleanQuickItems(raw).length === 0 && !hasContent(from) };
+    };
+
     const close = async () => {
         if (saving) return;
-        const cleaned = mode === 'list' ? cleanQuickItems(items) : [];
-        if (title.trim() === '' && cleaned.length === 0 && !hasContent()) {
+        const dismiss = () => {
             reset();
             setOpen(!sheet && false);
             onDismiss?.();
-            return;
-        }
+        };
+        if (draftNow().empty) { dismiss(); return; }
         setSaving(true);
+        const token = ++closeToken.current;
         let ok = false;
         try {
             // What the phone is still writing down belongs IN this note, so
@@ -181,11 +206,22 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
             if (transcribeJob.current) {
                 try { await transcribeJob.current; } catch { /* the job answers, it never rejects */ }
             }
-            ok = await onCreate(title, mode === 'list' ? items : [], extras());
+            // Everything below reads the draft AFTER that wait, which can be
+            // seconds long and which nothing about the composer freezes.
+            // Discard pressed in it means this save is cancelled: the draft is
+            // already gone, and creating the note now would bring back the
+            // very recording the user just threw away.
+            if (closeToken.current !== token) return;
+            const d = draftNow();
+            if (d.empty) { dismiss(); return; }   // emptied while we waited
+            ok = await onCreate(d.from.title, d.raw, extras(d.from));
         } finally {
             setSaving(false);
         }
         if (!ok) return;   // the owner has toasted why; the draft stays
+        // Discarded while the note was being created: whatever is on the
+        // screen now belongs to the next note, so leave it alone.
+        if (closeToken.current !== token) return;
         reset();
         setOpen(false);
         onDismiss?.();
@@ -193,6 +229,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
 
     const discard = () => {
         if ((pictures.length > 0 || clip || body.trim()) && !window.confirm('Discard this note?')) return;
+        // A save still waiting for the transcript is off, and the composer
+        // must stop claiming to be saving a note that no longer exists.
+        closeToken.current++;
+        setSaving(false);
         reset(); setOpen(false); onDismiss?.();
     };
 

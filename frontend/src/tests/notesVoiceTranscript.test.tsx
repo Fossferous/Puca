@@ -89,6 +89,16 @@ function type(el: HTMLTextAreaElement, value: string) {
     });
 }
 
+function typeInput(el: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+        setter.call(el, value);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+}
+
+const input = (label: string) => document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+
 /** Record a take and press Keep. Leaves whatever `transcribeClip` does next
  *  in flight, which is the whole point. */
 async function recordAndKeep(label: string) {
@@ -293,6 +303,69 @@ describe('the composer: a voice note is written down there too', () => {
         const extra = onCreate.mock.calls[0][2] as { body?: string; audio?: File[] };
         expect(extra.audio).toHaveLength(1);
         expect(extra.body).toBeUndefined();
+    });
+
+    it('what is typed WHILE the phone is writing it down is in the note', async () => {
+        const onCreate = vi.fn(async () => true);
+        const resolveWith = pendingTranscribe();
+        await openComposer(onCreate);
+        await recordAndKeep('Voice note');
+        await act(async () => { byText('Done')!.click(); });
+        await settle();
+        expect(onCreate, 'the save did not wait, so there is no window to test').not.toHaveBeenCalled();
+
+        // The composer is still on the screen, the notice reads "Writing down
+        // what you said…", and nothing here is disabled: this is exactly when
+        // someone adds the shop's name.
+        expect(document.querySelector('.notes-transcribe-notice')?.textContent).toMatch(/Writing down/);
+        typeInput(input('Title'), 'Milk from the corner shop');
+        typeInput(input('Item 1'), 'eggs');
+
+        await resolveWith({ text: 'pick up the prescription', reason: null });
+        await settle();
+        expect(onCreate).toHaveBeenCalledTimes(1);
+        expect(onCreate.mock.calls[0][0], 'the title was read from the render that started the save').toBe('Milk from the corner shop');
+        expect(onCreate.mock.calls[0][1], 'the item typed during the wait was dropped').toContain('eggs');
+        // Positive control: the words it heard still made it in, so this is
+        // not passing because the transcript path broke.
+        expect((onCreate.mock.calls[0][2] as { body?: string }).body).toBe('pick up the prescription');
+    });
+
+    it('Discard during that wait cancels the save — it does not land on the NEXT note', async () => {
+        const onCreate = vi.fn(async () => true);
+        const resolveWith = pendingTranscribe();
+        await openComposer(onCreate);
+        await recordAndKeep('Voice note');
+        await act(async () => { byText('Done')!.click(); });
+        await settle();
+        expect(onCreate).not.toHaveBeenCalled();
+
+        // Changed their mind while it was still thinking. window.confirm is
+        // mocked true, so "Discard this note?" is answered yes.
+        await act(async () => { byLabel('Discard note')!.click(); });
+        await settle();
+
+        // And they start the NEXT note, still inside the old wait.
+        await act(async () => { byText('Take a note…')!.click(); });
+        expect(byText('Saving…'), 'the reopened composer still claims to be saving the note that was discarded, so its Done is dead').toBeUndefined();
+        typeInput(input('Title'), 'Bread');
+        expect(onCreate).not.toHaveBeenCalled();
+
+        await resolveWith({ text: 'pick up the prescription', reason: null });
+        await settle();
+        // Nobody pressed Done on "Bread". A save that survives its own
+        // Discard picks the live draft up and creates it behind their back —
+        // and then resets the composer, taking the typing with it.
+        expect(onCreate, 'the cancelled save created the next note by itself').not.toHaveBeenCalled();
+        expect(input('Title').value, 'the cancelled save wiped the draft on screen').toBe('Bread');
+
+        // POSITIVE CONTROL: their own Done still works, and carries nothing
+        // of the discarded note — no recording, no words.
+        await act(async () => { byText('Done')!.click(); });
+        await settle();
+        expect(onCreate).toHaveBeenCalledTimes(1);
+        expect(onCreate.mock.calls[0][0]).toBe('Bread');
+        expect(onCreate.mock.calls[0][2], 'the discarded recording came back').toBeUndefined();
     });
 
     it('a take that is removed takes its words with it', async () => {
