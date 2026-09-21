@@ -294,11 +294,16 @@ there would link it into Púca's own APK.
 
 **Due reminders, open or closed.** The page still polls `GET /task-reminders`
 (ids and due times only), but in the app it posts nothing itself: every fetch
-goes to the native side as `{id, at, mark, due}` entries, which arms ONE exact
+goes to the native side as `{id, at, mark, due}` entries (one type,
+`api/reminderFeed.ts`), which arms ONE exact
 alarm for the next owed reminder and posts ONE notification for everything due
 — "Púca Notes · An item is due" / "3 items are due", never the item's text.
-An item fires once per `mark` (today the due time; the timing work makes it
-include a snooze), so an edited due time fires again. The alarm is re-armed
+An item fires once per `mark` (see *Calendar, repeats and snooze*), so an
+edited due time fires again. A repeating item arrives as several entries with
+one id — its reminders in the next 14 days, which the page precomputes
+because the native side cannot open the sealed rule — and only the latest past
+entry of an id counts (`ReminderPlan.plan`), so each occurrence fires once and
+never re-fires an earlier one. The alarm is re-armed
 after a reboot, an app update, a clock or time-zone change and a change to
 the exact-alarm grant, and a time that passed while the phone was off fires
 at the next arm. Tapping the notification opens Reminders. Just before firing,
@@ -313,11 +318,22 @@ token in its private, backup-excluded storage (`allowBackup=false` plus the
 include-only backup and data-extraction rules copied from Púca) and a
 JobScheduler job refreshes the reminder feed about once an hour, with any
 network, while Notes is closed — so a due time set on the desktop reaches the
-phone without opening Notes. A renewed token the server hands back is kept,
+phone without opening Notes. The refresh sees only `{id, due_at}`, so
+(`ReminderMerge.merge`): an unchanged `due_at` keeps every entry the page
+armed for that id, occurrences included; a `due_at` advanced on another device
+to one of the id's own occurrence instants keeps that occurrence (with the
+mark it may already have fired under) and the later ones; any other move — an
+edit, a snooze by an editor, which moves `due_at` — starts that id over from
+the server's time, and an id gone from the feed (completed, deleted) is
+dropped with all its entries. The page's next sync fills the series back
+in. A renewed token the server hands back is kept,
 and adopted by the page (same account, longer life only) — at launch, each
-time the page comes back into view, and before it would treat a 401 as the end
-of the session, so a Notes process that slept in the background for a day
-does not wake on the sign-in screen.
+time the page comes back into view, when the network returns after the token
+ran out offline, and before it would treat a 401 as the end of the session, so
+a Notes process that slept in the background for a day does not wake on the
+sign-in screen. A 401 for a token the page has already replaced (a request that
+left just before the adoption) is not an expiry at all (`api/client.ts`, and
+the live stream reconnects with the new token).
 Android decides when the job really runs: roughly hourly for an app in use,
 much less often for one left unopened for days, so a due time set elsewhere
 less than about an hour ahead can arrive late. (Holding an exact-alarm
@@ -348,14 +364,24 @@ notification, never zero. Before posting a due-item notification on Android,
 Púca asks Púca Notes (`SovereignAppPlugin.notesOwnsDueReminders` →
 `ReminderOwnerProvider`, a read-only, one-row content provider) and stays
 quiet **only on its yes**, which Notes gives while ALL of these hold
-(`ReminderRules.ownsDueReminders`, JUnit-tested): a live session, signed in to
-the **same account** Púca names; the reminder feed read successfully within
-the last **three hours** (the hourly job, or the open page's own poll);
-notifications allowed (permission, app switch and Reminders channel); and its
-alarm set whenever something is owed. Anything else — Notes not installed, a
-Notes APK from before the provider, signed out, another account, a job
-Android has not run for hours, notifications off, an error — and Púca
-notifies. The provider is guarded by
+(`ReminderRules.ownsDueReminders`, JUnit-tested): a live session whose token
+does not expire within five minutes (a stored token past its JWT `exp` — the
+30-day cap — is not one, even before the job's next run sees the 401), signed
+in to the **same account on the same server** Púca names (Púca passes its API
+base; user 42 on another server is someone else); the reminder feed read
+successfully within the last **three hours** (the hourly job, or the open
+page's own poll); notifications allowed (permission, app switch and Reminders
+channel); its alarm set whenever something is owed; and **every reminder Púca
+is about to post armed in Notes under the same mark** (Púca passes their
+`{id, mark}`, which both apps derive the same way). Anything else — Notes not
+installed, a Notes APK from before the provider, signed out, another account
+or server, a job Android has not run for hours, notifications off, an item
+Notes has not fetched yet, an error — and Púca notifies. That last rule is what
+keeps a freshly set item on time: one created or re-timed on another device
+after Notes' last look is announced by Púca when it falls due, not up to the
+freshness window later by Notes' next refresh — which may then announce it a
+second time. Two alerts, late or not, is the accepted way to fail; none is
+not. The provider is guarded by
 `com.sovereign.notes.permission.DUE_REMINDER_OWNER` with
 `protectionLevel="signature"`, declared by Notes and requested by Púca, so
 only an app signed with the same key can ask — both APKs release-sign with

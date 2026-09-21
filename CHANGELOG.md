@@ -74,7 +74,9 @@ one-line summary; this file is the full story. Versions follow
 - **Púca Notes on Android reminds you even when it is closed.** A due item
   now raises a notification from the Notes app itself — open or closed,
   after a restart of the phone too — saying only "An item is due"; tapping it
-  opens Reminders. About once an hour the app also checks for due times set
+  opens Reminders. A repeating item reminds you once at each time it comes
+  round, and a snooze set on another device moves the phone's reminder with
+  it. About once an hour the app also checks for due times set
   on your other devices, so they reach the phone without opening Notes (a
   time set less than about an hour ahead can arrive late, and a phone that
   has not opened Notes in days checks less often). If your session ends, one
@@ -101,10 +103,15 @@ one-line summary; this file is the full story. Versions follow
 
 ### Changed
 - **One notification per due item when both apps are installed.** When
-  Púca Notes on the phone is signed in to the same account, keeping up with
-  your reminders and allowed to notify, Púca leaves due items to it; in every
-  other case (Notes signed out, out of date, stopped, muted, or an older
-  version) Púca notifies as before, so an item is never left unannounced.
+  Púca Notes on the phone is signed in to the same account on the same
+  server, keeping up with your reminders, allowed to notify, and already
+  holding the reminder that is due, Púca leaves it to Notes; in every other
+  case (Notes signed out or its session about to run out, out of date,
+  stopped, muted, an older version, or an item Notes has not fetched yet)
+  Púca notifies as before, so an item is never left unannounced. The price of
+  that rule is an occasional second alert: an item set on another device
+  shortly before it falls due is announced by Púca on time, and by Notes
+  again when it next checks.
   Ship the Púca Notes APK with or before the Púca APK; if you update Notes
   from an older version, allow its notifications once.
 - **Signing out of Notes now removes this browser from your Devices list**, as

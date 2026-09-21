@@ -63,6 +63,8 @@ public class ReminderReceiver extends BroadcastReceiver {
             count = r.dueNow.size();
             ReminderStore.setFired(ctx, r.prunedFired);
         }
+        // A count and the check's outcome only — never an id, a time or a mark.
+        android.util.Log.i("NotesReminders", "alarm: " + count + " due (check " + outcome + ")");
         if (count > 0) NotesNotifier.postDue(ctx, count);
         ReminderAlarms.arm(ctx);
     }
