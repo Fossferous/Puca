@@ -109,6 +109,9 @@ export function NoteGrid(props: NoteGridProps) {
         onOpen: props.onOpen, onMenu: props.onMenu, onPickColor: props.onPickColor,
         onPickLabels: props.onPickLabels, onLabelClick: props.onLabelClick, onArchive: props.onArchive,
         registerEl: props.registerEl,
+        // A search is what put these cards here: hand the card the text so it
+        // can say WHERE it matched. Never persisted, never sent.
+        query: filter.kind === 'search' ? filter.query : undefined,
         onSelect: props.onSelect,
         selecting: (props.selected?.size ?? 0) > 0,
     };

@@ -438,6 +438,35 @@ ck('search: matches an item inside a note', await page.locator('.notes-card').co
 await page.fill('.notes-search input', 'violets');
 await sleep(300);
 ck('search: matches a note\'s text', await page.locator('.notes-card').count() === 1 && /Poem/.test(await page.locator('.notes-card-title').first().innerText()));
+// A result must say WHERE it matched. 'Milk' is the item ticked back in
+// section 5, and previewRows never renders a completed row — so without the
+// "also matched" line that card would show nothing at all to explain itself.
+await page.fill('.notes-search input', 'bread');
+await sleep(300);
+ck('search: the matching words are highlighted on the card',
+    await page.locator('.notes-card mark.notes-hl').count() >= 1
+    && /bread/i.test(await page.locator('.notes-card mark.notes-hl').first().innerText()),
+    await page.locator('.notes-card mark.notes-hl').first().innerText().catch(() => 'none'));
+await page.fill('.notes-search input', 'milk');
+await sleep(300);
+const foundRow = await page.locator('.notes-card-found-row').first().innerText().catch(() => '');
+ck('search: a match on a TICKED item is still explained', /ticked/.test(foundRow) && /Milk/i.test(foundRow), foundRow);
+ck('search: the ticked item is not in the card\u2019s item list', await page.locator('.notes-card-item-text', { hasText: 'Milk' }).count() === 0);
+// Opening a result steps through its matches.
+await page.fill('.notes-search input', 'bread');
+await sleep(300);
+await page.locator('.notes-card', { hasText: 'Groceries' }).click();
+await page.waitForSelector('.notes-editor .task-tree', { timeout: 15000 });
+const matchBar = await page.locator('.notes-editor-matches').innerText().catch(() => '');
+ck('search: the open note counts its matches', /\d+ of \d+/.test(matchBar), matchBar);
+ck('search: the open note highlights the matching item', await page.locator('.notes-editor mark.notes-hl').count() >= 1);
+await page.click('.notes-editor button[aria-label="Next match"]');
+await sleep(300);
+ck('search: Next match marks exactly one as the current match', await page.locator('.notes-editor mark.notes-hl.current').count() === 1);
+await shot('search-highlight');
+await page.locator('.notes-editor-foot').getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+
 await page.fill('.notes-search input', 'zzzz');
 await sleep(300);
 ck('search: no match shows the empty state', await page.locator('.notes-empty').count() === 1);
@@ -1152,6 +1181,17 @@ await mshot('phone-label-manager');
 await m.keyboard.press('Escape');
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-dialog', { state: 'detached', timeout: 5000 });
+
+// A highlight must not push the card sideways at 390px.
+await m.fill('.notes-search input', 'bread');
+await sleep(400);
+r = await audit();
+ck('phone: a search highlight does not overflow the card',
+    await m.locator('mark.notes-hl').count() >= 1 && !r.bodyScrollsHorizontally && r.widest <= r.vw + 1,
+    JSON.stringify({ widest: r.widest, vw: r.vw }));
+await mshot('phone-search-highlight');
+await m.tap('button[aria-label="Clear search"]');
+await sleep(300);
 
 // Ordering on a phone: notes.css forces ONE column in both views there, so
 // the grip is offered in grid view too — and it must be a real tap target

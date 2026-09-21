@@ -551,6 +551,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onArchive={archiveWithUndo}
                     pucaHref={pucaHref}
                     escapeBlocked={!!popup || !!contextMenu || help || labelMgr}
+                    query={filter.kind === 'search' ? filter.query : undefined}
                 />
             )}
 

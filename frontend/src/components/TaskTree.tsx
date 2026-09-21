@@ -195,11 +195,16 @@ interface TaskTreeProps {
     /** Channel checklists name their channel on attachment uploads so the
      *  server can honour ATTACH_FILES at the upload door. Personal lists omit it. */
     channelId?: number;
+    /** Render an item's text as something other than the plain string — Púca
+     *  Notes passes a search highlighter. Optional, and the default renders
+     *  exactly what it did before, so Púca's Tasks view (which has no search)
+     *  is untouched. Read-only rows only: the inline editor is a real input. */
+    renderDescription?: (text: string) => ReactNode;
 }
 
 export function TaskTree({
     tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSetAttachments,
-    myPerms, currentUserId, resolveUserName, channelId,
+    myPerms, currentUserId, resolveUserName, channelId, renderDescription = (t: string) => t,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
     const [subtaskFor, setSubtaskFor] = useState<number | null>(null);
@@ -437,10 +442,10 @@ export function TaskTree({
                 />
             ) : editable ? (
                 <span className="tt-description" onClick={() => startEdit(task)} title="Click to edit">
-                    {task.description}
+                    {renderDescription(task.description)}
                 </span>
             ) : (
-                <span className="tt-description">{task.description}</span>
+                <span className="tt-description">{renderDescription(task.description)}</span>
             )}
             {/* Flag a checklist item the server stored as plaintext (never
                 encrypted) — audit H-1. Everything else here is E2EE, so an

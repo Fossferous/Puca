@@ -7,6 +7,13 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Search shows you where it matched.** Púca Notes now highlights the words
+  you searched for in a note's title, its text and its items, shows a piece
+  of a long note around the match instead of its opening lines, and tells you
+  when a note matched something the card does not show — a ticked item, an
+  item further down the list, or a place on a date. Opening a result counts
+  its matches and steps through them. Searching still happens only on your
+  device, and a note that cannot be decrypted is never searched.
 - **Drag a note into place, and *Move to bottom*.** In list view — and on a
   phone in either view — a note can be dragged by the grip beside its title
   to reorder it, with a line showing where it will land. Pinned notes

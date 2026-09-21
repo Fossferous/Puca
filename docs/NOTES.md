@@ -33,7 +33,15 @@ Púca's reminders. Anything you do in one is what you see in the other.
   exactly as it does in the Tasks view. (Dragging a whole NOTE into place is a
   different thing — see *How it maps onto Púca*.)
 - **Search** — over decrypted titles, items, labels and server names, on the
-  device; nothing about the query leaves it.
+  device; nothing about the query leaves it. Matches are **highlighted** in a
+  card's title, its text and its items. A long note shows a piece of itself
+  around the match instead of its opening lines, and a card says so when it
+  matched something it cannot show — a ticked item, an item past the eighth,
+  or a place on a date, all of which the card normally folds away. Opening a
+  result steps through its matches. The marking up is worked out in memory
+  from text this device has already decrypted: it is never stored, never
+  cached and never sent, the query still never reaches the address bar, and
+  text that cannot be decrypted is neither searched nor highlighted.
 - **Reminders** — every open item with a due time, grouped Overdue / Today /
   Upcoming; tick it done from there. In a browser, Notes runs Púca's reminder
   loop, so a due item notifies while the Notes tab is open (allow
@@ -168,6 +176,29 @@ Nothing here lets the operator read your notes (`docs/SECURITY_MODEL.md`):
 search is local, thumbnails are decrypted client-side as they are in Púca, and
 the prefs document is ciphertext. What the server does learn is the document's
 size and when it is written.
+
+### What a search highlights
+
+The highlighting runs over the same decrypted strings the boolean search
+already reads, so there is no second source of truth: `noteMatches` decides
+WHETHER a card is a result, and `frontend/src/notes/model/noteSearch.ts`
+decides WHERE, from the same normalisation. That normalisation changes the
+text's length three ways — accents are folded, letters lowercased, runs of
+whitespace collapsed — so a match's position in the normalised string is not
+its position in the note. `noteSearch.ts` keeps an index map back to the
+original for exactly that reason; without it a highlight drifts by one
+character per accent and several per run of spaces.
+
+One thing is deliberately NOT highlighted: a note's own text while the note
+is **open**. That field is a real `<textarea>` the user is about to type in,
+and marked-up text cannot live inside one. It is highlighted on the card,
+where it is read rather than edited; in the open note, the counter and the
+next/previous buttons step through the item matches.
+
+Nothing about any of this reaches the server, which holds ciphertext for
+every field a search reads (`docs/SECURITY_MODEL.md`): searching, matching
+and marking up all happen on the device, and the query is deliberately kept
+out of the address bar and history too.
 
 ### Managing labels
 

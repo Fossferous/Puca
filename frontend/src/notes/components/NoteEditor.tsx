@@ -14,7 +14,7 @@
  * propagation (its other three editors do), so a window-level close would
  * swallow that cancel. isEditableTarget is the guard.
  */
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
@@ -22,11 +22,13 @@ import { isEditableTarget } from '../../api/hotkeys';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { TaskTree } from '../../components/TaskTree';
 import {
-    ArchiveIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
-    RefreshIcon, TagIcon, WarningIcon,
+    ArchiveIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
+    RefreshIcon, SearchIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
+import { findRanges, searchTerms } from '../model/noteSearch';
+import { Highlight } from './Highlight';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
 import { useTaskFeature } from '../../api/taskFeatures';
@@ -48,13 +50,19 @@ interface NoteEditorProps {
      *  from a bubble-phase listener of its own without stopping propagation,
      *  so without this both would close on one keypress. */
     escapeBlocked?: boolean;
+    /** The search that led here, so the note can say where it matched and
+     *  step through its matches. Display only — never stored or sent. */
+    query?: string;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false, query }: NoteEditorProps) {
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
     const tasksQuery = useNoteTasks(ref, { live: true });
-    const tasks: Task[] = tasksQuery.data ?? card.tasks ?? [];
+    // Memoised, not a fresh `?? []` per render: the match count below is a
+    // useMemo over it, and a new empty array each render would recompute it
+    // (and every child memo) forever.
+    const tasks: Task[] = useMemo(() => tasksQuery.data ?? card.tasks ?? [], [tasksQuery.data, card.tasks]);
     const [newItem, setNewItem] = useState('');
     const [titleDraft, setTitleDraft] = useState(card.title);
     // A rename that landed from elsewhere (another device, a refetch) replaces
@@ -65,6 +73,31 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         setTitleDraft(card.title);
     }
     const addRef = useRef<HTMLInputElement>(null);
+    const bodyRef = useRef<HTMLDivElement>(null);
+    // Search marks inside the open note. The COUNT comes from the model, not
+    // from counting DOM nodes, so it is right on the first render; stepping
+    // walks the rendered marks, which are the same ones.
+    const terms = useMemo(() => (query ? searchTerms(query) : []), [query]);
+    const matchCount = useMemo(
+        () => (terms.length === 0 ? 0 : tasks.reduce((n, t) => n + (isUndecryptable(t.description) ? 0 : findRanges(t.description, terms).length), 0)),
+        [tasks, terms],
+    );
+    const [matchAt, setMatchAt] = useState(0);
+    const renderDescription = useCallback(
+        (text: string) => <Highlight text={text} ranges={terms.length > 0 && !isUndecryptable(text) ? findRanges(text, terms) : undefined} />,
+        [terms],
+    );
+    /** Scroll the nth mark into view and flag it, imperatively — the marks
+     *  are already in the DOM, so no state has to travel down to find them. */
+    const goToMatch = useCallback((index: number) => {
+        const marks = bodyRef.current?.querySelectorAll<HTMLElement>('mark.notes-hl');
+        if (!marks || marks.length === 0) return;
+        const at = ((index % marks.length) + marks.length) % marks.length;
+        marks.forEach(m => m.classList.remove('current'));
+        marks[at].classList.add('current');
+        marks[at].scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setMatchAt(at);
+    }, []);
     const currentUserId = currentUserIdFromToken() ?? undefined;
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
@@ -152,11 +185,19 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     {tasksQuery.isFetching && <span className="notes-spinner" aria-label="Refreshing" />}
                 </div>
 
+                {matchCount > 0 && (
+                    <div className="notes-editor-matches" role="status">
+                        <SearchIcon />
+                        <span>{Math.min(matchAt, matchCount - 1) + 1} of {matchCount}</span>
+                        <button type="button" className="notes-iconbtn small" aria-label="Previous match" title="Previous match" onClick={() => goToMatch(matchAt - 1)}><ChevronUpIcon /></button>
+                        <button type="button" className="notes-iconbtn small" aria-label="Next match" title="Next match" onClick={() => goToMatch(matchAt + 1)}><ChevronDownIcon /></button>
+                    </div>
+                )}
                 {titleUnreadable && (
                     <div className="notes-editor-locked"><LockIcon /> This note's title can't be read yet: {card.title}</div>
                 )}
 
-                <div className="notes-editor-body">
+                <div className="notes-editor-body" ref={bodyRef}>
                     <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} />
                     {canCreate && (
                         <form className="notes-editor-add" onSubmit={addItem}>
@@ -190,6 +231,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             currentUserId={currentUserId}
                             resolveUserName={card.resolveUserName}
                             channelId={ref.id}
+                            renderDescription={renderDescription}
                         />
                     ) : (
                         <TaskTree
@@ -203,6 +245,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
                             onSetSchedule={onSetSchedule}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
+                            renderDescription={renderDescription}
                         />
                     )}
                 </div>

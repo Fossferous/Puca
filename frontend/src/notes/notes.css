@@ -575,6 +575,56 @@
 }
 .notes-grid.list { position: relative; }
 
+/* ---------- Search highlighting ---------------------------------------------
+   A bare <mark> takes the user agent's yellow-on-black, which ignores all
+   eight themes and sits on eleven card tints. Tokened explicitly, like every
+   other colour here; under [data-contrast="high"] the tint becomes an edge
+   stripe on the card, so the mark needs its own readable pairing there. */
+.notes-hl {
+    background: var(--brand-primary);
+    color: #fff;
+    border-radius: 3px;
+    padding: 0 1px;
+    /* The text keeps the card's own weight: a heavier mark reflows the line
+       as you type, and the colour is signal enough. */
+    font-weight: inherit;
+}
+[data-contrast="high"] .notes-hl {
+    background: var(--text-normal);
+    color: var(--bg-primary);
+}
+/* The match the editor's prev/next is sitting on. */
+.notes-hl.current { outline: 2px solid var(--text-normal); outline-offset: 1px; }
+
+/* The open note's match bar: "3 of 9" with prev/next. */
+.notes-editor-matches {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 16px 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.notes-editor-matches .svrn-icon { color: var(--text-faint); }
+
+/* "Also matched" — what the card structurally cannot show (a ticked item, an
+   item past the eighth, a place on a date). Without it those cards look as
+   though they matched nothing at all. */
+.notes-card-found {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border-faint);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.notes-card-found-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.notes-card-found-row .svrn-icon { flex-shrink: 0; color: var(--text-faint); font-size: 12px; }
+.notes-card-found-what { flex-shrink: 0; color: var(--text-faint); font-style: italic; }
+.notes-card-found-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---------- Popovers (colour / labels / account) ---------------------------- */
 .notes-popover-backdrop {
     position: fixed;

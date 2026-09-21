@@ -12,7 +12,7 @@
  * check and the channel plumbing). Thumbnails decrypt only once the card is
  * on screen, image types only, at most three per card.
  */
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments, isTaskOverdue, formatDueShort, type TaskAttachmentRef } from '../../api/tasks';
 import { parseEncAttachment, decryptToBlobUrl } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
@@ -21,10 +21,14 @@ import {
     ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
+import { findRanges, searchTerms, type Range } from '../model/noteSearch';
+import { scheduleSearchText } from '../model/notesTiming';
+import { Highlight } from './Highlight';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
 import { heroItems } from '../../api/noteMedia';
 import { ScheduleChip } from '../../components/schedule/ScheduleChip';
+import { SearchIcon } from '../../components/Icons';
 import { useNoteUnsynced } from '../model/notesOutbox';
 import { useLongPress } from './useLongPress';
 
@@ -46,6 +50,10 @@ interface NoteCardProps {
     compactTools: boolean;
     /** The card registers its element so menus opened elsewhere can anchor to it. */
     registerEl: (key: string, el: HTMLElement | null) => void;
+    /** The live search text, when a search is what put this card here.
+     *  Only for marking up what matched: the query is never stored or sent.
+     */
+    query?: string;
     /** Drag to reorder is on for this section (NoteGrid decides): show the
      *  grip and mark the article for useDragReorder. */
     draggable?: boolean;
@@ -78,7 +86,7 @@ function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible:
 
 function NoteCardImpl({
     card, actions, now, onOpen, onMenu, onPickColor, onPickLabels, onLabelClick, onArchive, compactTools, registerEl,
-    draggable = false, draggingKey = null, selected = false, selecting = false, onSelect,
+    query, draggable = false, draggingKey = null, selected = false, selecting = false, onSelect,
 }: NoteCardProps) {
     const elRef = useRef<HTMLElement | null>(null);
     const press = useLongPress(onSelect ? () => onSelect(card, { shiftKey: false }) : undefined);
@@ -93,6 +101,36 @@ function NoteCardImpl({
             if ((e.target as Element | null)?.closest?.('.notes-card-grip')) press.handlers.onPointerCancel();
         },
     };
+    // Where the search matched. Derived at render and never attached to the
+    // card: notesCache.ts seals and stores whatever a NoteCard carries, and a
+    // plaintext snippet has no business in that store. A decrypt-failure
+    // marker is blanked first, exactly as noteMatches blanks it, so searching
+    // "encrypted" never marks up a note you cannot read.
+    const terms = useMemo(() => (query ? searchTerms(query) : []), [query]);
+    const readable = (t: string) => (isUndecryptable(t) ? '' : t);
+    const titleRanges = useMemo(() => findRanges(readable(card.title), terms), [card.title, terms]);
+    const tasksForHits = card.tasks;
+    // Matches the card structurally cannot show: a ticked item (previewRows
+    // folds those away), an item past the eighth, or a place on a date, which
+    // ScheduleChip draws as a bare pin with no text. Without this the card
+    // looks as though it matched nothing at all.
+    const foundElsewhere = useMemo<{ what: string; text: string; ranges: Range[] }[]>(() => {
+        if (terms.length === 0 || !tasksForHits) return [];
+        const shown = new Set(previewRows(tasksForHits, PREVIEW_ROWS).rows.map(r => r.task.id));
+        const out: { what: string; text: string; ranges: Range[] }[] = [];
+        for (const t of tasksForHits) {
+            if (!shown.has(t.id)) {
+                const desc = isUndecryptable(t.description) ? '' : t.description;
+                const r = findRanges(desc, terms);
+                if (r.length > 0) out.push({ what: t.is_completed ? 'ticked' : 'further down', text: desc, ranges: r });
+            }
+            const place = scheduleSearchText(t);
+            const pr = place ? findRanges(place, terms) : [];
+            if (pr.length > 0) out.push({ what: 'a place', text: place, ranges: pr });
+        }
+        return out.slice(0, 3);
+    }, [terms, tasksForHits]);
+
     const unsynced = useNoteUnsynced(card.key);
     // No observer (an old WebView, jsdom) → decrypt right away rather than never.
     const [onScreen, setOnScreen] = useState(() => typeof IntersectionObserver === 'undefined');
@@ -188,7 +226,7 @@ function NoteCardImpl({
             <div className="notes-card-head">
                 {draggable && <span className="notes-card-grip" title="Drag to reorder" aria-hidden="true"><GripIcon /></span>}
                 <h3 className={`notes-card-title ${untitled ? 'untitled' : ''}`}>
-                    {untitled ? 'Untitled note' : card.title}
+                    {untitled ? 'Untitled note' : <Highlight text={card.title} ranges={titleRanges} />}
                     {card.titleEncState === 'legacy' && !titleUnreadable && (
                         <span className="tt-not-encrypted" title="Not encrypted — this title is stored as plaintext, not end-to-end encrypted."> <WarningIcon /> Not encrypted</span>
                     )}
@@ -205,7 +243,7 @@ function NoteCardImpl({
                 </button>
             </div>
 
-            <NoteBodyPreview body={card.body} />
+            <NoteBodyPreview body={card.body} terms={terms} />
             {preview === null ? (
                 <div className="notes-card-empty">Loading…</div>
             ) : preview.rows.length === 0 && preview.completedCount === 0 ? (
@@ -222,7 +260,9 @@ function NoteCardImpl({
                                 onClick={e => e.stopPropagation()}
                                 onChange={e => toggle(task, e)}
                             />
-                            <span className="notes-card-item-text">{task.description}</span>
+                            <span className="notes-card-item-text">
+                                <Highlight text={task.description} ranges={findRanges(readable(task.description), terms)} />
+                            </span>
                             {task.descEncState === 'legacy' && (
                                 <span className="tt-not-encrypted" title="Not encrypted — this item was stored as plaintext, not end-to-end encrypted."><WarningIcon /> Not encrypted</span>
                             )}
@@ -243,6 +283,17 @@ function NoteCardImpl({
                     {preview.completedCount > 0 && `${preview.completedCount} completed`}
                 </div>
             )}
+            {foundElsewhere.length > 0 && (
+                <div className="notes-card-found">
+                    {foundElsewhere.map((f, i) => (
+                        <span key={i} className="notes-card-found-row">
+                            <SearchIcon />
+                            <span className="notes-card-found-what">{f.what}</span>
+                            <span className="notes-card-found-text"><Highlight text={f.text} ranges={f.ranges} /></span>
+                        </span>
+                    ))}
+                </div>
+            )}
 
             {(thumbs.length > 0 || fileCount > 0) && (
                 <div className="notes-card-thumbs">
@@ -253,7 +304,7 @@ function NoteCardImpl({
 
             <div className="notes-card-foot">
                 {card.serverName && (
-                    <span className="notes-chip shared" title={`Shared checklist in ${card.serverName}`}><MembersIcon /> {card.serverName}</span>
+                    <span className="notes-chip shared" title={`Shared checklist in ${card.serverName}`}><MembersIcon /> <Highlight text={card.serverName} ranges={findRanges(card.serverName, terms)} /></span>
                 )}
                 {due && (
                     <span className={`notes-chip ${isTaskOverdue(due, now) ? 'overdue' : ''}`} title={`Next due: ${new Date(due.due_at!).toLocaleString()}`}>
@@ -274,7 +325,7 @@ function NoteCardImpl({
                         onClick={e => { e.stopPropagation(); onLabelClick(l); }}
                         onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onLabelClick(l); } }}
                     >
-                        <TagIcon /> {l}
+                        <TagIcon /> <Highlight text={l} ranges={findRanges(l, terms)} />
                     </span>
                 ))}
             </div>
