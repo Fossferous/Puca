@@ -402,8 +402,9 @@ export async function notesOwnsDueReminders(
 
 /**
  * Post (or replace — `key` is stable per conversation/channel) a message
- * notification. `nav` is where a tap lands: 'friends', 'tasks', 'devices',
- * 'settings', 'dms', 'notes', 'dm:<conversationId>' or 'server:<serverId>'.
+ * notification. `nav` is where a tap lands: 'friends', 'tasks', 'reminders'
+ * (the Tasks view's Reminders tab), 'devices', 'settings', 'dms', 'notes',
+ * 'dm:<conversationId>' or 'server:<serverId>'.
  */
 export async function postMobileNotification(
     key: string, title: string, body: string, nav?: string,

@@ -539,6 +539,24 @@ await page.waitForFunction(() => document.querySelector('.list-content-block .ni
     .then(() => ck('púca: a photo note shows its photo', true))
     .catch(() => ck('púca: a photo note shows its photo', false));
 await shot('puca-tasks-photo-note');
+// Púca's own Reminders tab: the SAME grouped list Notes shows, over every
+// personal list and checklist channel — and where a due-item notification
+// lands (api/desktopNotify dispatches 'sovereign:open-reminders').
+await page.locator('.tasks-tab-reminders').click();
+await page.waitForSelector('.tasks-reminders .notes-reminders', { timeout: 10000 });
+ck('púca reminders: the tab mounts the shared list', await page.locator('.tasks-reminders .notes-reminders').count() === 1);
+ck('púca reminders: the due item from a personal note is listed', await page.locator('.tasks-reminders .notes-reminder-row', { hasText: 'Eggs' }).count() === 1);
+ck('púca reminders: it is grouped, not a flat list', await page.locator('.tasks-reminders .notes-reminder-group .notes-section-title').count() >= 1);
+// The styles came with the shared component: Púca never loads notes.css, so
+// an unstyled row here is the failure this catches.
+ck('púca reminders: the row is laid out (the shared CSS reached Púca)',
+    await page.locator('.tasks-reminders .notes-reminder-row').first().evaluate(el => getComputedStyle(el).display) === 'flex');
+await shot('puca-tasks-reminders');
+await page.locator('.tasks-tab-all').click();
+await page.waitForSelector('.tasks-tab-all.active', { timeout: 5000 });
+await page.evaluate(() => window.dispatchEvent(new CustomEvent('sovereign:open-reminders')));
+const landed = await page.waitForSelector('.tasks-tab-reminders.active', { timeout: 5000 }).then(() => true, () => false);
+ck('púca reminders: a clicked due-item notification lands on the Reminders tab', landed);
 // Move to trash from Púca: the list leaves the bar and the Trash section offers it back.
 await page.locator('.tasks-tab', { hasText: 'Packing' }).click({ button: 'right' });
 await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
@@ -1147,6 +1165,25 @@ if (!psqlDsn) {
 // work added the last two, so a fixed count would only measure that).
 ck('desktop hint: a second line inside the item cell, not a new column', !!hinted && !!mine && !!hinted.sub && hinted.cells === mine.cells && hinted.sub.t >= hinted.text.t + 4 && hinted.sub.b <= hinted.row.b + 0.5, JSON.stringify({ hinted, mineCells: mine?.cells }));
         await shotOf(h)('hint-desktop');
+        // ---- 15b. The SAME rule in Púca's own Reminders tab -------------------
+        // Púca's sources are every member's items in that checklist, not just
+        // the caller's, so this line matters MORE here: /task-reminders' channel
+        // arm is `created_by = $1` and will never alert this user for it.
+        await h.goto('/chat');
+        await h.waitForSelector('.chat-container', { timeout: 20000 });
+        try { await h.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+        await h.click('.server-icon.home-button');
+        await h.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
+        await h.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+        await h.locator('.tasks-tab-reminders').click();
+        await h.waitForSelector('.tasks-reminders .notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
+        const prows = await rowFacts(h);
+        const phinted = prows.find(x => x.label === 'Shared errand');
+        const pmine = prows.find(x => x.label === 'My shared errand');
+        ck('púca reminders: the item someone else set says "Reminds whoever set it"', !!phinted && phinted.hint === 'Reminds whoever set it', JSON.stringify(phinted));
+        ck('púca reminders: my own shared item does not (control)', !!pmine && pmine.hint === null, JSON.stringify(pmine));
+        ck('púca reminders: a second line inside the item cell, not a new column', !!phinted && !!pmine && !!phinted.sub && phinted.cells === pmine.cells && phinted.sub.t >= phinted.text.t + 4, JSON.stringify(phinted));
+        await shotOf(h)('puca-reminders-hint-desktop');
         await hctx.close();
 
         const pctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: state });
@@ -1171,6 +1208,37 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
             JSON.stringify({ vw, overflow, hinted }));
         ck('phone hint: nothing covers it', await onTop(pg, '.notes-reminder-sub'));
         await shotOf(pg)('hint-phone');
+        // The same view in PÚCA at 390x844: the tab is a whole tap target, the
+        // rows fit, and the snooze button is not a 32 px dot on a phone.
+        await pg.goto('/chat');
+        await pg.waitForSelector('.chat-container', { timeout: 20000 });
+        try { await pg.tap('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+        await pg.tap('.server-icon.home-button');
+        await pg.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).tap();
+        await pg.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+        await pg.locator('.tasks-tab-reminders').tap();
+        await pg.waitForSelector('.tasks-reminders .notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
+        const tabBox = await pg.locator('.tasks-tab-reminders').boundingBox();
+        ck('púca reminders (phone): the tab is a whole tap target', !!tabBox && tabBox.width >= 44 && tabBox.height >= 44, JSON.stringify(tabBox));
+        const pucaPhone = await pg.evaluate(() => ({
+            overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+            vw: window.innerWidth,
+            rows: [...document.querySelectorAll('.tasks-reminders .notes-reminder-row')].map(r => r.getBoundingClientRect().right),
+            box: (() => { const b = document.querySelector('.tasks-reminders input[type="checkbox"]'); return b ? b.getBoundingClientRect().width : 0; })(),
+        }));
+        ck('púca reminders (phone): no horizontal overflow and every row fits', !pucaPhone.overflow && pucaPhone.rows.length > 0 && pucaPhone.rows.every(r => r <= pucaPhone.vw + 0.5), JSON.stringify(pucaPhone));
+        ck('púca reminders (phone): the tick box grew for a finger', pucaPhone.box >= 20, String(pucaPhone.box));
+        const snoozeBtn = pg.locator('.tasks-reminders .notes-snooze button').first();
+        if (await snoozeBtn.count() === 1) {
+            const sb = await snoozeBtn.boundingBox();
+            ck('púca reminders (phone): the snooze button is a 44 px target', !!sb && sb.width >= 44 && sb.height >= 44, JSON.stringify(sb));
+            await snoozeBtn.tap();
+            const presets = await pg.locator('.notes-snooze-menu .notes-textbtn').evaluateAll(els => els.map(e => { const b = e.getBoundingClientRect(); return { h: b.height, r: b.right }; }));
+            ck('púca reminders (phone): every snooze preset is 44 px and inside the viewport', presets.length >= 3 && presets.every(p => p.h >= 44 && p.r <= pucaPhone.vw + 0.5), JSON.stringify(presets));
+        } else {
+            skip('púca reminders (phone): snooze is off on this server (taskFeatures)');
+        }
+        await shotOf(pg)('puca-reminders-phone');
         await pctx.close();
     } catch (e) {
         ck('shared-item hint walk ran', false, String(e).slice(0, 300));

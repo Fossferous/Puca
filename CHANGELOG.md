@@ -29,6 +29,12 @@ one-line summary; this file is the full story. Versions follow
   view.** Month, week, day and agenda views. On a phone, the month shows dots
   and the chosen day's list. Drag an item to another day, or use *Move to
   date…* or the `[` and `]` keys. Tap a day to add something to it.
+- **Reminders in Púca.** The Tasks view now has a Reminders tab: every item
+  with a due time, across all your lists and checklist channels, grouped
+  Overdue / Today / Upcoming, with tick and snooze in place. It is the same
+  view Púca Notes has, and a due-item notification now opens it instead of
+  the all-tasks board. An item in a shared checklist that someone else set
+  says *Reminds whoever set it* — those go off for whoever set them, not you.
 - **Dates that repeat.** An item can be an event or a to-do, all-day or at a
   time in its own time zone, with an end, a place and reminders, repeating
   daily, weekly, monthly or yearly. Ticking a repeating to-do moves it to the

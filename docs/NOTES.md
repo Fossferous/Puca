@@ -41,7 +41,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
   section for items with a place saved on that phone. A due item in a shared
   note that someone else created says **Reminds whoever set it**: the
   reminder feed covers the shared items *you* created, so that one never
-  alerts you.
+  alerts you. **Púca's own Tasks view pins the same view as a Reminders
+  tab**, over every personal list and checklist channel, and a due-item
+  notification opens it — so this is not a Notes-only surface, and the
+  "Reminds whoever set it" line matters more there, because Púca's rows
+  include items every other member set.
 - **Calendar, repeats, snooze, Edited** — a Calendar in the rail, dates and
   repeat rules on items, snoozing reminders, and an Edited time on every note
   (see *Calendar, repeats and snooze* below).
@@ -94,7 +98,7 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
 | An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
 | Edited | `updated_at` on the list and its items (066) |
-| Reminders | `due_at` + `frontend/src/api/taskReminders.ts` |
+| Reminders | `due_at` + `frontend/src/api/taskReminders.ts`; the grouping and the timing rules are `frontend/src/api/reminderGroups.ts` + `reminderSlots.ts`, the list itself `frontend/src/components/reminders/` (both front doors) |
 | Colour, labels, archive | One sealed-to-self document per account (`/sealed-blobs/notes-prefs`, below) |
 | Grid/list, sort | Device-local (below) |
 
@@ -725,10 +729,15 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   in one request. *Skip this time* skips one occurrence. *Show completed* and
   *Show plain reminders* are switches. Shared notes on the calendar refresh
   every 30 seconds. Púca's Tasks view pins the same component as a
-  **Calendar** tab.
+  **Calendar** tab, and the Reminders list as a **Reminders** tab beside it —
+  the two shared hosts read the same per-list/per-channel queries under the
+  same cache keys (`frontend/src/components/taskSources.ts`), so switching
+  between them costs no extra requests.
 - **Reminders** lists events by their next occurrence and never calls them
   overdue, so a calendar of past appointments does not flood Overdue or the
-  badge. The server's `/task-reminders` returns recent past items and upcoming
+  badge. Neither Reminders view is built on `/task-reminders`: that feed is
+  ids and times only (it is what FIRES a reminder), so the rows come from the
+  ordinary per-list and per-channel reads and are decrypted on the device. The server's `/task-reminders` returns recent past items and upcoming
   ones separately, so old items cannot push future ones out.
 - **.ics**: export writes RFC 5545 (VERSION, PRODID, DTSTAMP, CRLF, folding,
   VTIMEZONE). Its UIDs are deterministic: the schedule's own uid, or an HMAC of

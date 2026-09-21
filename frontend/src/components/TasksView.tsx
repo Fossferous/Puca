@@ -47,6 +47,7 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
+import { consumeTasksTab } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
 import { useScheduleSetter } from './schedule/useScheduleSetter';
@@ -57,8 +58,9 @@ import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
 import { TasksCalendar } from './calendar/TasksCalendar';
+import { TasksReminders } from './reminders/TasksReminders';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
@@ -111,12 +113,15 @@ interface BarTab {
     resolveUserName?: (id: number) => string | undefined;
 }
 
-/** 'calendar' = the pinned Calendar tab (TasksCalendar), beside All tasks. */
-type Selected = { kind: TaskTabKind | 'calendar'; id: number } | null;
+/** 'calendar' and 'reminders' = the pinned tabs beside All tasks
+ *  (TasksCalendar, TasksReminders). */
+type Selected = { kind: TaskTabKind | 'calendar' | 'reminders'; id: number } | null;
 
 export function TasksView() {
-    // null = the pinned "All tasks" board (the default view).
-    const [selected, setSelected] = useState<Selected>(null);
+    // null = the pinned "All tasks" board (the default view) — unless
+    // something asked for a tab on the way in (a due-item notification asks
+    // for Reminders, api/tasksViewIntent.ts).
+    const [selected, setSelected] = useState<Selected>(() => (consumeTasksTab() === 'reminders' ? { kind: 'reminders', id: 0 } : null));
     const [lists, setLists] = useState<TaskList[]>([]);
     const [prefs, setPrefs] = useState<TaskTabPref[]>([]);
     const [tasks, setTasks] = useState<Task[]>([]);
@@ -138,6 +143,17 @@ export function TasksView() {
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
     useEffect(() => { selectedRef.current = selected; }, [selected]);
+
+    // Already on screen when a due-item notification is clicked: switch to
+    // Reminders (the initial state above covers a cold open).
+    useEffect(() => {
+        const onOpenReminders = () => {
+            consumeTasksTab();
+            setSelected({ kind: 'reminders', id: 0 });
+        };
+        window.addEventListener('sovereign:open-reminders', onOpenReminders);
+        return () => window.removeEventListener('sovereign:open-reminders', onOpenReminders);
+    }, []);
 
     // --- Server checklist channels (same cache keys the main app populates) ---
     const { data: servers = [] } = useServers();
@@ -682,6 +698,15 @@ export function TasksView() {
                         <CalendarIcon className="tasks-tab-kind" />
                         <span className="tasks-tab-title">Calendar</span>
                     </button>
+                    <button
+                        className={`tasks-tab tasks-tab-reminders ${selected?.kind === 'reminders' ? 'active' : ''}`}
+                        onClick={() => setSelected({ kind: 'reminders', id: 0 })}
+                        title="Reminders — everything due"
+                        aria-label="Reminders"
+                    >
+                        <BellIcon className="tasks-tab-kind" />
+                        <span className="tasks-tab-title">Reminders</span>
+                    </button>
                     {orderedTabs.map(renderTab)}
                     {addingList && (
                         <form className="tasks-tab-newform" onSubmit={handleCreateList}>
@@ -725,6 +750,15 @@ export function TasksView() {
             {selected?.kind === 'calendar' ? (
                 <div className="server-tasks-scroll tasks-calendar-scroll">
                     <TasksCalendar
+                        lists={lists}
+                        channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
+                        currentUserId={currentUserId}
+                        onOpen={(kind, id) => setSelected({ kind, id })}
+                    />
+                </div>
+            ) : selected?.kind === 'reminders' ? (
+                <div className="server-tasks-scroll">
+                    <TasksReminders
                         lists={lists}
                         channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
                         currentUserId={currentUserId}

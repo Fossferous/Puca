@@ -277,7 +277,13 @@ uses the account you are already signed in to.
 - **Pin** keeps a note at the top (it is the same favourite as the Tasks tab
   bar). **Colour**, **Labels** and **Archive** are Notes' own, and stay on the
   device you set them on. **Search** looks through titles and items.
-- **Reminders** in the left column lists every item with a due time.
+- **Reminders** in the left column lists every item with a due time, grouped
+  **Overdue**, **Today** and **Upcoming**. The Tasks view in Púca itself has
+  the same list as a **Reminders** tab, beside **Calendar** — so you can see
+  what is due on the desktop app and on your phone, where Púca Notes' page is
+  not reachable. A due-item notification opens it. An item in a shared
+  checklist that someone else set is marked *Reminds whoever set it*: it goes
+  off for them, not for you.
 - Archiving or deleting a note offers **Undo** for a few seconds.
 - Shortcuts: `/` search, `c` new note, `r` refresh, `?` help.
 

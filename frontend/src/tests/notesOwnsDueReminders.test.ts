@@ -126,7 +126,9 @@ describe('Púca\'s due-item notification with Púca Notes on the phone', () => {
         owns = false;
         m.notifyTasksDue(2, DUE);
         await settle();
-        expect(post).toHaveBeenCalledWith('tasks-due', 'Púca Tasks', '2 tasks are due', 'tasks');
+        // 'reminders' = the Tasks view's Reminders tab (the grouped list of
+        // what is due), and the body stays content-free.
+        expect(post).toHaveBeenCalledWith('tasks-due', 'Púca Tasks', '2 tasks are due', 'reminders');
         expect(taskOutcomes(m)).toEqual(['fired']);
     });
 
@@ -135,7 +137,7 @@ describe('Púca\'s due-item notification with Púca Notes on the phone', () => {
         owns = null;
         m.notifyTasksDue(1, DUE);
         await settle();
-        expect(post).toHaveBeenCalledWith('tasks-due', 'Púca Tasks', 'A task is due', 'tasks');
+        expect(post).toHaveBeenCalledWith('tasks-due', 'Púca Tasks', 'A task is due', 'reminders');
         expect(taskOutcomes(m)).toEqual(['fired']);
     });
 });

@@ -285,8 +285,9 @@ export function notifyNewMessage(opts: {
  * Deliberately does NOT suppress on focus, unlike a message: a message left
  * unread has badges and the channel list; a deadline that passes silently has
  * no other surface, and it is the one notification whose timing is the point.
- * Clicking it (web path) raises the app and opens the Tasks view via the
- * `sovereign:open-tasks` event Chat listens for.
+ * Clicking it (web path) raises the app and opens the Tasks view on its
+ * Reminders tab — the grouped list of what is due — via the
+ * `sovereign:open-reminders` event Chat listens for.
  */
 export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
     if (count <= 0) return;
@@ -320,7 +321,9 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
                 return;
             }
             record('fired');
-            await postMobileNotification('tasks-due', 'Púca Tasks', body, 'tasks');
+            // 'reminders' = the Tasks view's Reminders tab. Java passes nav
+            // through as an opaque string, so an older APK needs no change.
+            await postMobileNotification('tasks-due', 'Púca Tasks', body, 'reminders');
         })();
         return;
     }
@@ -349,7 +352,7 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
         const n = new Notification('Púca Tasks', { body, tag: 'tasks-due' });
         n.onclick = () => {
             void focusApp();
-            try { window.dispatchEvent(new CustomEvent('sovereign:open-tasks')); } catch { /* non-DOM env */ }
+            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders')); } catch { /* non-DOM env */ }
             n.close();
         };
     } catch {
