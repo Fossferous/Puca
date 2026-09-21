@@ -3,7 +3,7 @@
  * Upcoming. Ticking one completes it (the same cascade as everywhere else);
  * clicking a row opens its note.
  */
-import { type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
 import { canCompleteTasks, canEditTask, formatDueShort } from '../../api/tasks';
 import { snoozeLocked } from '../../api/taskSchedule';
@@ -28,6 +28,10 @@ interface RemindersViewProps {
     placeItems?: PlaceItem[];
     /** The server stores snoozes (taskFeatures). */
     canSnooze?: boolean;
+    /** The one item a due notification came for: its row is scrolled to and
+     *  flashed, so "an item is due" lands on WHICH item. An id only — the
+     *  text is decrypted here, in the page, after the tap. */
+    flashTaskId?: number | null;
 }
 
 /** A due item in a SHARED note that someone else created: GET /task-reminders
@@ -46,9 +50,13 @@ function mayChangeSnooze(item: DueItem): boolean {
     return !snoozeLocked(item.task, canEditTask(item.task, currentUserIdFromToken() ?? undefined, item.note.myPerms));
 }
 
-function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem; actions: NoteActions; now: number; onOpen: (c: NoteCard) => void; canSnooze?: boolean }) {
+function Row({ item, actions, now, onOpen, canSnooze = false, flash = false }: { item: DueItem; actions: NoteActions; now: number; onOpen: (c: NoteCard) => void; canSnooze?: boolean; flash?: boolean }) {
+    const ref = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (flash) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, [flash]);
     return (
-        <div className="notes-reminder-row" role="button" tabIndex={0}
+        <div ref={ref} id={`notes-reminder-${item.task.id}`} className={`notes-reminder-row${flash ? ' flash' : ''}`} role="button" tabIndex={0}
             onClick={() => onOpen(item.note)}
             onKeyDown={e => { if (e.key === 'Enter') onOpen(item.note); }}
         >
@@ -73,7 +81,7 @@ function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem;
     );
 }
 
-export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, nativeBanner, placeItems = [], canSnooze = false }: RemindersViewProps) {
+export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, nativeBanner, placeItems = [], canSnooze = false, flashTaskId = null }: RemindersViewProps) {
     const total = groups.overdue.length + groups.today.length + groups.upcoming.length + placeItems.length;
     return (
         <div className="notes-reminders">
@@ -94,20 +102,20 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
                     {groups.overdue.length > 0 && (
                         <section className="notes-reminder-group overdue" aria-label="Overdue">
                             <h2 className="notes-section-title">Overdue</h2>
-                            {groups.overdue.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
+                            {groups.overdue.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} flash={i.task.id === flashTaskId} />)}
                         </section>
                     )}
                     {groups.today.length > 0 && (
                         <section className="notes-reminder-group" aria-label="Today">
                             <h2 className="notes-section-title">Today</h2>
-                            {groups.today.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
+                            {groups.today.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} flash={i.task.id === flashTaskId} />)}
                         </section>
                     )}
                     <PlaceReminders items={placeItems} actions={actions} onOpen={onOpen} />
                     {groups.upcoming.length > 0 && (
                         <section className="notes-reminder-group" aria-label="Upcoming">
                             <h2 className="notes-section-title">Upcoming</h2>
-                            {groups.upcoming.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
+                            {groups.upcoming.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} flash={i.task.id === flashTaskId} />)}
                         </section>
                     )}
                 </>

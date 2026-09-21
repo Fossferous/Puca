@@ -15,9 +15,9 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 let available = true;
-let pending: string | null = null;
-let navListener: ((t: string) => void) | null = null;
-const consume = vi.fn(async () => { const t = pending; pending = null; return t; });
+let pending: { target: string | null; item: number | null } = { target: null, item: null };
+let navListener: ((n: { target: string | null; item: number | null }) => void) | null = null;
+const consume = vi.fn(async () => { const t = pending; pending = { target: null, item: null }; return t; });
 const syncNativeReminders = vi.fn(async () => ({ ok: true }));
 const setNativeBackgroundRefresh = vi.fn(async () => undefined);
 const startTaskReminders = vi.fn((_opts?: unknown) => () => {});
@@ -25,7 +25,7 @@ const startTaskReminders = vi.fn((_opts?: unknown) => () => {});
 vi.mock('../notes/native/notesNative', () => ({
     notesNativeAvailable: () => available,
     consumeNativeLaunchNav: () => consume(),
-    onNativeNavigate: (cb: (t: string) => void) => { navListener = cb; return () => { navListener = null; }; },
+    onNativeNavigate: (cb: (n: { target: string | null; item: number | null }) => void) => { navListener = cb; return () => { navListener = null; }; },
     syncNativeReminders: (...a: unknown[]) => syncNativeReminders(...(a as [])),
     setNativeBackgroundRefresh: (...a: unknown[]) => setNativeBackgroundRefresh(...(a as [])),
 }));
@@ -40,16 +40,17 @@ const settle = async () => { await act(async () => { for (let i = 0; i < 5; i++)
 let container: HTMLDivElement;
 let root: Root;
 const navigate = vi.fn();
+const compose = vi.fn();
 function Shell() {
-    useNotesReminderLoop(navigate);
+    useNotesReminderLoop(navigate, compose);
     return null;
 }
 
 beforeEach(() => {
     available = true;
-    pending = null;
+    pending = { target: null, item: null };
     navListener = null;
-    for (const f of [consume, syncNativeReminders, setNativeBackgroundRefresh, startTaskReminders, navigate]) f.mockClear();
+    for (const f of [consume, syncNativeReminders, setNativeBackgroundRefresh, startTaskReminders, navigate, compose]) f.mockClear();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -76,21 +77,44 @@ describe('useNotesReminderLoop', () => {
     });
 
     it('a launch from a reminder notification lands on Reminders', async () => {
-        pending = 'reminders';
+        pending = { target: 'reminders', item: null };
         act(() => root.render(<Shell />));
         await settle();
         expect(navigate).toHaveBeenCalledWith('/reminders');
+    });
+
+    it('one item due: the launch names it, so the shell can open that item', async () => {
+        pending = { target: 'reminders', item: 42 };
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(navigate).toHaveBeenCalledWith('/reminders?item=42');
+    });
+
+    it('a launcher shortcut, the tile or the widget opens the composer and navigates nowhere', async () => {
+        pending = { target: 'compose-draw', item: null };
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(compose).toHaveBeenCalledWith('draw');
+        expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it('an unknown target still does nothing at all (forward-compat control)', async () => {
+        pending = { target: 'compose-whatever-comes-next', item: null };
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(compose).not.toHaveBeenCalled();
+        expect(navigate).not.toHaveBeenCalled();
     });
 
     it('a tap while running navigates AND clears the parked target, so a later mount does not replay it', async () => {
         act(() => root.render(<Shell />));
         await settle();
         navigate.mockClear();
-        pending = 'reminders';            // what the native side parks alongside the event
-        act(() => navListener?.('reminders'));
+        pending = { target: 'reminders', item: null };   // what the native side parks alongside the event
+        act(() => navListener?.({ target: 'reminders', item: null }));
         await settle();
         expect(navigate).toHaveBeenCalledWith('/reminders');
-        expect(pending).toBeNull();
+        expect(pending.target).toBeNull();
         // Sign out and back in: the shell mounts again.
         act(() => root.render(<></>));
         navigate.mockClear();

@@ -21,6 +21,8 @@ import {
     type NoteCard, type NoteFilter, type NoteRef,
     allLabels, filterNotes, groupReminders, moveNoteInOrder, reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
+import { type ComposeIntent, type ComposeMode } from '../model/composeIntent';
+import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
@@ -124,12 +126,29 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
     const canSnooze = useTaskFeature('snooze') === true;
     const scheduleOnServer = useTaskFeature('schedule') === true;
+    // What the composer can offer against THIS server. Read by the share
+    // intake below as well as by the composer itself, so it is computed here
+    // rather than beside the render.
+    const composerContent = useMemo(
+        () => ({ text: actions.content.features.body, pictures: actions.content.features.attachments, camera: coarse }),
+        [actions.content.features.body, actions.content.features.attachments, coarse],
+    );
+    const contentRef = useRef(composerContent);
+    useEffect(() => { contentRef.current = composerContent; }, [composerContent]);
 
     const [drawer, setDrawer] = useState(false);
     const [popup, setPopup] = useState<Popup | null>(null);
     const [help, setHelp] = useState(false);
     const [sheet, setSheet] = useState(false);
     const [quickSignal, setQuickSignal] = useState(0);
+    // What a shortcut, the quick tile, the widget or a share asked the
+    // composer to open as. Nothing is saved until the user presses Done.
+    const [composeIntent, setComposeIntent] = useState<ComposeIntent | null>(null);
+    const composeSeq = useRef(0);
+    // The ONE item a due notification came for (notes/native/): its note
+    // opens and the row is flashed. Held in state, not the URL, so a reload
+    // cannot replay a tap from hours ago.
+    const [flashItem, setFlashItem] = useState<number | null>(null);
     const [pending, setPending] = useState<Pending | null>(null);
     const [notif, setNotif] = useState(notificationPermission);
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
@@ -200,9 +219,90 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     }, [setParams]);
     useNotesOutbox(noteMoved);
 
+    // --- Opening the composer from outside the page -------------------------------------
+    // A launcher shortcut, the quick-settings tile, the home-screen widget or
+    // a share from another app. All four land here, in one place.
+    const openCompose = useCallback((intent: Omit<ComposeIntent, 'seq'>) => {
+        composeSeq.current += 1;
+        setComposeIntent({ ...intent, seq: composeSeq.current });
+        // The inline composer only exists on the grid; the phone's sheet is a
+        // portal and works from anywhere.
+        if (isCoarse()) setSheet(true);
+        else {
+            if (!isGridPath(path)) { setQueryState(''); navigate('/'); }
+            setQuickSignal(n => n + 1);
+        }
+    }, [navigate, path]);
+    const onNativeCompose = useCallback((mode: ComposeMode) => { openCompose({ mode }); }, [openCompose]);
+    const composeTaken = useCallback(() => setComposeIntent(null), []);
+
+    // Share INTO Notes (Android): the composer opens with what arrived. A
+    // picture this server cannot keep is refused out loud rather than
+    // vanishing, which would look like the share never came.
+    const onShared = (shared: SharedIntoNotes) => {
+        const content = contentRef.current;
+        const files = content.pictures ? shared.files : [];
+        if (shared.files.length > 0 && files.length === 0) {
+            pushMessageToast({ title: 'This server can’t keep pictures in a note, so the shared picture wasn’t added.' });
+        }
+        if (!shared.title && !shared.body && files.length === 0) return;
+        openCompose({ mode: content.text ? 'text' : 'list', title: shared.title, body: shared.body, files });
+    };
+    useNativeShareIn(onShared);
+
     // --- Reminders loop + notifications -------------------------------------------------
     // Android app: native alarms own firing, open or closed (notes/native/).
-    useNotesReminderLoop(go);
+    useNotesReminderLoop(go, onNativeCompose);
+
+    // A due notification that named ONE item: take the id off the URL at
+    // once (a one-shot — a reload must not replay it), then, once the notes
+    // are loaded, open that item's note. An id that is stale by the time of
+    // the tap — completed, deleted, in a note this account lost — falls back
+    // to Reminders and never opens a blank editor.
+    const itemParam = params.get('item');
+    useEffect(() => {
+        const raw = Number(itemParam);
+        if (!raw || raw <= 0) return;
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setFlashItem(raw);
+        setParams(p => { p.delete('item'); return p; }, { replace: true });
+    }, [itemParam, setParams]);
+    // ONCE. `cards` changes identity on every refetch, and without this the
+    // effect re-set `note` after the user had closed the note — the flashed
+    // note re-opened itself for as long as the flash lasted. Found by the walk.
+    const flashResolved = useRef<number | null>(null);
+    useEffect(() => {
+        if (!flashItem || loading || cards.length === 0) return;
+        if (flashResolved.current === flashItem) return;
+        const card = cards.find(c => (c.tasks ?? []).some(t => t.id === flashItem));
+        if (card) {
+            flashResolved.current = flashItem;
+            setParams(p => { p.set('note', card.key); return p; }, { replace: true });
+        } else if (!tasksPending) {
+            // Every note's items are in: the id is stale (completed, deleted,
+            // a note this account lost). Stay on Reminders.
+            flashResolved.current = flashItem;
+            // eslint-disable-next-line react-hooks/set-state-in-effect
+            setFlashItem(null);
+        }
+    }, [flashItem, loading, tasksPending, cards, setParams]);
+    useEffect(() => {
+        if (!flashItem) return;
+        // Long enough to see, short enough that a later render (or going
+        // back) does not show it a second time.
+        const t = setTimeout(() => setFlashItem(null), 4000);
+        return () => clearTimeout(t);
+    }, [flashItem]);
+    // The browser/desktop half of the same tap: notifyTasksDue carries the
+    // due ids on its event (api/desktopNotify.ts).
+    useEffect(() => {
+        const onOpenTasks = (ev: Event) => {
+            const ids = (ev as CustomEvent<{ ids?: number[] }>).detail?.ids;
+            navigate(Array.isArray(ids) && ids.length === 1 ? `/reminders?item=${ids[0]}` : '/reminders');
+        };
+        window.addEventListener('sovereign:open-tasks', onOpenTasks);
+        return () => window.removeEventListener('sovereign:open-tasks', onOpenTasks);
+    }, [navigate]);
     const placeItems = usePlaceReminderItems(cards);
     const enableNotifications = async () => {
         if (typeof Notification === 'undefined') return;
@@ -378,7 +478,6 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const exportJson = () => { void exportNotes(cards, 'json'); };
 
     const popupCard = popup && popup.kind !== 'account' ? cardsByKey.get(popup.key) ?? null : null;
-    const composerContent = { text: actions.content.features.body, pictures: actions.content.features.attachments, camera: coarse };
     const offline = error !== null && error !== undefined && isNetworkError(error);
 
     return (
@@ -442,6 +541,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 nativeBanner={<NativeReminderBanners />}
                                 placeItems={placeItems}
                                 canSnooze={canSnooze}
+                                flashTaskId={flashItem}
                             />
                         ) : calendarView ? (
                             <CalendarView
@@ -453,7 +553,9 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                             />
                         ) : (
                             <>
-                                {filter.kind === 'all' && <QuickAdd onCreate={createNote} openSignal={quickSignal} content={composerContent} />}
+                                {/* The sheet takes the payload when it is open; the inline
+                                    card is still mounted behind it on a phone. */}
+                                {filter.kind === 'all' && <QuickAdd onCreate={createNote} openSignal={quickSignal} content={composerContent} initial={sheet ? null : composeIntent} onInitialUsed={composeTaken} />}
                                 {filter.kind === 'label' && <h1 className="notes-section-title">Label: {filter.label}</h1>}
                                 {filter.kind === 'archive' && <h1 className="notes-section-title">Archive</h1>}
                                 {filter.kind === 'search' && <h1 className="notes-section-title">Results for “{filter.query}”</h1>}
@@ -487,7 +589,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     <PlusIcon />
                 </button>
             )}
-            {sheet && <QuickAdd sheet onCreate={createNote} onDismiss={() => setSheet(false)} content={composerContent} />}
+            {sheet && <QuickAdd sheet onCreate={createNote} onDismiss={() => setSheet(false)} content={composerContent} initial={composeIntent} onInitialUsed={composeTaken} />}
 
             {openCard && (
                 <NoteEditor
@@ -501,6 +603,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onArchive={archiveWithUndo}
                     pucaHref={pucaHref}
                     escapeBlocked={!!popup || !!contextMenu || help}
+                    flashTaskId={flashItem}
                 />
             )}
 

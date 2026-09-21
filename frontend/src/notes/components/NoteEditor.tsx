@@ -48,9 +48,11 @@ interface NoteEditorProps {
      *  from a bubble-phase listener of its own without stopping propagation,
      *  so without this both would close on one keypress. */
     escapeBlocked?: boolean;
+    /** The one item a due notification came for: TaskTree flashes that row. */
+    flashTaskId?: number | null;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false, flashTaskId = null }: NoteEditorProps) {
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
     const tasksQuery = useNoteTasks(ref, { live: true });
@@ -190,6 +192,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             currentUserId={currentUserId}
                             resolveUserName={card.resolveUserName}
                             channelId={ref.id}
+                            flashTaskId={flashTaskId}
                         />
                     ) : (
                         <TaskTree
@@ -203,6 +206,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
                             onSetSchedule={onSetSchedule}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
+                            flashTaskId={flashTaskId}
                         />
                     )}
                 </div>

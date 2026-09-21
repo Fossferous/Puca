@@ -349,7 +349,9 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
         const n = new Notification('Púca Tasks', { body, tag: 'tasks-due' });
         n.onclick = () => {
             void focusApp();
-            try { window.dispatchEvent(new CustomEvent('sovereign:open-tasks')); } catch { /* non-DOM env */ }
+            // The ids it already holds ride along: Púca Notes opens the
+            // one item when exactly one is due (Chat.tsx ignores `detail`).
+            try { window.dispatchEvent(new CustomEvent('sovereign:open-tasks', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
             n.close();
         };
     } catch {
