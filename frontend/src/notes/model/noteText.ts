@@ -105,6 +105,33 @@ export function noteToMessage(card: NoteCard): { text: string; omitted: number; 
     return { text: scrubClipRefs(out.join('\n').trim()), omitted, pictures };
 }
 
+/** The server's cap on one message, in BYTES of the SEALED envelope it stores
+ *  (`MAX_MESSAGE_LEN`, src/message_handlers.rs; the same number again in
+ *  src/dm_handlers.rs). Over it the send is refused with 413. */
+export const MAX_MESSAGE_BYTES = 8000;
+
+// `{"v":3,"t":"ch","epoch":4294967295,"ct":"…"}` — the smallest envelope a
+// send produces, rounded up. A v4 DM is much larger (it carries one wrapped
+// key per device the recipient has), which is why the DM path re-measures the
+// real wire before posting; this is the bound that can be shown BEFORE
+// anything is sealed, which is the only moment the user can still act on it.
+const ENVELOPE_OVERHEAD_BYTES = 48;
+
+/**
+ * How big this text will be once sealed, at least — what the server measures.
+ *
+ * A note is judged by its plaintext in the sheet and by its CIPHERTEXT at the
+ * server: AES-GCM adds a 12-byte nonce and a 16-byte tag, base64 costs another
+ * third, and the envelope wraps the lot in JSON. Roughly 5.9k characters of
+ * note is already 8000 bytes of message, so a long note that looks fine in the
+ * preview is refused on arrival — and "Couldn't send it" would be the only
+ * thing the user ever learned about why.
+ */
+export function sealedMessageBytes(plaintext: string): number {
+    const n = new TextEncoder().encode(plaintext).length;
+    return ENVELOPE_OVERHEAD_BYTES + Math.ceil((12 + n + 16) / 3) * 4;
+}
+
 export function notesToMarkdown(cards: NoteCard[]): string {
     return cards.map(noteToMarkdown).join('\n');
 }

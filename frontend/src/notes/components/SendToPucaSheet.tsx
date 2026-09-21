@@ -14,6 +14,11 @@
  * touches the WebSocket — the DM rides `POST /dms/:id/messages` — because
  * Notes never opens a socket (notesQueries.ts's header; guarded by
  * tests/notesNoSocket.test.ts).
+ *
+ * One send at a time, and no way out of the dialog while one is in flight
+ * (`busy`): closing does not cancel the request, so a second confirm would
+ * post the note twice — and the whole confirm step exists because a chat
+ * message cannot be unsent.
  */
 import { useMemo, useState } from 'react';
 import { sendChannelMessageEncrypted } from '../../api/servers';
@@ -21,13 +26,17 @@ import { encryptDMContent, sendDMMessageRest, type DMConversation } from '../../
 import { SecureSendError } from '../../api/e2ee';
 import { ApiError, isNetworkError } from '../../api/client';
 import { type NoteCard } from '../model/notesModel';
-import { noteToMessage } from '../model/noteText';
+import { MAX_MESSAGE_BYTES, noteToMessage, sealedMessageBytes } from '../model/noteText';
 import { useSendTargets, type SendChannelTarget } from '../model/notesQueries';
 import { NotesDialog } from './NotesDialog';
 
 type Target =
     | { kind: 'channel'; t: SendChannelTarget }
     | { kind: 'dm'; conv: DMConversation };
+
+/** Said in both places it can be discovered: before the send, from the size
+ *  the text will seal to, and after one, from the server's 413. */
+const TOO_LONG = 'This note is too long to post as one message — sending it would go over what a single message can hold. Shorten it, or send part of it.';
 
 function targetName(t: Target): string {
     return t.kind === 'channel' ? `#${t.t.channel.name}` : (t.conv.other_display_name || t.conv.other_username);
@@ -66,8 +75,12 @@ export function SendToPucaSheet({ card, onClose, onSent }: SendToPucaSheetProps)
         !q || (c.other_display_name ?? '').toLowerCase().includes(q) || c.other_username.toLowerCase().includes(q),
     ), [dms, q]);
 
+    // What the server will measure, as closely as it can be known before the
+    // seal. Shown in the confirm step rather than discovered as a failure.
+    const tooLong = sealedMessageBytes(message.text) > MAX_MESSAGE_BYTES;
+
     const send = async () => {
-        if (!picked || sending) return;
+        if (!picked || sending || tooLong) return;
         setSending(true);
         setError(null);
         try {
@@ -77,6 +90,15 @@ export function SendToPucaSheet({ card, onClose, onSent }: SendToPucaSheetProps)
                 // Seal for the partner first — a failure here must not leave a
                 // half-sent message — then hand the SEALED wire to REST.
                 const wire = await encryptDMContent(message.text, picked.conv.other_user_id);
+                // Only knowable here: a v4 DM wraps the message key to every
+                // device they have, so the same text can fit a channel and not
+                // a DM. Refuse before the POST rather than read it back as a
+                // generic error.
+                if (wire.length > MAX_MESSAGE_BYTES) {
+                    setError(TOO_LONG);
+                    setSending(false);
+                    return;
+                }
                 await sendDMMessageRest(picked.conv.id, wire);
             }
             onSent(targetName(picked));
@@ -87,13 +109,14 @@ export function SendToPucaSheet({ card, onClose, onSent }: SendToPucaSheetProps)
             if (err instanceof SecureSendError) setError(err.message);
             else if (isNetworkError(err)) setError('Couldn’t reach the server — nothing was sent.');
             else if (err instanceof ApiError && err.status === 403) setError('You can’t post there.');
+            else if (err instanceof ApiError && err.status === 413) setError(TOO_LONG);
             else setError('Couldn’t send it — nothing was posted.');
             setSending(false);
         }
     };
 
     return (
-        <NotesDialog title={picked ? 'Send this note?' : 'Send to Púca'} onClose={onClose}>
+        <NotesDialog title={picked ? 'Send this note?' : 'Send to Púca'} onClose={onClose} busy={sending}>
             {error && <div className="notes-send-error" role="alert">{error}</div>}
             {picked ? (
                 <div className="notes-send-confirm">
@@ -119,10 +142,13 @@ export function SendToPucaSheet({ card, onClose, onSent }: SendToPucaSheetProps)
                             Pictures are not sent — they stay in the note, and the message lists them by name.
                         </p>
                     )}
+                    {tooLong && (
+                        <p className="notes-send-error" role="alert">{TOO_LONG}</p>
+                    )}
                     <pre className="notes-send-preview">{message.text}</pre>
                     <div className="notes-send-actions">
                         <button type="button" className="notes-textbtn" disabled={sending} onClick={() => { setPicked(null); setError(null); }}>Back</button>
-                        <button type="button" className="notes-send-go" disabled={sending || !message.text} onClick={() => { void send(); }}>
+                        <button type="button" className="notes-send-go" disabled={sending || tooLong || !message.text} onClick={() => { void send(); }}>
                             {sending ? 'Sending…' : 'Send'}
                         </button>
                     </div>

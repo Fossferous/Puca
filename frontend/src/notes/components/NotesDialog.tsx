@@ -1,6 +1,12 @@
 /**
  * A small centred dialog (shortcuts help, confirmations). Portaled to body;
  * Escape closes it and stops there, like Popover.
+ *
+ * `busy` makes every way OUT inert — Escape, the backdrop and the X — without
+ * letting Escape reach the layer underneath. A dialog whose confirm step is
+ * mid-request must not be dismissable: the request is not cancelled by
+ * closing, so reopening and confirming again would do the thing twice, and
+ * "the thing" here is posting a chat message, which cannot be unsent.
  */
 import { useEffect, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -9,26 +15,31 @@ import { CloseIcon } from '../../components/Icons';
 interface NotesDialogProps {
     title: string;
     onClose: () => void;
+    /** A request this dialog started is in flight: it cannot be dismissed. */
+    busy?: boolean;
     children: ReactNode;
 }
 
-export function NotesDialog({ title, onClose, children }: NotesDialogProps) {
+export function NotesDialog({ title, onClose, busy = false, children }: NotesDialogProps) {
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
+            // Swallowed either way: while busy this dialog still owns Escape,
+            // it just does not act on it. Letting it through would close the
+            // note behind the dialog instead.
             e.preventDefault();
             e.stopPropagation();
-            onClose();
+            if (!busy) onClose();
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, busy]);
     return createPortal(
-        <div className="notes-dialog-backdrop" onClick={onClose}>
+        <div className="notes-dialog-backdrop" onClick={() => { if (!busy) onClose(); }}>
             <div className="notes-dialog" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
                 <div className="notes-dialog-head">
                     <h3>{title}</h3>
-                    <button type="button" className="notes-iconbtn small" aria-label="Close" title="Close" onClick={onClose}>
+                    <button type="button" className="notes-iconbtn small" aria-label="Close" title="Close" disabled={busy} onClick={onClose}>
                         <CloseIcon size={18} />
                     </button>
                 </div>

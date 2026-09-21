@@ -652,6 +652,15 @@ Pictures do not travel: a note's photos are sealed under the note's own key,
 so the message lists them by name. A clip reference loses its payload, which
 is the clip's key.
 
+A note can also simply be too long. The server's limit is 8000 bytes of the
+ENCRYPTED message, and sealing costs a nonce, a tag, base64 and — for a direct
+message — one wrapped key per device the recipient has, so a note of roughly
+six thousand characters is already over it. The sheet measures that before it
+seals anything and says so in the confirm step, and the DM path re-measures the
+real envelope before it posts, because only then is the true size known. While
+a send is in flight the sheet cannot be dismissed at all: closing it would not
+cancel the request, and confirming again would post the note twice.
+
 The mechanics, for the next reader: a channel goes through the same
 `POST /channels/:id/messages` the composer uses, so the server broadcasts,
 notifies and wakes exactly as it does for anything typed in Púca; a DM goes

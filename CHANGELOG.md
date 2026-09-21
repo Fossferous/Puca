@@ -14,7 +14,8 @@ one-line summary; this file is the full story. Versions follow
   sent to a channel can be read by everyone in it and cannot be unsent. It
   offers only channels you can actually post in. Anything this device cannot
   read is left out rather than guessed, and the app says how many things that
-  was; pictures stay in the note and are listed by name.
+  was; pictures stay in the note and are listed by name. A note too long to go
+  as one message says so before you send it, rather than failing afterwards.
 - **Save a message to Notes.** Right-click a message in Púca (long press on a
   phone) and pick *Save to Notes* to keep it as a new note or as an item in one
   you already have — its pictures can come too. The copy is yours: it is
