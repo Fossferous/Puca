@@ -71,6 +71,8 @@ fs.mkdirSync(outdir, { recursive: true });
 const username = 'notes_' + Math.random().toString(36).slice(2, 8);
 // A real (tiny) PNG for the photo note: 8x8, opaque red.
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC', 'base64');
+// Nothing decodes it; it only has to be a file that is NOT a picture.
+const PDF = Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n', 'utf8');
 const password = 'Password123!';
 
 let fail = 0;
@@ -198,6 +200,7 @@ await shot('drawing-editor');
 await page.getByRole('button', { name: 'Save drawing' }).click();
 await page.waitForSelector('.notes-draw-canvas', { state: 'detached', timeout: 5000 });
 ck('drawing: saving returns to the composer with the drawing attached', await page.locator('.notes-quickadd-media img').count() === 1);
+
 await page.getByRole('button', { name: 'Done' }).click();
 await page.waitForFunction(() => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Sketch') && c.querySelector('.notes-card-hero img.drawing[src^="blob:"]')), null, { timeout: 20000 })
     .then(() => ck('drawing note: the card shows the drawing', true))
@@ -495,6 +498,39 @@ if (psqlDsn) {
     skip('database: server-side truth (deleted note gone, injected plaintext flagged)', 'no psql DSN given');
 }
 
+// ---- 12a. A note holds any file, not only pictures ------------------------------------
+// After the order and count assertions above: this adds a note, and those
+// checks name every note by title.
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Tickets');
+await page.locator('.notes-quickadd-foot input[type="file"]:not([accept])').first().setInputFiles({ name: 'tickets.pdf', mimeType: 'application/pdf', buffer: PDF });
+await page.waitForSelector('.notes-quickadd-media .ni-file', { timeout: 5000 }).catch(() => {});
+ck('file note: a PDF picked in the composer shows as a named chip, not a broken image',
+    await page.locator('.notes-quickadd-media .ni-file').count() === 1 && await page.locator('.notes-quickadd-media img').count() === 0);
+await page.getByRole('button', { name: 'Done' }).click();
+await page.waitForSelector('.notes-card:has-text("Tickets")', { timeout: 20000 });
+ck('file note: the card counts the file it holds, rather than looking empty',
+    /1 file\b/.test(await page.locator('.notes-card', { hasText: 'Tickets' }).innerText()),
+    await page.locator('.notes-card', { hasText: 'Tickets' }).innerText());
+await page.locator('.notes-card', { hasText: 'Tickets' }).click();
+await page.waitForSelector('.notes-editor .ni-item.file', { timeout: 15000 });
+ck('file note: the editor offers the file as a download button, not dead text',
+    await page.locator('.notes-editor .ni-item.file button.ni-file').count() === 1);
+ck('file note: the button carries the real name',
+    (await page.locator('.notes-editor .ni-item.file button.ni-file').innerText()).includes('tickets.pdf'));
+ck('file note: no blob: link is ever in the document', await page.locator('a[href^="blob:"]').count() === 0);
+ck('file note: the editor offers Add file beside Add photo',
+    (await page.locator('.notes-editor .ni-action').allInnerTexts()).some(t => /Add file/.test(t)));
+if (psqlDsn) {
+    const att = sql(`SELECT coalesce(string_agg(l.attachments, '|'), '') FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}' AND l.attachments IS NOT NULL`);
+    ck('database: the file\u2019s real name and type are nowhere in the clear', !/tickets\.pdf|application\/pdf/.test(att), att.slice(0, 80));
+} else {
+    skip('database: the file\u2019s real name and type are nowhere in the clear', 'no psql DSN given');
+}
+await shot('file-note');
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+
 // ---- 12b. Export and share on the web ---------------------------------------------------------------
 // The Android app saves to Documents and offers Share and location reminders;
 // the browser keeps its download and shows neither app-only control (section
@@ -588,11 +624,15 @@ const evB = await streamB;
 ck('live: device B opened the task-event stream', evB?.status() === 200, String(evB?.status()));
 // A creates a note; B must show it with NO refresh and no focus change (the
 // list set has no poll, so only the stream can bring it).
-await page.click('.notes-quickadd-collapsed');
+// openComposer(), not a bare click: the composer focuses its first item on a
+// requestAnimationFrame, and filling the title before that lands loses it —
+// the note then takes its title from the item and nothing finds it again.
+await openComposer();
 await page.fill('.notes-quickadd-title', 'Live note');
 await page.locator('.notes-quickadd-item input').first().fill('Arrives by itself');
 await page.getByRole('button', { name: 'Done' }).click();
-await page.waitForSelector('.notes-card:has-text("Live note")', { timeout: 15000 });
+await page.waitForSelector('.notes-card:has-text("Live note")', { timeout: 15000 })
+    .catch(async e => { await shot('live-note-missing'); throw e; });
 const liveArrived = await pageB.waitForSelector('.notes-card:has-text("Live note")', { timeout: 10000 }).then(() => true, () => false);
 ck('live: a note created on A appears on B without a refresh', liveArrived);
 // A labels it; the sealed blob event brings the label to B.
@@ -670,7 +710,7 @@ const offlineCards = await page.waitForSelector('.notes-card:has-text("Groceries
 ck('offline: a reload with no network still shows the notes', offlineCards);
 await shot('offline-reload');
 const listsBeforeOffline = psqlDsn ? Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`)) : null;
-await page.click('.notes-quickadd-collapsed');
+await openComposer();   // see the note at "Live note": the bare click races the focus
 await page.fill('.notes-quickadd-title', 'Offline note');
 await page.locator('.notes-quickadd-item input').first().fill('Written on a plane');
 await page.getByRole('button', { name: 'Done' }).click();
@@ -678,6 +718,40 @@ await page.waitForSelector('.notes-card:has-text("Offline note")', { timeout: 10
 ck('offline: the new note says Not synced', await page.locator('.notes-card:has-text("Offline note") .notes-chip.unsynced').count() === 1);
 ck('offline: the pending banner counts the queued changes', await page.locator('[data-sync="pending"]').count() === 1);
 await shot('offline-edit');
+
+// A note's own TEXT typed with no network is kept, not refused.
+await page.locator('.notes-card', { hasText: 'Offline note' }).click();
+await page.waitForSelector('.notes-editor .note-body-field textarea', { timeout: 10000 });
+await page.fill('.notes-editor .note-body-field textarea', 'Typed at 30,000 feet');
+// Tab blurs the field, which is what makes it save; clicking elsewhere in
+// the dialog is intercepted by whatever is on top.
+await page.locator('.notes-editor .note-body-field textarea').press('Tab');
+const queuedSaid = await page.waitForSelector('.notes-editor .nb-status.queued', { timeout: 10000 }).then(() => true, () => false);
+ck('offline: text typed with no network is kept on this device, and says so', queuedSaid);
+ck('offline: it says KEPT, not saved and not failed',
+    /Kept on this device/.test(await page.locator('.notes-editor .nb-status').first().innerText().catch(() => ''))
+    && await page.locator('.notes-editor .nb-status.failed').count() === 0);
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+ck('offline: the card shows the typed words, not "Empty note"',
+    /Typed at 30,000 feet/.test(await page.locator('.notes-card', { hasText: 'Offline note' }).innerText()));
+
+// A PICTURE taken with no network: sealed on the device, shown from those
+// bytes, counted separately in the banner.
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Offline photo');
+await page.locator('.notes-quickadd-foot input[accept="image/*"]').first().setInputFiles({ name: 'plane.png', mimeType: 'image/png', buffer: PNG });
+await page.waitForSelector('.notes-quickadd-media img', { timeout: 5000 });
+await page.getByRole('button', { name: 'Done' }).click();
+await page.waitForSelector('.notes-card:has-text("Offline photo")', { timeout: 15000 });
+const parkedShown = await page.waitForFunction(
+    () => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Offline photo') && c.querySelector('.notes-card-hero img[src^="blob:"]')),
+    null, { timeout: 20000 }).then(() => true, () => false);
+ck('offline: a photo added with no network previews on the card from this device', parkedShown);
+ck('offline: the photo note says Not synced', await page.locator('.notes-card:has-text("Offline photo") .notes-chip.unsynced').count() === 1);
+ck('offline: the pending banner names the picture waiting',
+    /picture/.test(await page.locator('[data-sync="pending"]').innerText()));
+await shot('offline-photo');
 await ctx.setOffline(false);
 const synced = await page.waitForSelector('[data-sync="pending"]', { state: 'detached', timeout: 20000 }).then(() => true, () => false);
 ck('offline: back online, the queue replays', synced);
@@ -685,12 +759,29 @@ const offlineOnB = await pageB.waitForSelector('.notes-card:has-text("Offline no
 ck('offline: the edit made offline reached the server and device B sees it', offlineOnB);
 const itemOnB = await pageB.waitForFunction(() => /Written on a plane/.test(document.body.innerText), null, { timeout: 10000 }).then(() => true, () => false);
 ck('offline: its item came through too (temp ids rewritten)', itemOnB);
+const bodyOnB = await pageB.waitForFunction(() => /Typed at 30,000 feet/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
+ck('offline: the text written with no network reached device B', bodyOnB);
+// The hero only decrypts once the card is on screen (an IntersectionObserver),
+// so scroll to it first or this measures the viewport, not the upload.
+await pageB.locator('.notes-card', { hasText: 'Offline photo' }).scrollIntoViewIfNeeded({ timeout: 30000 }).catch(() => {});
+const photoOnB = await pageB.waitForFunction(
+    () => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Offline photo') && c.querySelector('.notes-card-hero img[src^="blob:"]')),
+    null, { timeout: 30000 }).then(() => true, () => false);
+ck('offline: the picture taken with no network uploaded and decrypts on device B', photoOnB);
+ck('offline: nothing is left parked once the queue is empty',
+    await page.locator('.ni-item[data-parked="true"]').count() === 0 && await page.locator('[data-sync="pending"]').count() === 0);
 if (psqlDsn) {
     try {
         // EXACTLY one more than before it was written: not a lower bound the
         // walk's earlier notes already satisfy, and not two (a replayed create).
         const n = Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`));
-        ck('database: the offline note became exactly one real list on the server', n === listsBeforeOffline + 1, `before=${listsBeforeOffline} after=${n}`);
+        // Two: the checklist note AND the photo note, each exactly once (a
+        // replayed create would make three or four).
+        ck('database: the notes made offline became exactly two real lists on the server', n === listsBeforeOffline + 2, `before=${listsBeforeOffline} after=${n}`);
+        const bodies = sql(`SELECT coalesce(string_agg(l.body, '|'), '') FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}' AND l.body IS NOT NULL`);
+        ck('database: the text typed offline is stored as ciphertext only', bodies.length > 0 && !/30,000 feet/.test(bodies), bodies.slice(0, 60));
+        const att = sql(`SELECT coalesce(string_agg(l.attachments, '|'), '') FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}' AND l.attachments IS NOT NULL`);
+        ck('database: no local puca-parked ref was ever sealed for the server', !/puca-parked/.test(att), att.slice(0, 60));
         const blob = sql(`SELECT blob FROM user_sealed_blobs b JOIN users u ON u.id = b.user_id WHERE u.username = '${username}' AND b.name = 'notes-prefs'`);
         ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|sage|mint/.test(blob), blob.slice(0, 60));
     } catch (e) {
@@ -876,6 +967,18 @@ await m.tap('.notes-fab');
 await m.waitForSelector('.notes-quickadd.sheet', { timeout: 5000 });
 ck('phone: the composer offers the camera directly', await m.locator('.notes-quickadd-foot button[aria-label="Take photo"]').count() === 1
     && await m.locator('.notes-quickadd-foot input[capture]').count() === 1);
+// "Add file" is a seventh control in a foot that already carried six at
+// 390 px: it must fit the row, not push it sideways.
+ck('phone: the composer offers Add file, and its foot still fits 390 px',
+    await m.locator('.notes-quickadd-foot button[aria-label="Add file"]').count() === 1
+    && await m.evaluate(() => {
+        const f = document.querySelector('.notes-quickadd-foot');
+        return !!f && f.scrollWidth <= f.clientWidth + 1 && f.getBoundingClientRect().right <= window.innerWidth + 1;
+    }),
+    JSON.stringify(await m.evaluate(() => {
+        const f = document.querySelector('.notes-quickadd-foot');
+        return f ? { scrollWidth: f.scrollWidth, clientWidth: f.clientWidth, right: Math.round(f.getBoundingClientRect().right) } : null;
+    })));
 await m.tap('.notes-quickadd-foot button[aria-label="Text note"]');
 r = await audit();
 ck('phone: composer text field ≥ 16px, footer targets at size', r.fonts['.notes-quickadd-body'] >= 16 && r.under.length === 0, JSON.stringify({ f: r.fonts['.notes-quickadd-body'], u: r.under }));
@@ -907,6 +1010,22 @@ ck('phone: a note trashed just now counts down the full 30 days (not 31)', /dele
 r = await audit();
 ck('phone: the Trash view fits, its row controls and Empty trash at size', trashRows >= 1 && !r.bodyScrollsHorizontally && r.under.length === 0, JSON.stringify({ rows: trashRows, under: r.under }));
 await mshot('phone-trash');
+
+// A note's FILE at a coarse pointer: the download button is a real tap
+// target and the name does not push the row off the screen.
+await m.goto('/notes/');
+await m.waitForSelector('.notes-card', { timeout: 20000 });
+await m.locator('.notes-card', { hasText: 'Tickets' }).tap();
+await m.waitForSelector('.notes-editor .ni-item.file button.ni-file', { timeout: 15000 });
+const fileBox = await m.locator('.notes-editor .ni-item.file button.ni-file').boundingBox();
+r = await audit();
+ck('phone: a note’s file is a 44px tap target that saves it, inside the viewport',
+    !!fileBox && fileBox.height >= 43.5 && fileBox.x >= -0.5 && fileBox.x + fileBox.width <= 390.5
+    && !r.bodyScrollsHorizontally && r.under.length === 0,
+    JSON.stringify({ fileBox, under: r.under }));
+await mshot('phone-file-note');
+await m.getByRole('button', { name: 'Close', exact: true }).tap();
+await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
 
 // Púca's Tasks view at 390x844: the Trash section at the end of the All tasks
 // board (above the bottom nav) and a photo note's text and picture controls.
