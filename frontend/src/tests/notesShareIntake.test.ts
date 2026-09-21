@@ -93,6 +93,17 @@ describe('a share decided against the server, not against the page', () => {
         expect(open.mock.calls[0][0].mode).toBe('text');
     });
 
+    it('does not lose the share when the ask itself throws', async () => {
+        const open = vi.fn();
+        await takeShare({ title: 'Snap', body: '', files: [pic()] }, {
+            ensureContent: async () => { throw new Error('network'); },
+            fallback: () => FULL,
+            open,
+            refusePicture: vi.fn(),
+        });
+        expect(open).toHaveBeenCalledTimes(1);
+    });
+
     it('a server with no note body turns shared text into a checklist (positive control)', async () => {
         const { deps, open, release } = harness({ text: false, pictures: true });
         const done = takeShare({ title: 'Errand', body: 'Milk', files: [] }, deps);

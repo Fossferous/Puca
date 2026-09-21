@@ -95,7 +95,11 @@ export interface ShareIntakeDeps {
  * page believes only when there is no answer to be had.
  */
 export async function takeShare(shared: SharedPayload, deps: ShareIntakeDeps): Promise<void> {
-    const content = (await deps.ensureContent()) ?? deps.fallback();
+    // Nothing here may lose the share: a rejected ask is the same as no
+    // answer, not an unhandled rejection with the payload inside it.
+    let answer: ComposeContent | null = null;
+    try { answer = await deps.ensureContent(); } catch { answer = null; }
+    const content = answer ?? deps.fallback();
     const files = content.pictures ? shared.files : [];
     if (shared.files.length > 0 && files.length === 0) deps.refusePicture();
     if (!shared.title && !shared.body && files.length === 0) return;
