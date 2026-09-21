@@ -187,7 +187,19 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
                     tabIndex={readOnly ? -1 : 0}
                     aria-label="Note text"
                     aria-readonly={readOnly}
-                    onFocus={() => { if (!readOnly) setEditing(true); }}
+                    onFocus={e => {
+                        if (readOnly) return;
+                        // Guarded exactly like the click below, and for the
+                        // same reason — but this one is what actually decides
+                        // whether a link can be tapped at all. Chromium
+                        // focuses an anchor on MOUSEDOWN and React wires
+                        // `onFocus` to `focusin`, which BUBBLES, so this runs
+                        // before the anchor's own click. Opening the editor
+                        // here unmounts the anchor between mousedown and
+                        // mouseup and the click never happens.
+                        if ((e.target as Element).closest('a')) return;
+                        setEditing(true);
+                    }}
                     onClick={e => {
                         if (readOnly) return;
                         // A tap on a link belongs to the link (NoteLinkText

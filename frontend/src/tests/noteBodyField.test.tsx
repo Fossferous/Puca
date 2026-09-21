@@ -7,7 +7,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+
+// The read view renders real links; opening one must not reach the shell.
+vi.mock('../api/openExternal', () => ({ openExternalUrl: vi.fn(), isExternalHref: () => true }));
+
 import { NoteBodyField } from '../components/NoteBodyField';
+import { openExternalUrl } from '../api/openExternal';
 import { BODY_SAVE_DELAY_MS, flushBodySave } from '../api/listContent';
 import { TASK_DECRYPT_FAILED } from '../api/decryptMarkers';
 
@@ -160,6 +165,32 @@ describe('NoteBodyField', () => {
         expect(area()).not.toBeNull();
         expect(area().value).toBe('read https://example.com/a');
         expect(document.activeElement).toBe(area());
+    });
+
+    it('tapping a LINK in the read view opens it — the focus it takes must not swap in the textarea', () => {
+        // The order a browser uses, and the one this used to get wrong:
+        // Chromium focuses an anchor on MOUSEDOWN, and React wires `onFocus`
+        // to `focusin`, which BUBBLES. So the read view is told about the
+        // focus before the anchor is ever told about its click. If that
+        // focus opens the editor, the anchor is unmounted between mousedown
+        // and mouseup and no click is ever dispatched at it — a web address
+        // in a note's text could be seen and never followed.
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="read https://example.com/a" onSave={onSave} />); });
+        const a = container.querySelector('.nb-rendered a.note-link') as HTMLAnchorElement;
+        expect(a).not.toBeNull();
+        act(() => { a.focus(); });
+        expect(container.querySelector('textarea')).toBeNull();   // still the read view...
+        act(() => { a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        expect(openExternalUrl).toHaveBeenCalledWith('https://example.com/a');
+        expect(container.querySelector('textarea')).toBeNull();   // ...and a tap on a link is not an edit
+        // POSITIVE CONTROL: focus that lands anywhere ELSE in the read view
+        // still opens the editor, so the guard above is about the anchor and
+        // not about focus-to-edit having been switched off.
+        const read = container.querySelector('.nb-rendered') as HTMLElement;
+        act(() => { read.focus(); });
+        expect(container.querySelector('textarea')).not.toBeNull();
+        expect(area().value).toBe('read https://example.com/a');
     });
 
     it('the textarea comes back at the HEIGHT of the text, not at two rows', () => {

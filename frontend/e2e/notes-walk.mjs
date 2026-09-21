@@ -328,8 +328,22 @@ ck('note links: javascript: and a scheme-less //host stay dead text',
     await page.locator('.notes-editor-content a[href^="javascript:"]').count() === 0
     && await page.locator('.notes-editor-content a[href^="//"]').count() === 0);
 ck('note links: nothing is fetched to render them', foreignRequests.length === 0, JSON.stringify(foreignRequests.slice(0, 3)));
-await page.locator('.notes-editor-content a.note-link').click({ trial: true });
-ck('note links: the link is hit-testable (a real tap target, not covered)', true);
+// A REAL tap, measured. `click({ trial: true })` deliberately dispatches no
+// click at all, so it could only ever prove the target was hit-testable — and
+// the way this broke was that the FOCUS the tap takes first (Chromium focuses
+// an anchor on mousedown; React's onFocus is `focusin`, which bubbles) swapped
+// the read view for the textarea before any click could reach the anchor.
+// Only a real click, with what it opened read back, can see that.
+await page.evaluate(() => {
+    window.__opened = [];
+    window.open = url => { window.__opened.push(String(url)); return null; };
+});
+await page.locator('.notes-editor-content a.note-link').click();
+const opened = await page.evaluate(() => window.__opened);
+const stillRead = await page.locator('.notes-editor-content textarea.nb-text').count() === 0;
+ck('note links: a real tap opens the address outside the app, and does NOT open the editor',
+    opened.length === 1 && opened[0] === 'https://example.com/a' && stillRead,
+    `${JSON.stringify(opened)} stillRead=${stillRead}`);
 await shot('note-links');
 // Clicking the text — not the link — puts the field back, still editable.
 await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
@@ -1229,8 +1243,22 @@ ck('phone: editor title + add row ≥ 16px', r.fonts['.notes-editor-title'] >= 1
 ck('phone: editor tap targets at size', r.under.length === 0, JSON.stringify(r.under));
 // A long web address must not widen the note. Seed one, measure, put it back.
 const LONG_URL = 'https://example.com/a/very/long/path/that/keeps/going/and/going/so/it/cannot/possibly/fit/on/one/line/at/390px?q=1';
-await m.tap('.notes-editor-content .nb-rendered');
+// Aimed at x:4 — the first word — and not at the middle of the box, because
+// the middle of THIS line is the link itself, and a tap on a link is the
+// link's, not the editor's. The detail string measures that rather than
+// asserting it: the layout may change, the aim should not.
+const centreIsLink = await m.evaluate(() => {
+    const el = document.querySelector('.notes-editor-content .nb-rendered');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    return !!hit?.closest('a.note-link');
+});
+await m.tap('.notes-editor-content .nb-rendered', { position: { x: 4, y: 4 } });
 await m.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+ck('phone: tapping the words beside a link puts the field back',
+    await m.locator('.notes-editor-content textarea.nb-text').count() === 1,
+    `middle of the line is the link: ${centreIsLink}`);
 await m.fill('.notes-editor-content textarea.nb-text', `Buy before Friday ${LONG_URL}`);
 await m.tap('.notes-editor-sub');
 await m.waitForSelector('.notes-editor-content .nb-rendered a.note-link', { timeout: 10000 }).catch(() => {});

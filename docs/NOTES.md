@@ -717,6 +717,12 @@ records the same deletion for chat.
 - Text holding an address swaps to a read view when it is not being edited;
   tapping anywhere but the link puts the cursor back where you tapped. Text
   with no address never leaves its editing field.
+- A tap on the link is the link's, including the FOCUS it takes: a browser
+  focuses an anchor on mousedown, and that focus bubbles to the read view
+  around it before the link is ever clicked. The read view ignores a focus
+  that landed on a link, exactly as it ignores a click on one — otherwise the
+  field would replace the link between press and release and the address
+  could be read but never followed.
 - On the card grid a link is **marked but not tappable**: the card's own tap
   opens the note, and a 44px tap target cannot live inside a clamped two-line
   preview at 390px.
