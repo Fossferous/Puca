@@ -21,7 +21,7 @@ import {
     type NoteCard, type NoteFilter, type NoteRef,
     allLabels, filterNotes, groupReminders, moveNoteInOrder, reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
-import { type ComposeIntent, type ComposeMode } from '../model/composeIntent';
+import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
@@ -244,14 +244,22 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     // Share INTO Notes (Android): the composer opens with what arrived. A
     // picture this server cannot keep is refused out loud rather than
     // vanishing, which would look like the share never came.
+    //
+    // The decision WAITS for /notes/features. A share is normally a cold
+    // start, and the native handoff beats that request every time: judged
+    // against what the page knows at that instant, the picture would be
+    // dropped and the user told this server cannot keep pictures when it can
+    // (model/composeIntent's takeShare).
     const onShared = (shared: SharedIntoNotes) => {
-        const content = contentRef.current;
-        const files = content.pictures ? shared.files : [];
-        if (shared.files.length > 0 && files.length === 0) {
-            pushMessageToast({ title: 'This server can’t keep pictures in a note, so the shared picture wasn’t added.' });
-        }
-        if (!shared.title && !shared.body && files.length === 0) return;
-        openCompose({ mode: content.text ? 'text' : 'list', title: shared.title, body: shared.body, files });
+        void takeShare(shared, {
+            ensureContent: async () => {
+                const f = await actions.content.ensureFeatures();
+                return f ? { text: f.body, pictures: f.attachments } : null;
+            },
+            fallback: () => contentRef.current,
+            open: openCompose,
+            refusePicture: () => pushMessageToast({ title: 'This server can’t keep pictures in a note, so the shared picture wasn’t added.' }),
+        });
     };
     useNativeShareIn(onShared);
 

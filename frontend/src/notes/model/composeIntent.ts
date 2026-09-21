@@ -56,3 +56,48 @@ export function composeModeFor(mode: ComposeMode, content: ComposeContent | unde
     if (mode === 'draw' || mode === 'photo') return content.pictures ? mode : 'list';
     return 'list';
 }
+
+/** What a share from another app carries, once the native side has shaped it
+ *  (native/useNativeShareIn's SharedIntoNotes). */
+export interface SharedPayload {
+    title: string;
+    body: string;
+    files: File[];
+}
+
+/** What `takeShare` needs from the shell. */
+export interface ShareIntakeDeps {
+    /** The server's answer about what a note may hold, FETCHED if the page
+     *  has not got it yet (useListContent's `ensureFeatures`). `null` when it
+     *  could not be asked at all — offline, or the request failed. */
+    ensureContent: () => Promise<ComposeContent | null>;
+    /** What the page already believes. Used ONLY when the ask failed, so an
+     *  offline share still opens something. */
+    fallback: () => ComposeContent;
+    /** Open the composer on it. Nothing is saved here. */
+    open: (intent: Omit<ComposeIntent, 'seq'>) => void;
+    /** Say out loud that the picture could not come; a share that vanished
+     *  silently looks like a share that never arrived. */
+    refusePicture: () => void;
+}
+
+/**
+ * Take a share into the composer.
+ *
+ * ASYNC ON PURPOSE. A share is normally a COLD START — that is the whole
+ * point of the entry point, the app was not running — and the native handoff
+ * (one bridge call plus a local `_capacitor_file_` read) finishes in
+ * milliseconds, while `GET /notes/features` is an HTTPS round trip to the
+ * user's own server. Deciding against what the page knows at that instant
+ * means deciding against NO_LIST_FEATURES: the shared picture is dropped, the
+ * user is told this server cannot keep pictures when it can, and a text share
+ * opens as a checklist. So wait for the answer, and fall back to what the
+ * page believes only when there is no answer to be had.
+ */
+export async function takeShare(shared: SharedPayload, deps: ShareIntakeDeps): Promise<void> {
+    const content = (await deps.ensureContent()) ?? deps.fallback();
+    const files = content.pictures ? shared.files : [];
+    if (shared.files.length > 0 && files.length === 0) deps.refusePicture();
+    if (!shared.title && !shared.body && files.length === 0) return;
+    deps.open({ mode: composeModeFor('text', content), title: shared.title, body: shared.body, files });
+}

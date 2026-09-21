@@ -391,6 +391,19 @@ The text extras are read as `CharSequence`, not `String` — an app sharing
 styled or selected text puts a `Spanned` there, and `getStringExtra` answers
 null for one, silently.
 
+On the page side the share **waits for `GET /notes/features`** before it
+decides anything (`model/composeIntent.ts`'s `takeShare`). A share is normally
+a cold start — that is the point of the entry point, the app was not running
+— and the native handoff is a bridge call plus a local file read, while the
+features request is a round trip to the user's own server. Judged at the
+instant the share lands, the answer is still `NO_LIST_FEATURES`: the shared
+picture would be thrown away, the user told this server cannot keep pictures
+when it can, and shared text opened as a checklist. When the server cannot be
+asked at all — offline — the page falls back to what it last knew, so an
+offline share still opens something. A local walk cannot catch this: against
+`127.0.0.1` the features query wins, and the picture check passes for the
+wrong reason, so the case is held open in `notesShareIntake.test.ts` instead.
+
 **Shortcuts, the quick tile and the widget.** Three launcher shortcuts
 (`res/xml/shortcuts.xml`), a quick-settings tile (`NotesTileService`) and a 4×1
 home-screen widget (`NotesWidgetProvider`) all put one constant word in the
