@@ -274,6 +274,22 @@ await page.fill('.tt-due-edit input', `${d.getFullYear()}-${p(d.getMonth() + 1)}
 await page.click('.tt-due-set');
 await page.waitForSelector('.notes-editor .tt-due', { timeout: 10000 });
 ck('editor: a due time renders its chip', true);
+// The snooze menu on that row is a layer INSIDE the editor. Its listener is
+// a capture-phase document one, so it must CONSUME Escape: the editor's own
+// Escape (NoteEditor.tsx) skips only a keypress that was defaultPrevented,
+// and without that the one press closed the note as well as the menu.
+const eggsSnooze = eggsRow.locator('.notes-snooze button').first();
+if (await eggsSnooze.count() === 1) {
+    await eggsRow.hover();
+    await eggsSnooze.click();
+    await page.waitForSelector('.notes-snooze-menu', { timeout: 5000 });
+    await page.keyboard.press('Escape');
+    await sleep(200);
+    ck('editor: Escape closes the row’s snooze menu and leaves the note open',
+        await page.locator('.notes-snooze-menu').count() === 0 && await page.locator('.notes-editor').count() === 1);
+} else {
+    skip('editor: snooze is off on this server (taskFeatures)');
+}
 // Escape INSIDE an inline item edit must not close the note
 await page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first().locator('.tt-description').click();
 await page.waitForSelector('.notes-editor .tt-edit-input', { timeout: 5000 });

@@ -13,7 +13,8 @@
  * control serves a Reminders row and an item row inside a list (TaskTree), so
  * there is one snooze menu in the app, not one per surface.
  *
- * It closes on Escape and on a press outside it, the way ContextMenu does. On
+ * It closes on Escape (consuming the key, so a surface above it does not
+ * close too) and on a press outside it, the way ContextMenu does. On
  * an item row the menu is absolutely positioned OVER the next row
  * (Reminders.css), so one left open by moving the pointer away would swallow
  * that row's clicks until the snooze button was pressed again.
@@ -48,7 +49,19 @@ export function SnoozeControl({ task, snoozed = false, now, onSnooze, className 
         const onDown = (e: PointerEvent) => {
             if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
         };
-        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+        // Escape belongs to the open menu, and to nothing above it. Púca
+        // Notes' editor closes on a bubble-phase document Escape of its own
+        // (NoteEditor.tsx) which bails only on `defaultPrevented`, so a menu
+        // that merely closed would take the whole note with it — TaskTree's
+        // due editor consumes the key for the same reason. ContextMenu gets
+        // away with not consuming it because NotesShell sets escapeBlocked
+        // for that layer; this control has no such cover.
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(false);
+        };
         document.addEventListener('pointerdown', onDown, true);
         document.addEventListener('keydown', onKey, true);
         return () => {

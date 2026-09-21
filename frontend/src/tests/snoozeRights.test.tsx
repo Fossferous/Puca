@@ -194,6 +194,50 @@ describe('Snooze on the item row', () => {
         expect(menu()).toBeNull();
     });
 
+    // ...and the key must not travel past it. In Púca Notes this control sits
+    // inside the note editor, whose own Escape is a bubble-phase document
+    // listener that bails only on `defaultPrevented` (NoteEditor.tsx), so a
+    // menu that closed without consuming the key closed the whole note with
+    // it. Dispatched from BODY, not from document: that is where a keypress
+    // starts, and it is the only path where the capture-phase listener runs
+    // before the editor's.
+    it('the open menu consumes Escape — a surface above it does not also close', () => {
+        const reached: string[] = [];
+        // NoteEditor's listener, to the letter.
+        const editorEscape = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || e.defaultPrevented) return;
+            reached.push('editor');
+        };
+        document.addEventListener('keydown', editorEscape);
+        const esc = () => new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+        try {
+            const el = mount(
+                <TaskTree
+                    tasks={[task]}
+                    onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+                    onSetDue={() => {}} onSetAttachments={() => {}} onSnooze={() => {}}
+                    myPerms={PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS} currentUserId={3}
+                />,
+            );
+            const btn = () => el.querySelector('.tt-item .notes-snooze button') as HTMLButtonElement;
+            const menu = () => el.querySelector('.notes-snooze-menu');
+
+            // POSITIVE CONTROL: with no menu open the very same keypress does
+            // reach the editor — so "not reached" below is the menu, not a
+            // listener that never fires.
+            act(() => { document.body.dispatchEvent(esc()); });
+            expect(reached).toEqual(['editor']);
+
+            act(() => btn().click());
+            expect(menu()).not.toBeNull();
+            act(() => { document.body.dispatchEvent(esc()); });
+            expect(menu()).toBeNull();
+            expect(reached).toEqual(['editor']);   // still one: the menu ate this one
+        } finally {
+            document.removeEventListener('keydown', editorEscape);
+        }
+    });
+
     it('offers Unsnooze only while a snooze is in force', () => {
         const el = mount(
             <TaskTree
