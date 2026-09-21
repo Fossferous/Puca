@@ -607,8 +607,9 @@ ck('copy: the picture came with the copy, and it decrypts', await page.evaluate(
 const freshFiles = [...filesFetched].filter(id => !knownFiles.has(id));
 ck('copy: the picture is the COPY’s OWN upload, not the original’s',
     freshFiles.length >= 1, JSON.stringify({ fresh: freshFiles.length, before: knownFiles.size }));
-await page.locator('.notes-editor-title').blur();
-await page.keyboard.press('Escape');
+// The Close button, not Escape: a note with no items autofocuses its add
+// row, and Escape inside an input belongs to the input.
+await page.getByRole('button', { name: 'Close', exact: true }).click();
 await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 ck('copy: both notes are there — the original and its copy',
     await page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Holiday photo$/ }) }).count() === 1
@@ -637,6 +638,13 @@ try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* 
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+// Púca asks, 3 s after it mounts, about a recovery code generated at sign-up
+// and never confirmed. It is a FULL-SCREEN overlay that swallows every click,
+// so it is answered here, before the board is driven, rather than after (it is
+// not under test; the later dismissal stays for a tab that mounted later).
+await page.waitForSelector('.recovery-modal-overlay .recovery-done-btn', { timeout: 8000 })
+    .then(() => page.click('.recovery-modal-overlay .recovery-done-btn'))
+    .catch(() => { /* not shown */ });
 await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
 ck('púca: the board card shows a text note\'s text', /Roses are red/.test(await page.locator('.checklist-card', { hasText: 'Poem' }).locator('.tasks-card-body').innerText().catch(() => '')));
 ck('púca: the board card says a photo note has a picture', /1 picture/.test(await page.locator('.checklist-card', { hasText: 'Holiday photo' }).locator('.tasks-card-body').innerText().catch(() => '')));
@@ -1141,17 +1149,30 @@ ck('phone: the note text undo is a real tap target', undoBtnBox && undoBtnBox.wi
 await m.tap('.notes-editor .nb-histbtn[aria-label="Undo"]');
 await new Promise(res => setTimeout(res, 1500));
 ck('phone: tapping Undo puts the text back', (await m.locator('.notes-editor textarea.nb-text').inputValue()) === 'Buy before Friday');
-// An item delete offers the same snackbar, inside the viewport.
-const sour = () => m.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).first();
-await sour().locator('.tt-btn[title="Delete"]').tap();
+// An item delete offers the same snackbar, inside the viewport. The item is
+// one this section adds itself: what the sections above left in this note has
+// been through a trash, a plaintext injection and two edits, and the check is
+// about the snackbar, not about them.
+const hasRow = t => m.waitForFunction(
+    text => [...document.querySelectorAll('.notes-editor .tt-description')].some(d => d.textContent.trim() === text),
+    t, { timeout: 15000 },
+).then(() => true).catch(() => false);
+const mine = () => m.locator('.notes-editor .tt-item', { hasText: 'Undo me' }).first();
+await m.fill('.notes-editor-add input', 'Undo me');
+await m.press('.notes-editor-add input', 'Enter');
+ck('phone: the add row adds an item', await hasRow('Undo me'));
+await mine().locator('.tt-btn[title="Delete"]').tap();
 await m.waitForSelector('.notes-undo', { timeout: 8000 });
 const undoBarBox = await m.locator('.notes-undo').boundingBox();
 ck('phone: the item undo bar fits the viewport and clears the safe area',
     undoBarBox && undoBarBox.x >= 0 && undoBarBox.x + undoBarBox.width <= 390.5, JSON.stringify(undoBarBox));
+ck('phone: the item is gone while Undo is offered', await m.locator('.notes-editor .tt-item', { hasText: 'Undo me' }).count() === 0);
 await m.locator('.notes-undo button').tap();
-await new Promise(res => setTimeout(res, 1500));
-ck('phone: Undo puts the subtask back, still nested',
-    await m.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1);
+ck('phone: tapping Undo puts the item back', await hasRow('Undo me'));
+// ...and leave the note as this section found it.
+await mine().locator('.tt-btn[title="Delete"]').tap();
+await m.waitForSelector('.notes-undo', { timeout: 8000 });
+await m.locator('.notes-undo').waitFor({ state: 'detached', timeout: 12000 });
 await mshot('phone-editor');
 // a popover from the footer stays inside the viewport
 await m.tap('.notes-editor-foot button[aria-label="Colour"]');
