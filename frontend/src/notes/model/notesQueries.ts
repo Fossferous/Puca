@@ -416,7 +416,12 @@ export interface NoteActions {
      *  — even if some items failed (they are reported; the note is real) —
      *  and null only when nothing was saved. */
     createNote: (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
-    renameNote: (note: NoteRef, title: string) => Promise<boolean>;
+    /** `baseRev` is the note's content revision when the user STARTED typing
+     *  the new title (NoteEditor captures it on the clean→dirty edge). Pass
+     *  it, or a rename made while another device's landed will name THEIRS
+     *  and destroy it with no refusal. Omitted = the cached revision, which
+     *  is right only for a rename with no typing window in front of it. */
+    renameNote: (note: NoteRef, title: string, baseRev?: number) => Promise<boolean>;
     /** Moves the note to the trash where the server has one, else deletes it
      *  for good; queued while offline (the trash is probed when it runs). */
     deleteNote: (note: NoteRef) => Promise<boolean>;
@@ -691,18 +696,29 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         return ref;
     }, [qc]);
 
-    const renameNote = useCallback(async (note: NoteRef, title: string): Promise<boolean> => {
+    const renameNote = useCallback(async (note: NoteRef, title: string, baseRev?: number): Promise<boolean> => {
         if (note.kind !== 'list') return false;
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
         // The revision this rename is based on, so it cannot land on top of a
-        // rename made somewhere else in the meantime (migration 069). Absent
-        // against a server without it: last write wins, as before.
+        // rename made somewhere else in the meantime (migration 069). The
+        // CALLER's base wins: a title is typed over seconds, and a live
+        // refetch during those seconds moves the cached revision to the other
+        // device's — reading it here would name THEIRS and win the race this
+        // check exists to lose. Absent against a server without the revision:
+        // last write wins, as before.
         const base = contentRef.current.features.contentRev
-            ? prev?.find(l => l.id === note.id)?.content_rev
+            ? (baseRev ?? prev?.find(l => l.id === note.id)?.content_rev)
             : undefined;
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.map(l => (l.id === note.id ? { ...l, title } : l)));
         try {
-            await sendNoteOp(ops.renameList(note.id, title, base));
+            // The answer carries the note's new revision, so a second rename
+            // straight after the first is not judged against the one this
+            // call has already moved past.
+            const sent = await sendNoteOp<number | null>(ops.renameList(note.id, title, base));
+            if (!sent.queued && typeof sent.value === 'number') {
+                const rev = sent.value;
+                qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.map(l => (l.id === note.id ? { ...l, content_rev: rev } : l)));
+            }
             return true;
         } catch (err) {
             qc.setQueryData(notesKeys.lists, prev);

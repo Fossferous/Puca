@@ -808,6 +808,19 @@ await pageB.locator('.notes-editor textarea.nb-text').click();
 await sleep(2500);
 ck('conflict: a rename on B does not wipe the title A is typing',
     (await page.locator('.notes-editor-title').inputValue()) === 'A is renaming this');
+// ...and keeping A's draft is only half of it. A now COMMITS. The commit
+// names the revision A started typing from, which B has moved past, so it
+// must be refused: B's name survives and A is told. Reading the revision at
+// commit time instead would name B's, be accepted, and destroy B's rename
+// with nothing on screen to say so.
+await page.locator('.notes-editor textarea.nb-text').click();   // blur the title = commit
+await sleep(2500);
+const titleAfterA = await page.locator('.notes-editor-title').inputValue();
+const renameToast = await page.locator('.message-toast-title', { hasText: 'renamed somewhere else' }).count();
+ck('conflict: A\'s rename is refused rather than destroying B\'s, and A is told',
+    titleAfterA === 'B renamed it' && renameToast > 0, `title=${JSON.stringify(titleAfterA)} toast=${renameToast}`);
+// And B still holds its own name — the loss this check exists for.
+ck('conflict: B\'s rename survived on B', await pageB.locator('.notes-editor-title').inputValue() === 'B renamed it');
 await closeNote(page);
 await closeNote(pageB);
 

@@ -185,11 +185,15 @@ back the copy it holds (migration 069, `expect_rev` on
   key you do not have yet), only *Keep mine* is offered — sealing the words of
   an error over real content is the one thing the note text field exists to
   prevent.
-- **The revision is taken when you start typing**, not when the save goes out.
-  The other device's change usually arrives while you are still writing: the
-  field keeps what you typed, and the save is still judged against what you
-  were writing on top of. Reading the revision at send time would name theirs
-  and quietly win.
+- **The revision is taken when you start typing**, not when the save goes out
+  — for the text and for the title alike. The other device's change usually
+  arrives while you are still writing: the field keeps what you typed, and the
+  save is still judged against what you were writing on top of. Reading the
+  revision at send time would name theirs and quietly win — which for a title
+  would mean their rename disappearing with nothing on screen to say so. A
+  picture takes its revision when the sidecar it is being added to is read,
+  before the upload, for the same reason: the upload is the window the other
+  device's change arrives in.
 - **Ticking, adding, editing or reordering an ITEM is never a clash.** A note
   is one card holding both its text and its items, and the revision moves only
   for the note's own content.

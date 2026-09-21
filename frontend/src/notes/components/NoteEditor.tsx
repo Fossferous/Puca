@@ -62,16 +62,25 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     // UNLESS this title is being typed right now. Without that guard a rename
     // arriving mid-keystroke wiped what the user was writing, with no way to
     // get it back; the note's text has never behaved that way
-    // (components/NoteBodyField.tsx) and the title should not either. What is
-    // typed here stays until it is committed or abandoned, and the commit
-    // itself names the revision it was based on, so it cannot land over the
-    // other rename either.
+    // (components/NoteBodyField.tsx) and the title should not either.
     const [titleDirty, setTitleDirty] = useState(false);
     const [seenTitle, setSeenTitle] = useState(card.title);
     if (seenTitle !== card.title) {
         setSeenTitle(card.title);
         if (!titleDirty) setTitleDraft(card.title);
     }
+    // THE BASE IS TAKEN WHEN TYPING STARTS, exactly as the note's text takes
+    // it (components/NoteBodyField.tsx). Keeping the draft is only half the
+    // protection: the rename that follows must also name the revision it was
+    // written on top of. Reading the card's revision at COMMIT time would
+    // read the one the refetch above just moved to the OTHER device's — and
+    // the commit would then be accepted and destroy their rename with no
+    // refusal, no banner and no toast.
+    const titleBase = useRef<number | undefined>(card.contentRev);
+    const markTitleDirty = () => {
+        if (!titleDirty) titleBase.current = card.contentRev;   // the committed render's value
+        setTitleDirty(true);
+    };
     const addRef = useRef<HTMLInputElement>(null);
     const currentUserId = currentUserIdFromToken() ?? undefined;
     const isChannel = ref.kind === 'channel';
@@ -101,9 +110,10 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
 
     const commitTitle = () => {
         const t = titleDraft.trim();
+        const base = titleBase.current;
         setTitleDirty(false);
         if (isChannel || titleUnreadable || !t || t === card.title) { setTitleDraft(card.title); return; }
-        void actions.renameNote(ref, t);
+        void actions.renameNote(ref, t, base);
     };
 
     const addItem = async (e: React.FormEvent) => {
@@ -128,7 +138,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         readOnly={isChannel || titleUnreadable}
                         title={isChannel ? 'Channel checklists are renamed from the channel settings in Púca' : 'Click to rename'}
                         aria-label="Note title"
-                        onChange={e => { setTitleDirty(true); setTitleDraft(e.target.value); }}
+                        onChange={e => { markTitleDirty(); setTitleDraft(e.target.value); }}
                         onBlur={commitTitle}
                         onKeyDown={e => {
                             if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
