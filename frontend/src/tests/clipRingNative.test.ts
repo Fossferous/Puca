@@ -349,7 +349,9 @@ describe('native ring: audio lands where it happened', () => {
                 // The main thread reports the lead with each packet that changes it
                 // (and at least once a second: replayBuffer.leadReporter).
                 if (opts.lead && (j === 0 || reported(j) !== reported(j - 1) || j % 46 === 0)) {
-                    ring.noteAudioLead({ renderAtMs: A0 + (j * AUDIO_US) / 1000 + lead(j), leadMs: reported(j) });
+                    // Epoch time, as replayBuffer sends it (the mocked performance.now is
+                    // the worker's clock; the two contexts share only timeOrigin's base).
+                    ring.noteAudioLead({ renderAtMs: performance.timeOrigin + A0 + (j * AUDIO_US) / 1000 + lead(j), leadMs: reported(j) });
                 }
                 ctrl.enqueue({ timestamp: RAW0 + j * AUDIO_US + Math.round(lead(j) * 1000), index: j, close() { } } as unknown as AudioData);
                 await new Promise(r => setTimeout(r, 0)); // the pump reads it at THIS clock

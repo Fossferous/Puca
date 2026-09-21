@@ -127,7 +127,8 @@ describe('the clip-audio invoke wire', () => {
         ctx.currentTime = 1;               // the clock jumped past the playhead: an underrun
         fire('clip-audio-data', packet()); // re-primed at now + 50 ms
         expect(leads.map(l => Math.round(l.leadMs))).toEqual([50, 60, 50]);
-        const now = performance.now();
+        // Epoch time, so a worker with its own time origin can look it up.
+        const now = performance.timeOrigin + performance.now();
         for (const l of leads) expect(Math.abs(l.renderAt - l.leadMs - now)).toBeLessThan(500);
         // The drift reset: 60 more packets on a still clock push the playhead
         // 600 ms ahead; past MAX_BACKLOG_S (500) it re-primes at 50.

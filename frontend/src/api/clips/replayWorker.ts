@@ -142,8 +142,9 @@ export class Ring {
     lastNativeTsUs = -Infinity;
     /** Native captures: the loopback context's scheduling lead over time
      *  (main-thread `audioLead` messages; nativeCapture.ts explains the
-     *  lead). Each entry: the wall time a packet renders at and the lead
-     *  it was scheduled with. `leadUsAt` looks a sample up by its render
+     *  lead). Each entry: the EPOCH time a packet renders at and the lead
+     *  it was scheduled with (epoch, because this worker's performance.now
+     *  starts at its own creation, not the page's). `leadUsAt` looks a sample up by its render
      *  time. Bounded; the oldest half is dropped past the cap. */
     audioLeads: { renderAtMs: number; leadUs: number }[] = [];
     /** Seals muxing right now. Eviction waits for them: it splices `gops`
@@ -509,7 +510,7 @@ export class Ring {
     private leadUsAt(rawTsUs: number): number {
         const leads = this.audioLeads;
         if (leads.length === 0 || !Number.isFinite(this.aOriginMs)) return 0;
-        const renderMs = this.aOriginMs + rawTsUs / 1000;
+        const renderMs = performance.timeOrigin + this.aOriginMs + rawTsUs / 1000;
         let lo = 0, hi = leads.length - 1, found = -1;
         while (lo <= hi) {
             const mid = (lo + hi) >> 1;

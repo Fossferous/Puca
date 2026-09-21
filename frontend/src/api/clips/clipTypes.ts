@@ -37,8 +37,9 @@ export type ToWorker =
     | { t: 'arm'; cfg: ArmConfig; video: ReadableStream<VideoFrame> | null; audio: ReadableStream<AudioData> | null }
     | { t: 'rebindAudio'; audio: ReadableStream<AudioData> | null }
     /** Native captures: the loopback context's scheduling lead changed. The
-     *  packet scheduled now renders at `renderAtMs` (performance.now ms in
-     *  the main thread; the worker's clock is the same origin), `leadMs`
+     *  packet scheduled now renders at `renderAtMs` (EPOCH ms:
+     *  performance.timeOrigin + performance.now on the main thread; the
+     *  worker's own performance.now has a different origin), `leadMs`
      *  after it was captured. The worker subtracts the lead in effect for
      *  each audio sample at seal (replayWorker.ts leadUsAt). */
     | { t: 'audioLead'; renderAtMs: number; leadMs: number }

@@ -217,8 +217,11 @@ export async function preferredLoopbackDeviceName(): Promise<string | null> {
 export async function startNativeSystemAudioTrack(
     onError?: (message: string) => void,
     deviceName?: string | null,
-    // Called per packet with the wall time (performance.now ms) its first
-    // sample will RENDER at and the scheduling lead that puts it there.
+    // Called per packet with the EPOCH time (performance.timeOrigin +
+    // performance.now, ms) its first sample will RENDER at and the scheduling
+    // lead that puts it there. Epoch, not performance.now: the worker that
+    // consumes this has its own time origin (its creation), so a plain
+    // performance.now would be off by however long the app had been open.
     // The clip worker subtracts that lead: see the comment at src.start.
     onLead?: (renderAtMs: number, leadMs: number) => void,
 ): Promise<NativeAudioHandle> {
@@ -281,7 +284,7 @@ export async function startNativeSystemAudioTrack(
             // packet renders at, which is what the worker can look up an
             // audio sample by (replayWorker.ts leadUsAt).
             const leadMs = (playhead - now) * 1000;
-            onLead?.(performance.now() + leadMs, leadMs);
+            onLead?.(performance.timeOrigin + performance.now() + leadMs, leadMs);
             playhead += buf.duration;
         } catch (err) {
             console.warn('[nativeCapture] Dropped malformed desktop-audio chunk:', err);
