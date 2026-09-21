@@ -115,7 +115,8 @@ its filter narrows to one label, and — exactly as in Notes — a favourite or 
 tab drag made while notes are hidden saves every hidden note back in its slot.
 Creating a list puts that filter back to everything: a brand-new note carries
 no label and is not archived, so any filter would hide it, and the *Show all
-notes* way back only appears on an empty board.
+notes* way back only appears on an empty board. Leaving the Tasks view inside
+the push debounce sends the pending colour rather than dropping it.
 Grid/list and sort stay Notes' own, per device.
 
 ## What follows the account
@@ -246,7 +247,12 @@ is open. The poll is off only while the stream is live.
   pending (bounded), then asks if offline edits or colour/label changes have
   still not reached the server. Signing out from **Púca** deletes the same
   things, so it asks the same question: Notes publishes the counts (never
-  content) to a per-account flag Púca's sign-out reads.
+  content) to a per-account flag Púca's sign-out reads. Púca writes the
+  colour/label half of that flag as well, since it makes those changes now. It
+  may RAISE the flag from anywhere, but it clears it only off the back of a
+  sync that succeeded in its own tab: a warning Notes raised for a reason Púca
+  cannot see from where it sits — a refused rollback, a backend with no route
+  — must not be dropped by a Púca tab that has never opened Tasks.
 
 ## Sessions: one origin, two pages
 

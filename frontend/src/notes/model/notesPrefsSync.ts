@@ -428,12 +428,25 @@ export function useNotesUnsyncedFlag(outboxPending: number): void {
  * navigated away from within the push debounce leaves the view unmounted with
  * the write still local, and a publisher that unmounted with it would leave
  * the flag saying the opposite.
+ *
+ * It may RAISE the flag from anywhere, but it may only CLEAR it off the back
+ * of a sync that actually SUCCEEDED here. The flag is one shared key that
+ * Notes publishes too, from its own module state: unsynced() answers true
+ * outright while the status is 'unreadable', 'rollback' or 'local-only', and
+ * in the Púca bundle the status stays 'idle' until the Tasks view has been
+ * opened at least once. A Púca tab in any other state therefore cannot tell a
+ * clean document from a refused rollback the Notes tab is sitting on — so it
+ * says nothing rather than writing false over Notes' true and dropping a real
+ * warning. Over-warning is the safe side of this; under-warning loses data.
  */
 export function useNotesPrefsUnsyncedFlag(): void {
     useEffect(() => {
         const publish = () => {
             const uid = currentUserIdFromToken();
-            if (uid !== null) writeNotesUnsyncedPrefs(uid, appSync.unsynced());
+            if (uid === null) return;
+            const unsynced = appSync.unsynced();
+            if (!unsynced && appSync.status() !== 'synced') return;
+            writeNotesUnsyncedPrefs(uid, unsynced);
         };
         publish();
         const offSettled = appSync.subscribeSettled(publish);
@@ -464,7 +477,7 @@ export function useNotesPrefsSync(): PrefsSyncStatus {
         let timer: number | undefined;
         const schedule = () => {
             window.clearTimeout(timer);
-            timer = window.setTimeout(() => { void appSync.push(); }, PUSH_DEBOUNCE_MS);
+            timer = window.setTimeout(() => { timer = undefined; void appSync.push(); }, PUSH_DEBOUNCE_MS);
         };
         const unsub = subscribeNotesPrefs(schedule);
         const onFocus = () => { void appSync.pull(); };
@@ -473,7 +486,11 @@ export function useNotesPrefsSync(): PrefsSyncStatus {
         window.addEventListener('online', onOnline);
         return () => {
             unsub();
-            window.clearTimeout(timer);
+            // A colour picked and then navigated away from inside the debounce
+            // must still go out: this view unmounts, the write does not. Only
+            // when one is genuinely outstanding — `timer` is cleared as it
+            // fires, so an unmount long after the last edit asks for nothing.
+            if (timer !== undefined) { window.clearTimeout(timer); timer = undefined; void appSync.push(); }
             window.removeEventListener('focus', onFocus);
             window.removeEventListener('online', onOnline);
         };
