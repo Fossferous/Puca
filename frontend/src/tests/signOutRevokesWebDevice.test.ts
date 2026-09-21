@@ -246,9 +246,10 @@ describe('a revoke the server committed but this page never heard back from', ()
         expect(await enrolThisDevice(53)).toBeNull();
         expect(store[WEB_KEY_STORAGE]).toBe(key);
         // Nor a marker for ANOTHER device or account. The settle DELETE fails
-        // (offline) so the marker SURVIVES into attest's own devId check —
-        // answered, it would 404 and clear the marker, and enrolment would
-        // never look at it.
+        // (offline) so the marker SURVIVES into attest's own check — answered,
+        // it would 404 and clear the marker, and enrolment would never look at
+        // it. Which CLAUSE of pendingRevokeMatches refuses it is not pinned
+        // here; the mid-flight test below pins the devId one.
         store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: 'someone-else', uid: 53, at: 1 });
         stubFetch('offline');
         expect(await enrolThisDevice(53)).toBeNull();
@@ -258,6 +259,68 @@ describe('a revoke the server committed but this page never heard back from', ()
         store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: id, uid: 99, at: 1 });
         expect(await enrolThisDevice(53)).toBeNull();
         expect(store[WEB_KEY_STORAGE]).toBe(key);
+    });
+
+    // The control above cannot isolate the marker's OWN devId comparison:
+    // `storedWebDeviceId() === m.devId` refuses 'someone-else' by itself,
+    // because on the web `ensureDeviceKey` reads the same localStorage slot
+    // `storedWebDeviceId` peeks at, so the two ids agree — until the slot
+    // CHANGES while a POST is in flight. That is the case below, and it is
+    // the one `m.devId !== devId` is the only guard for.
+    it('a marker another tab wrote mid-flight never destroys the key that tab just minted', async () => {
+        const key1 = webKey(7);
+        const key2 = webKey(11);
+        useBackingStore({ auth_token: jwt(54), [WEB_KEY_STORAGE]: key1 });
+        const id1 = await keyId();
+        rows.set(id1, { uid: 54, revoked: true });          // signed out from elsewhere
+        stubFetch('offline');
+        let swapped = false;
+        vi.mocked(apiClient.post).mockImplementation(async (path: string, body?: unknown) => {
+            const b = body as { device_pub: string; sign_pub: string };
+            const id = deriveDeviceId(b.device_pub, b.sign_pub);
+            if (!swapped) {
+                // While this POST is in flight: another tab's key lands in the
+                // shared slot, and that tab signs out, leaving ITS marker.
+                swapped = true;
+                store[WEB_KEY_STORAGE] = key2;
+                store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: storedWebDeviceId(), uid: 54, at: 2 });
+            }
+            if (rows.get(id)?.revoked) throw new Error('device_revoked: this device was signed out; add it again as a new device');
+            rows.set(id, { uid: 54, revoked: false });
+            return { id } as never;
+        });
+        expect(await enrolThisDevice(54)).toBeNull();       // refused, and it stays refused
+        // The refusal was about key1. The marker names key2's device, so it is
+        // not this call's confirmation, and key2 survives untouched.
+        expect(store[WEB_KEY_STORAGE]).toBe(key2);
+        const id2 = storedWebDeviceId();
+        expect(id2).not.toBe(id1);                          // the two really are different devices
+        expect(JSON.parse(store[PENDING_REVOKE_KEY]).devId).toBe(id2);   // still that tab's to settle
+    });
+
+    it('positive control: a marker for THIS call’s own device, written while it was in flight, still confirms', async () => {
+        const key = webKey(13);
+        useBackingStore({ auth_token: jwt(55), [WEB_KEY_STORAGE]: key });
+        const id1 = await keyId();
+        rows.set(id1, { uid: 55, revoked: true });
+        stubFetch('offline');
+        let wrote = false;
+        vi.mocked(apiClient.post).mockImplementation(async (path: string, body?: unknown) => {
+            const b = body as { device_pub: string; sign_pub: string };
+            const id = deriveDeviceId(b.device_pub, b.sign_pub);
+            if (!wrote) {
+                wrote = true;                               // the sign-out this call never heard about
+                store[PENDING_REVOKE_KEY] = JSON.stringify({ devId: id1, uid: 55, at: 2 });
+            }
+            if (rows.get(id)?.revoked) throw new Error('device_revoked: this device was signed out; add it again as a new device');
+            rows.set(id, { uid: 55, revoked: false });
+            return { id } as never;
+        });
+
+        const row = await enrolThisDevice(55);
+        expect(row).not.toBeNull();                         // re-enrolled as a NEW device
+        expect(store[WEB_KEY_STORAGE]).not.toBe(key);
+        expect(store[PENDING_REVOKE_KEY]).toBeUndefined();
     });
 
     it('another account’s marker is left alone at sign-in', async () => {
