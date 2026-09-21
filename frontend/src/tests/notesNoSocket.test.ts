@@ -11,8 +11,17 @@
  * registers next — so a Notes socket would silently eat an offer meant for the
  * chat app, which is delivered exactly once.
  *
- * This walks the real source, and carries a positive control: the checker must
- * flag a synthetic offender, or a checker that always passed would pass here.
+ * It walks the TRANSITIVE closure, not just src/notes. Scanning that directory
+ * alone was a hole big enough to drive this very feature through: "Send to
+ * Púca…" made noteText.ts import components/contextMenuUtils, and api/dms.ts
+ * had already needed hand-adding to the scan. Notes is its own Vite entry, so
+ * whatever it reaches for is IN its bundle — an import two modules away brings
+ * the socket in just as surely as a direct one, with a directory scan still
+ * green.
+ *
+ * Two positive controls: the checker must flag a synthetic offender, and the
+ * walker must be shown actually leaving src/notes — a closure that quietly
+ * stopped following imports would pass this file for the wrong reason.
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
@@ -32,6 +41,40 @@ function sourceFiles(dir: string): string[] {
     return out;
 }
 
+/** Static and dynamic module specifiers, in source order. */
+export function importSpecifiers(text: string): string[] {
+    const out: string[] = [];
+    const re = /(?:import|export)[^;\n]*?from\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) out.push(m[1] ?? m[2]);
+    return out;
+}
+
+/** A relative specifier as a file on disk, with TS's extension guesses.
+ *  Bare specifiers are packages — not our source, and not our rule. */
+function resolveRelative(fromFile: string, spec: string): string | null {
+    if (!spec.startsWith('.')) return null;
+    const base = path.resolve(path.dirname(fromFile), spec);
+    for (const c of [base, `${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts'), path.join(base, 'index.tsx')]) {
+        if (fs.existsSync(c) && fs.statSync(c).isFile()) return c;
+    }
+    return null;
+}
+
+/** Every source file the Notes entry pulls in, however deep. */
+export function notesClosure(): string[] {
+    const seen = new Set<string>(sourceFiles(NOTES_DIR));
+    const queue = [...seen];
+    while (queue.length) {
+        const file = queue.pop()!;
+        for (const spec of importSpecifiers(fs.readFileSync(file, 'utf8'))) {
+            const target = resolveRelative(file, spec);
+            if (target && !seen.has(target)) { seen.add(target); queue.push(target); }
+        }
+    }
+    return [...seen];
+}
+
 /** Lines that reach for the socket, ignoring comments (the headers and this
  *  test's own reasons name `wsClient` on purpose). */
 export function socketOffences(text: string): string[] {
@@ -45,9 +88,9 @@ export function socketOffences(text: string): string[] {
 }
 
 describe('Púca Notes never opens a WebSocket', () => {
-    it('no file under src/notes imports api/websocket or touches wsClient', () => {
+    it('nothing the Notes entry imports, at any depth, touches wsClient or api/websocket', () => {
         const offenders: string[] = [];
-        for (const file of sourceFiles(NOTES_DIR)) {
+        for (const file of notesClosure()) {
             for (const line of socketOffences(fs.readFileSync(file, 'utf8'))) {
                 offenders.push(`${path.relative(SRC, file)}: ${line}`);
             }
@@ -57,6 +100,7 @@ describe('Púca Notes never opens a WebSocket', () => {
 
     it('it actually scanned files (a checker over an empty set proves nothing)', () => {
         expect(sourceFiles(NOTES_DIR).length).toBeGreaterThan(40);
+        expect(notesClosure().length).toBeGreaterThan(sourceFiles(NOTES_DIR).length);
     });
 
     it('positive control: the checker DOES flag the obvious offender', () => {
@@ -66,8 +110,19 @@ describe('Púca Notes never opens a WebSocket', () => {
         expect(socketOffences(' * Notes never opens the socket, so wsClient is absent here.')).toHaveLength(0);
     });
 
-    it('api/dms.ts — the module Notes DOES pull in — never imports the socket either', () => {
-        const text = fs.readFileSync(path.join(SRC, 'api', 'dms.ts'), 'utf8');
-        expect(socketOffences(text)).toEqual([]);
+    it('positive control: the walker really leaves src/notes and follows imports', () => {
+        const closure = notesClosure().map(f => path.relative(SRC, f).replace(/\\/g, '/'));
+        // api/dms.ts used to be special-cased by hand; contextMenuUtils.ts is
+        // the module this feature added, two hops out. Both must be reached by
+        // the walk itself, or the closure is not a closure.
+        expect(closure).toContain('api/dms.ts');
+        expect(closure).toContain('components/contextMenuUtils.ts');
+    });
+
+    it('positive control: a bare specifier is not mistaken for a file', () => {
+        expect(importSpecifiers("import React from 'react';\nimport { x } from '../api/dms';"))
+            .toEqual(['react', '../api/dms']);
+        expect(resolveRelative(path.join(SRC, 'notes', 'x.ts'), 'react')).toBeNull();
+        expect(resolveRelative(path.join(SRC, 'notes', 'x.ts'), '../api/dms')).toBe(path.join(SRC, 'api', 'dms.ts'));
     });
 });
