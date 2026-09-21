@@ -187,6 +187,47 @@ describe('two devices, one account', () => {
     });
 });
 
+describe('Púca and Notes open at once (two writers, one document)', () => {
+    it('a colour from one tab and an archive from the other both land on the same note', async () => {
+        const server = new FakeServer();
+        const notes = device(server);
+        const puca = device(server);
+        await notes.sync.pull();
+        await puca.sync.pull();
+
+        notes.edit(s => ({ ...s, archived: { 'list:3': true } }));
+        puca.edit(s => ({ ...s, colors: { 'list:3': 'sage' } }));
+        expect(await notes.sync.push()).toBe('synced');
+        const putsBefore = server.puts;
+        expect(await puca.sync.push()).toBe('synced');
+
+        expect(server.puts - putsBefore, 'one conflict, one retry').toBe(2);
+        expect(await server.state()).toEqual(st({ archived: { 'list:3': true }, colors: { 'list:3': 'sage' } }));
+        // Not last-write-wins: the archive the OTHER tab set is in this one's
+        // own copy now, which is what stops the two undoing each other all day.
+        expect(puca.local.archived).toEqual({ 'list:3': true });
+    });
+
+    it('a label removed in one tab is not resurrected by the other tab’s edit to the same note', async () => {
+        const server = new FakeServer();
+        const notes = device(server, st({ labels: { 'list:3': ['Shopping', 'Urgent'] } }));
+        await notes.sync.pull();
+        const puca = device(server);
+        await puca.sync.pull();
+        expect(puca.local.labels['list:3'], 'both tabs start from the same document').toEqual(['Shopping', 'Urgent']);
+
+        notes.edit(s => ({ ...s, labels: { 'list:3': ['Shopping'] } }));      // drops Urgent
+        expect(await notes.sync.push()).toBe('synced');
+        puca.edit(s => ({ ...s, labels: { 'list:3': ['Shopping', 'Urgent', 'Later'] } }));   // adds Later
+        expect(await puca.sync.push()).toBe('synced');
+
+        // The three-way merge is what decides this: a union would have brought
+        // Urgent back, and a last write would have lost Later.
+        expect((await server.state())!.labels['list:3']).toEqual(['Shopping', 'Later']);
+        expect(puca.local.labels['list:3']).toEqual(['Shopping', 'Later']);
+    });
+});
+
 describe('nothing is lost in a slow conflict, and a rollback has a way out', () => {
     it('an edit made DURING a slow 409 round trip survives the merge', async () => {
         const server = new FakeServer();

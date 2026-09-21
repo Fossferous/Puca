@@ -26,8 +26,8 @@ vi.mock('../api/e2ee', async (orig) => {
     return { ...real, getActiveIdentity: () => id };
 });
 
-import { NOTES_UNSYNCED_PREFIX } from '../api/notesCacheScrub';
-import { flushNotesPrefs, useNotesUnsyncedFlag } from '../notes/model/notesPrefsSync';
+import { NOTES_UNSYNCED_PREFIX, notesSignOutWarning, readNotesUnsynced, writeNotesUnsynced } from '../api/notesCacheScrub';
+import { flushNotesPrefs, useNotesPrefsUnsyncedFlag, useNotesUnsyncedFlag } from '../notes/model/notesPrefsSync';
 import { invalidateNotesPrefs, setNoteColor } from '../notes/model/notesPrefs';
 
 const store: Record<string, string> = {};
@@ -35,6 +35,12 @@ const FLAG = `${NOTES_UNSYNCED_PREFIX}7`;
 
 function Probe() {
     useNotesUnsyncedFlag(0);
+    return null;
+}
+
+/** Púca's half: it writes colours and labels too, but has no outbox. */
+function PucaProbe() {
+    useNotesPrefsUnsyncedFlag();
     return null;
 }
 
@@ -67,5 +73,24 @@ describe('the unsynced flag for Púca’s sign-out', () => {
         await act(async () => { expect(await flushNotesPrefs()).toBe(false); });   // synced -> synced
         expect(store[FLAG]).toBeUndefined();
         expect(server.rev).toBe(2);                             // positive control: it really went up
+    });
+
+    it('is published by PÚCA too — without erasing the queued edits Notes recorded', async () => {
+        // Notes, in the other tab, has two edits made offline. Púca has no
+        // outbox of its own and must leave that count exactly where it is.
+        writeNotesUnsynced(7, { ops: 2, prefs: false });
+        const host = document.createElement('div');
+        root = createRoot(host);
+        act(() => { root!.render(<PucaProbe />); });
+        expect(JSON.parse(store[FLAG])).toEqual({ ops: 2, prefs: false });
+
+        act(() => { setNoteColor('list:1', 'mint'); });
+        expect(JSON.parse(store[FLAG]), 'Púca’s own unsent colour is published').toEqual({ ops: 2, prefs: true });
+        expect(notesSignOutWarning(readNotesUnsynced(7)), 'and Púca’s sign-out asks about both')
+            .toMatch(/2 changes made offline and colours, labels or archive changes/);
+
+        await act(async () => { expect(await flushNotesPrefs()).toBe(false); });
+        expect(JSON.parse(store[FLAG]), 'the colour landed; the queued edits are untouched').toEqual({ ops: 2, prefs: false });
+        expect(server.rev, 'positive control: it really went up').toBe(1);
     });
 });

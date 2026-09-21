@@ -44,7 +44,7 @@ import { currentUserIdFromToken } from '../../api/auth';
 import { getActiveIdentity, openAccountBlob, sealAccountBlob, type Identity } from '../../api/e2ee';
 import { isNetworkError } from '../../api/client';
 import { getSealedBlob, putSealedBlob, type GetBlobResult, type PutBlobResult } from '../../api/sealedBlobs';
-import { writeNotesUnsynced } from '../../api/notesCacheScrub';
+import { writeNotesUnsynced, writeNotesUnsyncedPrefs } from '../../api/notesCacheScrub';
 import { MAX_LABELS_PER_NOTE, type NotesNoteState } from './notesModel';
 import { dedupeLabels, getNotesPrefs, parseNotesPrefs, replaceNoteState, subscribeNotesPrefs } from './notesPrefs';
 
@@ -416,6 +416,30 @@ export function useNotesUnsyncedFlag(outboxPending: number): void {
         const offLocal = subscribeNotesPrefs(publish);
         return () => { offSettled(); offLocal(); };
     }, [outboxPending]);
+}
+
+/**
+ * The same flag, published by PÚCA. Púca's Tasks view writes this document
+ * too, so its sign-out warning has to be about its OWN unsent writes as well
+ * as Notes' — but Púca has no outbox, so it publishes only the prefs half
+ * (writeNotesUnsyncedPrefs) and leaves Notes' queued-edit count alone.
+ *
+ * Mounted at the top of the app, not in the Tasks view: a colour set and then
+ * navigated away from within the push debounce leaves the view unmounted with
+ * the write still local, and a publisher that unmounted with it would leave
+ * the flag saying the opposite.
+ */
+export function useNotesPrefsUnsyncedFlag(): void {
+    useEffect(() => {
+        const publish = () => {
+            const uid = currentUserIdFromToken();
+            if (uid !== null) writeNotesUnsyncedPrefs(uid, appSync.unsynced());
+        };
+        publish();
+        const offSettled = appSync.subscribeSettled(publish);
+        const offLocal = subscribeNotesPrefs(publish);
+        return () => { offSettled(); offLocal(); };
+    }, []);
 }
 
 /**
