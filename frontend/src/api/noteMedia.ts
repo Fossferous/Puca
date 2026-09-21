@@ -142,7 +142,6 @@ export function withoutItem(refs: TaskAttachmentRef[], item: GalleryItem): TaskA
     return refs.filter(r => !drop.has(r.href));
 }
 
-/** The next free `drawing-<n>` base name in a sidecar. */
 /**
  * What saving a drawing does to a note's sidecar. A drawing is a PAIR — the
  * PNG everything shows and the strokes that make it editable — so REPLACING
@@ -160,6 +159,7 @@ export function planDrawingReplace(refs: TaskAttachmentRef[], replacing?: Galler
     return { kept, dropped: replacing ? refsOfItem(replacing) : [], base: nextDrawingName(kept) };
 }
 
+/** The next free `drawing-<n>` base name in a sidecar. */
 export function nextDrawingName(refs: TaskAttachmentRef[]): string {
     let n = 1;
     const taken = new Set(refs.map(r => baseName(r.name)));

@@ -587,9 +587,11 @@ const pucaInked = await page.evaluate(() => {
     return dark;
 });
 ck('púca: reopening the drawing restores the strokes', pucaInked > 50, `dark samples=${pucaInked}`);
+// DrawingCanvas.css sets .notes-draw's radius to 12px. An unstyled block
+// computes to '0px' — never '' — so the value itself is the assertion.
+const drawRadius = await page.locator('.notes-draw').evaluate(el => getComputedStyle(el).borderRadius);
 ck('púca: the editor is the full-size modal, not an unstyled block (its stylesheet travelled with it)',
-    await page.locator('.notes-draw').evaluate(el => getComputedStyle(el).borderRadius) !== '',
-    await page.locator('.notes-draw').evaluate(el => getComputedStyle(el).backgroundColor));
+    drawRadius === '12px', drawRadius);
 await shot('puca-drawing-editor');
 // Draw a second stroke and save: ONE drawing remains (both old refs replaced).
 const pcb = await page.locator('.notes-draw-canvas').boundingBox();
