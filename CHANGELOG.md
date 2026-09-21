@@ -37,6 +37,15 @@ one-line summary; this file is the full story. Versions follow
   the server sees the next reminder time, so reminders reach your other
   devices. A per-item *Keep the time private from the server* switch hides that
   too, and then the item gets no reminders.
+- **Reminder times that are yours.** Give an item a time with one tap —
+  *Morning*, *Afternoon* or *Evening* — instead of filling in a date and a
+  time. What those three mean, and the time a new reminder starts at, is
+  yours to set in the account menu, and it follows your account to your other
+  devices, encrypted like everything else. If the time has already gone
+  today, the tap means tomorrow. Snooze's *Tomorrow* now means your morning
+  rather than 09:00. The server still only ever sees when an item is due,
+  never what it is — and the per-item *Keep the time private from the server*
+  switch is still there for the ones it should not see at all.
 - **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
   morning. The reminder time the server holds moves with the snooze, so a
   phone reminding with Púca Notes closed goes off at the snoozed time. Snooze

@@ -256,6 +256,42 @@ ck('editor: a subtask nests under its parent', await page.locator('.notes-editor
 await page.keyboard.press('Escape');
 await sleep(150);
 ck('editor: Escape closes the subtask input and keeps the note open', await page.locator('.notes-editor .tt-subtask-add').count() === 0 && await page.locator('.notes-editor').count() === 1);
+// ---- the reminder times: the setting, then the one-tap row that reads it ----------------------
+// Set Morning to 07:30 FIRST, so "the preset used the setting" cannot pass by
+// landing on the old hardcoded 09:00.
+await page.click('button[aria-label="Account and settings"]');
+await page.waitForSelector('.notes-menu', { timeout: 5000 });
+ck('settings: the account menu has the four reminder times',
+    await page.locator('#notes-remind-morning, #notes-remind-afternoon, #notes-remind-evening, #notes-remind-default').count() === 4);
+await page.fill('#notes-remind-morning', '07:30');
+await page.keyboard.press('Escape');
+await sleep(300);
+await page.click('button[aria-label="Account and settings"]');
+await page.waitForSelector('.notes-menu', { timeout: 5000 });
+ck('settings: the changed Morning is kept', await page.locator('#notes-remind-morning').inputValue() === '07:30');
+await page.keyboard.press('Escape');
+await sleep(200);
+
+const dueCount = () => Number(sql(`SELECT count(*) FROM channel_tasks t JOIN task_lists l ON l.id = t.list_id JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}' AND t.due_at IS NOT NULL`));
+const duesBefore = psqlDsn ? dueCount() : null;
+const presetRow = page.locator('.notes-editor .tt-item', { hasText: 'Bread' }).first();
+await presetRow.hover();
+await presetRow.locator('.tt-btn[title="Add due time"]').click();
+await page.waitForSelector('.tt-due-edit', { timeout: 5000 });
+ck('presets: the due editor offers Morning, Afternoon and Evening', await page.locator('.tt-due-presets button').count() === 3);
+await page.locator('.tt-due-presets button', { hasText: 'Morning' }).click();
+await page.waitForSelector('.notes-editor .tt-item:has-text("Bread") .tt-due', { timeout: 10000 });
+const presetDue = await presetRow.locator('.tt-due-label').first().innerText();
+ck('presets: Morning wrote the configured time, not 09:00', /07:30/.test(presetDue), presetDue);
+ck('presets: one tap set it — no date form is left open', await page.locator('.tt-due-edit input[type="datetime-local"]').count() === 0);
+if (psqlDsn) {
+    await sleep(800);
+    const after = dueCount();
+    ck('database: the preset wrote ONE ordinary plaintext due_at (the server learns WHEN, never WHAT)', after === duesBefore + 1, `before=${duesBefore} after=${after}`);
+} else {
+    skip('database: the preset wrote one plaintext due_at', 'no psql DSN given');
+}
+
 // due time on Eggs (tomorrow 09:00)
 const eggsRow = page.locator('.notes-editor .tt-item', { hasText: 'Eggs' }).first();
 await eggsRow.hover();
@@ -685,6 +721,20 @@ const offlineOnB = await pageB.waitForSelector('.notes-card:has-text("Offline no
 ck('offline: the edit made offline reached the server and device B sees it', offlineOnB);
 const itemOnB = await pageB.waitForFunction(() => /Written on a plane/.test(document.body.innerText), null, { timeout: 10000 }).then(() => true, () => false);
 ck('offline: its item came through too (temp ids rewritten)', itemOnB);
+// The reminder times follow the account: device B pulls the sealed document
+// on focus, so re-open its menu until it has (bounded), never forever.
+let bMorning = '';
+for (let i = 0; i < 6 && bMorning !== '07:30'; i++) {
+    await pageB.bringToFront();
+    await sleep(1000);
+    await pageB.click('button[aria-label="Account and settings"]');
+    await pageB.waitForSelector('.notes-menu', { timeout: 5000 });
+    bMorning = await pageB.locator('#notes-remind-morning').inputValue();
+    await pageB.keyboard.press('Escape');
+    await sleep(200);
+}
+ck('settings: the reminder times reach a second device', bMorning === '07:30', bMorning);
+await page.bringToFront();
 if (psqlDsn) {
     try {
         // EXACTLY one more than before it was written: not a lower bound the
@@ -693,6 +743,9 @@ if (psqlDsn) {
         ck('database: the offline note became exactly one real list on the server', n === listsBeforeOffline + 1, `before=${listsBeforeOffline} after=${n}`);
         const blob = sql(`SELECT blob FROM user_sealed_blobs b JOIN users u ON u.id = b.user_id WHERE u.username = '${username}' AND b.name = 'notes-prefs'`);
         ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|sage|mint/.test(blob), blob.slice(0, 60));
+        // The reminder times ride in that same document: the server must see
+        // no 07:30 anywhere, only the plaintext due_at the preset wrote.
+        ck('database: the reminder times are inside the ciphertext, not beside it', !/07:30/.test(blob));
     } catch (e) {
         ck('database sync checks ran', false, String(e).slice(0, 200));
     }
@@ -979,6 +1032,11 @@ await m.tap('button[aria-label="Account and settings"]');
 await m.waitForSelector('.notes-menu-row select', { timeout: 5000 });
 const selPx = await m.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.notes-menu-row select')).fontSize));
 ck('phone: account-menu selects ≥ 16px', selPx >= 16, `${selPx}px`);
+// The four reminder-time rows: inside 390px, and no iOS zoom either.
+const timeRow = await m.locator('.notes-menu-row:has(#notes-remind-morning)').boundingBox();
+ck('phone: the reminder-time rows fit the viewport', timeRow && timeRow.x >= 0 && timeRow.x + timeRow.width <= 390.5, JSON.stringify(timeRow));
+const timePx = await m.evaluate(() => parseFloat(getComputedStyle(document.querySelector('#notes-remind-morning')).fontSize));
+ck('phone: the reminder-time inputs ≥ 16px', timePx >= 16, `${timePx}px`);
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 });
 
@@ -1014,6 +1072,17 @@ ck('phone: editor tap targets at size', r.under.length === 0, JSON.stringify(r.u
 const grip = await m.evaluate(() => { const g = document.querySelector('.notes-editor .tt-grip:not(.tt-grip-ghost)'); return g ? parseFloat(getComputedStyle(g).opacity) : -1; });
 ck('phone: the drag grip is visible (not the desktop hover state)', grip >= 0.5, String(grip));
 ck('phone: the move arrows (tap alternative) are shown', await m.locator('.notes-editor .tt-move').first().isVisible());
+// The one-tap reminder row: a real button at 44px, inside the viewport.
+const eggsPhone = m.locator('.notes-editor .tt-item', { hasText: 'Eggs' }).first();
+await eggsPhone.locator('.tt-btn[title="Edit due time"]').tap();
+await m.waitForSelector('.tt-due-presets', { timeout: 5000 });
+const presetBox = await m.locator('.tt-due-presets button').first().boundingBox();
+ck('phone: the preset buttons meet the tap-target size', presetBox && presetBox.height >= 44, JSON.stringify(presetBox));
+const dueEditBox = await m.locator('.tt-due-edit').boundingBox();
+ck('phone: the due editor stays inside the viewport', dueEditBox && dueEditBox.x >= 0 && dueEditBox.x + dueEditBox.width <= 390.5, JSON.stringify(dueEditBox));
+await m.keyboard.press('Escape');
+await sleep(200);
+
 // Bread, not Butter: the database step above rewrote Butter's text.
 await m.locator('.notes-editor .tt-item', { hasText: 'Bread' }).first().locator('.tt-description').tap();
 await m.waitForSelector('.notes-editor .tt-edit-input', { timeout: 5000 });

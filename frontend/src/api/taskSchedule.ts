@@ -24,6 +24,7 @@ import {
     type Wall, addDays, compareWall, daysBetween, formatWall, instantToWall, isValidZone, parseWall, viewerZone, wallToInstant,
 } from '../utils/calendarMath';
 import { isUndecryptable } from './decryptMarkers';
+import { isReminderTime } from './reminderTimes';
 
 export const SCHEDULE_VERSION = 1;
 /** Plaintext size buckets. The largest is also the hard cap, well inside the
@@ -525,10 +526,13 @@ export function effectiveReminderMs(dueAt: string | null, snoozePlain: string | 
 
 export type SnoozePreset = '10m' | '1h' | 'tomorrow';
 
-/** The instant a snooze preset names (tomorrow = 09:00 local tomorrow). */
-export function snoozeUntil(preset: SnoozePreset, nowMs: number, tz: string = viewerZone()): number {
+/** The instant a snooze preset names. `tomorrowAt` is the user's morning
+ *  time (api/reminderTimes.ts); it defaults to 09:00, which is what this
+ *  always was, so a caller that has no setting to hand is unchanged. */
+export function snoozeUntil(preset: SnoozePreset, nowMs: number, tz: string = viewerZone(), tomorrowAt = '09:00'): number {
     if (preset === '10m') return nowMs + 10 * 60_000;
     if (preset === '1h') return nowMs + 60 * 60_000;
     const w = addDays(instantToWall(nowMs, tz), 1);
-    return wallToInstant({ ...w, hh: 9, mm: 0 }, tz);
+    const at = isReminderTime(tomorrowAt) ? tomorrowAt : '09:00';
+    return wallToInstant({ ...w, hh: Number(at.slice(0, 2)), mm: Number(at.slice(3)) }, tz);
 }

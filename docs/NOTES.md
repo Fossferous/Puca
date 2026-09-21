@@ -105,7 +105,8 @@ always the full set — `moveNoteInOrder` in `frontend/src/notes/model/notesMode
 
 ## What follows the account
 
-Colour, labels and the archive flag are one document, sealed to your own key
+Colour, labels, the archive flag and your four **reminder times** are one
+document, sealed to your own key
 (`sealAccountBlob` in `frontend/src/api/e2ee.ts`: its own HKDF key, and an AAD
 naming your account and the document, so the server cannot swap it for another
 sealed field) and stored as ciphertext with a revision number
@@ -694,7 +695,20 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   whose subtree holds an open item that still repeats (or whose schedule it
   cannot read) says so and changes nothing — tick the repeating item on its
   own, or remove its repeat.
-- **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from Reminders and from
+- **Reminder times**: what *Morning*, *Afternoon* and *Evening* mean to you,
+  and the time a new reminder starts at. Set them in the account menu
+  (09:00 / 14:00 / 19:00, new reminders at 09:00, until you change them). An
+  item's clock button then offers those three as one tap, the *Date & repeat*
+  dialog offers the same row, and Snooze's *Tomorrow* means your morning. A
+  preset lands on today if that time is still ahead and on tomorrow if it has
+  gone, by wall clock, so the day the clocks change still gives you the time
+  you asked for. The times follow your account in the sealed document above —
+  the server never sees them — but a preset writes the same plaintext `due_at`
+  any reminder does, so the per-item *Keep the time private from the server*
+  switch is still the way to hide when something is. Púca's own Tasks view
+  shows the same three buttons at the standard times; the setting lives in
+  Púca Notes.
+- **Snooze**: 10 minutes, 1 hour or tomorrow at your morning time, from Reminders and from
   the calendar, for anyone who may tick the item. When the snoozer may also
   edit the item's time (its creator, a task manager, any personal note), the
   snooze **moves the plaintext `due_at` to the snooze instant** — the server,

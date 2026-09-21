@@ -1,5 +1,5 @@
-// Unit tests for the device-local Notes store (colour / labels / archived /
-// view). The global test setup replaces localStorage with vi.fn() stubs that
+// Unit tests for the Notes prefs store (colour / labels / archived / the four
+// reminder times / view). The global test setup replaces localStorage with vi.fn() stubs that
 // STORE NOTHING, so a test that only asserted "no throw" would pass against
 // a store that never persisted — these give the stubs a real backing map and
 // assert on what lands in it.
@@ -12,9 +12,10 @@ vi.mock('../api/auth', () => ({
 
 const {
     parseNotesPrefs, dedupeLabels, getNotesPrefs, subscribeNotesPrefs, invalidateNotesPrefs,
-    setNoteColor, setNoteLabels, setNoteArchived, setNotesView, renameLabel, pruneNotesPrefs,
+    setNoteColor, setNoteLabels, setNoteArchived, setNotesView, setReminderTimes, renameLabel, pruneNotesPrefs,
     EMPTY_KEEP_PREFS,
 } = await import('../notes/model/notesPrefs');
+import { DEFAULT_REMINDER_TIMES } from '../api/reminderTimes';
 
 const backing = new Map<string, string>();
 
@@ -48,6 +49,7 @@ describe('parseNotesPrefs', () => {
             colors: { 'list:1': 'mint', 'channel:4': 'coral' },
             labels: { 'list:1': ['Home', 'Work'] },
             archived: { 'list:1': true, 'channel:5': true },
+            times: DEFAULT_REMINDER_TIMES,
             view: 'list',
             sort: 'puca',
         });
@@ -102,7 +104,7 @@ describe('the live store', () => {
         setNoteLabels('list:2', ['  ']);
         setNoteArchived('list:3', true);
         setNoteArchived('list:3', false);
-        expect(JSON.parse(backing.get('pucaNotesPrefs:42')!)).toEqual({ colors: {}, labels: {}, archived: {}, view: 'grid', sort: 'puca' });
+        expect(JSON.parse(backing.get('pucaNotesPrefs:42')!)).toEqual({ colors: {}, labels: {}, archived: {}, times: DEFAULT_REMINDER_TIMES, view: 'grid', sort: 'puca' });
     });
 
     it('notifies subscribers on every write and on invalidation, not on reads', () => {
@@ -139,6 +141,46 @@ describe('the live store', () => {
         pruneNotesPrefs(new Set(['list:1', 'list:2', 'channel:3']));
         expect(getNotesPrefs()).toBe(before);   // untouched: no write, same object
         pruneNotesPrefs(new Set(['list:2']));
-        expect(getNotesPrefs()).toEqual({ colors: {}, labels: { 'list:2': ['x'] }, archived: {}, view: 'grid', sort: 'puca' });
+        expect(getNotesPrefs()).toEqual({ colors: {}, labels: { 'list:2': ['x'] }, archived: {}, times: DEFAULT_REMINDER_TIMES, view: 'grid', sort: 'puca' });
+    });
+});
+
+// The four reminder times live in the same store and the same sealed document
+// (notesPrefsSync.ts). A malformed one must fall back to ITS OWN default, not
+// take the store down or leave a bad value where a preset will read it.
+describe('reminder times', () => {
+    it('parses per field and falls back to the default for anything that is not HH:mm', () => {
+        const raw = JSON.stringify({ times: { morning: '07:30', afternoon: '25:00', evening: '9:00', default: 7 } });
+        expect(parseNotesPrefs(raw).times).toEqual({
+            morning: '07:30', afternoon: DEFAULT_REMINDER_TIMES.afternoon,
+            evening: DEFAULT_REMINDER_TIMES.evening, default: DEFAULT_REMINDER_TIMES.default,
+        });
+        // Positive control: a whole valid object round-trips untouched.
+        const good = { morning: '06:15', afternoon: '13:45', evening: '21:00', default: '08:00' };
+        expect(parseNotesPrefs(JSON.stringify({ times: good })).times).toEqual(good);
+    });
+
+    it('a store with no times at all reads as the defaults', () => {
+        expect(parseNotesPrefs(JSON.stringify({ colors: {} })).times).toEqual(DEFAULT_REMINDER_TIMES);
+        expect(getNotesPrefs().times).toEqual(DEFAULT_REMINDER_TIMES);
+    });
+
+    it('setReminderTimes writes through to storage and notifies', () => {
+        const cb = vi.fn();
+        const off = subscribeNotesPrefs(cb);
+        setReminderTimes({ morning: '07:30' });
+        expect(JSON.parse(backing.get('pucaNotesPrefs:42')!).times).toEqual({ ...DEFAULT_REMINDER_TIMES, morning: '07:30' });
+        expect(getNotesPrefs().times.morning).toBe('07:30');
+        expect(cb).toHaveBeenCalledTimes(1);
+        off();
+    });
+
+    it('ignores a half-typed or impossible value rather than storing it', () => {
+        setReminderTimes({ morning: '07:30' });
+        const before = getNotesPrefs();
+        setReminderTimes({ morning: '' });        // <input type="time"> mid-edit
+        setReminderTimes({ evening: '24:00' });
+        expect(getNotesPrefs()).toBe(before);     // no write at all: same object
+        expect(getNotesPrefs().times.morning).toBe('07:30');
     });
 });

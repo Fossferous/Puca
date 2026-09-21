@@ -28,6 +28,7 @@ import {
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
+import { useReminderTimes } from '../model/notesPrefs';
 import { NoteContentSection } from './NoteContentSection';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { EditedStamp } from './EditedStamp';
@@ -66,6 +67,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     }
     const addRef = useRef<HTMLInputElement>(null);
     const currentUserId = currentUserIdFromToken() ?? undefined;
+    const reminderTimes = useReminderTimes();
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
     const titleUnreadable = isUndecryptable(card.title);
@@ -186,6 +188,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
                             onSetSchedule={onSetSchedule}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
+                            reminderTimes={reminderTimes}
                             myPerms={card.myPerms}
                             currentUserId={currentUserId}
                             resolveUserName={card.resolveUserName}
@@ -203,6 +206,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
                             onSetSchedule={onSetSchedule}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
+                            reminderTimes={reminderTimes}
                         />
                     )}
                 </div>

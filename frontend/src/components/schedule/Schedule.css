@@ -99,6 +99,11 @@
 [data-theme="light"] .sched-row input,
 [data-theme="light"] .sched-row select { color-scheme: light; }
 .sched-check > span { width: auto !important; color: var(--text-normal) !important; display: inline-flex; align-items: center; gap: 6px; font-size: 14px !important; }
+/* The one-tap times. Three equal buttons that wrap rather than overflow the
+   dialog at 390px; .sched-btn already gives them the 44px coarse height. */
+.sched-presets { display: flex; gap: 8px; flex-wrap: wrap; }
+.sched-preset { flex: 1 1 90px; font-size: 14px; }
+
 .sched-pair { display: flex; gap: 12px; flex-wrap: wrap; }
 .sched-pair .sched-row { flex: 1 1 180px; }
 

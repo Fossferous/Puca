@@ -21,7 +21,7 @@ import {
     type NoteCard, type NoteFilter, type NoteRef,
     allLabels, filterNotes, groupReminders, moveNoteInOrder, reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
-import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
+import { setNotesSort, setNotesView, setReminderTimes, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
 import { readableBody } from '../model/noteContent';
@@ -521,6 +521,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                         username={username}
                         sort={local.sort}
                         onSort={s => setNotesSort(s)}
+                        times={local.times}
+                        onTimes={patch => setReminderTimes(patch)}
                         onExportMarkdown={() => { setPopup(null); exportMd(); }}
                         onExportJson={() => { setPopup(null); exportJson(); }}
                         onShare={canShareNotes() ? () => { setPopup(null); void shareNotes(cards); } : undefined}

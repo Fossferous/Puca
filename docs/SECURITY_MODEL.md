@@ -128,8 +128,10 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   older than 0.9.0 must update), so nothing new can land in a log this way.
   Existing log files, of course, still contain what they already captured.
 
-- **Púca Notes sync metadata.** A note's colour, labels and archive flag are one
-  document sealed to your own key (`/sealed-blobs/notes-prefs`, its own HKDF key
+- **Púca Notes sync metadata.** A note's colour, labels and archive flag, plus
+  the four reminder times (what Morning, Afternoon and Evening mean to you and
+  the time a new reminder starts at — personal enough to say when you sleep),
+  are one document sealed to your own key (`/sealed-blobs/notes-prefs`, its own HKDF key
   and an AAD naming your account and the document); the server stores ciphertext
   and a revision number, and so learns its **size, how often and when it is
   written** — roughly how much you organise, never what. The live-update stream
@@ -163,8 +165,12 @@ stores them and cannot read them. What it CAN see, per task:
   always was. For an item with a schedule it is the **next reminder instant**,
   so reminders reach your other devices. A calendar full of events is therefore
   a server-visible list of timestamps — and a round local time such as 09:00
-  also reveals your UTC offset. The per-item switch **Keep the time private from
-  the server** (off by default) keeps `due_at` NULL. The item then shows in the
+  also reveals your UTC offset. The one-tap Morning / Afternoon / Evening times
+  make round local times more common, and a time you chose yourself (07:30,
+  say) is a small fingerprint of its own — the times themselves stay sealed,
+  but what they produce is an ordinary `due_at`. The per-item switch **Keep the
+  time private from the server** (off by default) keeps `due_at` NULL, and it
+  sits on the same dialog as the preset row. The item then shows in the
   calendar but cannot notify from the server's reminder feed.
 - **That a schedule exists, and its size bucket.** The client pads the sealed
   plaintext to 256, 1024, 4096 or 8192 bytes, so the server learns roughly how

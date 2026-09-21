@@ -6,6 +6,11 @@
  * §6). Every input is a native date/time/select at 16px or more under a
  * coarse pointer.
  *
+ * A row of one-tap times (Morning / Afternoon / Evening) sets the date and
+ * the time together; what those mean is the person's own setting
+ * (api/reminderTimes.ts), and "Keep the time private from the server" stays
+ * right there on the same dialog, which is why a preset belongs here.
+ *
  * The form ⇄ schedule logic is scheduleForm.ts (tested); this renders it.
  * A read-only schedule (newer version, unreadable) shows why and offers no
  * Save — it must never be rewritten by a build that cannot read it.
@@ -19,6 +24,7 @@ import {
     removingRevealsPrivateTime, scheduleFromForm,
 } from '../../api/scheduleForm';
 import { formatDateKey } from '../../api/scheduleFormat';
+import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderTimes } from '../../api/reminderTimes';
 import { parseWall, viewerZone, isInGap } from '../../utils/calendarMath';
 import { CalendarIcon, CloseIcon, EyeOffIcon, WarningIcon } from '../Icons';
 import './Schedule.css';
@@ -33,6 +39,9 @@ export interface ScheduleEditorProps {
     defaultKind?: ScheduleKind;
     defaultDate?: string;
     now?: number;
+    /** The person's Morning / Afternoon / Evening and the time a new
+     *  reminder starts at; the defaults are what this always used. */
+    times?: ReminderTimes;
 }
 
 const ORD = ['first', 'second', 'third', 'fourth', 'fifth'];
@@ -42,12 +51,12 @@ function todayKey(now: number): string {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', defaultDate, now: nowProp }: ScheduleEditorProps) {
+export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', defaultDate, now: nowProp, times = DEFAULT_REMINDER_TIMES }: ScheduleEditorProps) {
     const [now] = useState(() => nowProp ?? Date.now());
     const parsed = useMemo(() => parseSchedule(task.schedule), [task.schedule]);
     const readOnly = parsed.state === 'readonly';
     const [form, setForm] = useState<ScheduleForm>(() => {
-        if (parsed.state === 'ok') return formFromSchedule(parsed.schedule);
+        if (parsed.state === 'ok') return formFromSchedule(parsed.schedule, times.default);
         // A plain task with a due time starts from that time.
         if (task.due_at) {
             const d = new Date(task.due_at);
@@ -55,7 +64,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
             const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
             return newForm(defaultKind, key, now, time);
         }
-        return newForm(defaultKind, defaultDate ?? todayKey(now), now);
+        return newForm(defaultKind, defaultDate ?? todayKey(now), now, undefined, viewerZone(), times.default);
     });
     const [error, setError] = useState<string | null>(null);
     const set = (patch: Partial<ScheduleForm>) => { setForm(f => ({ ...f, ...patch })); setError(null); };
@@ -125,6 +134,26 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                                         className={form.kind === k ? 'on' : ''}
                                         onClick={() => set({ kind: k, alert: k === 'event' ? (form.allDay ? '-540' : '10') : (form.allDay ? '-540' : '0') })}>
                                         {k === 'event' ? 'Event' : 'To-do'}
+                                    </button>
+                                ))}
+                            </div>
+                            {/* One tap for the common case. The date the
+                                preset lands on is today or tomorrow, whichever
+                                that time is still ahead in. */}
+                            <div className="sched-presets" role="group" aria-label="Remind">
+                                {REMINDER_PRESETS.map(p => (
+                                    <button key={p.value} type="button" className="sched-btn sched-preset"
+                                        title={`${p.label} — ${times[p.value]}`}
+                                        onClick={() => {
+                                            const at = new Date(presetInstant(times[p.value], Date.now()));
+                                            // Coming off all-day also drops the all-day alert offset
+                                            // (-540), which has no option in the timed list.
+                                            set({
+                                                date: todayKey(at.getTime()), startTime: times[p.value], allDay: false,
+                                                ...(form.allDay ? { alert: form.kind === 'event' ? '10' : '0' } : {}),
+                                            });
+                                        }}>
+                                        {p.label}
                                     </button>
                                 ))}
                             </div>

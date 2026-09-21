@@ -11,6 +11,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { type ScheduleKind } from '../../api/taskSchedule';
+import { DEFAULT_REMINDER_TIMES } from '../../api/reminderTimes';
 import { CalendarIcon, CloseIcon, MembersIcon } from '../Icons';
 import '../schedule/Schedule.css';
 
@@ -30,9 +31,12 @@ export interface AddSheetResult {
     target: string;
 }
 
-export function CalendarAddSheet({ dayKey, time, targets, defaultTarget, scheduleSupported, onSubmit, onClose, allowNew = true }: {
+export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_TIMES.default, targets, defaultTarget, scheduleSupported, onSubmit, onClose, allowNew = true }: {
     dayKey: string;
     time?: string;
+    /** What a new reminder starts at when the tap named no time (the
+     *  person's own setting — api/reminderTimes.ts). */
+    defaultTime?: string;
     targets: AddTarget[];
     defaultTarget: string | null;
     /** The server stores schedules: offer event/to-do and all-day. */
@@ -44,7 +48,7 @@ export function CalendarAddSheet({ dayKey, time, targets, defaultTarget, schedul
 }) {
     const [title, setTitle] = useState('');
     const [day, setDay] = useState(dayKey);
-    const [at, setAt] = useState(time ?? '09:00');
+    const [at, setAt] = useState(time ?? defaultTime);
     const [allDay, setAllDay] = useState(!time && scheduleSupported);
     const [kind, setKind] = useState<ScheduleKind>('event');
     const [target, setTarget] = useState(defaultTarget && targets.some(t => t.key === defaultTarget) ? defaultTarget : (targets[0]?.key ?? (allowNew ? 'new' : '')));
@@ -119,6 +123,10 @@ export function CalendarAddSheet({ dayKey, time, targets, defaultTarget, schedul
                     </label>
                     {shared && <div className="sched-note"><MembersIcon /> Everyone in this checklist on {shared} will see it.</div>}
                     {!scheduleSupported && <div className="sched-note">This server stores a due time only: the item reminds you then; all-day, repeats and places need the server updated.</div>}
+                    {/* All-day items alert at the fixed 09:00 offset the
+                        schedule carries (scheduleForm.ALLDAY_ALERTS), which is
+                        NOT the person's morning time — so say 09:00, not a
+                        setting that does not apply here. */}
                     <div className="sched-note">It reminds you {allDay ? 'at 09:00 on the day' : kind === 'event' ? '10 minutes before' : 'at that time'} — change that from its menu.</div>
                 </div>
                 <div className="sched-foot">

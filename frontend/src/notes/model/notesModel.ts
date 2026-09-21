@@ -26,6 +26,7 @@ import {
     isTaskOverdue,
 } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
+import { type ReminderTimes } from '../../api/reminderTimes';
 import { type MessageEncState } from '../../api/e2ee';
 import { parseServerTimestamp } from '../../utils/serverTime';
 import { type ReminderSlot, noteUpdatedAt, reminderSlotOf, scheduleSearchText } from './notesTiming';
@@ -118,11 +119,15 @@ export interface NoteCard extends NoteSource {
     completed: number;
 }
 
-/** The device-local Notes state a card needs (see notesPrefs.ts). */
+/** The Notes state that follows the account (see notesPrefs.ts). */
 export interface NotesNoteState {
     colors: Record<string, NoteColor>;
     labels: Record<string, string[]>;
     archived: Record<string, true>;
+    /** The four reminder times. ABSENT means "this document predates the
+     *  setting", which is not the same as "cleared": a build that does not
+     *  know them must never delete them (notesPrefsSync.ts). */
+    times?: ReminderTimes;
 }
 
 /**

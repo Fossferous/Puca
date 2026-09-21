@@ -1,6 +1,6 @@
 /**
- * Púca Notes — the device-local note state: colour, labels, archived, and
- * the grid/list view choice.
+ * Púca Notes — the device-local note state: colour, labels, archived, the
+ * reminder times, and the grid/list view choice.
  *
  * WHY DEVICE-LOCAL. Notes is a presentation of Púca's task data, and the ask
  * was that the INFORMATION and FUNCTIONALITY be what persists — the pin and
@@ -12,8 +12,11 @@
  * same way saved places do (api/taskPlaces.ts). SINCE MIGRATION 067 this
  * store is the local copy of a sealed-to-self server blob: colour, labels and
  * archive follow the account (notesPrefsSync.ts does the syncing; this module
- * stays the synchronous snapshot the UI reads). The grid/list and sort
- * choices are NOT synced — they are per device, on purpose.
+ * stays the synchronous snapshot the UI reads). The four REMINDER TIMES
+ * (what Morning, Afternoon and Evening mean, and the time a new reminder
+ * starts at) ride in the same document and follow the account too. The
+ * grid/list and sort choices are NOT synced — they are per device, on
+ * purpose.
  *
  * NAMESPACED PER ACCOUNT, deliberately, like taskPlaces: the key carries the
  * user id, so on a shared browser user B never sees user A's labels, and a
@@ -24,7 +27,9 @@
  * with useSyncExternalStore and get a referentially stable object between
  * writes.
  */
+import { useSyncExternalStore } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
+import { DEFAULT_REMINDER_TIMES, isReminderTime, parseReminderTimes, sameReminderTimes, type ReminderTimes } from '../../api/reminderTimes';
 import { isNoteColor, normalizeLabel, type NotesNoteState, type NoteColor, MAX_LABELS_PER_NOTE } from './notesModel';
 
 export type NotesViewMode = 'grid' | 'list';
@@ -33,6 +38,9 @@ export type NotesViewMode = 'grid' | 'list';
 export type NotesSortMode = 'puca' | 'title' | 'created' | 'edited';
 
 export interface NotesPrefs extends NotesNoteState {
+    /** Always concrete here (the synced shape leaves it absent when the
+     *  account has never set one — see notesPrefsSync.ts). */
+    times: ReminderTimes;
     view: NotesViewMode;
     sort: NotesSortMode;
 }
@@ -43,6 +51,7 @@ export const EMPTY_KEEP_PREFS: NotesPrefs = Object.freeze({
     colors: {},
     labels: {},
     archived: {},
+    times: DEFAULT_REMINDER_TIMES,
     view: 'grid',
     sort: 'puca',
 }) as NotesPrefs;
@@ -99,7 +108,7 @@ export function parseNotesPrefs(raw: string | null): NotesPrefs {
 
     const view: NotesViewMode = o.view === 'list' ? 'list' : 'grid';
     const sort: NotesSortMode = o.sort === 'title' || o.sort === 'created' || o.sort === 'edited' ? o.sort : 'puca';
-    return { colors, labels, archived, view, sort };
+    return { colors, labels, archived, times: parseReminderTimes(o.times), view, sort };
 }
 
 /** Normalise, drop blanks, dedupe case-insensitively (first spelling wins),
@@ -146,6 +155,12 @@ export function getNotesPrefs(): NotesPrefs {
         cached = readFromStorage(uid);
     }
     return cached;
+}
+
+/** The account's four reminder times, live. The snapshot object is stable
+ *  between writes, so this is safe for useSyncExternalStore. */
+export function useReminderTimes(): ReminderTimes {
+    return useSyncExternalStore(subscribeNotesPrefs, () => getNotesPrefs().times, () => getNotesPrefs().times);
 }
 
 export function subscribeNotesPrefs(cb: () => void): () => void {
@@ -221,6 +236,18 @@ export function setNotesSort(sort: NotesSortMode): void {
     update(p => (p.sort === sort ? p : { ...p, sort }));
 }
 
+/** Change one or more reminder times. A malformed value is ignored rather
+ *  than stored (the <input type="time"> hands us '' while it is half-typed). */
+export function setReminderTimes(patch: Partial<ReminderTimes>): void {
+    update(p => {
+        const times = { ...p.times };
+        for (const [k, v] of Object.entries(patch)) {
+            if (isReminderTime(v)) times[k as keyof ReminderTimes] = v;
+        }
+        return sameReminderTimes(times, p.times) ? p : { ...p, times };
+    });
+}
+
 /** Rename a label everywhere it is used (case-insensitive match). An empty
  *  new name deletes the label from every note. */
 export function renameLabel(from: string, to: string): void {
@@ -256,7 +283,9 @@ export function pruneNotesPrefs(liveKeys: ReadonlySet<string>): void {
  *  per device and are left exactly as they are. */
 export function replaceNoteState(state: NotesNoteState): void {
     const p = getNotesPrefs();
-    write({ ...p, colors: state.colors, labels: state.labels, archived: state.archived });
+    // `times` absent means the account's document predates the setting: keep
+    // this device's copy rather than resetting it (notesPrefsSync.ts).
+    write({ ...p, colors: state.colors, labels: state.labels, archived: state.archived, times: state.times ?? p.times });
 }
 
 /** Forget these notes' colour, labels and archive flag — on an explicit

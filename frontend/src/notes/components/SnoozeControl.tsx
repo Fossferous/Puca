@@ -1,6 +1,7 @@
 /**
  * Snooze for a reminder row (Reminders view, the calendar's day list):
- * 10 minutes, an hour, or tomorrow at 09:00. The snooze record is sealed on
+ * 10 minutes, an hour, or tomorrow at the person's own morning time
+ * (api/reminderTimes.ts — 09:00 unless they changed it). The snooze record is sealed on
  * the device; an editor's snooze also moves the plaintext due_at to the
  * snooze instant (taskSchedule.snoozePatch, docs/SECURITY_MODEL.md §2). Only an item
  * whose reminder has a time on the server (due_at) can be snoozed: a
@@ -15,6 +16,7 @@ import { CalendarIcon, RepeatIcon, SnoozeIcon } from '../../components/Icons';
 import { type DueItem } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { type ReminderSlot } from '../model/notesTiming';
+import { useReminderTimes } from '../model/notesPrefs';
 
 const PRESETS: { value: SnoozePreset; label: string }[] = [
     { value: '10m', label: '10 min' },
@@ -24,6 +26,7 @@ const PRESETS: { value: SnoozePreset; label: string }[] = [
 
 export function SnoozeControl({ item, actions, now }: { item: DueItem; actions: NoteActions; now: number }) {
     const [open, setOpen] = useState(false);
+    const times = useReminderTimes();
     if (!item.task.due_at) return null;
     const snoozed = item.slot?.snoozed === true;
     return (
@@ -42,7 +45,7 @@ export function SnoozeControl({ item, actions, now }: { item: DueItem; actions: 
                 <span className="notes-snooze-menu" role="group" aria-label="Snooze for">
                     {PRESETS.map(p => (
                         <button key={p.value} type="button" className="notes-textbtn"
-                            onClick={() => { setOpen(false); void actions.snoozeTask(item.note.ref, item.task, snoozeUntil(p.value, now)); }}>
+                            onClick={() => { setOpen(false); void actions.snoozeTask(item.note.ref, item.task, snoozeUntil(p.value, now, undefined, times.morning)); }}>
                             {p.label}
                         </button>
                     ))}
