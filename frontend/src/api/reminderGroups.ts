@@ -9,7 +9,7 @@
  */
 import { type Task, isTaskOverdue } from './tasks';
 import { type ReminderSlot, reminderSlotOf } from './reminderSlots';
-import { snoozeLocked } from './taskSchedule';
+import { maySnooze } from './taskSchedule';
 import { type CalendarSource } from './taskCalendar';
 
 /** The least a row needs to be sorted and bucketed. */
@@ -94,6 +94,5 @@ export function remindsSomeoneElse(source: CalendarSource, me: number | undefine
  *  (taskSchedule.snoozeLocked). A personal list (canComplete omitted) is
  *  always yours. */
 export function mayChangeSnooze(source: CalendarSource): boolean {
-    if (source.canComplete === false) return false;
-    return !snoozeLocked(source.task, source.canEdit);
+    return maySnooze(source.task, source.canComplete !== false, source.canEdit);
 }

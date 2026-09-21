@@ -50,7 +50,7 @@ import { pokeTaskReminders } from '../api/taskReminders';
 import { consumeTasksTab } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
-import { useScheduleSetter } from './schedule/useScheduleSetter';
+import { useScheduleSetter, useSnoozeSetter } from './schedule/useScheduleSetter';
 import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
 import { isMobile, isTauri } from '../api/platform';
@@ -101,6 +101,10 @@ function tokenUserId(): number | undefined {
         return undefined;
     }
 }
+
+/** A personal list's items are all the owner's: nothing to ask. Module-level
+ *  so the snooze handler's identity does not change every render. */
+const alwaysEditable = () => true;
 
 /** One bar tab: a personal list or a channel checklist. */
 interface BarTab {
@@ -515,6 +519,10 @@ export function TasksView() {
     // Date & repeat: only against a server that stores it (taskFeatures).
     const scheduleOn = useTaskFeature('schedule') === true;
     const handleSetSchedule = useScheduleSetter(tasks, setTasks);
+    // Snooze: same gate, its own feature. A personal list is always yours,
+    // so the snoozer may always move its due_at.
+    const snoozeOn = useTaskFeature('snooze') === true;
+    const handleSnooze = useSnoozeSetter(tasks, setTasks, alwaysEditable);
 
     const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
         const original = tasks;
@@ -867,6 +875,7 @@ export function TasksView() {
                         onReorder={handleReorder}
                         onSetDue={handleSetDue}
                         onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
+                        onSnooze={snoozeOn ? handleSnooze : undefined}
                         onSetAttachments={handleSetAttachments}
                     />
                 </div>

@@ -72,7 +72,9 @@ function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze }: {
             <ReminderTimingMarks slot={row.slot} />
             <span className="notes-reminder-note">{row.source.noteTitle}</span>
             <span className="notes-reminder-when" title={new Date(row.at).toLocaleString()}>{formatDueShort(new Date(row.at).toISOString(), now)}</span>
-            {onSnooze && mayChangeSnooze(row.source) && <SnoozeControl row={row} now={now} onSnooze={onSnooze} />}
+            {onSnooze && mayChangeSnooze(row.source) && (
+                <SnoozeControl task={task} snoozed={row.slot?.snoozed === true} now={now} onSnooze={until => onSnooze(row, until)} />
+            )}
         </div>
     );
 }

@@ -9,13 +9,15 @@
  * Also the small marks a row carries: repeats, is an event, is snoozed.
  *
  * Host-agnostic: it reports the instant it wants, and the host sends it (a
- * NoteAction in Púca Notes, patchTaskTiming in Púca's Tasks view).
+ * NoteAction in Púca Notes, patchTaskTiming in Púca's Tasks view). The same
+ * control serves a Reminders row and an item row inside a list (TaskTree), so
+ * there is one snooze menu in the app, not one per surface.
  */
 import { useState } from 'react';
 import './Reminders.css';
 import { type SnoozePreset, snoozeUntil } from '../../api/taskSchedule';
-import { type DueRow } from '../../api/reminderGroups';
 import { type ReminderSlot } from '../../api/reminderSlots';
+import { type Task } from '../../api/tasks';
 import { CalendarIcon, RepeatIcon, SnoozeIcon } from '../Icons';
 
 const PRESETS: { value: SnoozePreset; label: string }[] = [
@@ -24,15 +26,23 @@ const PRESETS: { value: SnoozePreset; label: string }[] = [
     { value: 'tomorrow', label: 'Tomorrow' },
 ];
 
-export function SnoozeControl({ row, now, onSnooze }: { row: DueRow; now: number; onSnooze: (row: DueRow, until: number | null) => void }) {
+export function SnoozeControl({ task, snoozed = false, now, onSnooze, className = '', buttonClass = 'notes-iconbtn small' }: {
+    task: Task;
+    /** A snooze is in force (the menu then offers Unsnooze). */
+    snoozed?: boolean;
+    now: number;
+    onSnooze: (until: number | null) => void;
+    /** Extra class on the wrapper — an item row positions its menu. */
+    className?: string;
+    buttonClass?: string;
+}) {
     const [open, setOpen] = useState(false);
-    if (!row.source.task.due_at) return null;
-    const snoozed = row.slot?.snoozed === true;
+    if (!task.due_at) return null;
     return (
-        <span className="notes-snooze" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+        <span className={`notes-snooze ${className}`.trim()} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
             <button
                 type="button"
-                className="notes-iconbtn small"
+                className={buttonClass}
                 aria-label={snoozed ? 'Snoozed — change or clear' : 'Snooze'}
                 aria-expanded={open}
                 title="Snooze"
@@ -44,12 +54,12 @@ export function SnoozeControl({ row, now, onSnooze }: { row: DueRow; now: number
                 <span className="notes-snooze-menu" role="group" aria-label="Snooze for">
                     {PRESETS.map(p => (
                         <button key={p.value} type="button" className="notes-textbtn"
-                            onClick={() => { setOpen(false); onSnooze(row, snoozeUntil(p.value, now)); }}>
+                            onClick={() => { setOpen(false); onSnooze(snoozeUntil(p.value, now)); }}>
                             {p.label}
                         </button>
                     ))}
                     {snoozed && (
-                        <button type="button" className="notes-textbtn" onClick={() => { setOpen(false); onSnooze(row, null); }}>
+                        <button type="button" className="notes-textbtn" onClick={() => { setOpen(false); onSnooze(null); }}>
                             Unsnooze
                         </button>
                     )}

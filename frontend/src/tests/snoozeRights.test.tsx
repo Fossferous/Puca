@@ -1,11 +1,13 @@
 // A snooze rides the COMPLETE_TASKS right on the server. A member without it
-// must not be offered Snooze (the calendar's item menu, Notes' Reminders row),
-// and every server refusal in the calendars/Notes is toasted with the
-// server's own words (toastRefusal) — a 403 used to vanish silently.
+// must not be offered Snooze (the calendar's item menu, either Reminders row,
+// an item row inside a list), and every server refusal in the calendars/Notes
+// is toasted with the server's own words (toastRefusal) — a 403 used to
+// vanish silently.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Calendar } from '../components/calendar/Calendar';
+import { TaskTree } from '../components/TaskTree';
 import { RemindersView } from '../notes/components/RemindersView';
 import type { CalendarSource } from '../api/taskCalendar';
 import type { Task } from '../api/tasks';
@@ -16,6 +18,21 @@ import { toastRefusal } from '../api/refusalToast';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { PERM } from '../api/permissionBits';
 import { serializeSnooze } from '../api/taskSchedule';
+
+// The item ROW's snooze (TaskTree), the third surface: same rule, one
+// implementation (taskSchedule.maySnooze).
+const row = (over: { t?: Task; myPerms?: number; me?: number; on?: boolean } = {}) => {
+    const el = mount(
+        <TaskTree
+            tasks={[over.t ?? task]}
+            onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+            onSetDue={() => {}} onSetAttachments={() => {}}
+            onSnooze={over.on === false ? undefined : () => {}}
+            myPerms={over.myPerms} currentUserId={over.me ?? 3}
+        />,
+    );
+    return el.querySelector('.tt-item .notes-snooze');
+};
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -117,6 +134,51 @@ describe('an editor’s moved snooze is not a tick-only member’s to change', (
         act(() => root?.unmount());
         document.body.innerHTML = '';
         expect(reminders(card(undefined, 'list', moved), moved).querySelector('.notes-snooze')).not.toBeNull();
+    });
+});
+
+describe('Snooze on the item row', () => {
+    it('is offered to a member who may complete, and to the owner of a personal list', () => {
+        expect(row({ myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).not.toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ myPerms: undefined })).not.toBeNull();
+    });
+    it('is hidden without COMPLETE_TASKS, on an item with no reminder time, and on a server with no snooze', () => {
+        expect(row({ myPerms: PERM.VIEW_CHANNEL })).toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ t: { ...task, due_at: null } })).toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ on: false })).toBeNull();
+    });
+    it('an editor’s moved snooze is not a tick-only member’s to change', () => {
+        const MOVED = '2030-10-07T10:00:00.000Z';
+        const moved: Task = { ...task, due_at: MOVED, snooze: serializeSnooze({ forDue: DUE, until: MOVED }) };
+        expect(row({ t: moved, myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        // Positive control: a task manager may, and so may the same member on
+        // an item nobody has snoozed.
+        expect(row({ t: moved, myPerms: PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS })).not.toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ t: { ...moved, snooze: null }, myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).not.toBeNull();
+    });
+    it('offers Unsnooze only while a snooze is in force', () => {
+        const el = mount(
+            <TaskTree
+                tasks={[{ ...task, snooze: serializeSnooze({ forDue: DUE, until: '2030-10-07T10:00:00.000Z' }) }]}
+                onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+                onSetDue={() => {}} onSetAttachments={() => {}} onSnooze={() => {}}
+                myPerms={PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS} currentUserId={3}
+            />,
+        );
+        const btn = el.querySelector('.tt-item .notes-snooze button');
+        act(() => (btn as HTMLButtonElement).click());
+        const labels = [...el.querySelectorAll('.notes-snooze-menu button')].map(b => b.textContent);
+        expect(labels).toEqual(['10 min', '1 hour', 'Tomorrow', 'Unsnooze']);
     });
 });
 

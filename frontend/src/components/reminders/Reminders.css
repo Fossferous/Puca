@@ -44,6 +44,16 @@
 }
 .notes-snooze-menu .notes-textbtn { padding: 4px 8px; font-size: 12px; }
 .notes-reminder-marks { display: inline-flex; gap: 2px; color: var(--text-muted); flex-shrink: 0; }
+/* On an item row (TaskTree) the menu always floats: the action cluster is a
+   tight flex row with nowhere to put three buttons inline. */
+.notes-snooze.tt-snooze .notes-snooze-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+    margin-left: 0;
+    max-width: calc(100vw - 16px);
+}
 
 /* The Notes utilities this markup uses, scoped so Púca gets them too. */
 .notes-reminders .notes-section-title {

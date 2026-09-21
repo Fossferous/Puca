@@ -32,6 +32,8 @@ import {
 } from './Icons';
 import { ScheduleChip, SnoozeChip } from './schedule/ScheduleChip';
 import { ScheduleEditor } from './schedule/ScheduleEditor';
+import { SnoozeControl } from './reminders/SnoozeControl';
+import { activeSnooze, maySnooze } from '../api/taskSchedule';
 import './TaskTree.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { isAndroidApp } from '../api/platform';
@@ -52,6 +54,14 @@ function subscribeHalfMinute(onTick: () => void): () => void {
 }
 function halfMinuteNow(): number {
     return Math.floor(Date.now() / 30_000) * 30_000;
+}
+
+/** A snooze is in force right now (the same read SnoozeChip makes). */
+function isSnoozed(task: Task, now: number): boolean {
+    const s = activeSnooze(task.due_at, task.snooze);
+    if (!s) return false;
+    const until = Date.parse(s.until);
+    return Number.isFinite(until) && until > now;
 }
 
 const NEW_PLACE = '__new__';
@@ -180,6 +190,12 @@ interface TaskTreeProps {
      *  schedule never shows the raw due editor or a "Due" chip: its due_at is
      *  the next reminder, not a deadline. */
     onSetSchedule?: (task: Task, schedule: string | null, dueAt: string | null) => void;
+    /** Snooze an item's reminder until an instant (null unsnoozes). Pass it
+     *  ONLY where the server stores snoozes (taskFeatures). The row offers it
+     *  wherever the calendar and the Reminders views do — the same rule
+     *  (taskSchedule.maySnooze), so a user who snoozes from the calendar can
+     *  find it again on the item itself. */
+    onSnooze?: (task: Task, until: number | null) => void;
     /** Replace a task's full attachment list (add and remove both land here). */
     onSetAttachments: (task: Task, refs: TaskAttachmentRef[]) => void;
     /** Resolved channel permission bits (Channel.my_permissions). undefined =
@@ -198,7 +214,7 @@ interface TaskTreeProps {
 }
 
 export function TaskTree({
-    tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSetAttachments,
+    tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSnooze, onSetAttachments,
     myPerms, currentUserId, resolveUserName, channelId,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
@@ -525,6 +541,20 @@ export function TaskTree({
                     >
                         <CalendarIcon />
                     </button>
+                )}
+                {/* Snooze, on the item itself. Gated on the COMPLETION right
+                    (not `editable`): a member who may tick an item may push
+                    its reminder back, and taskSchedule.maySnooze also keeps an
+                    editor's moved snooze out of a tick-only member's hands. */}
+                {!task.is_completed && onSnooze && maySnooze(task, canComplete, canEdit(task)) && editingId !== task.id && (
+                    <SnoozeControl
+                        task={task}
+                        snoozed={isSnoozed(task, now)}
+                        now={now}
+                        className="tt-snooze"
+                        buttonClass="tt-btn"
+                        onSnooze={until => onSnooze(task, until)}
+                    />
                 )}
                 {/* NOT gated on `editable`: the place is this phone's own
                     reminder state, so a member who can't edit a shared task
