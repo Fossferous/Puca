@@ -58,6 +58,16 @@ one-line summary; this file is the full story. Versions follow
   still have not, Notes (or Púca) asks before signing out. The server stores
   them encrypted and cannot read them. Grid or list view and the sort order
   still stay per device.
+- **Colours, labels and archive in Púca's Tasks view.** The colours, labels and
+  archive you organise your notes with in Púca Notes now show in Púca's own
+  Tasks view — on the tabs and on the All tasks board — and you can set them
+  from there: right-click a tab or a card for *Colour*, *Labels* and
+  *Archive*. An archived note leaves the tab bar and the board, and the new
+  filter beside *New list* narrows both to one label or opens the archive. It
+  is the same organisation, sealed with your own key, so changing it in one
+  place changes it in the other, and the server still cannot read any of it.
+  Deleting a note for good from the Tasks view forgets its colour and labels
+  too; moving it to the trash keeps them for a restore.
 - **Notes update live.** A change made on one device or by someone sharing a
   checklist appears on your other open devices within a moment, with no
   refresh. The server says only which note changed, never what it says.

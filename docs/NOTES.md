@@ -45,8 +45,10 @@ Púca's reminders. Anything you do in one is what you see in the other.
 - **Calendar, repeats, snooze, Edited** — a Calendar in the rail, dates and
   repeat rules on items, snoozing reminders, and an Edited time on every note
   (see *Calendar, repeats and snooze* below).
-- **Colour, labels, archive** — Notes' own organisation, sealed to your own
-  key and synced across your devices (see *What follows the account* below).
+- **Colour, labels, archive** — shared organisation, sealed to your own key
+  and synced across your devices (see *What follows the account* below).
+  Púca's Tasks view shows and sets the same three (see *Both front doors
+  agree* below).
 - **Select several** — a checkbox on hover, Shift/Ctrl-click and Ctrl+A on a
   desktop, a long press on a phone (then taps add to the selection); `Esc`
   clears. The bar pins or unpins, colours, labels, archives, moves to the
@@ -103,6 +105,16 @@ front of Púca's bar, as favouriting does there. A reorder made while notes
 are filtered or archived keeps every hidden note in place (the saved order is
 always the full set — `moveNoteInOrder` in `frontend/src/notes/model/notesModel.ts`).
 
+**Colour, labels and archive are shared too.** They are not Notes' private
+state: Púca's Tasks view reads the same sealed document and writes it through
+the same mutators and the same compare-and-swap, so there is one merge rule
+and not two (`frontend/src/components/TasksView.tsx`; the picker, the popover
+and the tints they share live in `frontend/src/components/notes/` and
+`frontend/src/styles/noteChrome.css`). Púca's bar hides an archived note and
+its filter narrows to one label, and — exactly as in Notes — a favourite or a
+tab drag made while notes are hidden saves every hidden note back in its slot.
+Grid/list and sort stay Notes' own, per device.
+
 ## What follows the account
 
 Colour, labels and the archive flag are one document, sealed to your own key
@@ -132,8 +144,11 @@ step:
   device's*; either resumes syncing. A conflict re-reads this device's copy
   after the round trip, so an edit made while it was out is merged, not lost.
 - **Deleting a note forgets its colour and labels** when the delete is
-  permanent; a note moved to the trash keeps them for a restore. Notes deleted
-  *outside* Notes (Púca's Tasks view, a removed checklist channel) are pruned
+  permanent, wherever the delete is made: Púca's Tasks view forgets them on
+  its own *Delete List* and on *Delete forever* in its Trash section, rather
+  than leaving a dead key for Notes' prune to find. A note moved to the trash
+  keeps them for a restore. Notes deleted
+  *outside* either app (a removed checklist channel) are pruned
   only once they have been missing from two settled, complete fetches at least
   a minute apart, both made by this page (a view rebuilt from the device cache
   never counts), never while offline edits are queued, and a personal list
@@ -577,7 +592,13 @@ Migration 065 gives a personal list three nullable columns, and
 
 **Both front doors agree.** Púca's Tasks view shows and edits a personal
 list's text and photos, and its *Delete list* becomes *Move to trash* on a
-server that has one. A client decides all of this from
+server that has one. It also wears the same organisation: a note's colour
+tints its tab and its board card, its labels show as chips, an archived note
+is off the bar and off the board, and *Colour*, *Labels* and *Archive* sit on
+every tab's and card's context menu with a filter beside *New list* for the
+labels and the archive. An older Púca (0.9.816 or earlier) shows every note as
+an untinted, unlabelled tab and keeps archived notes in its bar — it never
+writes the document, so nothing is lost by using one. A client decides all of this from
 `GET /task-lists/features`, which does not depend on having any lists; an
 older server answers it with an error and every client behaves exactly as it
 did before 065. An older client on a newer server keeps working: it never

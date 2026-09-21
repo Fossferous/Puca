@@ -11,7 +11,8 @@
 // move-to-trash with undo, the Trash view (restore, delete forever); text
 // notes, photo notes and drawing notes (sealed on the server — the database
 // check reads the stored envelope); the text shown AND edited in Púca's own
-// Tasks view; a Notes sign-out lands the main app's tab on its login
+// Tasks view, where the colour, labels and archive set in Notes show and can
+// be set from there too; a Notes sign-out lands the main app's tab on its login
 // (sessionSync); a plaintext row injected in the database is flagged "Not
 // encrypted"; live updates reach a second device, colour and labels sync
 // (and survive a sign-out), bulk selection works by Ctrl-click and by long
@@ -526,7 +527,49 @@ try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* 
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+// Puca asks, 3 s after it mounts, about a recovery code generated at sign-up
+// and never confirmed. Answer it HERE, before anything below tries to click
+// through its overlay (it is not what any of this is testing).
+await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 6000 })
+    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* not shown */ });
 await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
+// Parity: the ONE sealed document, seen through the other front door.
+// Groceries was coloured mint and labelled Errands in Notes (§5-6); Packing
+// was archived there (§10).
+const barTabs = () => page.locator('.tasks-tab-scroll .tasks-tab:not(.tasks-tab-all):not(.tasks-tab-calendar)');
+ck('púca: a note coloured in Notes tints its tab here', await page.locator('.tasks-tab[data-color="mint"]').count() === 1);
+ck('púca: …and its board card', await page.locator('.checklist-card[data-color="mint"]').count() === 1);
+ck('púca: the label set in Notes is on the tab', /Errands/.test(await page.locator('.tasks-tab', { hasText: 'Groceries' }).locator('.tasks-tab-labels').innerText().catch(() => '')));
+ck('púca: …and a chip on the card', /Errands/.test(await page.locator('.checklist-card', { hasText: 'Groceries' }).locator('.tasks-card-label').innerText().catch(() => '')));
+ck('púca: a note archived in Notes has no tab here', await page.locator('.tasks-tab', { hasText: 'Packing' }).count() === 0);
+ck('púca: …and no board card', await page.locator('.checklist-card', { hasText: 'Packing' }).count() === 0);
+const tabsAll = await barTabs().count();
+await shot('puca-tasks-organisation');
+// The filter beside New list: one entry per label, and the archive with its count.
+await page.click('.tasks-tab-filter');
+await page.waitForSelector('.notes-popover .tasks-filter-item', { timeout: 5000 });
+ck('púca: the filter lists the label and counts the archive',
+    await page.locator('.tasks-filter-item', { hasText: 'Errands' }).count() === 1
+    && /1/.test(await page.locator('.tasks-filter-item', { hasText: 'Archive' }).innerText()));
+await shot('puca-tasks-filter');
+await page.locator('.tasks-filter-item', { hasText: 'Errands' }).click();
+await sleep(300);
+const tabsLabelled = await barTabs().count();
+ck('púca: filtering by the label leaves only that note', tabsLabelled === 1 && tabsAll > 1, `${tabsLabelled} of ${tabsAll}`);
+// Back to everything, and set a colour from HERE: the same document, written
+// the other way (the check that it reached Notes is after the trash section).
+await page.click('.tasks-tab-filter');
+await page.locator('.tasks-filter-item', { hasText: 'All notes' }).click();
+await sleep(300);
+ck('púca: "All notes" puts them back', await barTabs().count() === tabsAll);
+await page.locator('.tasks-tab', { hasText: 'Sketch' }).click({ button: 'right' });
+await page.locator('.context-menu-item', { hasText: 'Colour' }).click();
+await page.waitForSelector('.notes-popover .notes-swatch', { timeout: 5000 });
+await page.click('.notes-popover .notes-swatch[data-color="dusk"]');
+ck('púca: a colour set here tints the tab at once', await page.locator('.tasks-tab[data-color="dusk"]').count() === 1);
+await page.keyboard.press('Escape');
+await sleep(800);   // the push is debounced
 ck('púca: the board card shows a text note\'s text', /Roses are red/.test(await page.locator('.checklist-card', { hasText: 'Poem' }).locator('.tasks-card-body').innerText().catch(() => '')));
 ck('púca: the board card says a photo note has a picture', /1 picture/.test(await page.locator('.checklist-card', { hasText: 'Holiday photo' }).locator('.tasks-card-body').innerText().catch(() => '')));
 await page.locator('.tasks-tab', { hasText: 'Poem' }).click();
@@ -539,7 +582,13 @@ await page.waitForFunction(() => document.querySelector('.list-content-block .ni
     .then(() => ck('púca: a photo note shows its photo', true))
     .catch(() => ck('púca: a photo note shows its photo', false));
 await shot('puca-tasks-photo-note');
-// Move to trash from Púca: the list leaves the bar and the Trash section offers it back.
+// Move to trash from Púca. Packing is ARCHIVED, so it is not on the bar at
+// all any more — it is reached through the Archive filter, which is where it
+// stays for the restore below.
+await page.click('.tasks-tab-filter');
+await page.locator('.tasks-filter-item', { hasText: 'Archive' }).click();
+await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 });
+ck('púca: the Archive filter shows the archived note, and only that', await barTabs().count() === 1);
 await page.locator('.tasks-tab', { hasText: 'Packing' }).click({ button: 'right' });
 await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
 await page.waitForFunction(() => ![...document.querySelectorAll('.tasks-tab')].some(t => t.textContent.includes('Packing')), null, { timeout: 10000 }).catch(() => {});
@@ -567,10 +616,11 @@ await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { ti
     .catch(() => { /* not shown */ });
 await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button', { name: 'Restore' }).click();
 await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
-    .then(() => ck('púca: Restore puts it back in the bar', true))
-    .catch(() => ck('púca: Restore puts it back in the bar', false));
+    .then(() => ck('púca: Restore puts it back in the bar (still archived, so behind the Archive filter)', true))
+    .catch(() => ck('púca: Restore puts it back in the bar (still archived, so behind the Archive filter)', false));
 await page.goto('/notes/');
 await page.waitForSelector('.notes-card:has-text("Poem")', { timeout: 15000 });
+ck('notes: the colour set in Púca is on the card here', await page.locator('.notes-card[data-color="dusk"]').count() === 1);
 ck('notes: the text edited in Púca shows on the card', /Edited in Púca/.test(await poem().locator('.notes-card-body').innerText()));
 ck('notes: Packing kept its archive flag through Púca\'s trash and restore', await page.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText() === '1');
 
@@ -934,6 +984,29 @@ if (hasTrashSection) {
     await trashToggle.tap();
     await m.waitForSelector('.tasks-trash-row', { timeout: 5000 }).catch(() => {});
 }
+// The organisation controls at 390x844: the filter belongs in the FIXED
+// actions block (the tab bar itself scrolls away), and its popover has to fit
+// the screen with every row at size.
+const filterBox = await m.locator('.tasks-tab-filter').boundingBox().catch(() => null);
+ck('phone púca: the note filter is beside New list and at size', !!filterBox && filterBox.width >= 43.5 && filterBox.height >= 43.5, JSON.stringify(filterBox));
+await m.locator('.tasks-tab-filter').tap().catch(() => {});
+await m.waitForSelector('.notes-popover .tasks-filter-item', { timeout: 5000 }).catch(() => {});
+const fpop = await m.evaluate(() => {
+    const p = document.querySelector('.notes-popover');
+    if (!p) return null;
+    const b = p.getBoundingClientRect();
+    const rows = [...p.querySelectorAll('button')].map(x => x.getBoundingClientRect());
+    return {
+        rows: rows.length,
+        inside: b.left >= -0.5 && b.right <= window.innerWidth + 0.5 && b.top >= -0.5 && b.bottom <= window.innerHeight + 0.5,
+        small: rows.filter(i => i.height < 43.5).length,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+});
+ck('phone púca: the filter popover fits, its rows at size, nothing overflows', !!fpop && fpop.rows >= 2 && fpop.inside && fpop.small === 0 && !fpop.overflow, JSON.stringify(fpop));
+await mshot('phone-puca-filter');
+await m.keyboard.press('Escape');
+await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
 let pr = await pucaAudit('.tasks-trash');
 ck('phone púca: the Trash section lists the note trashed on the phone', await m.locator('.tasks-trash-row', { hasText: 'Phone note' }).count() === 1);
 ck('phone púca: Trash controls at size, nothing overflows', pr.buttons >= 3 && pr.under.length === 0 && !pr.overflow, JSON.stringify(pr));
