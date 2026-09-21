@@ -1,10 +1,14 @@
 /**
+ * The twelve card tints as a radio group of swatches. Shared chrome: Púca
+ * Notes' editor and selection bar and Púca's own Tasks view all open this
+ * one picker (styles/noteChrome.css dresses it for both).
+ *
  * The twelve card tints as a radio group of swatches. Colour is never the
  * only carrier: each swatch is labelled by name, and the card also carries
  * the name in its title attribute (notesModel NOTE_COLORS).
  */
-import { CheckIcon } from '../../components/Icons';
-import { NOTE_COLORS, type NoteColor } from '../model/notesModel';
+import { CheckIcon } from '../Icons';
+import { NOTE_COLORS, type NoteColor } from '../../notes/model/notesModel';
 
 interface ColorPickerProps {
     value: NoteColor;

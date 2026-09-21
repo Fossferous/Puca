@@ -1,11 +1,12 @@
 /**
  * Toggle a note's labels among every label in use, or type a new one.
+ * Shared chrome: Púca Notes and Púca's Tasks view open the same picker.
  * Labels are sealed to the account and sync (notesPrefsSync.ts) — the hint
  * says so, once, where the user is about to rely on them.
  */
 import { useState } from 'react';
-import { PlusIcon } from '../../components/Icons';
-import { MAX_LABELS_PER_NOTE, MAX_LABEL_LENGTH, normalizeLabel } from '../model/notesModel';
+import { PlusIcon } from '../Icons';
+import { MAX_LABELS_PER_NOTE, MAX_LABEL_LENGTH, normalizeLabel } from '../../notes/model/notesModel';
 
 interface LabelPickerProps {
     /** Every label in use across the account's notes (rail order). */

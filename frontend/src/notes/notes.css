@@ -11,37 +11,13 @@
  * safe areas, 16px inputs, always-visible actions, dvh not vh.
  */
 
-/* ---------- Tints ----------------------------------------------------------
-   Named, not hued, so a theme can reinterpret them: each is a translucent
-   wash over the card surface, which keeps text contrast on dark, light and
-   amoled alike. */
+@import '../styles/noteChrome.css';
+
+/* The shell's own metrics; the tints they used to sit beside are shared
+   with Púca's Tasks view now (styles/noteChrome.css). */
 :root {
-    --notes-tint-coral: rgba(242, 139, 130, 0.34);
-    --notes-tint-peach: rgba(251, 188, 4, 0.30);
-    --notes-tint-sand: rgba(255, 244, 117, 0.30);
-    --notes-tint-mint: rgba(204, 255, 144, 0.28);
-    --notes-tint-sage: rgba(167, 255, 235, 0.28);
-    --notes-tint-fog: rgba(203, 240, 248, 0.30);
-    --notes-tint-storm: rgba(174, 203, 250, 0.32);
-    --notes-tint-dusk: rgba(215, 174, 251, 0.30);
-    --notes-tint-blossom: rgba(253, 207, 232, 0.32);
-    --notes-tint-clay: rgba(230, 201, 168, 0.34);
-    --notes-tint-chalk: rgba(232, 234, 237, 0.24);
     --notes-topbar-height: 56px;
     --notes-rail-width: 240px;
-}
-[data-theme="light"] {
-    --notes-tint-coral: rgba(242, 139, 130, 0.55);
-    --notes-tint-peach: rgba(251, 188, 4, 0.45);
-    --notes-tint-sand: rgba(255, 244, 117, 0.6);
-    --notes-tint-mint: rgba(204, 255, 144, 0.55);
-    --notes-tint-sage: rgba(167, 255, 235, 0.55);
-    --notes-tint-fog: rgba(203, 240, 248, 0.7);
-    --notes-tint-storm: rgba(174, 203, 250, 0.6);
-    --notes-tint-dusk: rgba(215, 174, 251, 0.55);
-    --notes-tint-blossom: rgba(253, 207, 232, 0.65);
-    --notes-tint-clay: rgba(230, 201, 168, 0.65);
-    --notes-tint-chalk: rgba(232, 234, 237, 0.9);
 }
 
 /* ---------- Shell --------------------------------------------------------- */
@@ -244,34 +220,6 @@
     text-transform: uppercase;
     color: var(--text-faint);
     margin: 18px 0 8px 4px;
-}
-
-.notes-status {
-    padding: 8px 12px;
-    margin: 0 0 12px;
-    border-radius: 8px;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.notes-status.offline { background: var(--color-warning-bg); color: var(--text-warning); }
-.notes-status.error { background: var(--color-danger-bg); color: var(--text-danger); }
-.notes-status button {
-    margin-left: auto;
-    background: none;
-    border: 1px solid currentColor;
-    color: inherit;
-    border-radius: 6px;
-    padding: 3px 10px;
-    cursor: pointer;
-    /* The sentence beside it wraps; the button must not shrink under its own
-       label (at 390 px "Enable" ran out of its border). */
-    flex-shrink: 0;
-    white-space: nowrap;
-}
-@media (pointer: coarse) {
-    .notes-status button { min-height: 44px; }
 }
 
 .notes-empty {
@@ -545,99 +493,6 @@
     z-index: 6;
 }
 .notes-grid.list { position: relative; }
-
-/* ---------- Popovers (colour / labels / account) ---------------------------- */
-.notes-popover-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-}
-.notes-popover {
-    position: fixed;
-    z-index: 1001;
-    background: var(--bg-floating);
-    border: 1px solid var(--border-subtle);
-    border-radius: 10px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    padding: 10px;
-    min-width: 200px;
-    max-width: calc(100vw - 16px);
-    max-height: calc(100dvh - 16px);
-    overflow: auto;
-    color: var(--text-normal);
-}
-.notes-popover h4 {
-    margin: 0 0 8px;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-}
-
-.notes-swatches {
-    display: grid;
-    grid-template-columns: repeat(6, 32px);
-    gap: 6px;
-}
-.notes-swatch {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    border: 2px solid var(--border-faint);
-    background: linear-gradient(var(--tint, transparent), var(--tint, transparent)), var(--bg-secondary);
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--header-primary);
-    font-size: 14px;
-    padding: 0;
-}
-.notes-swatch:hover, .notes-swatch:focus-visible { border-color: var(--text-normal); }
-.notes-swatch.selected { border-color: var(--brand-primary); }
-.notes-swatch[data-color="coral"] { --tint: var(--notes-tint-coral); }
-.notes-swatch[data-color="peach"] { --tint: var(--notes-tint-peach); }
-.notes-swatch[data-color="sand"] { --tint: var(--notes-tint-sand); }
-.notes-swatch[data-color="mint"] { --tint: var(--notes-tint-mint); }
-.notes-swatch[data-color="sage"] { --tint: var(--notes-tint-sage); }
-.notes-swatch[data-color="fog"] { --tint: var(--notes-tint-fog); }
-.notes-swatch[data-color="storm"] { --tint: var(--notes-tint-storm); }
-.notes-swatch[data-color="dusk"] { --tint: var(--notes-tint-dusk); }
-.notes-swatch[data-color="blossom"] { --tint: var(--notes-tint-blossom); }
-.notes-swatch[data-color="clay"] { --tint: var(--notes-tint-clay); }
-.notes-swatch[data-color="chalk"] { --tint: var(--notes-tint-chalk); }
-
-.notes-labels-list { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
-.notes-labels-list label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 4px;
-    border-radius: 6px;
-    font-size: 13px;
-    cursor: pointer;
-}
-.notes-labels-list label:hover { background: var(--bg-modifier-hover); }
-.notes-labels-list input[type="checkbox"] { accent-color: var(--brand-primary); }
-.notes-labels-new {
-    display: flex;
-    gap: 6px;
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border-faint);
-}
-.notes-labels-new input {
-    flex: 1;
-    min-width: 0;
-    padding: 7px 10px;
-    border: none;
-    border-radius: 6px;
-    background: var(--bg-quaternary);
-    color: var(--text-normal);
-    font-size: 13px;
-}
-.notes-labels-hint { font-size: 11px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
 
 .notes-menu { display: flex; flex-direction: column; min-width: 220px; }
 .notes-menu-head {
@@ -970,13 +825,9 @@
         padding-top: var(--safe-area-top, 0px);
     }
     .notes-editor-title { font-size: 20px; }
-    .notes-editor-add input, .notes-quickadd-title, .notes-quickadd-item input, .notes-labels-new input { font-size: 16px; }
+    .notes-editor-add input, .notes-quickadd-title, .notes-quickadd-item input { font-size: 16px; }
     .notes-editor-foot .notes-textbtn { padding: 10px 12px; }
 
-    .notes-popover { left: 8px !important; right: 8px; max-width: none; top: auto !important; bottom: calc(8px + var(--safe-area-bottom, 0px)); }
-    .notes-swatches { grid-template-columns: repeat(6, 1fr); }
-    .notes-swatch { width: 40px; height: 40px; }
-    .notes-labels-list label { padding: 10px 6px; font-size: 15px; }
     .notes-menu-item { padding: 12px 10px; font-size: 15px; }
     /* <select> is a form control too: below 16px iOS zooms the page. */
     .notes-menu-row select, .notes-menu-row label { font-size: 16px; }
@@ -1058,14 +909,3 @@
     background: var(--bg-secondary);
     border-left: 4px solid var(--stripe, var(--border-subtle));
 }
-[data-contrast="high"] [data-color="coral"] { --stripe: #f28b82; }
-[data-contrast="high"] [data-color="peach"] { --stripe: #fbbc04; }
-[data-contrast="high"] [data-color="sand"] { --stripe: #fff475; }
-[data-contrast="high"] [data-color="mint"] { --stripe: #ccff90; }
-[data-contrast="high"] [data-color="sage"] { --stripe: #a7ffeb; }
-[data-contrast="high"] [data-color="fog"] { --stripe: #cbf0f8; }
-[data-contrast="high"] [data-color="storm"] { --stripe: #aecbfa; }
-[data-contrast="high"] [data-color="dusk"] { --stripe: #d7aefb; }
-[data-contrast="high"] [data-color="blossom"] { --stripe: #fdcfe8; }
-[data-contrast="high"] [data-color="clay"] { --stripe: #e6c9a8; }
-[data-contrast="high"] [data-color="chalk"] { --stripe: #e8eaed; }

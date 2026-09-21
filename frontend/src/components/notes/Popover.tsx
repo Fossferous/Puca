@@ -1,4 +1,7 @@
 /**
+ * Shared chrome (styles/noteChrome.css): the colour and label pickers open
+ * in this from Púca Notes and from Púca's Tasks view alike.
+ *
  * An anchored popover: portaled to document.body (so no transformed
  * ancestor — the mobile drawer — can trap it), positioned under its anchor
  * and clamped to the viewport on desktop; notes.css pins it to the bottom of

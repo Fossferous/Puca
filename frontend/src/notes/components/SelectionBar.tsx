@@ -31,8 +31,8 @@ import { type BulkPendingApi } from './useNoteSelection';
 import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
 import { readableBody } from '../model/noteContent';
 import { useTaskFeature } from '../../api/taskFeatures';
-import { ColorPicker } from './ColorPicker';
-import { Popover } from './Popover';
+import { ColorPicker } from '../../components/notes/ColorPicker';
+import { Popover } from '../../components/notes/Popover';
 import '../sync.css';
 
 type Pop = { kind: 'color' | 'labels'; anchor: HTMLElement } | null;

@@ -26,15 +26,15 @@ import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueri
 import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
 import { readableBody } from '../model/noteContent';
 import { AccountMenu } from './AccountMenu';
-import { ColorPicker } from './ColorPicker';
+import { ColorPicker } from '../../components/notes/ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
 import { NotesRail } from './NotesRail';
 import { NotesTopBar } from './NotesTopBar';
 import { NotesUpdateStripSlot } from './NotesUpdateGate';
-import { LabelPicker } from './LabelPicker';
+import { LabelPicker } from '../../components/notes/LabelPicker';
 import { NoteEditor } from './NoteEditor';
 import { NoteGrid } from './NoteGrid';
-import { Popover } from './Popover';
+import { Popover } from '../../components/notes/Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { TrashView } from './TrashView';
