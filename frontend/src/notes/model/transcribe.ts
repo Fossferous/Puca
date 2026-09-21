@@ -22,6 +22,14 @@
  * note's sidecar is the only one that lasts. The transcript itself is
  * ordinary sealed note text — which is also what makes a voice note findable,
  * because search reads note text and never attachment names.
+ *
+ * THE PCM CROSSES THE BRIDGE AS BASE64, deliberately: the Filesystem plugin
+ * takes nothing else, and the alternative is a native MediaExtractor/
+ * MediaCodec decode path of our own. It is chunked so no multi-megabyte
+ * string is ever built, and the cost of the choice — a debuggable build logs
+ * plugin payloads, a release build does not — is written down in
+ * docs/NOTES.md under "Transcripts stay on the phone". Do not quietly swap
+ * this for a recogniser or a transport that leaves the device.
  */
 import { MAX_TRANSCRIBE_MS, PCM_SAMPLE_RATE, toPcm16Mono16k, transcribeBudgetMs } from './audioNote';
 import { nativeTranscribePcm, notesNativeFeatures } from '../native/notesNative';

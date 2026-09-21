@@ -369,6 +369,21 @@ transcript) — they are still saved. The transcript is ordinary sealed note
 text, which is also what makes a voice note findable: search reads a note's
 title, text, labels and items, and never an attachment's name.
 
+That cache file is written through Capacitor's Filesystem plugin, which takes
+base64 and nothing else, so the decoded PCM crosses the JS/native bridge as
+base64 — in 192 KB chunks (about six seconds of speech each), so no single
+multi-megabyte string is ever built, but it crosses. **This was weighed and
+accepted.** What it costs: on a DEBUGGABLE build, Capacitor logs every plugin
+call's payload (`Bridge.callPluginMethod`, guarded by `Logger.shouldLog()`),
+so the audio of a voice note is recoverable from logcat on a developer's own
+machine. A release APK is not debuggable and logs none of it, nothing leaves
+the phone on either build, and the two-minute cap bounds what a debug build
+could spill. What avoiding it would cost: handing the COMPRESSED clip over
+instead (~8x fewer bytes) and decoding it natively with MediaExtractor and
+MediaCodec — a new native audio-decode path, with its own formats and
+failures, to close a hole that only exists in builds we hand to nobody. If
+Notes ever grows a native decoder for another reason, move this onto it.
+
 Both capture surfaces write it down, and each puts the words where they
 survive. In the COMPOSER the take is transcribed as soon as it is kept, and
 *Done* waits for it if it has not finished, so the note is created with the
