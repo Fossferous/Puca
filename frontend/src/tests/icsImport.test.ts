@@ -232,6 +232,7 @@ describe('icsImportTargets', () => {
             id => (id === 1 ? [task(10, sched('uid-a')), task(11)] : []),
         );
         expect(targets.map(t => [t.listId, t.title, t.count])).toEqual([[1, 'Trips', 2], [2, 'Home', 0]]);
+        expect(targets.map(t => t.loaded)).toEqual([true, true]);
         expect([...targets[0].uids]).toEqual(['uid-a']);
         // The item with no schedule contributes no UID — importing its event
         // again must not be skipped on the strength of a plain reminder.
@@ -239,9 +240,18 @@ describe('icsImportTargets', () => {
         expect([...targets[1].uids]).toEqual([]);
     });
 
-    it('a list whose items have not been read yet is offered as empty, not skipped', () => {
-        const targets = icsImportTargets([{ id: 3, title: 'New' }], () => undefined);
-        expect(targets).toHaveLength(1);
+    // An unread list looks exactly like an empty one — no items, no UIDs — so
+    // importing into it would dedupe against nothing and count the cap from
+    // zero. It has to be distinguishable, and the dialog waits for it.
+    it('a list whose items have not been read yet is marked NOT loaded, not passed off as empty', () => {
+        const targets = icsImportTargets([{ id: 3, title: 'New' }, { id: 4, title: 'Read' }], id => (id === 4 ? [task(10, sched('uid-a'))] : undefined));
+        expect(targets.map(t => [t.listId, t.loaded, t.count])).toEqual([[3, false, 0], [4, true, 1]]);
+        expect([...targets[0].uids]).toEqual([]);
+    });
+
+    it('an empty list that HAS been read is a target (the positive control for that flag)', () => {
+        const targets = icsImportTargets([{ id: 5, title: 'Empty' }], () => []);
+        expect(targets[0].loaded).toBe(true);
         expect(targets[0].count).toBe(0);
     });
 });

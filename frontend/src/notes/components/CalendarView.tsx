@@ -181,6 +181,10 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const importTargets = personal.map(c => ({
         listId: c.ref.id,
         title: c.title,
+        // Not read yet = not a target: with no items in hand there is nothing
+        // to dedupe against, so a second import of the same file would bring
+        // every event in twice (icsImport.icsImportTargets).
+        loaded: c.tasks !== null && c.tasks !== undefined,
         count: c.tasks?.length ?? c.total,
         uids: new Set((c.tasks ?? []).map(t => parseSchedule(t.schedule)).flatMap(p => (p.state === 'ok' ? [p.schedule.uid] : []))),
     }));

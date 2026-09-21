@@ -55,7 +55,9 @@ one-line summary; this file is the full story. Versions follow
   brings a calendar file into a personal note. It first lists anything it
   cannot bring across, and it skips events it already has. Both are offered
   in Púca Notes' calendar and in Púca's own Calendar tab; an import always
-  goes into one of your own notes, never a shared checklist. In the Púca
+  goes into one of your own notes, never a shared checklist, and a note the
+  app is still reading cannot be picked until it has — otherwise importing
+  the same file twice would bring everything in twice. In the Púca
   Notes Android app, *Add to phone calendar* copies one event to your phone's
   calendar.
 - **Colours, labels and archive follow your account.** They used to live in one

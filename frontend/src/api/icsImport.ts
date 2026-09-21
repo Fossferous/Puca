@@ -198,17 +198,23 @@ export function importSummary(s: ImportState, total: number): string {
  *
  * The UID set is what makes a second import of the same file a no-op — it
  * comes from the schedules already in the note, read on this device.
+ *
+ * A note whose items have NOT been read yet is reported with `loaded: false`
+ * rather than as an empty one: importing into it would dedupe against nothing
+ * (a second run of the same file would duplicate every event) and would count
+ * the per-list cap from zero. The picker waits for it instead.
  */
 export function icsImportTargets(
     lists: { id: number; title: string }[], tasksIn: (listId: number) => Task[] | undefined,
-): { listId: number; title: string; count: number; uids: ReadonlySet<string> }[] {
+): { listId: number; title: string; count: number; uids: ReadonlySet<string>; loaded: boolean }[] {
     return lists.map(l => {
-        const items = tasksIn(l.id) ?? [];
+        const items = tasksIn(l.id);
         return {
             listId: l.id,
             title: l.title,
-            count: items.length,
-            uids: new Set(items.map(t => parseSchedule(t.schedule)).flatMap(p => (p.state === 'ok' ? [p.schedule.uid] : []))),
+            loaded: items !== undefined,
+            count: items?.length ?? 0,
+            uids: new Set((items ?? []).map(t => parseSchedule(t.schedule)).flatMap(p => (p.state === 'ok' ? [p.schedule.uid] : []))),
         };
     });
 }

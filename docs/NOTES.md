@@ -761,7 +761,11 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   tab, and is into personal notes only — an import into a shared checklist
   would notify every member for every item, so the picker is built from
   personal lists and cannot be handed a channel
-  (`api/icsImport.ts`'s `icsImportTargets`). A file over 5 MB is refused
+  (`api/icsImport.ts`'s `icsImportTargets`). A note whose items this device
+  has not read yet is shown as *still loading* and cannot be chosen: with no
+  items in hand there is nothing to skip against, so a second import of the
+  same file would bring every event in twice, and the per-note cap would be
+  counted from zero. A file over 5 MB is refused
   before it is parsed. It shows a preview that lists
   everything it cannot represent. It skips events whose UID is already there,
   and paces itself under the rate limiter, retrying after a 429 and able to
