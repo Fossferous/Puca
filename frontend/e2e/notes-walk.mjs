@@ -624,6 +624,36 @@ ck('bulk: Escape clears the selection', await page.locator('.notes-selectbar').c
 const sageOnB = await pageB.waitForFunction(() => document.querySelectorAll('.notes-card[data-color="sage"]').length === 2, null, { timeout: 10000 }).then(() => true, () => false);
 ck('bulk: the colour change reached device B (one sealed write)', sageOnB);
 
+// Selection lives on the grid only. Trash, Calendar and Reminders fall back to
+// the "all notes" filter underneath, so a selection there would be of notes
+// that are not on screen — and its Delete would trash every one of them.
+const selectBar = () => page.locator('.notes-selectbar');
+await page.locator('.notes-card', { hasText: 'Groceries' }).click({ modifiers: ['Control'] });
+const barOnGrid = await page.waitForSelector('.notes-selectbar', { timeout: 5000 }).then(() => true, () => false);
+ck('bulk: a selection made on the grid shows its bar (control for the checks below)', barOnGrid);
+await page.locator('.notes-rail-item', { hasText: 'Trash' }).click();
+await page.waitForSelector('.notes-trash', { timeout: 10000 });
+ck('bulk: opening the Trash drops the grid’s selection — no bar, no Delete', await selectBar().count() === 0);
+await page.locator('.notes-trash-head').click();   // focus the page, not an input
+await page.keyboard.press('Control+a');
+await sleep(300);
+ck('bulk: Ctrl+A on the Trash selects nothing (no bar, no Delete selected)', await selectBar().count() === 0 && await page.locator('button[aria-label="Delete selected"]').count() === 0);
+await page.locator('.notes-rail-item', { hasText: 'Calendar' }).click();
+await page.waitForFunction(() => location.hash.startsWith('#/calendar'), null, { timeout: 5000 }).catch(() => {});
+await sleep(300);
+await page.keyboard.press('Control+a');
+await sleep(300);
+ck('bulk: Ctrl+A on the Calendar selects nothing (no bar, no Delete selected)', await selectBar().count() === 0 && await page.locator('button[aria-label="Delete selected"]').count() === 0);
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await page.waitForSelector('.notes-card:has-text("Groceries")', { timeout: 10000 });
+await sleep(300);
+ck('bulk: back on the grid the old selection does not come back', await selectBar().count() === 0 && await page.locator('.notes-card[data-selected="true"]').count() === 0);
+await page.keyboard.press('Control+a');
+const barAgain = await page.waitForSelector('.notes-selectbar', { timeout: 5000 }).then(() => true, () => false);
+ck('bulk: POSITIVE CONTROL — Ctrl+A on the grid does select', barAgain && await page.locator('.notes-card[data-selected="true"]').count() > 0);
+await page.keyboard.press('Escape');
+await page.waitForSelector('.notes-selectbar', { state: 'detached', timeout: 5000 }).catch(() => {});
+
 // Offline on A: the worker serves the page, the cache fills it, edits queue.
 const swReady = await page.evaluate(async () => {
     if (!('serviceWorker' in navigator)) return 'no serviceWorker';
