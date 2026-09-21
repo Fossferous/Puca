@@ -133,7 +133,10 @@ channel. Personal-list items seal both to self (v2, no
 associated data); there the plaintexts carry their own type tag (`"v":1` +
 `kind` for a schedule, `"k":"snooze/1"` for a snooze) and each parser refuses
 the other's, so a swap between the two columns reads as "no value" — but a
-swap between two of your own items is not detected. `docs/SECURITY_MODEL.md` §2
+swap between two of your own items is not detected. A **note's own**
+schedule (`task_lists.schedule`, migration 068) is the same value sealed the
+same way, to self: no new kind and no new AAD, so it is read by the same
+parser and carries the same caveat. `docs/SECURITY_MODEL.md` §2
 states this. Neither field ever had a plaintext era, so a non-envelope value
 from the server is treated as unreadable, never as plaintext. In a channel
 they are **v3 or newer**: these kinds were born v3, so a v2 (unbound) channel

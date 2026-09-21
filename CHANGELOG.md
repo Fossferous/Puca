@@ -7,6 +7,16 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **A reminder on a note.** A note can now remind you by itself, with no
+  checklist item to hang the time on — write "call the vet" and give the note
+  a time from the clock in its footer. *Date & repeat* is there too, so a note
+  can be an all-day thing, repeat, carry a place or a few alerts. It appears
+  in Reminders and on the calendar as the note it is, not as a to-do, and your
+  phone tells you about it the same way it tells you about an item. It is
+  encrypted like the rest of the note: as with items, the server sees only
+  when, never what, and *Keep the time private from the server* hides even
+  that. A note in the trash stays quiet, and gets its reminder back if you
+  restore it.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

@@ -33,8 +33,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
   Tasks view.
 - **Search** — over decrypted titles, items, labels and server names, on the
   device; nothing about the query leaves it.
-- **Reminders** — every open item with a due time, grouped Overdue / Today /
-  Upcoming; tick it done from there. In a browser, Notes runs Púca's reminder
+- **Reminders** — everything with a time, grouped Overdue / Today /
+  Upcoming: every open item with a due time, and **every note that reminds
+  you by itself** — a note needs no checklist item to hang a time on (*A
+  reminder on the note itself*, below). Tick an item done from there; a note
+  row has nothing to tick, so it offers *clear this reminder* instead. In a browser, Notes runs Púca's reminder
   loop, so a due item notifies while the Notes tab is open (allow
   notifications from the Reminders view). The Android app notifies whether it
   is open or closed (see *The Android app*), and adds an **At a place**
@@ -94,7 +97,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
 | An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
 | Edited | `updated_at` on the list and its items (066) |
-| Reminders | `due_at` + `frontend/src/api/taskReminders.ts` |
+| Reminders | `due_at` on `channel_tasks` (an item) **and** on `task_lists` (a note's own, 068) + `frontend/src/api/taskReminders.ts` |
+| A note's own date, repeat and alerts | `task_lists.due_at` + `task_lists.schedule` (068), sealed exactly like an item's |
 | Colour, labels, archive | One sealed-to-self document per account (`/sealed-blobs/notes-prefs`, below) |
 | Grid/list, sort | Device-local (below) |
 
@@ -657,6 +661,64 @@ with its pictures, and only the other items become lines of text.
 - **A push doorbell for the closed Android app.** An open Notes page has the
   live stream (*Live updates*); a closed app has nothing worth delivering
   over a push, and the hourly refresh is the part that matters.
+- **Snoozing a note's own reminder.** Migration 068 gives a note a `due_at`
+  and a sealed `schedule`, not a `snooze`: a snooze has its own edit right
+  and must never rewrite the schedule, and the trigger that decides what
+  counts as an edit would need the carve-out it has for items. So Reminders
+  and the calendar offer no Snooze on a note row rather than a button that
+  does nothing.
+- **Editing a note's reminder from the calendar.** A note's reminder appears
+  there, and its menu opens the note; dragging it to another day, skipping an
+  occurrence and ticking it belong to controls a note does not have. Change
+  it from the note.
+
+## A reminder on the note itself
+
+Until migration 068 the only way to be reminded about a note was to invent a
+checklist item to hang the time on — which then showed as a to-do nobody
+wrote, in the card preview, in Reminders and on the calendar, and ticking it
+"completed" something that was never a task. A note now carries its own time.
+
+- **Where it is.** The clock in an open note's footer (and the same control in
+  Púca's Tasks view, beside the list title, so the two front doors agree).
+  *Remind me* takes a plain date and time; **Date & repeat** opens the same
+  editor an item's schedule uses, so a note gets all-day, an end, a place,
+  alerts, skipped dates and a repeat rule for free. The card shows the note's
+  own reminder as its own chip, next to — never merged with — the chip for the
+  soonest due **item** in it: they are two different things.
+- **What the server holds.** Two nullable columns on the note's row:
+  `due_at`, the next reminder instant **in plaintext**, exactly the trade an
+  item's `due_at` already makes (docs/SECURITY_MODEL.md §2 — the server
+  learns WHEN, never WHAT), and `schedule`, the same client-sealed
+  EventSchedule an item carries, sealed to yourself. Because the note has its
+  own sealed column, **Keep the time private from the server** means the same
+  thing on a note as on an item: the time lives inside the sealed schedule,
+  `due_at` stays empty, and the note still reminds on a device that can open
+  it.
+- **One feed, no new app.** A note's reminder rides the same
+  `GET /task-reminders` array as an item's, under the **negative** id
+  `-list_id`, with `list_id` naming the note. Task ids are always positive, so
+  the two can never collide in a per-id map — the web loop's fired markers,
+  Púca Notes' `ReminderPlan` / `ReminderMerge` — and the Android app needed no
+  change at all to arm them: its engine treats an id as an opaque key and a
+  mark as an opaque string (`ReminderPlan.java`'s header says so on purpose).
+  A JUnit case pins that. As for an item, the notification stays content-free.
+  A client older than 068 polling a 068 server sees those rows too and fires
+  its ordinary content-free "a task is due" toast for them, which is right;
+  the only rough edge is that such a client would try to advance a note's
+  repeating *event* through `/tasks/-5` and get a 404 each cycle. A 068
+  client advances it on the list instead.
+- **A trashed note does not remind**, and its reminder comes back with it on
+  restore — the same rule the item arm has had since 065.
+- **Two devices cannot both move it.** A note's reminder is written through
+  the same compare-and-swap an item's is (`expect_due_at`): the loser gets a
+  409 and writes nothing. A note's repeating **event** is advanced after its
+  alert fires exactly as an item's is, on the list rather than on a task.
+- **Offline**, setting or clearing a note's reminder queues like every item
+  date and replays in order.
+- **Version skew.** `GET /task-lists/features` answers `note_reminders`. A
+  listing cannot be read as the probe: on a 067 server and a 068 one, an
+  account whose notes have no reminders looks identical.
 
 ## Calendar, repeats and snooze
 
