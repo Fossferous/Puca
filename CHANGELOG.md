@@ -7,6 +7,13 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Reset a checklist in one go.** A note's foot now has *List actions*:
+  *Uncheck all* puts every ticked item back, and *Delete checked* removes them.
+  Both offer Undo, and Undo brings deleted items back with their dates,
+  repeats, pictures and their ticks. If a repeating to-do whose series has
+  already finished is among the ticked items, Púca Notes asks first — unticking
+  it would reopen a repeat with no next time. Ticked items were always at the
+  bottom in their own Completed section, so there is nothing to move.
 - **Tappable links in notes.** A web address in a note's text, or in one of
   its items, is now a link you can tap — in Púca Notes and in Púca's Tasks
   view. Púca works out where the link goes from the text on your device: it

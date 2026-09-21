@@ -30,7 +30,18 @@ Púca's reminders. Anything you do in one is what you see in the other.
 - **Open a note** — Púca's own task tree: inline edit, subtasks, drag to reorder
   and to nest, due times, attachments, the collapsible Completed section. It is
   the same component Púca renders, so a note lays out exactly as it does in the
-  Tasks view.
+  Tasks view. A **List actions** button appears in its foot as soon
+  as something is ticked, with *Uncheck all* and *Delete checked* — what a
+  weekly shopping list needs to start again. Both offer Undo, and Undo after a
+  delete brings the items back with their dates, repeats, pictures and their
+  ticks. *Uncheck all* asks first when a ticked repeating to-do whose series
+  has already finished is among them, because unticking that one reopens a
+  repeat with no next time. Both are refused while offline or while changes are
+  waiting to sync, for the same reason *Show checkboxes* is — a hundred writes
+  that replay later is not what the button looked like when it was tapped. And
+  there is deliberately no "move checked to bottom": ticked items are always in
+  the Completed section at the bottom, here and on the server, so there is
+  nowhere else for them to be.
 - **Search** — over decrypted titles, items, labels and server names, on the
   device; nothing about the query leaves it.
 - **Reminders** — every open item with a due time, grouped Overdue / Today /
@@ -151,6 +162,13 @@ Nothing here lets the operator read your notes (`docs/SECURITY_MODEL.md`):
 search is local, thumbnails are decrypted client-side as they are in Púca, and
 the prefs document is ciphertext. What the server does learn is the document's
 size and when it is written.
+
+*Uncheck all* and *Delete checked* send the same tick and delete requests the
+server already sees when you tick and delete by hand — one per item, spaced
+out, with no new kind of request and no new field. They are not free of
+signal, though, and it is worth saying plainly: a run of them inside a few
+seconds tells the operator that a list was reset in one go, and how many items
+were ticked. Pacing blunts that; it does not remove it.
 
 ## Live updates
 

@@ -365,6 +365,47 @@ await page.fill('.tt-due-edit input', `${d.getFullYear()}-${p(d.getMonth() + 1)}
 await page.click('.tt-due-set');
 await page.waitForSelector('.notes-editor .tt-due', { timeout: 10000 });
 ck('editor: a due time renders its chip', true);
+
+// ---- List actions: Uncheck all / Delete checked -------------------------------------
+const doneBefore = await page.locator('.notes-editor .tt-completed-section .tt-item').count();
+const itemsBefore = await page.locator('.notes-editor .tt-item').count();
+ck('list actions: there is something ticked to act on', doneBefore > 0 && itemsBefore > doneBefore, `completed=${doneBefore} items=${itemsBefore}`);
+// Ticked items are at the bottom with no action taken — the always-on
+// invariant, which is why there is no "move checked to bottom" to build.
+ck('list actions: ticked items already sit below the open ones', await page.evaluate(() => {
+    const open = document.querySelector('.notes-editor .tt-list:not(.completed) .tt-item');
+    const done = document.querySelector('.notes-editor .tt-list.completed .tt-item');
+    return !!open && !!done && open.getBoundingClientRect().top < done.getBoundingClientRect().top;
+}));
+await page.click('.notes-editor-foot button[aria-label="List actions"]');
+await page.waitForSelector('.notes-list-actions', { timeout: 5000 });
+ck('list actions: the menu opens with both rows',
+    await page.locator('.notes-list-actions button').count() === 2
+    && /Uncheck all \(\d+\)/.test(await page.locator('.notes-list-actions').innerText())
+    && /Delete checked \(\d+\)/.test(await page.locator('.notes-list-actions').innerText()));
+await shot('list-actions');
+await page.getByRole('button', { name: /Uncheck all/ }).click();
+await page.waitForSelector('.notes-editor .tt-completed-section', { state: 'detached', timeout: 20000 }).catch(() => {});
+ck('uncheck all: the Completed section is gone', await page.locator('.notes-editor .tt-completed-section').count() === 0);
+ck('uncheck all: no item was lost', await page.locator('.notes-editor .tt-item').count() === itemsBefore);
+ck('uncheck all: an Undo is offered', await page.locator('.notes-undo').count() === 1);
+await page.click('.notes-undo .notes-textbtn');
+await page.waitForSelector('.notes-editor .tt-completed-section', { timeout: 20000 }).catch(() => {});
+ck('uncheck all: Undo puts the ticks back',
+    await page.locator('.notes-editor .tt-completed-section .tt-item').count() === doneBefore);
+// Delete checked, then Undo: the items come back, still ticked.
+page.once('dialog', d => d.accept());
+await page.click('.notes-editor-foot button[aria-label="List actions"]');
+await page.waitForSelector('.notes-list-actions', { timeout: 5000 });
+await page.getByRole('button', { name: /Delete checked/ }).click();
+await page.waitForFunction(n => document.querySelectorAll('.notes-editor .tt-item').length === n, itemsBefore - doneBefore, { timeout: 20000 }).catch(() => {});
+ck('delete checked: only the ticked items went',
+    await page.locator('.notes-editor .tt-item').count() === itemsBefore - doneBefore);
+await page.click('.notes-undo .notes-textbtn');
+await page.waitForFunction(n => document.querySelectorAll('.notes-editor .tt-item').length === n, itemsBefore, { timeout: 20000 }).catch(() => {});
+ck('delete checked: Undo brings the items back, still ticked',
+    await page.locator('.notes-editor .tt-item').count() === itemsBefore
+    && await page.locator('.notes-editor .tt-completed-section .tt-item').count() === doneBefore);
 // Escape INSIDE an inline item edit must not close the note
 await page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first().locator('.tt-description').click();
 await page.waitForSelector('.notes-editor .tt-edit-input', { timeout: 5000 });
@@ -1179,6 +1220,24 @@ const pb = await m.locator('.notes-popover').boundingBox();
 ck('phone: colour popover inside the viewport', pb && pb.x >= 0 && pb.x + pb.width <= 390.5 && pb.y >= 0 && pb.y + pb.height <= vh + 0.5, JSON.stringify(pb));
 await mshot('phone-popover');
 await m.keyboard.press('Escape');
+await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+// List actions at 390x844: answerable, inside the viewport, targets at size.
+if (await m.locator('.notes-editor-foot button[aria-label="List actions"]').count() === 1) {
+    await m.tap('.notes-editor-foot button[aria-label="List actions"]');
+    await m.waitForSelector('.notes-list-actions', { timeout: 5000 });
+    const laBoxes = await Promise.all((await m.locator('.notes-list-actions button').all()).map(async b => (await b.boundingBox())?.height ?? 0));
+    ck('phone: every list-action row is a full tap target', laBoxes.length === 2 && laBoxes.every(h => h >= 44), JSON.stringify(laBoxes));
+    const laBox = await m.locator('.notes-popover').boundingBox();
+    ck('phone: the list-actions popover is inside the viewport',
+        laBox && laBox.x >= 0 && laBox.x + laBox.width <= 390.5 && laBox.y >= 0 && laBox.y + laBox.height <= vh + 0.5, JSON.stringify(laBox));
+    ck('phone: the editor foot still does not scroll sideways',
+        await m.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    await mshot('phone-list-actions');
+    await m.keyboard.press('Escape');
+    await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+} else {
+    skip('phone: the list-actions popover', 'nothing is ticked in this note here');
+}
 await m.getByRole('button', { name: 'Close', exact: true }).tap();
 await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 

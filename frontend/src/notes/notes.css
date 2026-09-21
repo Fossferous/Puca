@@ -1044,6 +1044,25 @@
 .notes-dialog-head h3 { margin: 0; font-size: 15px; }
 .notes-dialog-body { padding: 14px 16px 16px; }
 
+/* ---------- List actions (Uncheck all / Delete checked) --------------------------- */
+.notes-list-actions { display: flex; flex-direction: column; min-width: 200px; }
+.notes-list-actions button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: none;
+    background: none;
+    color: var(--text-normal);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+}
+.notes-list-actions button:hover { background: var(--bg-modifier-hover); }
+.notes-list-actions button.danger { color: var(--text-danger); }
+
 /* ---------- Composer as a phone sheet --------------------------------------------- */
 .notes-quickadd-sheet { padding: 8px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 /* The sheet scrolls as a whole: a long list must keep its Done/Discard row

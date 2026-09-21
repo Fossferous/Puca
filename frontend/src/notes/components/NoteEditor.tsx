@@ -29,6 +29,7 @@ import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
+import { ListActionsMenu } from './ListActionsMenu';
 import { PastedLinesDialog } from './PastedLinesDialog';
 import { linesFromPaste, pasteAsOneLine } from '../model/noteContent';
 import { useTaskFeature } from '../../api/taskFeatures';
@@ -235,6 +236,10 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="Labels" title="Labels" onClick={e => onPickLabels(card, e.currentTarget)}><TagIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label={card.archived ? 'Unarchive' : 'Archive'} title={card.archived ? 'Unarchive' : 'Archive'} onClick={() => onArchive(card, !card.archived)}><ArchiveIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label="Refresh this note" title="Refresh" onClick={() => void actions.refreshNote(ref)}><RefreshIcon /></button>
+                    {/* Uncheck all / Delete checked, on the editor's LIVE
+                        items. Shown only when something is ticked, and only
+                        on a personal note. */}
+                    <ListActionsMenu note={ref} actions={actions} tasks={tasks} />
                     {pucaHref && (
                         <a className="notes-iconbtn" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
                     )}
