@@ -286,7 +286,10 @@ export function notifyNewMessage(opts: {
  * unread has badges and the channel list; a deadline that passes silently has
  * no other surface, and it is the one notification whose timing is the point.
  * Clicking it (web path) raises the app and opens the Tasks view via the
- * `sovereign:open-tasks` event Chat listens for.
+ * `sovereign:open-tasks` event Chat listens for. The event carries the due
+ * ids, and Púca Notes opens that one item's note when exactly one is due
+ * (notes/native/useNativeReminders, which also carries the merge note about
+ * this event's name). Drop the detail and that tap quietly stops working.
  */
 export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
     if (count <= 0) return;

@@ -1446,6 +1446,22 @@ try {
         await shotOf(a)('reminder-tap-item');
         await a.keyboard.press('Escape');
         await a.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+        // The SAME item, a second time, WITHOUT a reload: a repeat or a
+        // snooze fires again while the app is still up, and the note must
+        // open again. The resolution is a one-shot per TAP, not per id —
+        // keyed on the id, this second tap recognised it and opened nothing.
+        // Fired through the live listener, not `park`, because park reloads
+        // and a reload is a new page session, where the bug cannot happen.
+        await a.evaluate(id => {
+            for (const cb of (window.__fakeAndroid.listeners['NotesNative:navigate'] || [])) cb({ target: 'reminders', item: id });
+        }, open.id);
+        await a.waitForSelector('.notes-editor', { timeout: 15000 }).catch(() => {});
+        ck('reminder tap: the same item coming due again opens its note a second time',
+            await a.locator('.notes-editor').count() === 1
+            && await a.locator(`#tt-task-${open.id}.flash`).count() === 1);
+        await a.keyboard.press('Escape');
+        await a.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
     }
     await park('__walkNav', { target: 'reminders', item: 99999999 });
     await a.waitForSelector('.notes-reminders', { timeout: 15000 }).catch(() => {});

@@ -9,6 +9,8 @@
  *    also parks that target for a page that was not listening, so the hook
  *    must take it off the shelf too. Found on the emulator: without that,
  *    signing out and back in replayed an old tap and opened Reminders.
+ *  - In the browser and on the desktop there is no plugin at all: the same
+ *    tap arrives as a window event carrying the ids the notification held.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -33,7 +35,8 @@ vi.mock('../api/taskReminders', () => ({ startTaskReminders: (o?: unknown) => st
 vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7, getToken: () => 'tok' }));
 vi.mock('../api/config', () => ({ API_BASE_URL: 'https://api.example.test' }));
 
-const { useNotesReminderLoop } = await import('../notes/native/useNativeReminders');
+const { OPEN_TASKS_EVENT, onOpenTasks, openTasksRoute, useNotesReminderLoop } =
+    await import('../notes/native/useNativeReminders');
 
 const settle = async () => { await act(async () => { for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0)); }); };
 
@@ -121,5 +124,53 @@ describe('useNotesReminderLoop', () => {
         act(() => root.render(<Shell />));
         await settle();
         expect(navigate).not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * The browser / desktop half: notifyTasksDue dispatches the due ids and
+ * Notes routes on them. Nothing else covers this path — it has no plugin,
+ * no walk line, and the phone's half would stay green if it broke.
+ */
+describe('a due-notification click in the browser or on the desktop', () => {
+    it('one item due: the click opens that item’s note', () => {
+        const nav = vi.fn();
+        const off = onOpenTasks(nav);
+        window.dispatchEvent(new CustomEvent(OPEN_TASKS_EVENT, { detail: { ids: [42] } }));
+        expect(nav).toHaveBeenCalledWith('/reminders?item=42');
+        off();
+    });
+
+    it('several due: Reminders, with nothing named', () => {
+        const nav = vi.fn();
+        const off = onOpenTasks(nav);
+        window.dispatchEvent(new CustomEvent(OPEN_TASKS_EVENT, { detail: { ids: [42, 43] } }));
+        expect(nav).toHaveBeenCalledWith('/reminders');
+        off();
+    });
+
+    it('an event with no ids at all still opens Reminders (an older caller)', () => {
+        const nav = vi.fn();
+        const off = onOpenTasks(nav);
+        window.dispatchEvent(new CustomEvent(OPEN_TASKS_EVENT));
+        expect(nav).toHaveBeenCalledWith('/reminders');
+        off();
+    });
+
+    it('unsubscribing really stops it (the shell remounts on every sign-in)', () => {
+        const nav = vi.fn();
+        onOpenTasks(nav)();
+        window.dispatchEvent(new CustomEvent(OPEN_TASKS_EVENT, { detail: { ids: [42] } }));
+        expect(nav).not.toHaveBeenCalled();
+    });
+
+    it('a detail that is not what we expect never becomes a route', () => {
+        expect(openTasksRoute(undefined)).toBe('/reminders');
+        expect(openTasksRoute({ ids: 'nope' })).toBe('/reminders');
+        expect(openTasksRoute({ ids: [] })).toBe('/reminders');
+        expect(openTasksRoute({ ids: ['x'] })).toBe('/reminders');
+        expect(openTasksRoute({ ids: [0] })).toBe('/reminders');
+        expect(openTasksRoute({ ids: [-1] })).toBe('/reminders');
+        expect(openTasksRoute({ ids: [7] })).toBe('/reminders?item=7');
     });
 });

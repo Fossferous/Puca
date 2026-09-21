@@ -24,8 +24,11 @@ one-line summary; this file is the full story. Versions follow
 - **A due reminder opens the item.** Tapping the reminder notification when a
   single item is due now opens that item's note with the item flagged, instead
   of the list of reminders; when more than one is due it opens Reminders, as
-  before. Only the item's number travels in the notification — what the item
-  says is still never in it, on the lock screen, or anywhere else.
+  before. A repeating item that comes due again opens its note again, however
+  many times it fires while the app is open. The same tap works from the
+  desktop app and the browser. Only the item's number travels in the
+  notification — what the item says is still never in it, on the lock screen,
+  or anywhere else.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

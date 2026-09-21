@@ -44,7 +44,7 @@ import { type NoteExtras } from '../model/useListContent';
 import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
-import { useNotesReminderLoop } from '../native/useNativeReminders';
+import { onOpenTasks, useNotesReminderLoop } from '../native/useNativeReminders';
 import { canShareNotes, exportNotes, shareNote, shareNotes } from '../native/notesExport';
 import { usePlaceReminderItems } from '../native/useNotesPlaces';
 import { NativeReminderBanners } from '../native/NativeReminderBanners';
@@ -148,7 +148,12 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     // The ONE item a due notification came for (notes/native/): its note
     // opens and the row is flashed. Held in state, not the URL, so a reload
     // cannot replay a tap from hours ago.
-    const [flashItem, setFlashItem] = useState<number | null>(null);
+    //
+    // A TAP, not an id: `seq` counts them, so the same item coming due twice
+    // in one page session — a repeat, or a snooze that fired again — is two
+    // taps, and the second one opens the note as the first did.
+    const [flashTap, setFlashTap] = useState<{ id: number; seq: number } | null>(null);
+    const flashItem = flashTap?.id ?? null;
     const [pending, setPending] = useState<Pending | null>(null);
     const [notif, setNotif] = useState(notificationPermission);
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
@@ -264,45 +269,44 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         const raw = Number(itemParam);
         if (!raw || raw <= 0) return;
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setFlashItem(raw);
+        setFlashTap(prev => ({ id: raw, seq: (prev?.seq ?? 0) + 1 }));
         setParams(p => { p.delete('item'); return p; }, { replace: true });
     }, [itemParam, setParams]);
-    // ONCE. `cards` changes identity on every refetch, and without this the
-    // effect re-set `note` after the user had closed the note — the flashed
-    // note re-opened itself for as long as the flash lasted. Found by the walk.
-    const flashResolved = useRef<number | null>(null);
+    // ONCE PER TAP. `cards` changes identity on every refetch, and without
+    // this the effect re-set `note` after the user had closed the note — the
+    // flashed note re-opened itself for as long as the flash lasted. Found by
+    // the walk. Keyed on the tap's `seq` and not on the item's id, because a
+    // repeat or a snooze brings the SAME id round again and that tap must
+    // open the note just as the first one did.
+    const flashResolved = useRef(-1);
+    const flashSeq = flashTap?.seq ?? -1;
     useEffect(() => {
         if (!flashItem || loading || cards.length === 0) return;
-        if (flashResolved.current === flashItem) return;
+        if (flashResolved.current === flashSeq) return;
         const card = cards.find(c => (c.tasks ?? []).some(t => t.id === flashItem));
         if (card) {
-            flashResolved.current = flashItem;
+            flashResolved.current = flashSeq;
             setParams(p => { p.set('note', card.key); return p; }, { replace: true });
         } else if (!tasksPending) {
             // Every note's items are in: the id is stale (completed, deleted,
             // a note this account lost). Stay on Reminders.
-            flashResolved.current = flashItem;
+            flashResolved.current = flashSeq;
             // eslint-disable-next-line react-hooks/set-state-in-effect
-            setFlashItem(null);
+            setFlashTap(null);
         }
-    }, [flashItem, loading, tasksPending, cards, setParams]);
+    }, [flashItem, flashSeq, loading, tasksPending, cards, setParams]);
     useEffect(() => {
-        if (!flashItem) return;
+        if (!flashTap) return;
         // Long enough to see, short enough that a later render (or going
-        // back) does not show it a second time.
-        const t = setTimeout(() => setFlashItem(null), 4000);
+        // back) does not show it a second time. Per TAP: the next one gets
+        // its own four seconds.
+        const t = setTimeout(() => setFlashTap(null), 4000);
         return () => clearTimeout(t);
-    }, [flashItem]);
+    }, [flashTap]);
     // The browser/desktop half of the same tap: notifyTasksDue carries the
-    // due ids on its event (api/desktopNotify.ts).
-    useEffect(() => {
-        const onOpenTasks = (ev: Event) => {
-            const ids = (ev as CustomEvent<{ ids?: number[] }>).detail?.ids;
-            navigate(Array.isArray(ids) && ids.length === 1 ? `/reminders?item=${ids[0]}` : '/reminders');
-        };
-        window.addEventListener('sovereign:open-tasks', onOpenTasks);
-        return () => window.removeEventListener('sovereign:open-tasks', onOpenTasks);
-    }, [navigate]);
+    // due ids on its event (api/desktopNotify.ts, and the merge note beside
+    // onOpenTasks).
+    useEffect(() => onOpenTasks(navigate), [navigate]);
     const placeItems = usePlaceReminderItems(cards);
     const enableNotifications = async () => {
         if (typeof Notification === 'undefined') return;

@@ -54,6 +54,37 @@ export function reminderRoute(item: number | null): string {
 }
 
 /**
+ * The browser and desktop half of the same tap. There is no plugin there:
+ * clicking the due-task notification dispatches an event carrying the ids it
+ * already held (api/desktopNotify.ts), and exactly one due item opens that
+ * item's note, as on the phone.
+ *
+ * MERGE NOTE: work/notes-f-puca-views renames this dispatch to
+ * 'sovereign:open-reminders' for Púca's own Tasks view. Whichever name
+ * survives the merge into work/notes-merge, it must keep carrying `ids` and
+ * both listeners must move together — drop the detail and a one-item tap
+ * silently goes back to opening the plain Reminders list, with every gate
+ * still green.
+ */
+export const OPEN_TASKS_EVENT = 'sovereign:open-tasks';
+
+/** Pure: where that event lands. One id names the item; several (or none)
+ *  land on Reminders, exactly as before there was a detail at all. */
+export function openTasksRoute(detail: unknown): string {
+    const ids = (detail as { ids?: unknown } | null | undefined)?.ids;
+    const one = Array.isArray(ids) && ids.length === 1 ? Number(ids[0]) : NaN;
+    return reminderRoute(Number.isFinite(one) ? one : null);
+}
+
+/** Subscribe to it. Returns the unsubscribe, so the shell's effect is one
+ *  line and this wiring can be tested without rendering the shell. */
+export function onOpenTasks(navigate: (to: string) => void): () => void {
+    const h = (ev: Event) => navigate(openTasksRoute((ev as CustomEvent).detail));
+    window.addEventListener(OPEN_TASKS_EVENT, h);
+    return () => window.removeEventListener(OPEN_TASKS_EVENT, h);
+}
+
+/**
  * Where a notification tap lands. 'reminders' opens Reminders (on the one
  * item that came due, when it named one). A compose- target opens the
  * composer. 'signin' comes
