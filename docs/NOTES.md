@@ -673,6 +673,17 @@ the note intact, and deleting the note takes only its own copy. A message this
 device cannot decrypt is not offered, and neither is a clip post — its body
 carries the clip key, and a note outlives the window the clip was approved for.
 
+A note whose TEXT or whose pictures this device cannot read yet is not offered
+as a destination either. Every write here replaces what is stored — the note's
+text wholesale, the picture list wholesale — so saving into such a note would
+seal the captured line over ciphertext the account still holds under a key this
+device has not got, and no device could ever read it again. That is the rule
+`isAttachmentsLocked` already carried for the picture list; it applies to the
+text for exactly the same reason. The refusal survives changing your mind about
+pictures after picking a note, and a save that half-succeeds — the note made,
+the item refused — undoes the note rather than leaving it behind with pictures
+that nothing names.
+
 Like every other picture and text save, a capture needs the network (see the
 offline bullet below); it is never queued.
 

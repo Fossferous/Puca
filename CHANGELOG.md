@@ -20,8 +20,10 @@ one-line summary; this file is the full story. Versions follow
   you already have — its pictures can come too. The copy is yours: it is
   encrypted again under your own key and uploaded as your own file, so it
   survives the message being deleted, and deleting the note does not touch the
-  chat. Only your own notes are offered, never a shared one. Messages you
-  cannot read, and clips, are not offered.
+  chat. Only your own notes are offered, never a shared one, and a note whose
+  text or pictures this device cannot read yet is not offered either — saving
+  into one would write over what you still have elsewhere. Messages you cannot
+  read, and clips, are not offered.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with
