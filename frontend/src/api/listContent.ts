@@ -135,23 +135,32 @@ export async function fetchListSidecar(listId: number): Promise<TaskAttachmentRe
  * INTENT, not a snapshot. A replayed full replace would silently delete a
  * picture another device added in the meantime (and strand its upload); this
  * cannot, because it never names refs it did not just read.
+ *
+ * Returns the refs it actually DROPPED — never the ones it was merely asked
+ * to drop. Those uploads are nobody's now, and the caller deletes them
+ * (api/noteMedia.ts `addNoteRefs`); a ref the server no longer held is not
+ * among them, so a picture another device still names is never destroyed.
  */
-export async function addTaskListAttachments(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<void> {
+export async function addTaskListAttachments(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<TaskAttachmentRef[]> {
     const current = await fetchListSidecar(listId);
     if (current === null) throw new NoteFilesUnreadableError();
     const drop = new Set(replacing);
+    const dropped = current.filter(r => drop.has(r.href));
     const next = [...current.filter(r => !drop.has(r.href)), ...added];
-    return setTaskListAttachments(listId, next);
+    await setTaskListAttachments(listId, next);
+    return dropped;
 }
 
-/** Remove refs from whatever the server holds now — the same intent form. */
-export async function removeTaskListAttachments(listId: number, removing: string[]): Promise<void> {
+/** Remove refs from whatever the server holds now — the same intent form,
+ *  and the same answer: the refs actually taken out. */
+export async function removeTaskListAttachments(listId: number, removing: string[]): Promise<TaskAttachmentRef[]> {
     const current = await fetchListSidecar(listId);
     if (current === null) throw new NoteFilesUnreadableError();
     const drop = new Set(removing);
     const next = current.filter(r => !drop.has(r.href));
-    if (next.length === current.length) return;   // already gone: nothing to say
-    return setTaskListAttachments(listId, next);
+    if (next.length === current.length) return [];   // already gone: nothing to say
+    await setTaskListAttachments(listId, next);
+    return current.filter(r => drop.has(r.href));
 }
 
 /** Create a list with its title, and optionally its note text and refs, in

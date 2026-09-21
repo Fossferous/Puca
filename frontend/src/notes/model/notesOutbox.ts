@@ -37,13 +37,16 @@
  *
  * A NOTE'S OWN CONTENT queues too. `setBody` carries the typed text and is
  * sealed for the server when it runs, like every other op; a second one for
- * the same note REPLACES the queued one, because the editor saves after
- * every pause in typing. `addMedia` carries only the IDS of ciphertext
+ * the same note REPLACES the queued one — in its place, but with its OWN op
+ * id — because the editor saves after every pause in typing.
+ * `addMedia` carries only the IDS of ciphertext
  * parked on this device (notesBlobs.ts) — a photo is encrypted the moment it
  * is taken, and replay uploads the bytes and then adds the real refs to
  * whatever the server's sidecar holds at that moment. A dropped or forgotten
  * media op deletes its ciphertext, and `load` sweeps anything the queue does
- * not name.
+ * not name. What a replayed add or remove takes OUT of the sidecar has its
+ * upload deleted once the server has the new sidecar — the same rule Púca's
+ * Tasks view follows, kept in one place (api/noteMedia.ts).
  *
  * CREATES ARE AT-LEAST-ONCE. The create routes take no client op id, so a
  * create the server COMMITTED whose answer was lost (the connection dropped
@@ -71,11 +74,11 @@ import {
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
 import {
-    addTaskListAttachments, deleteFiles, keepHiddenSlots, removeTaskListAttachments, restoreTaskList,
+    deleteFiles, keepHiddenSlots, restoreTaskList,
     setTaskListAttachments, setTaskListBody, trashOrDeleteList,
 } from '../../api/listContent';
 import { type TaskAttachmentRef } from '../../api/tasks';
-import { fileIdsOf, uploadParkedMedia } from '../../api/noteMedia';
+import { addNoteRefs, fileIdsOf, fileIdsOfHrefs, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
 import { appParkedStore, type ParkedStore } from './notesBlobs';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
@@ -277,8 +280,15 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
             if (records.length === 0) return undefined;
             const added = await uploadParkedMedia(records);
             try {
-                if (fromQueue) await addTaskListAttachments(listId, added, op.replacing);
-                else await setTaskListAttachments(listId, [...op.refs, ...added]);
+                // `addNoteRefs` also deletes the uploads behind whatever the
+                // replace dropped — nothing names those now, and leaving
+                // them would charge the owner's quota for a picture no note
+                // shows (api/noteMedia.ts holds that rule for both doors).
+                if (fromQueue) await addNoteRefs(listId, added, op.replacing);
+                else {
+                    await setTaskListAttachments(listId, [...op.refs, ...added]);
+                    if (op.replacing.length > 0) await deleteFiles(fileIdsOfHrefs(op.replacing));
+                }
             } catch (err) {
                 // Nothing names the uploads now: do not leave them against
                 // the quota (the same rule as uploadNoteMedia).
@@ -290,8 +300,10 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
         }
         case 'removeMedia': {
             const listId = r(op.listId);
-            if (fromQueue) return removeTaskListAttachments(listId, op.removing);
-            return setTaskListAttachments(listId, op.refs);
+            if (fromQueue) return removeNoteRefs(listId, op.removing);
+            await setTaskListAttachments(listId, op.refs);
+            if (op.removing.length > 0) await deleteFiles(fileIdsOfHrefs(op.removing));
+            return undefined;
         }
         case 'prefs': {
             if (!fromQueue) return putTaskTabPrefs(op.prefs);
@@ -409,6 +421,11 @@ export interface Outbox {
     queuedListDeletes(): ReadonlySet<number>;
     subscribe(cb: () => void): () => void;
     load(): Promise<void>;
+    /** Resolves once `pending()` reflects the PERSISTED queue. Until the
+     *  load finishes it reads 0 whatever a previous page left behind, so
+     *  anything that decides "nothing is waiting, run this directly" has to
+     *  wait for this first — `send` already does. */
+    ready(): Promise<void>;
     send<T>(op: NoteOp): Promise<{ queued: true } | { queued: false; value: T }>;
     replay(): Promise<ReplaySummary | undefined>;
     /** The id a temp id became, once its create has replayed. */
@@ -536,6 +553,11 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             return p;
         },
 
+        ready() {
+            const c = ctx();
+            return c ? ensureLoaded(c.sub) : Promise.resolve();
+        },
+
         async send<T>(op: NoteOp) {
             const c0 = ctx();
             if (c0) await ensureLoaded(c0.sub);
@@ -649,7 +671,14 @@ export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
         const i = s.queue.findIndex(o => o.k === 'setBody' && o.listId === op.listId);
         if (i >= 0) {
             const queue = [...s.queue];
-            queue[i] = { ...op, oid: queue[i].oid };
+            // The INDEX is what keeps the order; the replacement keeps its
+            // own oid. Reusing the old one lost the last thing the user
+            // typed: `replay` awaits `exec(head)` OUTSIDE the queue lock, so
+            // a save that collapses in while the head is in flight would be
+            // deleted by the success filter (`oid !== head.oid`) — and by
+            // dropHead on a 403 — as though it were the op that just ran.
+            // With a fresh oid both are no-ops and the newer text replays next.
+            queue[i] = op;
             return { ...s, queue };
         }
     }
@@ -736,6 +765,17 @@ export async function sendCreateList(title: string): Promise<TaskList> {
 
 export function pendingOutboxCount(): number {
     return appOutbox.pending();
+}
+
+/**
+ * Await before reading `pendingOutboxCount()` to decide whether something
+ * may run directly. The count is 0 until the persisted queue has loaded, so
+ * a note made in the first moments after a reload would otherwise be sent
+ * straight to the server, ahead of everything the previous page queued —
+ * exactly the overtaking `send`'s own cold-start wait exists to prevent.
+ */
+export function ensureOutboxLoaded(): Promise<void> {
+    return appOutbox.ready();
 }
 
 /** Forget parked media removed from a note before it could be sent. */

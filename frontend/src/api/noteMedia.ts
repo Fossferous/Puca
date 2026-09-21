@@ -18,7 +18,7 @@ import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, pars
 import { type SealedFile, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
-import { deleteFiles } from './listContent';
+import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
 export const DRAWING_STROKES_MIME = 'application/x-puca-drawing';
@@ -176,7 +176,44 @@ export async function readStrokes(ref: TaskAttachmentRef): Promise<string> {
 
 /** The uploaded file ids behind refs (for best-effort deletion). */
 export function fileIdsOf(refs: TaskAttachmentRef[]): string[] {
-    return refs.map(r => parseEncAttachment(r.href)?.id).filter((x): x is string => !!x);
+    return fileIdsOfHrefs(refs.map(r => r.href));
+}
+
+/** The same, from hrefs alone — a queued op carries hrefs, not whole refs. */
+export function fileIdsOfHrefs(hrefs: string[]): string[] {
+    return hrefs.map(h => parseEncAttachment(h)?.id).filter((x): x is string => !!x);
+}
+
+/**
+ * Add refs to a note's sidecar and delete the uploads behind whatever that
+ * dropped. ONE place for that rule: Púca Notes reaches it from the editor
+ * (online) and from the offline queue's replay, and the two front doors onto
+ * the same note must not disagree about whose files survive.
+ */
+export async function addNoteRefs(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<void> {
+    const dropped = await addTaskListAttachments(listId, added, replacing);
+    if (dropped.length > 0) await deleteFiles(fileIdsOf(dropped));
+}
+
+/** Remove refs from a note's sidecar, and delete their uploads. */
+export async function removeNoteRefs(listId: number, removing: string[]): Promise<void> {
+    const dropped = await removeTaskListAttachments(listId, removing);
+    if (dropped.length > 0) await deleteFiles(fileIdsOf(dropped));
+}
+
+/**
+ * What a batch of media is called in a queued op's label and in the toast
+ * that lists what could not be saved. A note holds any file now, so counting
+ * a PDF as a picture would tell the user something that is not true.
+ */
+export function mediaCountLabel(photos: File[], drawings: number): string {
+    const images = photos.filter(f => f.type.startsWith('image/')).length;
+    const pictures = images + drawings;
+    const files = photos.length - images;
+    const parts: string[] = [];
+    if (pictures > 0) parts.push(`${pictures} picture${pictures === 1 ? '' : 's'}`);
+    if (files > 0) parts.push(`${files} file${files === 1 ? '' : 's'}`);
+    return parts.length === 0 ? 'nothing' : parts.join(' and ');
 }
 
 // --- The gallery -------------------------------------------------------------------------

@@ -26,8 +26,8 @@ vi.mock('../api/tasks', async () => {
 vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 vi.mock('../components/messageToastBus', () => ({ pushMessageToast: vi.fn() }));
 
-import { makeIdentity } from '../api/e2ee';
-const { createOutbox, enqueue, execOp, ops, queuedBlobIds, busyKeyOf } = await import('../notes/model/notesOutbox');
+import { makeIdentity, sealLocal } from '../api/e2ee';
+const { createOutbox, enqueue, ops, queuedBlobIds, busyKeyOf } = await import('../notes/model/notesOutbox');
 const { createParkedStore, MAX_PARKED_MEDIA_BYTES, ParkedMediaFullError } = await import('../notes/model/notesBlobs');
 const { memoryStore } = await import('../notes/model/notesCache');
 const { resetNoteBusy } = await import('../notes/model/noteBusy');
@@ -78,6 +78,28 @@ function harness() {
     return { store, queue, parked, ran, failures, summaries, make, setOnline: (v: boolean) => { online = v; } };
 }
 
+/** A lock that behaves like the real one: `ifAvailable` gives up rather than
+ *  waiting, so a scheduled replay cannot run beside the one in flight. */
+const lockChains = new Map<string, Promise<unknown>>();
+function realLock<T>(name: string, fn: () => Promise<T>, opts?: { ifAvailable?: boolean }): Promise<T | undefined> {
+    if (lockChains.has(name) && opts?.ifAvailable) return Promise.resolve(undefined);
+    const prev = lockChains.get(name) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    const tail = next.catch(() => undefined);
+    lockChains.set(name, tail);
+    void tail.then(() => { if (lockChains.get(name) === tail) lockChains.delete(name); });
+    return next;
+}
+
+/** Wait for a condition, with a deadline rather than a hang. */
+async function until(ok: () => boolean, ms = 2_000): Promise<void> {
+    const end = Date.now() + ms;
+    while (!ok()) {
+        if (Date.now() > end) throw new Error('timed out waiting');
+        await new Promise(res => setTimeout(res, 1));
+    }
+}
+
 beforeEach(() => resetNoteBusy());
 
 describe('a note’s text with no connection', () => {
@@ -124,6 +146,45 @@ describe('a note’s text with no connection', () => {
         expect(s.queue.map(o => o.k)).toEqual(['createList', 'setBody', 'deleteTask']);
         expect(s.queue[1]).toMatchObject({ body: 'second' });
     });
+
+    it('the replacement carries its OWN op id, so it is not mistaken for the one in flight', () => {
+        let s = enqueue({ queue: [], ids: {}, dead: [] }, ops.setBody(4, 'first'));
+        const firstOid = s.queue[0].oid;
+        s = enqueue(s, ops.setBody(4, 'second'));
+        expect(s.queue[0].body).toBe('second');
+        expect(s.queue[0].oid).not.toBe(firstOid);
+    });
+
+    it('a word typed WHILE the queued save is in flight is not swallowed by it', async () => {
+        // `replay` awaits exec OUTSIDE the queue lock, so a save can collapse
+        // into the op being sent. Reusing the queued op's id made the
+        // success filter (`oid !== head.oid`) delete the NEWER text, while
+        // the editor said "Kept on this device".
+        const { parked } = parkedHarness();
+        const queue = memoryStore();
+        const ran: string[] = [];
+        let release: (() => void) | null = null;
+        let online = false;
+        const exec = vi.fn(async (op: NoteOp) => {
+            ran.push(op.k === 'setBody' ? op.body : op.k);
+            if (ran.length === 1) await new Promise<void>(res => { release = res; });
+            return {};
+        });
+        const ob = createOutbox({
+            sub: () => 7, identity: () => identity, store: () => queue, exec: exec as never,
+            online: () => online, lock: realLock, onReplayed: () => {}, parked,
+        });
+        await ob.send(ops.setBody(4, 'abc'));                 // offline: queued
+        expect(ob.pending()).toBe(1);
+        online = true;
+        const replaying = ob.replay();
+        await until(() => release !== null);
+        await ob.send(ops.setBody(4, 'abc def'));             // collapses into the op in flight
+        release!();
+        await replaying;
+        expect(ran).toEqual(['abc', 'abc def']);
+        expect(ob.pending()).toBe(0);
+    });
 });
 
 describe('a picture taken with no connection', () => {
@@ -148,6 +209,40 @@ describe('a picture taken with no connection', () => {
         expect(await h.parked.read(['b', 'c'])).toEqual([]);
         // The one already waiting is untouched.
         expect((await h.parked.waiting()).items).toBe(1);
+    });
+
+    it('refuses when the BROWSER says the origin has no room, before it writes anything', async () => {
+        const h = parkedHarness();
+        const estimate = vi.fn(async () => ({ quota: 1_000_000, usage: 999_000 }));
+        Object.defineProperty(navigator, 'storage', { value: { estimate }, configurable: true });
+        try {
+            await expect(h.parked.park([media('a', 'x', 10_000)])).rejects.toBeInstanceOf(ParkedMediaFullError);
+            expect(await h.parked.read(['a'])).toEqual([]);
+            expect(estimate).toHaveBeenCalled();
+            // Positive control: with room, the same call parks.
+            estimate.mockResolvedValue({ quota: 1_000_000, usage: 0 });
+            await h.parked.park([media('a', 'x', 10_000)]);
+            expect(await h.parked.read(['a'])).toHaveLength(1);
+        } finally {
+            Reflect.deleteProperty(navigator, 'storage');
+        }
+    });
+
+    it('a record the queue still names, whose index entry was lost, is re-indexed with a real size', async () => {
+        const h = parkedHarness();
+        await h.parked.park([media('a', 'x', 1_000)]);
+        expect((await h.parked.waiting()).bytes).toBe(1_000);   // positive control
+        // A page that died mid-write, or an index from an older version: the
+        // RECORD is on disk and an op still names it, but the index forgot it.
+        h.store.map.set('index', await sealLocal(identity, 7, 'm:index', JSON.stringify({ items: {} })));
+        await h.parked.sweep(new Set(['a']), 0);
+        expect(await h.parked.read(['a'])).toHaveLength(1);     // kept: an op names it
+        // Counted as 0 it would sit on the device charging nothing, and
+        // enough of them would stop the cap biting at all. What it counts
+        // instead is what the record takes on disk.
+        const onDisk = h.store.map.get('b:a')!.length;
+        expect(onDisk).toBeGreaterThan(0);
+        expect((await h.parked.waiting()).bytes).toBe(onDisk);
     });
 
     it('queues one op naming the parked bytes, and the note shows it meanwhile', async () => {
@@ -175,19 +270,22 @@ describe('what replay does with parked media', () => {
         vi.resetModules();
         vi.doMock('../api/noteMedia', async () => {
             const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
-            return { ...real, uploadParkedMedia: vi.fn(async () => [uploaded]) };
+            return {
+                ...real,
+                uploadParkedMedia: vi.fn(async () => [uploaded]),
+                // The REAL intent shape: read what the server holds now, then
+                // write kept + added. (What it frees is its own test.)
+                addNoteRefs: vi.fn(async (listId: number, added: typeof theirs[], replacing: string[] = []) => {
+                    const cur = JSON.parse(server.get(listId) ?? '[]') as typeof theirs[];
+                    const drop = new Set(replacing);
+                    server.set(listId, JSON.stringify([...cur.filter(r => !drop.has(r.href)), ...added]));
+                }),
+            };
         });
         vi.doMock('../api/listContent', async () => {
             const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
             return {
                 ...real,
-                // The REAL intent shape: read what the server holds now, then
-                // write kept + added.
-                addTaskListAttachments: vi.fn(async (listId: number, added: typeof theirs[], replacing: string[] = []) => {
-                    const cur = JSON.parse(server.get(listId) ?? '[]') as typeof theirs[];
-                    const drop = new Set(replacing);
-                    server.set(listId, JSON.stringify([...cur.filter(r => !drop.has(r.href)), ...added]));
-                }),
                 setTaskListAttachments: vi.fn(async (listId: number, refs: typeof theirs[]) => {
                     server.set(listId, JSON.stringify(refs));
                 }),
@@ -294,9 +392,112 @@ describe('execOp inline (online, nothing queued)', () => {
         vi.resetModules();
     });
 
-    it('execOp is still total over the op union', () => {
-        // Every op kind must have an arm; a missing one is a TS error, but
-        // this also catches an arm that forgot to return.
-        expect(typeof execOp).toBe('function');
+    it('a queued removal frees the upload behind it, and a no-op removal frees nothing', async () => {
+        // The rule itself (api/noteMedia.ts), against the intent form's real
+        // answer: what it ACTUALLY took out of the sidecar the server holds.
+        const a = { href: 'sovereign-enc:afile?k=K&m=image%2Fpng', name: 'a.png' };
+        const b = { href: 'sovereign-enc:bfile?k=K&m=image%2Fpng', name: 'b.png' };
+        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        let server = [a, b];
+
+        vi.resetModules();
+        vi.doMock('../api/listContent', () => ({
+            deleteFiles,
+            removeTaskListAttachments: vi.fn(async (_id: number, removing: string[]) => {
+                const drop = new Set(removing);
+                const gone = server.filter(r => drop.has(r.href));
+                server = server.filter(r => !drop.has(r.href));
+                return gone;
+            }),
+            addTaskListAttachments: vi.fn(async () => []),
+        }));
+        const nm = await import('../api/noteMedia');
+
+        await nm.removeNoteRefs(4, [b.href]);
+        expect(server).toEqual([a]);
+        expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['bfile']]);
+
+        // Gone already — that ref may be one another device still names.
+        deleteFiles.mockClear();
+        await nm.removeNoteRefs(4, [b.href]);
+        expect(deleteFiles).not.toHaveBeenCalled();
+
+        vi.doUnmock('../api/listContent');
+        vi.resetModules();
+    });
+
+    it('replacing a picture (a re-drawn drawing) frees the one it replaced', async () => {
+        const old = { href: 'sovereign-enc:oldfile?k=K&m=image%2Fpng', name: 'drawing-1.png' };
+        const fresh = { href: 'sovereign-enc:newfile?k=K2&m=image%2Fpng', name: 'drawing-1.png' };
+        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        let server = [old];
+
+        vi.resetModules();
+        vi.doMock('../api/listContent', () => ({
+            deleteFiles,
+            removeTaskListAttachments: vi.fn(async () => []),
+            addTaskListAttachments: vi.fn(async (_id: number, added: typeof old[], replacing: string[] = []) => {
+                const drop = new Set(replacing);
+                const gone = server.filter(r => drop.has(r.href));
+                server = [...server.filter(r => !drop.has(r.href)), ...added];
+                return gone;
+            }),
+        }));
+        const nm = await import('../api/noteMedia');
+
+        await nm.addNoteRefs(4, [fresh], [old.href]);
+        expect(server).toEqual([fresh]);
+        expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['oldfile']]);
+
+        // An add that replaces nothing deletes nothing.
+        deleteFiles.mockClear();
+        await nm.addNoteRefs(4, [fresh]);
+        expect(deleteFiles).not.toHaveBeenCalled();
+
+        vi.doUnmock('../api/listContent');
+        vi.resetModules();
+    });
+
+    it('replay puts a removal through that rule instead of leaving the files behind', async () => {
+        const removeNoteRefs = vi.fn(async () => undefined);
+        const addNoteRefs = vi.fn(async () => undefined);
+        vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, removeNoteRefs, addNoteRefs, uploadParkedMedia: vi.fn(async () => [{ href: 'sovereign-enc:up?k=K&m=image%2Fpng', name: 'u.png' }]) };
+        });
+        const outbox = await import('../notes/model/notesOutbox');
+        const { parked } = parkedHarness();
+        await parked.park([media('a')]);
+
+        await outbox.execOp(outbox.ops.removeMedia(4, ['sovereign-enc:gone?k=K&m=image%2Fpng'], [], 'remove 1 picture'), {}, true);
+        expect(removeNoteRefs).toHaveBeenCalledWith(4, ['sovereign-enc:gone?k=K&m=image%2Fpng']);
+
+        await outbox.execOp(outbox.ops.addMedia(4, ['a'], ['sovereign-enc:old?k=K&m=image%2Fpng'], [], '1 picture'), {}, true, parked);
+        expect(addNoteRefs).toHaveBeenCalledWith(4, [{ href: 'sovereign-enc:up?k=K&m=image%2Fpng', name: 'u.png' }], ['sovereign-enc:old?k=K&m=image%2Fpng']);
+
+        vi.doUnmock('../api/noteMedia');
+        vi.resetModules();
+    });
+
+    it('the SAME rule inline: online with nothing queued, a removal still frees its upload', async () => {
+        const gone = { href: 'sovereign-enc:gonefile?k=K&m=image%2Fpng', name: 'b.png' };
+        const kept = { href: 'sovereign-enc:keptfile?k=K&m=image%2Fpng', name: 'a.png' };
+        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        const setTaskListAttachments = vi.fn(async () => undefined);
+
+        vi.resetModules();
+        vi.doMock('../api/listContent', async () => {
+            const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
+            return { ...real, deleteFiles, setTaskListAttachments };
+        });
+        const outbox = await import('../notes/model/notesOutbox');
+
+        await outbox.execOp(outbox.ops.removeMedia(4, [gone.href], [kept], 'remove 1 picture'), {}, false);
+        expect(setTaskListAttachments).toHaveBeenCalledWith(4, [kept]);
+        expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['gonefile']]);
+
+        vi.doUnmock('../api/listContent');
+        vi.resetModules();
     });
 });

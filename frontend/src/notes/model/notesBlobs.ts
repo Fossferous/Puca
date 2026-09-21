@@ -17,9 +17,11 @@
  * the Cache API.
  *
  * A HARD CAP, because the device is not a server. Parking stops at
- * MAX_PARKED_MEDIA_BYTES and says so rather than filling the disk, and the
- * browser may evict the origin's storage anyway (`requestPersistentStorage`
- * is a request, not a promise) — docs/NOTES.md says both plainly.
+ * MAX_PARKED_MEDIA_BYTES — or sooner, when `navigator.storage.estimate()`
+ * says the ORIGIN has less room than that, which an Android WebView's quota
+ * may well have — and says so rather than filling the disk, and the browser
+ * may evict the origin's storage anyway (`requestPersistentStorage` is a
+ * request, not a promise) — docs/NOTES.md says all of it plainly.
  *
  * ORPHANS. Bytes are only worth keeping while an op names them: the outbox
  * deletes a dropped op's records, and `sweep` at load removes anything no
@@ -85,6 +87,30 @@ export interface ParkedStore {
     waiting(): Promise<{ bytes: number; items: number }>;
 }
 
+/**
+ * Does the ORIGIN have room for this much more? MAX_PARKED_MEDIA_BYTES is
+ * our own limit; the browser has its own, and on a WebView it can be the
+ * smaller of the two. Asking first turns a quota failure part-way through a
+ * park — which the user reads as “Couldn’t add the picture”, as though the
+ * picture were at fault — into the honest refusal that says what to do.
+ *
+ * True whenever the browser will not say (the API is absent, or it answers
+ * without numbers): a guess must never refuse a picture the device could
+ * hold. The sealed record is bigger than the ciphertext in it, so the
+ * headroom asked for is twice what is being added.
+ */
+async function roomFor(bytes: number): Promise<boolean> {
+    try {
+        const storage = typeof navigator === 'undefined' ? undefined : navigator.storage;
+        if (!storage || typeof storage.estimate !== 'function') return true;
+        const { quota, usage } = await storage.estimate();
+        if (typeof quota !== 'number' || typeof usage !== 'number') return true;
+        return quota - usage > bytes * 2;
+    } catch {
+        return true;
+    }
+}
+
 export function createParkedStore(deps: ParkedStoreDeps): ParkedStore {
     // Read-modify-write of the index is serialised on this page; two tabs
     // parking at the same instant can each see the other's bytes late, which
@@ -130,6 +156,7 @@ export function createParkedStore(deps: ParkedStoreDeps): ParkedStore {
                 const have = Object.values(ix.items).reduce((n, v) => n + v.bytes, 0);
                 const adding = records.reduce((n, r) => n + r.bytes, 0);
                 if (have + adding > MAX_PARKED_MEDIA_BYTES) throw new ParkedMediaFullError();
+                if (!await roomFor(adding)) throw new ParkedMediaFullError();
                 // The INDEX first, so a record is never on disk without a
                 // parked-at time: a sweep racing this would otherwise see a
                 // record it cannot date and delete a picture just taken.
@@ -193,14 +220,20 @@ export function createParkedStore(deps: ParkedStoreDeps): ParkedStore {
                 const ix = await readIndex(c);
                 const items: ParkedIndex['items'] = {};
                 const seen = new Set<string>();
-                for (const [key] of rows) {
+                for (const [key, value] of rows) {
                     if (key === INDEX) continue;
                     if (!key.startsWith('b:')) continue;
                     const id = key.slice(2);
                     seen.add(id);
                     const entry = ix.items[id];
                     const fresh = entry !== undefined && now - entry.at < graceMs;
-                    if (keep.has(id) || fresh) items[id] = entry ?? { bytes: 0, at: now };
+                    // A kept record whose index entry is gone is re-indexed
+                    // from what is ON DISK. Recorded as 0 it would occupy the
+                    // device and count nothing, and enough of them would stop
+                    // the cap biting at all; the sealed string is longer than
+                    // the ciphertext in it, so this errs toward refusing
+                    // sooner, never toward filling the disk.
+                    if (keep.has(id) || fresh) items[id] = entry ?? { bytes: value.length, at: now };
                     else await c.kv.del(key).catch(() => undefined);
                 }
                 // An index entry whose record never landed (a park that died

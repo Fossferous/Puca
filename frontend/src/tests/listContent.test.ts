@@ -349,6 +349,26 @@ describe('adding and removing against what the server holds NOW', () => {
         expect(patch).not.toHaveBeenCalled();
     });
 
+    it('both answer with what they actually DROPPED — never with what they were asked to drop', async () => {
+        // The caller deletes the uploads behind these (api/noteMedia.ts). A
+        // ref the server no longer holds may be one another device still
+        // names, so it must not be in the answer.
+        await serverHas([ref('old'), ref('theirs')]);
+        patch.mockResolvedValue(undefined);
+        expect(await addTaskListAttachments(3, [ref('new')], [ref('old').href, ref('never-here').href]))
+            .toEqual([ref('old')]);
+
+        await serverHas([ref('a'), ref('b')]);
+        expect(await removeTaskListAttachments(3, [ref('b').href, ref('never-here').href]))
+            .toEqual([ref('b')]);
+
+        // Nothing dropped at all: nothing to delete.
+        await serverHas([ref('a')]);
+        expect(await addTaskListAttachments(3, [ref('new')])).toEqual([]);
+        await serverHas([ref('a')]);
+        expect(await removeTaskListAttachments(3, [ref('b').href])).toEqual([]);
+    });
+
     it('refuses rather than guessing when the note is gone or its sidecar is locked', async () => {
         get.mockResolvedValue([]);
         await expect(addTaskListAttachments(3, [ref('mine')])).rejects.toBeInstanceOf(NoteFilesUnreadableError);

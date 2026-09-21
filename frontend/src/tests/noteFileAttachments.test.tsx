@@ -35,7 +35,7 @@ vi.mock('../api/uploads', () => ({
 }));
 
 import { NoteImages } from '../components/NoteImages';
-import { galleryItems, clampAttachmentName, MAX_ATTACHMENT_NAME_LEN, uploadNoteMedia, DRAWING_STROKES_MIME } from '../api/noteMedia';
+import { galleryItems, clampAttachmentName, mediaCountLabel, MAX_ATTACHMENT_NAME_LEN, uploadNoteMedia, DRAWING_STROKES_MIME } from '../api/noteMedia';
 import { deriveContentTitle } from '../notes/model/noteContent';
 import { listBodySnippet } from '../components/useListContentSupport';
 
@@ -155,6 +155,16 @@ describe('the words around a file-only note', () => {
         expect(deriveContentTitle('', { fileNames: ['tickets.pdf'] })).toBe('tickets');
         expect(deriveContentTitle('', {})).toBe('Untitled note');            // nothing to go on
         expect(deriveContentTitle('Trip', { fileNames: ['tickets.pdf'] })).toBe('Trip');   // a typed title wins
+    });
+
+    it('a queued PDF is called a file, not a picture, in the op label the toast repeats', () => {
+        const f = (name: string, type: string) => new File(['x'], name, { type });
+        expect(mediaCountLabel([f('tickets.pdf', 'application/pdf')], 0)).toBe('1 file');
+        expect(mediaCountLabel([f('a.png', 'image/png'), f('b.png', 'image/png')], 0)).toBe('2 pictures');
+        expect(mediaCountLabel([f('a.png', 'image/png'), f('t.pdf', 'application/pdf')], 0)).toBe('1 picture and 1 file');
+        expect(mediaCountLabel([], 1)).toBe('1 picture');                       // a drawing is a picture
+        expect(mediaCountLabel([f('t.pdf', 'application/pdf')], 1)).toBe('1 picture and 1 file');
+        expect(mediaCountLabel([f('x', '')], 0)).toBe('1 file');                // no type at all is not a picture
     });
 
     it('counts files in the board snippet instead of leaving it blank', () => {
