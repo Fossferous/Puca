@@ -91,6 +91,7 @@ export function SelectionBar({ cards, actions, labels, bulk, onClear, onSelectAl
         for (const c of cards) {
             // A copy as the card menu makes one (NotesShell duplicate): the
             // whole note, and nothing at all when part of it cannot be read here.
+            // Unreadable here, or still loading: either way it is not copied.
             if (copyRefusal(copyBlockersOf(c))) { unreadable++; continue; }
             const ref = await actions.copyNote(copyPlanOf(c, { schedules: !!scheduleOnServer }));
             if (!ref) continue;
@@ -101,7 +102,7 @@ export function SelectionBar({ cards, actions, labels, bulk, onClear, onSelectAl
         const title = made === cards.length
             ? `Made ${made} cop${made === 1 ? 'y' : 'ies'}`
             : unreadable > 0
-                ? `Made ${made} of ${cards.length} copies — ${unreadable} couldn’t be read on this device`
+                ? `Made ${made} of ${cards.length} copies — ${unreadable} couldn’t be copied on this device`
                 : `Made ${made} of ${cards.length} copies`;
         pushMessageToast({ title });
     };

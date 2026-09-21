@@ -158,11 +158,18 @@ export interface RecreateResult {
  *
  * The items come back as NEW items: new ids, appended at the end of their
  * group, and in a shared note created by whoever pressed Undo.
+ *
+ * Completions are a SECOND pass, after every create. Completing an item
+ * sweeps its subtree as it stands AT THAT MOMENT
+ * (src/task_handlers.rs, the recursive UPDATE), so marking a parent while its
+ * children did not exist yet would put the branch back with the parent done
+ * and everything under it open.
  */
 export async function recreateSubtree(
     actions: RecreateActions, note: NoteRef, snapshot: Task[],
 ): Promise<RecreateResult> {
     const out: RecreateResult = { idMap: new Map(), missing: 0, unreadableTiming: 0 };
+    const done: Task[] = [];
     for (const t of snapshot) {
         // Parents come first, so a missing mapping means the parent never
         // came back: its children go with it rather than to the top level.
@@ -188,10 +195,11 @@ export async function recreateSubtree(
         const snooze = parseSnooze(t.snooze);
         if (snooze) await actions.snoozeTask(note, made, Date.parse(snooze.until));
         else if (t.snooze && isUndecryptable(t.snooze)) out.unreadableTiming++;
-        // Completing a parent completes its subtree, so only the top of each
-        // completed branch is marked.
+        // Completing a parent sweeps its subtree, so only the top of each
+        // completed branch is marked — once the whole branch exists.
         const parentDone = t.parent_id !== null && snapshot.find(p => p.id === t.parent_id)?.is_completed;
-        if (t.is_completed && !parentDone) await actions.restoreCompleted(note, made);
+        if (t.is_completed && !parentDone) done.push(made);
     }
+    for (const made of done) await actions.restoreCompleted(note, made);
     return out;
 }

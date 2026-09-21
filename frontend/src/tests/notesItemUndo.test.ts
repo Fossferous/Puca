@@ -43,21 +43,24 @@ interface Calls {
     snoozed: Array<[number, number | null]>;
     completed: number[];
     toggled: number[];
+    /** Every call in the order it was made, for the ordering check below. */
+    order: string[];
 }
 
 /** A fake data layer. `fail` names the descriptions whose create is refused. */
 function fakes(fail: string[] = []): Calls {
-    const c: Partial<Calls> = { added: [], attachments: [], snoozed: [], completed: [], toggled: [] };
+    const c: Partial<Calls> = { added: [], attachments: [], snoozed: [], completed: [], toggled: [], order: [] };
     let next = 900;
     c.actions = {
         addTask: vi.fn(async (_n: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming) => {
             c.added!.push([description, parentId, timing]);
+            c.order!.push(`add ${description}`);
             if (fail.includes(description)) return null;
             return task(next++, { description, parent_id: parentId ?? null, due_at: timing?.dueAt ?? null, schedule: timing?.schedule ?? null });
         }),
         setAttachments: vi.fn(async (_n: NoteRef, t: Task, refs: TaskAttachmentRef[]) => { c.attachments!.push([t.id, refs]); }),
         snoozeTask: vi.fn(async (_n: NoteRef, t: Task, until: number | null) => { c.snoozed!.push([t.id, until]); }),
-        restoreCompleted: vi.fn(async (_n: NoteRef, t: Task) => { c.completed!.push(t.id); }),
+        restoreCompleted: vi.fn(async (_n: NoteRef, t: Task) => { c.completed!.push(t.id); c.order!.push(`done ${t.description}`); }),
     };
     return c as Calls;
 }
@@ -114,12 +117,18 @@ describe('recreateSubtree', () => {
         expect(back.state === 'ok' && back.schedule.doneThrough).toBe('2026-09-28T09:00');
     });
 
-    it('marks only the top of a completed branch — completing a parent sweeps its subtree', async () => {
+    it('marks only the top of a completed branch, and only once the branch EXISTS', async () => {
         const c = fakes();
         await recreateSubtree(c.actions, note, [
-            task(2, { is_completed: true }), task(3, { parent_id: 2, is_completed: true }),
+            task(2, { description: 'Milk', is_completed: true }),
+            task(3, { description: 'Semi-skimmed', parent_id: 2, is_completed: true }),
         ]);
         expect(c.completed).toEqual([900]);
+        // The server sweeps the subtree AS IT STANDS when the parent is
+        // marked (task_handlers.rs, the recursive UPDATE). Marking the parent
+        // before its child was created would put the branch back with the
+        // parent done and everything under it open.
+        expect(c.order).toEqual(['add Milk', 'add Semi-skimmed', 'done Milk']);
     });
 
     it('carries the snooze and the readable attachments, and never a locked sidecar', async () => {
