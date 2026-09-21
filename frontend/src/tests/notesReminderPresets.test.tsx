@@ -130,6 +130,49 @@ describe('the date & repeat dialog offers them too — with the privacy switch s
         expect(alert.value).toBe('0');
     });
 
+    it('an explicit "No reminder" survives a preset, the all-day switch and the kind switch', () => {
+        // Those resets exist to move the reminder off an offset the list it is
+        // switching to does not carry. "No reminder" is in BOTH lists
+        // (scheduleForm.TIMED_ALERTS / ALLDAY_ALERTS), so none of them has a
+        // reason to overwrite it — and switching a notification back on is the
+        // one direction a person cannot see until it fires at them.
+        mount(<ScheduleEditor task={task} onSave={() => {}} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        const alert = dialog.querySelector<HTMLSelectElement>('select[aria-label="Reminder"]')!;
+        const choose = (value: string) => act(() => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+            setter.call(alert, value);
+            alert.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        const allDay = () => dialog.querySelector<HTMLInputElement>('.sched-check input[type="checkbox"]')!;
+
+        // All day, "No reminder", then one tap on a preset.
+        act(() => { allDay().click(); });
+        choose('none');
+        expect(alert.value).toBe('none');
+        act(() => (dialog.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(allDay().checked).toBe(false);            // the preset still did its job
+        expect(alert.value).toBe('none');
+
+        // The all-day switch itself, both ways.
+        act(() => { allDay().click(); });
+        expect(alert.value).toBe('none');
+        act(() => { allDay().click(); });
+        expect(alert.value).toBe('none');
+
+        // Event ⇄ To-do.
+        act(() => byText(dialog, 'Event')!.click());
+        expect(alert.value).toBe('none');
+        act(() => byText(dialog, 'To-do')!.click());
+        expect(alert.value).toBe('none');
+
+        // Positive control: from a real offset those same controls DO still
+        // reset, or this would pass against a dialog that never changes it.
+        choose('30');
+        act(() => { allDay().click(); });
+        expect(alert.value).toBe('-540');
+    });
+
     it('the dialog opened from INSIDE a note gets them too — the commonest way in', () => {
         // The due-editor row above it already uses the setting, so a dialog
         // still on 09:00 would be the same account contradicting itself.

@@ -711,7 +711,12 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   if it has gone, by wall clock, so the day the clocks change still gives you
   the time you asked for. On an **event** a preset moves the start and keeps
   the length: a 09:00-10:00 hour tapped to *Evening* is 21:45-22:45, not an
-  event running to 10:00 the next day. The times follow your account in the sealed document above —
+  event running to 10:00 the next day. A preset also takes the item off
+  all-day, which moves its reminder onto an offset the timed list actually
+  offers (the all-day 09:00 offsets are not in it) — but **No reminder** is a
+  choice rather than a default, and it is in both lists, so a preset, the
+  **All day** switch and the Event/To-do switch all leave it alone instead of
+  switching a notification back on. The times follow your account in the sealed document above —
   the server never sees them — but a preset writes the same plaintext `due_at`
   any reminder does, so the per-item *Keep the time private from the server*
   switch is still the way to hide when something is. Púca's own Tasks view

@@ -114,6 +114,14 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
 
     const alerts = form.allDay ? ALLDAY_ALERTS : TIMED_ALERTS;
 
+    /** The controls below move the reminder off an offset the list they are
+     *  switching to does not carry — all-day's -540 is not in TIMED_ALERTS,
+     *  and 10/0 are not in ALLDAY_ALERTS. "No reminder" is not that case: it
+     *  is in BOTH lists (scheduleForm.ts), and it is a choice the person made,
+     *  not a default. So a reset leaves an explicit 'none' alone; anything
+     *  else would switch a notification back on without saying so. */
+    const keepNone = (next: string) => (form.alert === 'none' ? 'none' : next);
+
     return createPortal(
         <div className="sched-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
             <div className="sched-dialog" role="dialog" aria-modal="true" aria-label="Date and repeat">
@@ -132,7 +140,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                                 {(['event', 'task'] as const).map(k => (
                                     <button key={k} type="button" role="radio" aria-checked={form.kind === k}
                                         className={form.kind === k ? 'on' : ''}
-                                        onClick={() => set({ kind: k, alert: k === 'event' ? (form.allDay ? '-540' : '10') : (form.allDay ? '-540' : '0') })}>
+                                        onClick={() => set({ kind: k, alert: keepNone(k === 'event' ? (form.allDay ? '-540' : '10') : (form.allDay ? '-540' : '0')) })}>
                                         {k === 'event' ? 'Event' : 'To-do'}
                                     </button>
                                 ))}
@@ -147,7 +155,8 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                                         onClick={() => {
                                             const at = new Date(presetInstant(times[p.value], Date.now()));
                                             // Coming off all-day also drops the all-day alert offset
-                                            // (-540), which has no option in the timed list.
+                                            // (-540), which has no option in the timed list — but
+                                            // not an explicit "No reminder", which has one (keepNone).
                                             // An EVENT keeps its length: moving only the start would
                                             // read as running past midnight (scheduleFromForm).
                                             set({
@@ -155,7 +164,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                                                 ...(form.kind === 'event' && form.endTime
                                                     ? { endTime: endTimeAfterMovingStart(form.startTime, form.endTime, times[p.value]) }
                                                     : {}),
-                                                ...(form.allDay ? { alert: form.kind === 'event' ? '10' : '0' } : {}),
+                                                ...(form.allDay ? { alert: keepNone(form.kind === 'event' ? '10' : '0') } : {}),
                                             });
                                         }}>
                                         {p.label}
@@ -167,7 +176,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                                 <input type="date" value={form.date} onChange={e => set({ date: e.target.value })} aria-label="Date" />
                             </label>
                             <label className="sched-row sched-check">
-                                <input type="checkbox" checked={form.allDay} onChange={e => set({ allDay: e.target.checked, alert: e.target.checked ? '-540' : (form.kind === 'event' ? '10' : '0') })} />
+                                <input type="checkbox" checked={form.allDay} onChange={e => set({ allDay: e.target.checked, alert: keepNone(e.target.checked ? '-540' : (form.kind === 'event' ? '10' : '0')) })} />
                                 <span>All day</span>
                             </label>
                             {!form.allDay ? (
