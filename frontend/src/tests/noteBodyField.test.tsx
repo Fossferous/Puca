@@ -22,10 +22,19 @@ function type(el: HTMLTextAreaElement, value: string) {
     });
 }
 const area = () => container.querySelector('textarea') as HTMLTextAreaElement;
+/** jsdom does no layout, so a real textarea's scrollHeight is always 0 and a
+ *  height assertion could not tell "sized" from "never sized". Stand in for
+ *  it with a height that grows with the text, the way a browser's does. */
+const LINE_PX = 21;
+const stubScrollHeight = () => Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get(this: HTMLTextAreaElement) { return this.value.split('\n').length * LINE_PX; },
+});
 const flushPromises = async () => { for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); }); };
 
 beforeEach(() => {
     vi.useFakeTimers();
+    stubScrollHeight();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -33,6 +42,7 @@ beforeEach(() => {
 afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
+    delete (HTMLTextAreaElement.prototype as Partial<HTMLTextAreaElement>).scrollHeight;
     vi.useRealTimers();
 });
 
@@ -150,6 +160,24 @@ describe('NoteBodyField', () => {
         expect(area()).not.toBeNull();
         expect(area().value).toBe('read https://example.com/a');
         expect(document.activeElement).toBe(area());
+    });
+
+    it('the textarea comes back at the HEIGHT of the text, not at two rows', () => {
+        // The regression this pins: the read/edit swap mounts a FRESH
+        // textarea without changing the text, so an auto-height effect keyed
+        // on the text alone never fires for it — and `.nb-text` is
+        // `overflow: hidden`, so a ten-line note would show two lines with
+        // the rest clipped until the next keystroke.
+        const body = ['read https://example.com/a', ...Array.from({ length: 9 }, (_, i) => `line ${i}`)].join('\n');
+        act(() => { root.render(<NoteBodyField value={body} onSave={vi.fn(async () => true)} />); });
+        const read = container.querySelector('.nb-rendered') as HTMLElement;
+        expect(read).not.toBeNull();
+        act(() => { read.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+        expect(area().style.height).toBe(`${10 * LINE_PX}px`);
+        // POSITIVE CONTROL: the number tracks the CONTENT, so the assertion
+        // above cannot be passing on a constant.
+        type(area(), 'one line');
+        expect(area().style.height).toBe(`${LINE_PX}px`);
     });
 
     it('unreadable text is locked: no field to type into', () => {

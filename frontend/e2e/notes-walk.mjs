@@ -335,6 +335,43 @@ await shot('note-links');
 await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
 ck('note links: clicking the text (not the link) returns to editing',
     await page.locator('.notes-editor-content textarea.nb-text:focus').count() === 1);
+// ---- The read/edit swap must be INVISIBLE ------------------------------------------
+// Measured in a real browser, because neither half is visible to a unit test
+// in jsdom, which does no layout.
+//
+// The SIZE check is a guard, not a fix: the read view carries BOTH classes
+// (`nb-text nb-rendered`), so every rule written for the field already
+// reaches it — which is exactly the property that would break silently if
+// someone dropped `nb-text` from it while tidying, and the reason
+// NoteImages.css merges the two selectors in the first place.
+//
+// The HEIGHT check is a fix: the swap mounts a FRESH textarea without
+// changing the text, so an auto-height effect keyed on the text alone never
+// fires for it, and `.nb-text` is overflow:hidden — the note would be
+// clipped to two rows until the next keystroke.
+const TALL = ['Buy before Friday https://example.com/a', ...Array.from({ length: 9 }, (_, i) => `line ${i + 1}`)].join('\n');
+await page.fill('.notes-editor-content textarea.nb-text', TALL);
+await page.locator('.notes-editor-sub').click();
+await page.waitForSelector('.notes-editor-content .nb-rendered', { timeout: 10000 }).catch(() => {});
+const readMetrics = await page.evaluate(() => {
+    const el = document.querySelector('.notes-editor-content .nb-rendered');
+    return el ? { h: el.getBoundingClientRect().height, font: getComputedStyle(el).fontSize } : null;
+});
+await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
+await page.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+const editMetrics = await page.evaluate(() => {
+    const el = document.querySelector('.notes-editor-content textarea.nb-text');
+    return el ? { h: el.getBoundingClientRect().height, font: getComputedStyle(el).fontSize, scroll: el.scrollHeight } : null;
+});
+ck('note text: the read view and the field are the same size — no reflow on focus',
+    !!readMetrics && !!editMetrics && readMetrics.font === editMetrics.font,
+    `${readMetrics?.font} vs ${editMetrics?.font}`);
+ck('note text: the field comes back at the HEIGHT of the text, not at two rows',
+    !!readMetrics && !!editMetrics && editMetrics.h > 100 && Math.abs(editMetrics.h - readMetrics.h) <= 2,
+    `read=${readMetrics?.h} edit=${editMetrics?.h}`);
+ck('note text: nothing of the note is clipped by the field that came back',
+    !!editMetrics && editMetrics.scroll <= Math.ceil(editMetrics.h) + 1,
+    `scrollHeight=${editMetrics?.scroll} height=${editMetrics?.h}`);
 await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
 await page.locator('.notes-editor-sub').click();
 await sleep(1500);

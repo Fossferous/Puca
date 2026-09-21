@@ -156,18 +156,26 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
         if (at !== null) el.setSelectionRange(at, at);
     }, [editing]);
 
+    // Computed HERE, above the effects, because the auto-height below has to
+    // depend on it: the swap remounts the textarea without changing `draft`.
+    const showRead = !editing && hasLink(draft);
+
+    // The field is as tall as its text. `showRead` is a dependency, not
+    // decoration: the read/edit swap mounts a FRESH textarea at its rows={2}
+    // size while `draft` is unchanged, so an effect keyed on the text alone
+    // never fires for it — and `.nb-text` is `overflow: hidden`, so the rest
+    // of the note would simply be clipped until the next keystroke.
     useLayoutEffect(() => {
+        if (showRead) return;
         const el = areaRef.current;
         if (!el) return;
         el.style.height = 'auto';
         el.style.height = `${el.scrollHeight}px`;
-    }, [draft]);
+    }, [draft, showRead]);
 
     if (isUndecryptable(current)) {
         return <div className="nb-locked"><LockIcon /> This note’s text can’t be read yet: {current}</div>;
     }
-
-    const showRead = !editing && hasLink(draft);
 
     return (
         <div className="note-body-field">
