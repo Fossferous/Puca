@@ -247,9 +247,10 @@ export class Ring {
     }
 
     /** A native timestamp went BACKWARDS: another capture's clock. "Restart
-     *  buffer" re-arms at once, and the old capture's last chunks can reach
-     *  this ring before the new capture's first (the video event carries
-     *  no capture generation). Taken as a clock sample, one such chunk
+     *  buffer" re-arms at once, and the old capture's last chunks could
+     *  reach this ring before the new capture's first (nativeCapture.ts
+     *  now drops foreign generations; this is the backstop for a chunk
+     *  that gets past it). Taken as a clock sample, one such chunk
      *  put every later clip's audio late by the old session's length.
      *  Nothing on the old clock shares a timeline with what follows: start
      *  the estimate again, drop the open unit, and make the next

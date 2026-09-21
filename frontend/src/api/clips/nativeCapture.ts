@@ -53,6 +53,9 @@ interface RustTarget {
     height: number;
     reason: string;
     bitrate: number;
+    /** Which capture this start began (clip_capture.rs). Chunks and the
+     *  death of any OTHER capture are dropped, and stop names it. */
+    generation?: number;
 }
 
 export function isNativeCaptureSupported(): boolean {
@@ -95,21 +98,43 @@ export async function startNativeVideo(
     const { invoke } = await import('@tauri-apps/api/core');
     const { listen } = await import('@tauri-apps/api/event');
 
+    // Set once the start resolves. Chunks carrying a DIFFERENT generation are
+    // another capture's: the predecessor's tail after "Restart buffer"
+    // (the sidecar dies within a 50 ms poll of its stop, but its last frames
+    // are already in the pipe and the event queue), stamped with the OLD
+    // capture's clock. One of those, taken as a clock sample by the replay
+    // worker, put every later clip's audio late by the old session's
+    // length. Same rule and the same shape as the audio side below.
+    let myGeneration: number | null = null;
+    const foreign = (g: number | undefined): boolean =>
+        typeof g === 'number' && myGeneration !== null && g !== myGeneration;
+
     const unlistenChunk = await listen<{
-        data: string; keyframe: boolean; ts_us: number; dur_us: number; codec: string | null; width: number; height: number;
+        data: string; keyframe: boolean; ts_us: number; dur_us: number; codec: string | null; width: number; height: number; generation?: number;
     }>('clip-video-chunk', (event) => {
         const p = event.payload;
+        if (foreign(p.generation)) return;
         const bytes = base64ToBytes(p.data);
         onChunk({
             keyframe: p.keyframe, tsUs: p.ts_us, durUs: p.dur_us,
             bytes: bytes.buffer as ArrayBuffer, codec: p.codec ?? undefined, codedWidth: p.width, codedHeight: p.height,
         });
     });
-    const unlistenError = onError ? await listen<string>('clip-video-capture-error', (e) => onError(e.payload)) : null;
+    const unlistenError = onError
+        ? await listen<{ message?: string; generation?: number } | string>('clip-video-capture-error', (e) => {
+            // A stale death: the OLD capture's error landing after a
+            // successful restart must not disarm the new one.
+            const p = e.payload;
+            if (typeof p === 'string') { onError(p); return; }
+            if (foreign(p?.generation)) return;
+            onError(typeof p?.message === 'string' ? p.message : String(p));
+        })
+        : null;
 
     let target: RustTarget;
     try {
         target = await invoke<RustTarget>('start_clip_video_capture', { fps: opts.fps, bitrate: opts.bitrate, assumedPixels: opts.assumedPixels, gopMs: opts.gopMs });
+        myGeneration = typeof target?.generation === 'number' ? target.generation : null;
     } catch (e) {
         unlistenChunk();
         unlistenError?.();
@@ -122,7 +147,10 @@ export async function startNativeVideo(
         stopped = true;
         unlistenChunk();
         unlistenError?.();
-        try { await invoke('stop_clip_video_capture'); } catch { /* already stopped */ }
+        // Stop ONLY the capture this handle owns; a missing number (never
+        // on this shell, which bundles both ends) degrades to the
+        // unconditional stop, as the audio side does.
+        try { await invoke('stop_clip_video_capture', { generation: myGeneration }); } catch { /* already stopped */ }
     };
     return {
         target: { outputIndex: target.output_index, width: target.width, height: target.height, reason: 'primary', bitrate: target.bitrate },

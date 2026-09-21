@@ -136,14 +136,17 @@ async fn start_clip_video_capture(fps: u32, bitrate: u32, assumed_pixels: u64, g
     Err("native clip capture is only supported on Windows".into())
 }
 
+/// `generation` (JS: `generation`): stop only the capture the caller owns —
+/// absent means "whatever is running" (a whole-session teardown). Same
+/// contract as `stop_clip_desktop_audio`.
 #[cfg(windows)]
 #[tauri::command]
-fn stop_clip_video_capture(state: tauri::State<'_, Arc<ClipCaptureState>>) {
-    clip_capture::stop_video_capture(state.inner().clone());
+fn stop_clip_video_capture(state: tauri::State<'_, Arc<ClipCaptureState>>, generation: Option<u64>) {
+    clip_capture::stop_video_capture(state.inner().clone(), generation);
 }
 #[cfg(not(windows))]
 #[tauri::command]
-fn stop_clip_video_capture() {}
+fn stop_clip_video_capture(_generation: Option<u64>) {}
 
 /// `device_name` (JS: `deviceName`): capture the loopback of the render
 /// device whose friendly name best matches, instead of whatever the DEFAULT
@@ -558,9 +561,9 @@ fn reset_capture_state(
     clip_video: tauri::State<'_, Arc<ClipCaptureState>>,
     clip_audio: tauri::State<'_, Arc<ClipDesktopAudioState>>,
 ) {
-    clip_capture::stop_video_capture(clip_video.inner().clone());
     // generation None = "whatever is running": this IS the whole-session
     // teardown that argument exists for.
+    clip_capture::stop_video_capture(clip_video.inner().clone(), None);
     clip_desktop_audio::stop_capture(clip_audio.inner().clone(), None);
     clear_tray_capture_parts(&app, &state);
 }

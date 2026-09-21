@@ -51,7 +51,7 @@
 //! the cadence real.
 
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
@@ -61,6 +61,16 @@ use puca_encode::{EncodeError, H264Encoder};
 pub struct ClipCaptureState {
     pub is_capturing: AtomicBool,
     pub stop_signal: AtomicBool,
+    /// Which capture is running: bumped by every successful claim in
+    /// `start_video_capture`, stamped on every event that capture emits and
+    /// returned to the caller, exactly as `clip_desktop_audio.rs` does.
+    /// A stopped capture's tail (the sidecar dies within one 50 ms poll
+    /// of the stop, but its last frames are already in the pipe and the
+    /// event queue) can land after "Restart buffer" has re-armed; those
+    /// frames carry the OLD capture's clock, and the replay worker, taking
+    /// one as a clock sample, once put every later clip's audio late by
+    /// the old session's length. The listener drops foreign generations.
+    pub generation: AtomicU64,
 }
 
 impl Default for ClipCaptureState {
@@ -68,6 +78,7 @@ impl Default for ClipCaptureState {
         Self {
             is_capturing: AtomicBool::new(false),
             stop_signal: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         }
     }
 }
@@ -165,6 +176,11 @@ pub struct ClipCaptureTarget {
     /// requested bitrate scaled to this monitor's real pixel count (see
     /// `scale_bitrate`). 0 from `pick_target`, which starts no encoder.
     pub bitrate: u32,
+    /// The capture this reply started (`ClipCaptureState::generation`);
+    /// every `clip-video-chunk` it emits carries the same number, and
+    /// `stop_video_capture` with it stops only this capture. 0 from
+    /// `pick_target`, which starts nothing.
+    pub generation: u64,
 }
 
 #[cfg(windows)]
@@ -267,6 +283,7 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
                 TargetReason::FirstAvailable => "primary", // same UI copy — "no primary flag" is not user-meaningful
             },
             bitrate: 0,
+            generation: 0,
         });
     }
 
@@ -470,6 +487,16 @@ struct ClipVideoChunkEvent {
     codec: Option<String>,
     width: u32,
     height: u32,
+    /// Which capture emitted it (`ClipCaptureState::generation`).
+    generation: u64,
+}
+
+/// A capture's death, attributed, so a stale one landing after a
+/// successful restart cannot be mistaken for the new capture's.
+#[derive(Serialize, Clone)]
+struct ClipVideoError {
+    message: String,
+    generation: u64,
 }
 
 #[cfg(windows)]
@@ -517,6 +544,8 @@ pub fn start_video_capture(
         }
     }
     state.stop_signal.store(false, Ordering::SeqCst);
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    target.generation = generation;
 
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let state_clone = state.clone();
@@ -527,7 +556,7 @@ pub fn start_video_capture(
         state_clone.is_capturing.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             log::error!("Clip video capture error: {}", e);
-            let _ = emit_handle.emit("clip-video-capture-error", e);
+            let _ = emit_handle.emit("clip-video-capture-error", ClipVideoError { message: e, generation });
         }
     });
 
@@ -545,8 +574,17 @@ pub fn start_video_capture(
     }
 }
 
+/// Signal the capture to stop — but only the capture the caller OWNS.
+/// `generation` from the start's reply; `None` stops whatever is running
+/// (a whole-session teardown). A caller that lost the start race, or whose
+/// start failed, holds no generation and must not be able to stop the
+/// winner's capture: that is the audio side's rule too (`stop_capture`).
 #[cfg(windows)]
-pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
+pub fn stop_video_capture(state: Arc<ClipCaptureState>, generation: Option<u64>) {
+    if !owns_capture(state.generation.load(Ordering::SeqCst), generation) {
+        log::info!("Clip video capture: stop for capture {:?} ignored, capture {} is running", generation, state.generation.load(Ordering::SeqCst));
+        return;
+    }
     // SAY SO. This used to flip the flag and nothing else, and the loop's clean
     // exit was silent too — so the log recorded a start and never a stop, and
     // "no stop line" proved nothing about whether a capture was still running.
@@ -554,6 +592,12 @@ pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
     // took a process-memory scan because of it.
     log::info!("Clip video capture: stop requested");
     state.stop_signal.store(true, Ordering::SeqCst);
+}
+
+/// Whether a stop naming `requested` may stop the capture `running`: an
+/// unnamed stop always may (teardown), a named one only its own.
+fn owns_capture(running: u64, requested: Option<u64>) -> bool {
+    requested.map_or(true, |g| g == running)
 }
 
 #[cfg(windows)]
@@ -795,6 +839,7 @@ fn sidecar_capture_loop(
             codec,
             width: target.width,
             height: target.height,
+            generation: target.generation,
         };
         if app.emit("clip-video-chunk", event).is_err() {
             break; // the window is gone — nothing left to stream to
@@ -1039,6 +1084,7 @@ fn in_process_capture_loop(
             codec,
             width: target.width,
             height: target.height,
+            generation: target.generation,
         };
         if app.emit("clip-video-chunk", event).is_err() {
             break; // the window is gone — nothing left to stream to
@@ -1083,7 +1129,7 @@ pub fn start_video_capture(
 }
 
 #[cfg(not(windows))]
-pub fn stop_video_capture(_state: Arc<ClipCaptureState>) {}
+pub fn stop_video_capture(_state: Arc<ClipCaptureState>, _generation: Option<u64>) {}
 
 /// No base64 crate pulled in just for this — the app already depends on one
 /// for `audio_capture.rs`; reuse it so there is exactly one implementation.
@@ -1095,6 +1141,28 @@ fn base64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stop names the capture it owns; only an unnamed stop (teardown)
+    /// ends whatever is running. A starter that lost the race holds an
+    /// older number and must not be able to stop the winner.
+    #[test]
+    fn a_stop_ends_only_the_capture_it_names() {
+        assert!(owns_capture(3, Some(3)), "the owner");
+        assert!(!owns_capture(3, Some(2)), "a predecessor");
+        assert!(!owns_capture(3, Some(4)), "a number nobody was given");
+        assert!(owns_capture(3, None), "teardown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_foreign_stop_leaves_the_stop_signal_alone() {
+        let state = Arc::new(ClipCaptureState::default());
+        state.generation.store(7, Ordering::SeqCst);
+        stop_video_capture(state.clone(), Some(6));
+        assert!(!state.stop_signal.load(Ordering::SeqCst), "a predecessor's stop must not end capture 7");
+        stop_video_capture(state.clone(), Some(7));
+        assert!(state.stop_signal.load(Ordering::SeqCst), "positive control: the owner's stop does");
+    }
 
     fn r(left: i32, top: i32, w: i32, h: i32) -> Rect {
         Rect { left, top, right: left + w, bottom: top + h }

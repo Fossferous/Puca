@@ -316,9 +316,11 @@ needs no picker).
   AudioContext's scheduling lead, ~50 ms and drifting up to 500 ms before
   it re-primes), minus the video stamp's lag behind the present (it is
   taken after acquire and readback). Only an end-to-end sync test (flash
-  plus click) can calibrate that. A video timestamp going BACKWARDS is
-  another capture's clock (the old capture's tail after "Restart
-  buffer"; `clip-video-chunk` carries no generation) and restarts the
+  plus click) can calibrate that. `clip-video-chunk` carries the capture
+  generation (as `clip-audio-data` does) and `startNativeVideo` drops any
+  other capture's chunks, so the old capture's tail after "Restart
+  buffer" never reaches the new ring; as a backstop, a video timestamp
+  going BACKWARDS is treated as another capture's clock and restarts the
   estimate. Silent field check: once both clocks have
   5 s of samples, puca.log gets `[stream-diag] clip-av video-origin=..
   shift=.. legacy-late=..` (again if the shift moves 10 ms), where
