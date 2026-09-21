@@ -38,6 +38,11 @@ export interface ListFeatures {
     body: boolean;
     attachments: boolean;
     trash: boolean;
+    /** The NOTE itself can carry a reminder (migration 068): `due_at` and a
+     *  sealed `schedule` on the list, and a `-list_id` row in the reminder
+     *  feed. A listing cannot be read as this probe — a 067 server and a 068
+     *  one look identical for an account whose notes have no reminder yet. */
+    noteReminders: boolean;
     /** 0 = the server keeps trash until it is emptied. */
     trashRetentionDays: number;
     maxBodyLen: number;
@@ -53,6 +58,7 @@ export const NO_LIST_FEATURES: ListFeatures = Object.freeze({
     body: false,
     attachments: false,
     trash: false,
+    noteReminders: false,
     trashRetentionDays: 0,
     maxBodyLen: 0,
     serverClockOffsetMs: null,
@@ -72,6 +78,7 @@ export function parseListFeatures(raw: unknown, receivedAt: number = Date.now())
         body: o.body === true && maxBody > 0,
         attachments: o.attachments === true,
         trash: o.trash === true,
+        noteReminders: o.note_reminders === true,
         trashRetentionDays: days,
         maxBodyLen: maxBody,
         serverClockOffsetMs: serverNow === null ? null : serverNow - receivedAt,
@@ -103,6 +110,24 @@ export async function setTaskListBody(listId: number, body: string): Promise<voi
     return apiClient.patch(`/task-lists/${listId}`, { body: sealed, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
+/** The NOTE's own reminder (migration 068), over the same PATCH the title
+ *  and body use. Three-state throughout, exactly as the task timing patch is:
+ *  a field left out is kept, `null` clears it, a value sets it.
+ *
+ *  `schedule` is sealed HERE (encrypt-to-self), so no caller can hand the
+ *  server a plaintext one by mistake; `expectDueAt` is the compare-and-swap
+ *  that stops two devices advancing the same reminder (409 when it loses). */
+export async function setTaskListTiming(
+    listId: number,
+    patch: { dueAt?: string | null; schedule?: string | null; expectDueAt?: string | null },
+): Promise<void> {
+    const body: Record<string, string | number> = { reads_up_to: MAX_READABLE_ENVELOPE_VERSION };
+    if (patch.dueAt !== undefined) body.due_at = patch.dueAt ?? '';
+    if (patch.schedule !== undefined) body.schedule = patch.schedule === null ? '' : await sealSelfField(patch.schedule);
+    if (patch.expectDueAt !== undefined) body.expect_due_at = patch.expectDueAt ?? '';
+    return apiClient.patch(`/task-lists/${listId}`, body);
+}
+
 /** Replace a list's own attachment refs; an empty array clears them. */
 export async function setTaskListAttachments(listId: number, refs: TaskAttachmentRef[]): Promise<void> {
     const sealed = refs.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(refs));
@@ -118,6 +143,9 @@ export async function createTaskListWithContent(
     const payload: Record<string, string> = { title: await sealSelfField(title) };
     if (content.body) payload.body = await sealSelfField(content.body);
     if (content.refs && content.refs.length > 0) payload.attachments = await sealSelfField(serializeTaskAttachments(content.refs));
+    // POST /task-lists also accepts `due_at` and `schedule` (migration 068),
+    // so a composer that offers a reminder can create a reminding note in ONE
+    // request. Nothing offers that yet, so nothing sends them here.
     const created: TaskList = await apiClient.post('/task-lists', payload);
     return {
         ...created,

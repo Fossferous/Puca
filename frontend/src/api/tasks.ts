@@ -96,6 +96,13 @@ export interface TaskList {
     /** The "Notes to self" list, which the server will not trash (absent
      *  from servers older than the trash). */
     is_self?: boolean;
+    /** The NOTE's own reminder (migration 068; listContent.noteReminders):
+     *  the next reminder instant in plaintext, and the sealed EventSchedule
+     *  it came from, exactly as a task carries them. Absent on a server
+     *  older than 068, null when the note does not remind. The sealed value
+     *  is OPENED by listSeal.openListContent before anything renders it. */
+    due_at?: string | null;
+    schedule?: string | null;
 }
 
 /** The one list title the server writes itself, as a plain label. */
@@ -280,6 +287,9 @@ export function getTaskTabPrefs(): Promise<TaskTabPref[]> {
  *  personal-list tasks + channel tasks they created (while still a member).
  *  Ids and times only — content stays E2EE and the toast is content-free. */
 export interface TaskReminder {
+    /** NEGATIVE for a NOTE's own reminder (migration 068): `-list_id`. Task
+     *  ids are always positive, so one feed carries both without any per-id
+     *  map (fired markers, ReminderPlan, ReminderMerge) confusing the two. */
     id: number;
     channel_id: number | null;
     list_id: number | null;
@@ -289,6 +299,15 @@ export interface TaskReminder {
     created_by?: number;
     schedule?: string | null;
     snooze?: string | null;
+    /** The row is a note's own reminder (068+). Redundant with `id < 0`,
+     *  which is the contract; this is only for readability. */
+    is_list?: boolean;
+}
+
+/** A note's own reminder rather than an item's — by the id namespace, which
+ *  every engine agrees on, not by a flag an older server would omit. */
+export function isNoteReminderId(id: number): boolean {
+    return id < 0;
 }
 
 export function listTaskReminders(): Promise<TaskReminder[]> {
