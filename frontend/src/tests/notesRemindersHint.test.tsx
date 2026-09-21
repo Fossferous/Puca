@@ -18,7 +18,8 @@ const due = new Date(Date.now() + 3 * 3600_000).toISOString();
 function item(id: number, kind: 'channel' | 'list', createdBy: number) {
     const note = { key: `${kind}:${id}`, ref: { kind, id }, title: `Note ${id}` } as never;
     const task = { id, description: `Item ${id}`, due_at: due, created_by: createdBy, is_completed: false } as never;
-    return { task, note, at: Date.parse(due) };
+    // `kind` since migration 068: a reminder row is an ITEM, or a note's own.
+    return { kind: 'task' as const, task, note, at: Date.parse(due) };
 }
 
 let root: Root | null = null;

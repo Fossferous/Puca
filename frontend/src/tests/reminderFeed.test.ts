@@ -2,9 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const openReminderTiming = vi.fn();
 const patchTaskTiming = vi.fn();
+const setTaskListTiming = vi.fn();
 vi.mock('../api/tasks', () => ({
     openReminderTiming: (...a: unknown[]) => openReminderTiming(...a),
     patchTaskTiming: (...a: unknown[]) => patchTaskTiming(...a),
+    // The real rule, not a stub that always says false: a NOTE's own
+    // reminder is a negative id (migration 068).
+    isNoteReminderId: (id: number) => id < 0,
+}));
+vi.mock('../api/listContent', () => ({
+    setTaskListTiming: (...a: unknown[]) => setTaskListTiming(...a),
 }));
 
 import {
@@ -19,7 +26,7 @@ const due = '2026-10-05T19:00:00Z';
 const row = (over: Partial<OpenedReminder> = {}): OpenedReminder => ({ id: 7, channel_id: null, list_id: 3, due_at: due, created_by: 1, ...over });
 const event: EventSchedule = { v: 1, kind: 'event', uid: 'uid-evt-0001', allDay: false, start: '2026-10-05T15:10', tz: 'America/New_York', alerts: [10], rrule: 'FREQ=WEEKLY' };
 
-beforeEach(() => { openReminderTiming.mockReset(); patchTaskTiming.mockReset(); });
+beforeEach(() => { openReminderTiming.mockReset(); patchTaskTiming.mockReset(); setTaskListTiming.mockReset(); });
 
 describe('the {id, at, mark} contract', () => {
     it('an unsnoozed row: at = due_at, mark = due_at (so pre-snooze fired markers stay valid)', () => {
@@ -120,5 +127,19 @@ describe('advancing a fired event: the firing path only, after the grace', () =>
         expect(await applyAdvances(adv)).toBe(1);
         expect(patchTaskTiming).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 7 }), { due_at: '2026-10-12T19:00:00.000Z', expect_due_at: due });
         expect(patchTaskTiming).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 8 }), { due_at: null, expect_due_at: due });
+    });
+
+    it('advances a NOTE\u2019s own event on the list, never on /tasks/-5', async () => {
+        setTaskListTiming.mockResolvedValueOnce(undefined);
+        const next = '2026-10-12T19:00:00.000Z';
+        expect(await applyAdvances([{ row: row({ id: -3 }), nextDue: next }])).toBe(1);
+        expect(setTaskListTiming).toHaveBeenCalledWith(3, { dueAt: next, expectDueAt: due });
+        // There is no task -3: a PATCH there would 404 on every cycle.
+        expect(patchTaskTiming).not.toHaveBeenCalled();
+        // Positive control: a positive id still goes the task way.
+        patchTaskTiming.mockResolvedValueOnce(undefined);
+        expect(await applyAdvances([{ row: row(), nextDue: next }])).toBe(1);
+        expect(patchTaskTiming).toHaveBeenCalledTimes(1);
+        expect(setTaskListTiming).toHaveBeenCalledTimes(1);
     });
 });

@@ -9,7 +9,9 @@ import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /** JVM tests for folding a background-fetched feed into the stored entries. */
 public class ReminderMergeTest {
@@ -232,6 +234,55 @@ public class ReminderMergeTest {
         for (long ms : new long[] { DUE_MS, DUE_MS + 7 * DAY + 59_999, 4_102_444_800_000L }) {
             assertEquals(ms, ReminderMerge.parseIsoMillis(ReminderMerge.isoMillis(ms)));
         }
+    }
+
+    /**
+     * A NOTE'S OWN reminder (migration 068) rides the same feed under the
+     * NEGATIVE id -list_id. This test is why that design needs no new APK:
+     * every id here is an opaque long key, so -5 and 5 are two reminders and
+     * neither can silence the other. If it ever goes red, a note reminder is
+     * cancelling an item reminder (or the reverse) on every phone.
+     */
+    @Test
+    public void aNegativeNoteIdIsADifferentReminderFromTheTaskWithTheSameNumber() throws Exception {
+        String later = "2026-09-19T11:00:00Z";
+        List<ReminderMerge.FeedRow> feed = ReminderMerge.parseFeed(
+                "[{\"id\":-5,\"due_at\":\"" + DUE + "\",\"list_id\":5,\"is_list\":true},"
+                        + "{\"id\":5,\"due_at\":\"" + later + "\"}]");
+        assertEquals(2, feed.size());
+        assertEquals(-5L, feed.get(0).id);
+        assertEquals(5L, feed.get(1).id);
+
+        // The merge keeps both, each with its own time.
+        List<ReminderPlan.Entry> merged = ReminderMerge.merge(Collections.<ReminderPlan.Entry>emptyList(), feed);
+        assertEquals(2, merged.size());
+        Map<Long, Long> at = new HashMap<>();
+        for (ReminderPlan.Entry e : merged) at.put(e.id, e.atMs);
+        assertEquals(Long.valueOf(DUE_MS), at.get(-5L));
+        assertEquals(Long.valueOf(DUE_MS + 3_600_000L), at.get(5L));
+
+        // Both fire, under their own marks.
+        long now = DUE_MS + 2 * 3_600_000L;
+        ReminderPlan.Result first = ReminderPlan.plan(merged, new HashMap<String, String>(), now);
+        assertEquals(2, first.dueNow.size());
+        assertTrue(first.dueNow.contains(-5L));
+        assertTrue(first.dueNow.contains(5L));
+        assertEquals(2, first.prunedFired.size());
+        assertTrue(first.prunedFired.containsKey("-5"));
+        assertTrue(first.prunedFired.containsKey("5"));
+
+        // Having fired the NOTE, the item with the same number still fires.
+        Map<String, String> firedNoteOnly = new HashMap<>();
+        firedNoteOnly.put("-5", first.prunedFired.get("-5"));
+        assertEquals(Collections.singletonList(5L), ReminderPlan.plan(merged, firedNoteOnly, now).dueNow);
+
+        // ...and the other way round.
+        Map<String, String> firedTaskOnly = new HashMap<>();
+        firedTaskOnly.put("5", first.prunedFired.get("5"));
+        assertEquals(Collections.singletonList(-5L), ReminderPlan.plan(merged, firedTaskOnly, now).dueNow);
+
+        // Positive control: with BOTH marks present nothing fires again.
+        assertTrue(ReminderPlan.plan(merged, first.prunedFired, now).dueNow.isEmpty());
     }
 
     @Test
