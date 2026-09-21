@@ -388,6 +388,10 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     await c.click('.server-icon.home-button');
     await c.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
     await c.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+    // The recovery-code reminder's overlay swallows clicks; answer it first.
+    await c.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+        .then(() => c.click('.recovery-reminder-actions .recovery-done-btn'))
+        .catch(() => { /* not shown */ });
     await c.locator('.tasks-tab-calendar').click();
     await c.waitForSelector('.tasks-calendar', { timeout: 15000 });
     ck('púca calendar: Import .ics is offered beside Export', await c.locator('.cal-btn', { hasText: 'Import .ics' }).count() === 1);

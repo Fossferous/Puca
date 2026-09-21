@@ -136,6 +136,14 @@ await page.fill('#password', password);
 await page.click('button[type="submit"]');
 await page.waitForURL('**/chat', { timeout: 30000 });
 try { await page.click('.recovery-done-btn', { timeout: 8000 }); } catch { /* no modal */ }
+/** Púca asks, a few seconds after the app mounts, about a recovery code
+ *  generated at sign-up and never confirmed. Its overlay swallows clicks, so
+ *  every landing on /chat answers it first (it is not under test here). */
+async function dismissRecoveryReminder(pg) {
+    await pg.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+        .then(() => pg.click('.recovery-reminder-actions .recovery-done-btn'))
+        .catch(() => { /* not shown */ });
+}
 try { await page.click('.welcome-popup-close', { timeout: 3000 }); } catch { /* no popup */ }
 await shot('main-app-signed-in');
 
@@ -526,6 +534,7 @@ try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* 
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+await dismissRecoveryReminder(page);
 await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
 ck('púca: the board card shows a text note\'s text', /Roses are red/.test(await page.locator('.checklist-card', { hasText: 'Poem' }).locator('.tasks-card-body').innerText().catch(() => '')));
 ck('púca: the board card says a photo note has a picture', /1 picture/.test(await page.locator('.checklist-card', { hasText: 'Holiday photo' }).locator('.tasks-card-body').innerText().catch(() => '')));
@@ -545,6 +554,8 @@ await shot('puca-tasks-photo-note');
 await page.locator('.tasks-tab-reminders').click();
 await page.waitForSelector('.tasks-reminders .notes-reminders', { timeout: 10000 });
 ck('púca reminders: the tab mounts the shared list', await page.locator('.tasks-reminders .notes-reminders').count() === 1);
+// The rows arrive with the per-list reads, not with the tab.
+await page.waitForSelector('.tasks-reminders .notes-reminder-row', { timeout: 15000 }).catch(() => {});
 ck('púca reminders: the due item from a personal note is listed', await page.locator('.tasks-reminders .notes-reminder-row', { hasText: 'Eggs' }).count() === 1);
 ck('púca reminders: it is grouped, not a flat list', await page.locator('.tasks-reminders .notes-reminder-group .notes-section-title').count() >= 1);
 // The styles came with the shared component: Púca never loads notes.css, so
@@ -634,11 +645,7 @@ await sleep(1500);   // the prune (and any fresh read of the trash it asks for) 
 const archivedWhileTrashed = await np.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText().catch(() => '?');
 ck('notes (second tab): opened while Púca holds Packing in the trash — it is in the Notes trash, not counted as archived', packingInNotesTrash && archivedWhileTrashed === '0', `inTrash=${packingInNotesTrash} archived=${archivedWhileTrashed}`);
 await np.close();
-// Púca asks, 3 s after it mounts, about a recovery code generated at sign-up and
-// never confirmed; the walk above outlasts that. Answer it (it is not under test).
-await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
-    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
-    .catch(() => { /* not shown */ });
+await dismissRecoveryReminder(page);
 await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button', { name: 'Restore' }).click();
 await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
     .then(() => ck('púca: Restore puts it back in the bar', true))
@@ -1231,6 +1238,7 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         await h.click('.server-icon.home-button');
         await h.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
         await h.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+        await dismissRecoveryReminder(h);
         await h.locator('.tasks-tab-reminders').click();
         await h.waitForSelector('.tasks-reminders .notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
         const prows = await rowFacts(h);
@@ -1266,16 +1274,37 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         await shotOf(pg)('hint-phone');
         // The same view in PÚCA at 390x844: the tab is a whole tap target, the
         // rows fit, and the snooze button is not a 32 px dot on a phone.
+        // The phone route into Púca's Tasks view is the bottom nav plus the
+        // self-note server icon (the desktop sidebar is not on screen at
+        // 390 px) — the same steps section 14's phone pass uses.
         await pg.goto('/chat');
-        await pg.waitForSelector('.chat-container', { timeout: 20000 });
-        try { await pg.tap('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
-        await pg.tap('.server-icon.home-button');
-        await pg.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).tap();
+        await pg.waitForSelector('.chat-container', { timeout: 20000 }).catch(() => {});
+        try { await pg.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+        await pg.locator('.mobile-nav-btn').nth(0).tap().catch(() => {});
+        await pg.locator('.server-icon.notes-self').tap({ timeout: 5000 }).catch(() => {});
         await pg.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+        await dismissRecoveryReminder(pg);
         await pg.locator('.tasks-tab-reminders').tap();
         await pg.waitForSelector('.tasks-reminders .notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
-        const tabBox = await pg.locator('.tasks-tab-reminders').boundingBox();
-        ck('púca reminders (phone): the tab is a whole tap target', !!tabBox && tabBox.width >= 44 && tabBox.height >= 44, JSON.stringify(tabBox));
+        // The LAYOUT box, not the rendered one: a tab that has just been
+        // tapped is still under the press effect (measured at 0.98 of its
+        // size — the shipped Calendar tab does the same), and a momentary
+        // animation is not the size of the thing a finger has to hit. The
+        // Calendar tab is the positive control for the convention.
+        const tapBoxes = await pg.evaluate(() => {
+            const box = sel => {
+                const el = document.querySelector(sel);
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return { w: el.offsetWidth, h: el.offsetHeight, drawnW: Math.round(r.width * 100) / 100, drawnH: Math.round(r.height * 100) / 100 };
+            };
+            return { reminders: box('.tasks-tab-reminders'), calendar: box('.tasks-tab-calendar') };
+        });
+        ck('púca reminders (phone): the tab is a whole tap target, like the Calendar tab beside it',
+            !!tapBoxes.reminders && !!tapBoxes.calendar
+            && tapBoxes.reminders.w >= 44 && tapBoxes.reminders.h >= 44
+            && tapBoxes.calendar.w >= 44 && tapBoxes.calendar.h >= 44,
+            JSON.stringify(tapBoxes));
         const pucaPhone = await pg.evaluate(() => ({
             overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
             vw: window.innerWidth,

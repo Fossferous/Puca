@@ -245,6 +245,12 @@ body.drag-reorder-active {
     opacity: 1;
 }
 
+/* The snooze menu hangs BELOW the row, outside .tt-item's box: without this
+   the cluster fades the moment the pointer travels down to it, and the menu
+   with it. Focus covers the keyboard, :has covers the pointer. */
+.tt-actions:focus-within { opacity: 1; }
+.tt-actions:has(.notes-snooze-menu) { opacity: 1; }
+
 .tt-btn {
     background: none;
     border: none;
