@@ -260,6 +260,7 @@ await shot('text-photo-drawing-cards');
 // everything is asserted on `autoplay`, `paused` and `readyState`.
 await openComposer();
 await page.evaluate(() => { window.__micOrder = []; });
+offMachineRequests.length = 0;
 ck('voice note: the composer offers one', await page.locator('.notes-quickadd-foot button[aria-label="Voice note"]').count() === 1);
 await page.click('.notes-quickadd-foot button[aria-label="Voice note"]');
 await page.waitForSelector('.notes-recorder', { timeout: 10000 });
@@ -284,6 +285,15 @@ await page.waitForSelector('.notes-quickadd-media audio', { timeout: 10000 });
 ck('voice note: the clip previews in the composer', await page.locator('.notes-quickadd-media audio').count() === 1);
 ck('voice note: the composer preview never autoplays',
     await page.locator('.notes-quickadd-media audio').evaluate(a => a.autoplay === false && a.paused === true));
+// A take kept in the COMPOSER is written down like one kept in an open note —
+// on the phone's own recogniser or not at all. In a browser there is none, so
+// what must show is the refusal, in words, with nothing having left the machine.
+await page.waitForSelector('.notes-quickadd .notes-transcribe-notice', { timeout: 15000 }).catch(() => {});
+const qaNotice = await page.locator('.notes-quickadd .notes-transcribe-notice').count() === 1
+    ? (await page.locator('.notes-quickadd .notes-transcribe-notice').innerText()).trim() : '';
+ck('voice note: the composer says why the browser did not write it down',
+    /on-device|can.t write down|recording is saved/i.test(qaNotice), qaNotice.slice(0, 120));
+ck('voice note: nothing left this machine while the composer refused', offMachineRequests.length === 0, offMachineRequests.slice(0, 3).join(','));
 // Discarded on purpose: the database checks below count the notes this walk
 // made, and the clip that matters is added to an EXISTING note next.
 await page.locator('.notes-quickadd-foot button[aria-label="Discard note"]').click();
@@ -1013,6 +1023,11 @@ ck('phone: the recording player does not overflow 390',
     plx && plx.x >= -0.5 && plx.x + plx.width <= 390.5 && !r.bodyScrollsHorizontally, JSON.stringify(plx));
 ck('phone: the recording preview never autoplays',
     await m.locator('.notes-quickadd-media audio').evaluate(a => a.autoplay === false && a.paused === true));
+await m.waitForSelector('.notes-quickadd .notes-transcribe-notice', { timeout: 15000 }).catch(() => {});
+const mNoticeBox = await m.locator('.notes-quickadd .notes-transcribe-notice').boundingBox().catch(() => null);
+ck('phone: the "not written down" line reads at 390 without overflowing',
+    mNoticeBox && mNoticeBox.x >= -0.5 && mNoticeBox.x + mNoticeBox.width <= 390.5,
+    JSON.stringify(mNoticeBox));
 await m.locator('.notes-quickadd.sheet button[aria-label="Discard note"]').tap();
 await m.waitForSelector('.notes-quickadd.sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
 // The Trash at phone size — with a note in it, or there is nothing to measure.

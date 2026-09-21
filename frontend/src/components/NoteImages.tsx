@@ -18,7 +18,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
 import { decryptToBlobUrl, parseEncAttachment } from '../api/attachments';
-import { type GalleryItem, galleryItems } from '../api/noteMedia';
+import { type GalleryItem, galleryItemNoun, galleryItems } from '../api/noteMedia';
 import { ImageLightbox } from './ImageLightbox';
 import { CameraIcon, CloseIcon, ImageIcon, LockIcon, MicIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import './NoteImages.css';
@@ -131,7 +131,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                                         </button>
                                     )}
                                     {onRemove && (
-                                        <button type="button" className="ni-tool" onClick={() => onRemove(item)} aria-label={`Remove ${item.kind === 'drawing' ? 'drawing' : item.kind === 'audio' ? 'voice note' : 'picture'}`} title="Remove">
+                                        <button type="button" className="ni-tool" onClick={() => onRemove(item)} aria-label={`Remove ${galleryItemNoun(item)}`} title="Remove">
                                             <CloseIcon />
                                         </button>
                                     )}

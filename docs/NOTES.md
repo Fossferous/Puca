@@ -369,6 +369,16 @@ transcript) — they are still saved. The transcript is ordinary sealed note
 text, which is also what makes a voice note findable: search reads a note's
 title, text, labels and items, and never an attachment's name.
 
+Both capture surfaces write it down, and each puts the words where they
+survive. In the COMPOSER the take is transcribed as soon as it is kept, and
+*Done* waits for it if it has not finished, so the note is created with the
+text already in it. In an OPEN note the transcript goes through the text
+FIELD — added to what is being typed, not written to the note behind it:
+transcribing takes a second or two, the recorder sheet is already closed, and
+that field's own autosave would otherwise put a half-typed line back over the
+words. If the note is closed before the transcript is ready it is dropped
+rather than written over whatever was saved last.
+
 **Background refresh.** While signed in, the app keeps a copy of the session
 token in its private, backup-excluded storage (`allowBackup=false` plus the
 include-only backup and data-extraction rules copied from Púca) and a

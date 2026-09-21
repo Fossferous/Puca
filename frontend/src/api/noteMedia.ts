@@ -26,7 +26,9 @@ export interface DrawingFiles {
 
 export class TooManyAttachmentsError extends Error {
     constructor() {
-        super(`A note holds at most ${MAX_TASK_ATTACHMENTS} photos and drawings (a drawing counts twice)`);
+        // Recordings take a slot too (slotsNeeded counts them), and this
+        // message is shown to the user verbatim — it must list what it counts.
+        super(`A note holds at most ${MAX_TASK_ATTACHMENTS} photos, drawings and recordings (a drawing counts twice)`);
         this.name = 'TooManyAttachmentsError';
     }
 }
@@ -97,6 +99,16 @@ export interface GalleryItem {
     kind: 'image' | 'drawing' | 'file' | 'audio';
     /** Drawings: the strokes ref paired with this PNG. */
     strokes?: TaskAttachmentRef;
+}
+
+/** What to CALL a gallery entry when speaking to the user — the Remove
+ *  button's label and the confirm that button opens must say the same word,
+ *  or "Remove this picture?" on a note full of photos reads as the wrong
+ *  attachment being deleted. One helper so the two cannot drift. */
+export function galleryItemNoun(item: GalleryItem): string {
+    if (item.kind === 'drawing') return 'drawing';
+    if (item.kind === 'audio') return 'voice note';
+    return 'picture';
 }
 
 function baseName(name: string): string {

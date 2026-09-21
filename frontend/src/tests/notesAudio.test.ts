@@ -34,7 +34,7 @@ vi.mock('../api/attachments', async () => {
     return { ...actual, encryptAndUploadRef: (f: File) => encryptAndUploadRef(f) };
 });
 
-const { galleryItems, heroItems, nameAudioFiles, nextAudioName, nextDrawingName, uploadNoteMedia, DRAWING_STROKES_MIME } =
+const { galleryItemNoun, galleryItems, heroItems, nameAudioFiles, nextAudioName, nextDrawingName, uploadNoteMedia, DRAWING_STROKES_MIME } =
     await import('../api/noteMedia');
 
 let seq = 0;
@@ -174,6 +174,25 @@ describe('uploadNoteMedia: the raw audio channel', () => {
     it('a recording counts against the sidecar slots', async () => {
         await expect(uploadNoteMedia([], [], 12, [file('voice-1.webm', 'audio/webm')])).rejects.toThrow(/at most/);
         expect(encryptAndUploadRef).not.toHaveBeenCalled();
+    });
+    it('and the refusal, which is shown verbatim, says recordings count', async () => {
+        // A user with twelve photos who is refused a recording must be able
+        // to tell from the message why: the toast is this string.
+        await expect(uploadNoteMedia([], [], 12, [file('voice-1.webm', 'audio/webm')]))
+            .rejects.toThrow(/photos, drawings and recordings/);
+    });
+});
+
+describe('what a gallery entry is CALLED', () => {
+    // The Remove button's label and the confirm it opens come from here, so
+    // "Remove voice note" can never open "Remove this picture?".
+    it.each([
+        ['audio', 'voice note'],
+        ['drawing', 'drawing'],
+        ['image', 'picture'],
+        ['file', 'picture'],
+    ])('a %s is a "%s"', (kind, noun) => {
+        expect(galleryItemNoun({ ref: ref('x', 'audio/webm'), kind: kind as 'audio' })).toBe(noun);
     });
 });
 

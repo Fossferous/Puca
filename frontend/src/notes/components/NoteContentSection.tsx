@@ -27,8 +27,8 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
-import { type GalleryItem, fileIdsOf, readStrokes, refsOfItem, withoutItem } from '../../api/noteMedia';
-import { NoteBodyField } from '../../components/NoteBodyField';
+import { type GalleryItem, fileIdsOf, galleryItemNoun, readStrokes, refsOfItem, withoutItem } from '../../api/noteMedia';
+import { type NoteBodyHandle, NoteBodyField } from '../../components/NoteBodyField';
 import { bodyBytes, deleteFiles, MAX_BODY_BYTES } from '../../api/listContent';
 import { NoteImages } from '../../components/NoteImages';
 import { pushMessageToast } from '../../components/messageToastBus';
@@ -40,7 +40,7 @@ import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBod
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
 import { AudioRecorder, type RecordedClip } from './AudioRecorder';
-import { appendTranscript, canRecordAudio } from '../model/audioNote';
+import { canRecordAudio } from '../model/audioNote';
 import { transcribeClip } from '../model/transcribe';
 import { UndoBar } from './UndoBar';
 import '../noteContent.css';
@@ -76,6 +76,9 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
     const undoRef = useRef<Undo | null>(null);
+    /** The live text field, while there is one — a transcript is added
+     *  through it, never behind it (see keepClip). */
+    const bodyRef = useRef<NoteBodyHandle>(null);
     // The items as they are NOW, for a commit that runs after they changed.
     const tasksRef = useRef(tasks);
     useEffect(() => { tasksRef.current = tasks; });
@@ -105,7 +108,10 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         try { await c.addNoteMedia(listId, files, []); } finally { setBusy(false); }
     };
     const remove = async (item: GalleryItem) => {
-        if (!window.confirm(`Remove this ${item.kind === 'drawing' ? 'drawing' : 'picture'}? It is deleted for good.`)) return;
+        // The same three words the Remove button carries (NoteImages.tsx):
+        // being asked to confirm deleting a "picture" on a note that also
+        // holds photos reads as the wrong attachment going.
+        if (!window.confirm(`Remove this ${galleryItemNoun(item)}? It is deleted for good.`)) return;
         setBusy(true);
         try { await c.setNoteAttachments(listId, withoutItem(refs, item), refsOfItem(item)); } finally { setBusy(false); }
     };
@@ -113,7 +119,12 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
      *  saved either way: a device that cannot transcribe says so rather than
      *  sending the audio anywhere (model/transcribe.ts). The transcript goes
      *  into the note's TEXT, which is what makes a voice note searchable —
-     *  search never reads attachment names. */
+     *  search never reads attachment names.
+     *
+     *  It goes there through the TEXT FIELD's own handle, never straight to
+     *  the note: transcribing takes a second or two, the recorder sheet is
+     *  already closed, and a body written behind a half-typed line is undone
+     *  by that field's next autosave. */
     const keepClip = async (clip: RecordedClip): Promise<boolean> => {
         setBusy(true);
         setTranscribeNotice(null);
@@ -124,17 +135,33 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         }
         setRecording(false);
         try {
+            // No text field, no home for a transcript: a server without the
+            // body feature holds nothing but the sealed clip, and asking the
+            // phone to transcribe for a note that cannot keep the words is
+            // work with nowhere to go.
+            if (!showBody) return true;
             const r = await transcribeClip(clip.file, clip.durationMs);
-            if (r.text) {
-                const next = appendTranscript(text, r.text, MAX_BODY_BYTES, bodyBytes);
-                if (next === null) setTranscribeNotice('There is no room left in this note’s text for what was said — the recording is saved.');
-                else if (!await c.setBody(listId, next)) setTranscribeNotice('The recording is saved, but what was said couldn’t be added to the text.');
-            } else {
-                setTranscribeNotice(r.reason);
+            if (!r.text) { setTranscribeNotice(r.reason); return true; }
+            const field = bodyRef.current;
+            if (!field) {
+                // The note was closed while the phone was transcribing. Its
+                // text is whatever that field last saved, which this closure
+                // can no longer see, so the transcript is dropped rather than
+                // written over the user's last words.
+                console.warn('[notes] the note closed before its transcript was ready');
+                return true;
             }
+            const outcome = await field.appendText(r.text);
+            if (outcome === 'too-long') setTranscribeNotice('There is no room left in this note’s text for what was said — the recording is saved.');
+            else if (outcome === 'failed') setTranscribeNotice('The recording is saved, but what was said couldn’t be added to the text.');
         } catch (err) {
             console.error('[notes] transcribing failed:', err);
             setTranscribeNotice('The recording is saved, but this device couldn’t write it down.');
+        } finally {
+            // The preview URL came with the clip and is OURS now
+            // (AudioRecorder hands ownership over on Keep and deliberately
+            // does not revoke it): the sheet is gone, so free the blob.
+            URL.revokeObjectURL(clip.url);
         }
         return true;
     };
@@ -261,6 +288,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             {showBody && (
                 <NoteBodyField
                     key={card.key}
+                    ref={bodyRef}
                     listId={listId}
                     value={card.body}
                     onSave={t => c.setBody(listId, t)}
