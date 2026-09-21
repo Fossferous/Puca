@@ -41,22 +41,38 @@ function sourceFiles(dir: string): string[] {
     return out;
 }
 
-/** Static and dynamic module specifiers, in source order. */
+/**
+ * Static and dynamic module specifiers, in source order.
+ *
+ * The clause between `import`/`export` and `from` may span LINES — the
+ * prettier-shaped `import {\n  A,\n} from '../x'` is the house style for a
+ * long list, and a gap that stopped at the first newline never saw one. That
+ * is a hole in the one thing this file exists to do: the closure would simply
+ * not contain that module, and the guard would stay green over it. So the gap
+ * is spelled as what an import clause can actually HOLD — identifiers, braces,
+ * commas, `*`, whitespace — which crosses newlines and still cannot run past
+ * the statement, because `;`, `(` and `=` are not in it.
+ *
+ * The third branch is the side-effect import (`import './x'`), which has no
+ * `from` at all and was invisible to both of the old ones.
+ */
 export function importSpecifiers(text: string): string[] {
     const out: string[] = [];
-    const re = /(?:import|export)[^;\n]*?from\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+    const re = /\b(?:import|export)[\w\s,{}*$]*?\bfrom\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)|\bimport\s+['"]([^'"]+)['"]/g;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) out.push(m[1] ?? m[2]);
+    while ((m = re.exec(text)) !== null) out.push(m[1] ?? m[2] ?? m[3]);
     return out;
 }
 
-/** A relative specifier as a file on disk, with TS's extension guesses.
- *  Bare specifiers are packages — not our source, and not our rule. */
+/** A relative specifier as a SOURCE file on disk, with TS's extension guesses.
+ *  Bare specifiers are packages — not our source, and not our rule; and a
+ *  stylesheet reached by a side-effect import is not source either, so the
+ *  closure stays a set of modules worth scanning. */
 function resolveRelative(fromFile: string, spec: string): string | null {
     if (!spec.startsWith('.')) return null;
     const base = path.resolve(path.dirname(fromFile), spec);
     for (const c of [base, `${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts'), path.join(base, 'index.tsx')]) {
-        if (fs.existsSync(c) && fs.statSync(c).isFile()) return c;
+        if (/\.tsx?$/.test(c) && fs.existsSync(c) && fs.statSync(c).isFile()) return c;
     }
     return null;
 }
@@ -117,12 +133,31 @@ describe('Púca Notes never opens a WebSocket', () => {
         // the walk itself, or the closure is not a closure.
         expect(closure).toContain('api/dms.ts');
         expect(closure).toContain('components/contextMenuUtils.ts');
+        // These two are in the Notes bundle through a MULTI-LINE import
+        // clause and nothing else — ScheduleEditor's and ImageLightbox's. A
+        // walker whose gap stopped at the first newline left both of them
+        // outside its own closure while reporting success.
+        expect(closure).toContain('api/scheduleForm.ts');
+        expect(closure).toContain('components/imageZoom.ts');
+    });
+
+    it('positive control: the scanner reads a clause that spans LINES', () => {
+        // The house style for a long import list. Reached by nothing else in
+        // this file, so a gap that stops at the newline returns [] here.
+        expect(importSpecifiers("import {\n    aLongName,\n    another,\n} from '../../api/dms';"))
+            .toEqual(['../../api/dms']);
+        expect(importSpecifiers("export {\n    x,\n} from './y';")).toEqual(['./y']);
+        // ...and a side-effect import, which names a module with no `from`.
+        expect(importSpecifiers("import './register';")).toEqual(['./register']);
+        // The gap still cannot run past a statement into an unrelated string.
+        expect(importSpecifiers("import x from './x';\nconst s = from('./nope');")).toEqual(['./x']);
     });
 
     it('positive control: a bare specifier is not mistaken for a file', () => {
         expect(importSpecifiers("import React from 'react';\nimport { x } from '../api/dms';"))
             .toEqual(['react', '../api/dms']);
         expect(resolveRelative(path.join(SRC, 'notes', 'x.ts'), 'react')).toBeNull();
+        expect(resolveRelative(path.join(SRC, 'notes', 'x.ts'), './notes.css')).toBeNull();
         expect(resolveRelative(path.join(SRC, 'notes', 'x.ts'), '../api/dms')).toBe(path.join(SRC, 'api', 'dms.ts'));
     });
 });
