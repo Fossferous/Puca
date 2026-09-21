@@ -110,6 +110,15 @@ pub struct ListFeatures {
     /// a phone whose clock runs days ahead would otherwise delete the owner's
     /// trash early, with no undo. A client that cannot read it does not purge.
     pub server_now_ms: i64,
+    /// Migration 069: every list row carries `content_rev`, and PATCH
+    /// /task-lists/:id honours `expect_rev` — so a save that lost a race with
+    /// another device is refused with the current copy instead of quietly
+    /// overwriting it. An older server omits the key, which the client reads
+    /// as false and keeps today's last-write-wins behaviour.
+    pub content_rev: bool,
+    /// Migration 070: POST /task-lists and the task create routes accept a
+    /// random `op_key`, so a create whose answer was lost is not made twice.
+    pub idempotent_creates: bool,
 }
 
 /// What the features route says, for a given trash window (None = forever)
@@ -122,6 +131,8 @@ pub fn features_for(retention_days: Option<i64>, now_ms: i64) -> ListFeatures {
         trash_retention_days: retention_days.unwrap_or(0),
         max_body_len: MAX_LIST_BODY_LEN,
         server_now_ms: now_ms,
+        content_rev: true,
+        idempotent_creates: true,
     }
 }
 
@@ -333,7 +344,38 @@ mod db_tests {
             body: body.map(String::from),
             attachments: attachments.map(String::from),
             reads_up_to,
+            expect_rev: None,
+            op_key: None,
         }
+    }
+
+    /// The same, naming the content revision this edit is based on
+    /// (migration 069).
+    fn req_at(rev: i64, title: Option<&str>, body: Option<&str>, attachments: Option<&str>) -> TaskListRequest {
+        TaskListRequest { expect_rev: Some(rev), ..req(title, body, attachments, None) }
+    }
+
+    /// A PATCH with its response body, so a test can read the new revision
+    /// (or the 409's copy of the current one).
+    async fn patch_json(state: &Arc<AppState>, c: &Claims, id: i64, r: TaskListRequest) -> (StatusCode, Value) {
+        let resp = th::rename_task_list(State(state.clone()), Path(id), Extension(c.clone()), Json(r)).await.into_response();
+        let status = resp.status();
+        (status, json_of(resp).await)
+    }
+
+    /// One list row's content revision, as the listing serves it.
+    async fn rev_of(state: &Arc<AppState>, c: &Claims, id: i64) -> i64 {
+        listing(state, c, false).await.iter()
+            .find(|r| r["id"] == id)
+            .and_then(|r| r["content_rev"].as_i64())
+            .expect("content_rev on every listed row")
+    }
+
+    /// content_rev straight from the row, for a list the listing hides
+    /// (one in the trash).
+    async fn rev_row(pool: &PgPool, id: i64) -> i64 {
+        let (rev,): (i64,) = sqlx::query_as("SELECT content_rev FROM task_lists WHERE id = $1").bind(id).fetch_one(pool).await.unwrap();
+        rev
     }
 
     async fn create(state: &Arc<AppState>, c: &Claims, title: &str, body: Option<&str>) -> i64 {
@@ -405,6 +447,92 @@ mod db_tests {
 
         let _ = sqlx::query("DELETE FROM task_lists WHERE owner_id = $1 OR owner_id = $2").bind(alice.sub).bind(mallory.sub).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(alice.sub as i32).bind(mallory.sub as i32).execute(&pool).await;
+    }
+
+    /// Migration 069: a note's TEXT, TITLE and PICTURES carry a revision, and
+    /// a save that names a stale one is refused with the current copy. What
+    /// is NOT the note's own content leaves the revision alone — which is
+    /// what keeps a ticked item from refusing a text save in the same note.
+    #[tokio::test]
+    async fn content_rev_guards_a_concurrent_edit_of_a_note() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "rev").await;
+        let id = create(&state, &alice, V2, Some(V2)).await;
+        let rev0 = rev_of(&state, &alice, id).await;
+
+        // A save that names the current revision goes through, and the answer
+        // carries the new one (so a run of saves needs no refetch between).
+        let (status, answer) = patch_json(&state, &alice, id, req_at(rev0, None, Some(V2B), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let rev1 = answer["content_rev"].as_i64().expect("the new revision comes back");
+        assert_eq!(rev1, rev0 + 1);
+        assert_eq!(rev_of(&state, &alice, id).await, rev1);
+
+        // The other device still holds rev0: refused, with the current copy,
+        // and NOTHING written.
+        let (status, conflict) = patch_json(&state, &alice, id, req_at(rev0, None, Some(V3), None)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(conflict["conflict"], "stale");
+        assert_eq!(conflict["content_rev"].as_i64(), Some(rev1));
+        assert_eq!(conflict["body"], V2B, "the 409 hands back the sealed body, so the loser can show both");
+        assert_eq!(conflict["title"], V2);
+        assert_eq!(stored(&pool, id).await.1.as_deref(), Some(V2B), "the loser wrote nothing");
+        assert_eq!(rev_of(&state, &alice, id).await, rev1, "and did not move the revision");
+
+        // Told the truth, the same save lands — the positive control for the
+        // refusal above: it was the base that was wrong, not the write.
+        assert_eq!(patch_json(&state, &alice, id, req_at(rev1, None, Some(V3), None)).await.0, StatusCode::OK);
+        let rev2 = rev_of(&state, &alice, id).await;
+        assert_eq!(rev2, rev1 + 1);
+
+        // NO expect_rev = no check: every client older than 069, and every op
+        // queued before it, keeps working exactly as it did.
+        assert_eq!(patch(&state, &alice, id, req(None, Some(V2), None, Some(3))).await, StatusCode::OK);
+        let rev3 = rev_of(&state, &alice, id).await;
+        assert_eq!(rev3, rev2 + 1);
+
+        // THE FALSE-POSITIVE TRAP, and the reason this is not expect_updated_at:
+        // an ITEM added, ticked and deleted moves the list's updated_at (066's
+        // puca_task_touch_list) but must NOT move content_rev — a note is one
+        // card holding both its text and its items.
+        let before_updated = list_updated_at(&pool, id).await;
+        let item = th::create_list_task(
+            State(state.clone()), Path(id), Extension(alice.clone()),
+            Json(serde_json::from_value(serde_json::json!({"description": V2})).unwrap()),
+        ).await.into_response();
+        assert_eq!(item.status(), StatusCode::OK);
+        let task_id = json_of(item).await["id"].as_i64().unwrap();
+        assert_eq!(rev_of(&state, &alice, id).await, rev3, "adding an item is not editing the note's text");
+        let upd = th::update_task(State(state.clone()), Path(task_id), Extension(alice.clone()),
+            Json(serde_json::from_value(serde_json::json!({"is_completed": true})).unwrap())).await.into_response();
+        assert_eq!(upd.status(), StatusCode::OK);
+        assert_eq!(rev_of(&state, &alice, id).await, rev3, "ticking an item is not editing the note's text");
+        let del = th::delete_task(State(state.clone()), Path(task_id), Extension(alice.clone())).await.into_response();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        assert_eq!(rev_of(&state, &alice, id).await, rev3, "deleting an item is not editing the note's text");
+        assert!(list_updated_at(&pool, id).await > before_updated, "updated_at DID move — which is why it cannot be the base");
+
+        // Trash and restore are not content either: a restore must not
+        // invalidate the base every other device is holding.
+        let r = trash_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(rev_row(&pool, id).await, rev3, "trashing is not an edit");
+        let r = restore_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(rev_of(&state, &alice, id).await, rev3, "restoring is not an edit");
+
+        // The features route is how a client knows any of this is here.
+        let f = features_for(None, 0);
+        assert!(f.content_rev && f.idempotent_creates);
+
+        let _ = sqlx::query("DELETE FROM task_lists WHERE owner_id = $1").bind(alice.sub).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(alice.sub as i32).execute(&pool).await;
+    }
+
+    async fn list_updated_at(pool: &PgPool, id: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+        let (u,): (Option<chrono::DateTime<chrono::Utc>>,) =
+            sqlx::query_as("SELECT updated_at FROM task_lists WHERE id = $1").bind(id).fetch_one(pool).await.unwrap();
+        u
     }
 
     #[tokio::test]
@@ -529,6 +657,7 @@ mod db_tests {
                 "body": true, "attachments": true, "trash": true,
                 "trash_retention_days": 7, "max_body_len": MAX_LIST_BODY_LEN,
                 "server_now_ms": 1_700_000_000_123_i64,
+                "content_rev": true, "idempotent_creates": true,
             })
         );
         let forever = serde_json::to_value(features_for(None, 5)).unwrap();

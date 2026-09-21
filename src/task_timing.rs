@@ -132,6 +132,10 @@ pub const TASK_FEATURES: &[&str] = &[
     "recurrence_aware",
     "reopen_subtree",
     "reminder_feed_v2",
+    // Migration 070: a create may carry a random `op_key`, and a replay of
+    // one the server already made is answered with the row it made instead
+    // of a second one.
+    "op_key",
 ];
 
 #[derive(Serialize)]
