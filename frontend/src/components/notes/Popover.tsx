@@ -4,9 +4,10 @@
  *
  * An anchored popover: portaled to document.body (so no transformed
  * ancestor — the mobile drawer — can trap it), positioned under its anchor
- * and clamped to the viewport on desktop; notes.css pins it to the bottom of
- * the screen under a coarse pointer. Escape closes it and STOPS there
- * (capture phase), so the note editor's own Escape never fires for a
+ * and clamped to the viewport on desktop; styles/noteChrome.css — imported by
+ * notes/notes.css and by components/TasksView.css alike — pins it to the
+ * bottom of the screen under a coarse pointer. Escape closes it and STOPS
+ * there (capture phase), so the note editor's own Escape never fires for a
  * keypress meant for the popover above it.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
