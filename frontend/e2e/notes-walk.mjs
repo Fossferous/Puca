@@ -389,21 +389,31 @@ ck('move: the pinned section is untouched by a bottom move', await page.locator(
 ck('grid view (fine pointer): no drag grips, masonry is two-dimensional', await page.locator('.notes-card-grip').count() === 0);
 await page.click('button[aria-label="Switch to list view"]');
 await page.waitForSelector('.notes-grid.list', { timeout: 5000 });
-ck('list view: every card shows a drag grip',
-    await page.locator('.notes-grid.list .notes-card-grip').count() === await page.locator('.notes-grid.list .notes-card').count()
-    && await page.locator('.notes-card-grip').count() > 1);
-// A real Pointer Events drag: press the grip, move past the third card's
-// midpoint in steps, release. Playwright's drag helpers do not drive this.
+// The PINNED section holds one card, which cannot be reordered among
+// anything — so the grips belong to the Others section, one per card.
 const otherCard = i => page.locator('section[aria-label="Other notes"] .notes-card').nth(i);
+const othersSel = 'section[aria-label="Other notes"] .notes-grid.list';
+ck('list view: every card in a reorderable section shows a drag grip',
+    await page.locator(`${othersSel} .notes-card-grip`).count() === await page.locator(`${othersSel} .notes-card`).count()
+    && await page.locator(`${othersSel} .notes-card-grip`).count() > 1);
+ck('list view: the one-card pinned section offers no grip (nothing to reorder it among)',
+    await page.locator('section[aria-label="Pinned notes"] .notes-card-grip').count() === 0);
+// A real Pointer Events drag: press the grip, move past the NEXT card's
+// midpoint in steps, release. Playwright's drag helpers do not drive this.
+// One slot only, and scrolled into view first: a long drag reaches the
+// viewport edge, where the hook's auto-scroll moves the content under the
+// pointer and the landing slot stops being predictable from the boxes.
+await otherCard(0).scrollIntoViewIfNeeded();
+await sleep(200);
 const gripBox = await otherCard(0).locator('.notes-card-grip').boundingBox();
-const thirdBox = await otherCard(2).boundingBox();
+const nextBox = await otherCard(1).boundingBox();
 let indicatorSeen = false;
-if (gripBox && thirdBox) {
+if (gripBox && nextBox) {
     const gx = gripBox.x + gripBox.width / 2;
     const gy = gripBox.y + gripBox.height / 2;
     await page.mouse.move(gx, gy);
     await page.mouse.down();
-    const targetY = thirdBox.y + thirdBox.height * 0.75;
+    const targetY = nextBox.y + nextBox.height * 0.75;
     for (let i = 1; i <= 10; i++) {
         await page.mouse.move(gx, gy + (targetY - gy) * (i / 10));
         await sleep(20);
@@ -413,8 +423,8 @@ if (gripBox && thirdBox) {
     await sleep(600);
 }
 ck('drag: the insertion line appears while dragging', indicatorSeen);
-ck('drag: dropping a card lower down reorders the others',
-    (await othersTitles()).join(',') === 'Holiday photo,Sketch,Reading,Packing,Poem', (await othersTitles()).join(','));
+ck('drag: dropping a card one slot down reorders the others',
+    (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
 ck('drag: the drop did not open the note (the ghost click is swallowed)', await page.locator('.notes-editor').count() === 0);
 ck('drag: the pinned card kept its section', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 await shot('list-drag');
@@ -423,7 +433,7 @@ await page.reload();
 await page.waitForSelector('.notes-card', { timeout: 20000 });
 await sleep(1000);
 ck('drag: the new order survived a reload (it reached the saved tab order)',
-    (await othersTitles()).join(',') === 'Holiday photo,Sketch,Reading,Packing,Poem', (await othersTitles()).join(','));
+    (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
 await page.fill('.notes-search input', 'a');
 await sleep(300);
 ck('drag: a search removes the grips (a result is not a section of the order)', await page.locator('.notes-card-grip').count() === 0);
