@@ -23,7 +23,10 @@ import { mkdirSync } from 'node:fs';
 const APP = process.env.APP || 'http://localhost:5173';
 const PGPORT = process.env.PGPORT || '5432';
 const PGDB = process.env.PGDB || 'puca';
-const SHOTS = process.env.SHOTS || 'e2e-shots';
+// Under the gitignored e2e-artifacts/, like every other harness's evidence:
+// a screenshot directory that is not ignored gets swept into the repo by the
+// next `git add -A` (it happened once, during the 0.9.810 ship).
+const SHOTS = process.env.SHOTS || 'e2e-artifacts/df-offer';
 const PSQL = process.env.PSQL || 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
 const PASS = 'Password123!';
 const stamp = Date.now().toString(36);
