@@ -137,6 +137,34 @@ public class ReminderPlanTest {
         assertEquals(Arrays.asList(1L, 2L), ReminderPlan.plan(entries, new HashMap<>(), NOW).dueNow);
     }
 
+    // --- which item a due notification may point at --------------------------
+
+    @Test
+    public void soleDueNamesTheOneItem() {
+        List<ReminderPlan.Entry> entries = Collections.singletonList(e(1, NOW - 1000, "m1"));
+        ReminderPlan.Result r = ReminderPlan.plan(entries, new HashMap<>(), NOW);
+        assertEquals(Collections.singletonList(1L), r.dueNow);
+        assertEquals(1L, ReminderPlan.soleDue(r));
+    }
+
+    @Test
+    public void soleDueIsSilentWithSeveral() {
+        // The one that matters: with two due, naming either would send the
+        // user to an arbitrary note and hide the other. "The first id" would
+        // pass the test above and fail this one.
+        List<ReminderPlan.Entry> entries = Arrays.asList(e(1, NOW - 2000, "a"), e(2, NOW - 1000, "b"));
+        ReminderPlan.Result r = ReminderPlan.plan(entries, new HashMap<>(), NOW);
+        assertEquals(2, r.dueNow.size());
+        assertEquals(-1L, ReminderPlan.soleDue(r));
+    }
+
+    @Test
+    public void soleDueIsSilentWithNone() {
+        List<ReminderPlan.Entry> entries = Collections.singletonList(e(1, NOW + 60_000, "m1"));
+        assertEquals(-1L, ReminderPlan.soleDue(ReminderPlan.plan(entries, new HashMap<>(), NOW)));
+        assertEquals(-1L, ReminderPlan.soleDue(null));
+    }
+
     @Test
     public void textIsACountNeverContent() {
         assertEquals("An item is due", ReminderPlan.dueText(1));

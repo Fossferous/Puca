@@ -35,17 +35,35 @@ final class NotesNotifier {
      *  location notification. */
     static final String CH_SESSION = "notes_session";
 
-    /** Where a notification tap asks the page to land (NotesNativePlugin). */
+    /** Where a notification, a launcher shortcut, the quick tile or the
+     *  home-screen widget asks the page to land (NotesNativePlugin). One
+     *  vocabulary for all four, so the Java side has a single source and this
+     *  class's content-free contract covers every entry point. */
     static final String EXTRA_NAV = "notes_nav";
     static final String NAV_REMINDERS = "reminders";
     /** The page checks its own session and lands on sign-in if it is dead. */
     static final String NAV_SIGNIN = "signin";
+    /** Open the composer. Four constants, no ids, no user data - what the
+     *  launcher, the shade and the home screen may hold. */
+    static final String NAV_COMPOSE_LIST = "compose-list";
+    static final String NAV_COMPOSE_NOTE = "compose-note";
+    static final String NAV_COMPOSE_DRAW = "compose-draw";
+    static final String NAV_COMPOSE_PHOTO = "compose-photo";
+
+    /** The ONE item a due notification came for, when exactly one did. An
+     *  integer the server already holds in clear and already sends this
+     *  phone in the content-free feed - never a title, never item text. */
+    static final String EXTRA_ITEM = "notes_item";
 
     static final int ID_DUE = 7401;
     static final int ID_STALE = 7402;
     static final int ID_PLACE = 7403;
     static final int ID_LOCATION_ONGOING = 7404;
     static final int ID_PLACES_PAUSED = 7405;
+    /** The quick-settings tile's own PendingIntent request code (see the
+     *  distinct-requestCode note on openApp). The widget's four live in
+     *  NotesWidgetProvider, clear of these. */
+    static final int RC_TILE = 7406;
 
     private NotesNotifier() {}
 
@@ -97,17 +115,34 @@ final class NotesNotifier {
     }
 
     static PendingIntent openApp(Context ctx, int requestCode, String nav) {
-        Intent open = new Intent(ctx, MainActivity.class);
-        open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        if (nav != null) open.putExtra(EXTRA_NAV, nav);
-        // A distinct requestCode per purpose: equal requestCodes collapse to
-        // one PendingIntent and every notification would open the LAST target.
-        return PendingIntent.getActivity(ctx, requestCode, open,
+        return openApp(ctx, requestCode, nav, -1L);
+    }
+
+    /** As above, naming the one item that came due (or -1 for none). */
+    static PendingIntent openApp(Context ctx, int requestCode, String nav, long itemId) {
+        return PendingIntent.getActivity(ctx, requestCode, openIntent(ctx, nav, itemId),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    /** ONE collapsing notification for everything due right now. */
-    static void postDue(Context ctx, int count) {
+    /** The launch intent itself, for a caller that wants to start the
+     *  activity directly (the quick-settings tile) rather than wrap it. */
+    static Intent openIntent(Context ctx, String nav, long itemId) {
+        Intent open = new Intent(ctx, MainActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        if (nav != null) open.putExtra(EXTRA_NAV, nav);
+        if (itemId > 0) open.putExtra(EXTRA_ITEM, itemId);
+        return open;
+    }
+
+    /** ONE collapsing notification for everything due right now.
+     *  `soleItemId` is the single item that came due, or -1 when several did
+     *  (ReminderPlan.soleDue): a tap then opens that item's note instead of
+     *  the Reminders list. The notification's WORDS never change - it is
+     *  still dueText(count), a count and nothing else. The request code stays
+     *  ID_DUE: FLAG_UPDATE_CURRENT updates the extras of the existing
+     *  PendingIntent, so no second code is needed and none should be added. */
+    static void postDue(Context ctx, int count, long soleItemId) {
         if (count <= 0) return;
         ensureChannels(ctx);
         NotificationManager nm = nm(ctx);
@@ -117,7 +152,7 @@ final class NotesNotifier {
                     .setContentTitle("Púca Notes")
                     .setContentText(ReminderPlan.dueText(count))
                     .setSmallIcon(android.R.drawable.ic_popup_reminder)
-                    .setContentIntent(openApp(ctx, ID_DUE, NAV_REMINDERS))
+                    .setContentIntent(openApp(ctx, ID_DUE, NAV_REMINDERS, soleItemId))
                     .setAutoCancel(true)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setCategory(NotificationCompat.CATEGORY_REMINDER)
