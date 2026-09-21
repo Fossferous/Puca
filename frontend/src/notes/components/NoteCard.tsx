@@ -96,12 +96,21 @@ function NoteCardImpl({
     // long press that opens bulk selection. Cancelling immediately rather than
     // skipping the handler keeps press.wasTouch() honest, which is what turns
     // Android's long-press `contextmenu` into a selection instead of the menu.
+    // BOTH routes into that selection have to go: cancelling kills the timer,
+    // and this ref kills the contextmenu below. Android fires `contextmenu`
+    // after ~500 ms of a still finger, and useDragReorder only swallows it
+    // once a drag is live — which takes 5px of movement that a press-and-hold
+    // has not made yet, so a held grip opened a selection nobody asked for.
+    const gripPress = useRef(false);
     const pressHandlers = {
         ...press.handlers,
         onPointerDown: (e: React.PointerEvent) => {
             press.handlers.onPointerDown(e);
-            if ((e.target as Element | null)?.closest?.('.notes-card-grip')) press.handlers.onPointerCancel();
+            gripPress.current = !!(e.target as Element | null)?.closest?.('.notes-card-grip');
+            if (gripPress.current) press.handlers.onPointerCancel();
         },
+        onPointerUp: () => { gripPress.current = false; press.handlers.onPointerUp(); },
+        onPointerCancel: () => { gripPress.current = false; press.handlers.onPointerCancel(); },
     };
     // Where the search matched. Derived at render and never attached to the
     // card: notesCache.ts seals and stores whatever a NoteCard carries, and a
@@ -214,6 +223,9 @@ function NoteCardImpl({
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(card); }
             }}
             onContextMenu={e => {
+                // ...unless the finger came down on the grip: that press is a
+                // drag, and Android's contextmenu for it is nobody's menu.
+                if (gripPress.current) { e.preventDefault(); return; }
                 // A long press on a touch screen is a selection, not the menu
                 // (the More button still opens that).
                 if (press.wasTouch()) { e.preventDefault(); press.fire(); return; }

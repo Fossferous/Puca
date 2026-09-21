@@ -150,6 +150,59 @@ describe('NoteGrid drag to reorder', () => {
     });
 });
 
+describe('a press on the GRIP is a drag, never a selection', () => {
+    // Android fires `contextmenu` after ~500 ms of a still finger. The grip
+    // cancels the long-press TIMER, but that left the contextmenu route wide
+    // open: useDragReorder only swallows contextmenu once a drag is live, and
+    // a drag needs 5px of movement a press-and-hold has not made. Holding the
+    // grip therefore opened a bulk selection nobody asked for.
+    const onSelect = vi.fn();
+    /** React reads pointerType/pointerId off the NATIVE event; jsdom's
+     *  PointerEvent is not wired to React's synthetic pointer events, so a
+     *  MouseEvent with a PointerEvent-shaped init is the idiom here. */
+    const touch = (type: string) => {
+        const ev = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: 10, clientY: 10 });
+        Object.assign(ev, { pointerType: 'touch', pointerId: 1, isPrimary: true });
+        return ev;
+    };
+    beforeEach(() => { onSelect.mockClear(); vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    const firstCard = () => document.querySelector<HTMLElement>('[data-drag-group="others"]')!;
+
+    it('holding the grip opens no selection, by either route', () => {
+        mount({ onSelect, selected: new Set<string>() });
+        const card = firstCard();
+        const grip = card.querySelector<HTMLElement>('.notes-card-grip')!;
+        act(() => { grip.dispatchEvent(touch('pointerdown')); });
+        act(() => { vi.advanceTimersByTime(900); });
+        expect(onSelect).not.toHaveBeenCalled();          // the timer was cancelled
+        act(() => { card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
+        expect(onSelect).not.toHaveBeenCalled();          // ...and so is the contextmenu
+    });
+
+    it('POSITIVE CONTROL: the same hold on the card BODY does open one', () => {
+        mount({ onSelect, selected: new Set<string>() });
+        const card = firstCard();
+        const title = card.querySelector<HTMLElement>('.notes-card-title')!;
+        act(() => { title.dispatchEvent(touch('pointerdown')); });
+        // The contextmenu route alone, before the timer could fire: this is
+        // the path Android takes, and it must still reach the selection.
+        act(() => { card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
+        expect(onSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: a grip press RELEASED frees the next press on the body', () => {
+        mount({ onSelect, selected: new Set<string>() });
+        const card = firstCard();
+        act(() => { card.querySelector<HTMLElement>('.notes-card-grip')!.dispatchEvent(touch('pointerdown')); });
+        act(() => { card.dispatchEvent(touch('pointerup')); });
+        act(() => { card.querySelector<HTMLElement>('.notes-card-title')!.dispatchEvent(touch('pointerdown')); });
+        act(() => { card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
+        expect(onSelect).toHaveBeenCalledTimes(1);
+    });
+});
+
 describe('when reordering is offered at all', () => {
     it('the menu offers Move only against the saved order and outside a search', () => {
         expect(canReorder('puca', 'all')).toBe(true);
