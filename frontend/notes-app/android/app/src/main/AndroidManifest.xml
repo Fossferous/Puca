@@ -148,6 +148,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
+    <!-- Voice notes (docs/NOTES.md, "The Android app"). FOREGROUND ONLY: the
+         microphone is held by the WebView's recorder while the recorder sheet
+         is open and released when Púca Notes leaves the screen. There is no
+         service and no FOREGROUND_SERVICE_MICROPHONE type, so nothing here can
+         record with the app closed. Asked from the recorder AFTER a prominent
+         disclosure. MODIFY_AUDIO_SETTINGS is declared because Capacitor's
+         BridgeWebChromeClient requests it TOGETHER with RECORD_AUDIO for a
+         WebView AUDIO_CAPTURE request — an undeclared one denies the whole
+         request. Recordings are sealed on-device; a transcript, where the
+         phone can make one ON-DEVICE, is made from a cache file that is
+         deleted straight after (NotesNativePlugin.transcribePcm). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <!-- Export into Documents on Android 10 and older (11+ needs no grant for
          a file the app creates there). -->
     <uses-permission

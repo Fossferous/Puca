@@ -5,12 +5,20 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.media.AudioFormat;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.provider.CalendarContract;
 import android.provider.Settings;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 
+import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.FileProvider;
 
@@ -31,6 +39,7 @@ import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Púca Notes' own native bridge: due reminders that fire with the app
@@ -40,8 +49,11 @@ import java.util.List;
  *
  * Reached from frontend/src/notes/native/notesNative.ts, which feature-detects
  * the plugin (the browser and older Notes APKs have none) and never throws.
- * Every method is content-free except shareText and addToPhoneCalendar, which
- * carry exactly what the USER chose to send out of the app, at that moment.
+ * Every method is content-free except shareText, addToPhoneCalendar and
+ * transcribePcm, which carry exactly what the USER chose at that moment.
+ * transcribePcm is handed a cache PATH, never audio bytes, and what it reads
+ * is transcribed by Android's ON-DEVICE recogniser or not at all
+ * (TranscribeGate) -- nothing is ever sent off the phone.
  */
 @CapacitorPlugin(
     name = "NotesNative",
@@ -52,7 +64,7 @@ import java.util.List;
 public class NotesNativePlugin extends Plugin {
 
     /** Bumped when a method is added, so the page can feature-detect. */
-    private static final int API_LEVEL = 1;
+    private static final int API_LEVEL = 2;
 
     /** The nav target of the intent that started the activity, held until
      *  the page asks (it boots after the WebView loads). */
@@ -100,11 +112,166 @@ public class NotesNativePlugin extends Plugin {
         ret.put("api", API_LEVEL);
         JSArray features = new JSArray();
         for (String f : new String[] { "reminders", "backgroundRefresh", "exactAlarm", "battery",
-                "share", "calendar", "launchNav" }) {
+                "share", "calendar", "launchNav", "transcribe" }) {
             features.put(f);
         }
         ret.put("features", features);
         call.resolve(ret);
+    }
+
+    // --- writing a voice note down, on this phone or not at all ----------------
+
+    /**
+     * Transcribe the raw 16 kHz mono PCM at `path` (a file URI in this app's
+     * own cache, written by notes/model/transcribe.ts) with Android's
+     * ON-DEVICE recogniser.
+     *
+     * Resolves {text} on success and {text: null, reason} on every refusal --
+     * it never falls back to the networked recogniser, and never sets
+     * EXTRA_PREFER_OFFLINE as a substitute for one (TranscribeGate says why).
+     * The audio itself never crosses the bridge, and the CALLER owns the cache
+     * file and deletes it whatever happens; this method only closes its own
+     * read-only descriptor.
+     */
+    @PluginMethod
+    public void transcribePcm(PluginCall call) {
+        String path = call.getString("path");
+        Integer rate = call.getInt("sampleRate");
+        if (path == null || path.isEmpty() || rate == null || rate <= 0) {
+            call.reject("path and sampleRate are required");
+            return;
+        }
+        boolean onDevice = Build.VERSION.SDK_INT >= TranscribeGate.MIN_SDK && onDeviceRecognitionAvailable();
+        TranscribeGate.Decision d = TranscribeGate.decide(Build.VERSION.SDK_INT, onDevice);
+        if (!d.allowed) {
+            refuse(call, d.reason);
+            return;
+        }
+        // The on-device recogniser still needs the app to hold the microphone
+        // permission, even when it reads from a file.
+        if (getContext().checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+                || getActivity() == null) {
+            refuse(call, "failed");
+            return;
+        }
+        getActivity().runOnUiThread(() -> recognizeFile(call, path, rate));
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.S)
+    private boolean onDeviceRecognitionAvailable() {
+        try {
+            return SpeechRecognizer.isOnDeviceRecognitionAvailable(getContext());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void refuse(PluginCall call, String reason) {
+        JSObject ret = new JSObject();
+        ret.put("text", (String) null);
+        ret.put("reason", reason);
+        call.resolve(ret);
+    }
+
+    /** Main thread only: SpeechRecognizer must be created and driven there. */
+    @RequiresApi(api = Build.VERSION_CODES.TIRAMISU)
+    private void recognizeFile(PluginCall call, String path, int rate) {
+        final AtomicBoolean answered = new AtomicBoolean(false);
+        final StringBuilder heard = new StringBuilder();
+        ParcelFileDescriptor opened = null;
+        SpeechRecognizer created = null;
+        try {
+            String file = Uri.parse(path).getPath();
+            if (file == null) {
+                refuse(call, "failed");
+                return;
+            }
+            opened = ParcelFileDescriptor.open(new File(file), ParcelFileDescriptor.MODE_READ_ONLY);
+            created = SpeechRecognizer.createOnDeviceSpeechRecognizer(getContext());
+            final ParcelFileDescriptor descriptor = opened;
+            final SpeechRecognizer recognizer = created;
+
+            created.setRecognitionListener(new RecognitionListener() {
+                @Override public void onReadyForSpeech(Bundle params) { }
+                @Override public void onBeginningOfSpeech() { }
+                @Override public void onRmsChanged(float rmsdB) { }
+                @Override public void onBufferReceived(byte[] buffer) { }
+                @Override public void onEndOfSpeech() { }
+                @Override public void onPartialResults(Bundle partialResults) { }
+                @Override public void onEvent(int eventType, Bundle params) { }
+
+                @Override
+                public void onError(int error) {
+                    if (!answered.compareAndSet(false, true)) return;
+                    close(descriptor, recognizer);
+                    boolean silence = error == SpeechRecognizer.ERROR_NO_MATCH
+                            || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT;
+                    refuse(call, silence ? "no-speech" : "failed");
+                }
+
+                @Override
+                public void onResults(Bundle results) {
+                    append(results);
+                    finish();
+                }
+
+                @Override
+                public void onSegmentResults(Bundle segmentResults) {
+                    append(segmentResults);
+                }
+
+                @Override
+                public void onEndOfSegmentedSession() {
+                    finish();
+                }
+
+                private void append(Bundle b) {
+                    ArrayList<String> best = b == null ? null : b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                    if (best == null || best.isEmpty()) return;
+                    String line = best.get(0);
+                    if (line == null || line.trim().isEmpty()) return;
+                    if (heard.length() > 0) heard.append(' ');
+                    heard.append(line.trim());
+                }
+
+                private void finish() {
+                    if (!answered.compareAndSet(false, true)) return;
+                    close(descriptor, recognizer);
+                    if (heard.length() == 0) {
+                        refuse(call, "no-speech");
+                        return;
+                    }
+                    JSObject ret = new JSObject();
+                    ret.put("text", heard.toString());
+                    call.resolve(ret);
+                }
+            });
+
+            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            // A file-backed session is a SEGMENTED one: results arrive per
+            // segment and the session ends with onEndOfSegmentedSession.
+            intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE);
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, descriptor);
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT);
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1);
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, rate);
+            created.startListening(intent);
+        } catch (Throwable t) {
+            if (answered.compareAndSet(false, true)) {
+                close(opened, created);
+                refuse(call, "failed");
+            }
+        }
+    }
+
+    private static void close(ParcelFileDescriptor pfd, SpeechRecognizer recognizer) {
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) { }
+        }
+        if (recognizer != null) {
+            try { recognizer.destroy(); } catch (Exception ignored) { }
+        }
     }
 
     // --- due reminders ---------------------------------------------------------
