@@ -44,8 +44,9 @@ one-line summary; this file is the full story. Versions follow
   devices. A per-item *Keep the time private from the server* switch hides that
   too, and then the item gets no reminders.
 - **Snooze.** From Reminders, from the calendar, or from the item's own row
-  in a note or a list: 10 minutes, an hour, or tomorrow morning. The reminder time the server holds moves with the snooze, so a
-  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
+  in a note or a list: 10 minutes, an hour, or tomorrow morning. The reminder
+  time the server holds moves with the snooze, so a phone reminding with Púca
+  Notes closed goes off at the snoozed time. Snooze
   is only offered to people allowed to tick the item, and a snooze set by
   someone who may edit the item cannot be changed or undone by someone who
   may only tick it.

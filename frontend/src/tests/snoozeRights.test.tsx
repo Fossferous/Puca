@@ -166,6 +166,34 @@ describe('Snooze on the item row', () => {
         document.body.innerHTML = '';
         expect(row({ t: { ...moved, snooze: null }, myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).not.toBeNull();
     });
+    // The row's menu is absolutely positioned OVER the next item
+    // (Reminders.css), so one left open would swallow that row's clicks.
+    it('the menu closes on Escape and on a press outside it', () => {
+        const el = mount(
+            <TaskTree
+                tasks={[task]}
+                onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+                onSetDue={() => {}} onSetAttachments={() => {}} onSnooze={() => {}}
+                myPerms={PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS} currentUserId={3}
+            />,
+        );
+        const btn = () => el.querySelector('.tt-item .notes-snooze button') as HTMLButtonElement;
+        const menu = () => el.querySelector('.notes-snooze-menu');
+
+        act(() => btn().click());
+        expect(menu()).not.toBeNull();
+        act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+        expect(menu()).toBeNull();
+
+        act(() => btn().click());
+        expect(menu()).not.toBeNull();
+        // Inside it first — a press on the menu itself must NOT close it.
+        act(() => { menu()!.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+        expect(menu()).not.toBeNull();
+        act(() => { document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+        expect(menu()).toBeNull();
+    });
+
     it('offers Unsnooze only while a snooze is in force', () => {
         const el = mount(
             <TaskTree

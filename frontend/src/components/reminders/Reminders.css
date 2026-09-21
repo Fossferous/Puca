@@ -126,4 +126,9 @@
         max-width: calc(100vw - 16px);
     }
     .notes-snooze-menu .notes-textbtn { min-height: 44px; min-width: 96px; font-size: 15px; }
+    /* The item row's own snooze button. Its siblings in .tt-actions are 30px
+       (TaskTree.css) — the row's long-standing convention — but this one is
+       new, and it opens a menu rather than toggling something recoverable, so
+       it gets the 44px target DESIGN_PHILOSOPHY §7 asks for. */
+    .notes-snooze.tt-snooze .tt-btn { min-width: 44px; min-height: 44px; }
 }

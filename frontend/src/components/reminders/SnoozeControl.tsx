@@ -12,8 +12,13 @@
  * NoteAction in Púca Notes, patchTaskTiming in Púca's Tasks view). The same
  * control serves a Reminders row and an item row inside a list (TaskTree), so
  * there is one snooze menu in the app, not one per surface.
+ *
+ * It closes on Escape and on a press outside it, the way ContextMenu does. On
+ * an item row the menu is absolutely positioned OVER the next row
+ * (Reminders.css), so one left open by moving the pointer away would swallow
+ * that row's clicks until the snooze button was pressed again.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './Reminders.css';
 import { type SnoozePreset, snoozeUntil } from '../../api/taskSchedule';
 import { type ReminderSlot } from '../../api/reminderSlots';
@@ -37,9 +42,23 @@ export function SnoozeControl({ task, snoozed = false, now, onSnooze, className 
     buttonClass?: string;
 }) {
     const [open, setOpen] = useState(false);
+    const wrapRef = useRef<HTMLSpanElement>(null);
+    useEffect(() => {
+        if (!open) return;
+        const onDown = (e: PointerEvent) => {
+            if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+        };
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+        document.addEventListener('pointerdown', onDown, true);
+        document.addEventListener('keydown', onKey, true);
+        return () => {
+            document.removeEventListener('pointerdown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+        };
+    }, [open]);
     if (!task.due_at) return null;
     return (
-        <span className={`notes-snooze ${className}`.trim()} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+        <span ref={wrapRef} className={`notes-snooze ${className}`.trim()} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
             <button
                 type="button"
                 className={buttonClass}

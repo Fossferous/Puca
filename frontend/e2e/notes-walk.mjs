@@ -615,6 +615,21 @@ if (await snoozeBtn.count() === 1) {
     await page.waitForSelector('.tt-item .tt-snoozed', { timeout: 10000 })
         .then(() => ck('púca: Snooze on an item row pushes the reminder back', true))
         .catch(() => ck('púca: Snooze on an item row pushes the reminder back', false));
+    // The menu floats over the NEXT row, so it has to be dismissible without
+    // picking anything: Escape, and a press anywhere outside it.
+    await eggsPuca.hover();
+    await eggsPuca.locator('.notes-snooze button').first().click();
+    await page.waitForSelector('.notes-snooze-menu', { timeout: 5000 });
+    await page.keyboard.press('Escape');
+    ck('púca: Escape closes the row’s snooze menu', await page.locator('.notes-snooze-menu').count() === 0);
+    await eggsPuca.hover();
+    await eggsPuca.locator('.notes-snooze button').first().click();
+    await page.waitForSelector('.notes-snooze-menu', { timeout: 5000 });
+    // On the tab BAR's own background — not on another tab, which would
+    // unmount the rows and hide the menu whatever this handler did.
+    await page.locator('.tasks-tabbar').click({ position: { x: 2, y: 2 } });
+    ck('púca: a press outside closes it too (it would otherwise swallow the next row’s clicks)',
+        await page.locator('.notes-snooze-menu').count() === 0 && await page.locator('.tt-item').count() > 0);
     await eggsPuca.hover();
     await eggsPuca.locator('.notes-snooze button').first().click();
     await page.locator('.notes-snooze-menu button', { hasText: 'Unsnooze' }).click();
@@ -1324,6 +1339,18 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
             skip('púca reminders (phone): snooze is off on this server (taskFeatures)');
         }
         await shotOf(pg)('puca-reminders-phone');
+        // The same 44 px rule on the item ROW's snooze. Reminders.css scopes
+        // it to .notes-snooze.tt-snooze: the 30 px siblings beside it in
+        // .tt-actions are that row's own long-standing convention.
+        await pg.locator('.tasks-tab', { hasText: 'Groceries' }).tap();
+        await pg.waitForSelector('.tt-item', { timeout: 15000 });
+        const rowSnooze = pg.locator('.tt-item .notes-snooze button').first();
+        if (await rowSnooze.count() === 1) {
+            const rb = await rowSnooze.boundingBox();
+            ck('púca tasks (phone): the item row’s snooze is a 44 px target too', !!rb && rb.width >= 44 && rb.height >= 44, JSON.stringify(rb));
+        } else {
+            skip('púca tasks (phone): no snoozable item row here (taskFeatures, or nothing dated)');
+        }
         await pctx.close();
     } catch (e) {
         ck('shared-item hint walk ran', false, String(e).slice(0, 300));

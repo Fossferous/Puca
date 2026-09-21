@@ -15,7 +15,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { type CalendarEntry, type CalendarSource, entriesInRange, groupByDay, layoutDay } from '../../api/taskCalendar';
-import { type SnoozePreset, activeSnooze, snoozeLocked } from '../../api/taskSchedule';
+import { type SnoozePreset, activeSnooze, maySnooze } from '../../api/taskSchedule';
 import { formatDateKey, formatTime } from '../../api/scheduleFormat';
 import {
     type WeekStart, addDaysToKey, gridOpenHour, localDayKey, minutesIntoDay, monthMatrix, parseWall, viewerZone, weekOf,
@@ -500,9 +500,10 @@ function EntryMenu({
     // A snooze rides the completion right on the server: never offer it to a
     // member who would only be refused (a 403 the menu cannot explain) — nor
     // to one who may not edit its time once an editor's snooze has moved
-    // due_at (taskSchedule.snoozeLocked: no change they could make works).
-    const canSnooze = !!onSnooze && !!t.due_at && !entry.completed && entry.source.canComplete !== false
-        && !snoozeLocked(t, entry.source.canEdit);
+    // due_at. That whole rule is taskSchedule.maySnooze, asked here exactly as
+    // both Reminders lists and the item row ask it, so the four surfaces
+    // cannot drift apart.
+    const canSnooze = !!onSnooze && !entry.completed && maySnooze(t, entry.source.canComplete !== false, entry.source.canEdit);
     const snoozed = activeSnooze(t.due_at, t.snooze);
     const act = (fn: () => void) => () => { onClose(); fn(); };
     return createPortal(

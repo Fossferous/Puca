@@ -709,7 +709,9 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
 - **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from either Reminders
   view, from the calendar, and from the item's own row inside a note or a list
   (one control, `components/reminders/SnoozeControl.tsx`), for anyone who may
-  tick the item. When the snoozer may also
+  tick the item. Its menu closes on Escape or a press outside it: on an item
+  row it floats over the row below, which it would otherwise swallow clicks
+  for. When the snoozer may also
   edit the item's time (its creator, a task manager, any personal note), the
   snooze **moves the plaintext `due_at` to the snooze instant** — the server,
   and a phone reminding with Notes closed, see the next reminder — and the
