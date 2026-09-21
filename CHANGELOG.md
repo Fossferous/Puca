@@ -4,7 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.816 — 2026-09-21
+
+Clips that cost a sixth of the CPU, no longer lose two seconds after a press, keep their sound in step and their pointer moving; DeepFilter rides out CPU spikes instead of giving up.
 
 ### Changed
 - **DeepFilter rides out CPU spikes instead of giving up.** When a busy
