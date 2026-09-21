@@ -514,6 +514,9 @@ Off per server until the owner turns it on.** spike numbers: `frontend/e2e/spike
 | system audio track from the WebView2 picker | real shell, toggle ON | 2026-08-18, desktop (spike S1) |
 | hardware encoder engaged | encode call ≈0.02 ms/frame, keyframes 2 s | 2026-08-18 (spike S2, headless Edge) |
 | A/V sync | flash/beep pairing, −42 ms → `AUDIO_OFFSET_US = 40_000` | 2026-08-18 (spike S4) |
+| native A/V anchor's clock assumptions | `e2e/clip-audio-clock-headless.mjs` (muted, never connected to an output): AudioData clock vs worker `performance.now` drift 0.0 ms over 60 s, median 1.4 ms above the min; AAC encoder output ts = input ts, decoded content 5-11 ms later than its ts (varies by run) | 2026-09-21, headless Edge on the owner's desktop |
+| native A/V sync end to end | flash + click through the real app (the `clip-av` puca.log line cannot see the desktop-audio leg's lead) | — |
+| pointer moves on repeated native frames | old vs new agent side by side on the same screen and mouse | 2026-09-21: NOT exercised: the screen presented every slot (754 new pictures, 0 repeats in 30 s); needs a genuinely still screen |
 | 10-min ring memory plateau | ~500 MB renderer working set, flat through eviction | 2026-08-18 (spike S6) |
 | no clip-sized files in the profile | profile scan | 2026-08-18 (spike S9) |
 | Android WebView plays the sealed MP4 | on-device | — (Phase 2) |
