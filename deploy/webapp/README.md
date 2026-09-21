@@ -11,7 +11,9 @@ shells, served directly to a browser. No separate build — it's the production
 - **App-audio capture** + the Windows "is-sharing" bar — desktop-only no-ops.
 - ~~DeepFilter~~ — since the worklet+worker rebuild DeepFilter **does** run in
   the browser (gated behind Settings → Advanced → Experimental); it only falls
-  back to RNNoise if the wasm can't start or the CPU can't keep up.
+  back to RNNoise if the wasm can't start, and rides out CPU spikes on an
+  RNNoise bridge built beside it (settling on it for the call if it keeps
+  falling behind).
 - **Media E2EE** — full frame encryption in Chromium (Insertable Streams);
   Firefox/Safari fall back to transport-only, and the indicator shows it.
 Everything else works: SRP login, E2EE messaging/DMs/channels, voice, screen

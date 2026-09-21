@@ -73,6 +73,7 @@ import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
 import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon } from './Icons';
 import { Toast } from './Toast';
+import { useDfSettledOffer } from './useDfSettledOffer';
 import './VoicePanel.css';
 
 
@@ -150,6 +151,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      *  Carries the step-down it is offering. Cleared when the share ends, and
      *  re-offered only after a step the person actually took. */
     const [loadOffer, setLoadOffer] = useState<{ text: string; to: ShareQuality } | null>(null);
+    /** Set when DeepFilter settled on its RNNoise bridge for this call
+     *  (deepFilter.ts): the text to show beside "Try DeepFilter again". */
+    const [dfOffer, setDfOffer] = useDfSettledOffer();
     /** The live watch, so accepting an offer can re-arm it — one step is not
      *  always enough, and a decline and an acceptance must not mean the same
      *  thing to it. Owned by the effect below. */
@@ -2074,16 +2078,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
     // A noise-suppression graph died (worklet wasm crash, or the liveness
     // watchdog caught it emitting pure silence against live speech): fall back
-    // to Standard so the user KEEPS TRANSMITTING, and say so.
+    // a tier so the user KEEPS TRANSMITTING, and say so.
+    //
+    // A DeepFilter that is only BEHIND does not come here: its RNNoise bridge
+    // covers the gap and it settles on that bridge by itself when it has to
+    // (useDfSettledOffer). The one overload that still arrives is a graph
+    // with no working bridge, marked kind 'overload'.
     useEffect(() => {
-        const onDead = () => {
+        const onDead = (e: Event) => {
             const mode = getNoiseSuppressionMode();
             if (mode !== 'rnnoise' && mode !== 'deepfilter') return; // stale event
+            const kind = (e as CustomEvent<{ kind?: string } | null>).detail?.kind;
             // Cascade one tier at a time: DeepFilter's failure says nothing
             // about RNNoise (different thread, different wasm), so a DF death
-            // (usually "this device can't keep up") lands on the lighter ML
-            // tier; an RNNoise death lands on Standard. A dead RNNoise fallback
-            // then cascades again via this same handler.
+            // lands on the lighter ML tier; an RNNoise death lands on
+            // Standard. A dead RNNoise fallback then cascades again via this
+            // same handler.
             const fallback: NoiseSuppressionMode = mode === 'deepfilter' ? 'rnnoise' : 'standard';
             console.error(`[VoicePanel] Noise-suppression graph dead — falling back from ${mode} to ${fallback}`);
             setNoiseMode(fallback);
@@ -2091,14 +2101,19 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // saved preference. Next launch retries their mode and falls back
             // again if it really is broken here.
             setNoiseSuppressionMode(fallback, false);
+            setDfOffer(null);
+            // No "for this call": the downgrade lasts until the member picks
+            // a mode again or restarts, and the notice used to promise less.
             setMicNotice(mode === 'deepfilter'
-                ? 'DeepFilter can’t keep up on this device — switched to RNNoise for this call.'
-                : 'RNNoise isn’t working on this device — switched to Standard noise suppression for this call so others can hear you.');
+                ? (kind === 'overload'
+                    ? 'DeepFilter can’t keep up on this device — switched to RNNoise. Pick DeepFilter again to retry.'
+                    : 'DeepFilter stopped working — switched to RNNoise. Pick DeepFilter again to retry.')
+                : 'RNNoise isn’t working on this device — switched to Standard noise suppression so others can hear you.');
             applyNoiseModeLive();
         };
         window.addEventListener('sovereign:noise-graph-dead', onDead);
         return () => window.removeEventListener('sovereign:noise-graph-dead', onDead);
-    }, [applyNoiseModeLive]);
+    }, [applyNoiseModeLive, setDfOffer]);
 
     // The graph failed to BUILD (import/wasm/addModule threw) rather than dying
     // later. media.ts has already downgraded the mode and re-captured the mic
@@ -2293,6 +2308,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         voiceDetectorCleanups.current.clear();
         setSpeakingUsers(new Set());
         setMicNotice(null);
+        setDfOffer(null);
 
         // Local camera teardown (the WS notify already went out above, before
         // we left the room).
@@ -2318,7 +2334,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // scratch, or every share still running when we left would be silently
         // treated as a replay and never chime or open a tile.
         sharingAnnouncedRef.current.clear();
-    }, [roomId, currentUserId, refreshVoiceUsersList, clearInactivity, setConnecting, stopPendingTimer]);
+    }, [roomId, currentUserId, refreshVoiceUsersList, clearInactivity, setConnecting, stopPendingTimer, setDfOffer]);
 
     // Keep the eviction handler's teardown pointer fresh (see RoomLeft handler).
     useEffect(() => { leaveVoiceRef.current = leaveVoice; }, [leaveVoice]);
@@ -3135,6 +3151,23 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         Lower it
                     </button>
                     <button className="voice-load-offer-btn ghost" onClick={() => setLoadOffer(null)}>Keep it</button>
+                </div>
+            )}
+            {dfOffer && (
+                <div className="voice-diag-note voice-load-offer" role="status">
+                    <span>{dfOffer}</span>
+                    <button
+                        className="voice-load-offer-btn"
+                        onClick={() => {
+                            setDfOffer(null);
+                            // The mode is still DeepFilter, so re-applying it
+                            // builds a fresh graph: a new Worker and bridge.
+                            void applyNoiseModeLive();
+                        }}
+                    >
+                        Try DeepFilter again
+                    </button>
+                    <button className="voice-load-offer-btn ghost" onClick={() => setDfOffer(null)}>Keep RNNoise</button>
                 </div>
             )}
             {/* Permission Help Modal — per-platform instructions (MicPermissionHelp) */}

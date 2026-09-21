@@ -242,6 +242,18 @@ mod stub {
         pub fn update_size(&mut self, _width: u32, _height: u32) -> bool {
             false
         }
+
+        pub fn encode_bgra_picture(
+            &mut self,
+            bgra: &[u8],
+            stride: usize,
+            force_key: bool,
+            _picture: u64,
+        ) -> Result<EncodedFrame, EncodeError> {
+            self.encode_bgra(bgra, stride, force_key)
+        }
+
+        pub fn set_patient_output(&mut self, _patient: bool) {}
     }
 }
 

@@ -23,11 +23,11 @@
 
  * Privacy contract (docs/CLIPS.md): no MediaRecorder, no Blob for the buffer,
  * no IndexedDB/localStorage/File; every closed GOP is AES-GCM ciphertext under
- * a non-extractable key; plaintext exists only in flight (the open GOP, the
- * seal's transient mux buffers, a preview/trim part while it is being
- * processed) and is zero-filled after use.
+ * a non-extractable key; plaintext exists only in flight (the open GOP, a
+ * seal's copy of it, the seal's transient mux buffers, a preview/trim part
+ * while it is being processed) and is zero-filled after use.
  */
-import { evictionPlan, selectWindow, trimLeadingAudio, type ChunkIndexEntry, type GopUnit } from './clipRing';
+import { evictionPlan, selectWindow, trimLeadingAudio, type ChunkIndexEntry, type GopUnit, type WindowUnit } from './clipRing';
 import { newRingKey, sealGop, openGop, newClipSecrets, sealPart, openPart, PART_MAX_PLAINTEXT, type ClipSecrets } from './clipCrypto';
 import { Fmp4Splitter, type SplitPart } from './fmp4Split';
 import { encodeClipRef, MAX_CLIP_PARTS, type ClipAudioCodec, type ClipManifest } from './clipRef';
@@ -61,6 +61,31 @@ interface OpenGop {
     bytes: number;
 }
 
+/** A seal's snapshot of the OPEN unit: what it held at the press, copied, so
+ *  the seal can include it without closing it. Closing it (what seal() used
+ *  to do) cost the native path everything up to the agent's next timed
+ *  keyframe, up to 2 s, because only the picker path can force one. Never
+ *  enters `gops`, eviction or `ringBytes`; zero-filled when the seal ends
+ *  (or by wipe(), which reaches it through `sealTails`). */
+interface TailUnit extends WindowUnit {
+    video: ChunkIndexEntry[];
+    audio: ChunkIndexEntry[];
+    plain: Uint8Array;
+}
+
+type SealUnit = GopUnit | TailUnit;
+
+/** A unit's plaintext layout: its video chunks in order, then its audio. */
+function concatOpen(g: OpenGop): Uint8Array {
+    const plain = new Uint8Array(g.bytes);
+    let o = 0;
+    for (const p of g.videoParts) { plain.set(p, o); o += p.byteLength; }
+    for (const p of g.audioParts) { plain.set(p, o); o += p.byteLength; }
+    return plain;
+}
+
+type NativeChunk = { keyframe: boolean; tsUs: number; durUs: number; bytes: ArrayBuffer; codec?: string; codedWidth?: number; codedHeight?: number };
+
 interface SealedClip {
     clipId: string;
     secrets: ClipSecrets;
@@ -75,7 +100,7 @@ interface SealedClip {
     ms?: MediaSource;
 }
 
-class Ring {
+export class Ring {
     cfg!: ArmConfig;
     key!: CryptoKey;
     gops: GopUnit[] = [];
@@ -97,6 +122,31 @@ class Ring {
     // timing
     firstVideoTs: number | null = null; wallV = 0;
     firstAudioTs: number | null = null; wallA = 0;
+    /** NATIVE A/V anchor. The picker path rebases both tracks by their first
+     *  samples' wall times (firstVideoTs/wallV/wallA, spike-calibrated). The
+     *  native path cannot: its video timestamps count from the agent's own
+     *  start, which this worker never sees, and wallV was never set, so
+     *  audio landed LATE by however long the agent took to start (plus the
+     *  picker's 40 ms). Instead each clock's origin is estimated in THIS
+     *  worker's time: the running MIN of (arrival - ts). A sample can only
+     *  arrive after it happened, so the min converges from above onto the
+     *  origin plus the fastest transport seen. Stamped at RECEIPT: a parked
+     *  chunk carries its receipt time to the drain, which comes hundreds
+     *  of ms later. A video timestamp that goes BACKWARDS is another
+     *  capture's clock and restarts the estimate (restartNativeClock).
+     *  Audio entries stay on the audio clock; seal() shifts them onto the
+     *  video timeline once per clip (`audioShiftUs`), so a later, better
+     *  estimate can never make one clip's audio go backwards. */
+    vOriginMs = Infinity; aOriginMs = Infinity;
+    vOriginSince: number | null = null; aOriginSince: number | null = null;
+    lastNativeTsUs = -Infinity;
+    /** Seals muxing right now. Eviction waits for them: it splices `gops`
+     *  and zero-fills what it drops, which would pull units out from under
+     *  a mux still reading them. The next close (or the last seal to
+     *  finish) catches up. */
+    sealsInFlight = 0;
+    /** In-flight seals' copies of the open unit, so wipe() can zero them. */
+    sealTails = new Set<Uint8Array>();
     lastKeyUs = -Infinity;
     forceKeyNext = true;
     // pumps
@@ -107,7 +157,7 @@ class Ring {
      *  completion in the middle of arm()'s awaits). Drained at the end of
      *  arm(); bounded, dropping the OLDEST (the codec re-rides every
      *  keyframe, so old chunks are the safe ones to lose). */
-    pendingNative: Parameters<Ring['ingestNativeVideoChunk']>[0][] = [];
+    pendingNative: [NativeChunk, number][] = [];
     audioGen = 0;
     running = false;
     // stats
@@ -156,35 +206,61 @@ class Ring {
         // codec-bearing first keyframe) is kept rather than dropped.
         const parked = this.pendingNative;
         this.pendingNative = [];
-        for (const c of parked) this.ingestNativeVideoChunk(c);
+        for (const [c, arrivedMs] of parked) this.ingestNativeVideoChunk(c, arrivedMs);
     }
 
     /** Feed one pre-encoded Annex-B access unit from a native capture
      *  directly into the SAME GOP-closing logic the WebCodecs path uses
      *  (`onVideoChunk`) — constructing a real `EncodedVideoChunk` is exactly
      *  as valid an input to it as one `VideoEncoder`'s own `output` callback
-     *  produces; nothing downstream can tell the difference. */
-    ingestNativeVideoChunk(m: { keyframe: boolean; tsUs: number; durUs: number; bytes: ArrayBuffer; codec?: string; codedWidth?: number; codedHeight?: number }): void {
+     *  produces; nothing downstream can tell the difference. `arrivedMs` is
+     *  when onmessage RECEIVED it (see vOriginMs). */
+    ingestNativeVideoChunk(m: NativeChunk, arrivedMs: number = nowMs()): void {
         if (!this.cfg?.nativeVideo || this.fatal) return;
         if (!this.running) {
             // arm() has set cfg but is still awaiting (key/codec probes) —
             // park the chunk; arm()'s tail drains this in order. 600 FRAMES:
             // 20 s at 30 fps, 10 s at the 60 fps presets; dropping the oldest
             // is safe because the codec re-rides every keyframe.
-            this.pendingNative.push(m);
-            if (this.pendingNative.length > 600) this.pendingNative.shift();
+            this.pendingNative.push([m, arrivedMs]);
+            if (this.pendingNative.length > 600) new Uint8Array(this.pendingNative.shift()![0].bytes).fill(0);
             return;
         }
+        if (m.tsUs < this.lastNativeTsUs) this.restartNativeClock();
+        this.lastNativeTsUs = m.tsUs;
+        // Every chunk is a clock sample, codec-less included.
+        if (arrivedMs - m.tsUs / 1000 < this.vOriginMs) this.vOriginMs = arrivedMs - m.tsUs / 1000;
+        this.vOriginSince ??= arrivedMs;
         const firstChunk = this.videoCodec === null;
         if (firstChunk) {
-            if (!m.codec) return; // the first chunk MUST carry the SPS-derived codec string
+            // The first chunk MUST carry the SPS-derived codec string.
+            if (!m.codec) { new Uint8Array(m.bytes).fill(0); return; }
             this.videoCodec = m.codec;
             post({ t: 'armed', videoCodec: this.videoCodec, audioCodec: this.audioCodec, width: this.width, height: this.height });
         }
-        this.bytesThisSec += m.bytes.byteLength;
+        // Bytes are counted in onVideoChunk, the one place both paths pass
+        // through; counting them here too doubled the native kbps.
         this.encodedFrames++; this.framesThisSec++;
         const chunk = new EncodedVideoChunk({ type: m.keyframe ? 'key' : 'delta', timestamp: m.tsUs, duration: m.durUs, data: m.bytes });
         this.onVideoChunk(chunk, firstChunk ? { decoderConfig: { codec: m.codec!, codedWidth: m.codedWidth ?? this.width, codedHeight: m.codedHeight ?? this.height } } : undefined);
+        new Uint8Array(m.bytes).fill(0); // EncodedVideoChunk copied it
+    }
+
+    /** A native timestamp went BACKWARDS: another capture's clock. "Restart
+     *  buffer" re-arms at once, and the old capture's last chunks could
+     *  reach this ring before the new capture's first (nativeCapture.ts
+     *  now drops foreign generations; this is the backstop for a chunk
+     *  that gets past it). Taken as a clock sample, one such chunk
+     *  put every later clip's audio late by the old session's length.
+     *  Nothing on the old clock shares a timeline with what follows: start
+     *  the estimate again, drop the open unit, and make the next
+     *  codec-bearing keyframe a new configuration (selectWindow never
+     *  muxes units of an older one into the same track). */
+    private restartNativeClock(): void {
+        this.vOriginMs = Infinity; this.vOriginSince = null;
+        if (this.open) { for (const p of this.open.videoParts) p.fill(0); for (const p of this.open.audioParts) p.fill(0); this.open = null; }
+        this.configId++;
+        this.videoCodec = null; this.vDecoderConfig = null;
     }
 
     private async pickVideoCodec(w: number, h: number, fps: number, bitrate: number): Promise<string | null> {
@@ -278,7 +354,12 @@ class Ring {
             try { res = await reader.read(); } catch { break; }
             if (res.done || !this.running || gen !== this.audioGen) { res.value?.close(); break; }
             const data = res.value;
+            const readMs = nowMs();
             try {
+                if (this.cfg.nativeVideo) {
+                    if (readMs - data.timestamp / 1000 < this.aOriginMs) this.aOriginMs = readMs - data.timestamp / 1000;
+                    this.aOriginSince ??= readMs;
+                }
                 if (this.fatal || !this.aenc || this.aenc.state !== 'configured') continue;
                 if (this.firstAudioTs === null) { this.firstAudioTs = data.timestamp; this.wallA = nowMs(); }
                 this.aenc.encode(data);
@@ -308,6 +389,8 @@ class Ring {
      *  sample, add the wall-clock skew between those first samples, and the
      *  spike-measured constant offset. */
     private audioTsUs(raw: number): number {
+        // Native: kept on the audio clock; seal() maps it (see vOriginMs).
+        if (this.cfg.nativeVideo) return raw;
         return raw - (this.firstAudioTs ?? raw) + Math.round((this.wallA - this.wallV) * 1000) + this.cfg.audioOffsetUs;
     }
 
@@ -327,7 +410,7 @@ class Ring {
             this.open = { startUs: tsUs, endUs: tsUs + durUs, configId: this.configId, videoParts: [], videoIdx: [], audioParts: [], audioIdx: [], bytes: 0 };
         }
         const g = this.open;
-        if (!g) return; // delta before the first keyframe (cannot happen after forceKeyNext, but be safe)
+        if (!g) return; // a delta before the first keyframe of an arm or a reconfigure
         g.videoParts.push(buf);
         g.videoIdx.push({ tsUs, durUs, len: buf.byteLength, key: chunk.type === 'key' });
         g.bytes += buf.byteLength;
@@ -349,7 +432,9 @@ class Ring {
         const g = this.open;
         if (!g) return; // before the first video keyframe: nothing to attach to
         const tsUs = this.audioTsUs(chunk.timestamp);
-        if (tsUs < 0) return; // predates the first video frame
+        // Predates the first video frame. Native entries are still on the
+        // audio clock here; seal()'s trimLeadingAudio drops theirs.
+        if (!this.cfg.nativeVideo && tsUs < 0) return;
         const buf = new Uint8Array(chunk.byteLength);
         chunk.copyTo(buf);
         g.audioParts.push(buf);
@@ -362,16 +447,19 @@ class Ring {
         const g = this.open;
         this.open = null;
         if (!g || g.videoIdx.length === 0) return;
-        const plain = new Uint8Array(g.bytes);
-        let o = 0;
-        for (const p of g.videoParts) { plain.set(p, o); o += p.byteLength; }
-        for (const p of g.audioParts) { plain.set(p, o); o += p.byteLength; }
+        const plain = concatOpen(g);
+        for (const p of g.videoParts) p.fill(0);
+        for (const p of g.audioParts) p.fill(0);
         g.videoParts.length = 0; g.audioParts.length = 0;
         const counter = this.counter++;
         const seq = this.seq++;
         this.pendingCloses++;
         if (this.pendingCloses > MAX_PENDING_CLOSES) {
-            this.fail('crypto', `GOP sealing fell ${this.pendingCloses} units behind`);
+            // Nothing is chained for this one, so nothing would count it
+            // back down. Bookkeeping: seal()'s wait also stops on `fatal`.
+            this.pendingCloses--;
+            plain.fill(0);
+            this.fail('crypto', `GOP sealing fell ${this.pendingCloses + 1} units behind`);
             return;
         }
         this.closing = this.closing.then(async () => {
@@ -381,12 +469,7 @@ class Ring {
                 if (!this.running) { blob.fill(0); return; }
                 this.gops.push({ seq, configId: g.configId, startUs: g.startUs, endUs: g.endUs, video: g.videoIdx, audio: g.audioIdx, counter, blob, plainLen: g.bytes });
                 this.ringBytes += blob.byteLength;
-                for (const ev of evictionPlan(this.gops, { maxDurationUs: this.cfg.ringMs * 1000, maxBytes: this.cfg.maxRingBytes })) {
-                    const i = this.gops.indexOf(ev);
-                    if (i >= 0) this.gops.splice(i, 1);
-                    this.ringBytes -= ev.blob.byteLength;
-                    ev.blob.fill(0);
-                }
+                if (this.sealsInFlight === 0) this.evict();
             } catch (e) {
                 plain.fill(0);
                 this.fail('crypto', e instanceof Error ? e.message : String(e));
@@ -394,6 +477,38 @@ class Ring {
                 this.pendingCloses--;
             }
         });
+    }
+
+    /** Drop the oldest units until the ring fits its limits again. */
+    private evict(): void {
+        for (const ev of evictionPlan(this.gops, { maxDurationUs: this.cfg.ringMs * 1000, maxBytes: this.cfg.maxRingBytes })) {
+            const i = this.gops.indexOf(ev);
+            if (i >= 0) this.gops.splice(i, 1);
+            this.ringBytes -= ev.blob.byteLength;
+            ev.blob.fill(0);
+        }
+    }
+
+    /** What seal() adds to a native audio entry's timestamp to put it on
+     *  the video timeline (see vOriginMs); 0 on the picker path, whose
+     *  entries were rebased at ingest. */
+    private audioShiftUs(): number {
+        if (!this.cfg.nativeVideo) return 0;
+        if (!Number.isFinite(this.aOriginMs) || !Number.isFinite(this.vOriginMs)) return this.cfg.audioOffsetUs;
+        return Math.round((this.aOriginMs - this.vOriginMs) * 1000) + this.cfg.audioOffsetUs;
+    }
+
+    /** The native anchor, for the silent diagnostic replayBuffer logs to
+     *  puca.log: once both clocks have been sampled for 5 s. `legacyLateMs`
+     *  is how much later the code before this anchor placed audio. */
+    private avAnchor(): WorkerStatus['avAnchor'] {
+        const now = nowMs();
+        if (!this.cfg.nativeVideo || this.vOriginSince === null || this.aOriginSince === null || this.firstAudioTs === null) return undefined;
+        if (now - this.vOriginSince < 5000 || now - this.aOriginSince < 5000) return undefined;
+        const shiftMs = this.audioShiftUs() / 1000;
+        const legacyMs = this.wallA - this.firstAudioTs / 1000 + 40;
+        const r = (x: number) => Math.round(x * 10) / 10;
+        return { videoOriginMs: r(this.vOriginMs), shiftMs: r(shiftMs), legacyLateMs: r(legacyMs - shiftMs) };
     }
 
     bufferedUs(): number {
@@ -409,6 +524,7 @@ class Ring {
             bufferedMs: Math.round(this.bufferedUs() / 1000), ringBytes: this.ringBytes + (this.open?.bytes ?? 0), gops: this.gops.length,
             droppedFrames: this.dropped, fps: this.fps, kbps: this.kbps, encodedFrames: this.encodedFrames,
             hasAudio: !!this.audioReader, videoCodec: this.videoCodec, audioCodec: this.audioCodec, width: this.width, height: this.height,
+            avAnchor: this.avAnchor(),
         };
         post({ t: 'status', s });
     }
@@ -422,20 +538,50 @@ class Ring {
 
     // ---- seal ------------------------------------------------------------------
     async seal(clipId: string, requestedMs: number, maxMs?: number): Promise<SealedClip> {
-        // Bring every pending frame out of the encoders and close the open unit
-        // so "Clip" captures right up to now. The next frame MUST be a keyframe:
-        // the unit that starts after this seal has no keyframe of its own otherwise.
+        // Bring every pending frame out of the encoders (the picker path) and
+        // let every GOP already closed finish sealing into the ring.
         try { await this.venc?.flush(); } catch { /* ignore */ }
         try { await this.aenc?.flush(); } catch { /* ignore */ }
-        this.closeOpenGop();
-        this.forceKeyNext = true;
-        await this.closing;
+        while (this.pendingCloses > 0 && !this.fatal) await this.closing;
+        if (this.fatal || !this.running) throw new Error('the buffer stopped before the clip could be made');
+        // THE PRESS: nothing awaits between here and `chosen`, so the clip is
+        // exactly the ring as it stands now plus a COPY of the open unit. The
+        // open unit is not closed: it keeps growing and closes on its own
+        // next keyframe, so nothing is lost after the press (the native
+        // path cannot force that keyframe). The mux reads `chosen` by
+        // reference, and eviction waits (sealsInFlight), so frames arriving
+        // while it runs can neither enter this clip nor pull a unit from it.
+        this.sealsInFlight++;
+        const held: { tail: TailUnit | null } = { tail: null };
+        try {
+            return await this.sealSnapshot(clipId, requestedMs, maxMs, held);
+        } finally {
+            const t = held.tail;
+            if (t) { t.plain.fill(0); this.sealTails.delete(t.plain); }
+            if (--this.sealsInFlight === 0 && this.running) this.evict();
+        }
+    }
+
+    /** The body of seal() from the press on. Synchronous up to `chosen`. */
+    private async sealSnapshot(clipId: string, requestedMs: number, maxMs: number | undefined, held: { tail: TailUnit | null }): Promise<SealedClip> {
         if (!this.vDecoderConfig || !this.videoCodec) throw new Error('no video decoder configuration yet');
-        const win = selectWindow(this.gops, requestedMs * 1000, maxMs !== undefined ? maxMs * 1000 : undefined);
+        // Part of the snapshot: a picker reconfigure mid-mux replaces these.
+        const vcfg = this.vDecoderConfig, width = this.width, height = this.height;
+        const units: SealUnit[] = [...this.gops];
+        const op = this.open;
+        if (op && op.videoIdx.length > 0) {
+            const tail: TailUnit = { configId: op.configId, startUs: op.startUs, endUs: op.endUs, video: op.videoIdx.slice(), audio: op.audioIdx.slice(), plain: concatOpen(op) };
+            this.sealTails.add(tail.plain);
+            held.tail = tail;
+            units.push(tail);
+        }
+        const win = selectWindow(units, requestedMs * 1000, maxMs !== undefined ? maxMs * 1000 : undefined);
         if (!win) throw new Error('the buffer is empty');
+        const chosen = units.slice(win.from, win.to + 1);
+        const shiftUs = this.audioShiftUs();
         const secrets = newClipSecrets(clipId);
         const audioCodec = this.audioCodec;
-        const hasAudio = !!audioCodec && !!this.aDecoderConfig && this.gops.slice(win.from, win.to + 1).some(g => g.audio.length > 0);
+        const hasAudio = !!audioCodec && !!this.aDecoderConfig && chosen.some(u => u.audio.length > 0);
 
         // Mux with mediabunny (statically imported above; worker-only bundle).
         const parts: SplitPart[] = [];
@@ -454,22 +600,26 @@ class Ring {
         await output.start();
 
         let firstV = true, firstA = true;
-        for (let i = win.from; i <= win.to; i++) {
-            const g = this.gops[i];
-            const plain = await openGop(this.key, g.counter, g.blob);
+        for (const g of chosen) {
+            // A disarm mid-seal zero-fills the ring and this seal's tail.
+            if (!this.running) throw new Error('the buffer was disarmed');
+            const plain = 'plain' in g ? g.plain : await openGop(this.key, g.counter, g.blob);
             try {
                 let off = 0;
                 for (const v of g.video) {
                     const bytes = plain.slice(off, off + v.len); off += v.len;
                     const pkt = new mb.EncodedPacket(bytes, v.key ? 'key' : 'delta', (v.tsUs - win.startUs) / 1e6, v.durUs / 1e6);
-                    await vsrc.add(pkt, firstV ? { decoderConfig: this.vDecoderConfig } : undefined);
+                    await vsrc.add(pkt, firstV ? { decoderConfig: vcfg } : undefined);
                     firstV = false;
                 }
-                const audioEntries = i === win.from ? trimLeadingAudio(g.audio, win.startUs) : g.audio;
+                // Native entries are on the audio clock until here (shiftUs);
+                // one shift per clip keeps its audio monotonic.
+                const audio = shiftUs === 0 ? g.audio : g.audio.map(a => ({ ...a, tsUs: a.tsUs + shiftUs }));
+                const audioEntries = g === chosen[0] ? trimLeadingAudio(audio, win.startUs) : audio;
                 // audio bytes follow the video bytes; walk the FULL index to keep offsets right
                 let aoff = off;
                 const keep = new Set(audioEntries);
-                for (const a of g.audio) {
+                for (const a of audio) {
                     const bytes = plain.slice(aoff, aoff + a.len); aoff += a.len;
                     if (!asrc || !keep.has(a)) continue;
                     const ts = Math.max(0, (a.tsUs - win.startUs) / 1e6);
@@ -508,13 +658,13 @@ class Ring {
         }
         const info: SealedInfo = {
             clipId, durationMs: Math.round(totalS * 1000), leadInMs: Math.round(win.leadInUs / 1000), lostMs: Math.round(win.lostUs / 1000),
-            width: this.width, height: this.height, partCount: sealedParts.length, totalCipherBytes: totalCipher,
-            videoCodec: this.vDecoderConfig.codec, audioCodec: hasAudio ? audioCodec : null, partDurMs: sealedParts.map(p => p.durMs),
+            width, height, partCount: sealedParts.length, totalCipherBytes: totalCipher,
+            videoCodec: vcfg.codec, audioCodec: hasAudio ? audioCodec : null, partDurMs: sealedParts.map(p => p.durMs),
             // Overwritten with the real value at send time (postSealed) — a
             // fresh seal always discards any undo point (discardSealed, below).
             canUndo: false,
         };
-        return { clipId, secrets, parts: sealedParts, info, videoCodec: this.vDecoderConfig.codec, audioCodec: hasAudio ? audioCodec : null, uploadedIds: new Map() };
+        return { clipId, secrets, parts: sealedParts, info, videoCodec: vcfg.codec, audioCodec: hasAudio ? audioCodec : null, uploadedIds: new Map() };
     }
 
     async wipe(): Promise<void> {
@@ -529,6 +679,10 @@ class Ring {
         this.venc = null; this.aenc = null;
         await this.closing.catch(() => { /* ignore */ });
         for (const g of this.gops) g.blob.fill(0);
+        for (const p of this.sealTails) p.fill(0);
+        this.sealTails.clear();
+        for (const [c] of this.pendingNative) new Uint8Array(c.bytes).fill(0);
+        this.pendingNative = [];
         this.gops.length = 0;
         this.ringBytes = 0;
         if (this.open) { for (const p of this.open.videoParts) p.fill(0); for (const p of this.open.audioParts) p.fill(0); this.open = null; }
@@ -748,7 +902,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                 break;
             }
             case 'rebindAudio': ring?.bindAudio(m.audio); break;
-            case 'nativeVideoChunk': ring?.ingestNativeVideoChunk(m); break;
+            case 'nativeVideoChunk': ring?.ingestNativeVideoChunk(m, nowMs()); break;
             case 'seal': {
                 if (!ring) throw new Error('not armed');
                 discardSealed();

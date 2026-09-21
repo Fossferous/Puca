@@ -944,6 +944,14 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                     setMicTestNotice(`${labelForMode(mode)} stopped working during playback (${why}). ` +
                         'In a call you would be switched down a tier automatically.');
                 },
+                onSettled: (why) => {
+                    if (stale()) return;
+                    // Still playing, but it is RNNoise now: say so in the
+                    // status line as well as the notice.
+                    setMicPlayMode('rnnoise');
+                    setMicTestNotice(`DeepFilter fell behind (it ${why}), so RNNoise is playing. ` +
+                        'In a call RNNoise would take over the same way, with a button to try DeepFilter again.');
+                },
                 onFallback: (from, to, why) => {
                     fallbackNote = `${labelForMode(from)} couldn’t start here (${why}) — playing through ${labelForMode(to)} instead.`;
                 },
@@ -2995,9 +3003,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 Adds a “DeepFilter (Max)” option to the Noise Suppression Mode
                                                 picker (Voice settings and the voice panel) — heavier ML
                                                 suppression than RNNoise, run in a background thread. Costs
-                                                real CPU and ~14 MB on first use; if this device can’t keep up
-                                                it falls back automatically mid-call. Try it with the mic test
-                                                in Voice settings after enabling.
+                                                real CPU and ~14 MB on first use. If a CPU spike leaves it behind,
+                                                RNNoise covers until it catches up; if it keeps falling behind,
+                                                RNNoise takes over for the call. Try it with the mic test in
+                                                Voice settings after enabling.
                                             </span>
                                         </div>
                                         <input

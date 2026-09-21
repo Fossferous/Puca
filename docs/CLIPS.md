@@ -73,6 +73,14 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   until the server says everyone approved; then a worker-side MSE preview and
   a trim (a RE-MUX of the kept range into a fresh fMP4 whose timeline starts
   at 0, re-sealed under fresh indices — `clipTrim.ts`) precede the upload.
+  The press does NOT close the open unit (2026-09-21): the seal muxes a
+  zero-filled-after-use COPY of it, and the unit keeps growing until its
+  own next keyframe. Closing it cost the native path everything up to the
+  agent's next timed keyframe (up to 2 s, video and audio) in every later
+  clip spanning the press, because only the picker path can force one.
+  The seal reads a list of units snapshotted at the press, and eviction
+  waits while any seal runs, so GOPs closing mid-mux can neither enter
+  the clip nor pull (and zero-fill) a unit out from under it.
 - **Discard / disarm / leave / channel switch / suspend / lock / quit** zero
   the buffers and drop the key (table below).
 
@@ -82,7 +90,8 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   (`src/tests/clipNoDiskWrite.test.ts` greps for it; the spike scanned the
   WebView2 profile for clip-sized files and found only Chromium caches).
 - The ring is ciphertext under a non-extractable key; plaintext exists only in
-  flight (the open GOP, the seal's transient mux buffers) and is zero-filled.
+  flight (the open GOP, a seal's copy of it, the seal's transient mux
+  buffers) and is zero-filled.
 - Nothing is uploaded until every required approver has said yes (Phase 2:
   the server refuses `kind=clip` bytes for an unapproved proposal BEFORE it
   reads the body). The server never sees a frame; the clip key rides in the
@@ -275,6 +284,47 @@ needs no picker).
   every IDR, so `ParamSetCache` caches the first SPS/PPS seen and prepends
   them to any later keyframe missing its own — otherwise a `seal()`/`trim()`
   primed from a LATER keyframe could throw an opaque mediabunny error.
+- **The pointer on repeated frames (2026-09-21).** DXGI reports a
+  pointer-only change as a frame with `LastPresentTime == 0`, which
+  `next_frame` answers as `Timeout`; the loops then re-send the stored
+  frame, whose pointer was drawn at the last present, so over a still
+  window it froze and jumped at the next present. Both loops now call
+  `puca_clip_wire::refresh_repeat`, which calls
+  `ScreenCapture::redraw_cursor` and bumps `picture` only when that
+  changed the pixels, so the NV12 is converted again exactly then.
+  `redraw_cursor` is a save-under (puca-capture `CursorOverlay`): the
+  pixels under the pointer are kept at each present, put back, and the
+  pointer drawn at its new spot; restore before save, never
+  undo-by-redraw. Cost: the pointer's rectangle (4 KB at 32x32), and one
+  conversion per slot while the pointer moves over a still screen. The
+  remote-control stream never calls it, so a pointer-only update still
+  sends nothing there.
+- **A/V anchoring (2026-09-21).** The video timestamps count from the
+  capture loop's own start (never 0 at the first chunk); the AudioData
+  timestamps are on another clock entirely (~30 h at the first sample).
+  Until then the worker rebased audio against its own time origin, so
+  audio in every native clip was LATE by the agent's start-up time plus
+  the picker path's 40 ms. Now the worker estimates each clock's origin
+  in its own time as the running MIN of (arrival - ts): video stamped
+  when onmessage receives a chunk (never when a parked chunk is drained),
+  audio when the pump reads a sample. Audio entries stay on the audio
+  clock and `seal()` applies one shift per clip, so a later, tighter
+  estimate cannot make a clip's audio go backwards (mediabunny throws on
+  that). The native offset is 0 (`NATIVE_AUDIO_OFFSET_US`); the 40 ms is
+  the picker's. Residual, not corrected and not visible to the anchor:
+  the desktop-audio leg's own latency (WASAPI buffer, IPC, the loopback
+  AudioContext's scheduling lead, ~50 ms and drifting up to 500 ms before
+  it re-primes), minus the video stamp's lag behind the present (it is
+  taken after acquire and readback). Only an end-to-end sync test (flash
+  plus click) can calibrate that. `clip-video-chunk` carries the capture
+  generation (as `clip-audio-data` does) and `startNativeVideo` drops any
+  other capture's chunks, so the old capture's tail after "Restart
+  buffer" never reaches the new ring; as a backstop, a video timestamp
+  going BACKWARDS is treated as another capture's clock and restarts the
+  estimate. Silent field check: once both clocks have
+  5 s of samples, puca.log gets `[stream-diag] clip-av video-origin=..
+  shift=.. legacy-late=..` (again if the shift moves 10 ms), where
+  `legacy-late` is how much later the old code placed the audio.
 - **Indicator**: `armNative()` fires the roster "buffering" badge, the
   local status pill AND the tray tooltip ("Púca — clip buffer armed
   (recording your fullscreen app / primary monitor)",
@@ -293,18 +343,49 @@ needs no picker).
   VoiceMoved (new room id) tries again, because the buffer must never span
   two rooms' rosters. `clipAutoArm.test.tsx`; the pre-0.8.106 checkbox
   `clipArmPromptOnJoin: true` loads as *Remind me*.
-- **Measured pacing (2026-08-20, 2560x1440 + NVENC, headless bench
-  `bench_clip_capture_encode_pacing` in `crates/puca-encode/tests/live_encode.rs`)**:
-  capture+convert+encode costs ~8 ms of ONE CPU thread per frame (mean 8.0,
-  p95 9.3) — ~40% of one core at the ~50 fps it achieves; the encoder is
-  fixed-function NVENC, so 3D-pipeline contention is minimal. The loop is
-  CPU-bound in the scalar BGRA→NV12 convert and CANNOT hold 60 fps at
-  1440p+ as written (it degrades to ~50 fps at 1440p, less at 4K — frames
-  just arrive slower; nothing queues). A 30 fps preset costs ~24% of one
-  core. Follow-up if 60 fps native matters: SIMD convert or the MFT's own
-  VideoProcessor. Relevant to the 2026-08-19 field report "puca was
-  making games choppy": the suspect there is the CURRENT WebCodecs path at
-  a heavy preset; whether native is lighter in-game is the A/B below.
+- **The frame rate is capped (2026-09-19).** Until then neither native loop
+  (the agent's `clip_host.rs`, the app's in-process fallback) capped
+  anything: `fps` set only the longest wait for a frame, and a frame arrives
+  on every present. Measured on the agent host itself (2560x1440 @ 165 Hz,
+  NVENC, `--fps 30 --bitrate 8000000`, a stream playing on that screen): the
+  shipped loop encoded **63-78 fps at 15-21 Mbit/s for 81-95% of one core**.
+  The bitrate follows the frame count because the encoder's sample clock
+  advances 1/fps per submitted frame. With `FramePacer`
+  (`crates/puca-clip-wire/src/pacer.rs`, shared by both loops): **29.9-30.0
+  fps, 7.1-7.2 Mbit/s, 36-39% of one core**, frame gaps p5 31 / p95 35 /
+  max 37 ms. (A first version that polled once per slot measured 29-29.6
+  fps, 6-7 Mbit/s and 33-36%, with gaps out to 104 ms: it re-sent more
+  stored frames, which are cheap, and caught fewer new ones.) Each slot waits
+  up to half a period for a new picture rather than polling once, so content
+  at exactly the asked-for rate is captured once per frame instead of
+  alternating duplicates and drops (`pacer.rs` explains why).
+- **Per-frame cost, profiled (2026-09-21).** Thread-cycle counters around each
+  stage of the capped loop, on the same screen, found 8.1-9.4 ms of CPU per
+  slot on a mostly still screen (11-29% of slots a new picture):
+  the BGRA→NV12 convert ~3.8-4 ms (on EVERY slot, including a still screen's
+  re-send of the same picture), a 4 ms spin waiting for the encoder's output
+  (~4 ms), the readback copy into a freshly allocated 14.7 MB buffer
+  (~1.7 ms per new picture), and the sample build (~0.6 ms). Four
+  changes, each byte-for-byte or behaviour-identical: a repeated picture
+  reuses its NV12 (`encode_bgra_picture`); the clip loops poll the encoder
+  by sleeping ~1 ms instead of spinning (`set_patient_output`; the
+  remote-control stream keeps its spin); an AVX2 kernel does the convert
+  (~1.4 ms, identical to the scalar loops, which remain the fallback); and
+  the readback reuses the previous frame's buffer (`ScreenCapture::recycle`,
+  ~0.6 ms). Result with every slot a new picture: **~3.3 ms of loop CPU per
+  slot; the whole host process 13.5-13.7% of one core at 30 fps, against
+  35-37% for the capped loop alone in the same conditions.** What remains:
+  the convert, the sample copy, the readback, and the encoder itself. The
+  next step down would be converting on the GPU, which also cuts what is
+  read back to 37.5% (NV12 is 1.5 bytes a pixel against BGRA's 4).
+- **Superseded bench (2026-08-20, `bench_clip_capture_encode_pacing` in
+  `crates/puca-encode/tests/live_encode.rs`)**: ~8 ms per frame, "~50 fps",
+  "cannot hold 60 fps at 1440p", "~24% of a core at 30 fps". It timed
+  `encode_bgra` alone (no readback) on the uncapped loop, so treat those
+  figures as history, not as the cost of the current loop. Follow-up if the
+  per-frame cost matters: convert on the GPU (the MFT's VideoProcessor)
+  instead of on the CPU. Relevant to the 2026-08-19 field report "puca was
+  making games choppy"; whether native is lighter in-game is the A/B below.
 - **NEEDS an on-device Windows walk** before this is trusted in the field: a
   real fullscreen game picked correctly over the primary monitor, WASAPI
   desktop-audio loopback actually capturing game + voice audio, a screen
@@ -312,10 +393,14 @@ needs no picker).
   the clip buffer is separately armed, the tray tooltip appearing/clearing
   on arm/disarm, and **game frame-pacing A/B: the same game with the buffer
   armed via the WebCodecs path vs the native path vs disarmed** (the field
-  report above is the reason). None of the native Rust capture loops have
-  been exercised against real hardware — only unit tests (pure logic), a
-  headless-browser e2e that stands in a real WebCodecs Annex-B stream for
-  the Rust encoder's output, and the headless pacing bench.
+  report above is the reason). The agent's `clip_host.rs` loop has been
+  measured on real hardware for frame rate, bitrate and CPU (2026-09-19,
+  above: a desktop showing a stream, not a game). Everything else in this
+  list is still unwalked, and so is the app's in-process Lite loop
+  (`clip_capture.rs`). The evidence for those is unit tests (pure logic,
+  including `pacer.rs`), a headless-browser e2e that stands in a real
+  WebCodecs Annex-B stream for the Rust encoder's output, and the superseded
+  encode bench.
 
 ## Phase 2 — the consent protocol
 
@@ -431,6 +516,9 @@ Off per server until the owner turns it on.** spike numbers: `frontend/e2e/spike
 | system audio track from the WebView2 picker | real shell, toggle ON | 2026-08-18, desktop (spike S1) |
 | hardware encoder engaged | encode call ≈0.02 ms/frame, keyframes 2 s | 2026-08-18 (spike S2, headless Edge) |
 | A/V sync | flash/beep pairing, −42 ms → `AUDIO_OFFSET_US = 40_000` | 2026-08-18 (spike S4) |
+| native A/V anchor's clock assumptions | `e2e/clip-audio-clock-headless.mjs` (muted, never connected to an output): AudioData clock vs worker `performance.now` drift 0.0 ms over 60 s, median 1.4 ms above the min; AAC encoder output ts = input ts, decoded content 5-11 ms later than its ts (varies by run) | 2026-09-21, headless Edge on the owner's desktop |
+| native A/V sync end to end | flash + click through the real app (the `clip-av` puca.log line cannot see the desktop-audio leg's lead) | — |
+| pointer moves on repeated native frames | old vs new agent side by side on the same screen and mouse | 2026-09-21: NOT exercised: the screen presented every slot (754 new pictures, 0 repeats in 30 s); needs a genuinely still screen |
 | 10-min ring memory plateau | ~500 MB renderer working set, flat through eviction | 2026-08-18 (spike S6) |
 | no clip-sized files in the profile | profile scan | 2026-08-18 (spike S9) |
 | Android WebView plays the sealed MP4 | on-device | — (Phase 2) |

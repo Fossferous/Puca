@@ -176,6 +176,56 @@ one-line summary; this file is the full story. Versions follow
 - New optional setting `TASK_EVENTS_MAX_PER_IP` (default 32): live Notes streams
   per address.
 
+## 0.9.816 — 2026-09-21
+
+Clips that cost a sixth of the CPU, no longer lose two seconds after a press, no longer put their sound late by the recorder's start-up time, and keep their pointer moving; DeepFilter rides out CPU spikes instead of giving up.
+
+### Changed
+- **DeepFilter rides out CPU spikes instead of giving up.** When a busy
+  moment left DeepFilter about half a second behind, the app rebuilt your
+  microphone on RNNoise and kept it there until you restarted Púca (the
+  notice said "for this call", but later calls stayed on RNNoise too), and
+  the rebuild itself was audible to the room. Now an RNNoise copy runs
+  beside DeepFilter and covers any moment it falls behind, lined up to the
+  sample, without rebuilding your microphone; DeepFilter takes over again
+  as soon as it catches up. Before, those moments went out with no noise
+  suppression at all. Only a device that stays behind (15 seconds, or four
+  times in three minutes) is switched to RNNoise for the call, and the
+  voice panel then offers **Try DeepFilter again**. The next call starts on
+  DeepFilter as usual.
+
+### Fixed
+- **Clip recording uses about a sixth of the CPU it did.** With clips
+  armed, the screen recorder ignored its own frame rate: on a high-refresh
+  monitor showing anything that moves (a stream, a game) it captured and
+  encoded every frame the screen drew, 63 to 78 a second when the preset
+  asked for 30, at more than twice the bitrate. Measured on a 2560x1440
+  165 Hz screen, it now records at the rate your preset sets: 30 frames a
+  second at about 7 Mbit/s, and it takes proportionally less of the graphics
+  card's video encoder. The same number of seconds now takes less than half
+  the memory. Each frame is also cheaper: a still screen no longer converts
+  the same picture again every frame, the colour conversion uses the CPU's
+  vector instructions where it has them (AVX2), the recorder no longer spins
+  while the video encoder
+  works, and it reuses one screen buffer instead of allocating a new one per
+  frame. Together: about 14% of one CPU core, down from 81-95%.
+- **Saving a clip no longer leaves a gap in the clip buffer.** With the
+  buffer armed automatically on joining a call, pressing Clip threw away
+  up to 2 seconds of picture and sound from just after the press, so a
+  later, longer clip covering that moment froze and went quiet there. A
+  save that failed part-way did the same. Saving a clip while the buffer
+  was full could also skip a couple of seconds and take in up to 2
+  seconds recorded after the press, which the approval request never
+  described, or fail.
+- **Sound in automatically recorded clips no longer lags the picture by
+  the screen recorder's start-up time.** It played late by however long
+  the recorder took to start, plus 40 ms. The clip buffer now measures
+  both clocks as it runs and lines them up when the clip is made.
+- **The mouse pointer moves in automatically recorded clips of a still
+  screen.** When nothing else on screen was changing (a page you were
+  reading, a paused video), the pointer stayed where it was at the last
+  screen update and then jumped. It now moves as you moved it.
+
 ## 0.9.815 — 2026-09-19
 
 Remote control that survives unlocking the computer, a warning when the

@@ -37,6 +37,13 @@ const check = (name, ok, detail = '') => {
 
 // ---------- sample-level analysis (Node side) ----------
 
+// Every sample the model did NOT produce: the raw delay line and, since the
+// RNNoise bridge, the bridge too. Counting only dry would let a model that
+// falls behind pass as realtime, because the bridge now covers it. Likewise
+// "overloaded" is an episode that ends; overloadEpisodes is the count.
+const fallback = (w) => (w?.drySamples ?? 0) + (w?.bridgeSamples ?? 0);
+const episodes = (w) => w?.overloadEpisodes ?? (w?.overloaded ? 1 : 0);
+
 const b64ToF32 = (b64) => {
     const bin = Buffer.from(b64, 'base64');
     return new Float32Array(bin.buffer, bin.byteOffset, bin.byteLength / 4);
@@ -279,7 +286,7 @@ try {
         check('transport: latency within budget (<= 60 ms)', lag <= 2880, `${(lag / 48).toFixed(1)} ms`);
         check('transport: no zero-runs', zeroRuns(tOut, tDry, lag) === 0);
         const ws = tRes.stats.worklet;
-        check('transport: zero dry-fallback samples through the jam', ws && ws.drySamples === 0, ws ? `dry=${ws.drySamples}` : 'no stats');
+        check('transport: zero fallback samples (dry or bridge) through the jam', ws && fallback(ws) === 0, ws ? `dry=${ws.drySamples} bridge=${ws.bridgeSamples}` : 'no stats');
 
         // Detector positive controls: inject the old design's exact artifact
         // (a zero-filled hop) into the capture — a glitch in silence is
@@ -324,9 +331,9 @@ try {
 
     check('real steady: no discontinuities (|step| > 0.35)', discontinuities(rOut, 0.35) === 0, `count=${discontinuities(rOut, 0.35)}`);
     if (rwk) {
-        const processedPct = (100 * rwk.processedSamples) / Math.max(1, rwk.processedSamples + rwk.drySamples);
-        check('real steady: >= 99% processed (not dry fallback)', processedPct >= 99, `${processedPct.toFixed(2)}%`);
-        check('real steady: not overloaded', rwk.overloaded === false);
+        const processedPct = (100 * rwk.processedSamples) / Math.max(1, rwk.processedSamples + fallback(rwk));
+        check('real steady: >= 99% processed (not dry or bridge fallback)', processedPct >= 99, `${processedPct.toFixed(2)}%`);
+        check('real steady: never overloaded', episodes(rwk) === 0, `episodes=${episodes(rwk)}`);
     } else {
         check('real steady: worklet stats present', false);
     }
@@ -364,9 +371,9 @@ try {
     const jRatio = rms(jOut) / Math.max(1e-9, rms(jDry));
     check('real jam: output still carries the speech (RMS >= 15% of dry)', jRatio >= 0.15 && rms(jOut) > 0.01, `ratio ${jRatio.toFixed(3)}`);
     if (rJam.stats.worklet && rwk) {
-        const dryDelta = rJam.stats.worklet.drySamples - rwk.drySamples;
-        check('real jam: zero NEW dry-fallback samples (audio thread + worker unaffected)', dryDelta === 0, `delta=${dryDelta}`);
-        check('real jam: still not overloaded', rJam.stats.worklet.overloaded === false);
+        const fbDelta = fallback(rJam.stats.worklet) - fallback(rwk);
+        check('real jam: zero NEW fallback samples (audio thread + worker unaffected)', fbDelta === 0, `delta=${fbDelta}`);
+        check('real jam: still never overloaded', episodes(rJam.stats.worklet) === 0, `episodes=${episodes(rJam.stats.worklet)}`);
         // Frozen telemetry (a worklet whose process() stopped running) would
         // pass both checks above — prove the counters ADVANCED through the jam.
         const emitDelta = rJam.stats.worklet.emittedSamples - rwk.emittedSamples;
@@ -403,9 +410,9 @@ try {
         const b = rNoise.statsBefore?.worklet;
         const a = rNoise.statsAfter?.worklet;
         const emitDelta = a && b ? a.emittedSamples - b.emittedSamples : -1;
-        const dryDelta = a && b ? a.drySamples - b.drySamples : -1;
-        check('real noise: worklet PROCESSED through the phase (telemetry advanced, zero dry)',
-            emitDelta >= 250000 && dryDelta === 0, `emitDelta=${emitDelta}, dryDelta=${dryDelta}`);
+        const fbDelta = a && b ? fallback(a) - fallback(b) : -1;
+        check('real noise: worklet PROCESSED through the phase (telemetry advanced, zero fallback)',
+            emitDelta >= 250000 && fbDelta === 0, `emitDelta=${emitDelta}, fallbackDelta=${fbDelta}`);
     }
 
     // ---- tuning pin: quiet speaker over fan noise --------------------------

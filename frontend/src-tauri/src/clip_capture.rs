@@ -41,12 +41,17 @@
 //! member gets roughly the budget their preset's label promised. Before that,
 //! "1080p60 — about 9 Mbps" on a 2560x1440 monitor meant a 2560x1440 60 fps
 //! 16 Mbps encode: 1.78x the work asked for, measured at 73-92% of a core on
-//! a real machine, against docs/CLIPS.md's own bench of ~40% at ~50 fps. That
-//! document already said this loop cannot hold 60 fps at 1440p or above, so
-//! the frames were being dropped regardless; the cadence is now honest.
+//! a real machine.
+//!
+//! That fold only lowered the NUMBER it passed on. Until 2026-09-19 neither
+//! capture loop enforced it: `fps` set how long an acquire would wait, and an
+//! acquire returns on every present, so a busy 165 Hz screen was encoded at
+//! 63-78 fps whatever fps said. Both loops now wait for a
+//! `puca_clip_wire::FramePacer` slot before acquiring, and that is what makes
+//! the cadence real.
 
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
@@ -56,6 +61,16 @@ use puca_encode::{EncodeError, H264Encoder};
 pub struct ClipCaptureState {
     pub is_capturing: AtomicBool,
     pub stop_signal: AtomicBool,
+    /// Which capture is running: bumped by every successful claim in
+    /// `start_video_capture`, stamped on every event that capture emits and
+    /// returned to the caller, exactly as `clip_desktop_audio.rs` does.
+    /// A stopped capture's tail (the sidecar dies within one 50 ms poll
+    /// of the stop, but its last frames are already in the pipe and the
+    /// event queue) can land after "Restart buffer" has re-armed; those
+    /// frames carry the OLD capture's clock, and the replay worker, taking
+    /// one as a clock sample, once put every later clip's audio late by
+    /// the old session's length. The listener drops foreign generations.
+    pub generation: AtomicU64,
 }
 
 impl Default for ClipCaptureState {
@@ -63,6 +78,7 @@ impl Default for ClipCaptureState {
         Self {
             is_capturing: AtomicBool::new(false),
             stop_signal: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         }
     }
 }
@@ -160,6 +176,11 @@ pub struct ClipCaptureTarget {
     /// requested bitrate scaled to this monitor's real pixel count (see
     /// `scale_bitrate`). 0 from `pick_target`, which starts no encoder.
     pub bitrate: u32,
+    /// The capture this reply started (`ClipCaptureState::generation`);
+    /// every `clip-video-chunk` it emits carries the same number, and
+    /// `stop_video_capture` with it stops only this capture. 0 from
+    /// `pick_target`, which starts nothing.
+    pub generation: u64,
 }
 
 #[cfg(windows)]
@@ -262,6 +283,7 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
                 TargetReason::FirstAvailable => "primary", // same UI copy — "no primary flag" is not user-meaningful
             },
             bitrate: 0,
+            generation: 0,
         });
     }
 
@@ -284,10 +306,9 @@ pub fn pick_target() -> Result<ClipCaptureTarget, String> {
 /// 2560x1440 at 60 fps, and `scale_bitrate` raised the promised ~9 Mbps to
 /// exactly 16 Mbps to match the extra pixels. Cost is pixels x fps, so that is
 /// 1.78x what the member asked for, sustained, for as long as the buffer is
-/// armed. Measured on such a host: 73-92% of a core, against a documented
-/// bench of ~40% at ~50 fps — and docs/CLIPS.md already says the loop cannot
-/// hold 60 fps at 1440p or above as written. It was dropping frames anyway;
-/// this makes the cadence honest instead of aspirational.
+/// armed. Measured on such a host: 73-92% of a core. (The fps this returns is
+/// only a request until the capture loop's `FramePacer` holds it; before
+/// 2026-09-19 nothing did, and a busy 165 Hz screen ran at 63-78 fps anyway.)
 ///
 /// A CPU downscale would be the wrong answer even though it sounds like the
 /// obvious one: the resize runs AFTER the full GPU-to-staging readback, so it
@@ -453,7 +474,10 @@ struct ClipVideoChunkEvent {
     /// Base64 Annex-B bitstream (same wire convention as `audio-data`).
     data: String,
     keyframe: bool,
-    /// Capture-relative microseconds — the FIRST chunk of a session is 0.
+    /// Microseconds since the capture loop's own start instant, stamped
+    /// after the frame's acquire and readback. The FIRST chunk is not 0
+    /// (typically tens of ms) and nothing may assume it is: the worker
+    /// anchors this clock by measurement (replayWorker.ts vOriginMs).
     ts_us: u64,
     dur_us: u64,
     /// The SPS-derived `avc1.PPCCLL` string, present on EVERY keyframe
@@ -463,6 +487,16 @@ struct ClipVideoChunkEvent {
     codec: Option<String>,
     width: u32,
     height: u32,
+    /// Which capture emitted it (`ClipCaptureState::generation`).
+    generation: u64,
+}
+
+/// A capture's death, attributed, so a stale one landing after a
+/// successful restart cannot be mistaken for the new capture's.
+#[derive(Serialize, Clone)]
+struct ClipVideoError {
+    message: String,
+    generation: u64,
 }
 
 #[cfg(windows)]
@@ -510,6 +544,8 @@ pub fn start_video_capture(
         }
     }
     state.stop_signal.store(false, Ordering::SeqCst);
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    target.generation = generation;
 
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let state_clone = state.clone();
@@ -520,7 +556,7 @@ pub fn start_video_capture(
         state_clone.is_capturing.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             log::error!("Clip video capture error: {}", e);
-            let _ = emit_handle.emit("clip-video-capture-error", e);
+            let _ = emit_handle.emit("clip-video-capture-error", ClipVideoError { message: e, generation });
         }
     });
 
@@ -538,8 +574,17 @@ pub fn start_video_capture(
     }
 }
 
+/// Signal the capture to stop — but only the capture the caller OWNS.
+/// `generation` from the start's reply; `None` stops whatever is running
+/// (a whole-session teardown). A caller that lost the start race, or whose
+/// start failed, holds no generation and must not be able to stop the
+/// winner's capture: that is the audio side's rule too (`stop_capture`).
 #[cfg(windows)]
-pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
+pub fn stop_video_capture(state: Arc<ClipCaptureState>, generation: Option<u64>) {
+    if !owns_capture(state.generation.load(Ordering::SeqCst), generation) {
+        log::info!("Clip video capture: stop for capture {:?} ignored, capture {} is running", generation, state.generation.load(Ordering::SeqCst));
+        return;
+    }
     // SAY SO. This used to flip the flag and nothing else, and the loop's clean
     // exit was silent too — so the log recorded a start and never a stop, and
     // "no stop line" proved nothing about whether a capture was still running.
@@ -547,6 +592,12 @@ pub fn stop_video_capture(state: Arc<ClipCaptureState>) {
     // took a process-memory scan because of it.
     log::info!("Clip video capture: stop requested");
     state.stop_signal.store(true, Ordering::SeqCst);
+}
+
+/// Whether a stop naming `requested` may stop the capture `running`: an
+/// unnamed stop always may (teardown), a named one only its own.
+fn owns_capture(running: u64, requested: Option<u64>) -> bool {
+    requested.map_or(true, |g| g == running)
 }
 
 #[cfg(windows)]
@@ -788,6 +839,7 @@ fn sidecar_capture_loop(
             codec,
             width: target.width,
             height: target.height,
+            generation: target.generation,
         };
         if app.emit("clip-video-chunk", event).is_err() {
             break; // the window is gone — nothing left to stream to
@@ -858,6 +910,8 @@ fn in_process_capture_loop(
         .map_err(|e| format!("Failed to start screen capture: {e}")));
     let mut encoder = init_step!(H264Encoder::new(target.width, target.height, fps, target.bitrate)
         .map_err(|e| format!("Failed to start the video encoder: {e}")));
+    // Frames here are stored, not watched live: no need to spin for each one.
+    encoder.set_patient_output(true);
 
     let _ = ready.send(Ok(()));
     log::info!(
@@ -875,13 +929,24 @@ fn in_process_capture_loop(
     // caller repeats the PREVIOUS frame rather than treating that as "no
     // output": the ring only closes/evicts GOPs on a video keyframe
     // (replayWorker.ts), so silence here would let audio grow the open GOP
-    // unbounded for as long as the screen doesn't change. Re-submit at most
-    // once per frame period so a long static stretch costs one cheap
-    // re-encode per tick, not a frame-rate encode of nothing.
+    // unbounded for as long as the screen doesn't change. The stored frame is
+    // re-submitted once per slot. That is not free (an encode; the NV12
+    // converted from it is reused, see `picture` below), but it is the frame
+    // rate that was asked for and no more.
     let mut last_frame: Option<puca_capture::Frame> = None;
-    let mut last_emit_at = std::time::Instant::now();
-    let frame_timeout_ms = ((1000 / fps.max(1)) as u32).max(15);
-    let frame_period = std::time::Duration::from_millis(frame_timeout_ms as u64);
+    // Names the pixels in last_frame for the encoder: bumped for every new
+    // picture, and for a re-send whose pointer had to be moved
+    // (refresh_repeat), unchanged otherwise, so a still screen's repeats
+    // skip the colour conversion (encode_bgra_picture).
+    let mut picture: u64 = 0;
+    // Only for the wait before the FIRST frame. After that the pacer decides
+    // when to look and for how long.
+    let first_frame_timeout_ms = ((1000 / fps.max(1)) as u32).max(15);
+    // THE CAP, shared with the agent's clip host so the two cannot drift
+    // again. `fps` used to set only how long an acquire would wait, and an
+    // acquire returns on every present, so a busy high-refresh screen was
+    // encoded at whatever rate it composed (see puca-clip-wire's pacer.rs).
+    let mut pacer = puca_clip_wire::FramePacer::new(fps);
     // AccessLost can be continuous (a sleeping/disconnected display) — the
     // crate rebuilds duplication on every call with no wait of its own, so
     // without a backoff this would peg a core for as long as the condition
@@ -899,13 +964,50 @@ fn in_process_capture_loop(
         // a per-frame clone of a 4K BGRA buffer is a ~33 MB memcpy at up to
         // 60 Hz, pure waste. The Timeout branch then re-encodes the same
         // stored frame, which is the whole reason it is kept.
-        match capture.next_frame(frame_timeout_ms) {
-            Ok(f) => { access_lost_streak = 0; last_frame = Some(f); }
-            Err(CaptureError::Timeout) => {
-                if last_emit_at.elapsed() < frame_period || last_frame.is_none() {
-                    continue; // paced, or nothing captured yet at all
+        //
+        // Wait for the slot BEFORE acquiring: presents that land meanwhile
+        // are folded into the next acquire by DXGI, so they are never read
+        // back, converted or encoded. At most one period, and then round
+        // again so the stop signal is re-checked before the acquire.
+        let wait = pacer.wait(std::time::Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+            continue;
+        }
+        let slot_at = std::time::Instant::now();
+        let had_frame = last_frame.is_some();
+        let acquired = if had_frame {
+            // Returns at once if a present is pending; otherwise waits for one
+            // for the first half of the slot (pacer.rs: a plain poll stutters
+            // when the frame rate matches the content's). About half a period
+            // is also all the stop signal can be kept waiting: the OS may round
+            // the wait up to its ~15.6 ms timer tick, which the grid absorbs
+            // because the slot is spent as of when it opened.
+            pacer.acquire_within(
+                slot_at,
+                |ms| capture.next_frame(ms),
+                |e| matches!(e, CaptureError::Timeout),
+            )
+        } else {
+            capture.next_frame(first_frame_timeout_ms)
+        };
+        match acquired {
+            Ok(f) => {
+                access_lost_streak = 0;
+                // The previous picture's buffer carries the next readback.
+                if let Some(old) = last_frame.replace(f) {
+                    capture.recycle(old);
                 }
-                // fall through and re-encode the stored frame
+                picture += 1;
+            }
+            Err(CaptureError::Timeout) => {
+                // No new picture within this slot's window: re-encode the
+                // stored frame, once per slot, with the pointer moved to
+                // where it is now (a pointer-only update is a Timeout too).
+                let Some(f) = last_frame.as_mut() else {
+                    continue; // nothing captured yet at all
+                };
+                puca_clip_wire::refresh_repeat(&mut picture, || capture.redraw_cursor(f));
             }
             Err(CaptureError::AccessLost) => {
                 access_lost_streak += 1;
@@ -915,6 +1017,12 @@ fn in_process_capture_loop(
             Err(CaptureError::Failed(e)) => return Err(format!("capture failed: {e}")),
         }
         let frame = last_frame.as_ref().expect("guarded above");
+        // Spend the slot on the SUBMISSION, whatever the encoder answers (an
+        // async encoder can take the frame and still say "need more input"),
+        // and as of the instant it OPENED, so a slow readback does not restart
+        // the grid from its own end. Not for the very first frame: that
+        // acquire blocked, so the second frame would follow it at once.
+        pacer.take(if had_frame { slot_at } else { std::time::Instant::now() });
         let ts_us = start.elapsed().as_micros();
         let force_key = ts_us as i128 - last_key_us >= gop_us as i128;
         if force_key {
@@ -929,7 +1037,7 @@ fn in_process_capture_loop(
             last_key_us = ts_us as i128;
         }
 
-        let encoded = match encoder.encode_bgra(&frame.bgra, frame.stride, force_key) {
+        let encoded = match encoder.encode_bgra_picture(&frame.bgra, frame.stride, force_key, picture) {
             Ok(f) => f,
             Err(EncodeError::NeedMoreInput) => continue, // encoder is buffering — nothing to emit yet
             Err(e) => return Err(format!("encode failed: {e}")),
@@ -976,11 +1084,11 @@ fn in_process_capture_loop(
             codec,
             width: target.width,
             height: target.height,
+            generation: target.generation,
         };
         if app.emit("clip-video-chunk", event).is_err() {
             break; // the window is gone — nothing left to stream to
         }
-        last_emit_at = std::time::Instant::now();
         frames_encoded += 1;
         bytes_emitted += emitted_bytes;
         if last_beat.elapsed() >= HEARTBEAT {
@@ -1021,7 +1129,7 @@ pub fn start_video_capture(
 }
 
 #[cfg(not(windows))]
-pub fn stop_video_capture(_state: Arc<ClipCaptureState>) {}
+pub fn stop_video_capture(_state: Arc<ClipCaptureState>, _generation: Option<u64>) {}
 
 /// No base64 crate pulled in just for this — the app already depends on one
 /// for `audio_capture.rs`; reuse it so there is exactly one implementation.
@@ -1033,6 +1141,28 @@ fn base64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stop names the capture it owns; only an unnamed stop (teardown)
+    /// ends whatever is running. A starter that lost the race holds an
+    /// older number and must not be able to stop the winner.
+    #[test]
+    fn a_stop_ends_only_the_capture_it_names() {
+        assert!(owns_capture(3, Some(3)), "the owner");
+        assert!(!owns_capture(3, Some(2)), "a predecessor");
+        assert!(!owns_capture(3, Some(4)), "a number nobody was given");
+        assert!(owns_capture(3, None), "teardown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_foreign_stop_leaves_the_stop_signal_alone() {
+        let state = Arc::new(ClipCaptureState::default());
+        state.generation.store(7, Ordering::SeqCst);
+        stop_video_capture(state.clone(), Some(6));
+        assert!(!state.stop_signal.load(Ordering::SeqCst), "a predecessor's stop must not end capture 7");
+        stop_video_capture(state.clone(), Some(7));
+        assert!(state.stop_signal.load(Ordering::SeqCst), "positive control: the owner's stop does");
+    }
 
     fn r(left: i32, top: i32, w: i32, h: i32) -> Rect {
         Rect { left, top, right: left + w, bottom: top + h }

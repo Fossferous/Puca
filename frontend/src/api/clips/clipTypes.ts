@@ -17,7 +17,9 @@ export interface ArmConfig {
     /** Hard memory ceiling for the ring, bytes. */
     maxRingBytes: number;
     /** Audio timeline shift applied to audio timestamps, µs (+ delays audio).
-     *  Measured by the Phase 0 spike (audio arrived ~40 ms early). */
+     *  Picker path: the Phase 0 spike's 40 ms, applied at ingest. Native
+     *  path: applied at seal on top of the measured anchor, and 0
+     *  (replayBuffer.ts NATIVE_AUDIO_OFFSET_US). */
     audioOffsetUs: number;
     /** Preferred audio codec; the worker falls back to opus if unsupported. */
     audioCodec: ClipAudioCodec;
@@ -75,7 +77,8 @@ export interface WorkerStatus {
     ringBytes: number;
     gops: number;
     droppedFrames: number;
-    /** Rolling one-second measurements. */
+    /** Rolling one-second measurements. `kbps` is video + audio bytes
+     *  entering the worker. Not shown in the UI (ReplayState only). */
     fps: number;
     kbps: number;
     encodedFrames: number;
@@ -84,6 +87,10 @@ export interface WorkerStatus {
     audioCodec: ClipAudioCodec | null;
     width: number;
     height: number;
+    /** Native captures only, once both clocks have 5 s of samples: the A/V
+     *  anchor seal() applies (replayWorker.ts vOriginMs). Diagnostic;
+     *  replayBuffer writes it to puca.log. */
+    avAnchor?: { videoOriginMs: number; shiftMs: number; legacyLateMs: number };
 }
 
 export interface SealedInfo {

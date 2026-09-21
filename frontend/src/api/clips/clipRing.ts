@@ -18,7 +18,9 @@
 
 /** One encoded chunk's position inside a unit's plaintext, plus its timing. */
 export interface ChunkIndexEntry {
-    /** Presentation timestamp, microseconds, already rebased to the ring's clock. */
+    /** Presentation timestamp, microseconds, rebased to the ring's clock.
+     *  EXCEPT native-capture audio entries: they stay on the AudioData
+     *  clock until seal() shifts them (replayWorker.ts audioShiftUs). */
     tsUs: number;
     /** Duration in microseconds (encoder-reported, or the nominal frame period). */
     durUs: number;
@@ -40,7 +42,8 @@ export interface GopUnit {
     endUs: number;
     /** Video chunks in decode order; [0].key === true. */
     video: ChunkIndexEntry[];
-    /** Audio chunks in order, all with tsUs >= startUs (trimmed at close). */
+    /** Audio chunks in order of arrival (the first selected unit's are
+     *  trimmed to the clip start at seal, trimLeadingAudio). */
     audio: ChunkIndexEntry[];
     /** AES-GCM nonce counter this unit was sealed under. */
     counter: number;
@@ -89,6 +92,11 @@ export function evictionPlan(g: readonly GopUnit[], lim: RingLimits): GopUnit[] 
     return out;
 }
 
+/** What window selection needs from a unit. A seal also selects over its
+ *  uncommitted copy of the OPEN unit (replayWorker.ts TailUnit), which has
+ *  no ciphertext, counter or seq and must never reach evictionPlan. */
+export type WindowUnit = Pick<GopUnit, 'configId' | 'startUs' | 'endUs'>;
+
 export interface WindowSelection {
     /** Index of the first unit to include. */
     from: number;
@@ -111,7 +119,7 @@ export interface WindowSelection {
  *
  * - `to` is always the newest unit — a GOP is decodable from its keyframe
  *   forward, so "Clip" captures right up to now, including the still-open one
- *   as long as the caller has closed it into a unit first.
+ *   as long as the caller passes a snapshot of it as the last unit.
  * - `from` is the LARGEST index whose startUs <= wantStart, i.e. the GOP that
  *   CONTAINS the requested start. `<=`, not `<`: a wantStart exactly on a
  *   keyframe selects that keyframe's GOP, and a wantStart 10 ms after a
@@ -128,7 +136,7 @@ export interface WindowSelection {
  * - Config clamp: units before the newest configId are dropped from the
  *   selection (never spliced into one AVC track); `lostUs` says how much.
  */
-export function selectWindow(g: readonly GopUnit[], requestedUs: number, maxUs?: number): WindowSelection | null {
+export function selectWindow(g: readonly WindowUnit[], requestedUs: number, maxUs?: number): WindowSelection | null {
     if (g.length === 0) return null;
     const to = g.length - 1;
     const endUs = g[to].endUs;

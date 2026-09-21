@@ -59,6 +59,14 @@ pub struct H264Encoder {
     /// Reused NV12 scratch — allocating 1.5 bytes/pixel per frame at 30fps is
     /// pure garbage-collector pressure for no benefit.
     nv12: Vec<u8>,
+    /// Which caller-named picture `nv12` currently holds, if any
+    /// (`encode_bgra_picture`). Set only once a conversion has really run,
+    /// so a frame turned away for lack of an input credit is never mistaken
+    /// for one already converted.
+    converted_picture: Option<u64>,
+    /// Wait for output by sleeping between polls rather than spinning
+    /// (`set_patient_output`).
+    patient_output: bool,
     /// Next sample's presentation time, 100ns units. ACCUMULATED rather than
     /// derived from a frame counter: `update_rate` can change `fps` while
     /// streaming, and `frame_index * duration` with a smaller duration would
@@ -173,6 +181,164 @@ fn chroma(b: i32, g: i32, r: i32) -> (u8, u8) {
     (u.clamp(0, 255) as u8, v.clamp(0, 255) as u8)
 }
 
+/// The AVX2 kernel behind `bgra_to_nv12`. Every value it computes is the one
+/// `luma` / `chroma` compute: in BT.601 studio swing the sums never leave
+/// 0..=255 (luma lands in 16..=235, chroma in 16..=239), so the scalar
+/// clamps are no-ops and plain 32-bit lane arithmetic reproduces them exactly.
+#[cfg(target_arch = "x86_64")]
+mod nv12_avx2 {
+    use std::arch::x86_64::*;
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn chan_b(px: __m256i) -> __m256i {
+        _mm256_and_si256(px, _mm256_set1_epi32(0xFF))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn chan_g(px: __m256i) -> __m256i {
+        _mm256_and_si256(_mm256_srli_epi32::<8>(px), _mm256_set1_epi32(0xFF))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn chan_r(px: __m256i) -> __m256i {
+        _mm256_and_si256(_mm256_srli_epi32::<16>(px), _mm256_set1_epi32(0xFF))
+    }
+
+    /// Eight BGRA pixels to their eight luma values, one per 32-bit lane.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn luma8(px: __m256i) -> __m256i {
+        let r = _mm256_mullo_epi32(chan_r(px), _mm256_set1_epi32(66));
+        let g = _mm256_mullo_epi32(chan_g(px), _mm256_set1_epi32(129));
+        let b = _mm256_mullo_epi32(chan_b(px), _mm256_set1_epi32(25));
+        let sum = _mm256_add_epi32(_mm256_add_epi32(r, g), _mm256_add_epi32(b, _mm256_set1_epi32(4096)));
+        _mm256_srai_epi32::<8>(sum)
+    }
+
+    /// Two registers of eight 0..=255 values each to sixteen bytes, in order.
+    /// The packs work per 128-bit lane, so they leave the groups of four as
+    /// [a0-3 b0-3 .. | a4-7 b4-7 ..]; the permute puts them back in sequence.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn pack16(a: __m256i, b: __m256i) -> __m128i {
+        let words = _mm256_packus_epi32(a, b);
+        let bytes = _mm256_packus_epi16(words, words);
+        let ordered = _mm256_permutevar8x32_epi32(bytes, _mm256_setr_epi32(0, 4, 1, 5, 0, 0, 0, 0));
+        _mm256_castsi256_si128(ordered)
+    }
+
+    /// Sums of each horizontally adjacent pixel pair across sixteen pixels
+    /// (`lo` = pixels 0-7, `hi` = 8-15), in pair order. hadd works per lane
+    /// and yields pairs [0 1 4 5 | 2 3 6 7]; the permute restores the order.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn pair_sums(lo: __m256i, hi: __m256i) -> __m256i {
+        _mm256_permutevar8x32_epi32(_mm256_hadd_epi32(lo, hi), _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7))
+    }
+
+    /// The 2x2 average of one channel over sixteen pixels of two rows.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn quad_avg(t0: __m256i, t1: __m256i, b0: __m256i, b1: __m256i, ch: u8) -> __m256i {
+        let pick = |v: __m256i| match ch {
+            0 => chan_b(v),
+            1 => chan_g(v),
+            _ => chan_r(v),
+        };
+        let lo = _mm256_add_epi32(pick(t0), pick(b0));
+        let hi = _mm256_add_epi32(pick(t1), pick(b1));
+        _mm256_srai_epi32::<2>(pair_sums(lo, hi))
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn luma_row(src: &[u8], dst: &mut [u8]) {
+        let n = dst.len();
+        let mut i = 0;
+        while i + 16 <= n {
+            let p = src.as_ptr().add(i * 4);
+            let a = luma8(_mm256_loadu_si256(p as *const __m256i));
+            let b = luma8(_mm256_loadu_si256(p.add(32) as *const __m256i));
+            _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, pack16(a, b));
+            i += 16;
+        }
+        for j in i..n {
+            dst[j] = super::luma(src[j * 4] as i32, src[j * 4 + 1] as i32, src[j * 4 + 2] as i32);
+        }
+    }
+
+    /// One row of interleaved UV from a pair of BGRA rows: each 2x2 quad
+    /// averaged (sum / 4, as the scalar loop does), then U and V.
+    #[target_feature(enable = "avx2")]
+    unsafe fn chroma_row(top: &[u8], bottom: &[u8], dst: &mut [u8]) {
+        let w = dst.len();
+        let mut i = 0;
+        while i + 16 <= w {
+            let tp = top.as_ptr().add(i * 4);
+            let bp = bottom.as_ptr().add(i * 4);
+            let t0 = _mm256_loadu_si256(tp as *const __m256i);
+            let t1 = _mm256_loadu_si256(tp.add(32) as *const __m256i);
+            let b0 = _mm256_loadu_si256(bp as *const __m256i);
+            let b1 = _mm256_loadu_si256(bp.add(32) as *const __m256i);
+            let bb = quad_avg(t0, t1, b0, b1, 0);
+            let gg = quad_avg(t0, t1, b0, b1, 1);
+            let rr = quad_avg(t0, t1, b0, b1, 2);
+            let bias = _mm256_set1_epi32(32768);
+            let u = _mm256_srai_epi32::<8>(_mm256_add_epi32(
+                _mm256_add_epi32(_mm256_mullo_epi32(rr, _mm256_set1_epi32(-38)), _mm256_mullo_epi32(gg, _mm256_set1_epi32(-74))),
+                _mm256_add_epi32(_mm256_mullo_epi32(bb, _mm256_set1_epi32(112)), bias),
+            ));
+            let v = _mm256_srai_epi32::<8>(_mm256_add_epi32(
+                _mm256_add_epi32(_mm256_mullo_epi32(rr, _mm256_set1_epi32(112)), _mm256_mullo_epi32(gg, _mm256_set1_epi32(-94))),
+                _mm256_add_epi32(_mm256_mullo_epi32(bb, _mm256_set1_epi32(-18)), bias),
+            ));
+            // u | v << 8 in each lane is the little-endian (u, v) byte pair.
+            let uv = _mm256_or_si256(u, _mm256_slli_epi32::<8>(v));
+            let words = _mm256_packus_epi32(uv, uv);
+            let ordered = _mm256_permutevar8x32_epi32(words, _mm256_setr_epi32(0, 1, 4, 5, 0, 0, 0, 0));
+            _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(ordered));
+            i += 16;
+        }
+        while i + 2 <= w {
+            let (t, b) = (&top[i * 4..i * 4 + 8], &bottom[i * 4..i * 4 + 8]);
+            let bs = t[0] as i32 + t[4] as i32 + b[0] as i32 + b[4] as i32;
+            let gs = t[1] as i32 + t[5] as i32 + b[1] as i32 + b[5] as i32;
+            let rs = t[2] as i32 + t[6] as i32 + b[2] as i32 + b[6] as i32;
+            let (u, v) = super::chroma(bs / 4, gs / 4, rs / 4);
+            dst[i] = u;
+            dst[i + 1] = v;
+            i += 2;
+        }
+    }
+
+    /// Even `w` and `h`, `bgra` holding every row, `y_plane` = w*h and
+    /// `uv_plane` = w*h/2: what `bgra_to_nv12` checks before calling.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn convert(bgra: &[u8], stride: usize, w: usize, h: usize, y_plane: &mut [u8], uv_plane: &mut [u8]) {
+        for row in 0..h {
+            luma_row(&bgra[row * stride..row * stride + w * 4], &mut y_plane[row * w..row * w + w]);
+        }
+        for pair in 0..h / 2 {
+            let top = &bgra[2 * pair * stride..2 * pair * stride + w * 4];
+            let bottom = &bgra[(2 * pair + 1) * stride..(2 * pair + 1) * stride + w * 4];
+            chroma_row(top, bottom, &mut uv_plane[pair * w..pair * w + w]);
+        }
+    }
+
+    /// For the equivalence test: whether this CPU runs the kernel at all.
+    #[cfg(test)]
+    pub(super) fn available() -> bool {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+}
+
+/// Whether a submission must run the BGRA-to-NV12 conversion: always for an
+/// anonymous frame (`encode_bgra`), and for a named picture unless it is the
+/// one the scratch buffer already holds.
+fn must_convert(converted: Option<u64>, picture: Option<u64>) -> bool {
+    picture.is_none() || picture != converted
+}
+
 /// BGRA -> NV12 (planar Y then interleaved UV at half resolution).
 ///
 /// THIS FUNCTION IS THE SINGLE LARGEST CPU COST IN THE STREAM. Measured on a
@@ -199,6 +365,16 @@ fn chroma(b: i32, g: i32, r: i32) -> (u8, u8) {
 /// whole agent down, which is a far worse answer than a slightly wrong pixel in
 /// a configuration nothing can encode.
 fn bgra_to_nv12(bgra: &[u8], stride: usize, width: u32, height: u32, out: &mut Vec<u8>) {
+    bgra_to_nv12_with(bgra, stride, width, height, out, true)
+}
+
+/// `bgra_to_nv12`, with the AVX2 kernel allowed (`simd`) or not. Production
+/// always allows it; the tests also run with it off, because every machine
+/// that runs them has AVX2 and would otherwise never reach the scalar loops
+/// below, which are what a CPU without AVX2 encodes every frame with.
+fn bgra_to_nv12_with(bgra: &[u8], stride: usize, width: u32, height: u32, out: &mut Vec<u8>, simd: bool) {
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = simd;
     let w = width as usize;
     let h = height as usize;
     let need = w * h + w * h / 2;
@@ -208,6 +384,25 @@ fn bgra_to_nv12(bgra: &[u8], stride: usize, width: u32, height: u32, out: &mut V
         out.resize(need, 0);
     }
     let (y_plane, uv_plane) = out.split_at_mut(w * h);
+
+    // THE AVX2 PATH, for the even-sized picture every caller streams, on any
+    // CPU that has it: Intel Core and AMD since about 2013-15, but NOT
+    // Intel's Pentium and Celeron desktop parts before Alder Lake (2022) or
+    // the Atom-class Gemini Lake / Jasper Lake chips, all of which run
+    // Windows 11 and take the loops below. Same integer maths as those
+    // loops, eight pixels to a register, and byte-for-byte identical to them
+    // and to the reference (nv12_tests runs both paths). A short buffer, a
+    // zero dimension or a CPU without AVX2 takes the loops, which stay the
+    // definition.
+    #[cfg(target_arch = "x86_64")]
+    if simd && even && w > 0 && h > 0 && bgra.len() >= (h - 1) * stride + w * 4
+        && std::arch::is_x86_feature_detected!("avx2")
+    {
+        // SAFETY: AVX2 was detected on this CPU just above, and the length
+        // check covers every row the kernel reads.
+        unsafe { nv12_avx2::convert(bgra, stride, w, h, y_plane, uv_plane) };
+        return;
+    }
 
     for row in 0..h {
         let Some(src) = bgra.get(row * stride..row * stride + w * 4) else { break };
@@ -258,6 +453,26 @@ fn bgra_to_nv12(bgra: &[u8], stride: usize, width: u32, height: u32, out: &mut V
                 dst[col + 1] = v;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod picture_reuse_tests {
+    use super::must_convert;
+
+    #[test]
+    fn the_same_picture_is_converted_once() {
+        assert!(must_convert(None, Some(7)), "nothing converted yet");
+        assert!(!must_convert(Some(7), Some(7)), "same pixels: reuse");
+        assert!(must_convert(Some(7), Some(8)), "a new picture");
+    }
+
+    #[test]
+    fn an_anonymous_frame_is_always_converted() {
+        // encode_bgra (the remote-control stream) names no picture: it must
+        // never reuse, whatever the scratch buffer holds.
+        assert!(must_convert(None, None));
+        assert!(must_convert(Some(7), None));
     }
 }
 
@@ -357,6 +572,23 @@ mod nv12_tests {
         assert!(rv > 200 && ru < 128, "red should be high V, low U — got ({ru},{rv})");
     }
 
+    /// The paths `bgra_to_nv12` can take ON THIS MACHINE: the scalar loops
+    /// always (every machine these tests run on has AVX2, so without being
+    /// asked for they would never run, yet they are what a CPU without AVX2
+    /// encodes every frame with), and the AVX2 kernel where the CPU has it.
+    /// `simd = true` on a CPU without AVX2 would silently fall back to the
+    /// loops and test them twice, so it is left out rather than claimed.
+    fn paths() -> Vec<bool> {
+        let mut p = vec![false];
+        #[cfg(target_arch = "x86_64")]
+        if super::nv12_avx2::available() {
+            p.push(true);
+        } else {
+            eprintln!("AVX2 not available on this CPU: the kernel is not exercised here");
+        }
+        p
+    }
+
     #[test]
     fn the_fast_path_matches_the_reference_byte_for_byte() {
         // Even dimensions only: that is what streams, and it is the whole range
@@ -364,13 +596,98 @@ mod nv12_tests {
         // below). A padded stride is included because that is what DXGI hands
         // back and it is the easiest thing for a chunked rewrite to get wrong.
         let cases = [(8usize, 6usize, 0usize), (2, 2, 0), (16, 8, 64), (64, 4, 32), (4, 64, 0)];
-        for &(w, h, pad) in &cases {
-            let stride = w * 4 + pad;
-            let src = noise(w, h, stride);
-            let (mut fast, mut slow) = (Vec::new(), Vec::new());
-            bgra_to_nv12(&src, stride, w as u32, h as u32, &mut fast);
-            reference(&src, stride, w as u32, h as u32, &mut slow);
-            assert_eq!(fast, slow, "{w}x{h} stride +{pad} diverged from the reference");
+        for simd in paths() {
+            for &(w, h, pad) in &cases {
+                let stride = w * 4 + pad;
+                let src = noise(w, h, stride);
+                let (mut fast, mut slow) = (Vec::new(), Vec::new());
+                bgra_to_nv12_with(&src, stride, w as u32, h as u32, &mut fast, simd);
+                reference(&src, stride, w as u32, h as u32, &mut slow);
+                assert_eq!(fast, slow, "{w}x{h} stride +{pad} (simd {simd}) diverged from the reference");
+            }
+        }
+    }
+
+    /// Every RGB cube corner as BGRA: the solid colours whose quads average
+    /// to the studio-swing BOUNDS the kernel's no-clamp argument rests on.
+    /// Black and white give luma 16 and 235; yellow gives U 16, blue U 239,
+    /// cyan V 16, red V 239 (`the_extremes_reach_every_studio_swing_bound`
+    /// checks that they really do).
+    const CORNERS: [[u8; 3]; 8] = [
+        [0, 0, 0], [255, 255, 255], [255, 0, 0], [0, 255, 0],
+        [0, 0, 255], [0, 255, 255], [255, 255, 0], [255, 0, 255],
+    ];
+
+    /// `kind` 0..8 fills with one of `CORNERS`; 8 is a magenta/green
+    /// checkerboard, every quad of which averages to 510/4 = 127 per
+    /// channel, so it pins the truncating quad average.
+    fn extremes(w: usize, h: usize, stride: usize, kind: usize) -> Vec<u8> {
+        let mut v = vec![0u8; stride * h];
+        for row in 0..h {
+            for p in 0..w {
+                let at = row * stride + p * 4;
+                let bgr = match CORNERS.get(kind) {
+                    Some(c) => *c,
+                    None if (row + p) % 2 == 0 => [255, 0, 255],
+                    None => [0, 255, 0],
+                };
+                v[at..at + 3].copy_from_slice(&bgr);
+                v[at + 3] = 255;
+            }
+        }
+        v
+    }
+
+    /// Positive control for the matrix below: its solid inputs really reach
+    /// luma 16 and 235 and both ends of U and of V (16 and 239). The kernel
+    /// packs `u | v << 8` with an UNSIGNED saturating pack, sound only
+    /// because chroma never leaves 16..=239; a test whose inputs all
+    /// averaged to grey (as the first version's did) could not see that
+    /// bound move.
+    #[test]
+    fn the_extremes_reach_every_studio_swing_bound() {
+        let (w, h) = (16usize, 2usize);
+        let (mut ys, mut us, mut vs) = (Vec::new(), Vec::new(), Vec::new());
+        for kind in 0..CORNERS.len() {
+            let mut out = Vec::new();
+            reference(&extremes(w, h, w * 4, kind), w * 4, w as u32, h as u32, &mut out);
+            let (y, uv) = out.split_at(w * h);
+            ys.extend_from_slice(y);
+            us.extend(uv.iter().step_by(2));
+            vs.extend(uv.iter().skip(1).step_by(2));
+        }
+        for (plane, vals, lo, hi) in [("Y", &ys, 16u8, 235u8), ("U", &us, 16, 239), ("V", &vs, 16, 239)] {
+            assert!(vals.contains(&lo) && vals.contains(&hi), "{plane} never reaches {lo} and {hi}");
+            assert!(vals.iter().all(|&x| (lo..=hi).contains(&x)), "{plane} left {lo}..={hi}");
+        }
+    }
+
+    /// Both paths (the AVX2 kernel where the CPU has it, and the scalar
+    /// loops always) against the independent reference, across widths that
+    /// exercise the kernel's 16-pixel main loop, its scalar tails and both
+    /// together, with padded strides, on noise and on `extremes`.
+    #[test]
+    fn the_avx2_kernel_matches_the_reference_byte_for_byte() {
+        let paths = paths();
+        for &w in &[16usize, 18, 32, 34, 46, 48, 64, 130, 2560] {
+            for &h in &[2usize, 4, 6] {
+                for &pad in &[0usize, 12, 64] {
+                    let stride = w * 4 + pad;
+                    let mut inputs = vec![noise(w, h, stride)];
+                    for kind in 0..=CORNERS.len() {
+                        inputs.push(extremes(w, h, stride, kind));
+                    }
+                    for (k, src) in inputs.iter().enumerate() {
+                        let mut slow = Vec::new();
+                        reference(src, stride, w as u32, h as u32, &mut slow);
+                        for &simd in &paths {
+                            let mut fast = Vec::new();
+                            bgra_to_nv12_with(src, stride, w as u32, h as u32, &mut fast, simd);
+                            assert_eq!(fast, slow, "{w}x{h} stride +{pad} input {k} (simd {simd}) diverged from the reference");
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -415,13 +732,15 @@ mod nv12_tests {
         let mut second = noise(w, h, stride);
         second.iter_mut().for_each(|b| *b = 255 - *b);
 
-        let mut reused = Vec::new();
-        bgra_to_nv12(&first, stride, w as u32, h as u32, &mut reused);
-        bgra_to_nv12(&second, stride, w as u32, h as u32, &mut reused);
+        for simd in paths() {
+            let mut reused = Vec::new();
+            bgra_to_nv12_with(&first, stride, w as u32, h as u32, &mut reused, simd);
+            bgra_to_nv12_with(&second, stride, w as u32, h as u32, &mut reused, simd);
 
-        let mut fresh = Vec::new();
-        bgra_to_nv12(&second, stride, w as u32, h as u32, &mut fresh);
-        assert_eq!(reused, fresh, "the reused buffer kept part of the first frame");
+            let mut fresh = Vec::new();
+            bgra_to_nv12_with(&second, stride, w as u32, h as u32, &mut fresh, simd);
+            assert_eq!(reused, fresh, "the reused buffer (simd {simd}) kept part of the first frame");
+        }
     }
 }
 
@@ -778,6 +1097,8 @@ impl H264Encoder {
                 width,
                 height,
                 nv12: Vec::new(),
+                converted_picture: None,
+                patient_output: false,
                 sample_time: 0,
                 fps: fps.max(1),
                 built_fps: fps.max(1),
@@ -923,6 +1244,7 @@ impl H264Encoder {
             self.height = height;
             // Scratch is sized per frame; force a clean fill at the new size.
             self.nv12 = Vec::new();
+            self.converted_picture = None;
             // `sample_time` stays monotonic across the change — rate control
             // reads a backwards step as a clock fault.
             self.owed_keyframe = true;
@@ -939,6 +1261,44 @@ impl H264Encoder {
         bgra: &[u8],
         stride: usize,
         force_key: bool,
+    ) -> Result<EncodedFrame, EncodeError> {
+        self.encode_bgra_inner(bgra, stride, force_key, None)
+    }
+
+    /// `encode_bgra` for a caller that re-submits the SAME picture, as the clip
+    /// recorder does on a still screen (once per frame slot, so the replay ring
+    /// keeps closing GOPs). `picture` names the pixels: pass the same value
+    /// only for the same pixels, and the BGRA-to-NV12 conversion, the largest
+    /// CPU cost per frame (at 1440p ~1.4 ms with the AVX2 kernel, ~3.8 ms with
+    /// the scalar loops; measured 2026-09-21), is skipped
+    /// in favour of the NV12 already converted from them.
+    pub fn encode_bgra_picture(
+        &mut self,
+        bgra: &[u8],
+        stride: usize,
+        force_key: bool,
+        picture: u64,
+    ) -> Result<EncodedFrame, EncodeError> {
+        self.encode_bgra_inner(bgra, stride, force_key, Some(picture))
+    }
+
+    /// For a caller that does not need each frame back the instant it is
+    /// encoded (the clip recorder, which only stores them): wait for an async
+    /// encoder's output by sleeping ~1 ms between polls instead of spinning.
+    /// The spin cost ~4 ms of CPU per frame (measured 2026-09-21: the clip
+    /// recorder's single largest cost after the conversion). The
+    /// remote-control stream keeps the spin, because there the wait IS the
+    /// latency. See OUTPUT_WAIT for why the spin was chosen.
+    pub fn set_patient_output(&mut self, patient: bool) {
+        self.patient_output = patient;
+    }
+
+    fn encode_bgra_inner(
+        &mut self,
+        bgra: &[u8],
+        stride: usize,
+        force_key: bool,
+        picture: Option<u64>,
     ) -> Result<EncodedFrame, EncodeError> {
         if bgra.len() < stride * self.height as usize {
             return Err(EncodeError::Failed("frame buffer is shorter than stride*height".into()));
@@ -975,7 +1335,10 @@ impl H264Encoder {
                 }
             }
 
-            bgra_to_nv12(bgra, stride, self.width, self.height, &mut self.nv12);
+            if must_convert(self.converted_picture, picture) {
+                bgra_to_nv12(bgra, stride, self.width, self.height, &mut self.nv12);
+                self.converted_picture = picture;
+            }
             let sample = self.make_sample(force_key)?;
             if self.events.is_some() {
                 return self.encode_async(sample, force_key);
@@ -1088,10 +1451,19 @@ impl H264Encoder {
             if let Some(frame) = self.ready.pop_front() {
                 return Ok(frame);
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(EncodeError::NeedMoreInput);
             }
-            std::thread::yield_now();
+            if self.patient_output {
+                // Rust's sleep is a high-resolution waitable timer on Windows
+                // 10 1803+, so this is ~1 ms, not the 15.6 ms tick the note on
+                // OUTPUT_WAIT is about; and a late wake only costs a frame the
+                // caller collects on its next call.
+                std::thread::sleep((deadline - now).min(Duration::from_millis(1)));
+            } else {
+                std::thread::yield_now();
+            }
         }
     }
 

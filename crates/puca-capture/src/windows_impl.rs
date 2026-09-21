@@ -46,12 +46,21 @@ pub struct ScreenCapture {
     /// Reused between frames — allocating a staging texture per frame is a
     /// GPU allocation 30 times a second for no reason.
     staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// A frame buffer handed back by the caller (`recycle`), reused by the
+    /// next readback instead of a fresh 14.7 MB allocation at 1440p.
+    spare: Option<Vec<u8>>,
     /// The host's real mouse pointer, which DXGI deliberately leaves OUT of the
     /// captured surface and reports separately.
     cursor: CursorState,
     /// Whether that pointer is blended back in. Off while a controller owns
     /// the cursor and draws its own — see set_draw_cursor.
     draw_cursor: bool,
+    /// Bumped whenever DXGI hands over a new pointer SHAPE, so
+    /// `redraw_cursor` can tell an arrow-to-I-beam change from no change.
+    shape_gen: u64,
+    /// The pixels under the pointer in the frame `copy_out` returned last,
+    /// so a repeat of that frame can move it (`redraw_cursor`).
+    overlay: CursorOverlay,
 }
 
 /// The pointer as DXGI last described it.
@@ -378,6 +387,7 @@ impl ScreenCapture {
             monitor,
             rotation,
             staging: None,
+            spare: None,
             // SEEDED, not empty: DXGI only reports the shape on CHANGE, so an
             // empty start meant no pointer in any frame until the host's own
             // mouse moved — "invisible but still working" after every capture
@@ -388,6 +398,8 @@ impl ScreenCapture {
             // a captured frame (a viewer that draws no cursor of its own, a
             // still grab) expects to see the pointer.
             draw_cursor: true,
+            shape_gen: 0,
+            overlay: CursorOverlay::default(),
         })
     }
 
@@ -401,6 +413,26 @@ impl ScreenCapture {
     /// stays ON: a host that is never asked behaves exactly as before.
     pub fn set_draw_cursor(&mut self, on: bool) {
         self.draw_cursor = on;
+    }
+
+    /// Bring the pointer up to date on a REPEATED frame. `next_frame` said
+    /// `Timeout`: nothing was presented, but the pointer may have moved or
+    /// changed shape (DXGI reports that as a pointer-only update, which
+    /// `next_frame` folds in and then answers as `Timeout`). A caller that
+    /// re-sends the previous frame without this shows the pointer frozen
+    /// where it was at the last present, then jumping at the next one.
+    ///
+    /// `frame` must be the frame `next_frame` returned last; any other is
+    /// left untouched. True only when the pixels changed, so a caller that
+    /// caches work per picture (the clip loops' `encode_bgra_picture`)
+    /// redoes it exactly when it must. The remote-control stream does not
+    /// call this: a pointer-only update still sends nothing there.
+    ///
+    /// After a rebuild that changed the output's rotation, a repeat of the
+    /// pre-rebuild frame is redrawn with new-orientation coordinates until
+    /// the next present (clipped, never out of bounds).
+    pub fn redraw_cursor(&mut self, frame: &mut Frame) -> bool {
+        self.overlay.on_repeat(frame, &self.cursor, self.shape_gen, self.draw_cursor)
     }
 
     /// How many outputs are available across all adapters.
@@ -450,6 +482,15 @@ impl ScreenCapture {
         let tex = tex.ok_or_else(|| CaptureError::Failed("no staging texture".into()))?;
         self.staging = Some((tex.clone(), desc.Width, desc.Height));
         Ok(tex)
+    }
+
+    /// Hand back a frame the caller is done with: its buffer is reused by the
+    /// next readback. Optional (the remote-control stream never calls it); the
+    /// clip recorder does, once per new picture, which saves a 14.7 MB
+    /// allocation per frame at 1440p. An HDR or rotated output builds a new
+    /// buffer either way (the conversion and the rotation write elsewhere).
+    pub fn recycle(&mut self, frame: Frame) {
+        self.spare = Some(frame.bgra);
     }
 
     /// Grab the next frame, waiting up to `timeout_ms` for the screen to change.
@@ -569,8 +610,11 @@ impl ScreenCapture {
         //
         // Treating it as `Timeout` is exactly right: it is the existing "the
         // screen did not change, repeat the previous frame" path, and the
-        // cursor news above has already been folded in, so a pointer that
-        // moves over a still screen still moves for the viewer.
+        // cursor news above has already been folded in. It only reaches the
+        // picture if the caller calls `redraw_cursor` on the frame it
+        // repeats (the clip loops do). This comment used to say the pointer
+        // "still moves for the viewer" without that; it did not: a repeated
+        // frame carried the pointer where it was at the last present.
         if info.LastPresentTime == 0 {
             unsafe {
                 let _ = dup.ReleaseFrame();
@@ -621,6 +665,7 @@ impl ScreenCapture {
             self.cursor.height = shape.Height;
             self.cursor.pitch = shape.Pitch;
             self.cursor.kind = shape.Type;
+            self.shape_gen = self.shape_gen.wrapping_add(1);
         }
     }
 
@@ -670,12 +715,13 @@ impl ScreenCapture {
         let mapped_slice = unsafe {
             std::slice::from_raw_parts(mapped.pData as *const u8, mapped_len)
         };
-        let raw = frame_from_staging(
+        let raw = frame_from_staging_into(
             desc.Format,
             desc.Width,
             desc.Height,
             mapped.RowPitch as usize,
             mapped_slice,
+            self.spare.take(),
         );
         unsafe {
             self.context.Unmap(&staging, 0);
@@ -694,11 +740,125 @@ impl ScreenCapture {
         // CURSOR OWNERSHIP. When the controller draws its own pointer, ours
         // must not be in the picture: two cursors separate under latency and
         // the viewer cannot tell which one their finger is steering. See
-        // set_draw_cursor.
-        if self.draw_cursor {
-            draw_cursor(&mut out, &self.cursor, self.cursor.x, self.cursor.y);
-        }
+        // set_draw_cursor. Drawn through the overlay, which also keeps the
+        // pixels the pointer covers so a repeat can move it; saving them is
+        // a read, so the frame is byte-identical to drawing it directly.
+        self.overlay.on_present(&mut out, &self.cursor, self.shape_gen, self.draw_cursor);
         Ok(out)
+    }
+}
+
+/// The pointer drawn into ONE frame, kept so it can be moved on that frame.
+///
+/// A repeated frame (`next_frame` said `Timeout`) is the last PRESENTED
+/// picture with the pointer baked in where it was then. To move it, the
+/// pixels it covered are put back and it is drawn at its new spot. Put back
+/// from a saved copy (save-under), never by drawing it again: an alpha blend
+/// or an AND/XOR black or white write cannot be undone; only the pure invert
+/// cases are their own inverse, so undo-by-redraw works on an I-beam and
+/// fails on the arrow. Restore BEFORE saving: when the old and new spots
+/// overlap, saving first captures the old pointer as background and leaves
+/// a ghost. The alternative, a clean copy of every frame, costs 14.7 MB
+/// resident and a 14.7 MB copy per present at 1440p; this costs the
+/// pointer's rectangle (4 KB for 32x32).
+#[derive(Default)]
+struct CursorOverlay {
+    /// The frame this belongs to: buffer address, length and geometry. A
+    /// frame that does not match is never written.
+    owner: Option<(usize, usize, u32, u32, usize)>,
+    /// What is drawn into that frame now (`drawn_key`).
+    drawn: Option<(i32, i32, u64)>,
+    /// The clipped rectangle the drawn pointer may have written, in frame
+    /// pixels (x, y, w, h), and the bytes that were there before it.
+    rect: (usize, usize, usize, usize),
+    under: Vec<u8>,
+}
+
+fn frame_identity(f: &Frame) -> (usize, usize, u32, u32, usize) {
+    (f.bgra.as_ptr() as usize, f.bgra.len(), f.width, f.height, f.stride)
+}
+
+/// What gets drawn for this state, as a comparable key: None when nothing is
+/// (hidden, or drawing is off), so a hidden pointer that moves changes
+/// nothing.
+fn drawn_key(c: &CursorState, shape_gen: u64, draw: bool) -> Option<(i32, i32, u64)> {
+    (draw && c.visible).then_some((c.x, c.y, shape_gen))
+}
+
+/// The rectangle `draw_cursor(f, c, left, top)` may write, clipped to the
+/// frame: the same early returns and geometry (`width` wide, half the
+/// reported height for a monochrome shape), in 64-bit maths because the
+/// position comes from a driver and may be anything.
+fn cursor_rect(f: &Frame, c: &CursorState, left: i32, top: i32) -> (usize, usize, usize, usize) {
+    if !c.visible || c.shape.is_empty() || c.width == 0 || c.pitch == 0 {
+        return (0, 0, 0, 0);
+    }
+    let mono = c.kind == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32;
+    let ch = if mono { c.height / 2 } else { c.height };
+    let clip = |at: i32, len: u32, max: u32| -> (usize, usize) {
+        let lo = (at as i64).clamp(0, max as i64);
+        let hi = (at as i64 + len as i64).clamp(0, max as i64);
+        (lo as usize, (hi - lo) as usize)
+    };
+    let (x, w) = clip(left, c.width, f.width);
+    let (y, h) = clip(top, ch, f.height);
+    if w == 0 || h == 0 {
+        return (0, 0, 0, 0);
+    }
+    (x, y, w, h)
+}
+
+impl CursorOverlay {
+    /// A NEW picture: draw the pointer on it (when `draw`), keeping what it
+    /// covers. Always records the frame, even when nothing is drawn, so a
+    /// pointer that appears on a later pointer-only update still gets drawn.
+    fn on_present(&mut self, f: &mut Frame, c: &CursorState, shape_gen: u64, draw: bool) {
+        self.owner = Some(frame_identity(f));
+        self.paint(f, c, shape_gen, draw);
+    }
+
+    /// A REPEAT of the frame `on_present` last saw: move the pointer to where
+    /// it is now. False, touching nothing, for any other frame or when what
+    /// would be drawn has not changed.
+    fn on_repeat(&mut self, f: &mut Frame, c: &CursorState, shape_gen: u64, draw: bool) -> bool {
+        if self.owner != Some(frame_identity(f)) || self.drawn == drawn_key(c, shape_gen, draw) {
+            return false;
+        }
+        self.restore(f);
+        self.paint(f, c, shape_gen, draw);
+        true
+    }
+
+    fn paint(&mut self, f: &mut Frame, c: &CursorState, shape_gen: u64, draw: bool) {
+        self.drawn = drawn_key(c, shape_gen, draw);
+        self.under.clear();
+        self.rect = if draw { cursor_rect(f, c, c.x, c.y) } else { (0, 0, 0, 0) };
+        let (x, y, w, h) = self.rect;
+        for row in y..y + h {
+            let at = row * f.stride + x * 4;
+            let Some(src) = f.bgra.get(at..at + w * 4) else {
+                // A frame shorter than stride * height. copy_out never builds
+                // one; if one ever arrives, draw nothing rather than draw
+                // pixels (draw_cursor checks per pixel) that were not saved.
+                self.rect = (0, 0, 0, 0);
+                self.under.clear();
+                return;
+            };
+            self.under.extend_from_slice(src);
+        }
+        if draw {
+            draw_cursor(f, c, c.x, c.y);
+        }
+    }
+
+    fn restore(&self, f: &mut Frame) {
+        let (x, y, w, h) = self.rect;
+        for (i, row) in (y..y + h).enumerate() {
+            let at = row * f.stride + x * 4;
+            if let Some(dst) = f.bgra.get_mut(at..at + w * 4) {
+                dst.copy_from_slice(&self.under[i * w * 4..(i + 1) * w * 4]);
+            }
+        }
     }
 }
 
@@ -1007,12 +1167,32 @@ pub fn hdr_sc_rgb_to_bgra8(
 }
 
 /// Extract Frame from mapped staging texture data, converting HDR surfaces to 8-bit BGRA.
+/// The capture itself calls `frame_from_staging_into`; this is the tests' fresh-buffer form.
+#[cfg(test)]
 pub(crate) fn frame_from_staging(
     format: DXGI_FORMAT,
     width: u32,
     height: u32,
     row_pitch: usize,
     data: &[u8],
+) -> Frame {
+    frame_from_staging_into(format, width, height, row_pitch, data, None)
+}
+
+/// `frame_from_staging`, reusing `spare` for the pixels when it is big enough.
+///
+/// A fresh `vec![0; len]` of 14.7 MB per frame (1440p) comes back from the
+/// allocator as new zeroed pages, and faulting those in cost more than the
+/// copy itself: ~1.7 ms of CPU per frame in the clip recorder, measured
+/// 2026-09-21. A recycled buffer is written without zeroing first. The result
+/// is byte-identical either way (pinned by recycle_tests).
+pub(crate) fn frame_from_staging_into(
+    format: DXGI_FORMAT,
+    width: u32,
+    height: u32,
+    row_pitch: usize,
+    data: &[u8],
+    spare: Option<Vec<u8>>,
 ) -> Frame {
     if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
         let w = width as usize;
@@ -1029,15 +1209,67 @@ pub(crate) fn frame_from_staging(
     } else {
         let stride = row_pitch;
         let len = stride * height as usize;
-        let mut bgra = vec![0u8; len];
         let copy_len = len.min(data.len());
-        bgra[..copy_len].copy_from_slice(&data[..copy_len]);
+        let bgra = match spare {
+            Some(mut v) if v.capacity() >= len => {
+                v.clear();
+                v.extend_from_slice(&data[..copy_len]);
+                v.resize(len, 0); // only a short source leaves a tail to zero
+                v
+            }
+            _ => {
+                let mut v = vec![0u8; len];
+                v[..copy_len].copy_from_slice(&data[..copy_len]);
+                v
+            }
+        };
         Frame {
             width,
             height,
             stride,
             bgra,
         }
+    }
+}
+
+#[cfg(test)]
+mod recycle_tests {
+    use super::*;
+
+    fn pixels(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+    }
+
+    #[test]
+    fn a_recycled_buffer_gives_the_same_frame_as_a_fresh_one() {
+        let (w, h, pitch) = (16u32, 8u32, 16 * 4 + 32);
+        let data = pixels(pitch * h as usize, 7);
+        let fresh = frame_from_staging(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data);
+        // A spare full of a DIFFERENT frame, as the clip loop hands back.
+        let old = pixels(pitch * h as usize, 200);
+        let reused = frame_from_staging_into(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data, Some(old));
+        assert_eq!(reused.bgra, fresh.bgra);
+        assert_eq!((reused.width, reused.height, reused.stride), (fresh.width, fresh.height, fresh.stride));
+    }
+
+    #[test]
+    fn a_short_source_leaves_zeros_not_the_previous_frame() {
+        let (w, h, pitch) = (16u32, 8u32, 16 * 4);
+        let data = pixels(pitch * h as usize - 100, 9); // shorter than the frame
+        let old = vec![0xAB; pitch * h as usize];
+        let reused = frame_from_staging_into(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data, Some(old));
+        let fresh = frame_from_staging(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data);
+        assert_eq!(reused.bgra, fresh.bgra);
+        assert!(reused.bgra[reused.bgra.len() - 100..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_spare_too_small_is_not_used() {
+        let (w, h, pitch) = (16u32, 8u32, 16 * 4);
+        let data = pixels(pitch * h as usize, 3);
+        let small = Vec::with_capacity(10);
+        let out = frame_from_staging_into(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data, Some(small));
+        assert_eq!(out.bgra, data);
     }
 }
 
@@ -1251,6 +1483,217 @@ fn seed_cursor(monitor: usize) -> CursorState {
             showing,
             (out.left, out.top, out.width, out.height),
         )
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    //! The pointer on REPEATED frames (CursorOverlay). Pure: frames are
+    //! plain buffers, nothing is captured or shown.
+    use super::*;
+
+    const TL: u8 = 10;
+    const TR: u8 = 20;
+    const BL: u8 = 30;
+    const BR: u8 = 40;
+
+    /// Every pixel a different colour (blue 100 + index, so never one of
+    /// the cursor's), and a padded stride whose padding is 0xEE: a restore
+    /// that lands a row off, or writes into the padding, cannot hide.
+    fn desktop(w: u32, h: u32) -> Frame {
+        let stride = w as usize * 4 + 12;
+        let mut bgra = vec![0xEEu8; stride * h as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let at = y as usize * stride + x as usize * 4;
+                bgra[at..at + 4].copy_from_slice(&[(100 + y * w + x) as u8, (x * 7) as u8, (y * 13) as u8, 255]);
+            }
+        }
+        Frame { width: w, height: h, stride, bgra }
+    }
+
+    fn blue(f: &Frame, x: usize, y: usize) -> u8 {
+        f.bgra[y * f.stride + x * 4]
+    }
+
+    /// A 2x2 COLOR cursor, a different colour per pixel, padded pitch.
+    fn arrow(x: i32, y: i32) -> CursorState {
+        let pitch = 2 * 4 + 8;
+        let mut shape = vec![0x77u8; pitch * 2];
+        for (i, b) in [TL, TR, BL, BR].into_iter().enumerate() {
+            let at = (i / 2) * pitch + (i % 2) * 4;
+            shape[at..at + 4].copy_from_slice(&[b, 0, 0, 255]);
+        }
+        CursorState { shape, width: 2, height: 2, pitch: pitch as u32, kind: DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32, x, y, visible: true }
+    }
+
+    /// A 2x2 MONOCHROME cursor that inverts everything under it: the case
+    /// where a ghost left by a wrong restore order is visible.
+    fn inverter(x: i32, y: i32) -> CursorState {
+        // AND rows then XOR rows, 1 byte each: and=1 xor=1 -> invert.
+        CursorState { shape: vec![0xFF, 0xFF, 0xFF, 0xFF], width: 2, height: 4, pitch: 1, kind: DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32, x, y, visible: true }
+    }
+
+    /// Every byte outside the (clipped) 2x2 rect at (x, y) equals `clean`.
+    fn untouched_outside(f: &Frame, clean: &Frame, x: i64, y: i64) {
+        for row in 0..f.height as i64 {
+            for b in 0..f.stride as i64 {
+                let col = b / 4;
+                let inside = b < f.width as i64 * 4 && (x..x + 2).contains(&col) && (y..y + 2).contains(&row);
+                if !inside {
+                    let at = (row * f.stride as i64 + b) as usize;
+                    assert_eq!(f.bgra[at], clean.bgra[at], "byte {b} of row {row} changed outside the pointer at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_frame_shows_the_pointer_where_it_is_now() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        let mut c = arrow(1, 1);
+        ov.on_present(&mut f, &c, 0, true);
+        // What the clip loops encoded before: the present, repeated as is.
+        let stale = f.clone();
+        c.x = 5;
+        c.y = 3;
+        assert!(ov.on_repeat(&mut f, &c, 0, true), "a moved pointer must be a new picture");
+        assert_eq!([blue(&f, 5, 3), blue(&f, 6, 3), blue(&f, 5, 4), blue(&f, 6, 4)], [TL, TR, BL, BR]);
+        untouched_outside(&f, &clean, 5, 3);
+        // Positive control: the oracle sees the frozen pointer.
+        assert_eq!(blue(&stale, 1, 1), TL, "the stale frame has the pointer at the old spot");
+        assert_ne!(blue(&stale, 5, 3), TL, "and not at the new one");
+    }
+
+    #[test]
+    fn an_inverting_pointer_moving_over_itself_leaves_no_ghost() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        ov.on_present(&mut f, &inverter(1, 1), 0, true);
+        // (2,1) overlaps (1,1) by a column; then far away.
+        for (x, y) in [(2, 1), (5, 3)] {
+            assert!(ov.on_repeat(&mut f, &inverter(x, y), 0, true));
+            untouched_outside(&f, &clean, x as i64, y as i64);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (px, py) = ((x + dx) as usize, (y + dy) as usize);
+                assert_eq!(blue(&f, px, py), !blue(&clean, px, py), "not inverted at ({px},{py})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pointer_hidden_at_the_present_appears_when_it_shows() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        let mut c = arrow(1, 1);
+        c.visible = false;
+        ov.on_present(&mut f, &c, 0, true);
+        assert_eq!(f.bgra, clean.bgra);
+        // Moving while hidden draws nothing and is not a new picture.
+        c.x = 3;
+        assert!(!ov.on_repeat(&mut f, &c, 0, true));
+        c.visible = true;
+        assert!(ov.on_repeat(&mut f, &c, 0, true));
+        assert_eq!(blue(&f, 3, 1), TL);
+        untouched_outside(&f, &clean, 3, 1);
+    }
+
+    #[test]
+    fn a_pointer_that_hides_leaves_the_frame_clean() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        let mut c = arrow(2, 2);
+        ov.on_present(&mut f, &c, 0, true);
+        c.visible = false;
+        assert!(ov.on_repeat(&mut f, &c, 0, true));
+        assert_eq!(f.bgra, clean.bgra);
+    }
+
+    #[test]
+    fn only_a_real_change_is_a_new_picture() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        let c = arrow(2, 2);
+        ov.on_present(&mut f, &c, 0, true);
+        let once = f.clone();
+        assert!(!ov.on_repeat(&mut f, &c, 0, true), "nothing changed");
+        assert_eq!(f.bgra, once.bgra);
+        // A new shape at the same spot (arrow to I-beam) is a change, and is
+        // drawn exactly as a present of that state would draw it.
+        assert!(ov.on_repeat(&mut f, &c, 1, true));
+        assert_eq!(f.bgra, once.bgra, "same shape bytes, same picture");
+        let mut other = inverter(2, 2);
+        assert!(ov.on_repeat(&mut f, &other, 2, true));
+        let mut direct = clean.clone();
+        draw_cursor(&mut direct, &other, 2, 2);
+        assert_eq!(f.bgra, direct.bgra);
+        other.x = 4;
+        assert!(ov.on_repeat(&mut f, &other, 2, true));
+    }
+
+    #[test]
+    fn drawing_off_draws_nothing_and_changes_nothing() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        let mut c = arrow(2, 2);
+        ov.on_present(&mut f, &c, 0, false);
+        c.x = 5;
+        assert!(!ov.on_repeat(&mut f, &c, 0, false));
+        assert_eq!(f.bgra, clean.bgra);
+        // Ownership handed back (set_draw_cursor(true)): drawn on the repeat.
+        assert!(ov.on_repeat(&mut f, &c, 0, true));
+        assert_eq!(blue(&f, 5, 2), TL);
+    }
+
+    #[test]
+    fn off_screen_and_absurd_positions_are_clipped() {
+        let clean = desktop(8, 6);
+        let mut f = clean.clone();
+        let mut ov = CursorOverlay::default();
+        ov.on_present(&mut f, &arrow(3, 3), 0, true);
+        for (x, y) in [(-1, -1), (7, 5), (i32::MIN, i32::MAX), (i32::MAX, i32::MIN), (-1, 4)] {
+            ov.on_repeat(&mut f, &arrow(x, y), 0, true);
+            untouched_outside(&f, &clean, x as i64, y as i64);
+        }
+        let mut gone = arrow(0, 0);
+        gone.visible = false;
+        assert!(ov.on_repeat(&mut f, &gone, 0, true));
+        assert_eq!(f.bgra, clean.bgra, "every partial draw was put back");
+    }
+
+    /// What the remote-control stream sees: a present through the overlay
+    /// is byte-identical to drawing the pointer directly.
+    #[test]
+    fn a_present_is_exactly_the_direct_draw() {
+        for c in [arrow(3, 2), inverter(6, 4), arrow(-1, 5)] {
+            let mut via = desktop(8, 6);
+            CursorOverlay::default().on_present(&mut via, &c, 0, true);
+            let mut direct = desktop(8, 6);
+            draw_cursor(&mut direct, &c, c.x, c.y);
+            assert_eq!(via.bgra, direct.bgra);
+        }
+    }
+
+    #[test]
+    fn a_frame_that_was_not_the_last_present_is_never_written() {
+        let clean = desktop(8, 6);
+        let mut last = clean.clone();
+        let mut other = clean.clone(); // same size, alive at the same time
+        let mut ov = CursorOverlay::default();
+        ov.on_present(&mut last, &arrow(1, 1), 0, true);
+        let before = last.clone();
+        assert!(!ov.on_repeat(&mut other, &arrow(5, 3), 0, true));
+        assert_eq!(other.bgra, clean.bgra);
+        assert_eq!(last.bgra, before.bgra);
+        // Positive control: the owned frame IS written by the same call.
+        assert!(ov.on_repeat(&mut last, &arrow(5, 3), 0, true));
     }
 }
 

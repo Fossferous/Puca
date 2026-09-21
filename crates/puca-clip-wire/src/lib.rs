@@ -12,6 +12,24 @@
 //! The stream is: `MAGIC` once, then records of
 //! `flags:u8, ts_us:u64, dur_us:u64, len:u32, payload[len]`, little-endian.
 //! The payload is one H.264 access unit in Annex-B.
+//!
+//! It also holds [`FramePacer`], the frame cadence both clip loops share (see
+//! `pacer.rs` for why it lives here).
+
+mod pacer;
+pub use pacer::FramePacer;
+
+/// A repeated slot (the capture said `Timeout`): bring the stored frame's
+/// pointer up to date (`redraw`, i.e. `ScreenCapture::redraw_cursor`), and
+/// if that changed its pixels, name it a NEW picture so the encoder
+/// converts it again (`encode_bgra_picture` skips the conversion for a
+/// picture it has already seen, and would encode the pointer where it
+/// was). Shared by both clip loops so the step cannot drift between them.
+pub fn refresh_repeat(picture: &mut u64, redraw: impl FnOnce() -> bool) {
+    if redraw() {
+        *picture += 1;
+    }
+}
 
 /// Written once, after capture AND the encoder have both opened successfully.
 ///
@@ -30,7 +48,9 @@ pub const HEADER_LEN: usize = 21;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub keyframe: bool,
-    /// Capture-relative microseconds. The first record of a session is 0.
+    /// Microseconds since the capture loop's own start instant. NOT 0 at
+    /// the first record (it is stamped after that frame's acquire and
+    /// readback); the app anchors this clock by measurement.
     pub ts_us: u64,
     pub dur_us: u64,
     pub len: u32,
@@ -118,5 +138,14 @@ mod tests {
         // The reader reads the magic with read_exact(8) before any record, so
         // a magic of a different length would eat into the first frame.
         assert_eq!(MAGIC.len(), 8);
+    }
+
+    #[test]
+    fn a_repeat_whose_pointer_moved_is_a_new_picture_and_only_then() {
+        let mut picture = 7;
+        refresh_repeat(&mut picture, || false);
+        assert_eq!(picture, 7, "nothing changed: the encoder may reuse its conversion");
+        refresh_repeat(&mut picture, || true);
+        assert_eq!(picture, 8, "the pixels changed: the encoder must convert again");
     }
 }

@@ -119,6 +119,8 @@ pub fn run(args: ClipHostArgs) -> i32 {
             return 4;
         }
     };
+    // Frames here are stored, not watched live: no need to spin for each one.
+    encoder.set_patient_output(true);
 
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -129,27 +131,67 @@ pub fn run(args: ClipHostArgs) -> i32 {
     let start = std::time::Instant::now();
     let gop_us = args.gop_ms as u128 * 1000;
     let mut last_key_us: i128 = -(gop_us as i128); // a keyframe on the very first frame
-    let frame_timeout_ms = ((1000 / args.fps.max(1)) as u32).max(15);
-    let frame_period = std::time::Duration::from_millis(frame_timeout_ms as u64);
+    // Only for the wait before the FIRST frame. After that the pacer decides
+    // when to look and for how long.
+    let first_frame_timeout_ms = ((1000 / args.fps.max(1)) as u32).max(15);
     let dur_us = (1_000_000u64 / args.fps.max(1) as u64).max(1);
+    // THE CAP. `--fps` used to set only how long an acquire would wait, and
+    // an acquire returns on every present: a 165 Hz screen playing a video
+    // was encoded at ~78 fps and ~21 Mbit/s when 30 and 8 were asked for.
+    // See puca-clip-wire's pacer.rs for the measurement and the design.
+    let mut pacer = puca_clip_wire::FramePacer::new(args.fps);
     // The frame is STORED and re-encoded on a timeout rather than cloned: on a
     // static desktop DXGI produces nothing, and the ring buffer only closes a
     // GOP on a video keyframe, so silence would let audio grow it unbounded.
     let mut last_frame: Option<puca_capture::Frame> = None;
-    let mut last_emit_at = std::time::Instant::now();
+    // Names the pixels in last_frame for the encoder: bumped for every new
+    // picture, and for a re-send whose pointer had to be moved
+    // (refresh_repeat), unchanged otherwise, so a still screen's repeats
+    // skip the colour conversion (encode_bgra_picture).
+    let mut picture: u64 = 0;
     let mut access_lost_streak: u32 = 0;
 
     loop {
-        match capture.next_frame(frame_timeout_ms) {
+        // Wait for the slot BEFORE acquiring. Presents that land meanwhile are
+        // folded into the next acquire by DXGI, so this loop spends nothing on
+        // them: no readback, no conversion, no encode. The newest picture wins.
+        let wait = pacer.wait(std::time::Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        let slot_at = std::time::Instant::now();
+        let had_frame = last_frame.is_some();
+        let acquired = if had_frame {
+            // Returns at once if a present is pending; otherwise waits for one
+            // for about the first half of the slot (pacer.rs: a plain poll
+            // stutters when the frame rate matches the content's). The OS may
+            // round that wait up to its ~15.6 ms timer tick; the grid absorbs
+            // it, because the slot is spent as of when it opened.
+            pacer.acquire_within(
+                slot_at,
+                |ms| capture.next_frame(ms),
+                |e| matches!(e, CaptureError::Timeout),
+            )
+        } else {
+            capture.next_frame(first_frame_timeout_ms)
+        };
+        match acquired {
             Ok(f) => {
                 access_lost_streak = 0;
-                last_frame = Some(f);
+                // The previous picture's buffer carries the next readback.
+                if let Some(old) = last_frame.replace(f) {
+                    capture.recycle(old);
+                }
+                picture += 1;
             }
             Err(CaptureError::Timeout) => {
-                if last_emit_at.elapsed() < frame_period || last_frame.is_none() {
-                    continue; // paced, or nothing captured yet at all
-                }
-                // fall through and re-encode the stored frame
+                // No new picture within this slot's window: re-encode the
+                // stored frame, once per slot, with the pointer moved to
+                // where it is now (a pointer-only update is a Timeout too).
+                let Some(f) = last_frame.as_mut() else {
+                    continue; // nothing captured yet at all
+                };
+                puca_clip_wire::refresh_repeat(&mut picture, || capture.redraw_cursor(f));
             }
             Err(CaptureError::AccessLost) => {
                 // A locked screen or a sleeping panel returns this on every
@@ -167,6 +209,12 @@ pub fn run(args: ClipHostArgs) -> i32 {
             }
         }
         let frame = last_frame.as_ref().expect("guarded above");
+        // Spend the slot on the SUBMISSION, whatever the encoder answers (an
+        // async encoder can take the frame and still say "need more input"),
+        // and as of the instant it OPENED, so a slow readback does not restart
+        // the grid from its own end. Not for the very first frame: that
+        // acquire blocked, so the second frame would follow it at once.
+        pacer.take(if had_frame { slot_at } else { std::time::Instant::now() });
 
         let ts_us = start.elapsed().as_micros();
         let force_key = ts_us as i128 - last_key_us >= gop_us as i128;
@@ -178,7 +226,7 @@ pub fn run(args: ClipHostArgs) -> i32 {
             last_key_us = ts_us as i128;
         }
 
-        let encoded = match encoder.encode_bgra(&frame.bgra, frame.stride, force_key) {
+        let encoded = match encoder.encode_bgra_picture(&frame.bgra, frame.stride, force_key, picture) {
             Ok(f) => f,
             Err(EncodeError::NeedMoreInput) => continue, // buffering; nothing to emit
             Err(e) => {
@@ -202,7 +250,6 @@ pub fn run(args: ClipHostArgs) -> i32 {
         {
             return 0;
         }
-        last_emit_at = std::time::Instant::now();
     }
 }
 
