@@ -305,12 +305,29 @@ needs no picker).
   fps, 7.1-7.2 Mbit/s, 36-39% of one core**, frame gaps p5 31 / p95 35 /
   max 37 ms. (A first version that polled once per slot measured 29-29.6
   fps, 6-7 Mbit/s and 33-36%, with gaps out to 104 ms: it re-sent more
-  stored frames, which are cheap, and caught fewer new ones.) What remains is per frame: the
-  GPU-to-CPU readback, the scalar BGRA→NV12 convert, and the encoder's short
-  wait for output. Each slot waits up to half a period for a new picture
-  rather than polling once, so content at exactly the asked-for rate is
-  captured once per frame instead of alternating duplicates and drops
-  (`pacer.rs` explains why).
+  stored frames, which are cheap, and caught fewer new ones.) Each slot waits
+  up to half a period for a new picture rather than polling once, so content
+  at exactly the asked-for rate is captured once per frame instead of
+  alternating duplicates and drops (`pacer.rs` explains why).
+- **Per-frame cost, profiled (2026-09-21).** Thread-cycle counters around each
+  stage of the capped loop, on the same screen, found 8.1-9.4 ms of CPU per
+  slot on a mostly still screen (11-29% of slots a new picture):
+  the BGRA→NV12 convert ~3.8-4 ms (on EVERY slot, including a still screen's
+  re-send of the same picture), a 4 ms spin waiting for the encoder's output
+  (~4 ms), the readback copy into a freshly allocated 14.7 MB buffer
+  (~1.7 ms per new picture), and the sample build (~0.6 ms). Four
+  changes, each byte-for-byte or behaviour-identical: a repeated picture
+  reuses its NV12 (`encode_bgra_picture`); the clip loops poll the encoder
+  by sleeping ~1 ms instead of spinning (`set_patient_output`; the
+  remote-control stream keeps its spin); an AVX2 kernel does the convert
+  (~1.4 ms, identical to the scalar loops, which remain the fallback); and
+  the readback reuses the previous frame's buffer (`ScreenCapture::recycle`,
+  ~0.6 ms). Result with every slot a new picture: **~3.3 ms of loop CPU per
+  slot; the whole host process 13.5-13.7% of one core at 30 fps, against
+  35-37% for the capped loop alone in the same conditions.** What remains:
+  the convert, the sample copy, the readback, and the encoder itself. The
+  next step down would be converting on the GPU, which also cuts what is
+  read back to 37.5% (NV12 is 1.5 bytes a pixel against BGRA's 4).
 - **Superseded bench (2026-08-20, `bench_clip_capture_encode_pacing` in
   `crates/puca-encode/tests/live_encode.rs`)**: ~8 ms per frame, "~50 fps",
   "cannot hold 60 fps at 1440p", "~24% of a core at 30 fps". It timed

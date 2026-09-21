@@ -186,6 +186,9 @@ impl ScreenCapture {
             .unwrap_or(0)
     }
 
+    /// Parity with the Windows capture's buffer reuse; nothing to reuse here.
+    pub fn recycle(&mut self, _frame: Frame) {}
+
     /// Grab the current screen.
     ///
     /// `timeout_ms` is accepted for parity with the Windows path and IGNORED:

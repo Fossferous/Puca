@@ -7,15 +7,19 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
-- **Clip recording uses about a third of the CPU it did.** With clips armed,
-  the screen recorder ignored its own frame rate: on a high-refresh monitor
-  showing anything that moves (a stream, a game) it captured and encoded
-  every frame the screen drew, 63 to 78 a second when the preset asked for
-  30, at more than twice the bitrate. Measured on a 2560x1440 165 Hz screen,
-  it now records at the rate your preset sets: 30 frames a second at about
-  7 Mbit/s, for 36-39% of one CPU core instead of 81-95%, and it takes
-  proportionally less of the graphics card's video encoder. The same number
-  of seconds now takes less than half the memory.
+- **Clip recording uses about a sixth of the CPU it did.** With clips
+  armed, the screen recorder ignored its own frame rate: on a high-refresh
+  monitor showing anything that moves (a stream, a game) it captured and
+  encoded every frame the screen drew, 63 to 78 a second when the preset
+  asked for 30, at more than twice the bitrate. Measured on a 2560x1440
+  165 Hz screen, it now records at the rate your preset sets: 30 frames a
+  second at about 7 Mbit/s, and it takes proportionally less of the graphics
+  card's video encoder. The same number of seconds now takes less than half
+  the memory. Each frame is also cheaper: a still screen no longer converts
+  the same picture again every frame, the colour conversion uses the CPU's
+  vector instructions, the recorder no longer spins while the video encoder
+  works, and it reuses one screen buffer instead of allocating a new one per
+  frame. Together: about 14% of one CPU core, down from 81-95%.
 
 ## 0.9.815 — 2026-09-19
 

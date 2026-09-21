@@ -862,6 +862,8 @@ fn in_process_capture_loop(
         .map_err(|e| format!("Failed to start screen capture: {e}")));
     let mut encoder = init_step!(H264Encoder::new(target.width, target.height, fps, target.bitrate)
         .map_err(|e| format!("Failed to start the video encoder: {e}")));
+    // Frames here are stored, not watched live: no need to spin for each one.
+    encoder.set_patient_output(true);
 
     let _ = ready.send(Ok(()));
     log::info!(
@@ -880,9 +882,14 @@ fn in_process_capture_loop(
     // output": the ring only closes/evicts GOPs on a video keyframe
     // (replayWorker.ts), so silence here would let audio grow the open GOP
     // unbounded for as long as the screen doesn't change. The stored frame is
-    // re-submitted once per slot. That is not free (a full colour conversion
-    // and an encode), but it is the frame rate that was asked for and no more.
+    // re-submitted once per slot. That is not free (an encode; the NV12
+    // converted from it is reused, see `picture` below), but it is the frame
+    // rate that was asked for and no more.
     let mut last_frame: Option<puca_capture::Frame> = None;
+    // Names the pixels in last_frame for the encoder: bumped for every new
+    // picture, unchanged when the stored one is re-sent, so a still screen's
+    // repeats skip the colour conversion (encode_bgra_picture).
+    let mut picture: u64 = 0;
     // Only for the wait before the FIRST frame. After that the pacer decides
     // when to look and for how long.
     let first_frame_timeout_ms = ((1000 / fps.max(1)) as u32).max(15);
@@ -936,7 +943,14 @@ fn in_process_capture_loop(
             capture.next_frame(first_frame_timeout_ms)
         };
         match acquired {
-            Ok(f) => { access_lost_streak = 0; last_frame = Some(f); }
+            Ok(f) => {
+                access_lost_streak = 0;
+                // The previous picture's buffer carries the next readback.
+                if let Some(old) = last_frame.replace(f) {
+                    capture.recycle(old);
+                }
+                picture += 1;
+            }
             Err(CaptureError::Timeout) => {
                 if last_frame.is_none() {
                     continue; // nothing captured yet at all
@@ -972,7 +986,7 @@ fn in_process_capture_loop(
             last_key_us = ts_us as i128;
         }
 
-        let encoded = match encoder.encode_bgra(&frame.bgra, frame.stride, force_key) {
+        let encoded = match encoder.encode_bgra_picture(&frame.bgra, frame.stride, force_key, picture) {
             Ok(f) => f,
             Err(EncodeError::NeedMoreInput) => continue, // encoder is buffering — nothing to emit yet
             Err(e) => return Err(format!("encode failed: {e}")),

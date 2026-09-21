@@ -187,6 +187,8 @@ mod stub {
             ))
         }
 
+        pub fn recycle(&mut self, _frame: Frame) {}
+
         pub fn next_frame(&mut self, _timeout_ms: u32) -> Result<Frame, CaptureError> {
             Err(CaptureError::Failed(
                 "native screen capture is only implemented on Windows".to_string(),

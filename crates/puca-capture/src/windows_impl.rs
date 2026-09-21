@@ -46,6 +46,9 @@ pub struct ScreenCapture {
     /// Reused between frames — allocating a staging texture per frame is a
     /// GPU allocation 30 times a second for no reason.
     staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// A frame buffer handed back by the caller (`recycle`), reused by the
+    /// next readback instead of a fresh 14.7 MB allocation at 1440p.
+    spare: Option<Vec<u8>>,
     /// The host's real mouse pointer, which DXGI deliberately leaves OUT of the
     /// captured surface and reports separately.
     cursor: CursorState,
@@ -378,6 +381,7 @@ impl ScreenCapture {
             monitor,
             rotation,
             staging: None,
+            spare: None,
             // SEEDED, not empty: DXGI only reports the shape on CHANGE, so an
             // empty start meant no pointer in any frame until the host's own
             // mouse moved — "invisible but still working" after every capture
@@ -450,6 +454,15 @@ impl ScreenCapture {
         let tex = tex.ok_or_else(|| CaptureError::Failed("no staging texture".into()))?;
         self.staging = Some((tex.clone(), desc.Width, desc.Height));
         Ok(tex)
+    }
+
+    /// Hand back a frame the caller is done with: its buffer is reused by the
+    /// next readback. Optional (the remote-control stream never calls it); the
+    /// clip recorder does, once per new picture, which saves a 14.7 MB
+    /// allocation per frame at 1440p. An HDR or rotated output builds a new
+    /// buffer either way (the conversion and the rotation write elsewhere).
+    pub fn recycle(&mut self, frame: Frame) {
+        self.spare = Some(frame.bgra);
     }
 
     /// Grab the next frame, waiting up to `timeout_ms` for the screen to change.
@@ -670,12 +683,13 @@ impl ScreenCapture {
         let mapped_slice = unsafe {
             std::slice::from_raw_parts(mapped.pData as *const u8, mapped_len)
         };
-        let raw = frame_from_staging(
+        let raw = frame_from_staging_into(
             desc.Format,
             desc.Width,
             desc.Height,
             mapped.RowPitch as usize,
             mapped_slice,
+            self.spare.take(),
         );
         unsafe {
             self.context.Unmap(&staging, 0);
@@ -1014,6 +1028,24 @@ pub(crate) fn frame_from_staging(
     row_pitch: usize,
     data: &[u8],
 ) -> Frame {
+    frame_from_staging_into(format, width, height, row_pitch, data, None)
+}
+
+/// `frame_from_staging`, reusing `spare` for the pixels when it is big enough.
+///
+/// A fresh `vec![0; len]` of 14.7 MB per frame (1440p) comes back from the
+/// allocator as new zeroed pages, and faulting those in cost more than the
+/// copy itself: ~1.7 ms of CPU per frame in the clip recorder, measured
+/// 2026-09-21. A recycled buffer is written without zeroing first. The result
+/// is byte-identical either way (pinned by recycle_tests).
+pub(crate) fn frame_from_staging_into(
+    format: DXGI_FORMAT,
+    width: u32,
+    height: u32,
+    row_pitch: usize,
+    data: &[u8],
+    spare: Option<Vec<u8>>,
+) -> Frame {
     if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
         let w = width as usize;
         let h = height as usize;
@@ -1029,15 +1061,67 @@ pub(crate) fn frame_from_staging(
     } else {
         let stride = row_pitch;
         let len = stride * height as usize;
-        let mut bgra = vec![0u8; len];
         let copy_len = len.min(data.len());
-        bgra[..copy_len].copy_from_slice(&data[..copy_len]);
+        let bgra = match spare {
+            Some(mut v) if v.capacity() >= len => {
+                v.clear();
+                v.extend_from_slice(&data[..copy_len]);
+                v.resize(len, 0); // only a short source leaves a tail to zero
+                v
+            }
+            _ => {
+                let mut v = vec![0u8; len];
+                v[..copy_len].copy_from_slice(&data[..copy_len]);
+                v
+            }
+        };
         Frame {
             width,
             height,
             stride,
             bgra,
         }
+    }
+}
+
+#[cfg(test)]
+mod recycle_tests {
+    use super::*;
+
+    fn pixels(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+    }
+
+    #[test]
+    fn a_recycled_buffer_gives_the_same_frame_as_a_fresh_one() {
+        let (w, h, pitch) = (16u32, 8u32, 16 * 4 + 32);
+        let data = pixels(pitch * h as usize, 7);
+        let fresh = frame_from_staging(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data);
+        // A spare full of a DIFFERENT frame, as the clip loop hands back.
+        let old = pixels(pitch * h as usize, 200);
+        let reused = frame_from_staging_into(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data, Some(old));
+        assert_eq!(reused.bgra, fresh.bgra);
+        assert_eq!((reused.width, reused.height, reused.stride), (fresh.width, fresh.height, fresh.stride));
+    }
+
+    #[test]
+    fn a_short_source_leaves_zeros_not_the_previous_frame() {
+        let (w, h, pitch) = (16u32, 8u32, 16 * 4);
+        let data = pixels(pitch * h as usize - 100, 9); // shorter than the frame
+        let old = vec![0xAB; pitch * h as usize];
+        let reused = frame_from_staging_into(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data, Some(old));
+        let fresh = frame_from_staging(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data);
+        assert_eq!(reused.bgra, fresh.bgra);
+        assert!(reused.bgra[reused.bgra.len() - 100..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_spare_too_small_is_not_used() {
+        let (w, h, pitch) = (16u32, 8u32, 16 * 4);
+        let data = pixels(pitch * h as usize, 3);
+        let small = Vec::with_capacity(10);
+        let out = frame_from_staging_into(DXGI_FORMAT_B8G8R8A8_UNORM, w, h, pitch, &data, Some(small));
+        assert_eq!(out.bgra, data);
     }
 }
 

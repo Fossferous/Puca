@@ -119,6 +119,8 @@ pub fn run(args: ClipHostArgs) -> i32 {
             return 4;
         }
     };
+    // Frames here are stored, not watched live: no need to spin for each one.
+    encoder.set_patient_output(true);
 
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -142,6 +144,10 @@ pub fn run(args: ClipHostArgs) -> i32 {
     // static desktop DXGI produces nothing, and the ring buffer only closes a
     // GOP on a video keyframe, so silence would let audio grow it unbounded.
     let mut last_frame: Option<puca_capture::Frame> = None;
+    // Names the pixels in last_frame for the encoder: bumped for every new
+    // picture, unchanged when the stored one is re-sent, so a still screen's
+    // repeats skip the colour conversion (encode_bgra_picture).
+    let mut picture: u64 = 0;
     let mut access_lost_streak: u32 = 0;
 
     loop {
@@ -171,7 +177,11 @@ pub fn run(args: ClipHostArgs) -> i32 {
         match acquired {
             Ok(f) => {
                 access_lost_streak = 0;
-                last_frame = Some(f);
+                // The previous picture's buffer carries the next readback.
+                if let Some(old) = last_frame.replace(f) {
+                    capture.recycle(old);
+                }
+                picture += 1;
             }
             Err(CaptureError::Timeout) => {
                 if last_frame.is_none() {
@@ -213,7 +223,7 @@ pub fn run(args: ClipHostArgs) -> i32 {
             last_key_us = ts_us as i128;
         }
 
-        let encoded = match encoder.encode_bgra(&frame.bgra, frame.stride, force_key) {
+        let encoded = match encoder.encode_bgra_picture(&frame.bgra, frame.stride, force_key, picture) {
             Ok(f) => f,
             Err(EncodeError::NeedMoreInput) => continue, // buffering; nothing to emit
             Err(e) => {
