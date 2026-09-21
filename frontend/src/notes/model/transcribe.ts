@@ -15,12 +15,15 @@
  *
  * The recogniser reads raw PCM from a file, so the clip is decoded on this
  * device and written to the APP'S CACHE for the length of the call, then
- * deleted on EVERY exit path including a refusal. The sealed copy in the
+ * deleted on EVERY exit path including a refusal — and the call itself is
+ * BOUNDED, because a recogniser that dies mid-session never calls back and a
+ * promise that never settles would leave that plaintext copy in the cache for
+ * good. The sealed copy in the
  * note's sidecar is the only one that lasts. The transcript itself is
  * ordinary sealed note text — which is also what makes a voice note findable,
  * because search reads note text and never attachment names.
  */
-import { MAX_TRANSCRIBE_MS, PCM_SAMPLE_RATE, toPcm16Mono16k } from './audioNote';
+import { MAX_TRANSCRIBE_MS, PCM_SAMPLE_RATE, toPcm16Mono16k, transcribeBudgetMs } from './audioNote';
 import { nativeTranscribePcm, notesNativeFeatures } from '../native/notesNative';
 
 /** The outcome of trying to write a clip down. `text` null = nothing was
@@ -79,6 +82,22 @@ async function decodeHere(buf: ArrayBuffer): Promise<{ sampleRate: number; chann
     }
 }
 
+/** `work`, or a throw once `ms` have passed. The timer is always cleared, so
+ *  a resolved call leaves nothing pending behind it. */
+async function withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            work,
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`the recogniser did not answer within ${ms} ms`)), ms);
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
+}
+
 /**
  * Write down `clip`, on this device or not at all.
  *
@@ -107,7 +126,12 @@ export async function transcribeClip(clip: Blob, durationMs: number): Promise<Tr
             await Filesystem.appendFile({ path, data: base64Of(bytes.subarray(i, i + CHUNK)), directory: Directory.Cache });
         }
         const { uri } = await Filesystem.getUri({ path, directory: Directory.Cache });
-        const r = await nativeTranscribePcm({ path: uri, sampleRate: PCM_SAMPLE_RATE });
+        // Bounded, because a call that never settles never reaches the
+        // `finally` that deletes the plaintext PCM (audioNote.ts says why).
+        const r = await withBudget(
+            nativeTranscribePcm({ path: uri, sampleRate: PCM_SAMPLE_RATE }),
+            transcribeBudgetMs(durationMs),
+        );
         const text = (r.text ?? '').trim();
         if (text === '') return { text: null, reason: describeTranscribeReason(r.reason ?? 'no-speech') };
         return { text, reason: null };

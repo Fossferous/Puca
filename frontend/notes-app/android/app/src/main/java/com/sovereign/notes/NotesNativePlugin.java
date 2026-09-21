@@ -10,6 +10,8 @@ import android.media.AudioFormat;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.provider.CalendarContract;
@@ -132,6 +134,11 @@ public class NotesNativePlugin extends Plugin {
      * The audio itself never crosses the bridge, and the CALLER owns the cache
      * file and deletes it whatever happens; this method only closes its own
      * read-only descriptor.
+     *
+     * It ALWAYS answers: whatever the segmented session managed to hear is
+     * kept even when a later segment errors, and a session that goes silent
+     * is cut off by a watchdog (TranscribeGate.watchdogMs) rather than
+     * hanging the page -- which would strand that cache file for good.
      */
     @PluginMethod
     public void transcribePcm(PluginCall call) {
@@ -186,10 +193,27 @@ public class NotesNativePlugin extends Plugin {
                 refuse(call, "failed");
                 return;
             }
-            opened = ParcelFileDescriptor.open(new File(file), ParcelFileDescriptor.MODE_READ_ONLY);
+            File pcm = new File(file);
+            opened = ParcelFileDescriptor.open(pcm, ParcelFileDescriptor.MODE_READ_ONLY);
             created = SpeechRecognizer.createOnDeviceSpeechRecognizer(getContext());
             final ParcelFileDescriptor descriptor = opened;
             final SpeechRecognizer recognizer = created;
+
+            // A session that is started but never calls back would leave this
+            // call unanswered, the descriptor open, and -- because the page
+            // deletes the cache file only when this RETURNS -- the plaintext
+            // PCM on disk for good. TranscribeGate.watchdogMs sizes the wait
+            // from the clip itself and is unit-tested.
+            final Handler handler = new Handler(Looper.getMainLooper());
+            final long budget = TranscribeGate.watchdogMs(pcm.length(), rate);
+            final Runnable watchdog = new Runnable() {
+                @Override
+                public void run() {
+                    if (!answered.compareAndSet(false, true)) return;
+                    close(descriptor, recognizer);
+                    refuse(call, "failed");
+                }
+            };
 
             created.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) { }
@@ -202,17 +226,19 @@ public class NotesNativePlugin extends Plugin {
 
                 @Override
                 public void onError(int error) {
-                    if (!answered.compareAndSet(false, true)) return;
-                    close(descriptor, recognizer);
                     boolean silence = error == SpeechRecognizer.ERROR_NO_MATCH
                             || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT;
-                    refuse(call, silence ? "no-speech" : "failed");
+                    // A SEGMENTED session can fail on a later segment after
+                    // earlier ones already produced text -- trailing silence
+                    // is the common case. What the phone has already heard is
+                    // kept rather than thrown away with the error.
+                    settle(silence ? "no-speech" : "failed");
                 }
 
                 @Override
                 public void onResults(Bundle results) {
                     append(results);
-                    finish();
+                    settle("no-speech");
                 }
 
                 @Override
@@ -222,7 +248,7 @@ public class NotesNativePlugin extends Plugin {
 
                 @Override
                 public void onEndOfSegmentedSession() {
-                    finish();
+                    settle("no-speech");
                 }
 
                 private void append(Bundle b) {
@@ -234,11 +260,14 @@ public class NotesNativePlugin extends Plugin {
                     heard.append(line.trim());
                 }
 
-                private void finish() {
+                /** Answer once, with whatever was heard; `reasonIfNothing` is
+                 *  the refusal for a session that produced no words at all. */
+                private void settle(String reasonIfNothing) {
                     if (!answered.compareAndSet(false, true)) return;
+                    handler.removeCallbacks(watchdog);
                     close(descriptor, recognizer);
                     if (heard.length() == 0) {
-                        refuse(call, "no-speech");
+                        refuse(call, reasonIfNothing);
                         return;
                     }
                     JSObject ret = new JSObject();
@@ -257,6 +286,10 @@ public class NotesNativePlugin extends Plugin {
             intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1);
             intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, rate);
             created.startListening(intent);
+            // Armed only once the session is actually running: startListening
+            // throwing is handled below, and a watchdog posted before it
+            // would have to be unposted there.
+            handler.postDelayed(watchdog, budget);
         } catch (Throwable t) {
             if (answered.compareAndSet(false, true)) {
                 close(opened, created);

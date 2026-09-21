@@ -377,7 +377,12 @@ FIELD — added to what is being typed, not written to the note behind it:
 transcribing takes a second or two, the recorder sheet is already closed, and
 that field's own autosave would otherwise put a half-typed line back over the
 words. If the note is closed before the transcript is ready it is dropped
-rather than written over whatever was saved last.
+rather than written over whatever was saved last. Both sides of the call are
+bounded (`TranscribeGate.watchdogMs`, `transcribeBudgetMs`): a recogniser
+whose service dies mid-session never calls back, and waiting for ever would
+leave that cache file — the one unsealed copy of the recording — on the phone.
+What a segmented session heard before a later segment failed is kept, not
+thrown away with the error.
 
 **Background refresh.** While signed in, the app keeps a copy of the session
 token in its private, backup-excluded storage (`allowBackup=false` plus the

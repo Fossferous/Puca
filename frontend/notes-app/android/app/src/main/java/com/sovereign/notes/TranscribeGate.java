@@ -26,6 +26,11 @@ package com.sovereign.notes;
  *
  * There is NO input to this class that returns ALLOW without
  * {@code onDeviceAvailable}. A test sweeps every combination to keep it that way.
+ *
+ * {@link #watchdogMs} lives here for the same reason: pure arithmetic is the
+ * only part of the native transcriber a JUnit run can see, and how long a
+ * recognition session may hang decides how long the plaintext PCM stays in
+ * the cache.
  */
 public final class TranscribeGate {
 
@@ -58,5 +63,38 @@ public final class TranscribeGate {
         if (sdkInt < MIN_SDK) return new Decision(false, REASON_SDK);
         if (!onDeviceAvailable) return new Decision(false, REASON_NO_MODEL);
         return new Decision(true, "");
+    }
+
+    /** The floor and ceiling of {@link #watchdogMs}, mirrored by
+     *  notes/model/audioNote.ts's {@code transcribeBudgetMs}. */
+    public static final long WATCHDOG_MIN_MS = 20_000L;
+    public static final long WATCHDOG_MAX_MS = 60_000L;
+
+    /**
+     * How long to let a recognition session run before giving up on it.
+     *
+     * A session that is started but never calls back -- the recogniser
+     * service is killed, the model is swapped out mid-session -- would
+     * otherwise leave the PluginCall unanswered for ever. That is not only a
+     * hung promise: the page's {@code finally} deletes the plaintext PCM from
+     * the app's cache when the call RETURNS, so a session that never answers
+     * leaves the one unsealed copy of the recording on disk indefinitely.
+     *
+     * The budget is measured from the clip itself, which arrives as raw
+     * 16-bit mono PCM, so its length is exactly {@code bytes / (rate * 2)}
+     * seconds. Half again as long plus fifteen seconds is far more than
+     * on-device recognition of a file needs, and it is clamped so a zero-byte
+     * or absurd file still gets a sane bound.
+     *
+     * @param pcmBytes   size of the cache file, or 0 when it cannot be read
+     * @param sampleRate the rate the page wrote it at
+     */
+    public static long watchdogMs(long pcmBytes, int sampleRate) {
+        long clipMs = 0L;
+        if (pcmBytes > 0L && sampleRate > 0) clipMs = (pcmBytes * 1000L) / ((long) sampleRate * 2L);
+        long budget = clipMs + clipMs / 2L + 15_000L;
+        if (budget < WATCHDOG_MIN_MS) return WATCHDOG_MIN_MS;
+        if (budget > WATCHDOG_MAX_MS) return WATCHDOG_MAX_MS;
+        return budget;
     }
 }

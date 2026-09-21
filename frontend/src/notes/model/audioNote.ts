@@ -36,6 +36,27 @@ export const MAX_TRANSCRIBE_MS = 120_000;
 /** What the recogniser is fed. Android's on-device model expects 16 kHz. */
 export const PCM_SAMPLE_RATE = 16_000;
 
+/**
+ * How long to wait for the phone's recogniser before giving up on a clip.
+ *
+ * This is a watchdog, not a performance budget: on-device recognition of a
+ * file runs well under real time, but a recogniser whose service is killed
+ * mid-session never calls back at all — and until this call RETURNS, the one
+ * unsealed copy of the recording (the 16 kHz PCM in the app's cache) is not
+ * deleted, because the delete lives in transcribeClip's `finally`.
+ *
+ * The phone's own watchdog (`TranscribeGate.watchdogMs`, which sees the same
+ * clip as a byte count) uses the same clamp, so it normally answers first
+ * with an honest refusal; the five seconds of slack here mean this side only
+ * fires when the bridge itself is gone. Hard-capped, because the composer
+ * waits on this before it closes.
+ */
+export function transcribeBudgetMs(durationMs: number): number {
+    const d = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
+    const clip = Math.round(d * 1.5) + 15_000;
+    return Math.min(60_000, Math.max(20_000, clip)) + 5_000;
+}
+
 /** The plaintext budget for one sealed clip. */
 export const MAX_CLIP_BYTES = MAX_UPLOAD_BYTES - ENCRYPTED_OVERHEAD_BYTES;
 

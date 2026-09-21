@@ -11,7 +11,10 @@
  *     feature into a cloud one.
  *  2. A BEHAVIOURAL check of transcribeClip: the plugin is handed a cache
  *     PATH and never audio bytes, and the plaintext cache file is deleted on
- *     every exit path — success, refusal and failure alike.
+ *     every exit path — success, refusal, failure, and a recogniser that
+ *     stops answering altogether.
+ *  3. The wait itself, which is why (3) is possible at all: the call is
+ *     bounded, so there is always an exit path to delete that file from.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -95,7 +98,7 @@ vi.mock('../notes/native/notesNative', () => ({
 }));
 
 const { transcribeClip } = await import('../notes/model/transcribe');
-const { MAX_TRANSCRIBE_MS, PCM_SAMPLE_RATE } = await import('../notes/model/audioNote');
+const { MAX_TRANSCRIBE_MS, PCM_SAMPLE_RATE, transcribeBudgetMs } = await import('../notes/model/audioNote');
 
 /** A clip whose decode yields one second of 16 kHz mono. jsdom's AudioContext
  *  stub is replaced per test so the pure resampler runs for real, and its Blob
@@ -184,10 +187,66 @@ describe('transcribeClip', () => {
         expect(transcribePcm).not.toHaveBeenCalled();
     });
 
+    it('deletes it even when the recogniser NEVER answers', async () => {
+        // The failure this guards: Android's recogniser service is killed
+        // mid-session, the plugin call never settles, the `finally` below
+        // never runs, and the one unsealed copy of the recording sits in the
+        // app's cache for good — with no notice to the user either.
+        transcribePcm.mockImplementation(() => new Promise(() => {}));
+        vi.useFakeTimers();
+        try {
+            const r = transcribeClip(clip(), 1_000);
+            let settled = false;
+            void r.then(() => { settled = true; });
+            // Positive control: it really is still waiting just before the
+            // budget, so the pass below is the timeout and not a fast path.
+            await vi.advanceTimersByTimeAsync(transcribeBudgetMs(1_000) - 1_000);
+            expect(settled, 'it gave up before its own budget').toBe(false);
+            await vi.advanceTimersByTimeAsync(2_000);
+            const outcome = await r;
+            expect(outcome.text).toBeNull();
+            expect(outcome.reason).toMatch(/didn’t work this time/i);
+            expect(deleteFile).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('an empty answer is a refusal with words, not an empty transcript', async () => {
         transcribePcm.mockResolvedValue({ text: '   ' });
         const r = await transcribeClip(clip(), 1_000);
         expect(r.text).toBeNull();
         expect(r.reason).toMatch(/nothing recognisable/i);
+    });
+});
+
+// --- 3. how long the wait may be ---------------------------------------------------
+
+describe('the transcription watchdog', () => {
+    // Bounded ON PURPOSE: the plaintext PCM in the app's cache is deleted
+    // when transcribeClip RETURNS, so a recogniser that never calls back must
+    // not be waited on for ever.
+    it('never waits without a limit, whatever the clip', () => {
+        for (const ms of [0, 1, 1_000, 30_000, MAX_TRANSCRIBE_MS, MAX_TRANSCRIBE_MS * 10, Number.MAX_SAFE_INTEGER]) {
+            const budget = transcribeBudgetMs(ms);
+            expect(Number.isFinite(budget), `${ms} gave ${budget}`).toBe(true);
+            expect(budget).toBeLessThanOrEqual(65_000);
+            expect(budget).toBeGreaterThanOrEqual(25_000);
+        }
+    });
+    it('gives a longer clip longer, up to the cap (positive control: it is not one constant)', () => {
+        expect(transcribeBudgetMs(20_000)).toBeGreaterThan(transcribeBudgetMs(0));
+        expect(transcribeBudgetMs(20_000)).toBe(50_000);   // 20 s + half again + 15 s, + 5 s slack
+        expect(transcribeBudgetMs(MAX_TRANSCRIBE_MS)).toBe(65_000);
+    });
+    it('a nonsense duration cannot make the wait shorter than the floor', () => {
+        expect(transcribeBudgetMs(-90_000)).toBe(25_000);
+        expect(transcribeBudgetMs(Number.NaN)).toBe(25_000);
+    });
+    /** The phone's own watchdog (TranscribeGate.watchdogMs, JUnit-tested) uses
+     *  the same clamp on the same clip, so it normally answers first with
+     *  words; this side only fires when the bridge itself is gone. */
+    it('leaves the phone room to answer first', () => {
+        expect(transcribeBudgetMs(20_000) - 45_000).toBe(5_000);
     });
 });
