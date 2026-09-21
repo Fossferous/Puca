@@ -28,7 +28,9 @@
 //!     game".
 //!   * A frame is only produced when something CHANGES. A static desktop yields
 //!     timeouts, so callers must repeat the previous frame rather than treating
-//!     a timeout as a dropped connection.
+//!     a timeout as a dropped connection. A pointer-only update is a timeout
+//!     too: a caller that repeats the frame and wants the pointer current
+//!     calls `redraw_cursor` on it.
 //!   * Duplication is EXCLUSIVE PER OUTPUT. A second `DuplicateOutput` on the
 //!     same monitor gets E_ACCESSDENIED while the first lives — so the agent
 //!     must hold ONE `ScreenCapture` per monitor and share its frames between
@@ -202,6 +204,10 @@ mod stub {
         /// Mirrors the Windows setter so callers compile everywhere. Nothing
         /// to toggle: this implementation never produces a frame at all.
         pub fn set_draw_cursor(&mut self, _on: bool) {}
+
+        pub fn redraw_cursor(&mut self, _frame: &mut Frame) -> bool {
+            false
+        }
     }
 
     pub fn outputs() -> Vec<super::OutputInfo> {

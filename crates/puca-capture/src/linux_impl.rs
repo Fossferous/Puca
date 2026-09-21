@@ -253,6 +253,11 @@ impl ScreenCapture {
     /// the pointer, so this capture simply has no cursor to draw — blending
     /// one in via XFixesGetCursorImage is where `on == true` would land.
     pub fn set_draw_cursor(&mut self, _on: bool) {}
+
+    /// Parity with Windows; X11 frames here carry no drawn pointer.
+    pub fn redraw_cursor(&mut self, _frame: &mut Frame) -> bool {
+        false
+    }
 }
 
 /// Capturable outputs with their geometry, in capture-index order.

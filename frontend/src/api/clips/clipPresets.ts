@@ -4,8 +4,10 @@
  * Bitrates were chosen from the Phase 0 spike on this repo's reference desktop
  * (WebView2 151, hardware H.264 via Media Foundation): a busy 1080p30 game
  * scene at 6 Mbps VBR is visually clean and one minute costs ~46 MB of ring.
- * The numbers are targets the encoder is asked for, not guarantees — the pill
- * shows the MEASURED kbps while armed.
+ * The numbers are targets the encoder is asked for, not guarantees. The
+ * worker measures the real rate (ReplayState.kbps, video + audio); no UI
+ * shows it, and puca.log's per-minute capture heartbeat is the video-only
+ * figure for a native capture.
  */
 
 export type ClipPresetId = '720p30' | '720p60' | '1080p30' | '1080p60' | '1440p30' | '2160p30' | 'native';

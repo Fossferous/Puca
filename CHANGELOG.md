@@ -20,6 +20,22 @@ one-line summary; this file is the full story. Versions follow
   vector instructions, the recorder no longer spins while the video encoder
   works, and it reuses one screen buffer instead of allocating a new one per
   frame. Together: about 14% of one CPU core, down from 81-95%.
+- **Saving a clip no longer leaves a gap in the clip buffer.** With the
+  buffer armed automatically on joining a call, pressing Clip threw away
+  up to 2 seconds of picture and sound from just after the press, so a
+  later, longer clip covering that moment froze and went quiet there. A
+  save that failed part-way did the same. Saving a clip while the buffer
+  was full could also skip a couple of seconds and take in up to 2
+  seconds recorded after the press, which the approval request never
+  described, or fail.
+- **Sound in automatically recorded clips no longer lags the picture by
+  the screen recorder's start-up time.** It played late by however long
+  the recorder took to start, plus 40 ms. The clip buffer now measures
+  both clocks as it runs and lines them up when the clip is made.
+- **The mouse pointer moves in automatically recorded clips of a still
+  screen.** When nothing else on screen was changing (a page you were
+  reading, a paused video), the pointer stayed where it was at the last
+  screen update and then jumped. It now moves as you moved it.
 
 ## 0.9.815 — 2026-09-19
 

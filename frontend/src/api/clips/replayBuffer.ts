@@ -105,8 +105,19 @@ function notifyArmed(armed: boolean): void {
     }
 }
 
-/** Spike-measured: audio arrived ~40 ms EARLY relative to video; delay it. */
+/** Spike-measured: audio arrived ~40 ms EARLY relative to video; delay it.
+ *  The picker path's figure (headless synthetic run, spike S4). */
 export const AUDIO_OFFSET_US = 40_000;
+/** The native path anchors audio by measuring both clocks in the worker
+ *  (replayWorker.ts vOriginMs); the picker's 40 ms would only add lag.
+ *  UNCALIBRATED. What the anchor cannot see is the desktop-audio leg's own
+ *  lead (WASAPI period, IPC, nativeCapture's loopback scheduling ~50 ms
+ *  ahead, the mixing hop) and the video stamp's lag behind the present.
+ *  Setting this needs an end-to-end sync measurement through the real
+ *  pipeline (a flash and a click); the puca.log `clip-av` line records
+ *  only the anchor and how late the old code was, not this residual.
+ *  Negative moves audio earlier. */
+export const NATIVE_AUDIO_OFFSET_US = 0;
 
 export function isClipCaptureSupported(): boolean {
     if (!isTauri()) return false;
@@ -135,6 +146,8 @@ interface Session {
     previewEl: HTMLVideoElement | null;
     /** Sequence of the LATEST preview request; results tagged with an older seq are ignored. */
     previewSeq: number;
+    /** The native A/V anchor last written to puca.log (logAvAnchor). */
+    avLoggedShiftMs?: number;
     /** Native (no-picker) session teardown - stops the Rust-side capture
      *  threads. disarm() calls this before anything else if present. Reads
      *  `sysAudioStop` at CALL time, so a retried audio capture is the one
@@ -321,7 +334,7 @@ export async function armNative(): Promise<void> {
             preset: { ...preset, videoBitrate: target.bitrate }, width: target.width, height: target.height,
             ringMs: Math.max(10_000, (settings.clipBufferSeconds ?? 300) * 1000),
             maxRingBytes: Math.min((settings.clipMemoryCapMB ?? 1024) * MIB, maxRingBytesForBudget(memoryBudgetBytes((navigator as Navigator & { deviceMemory?: number }).deviceMemory))),
-            audioOffsetUs: AUDIO_OFFSET_US, audioCodec: 'mp4a.40.2', verbose: false,
+            audioOffsetUs: NATIVE_AUDIO_OFFSET_US, audioCodec: 'mp4a.40.2', verbose: false,
             nativeVideo: { fps: preset.fps },
         };
         worker.onmessage = (ev: MessageEvent<FromWorker>) => handleWorker(s, ev.data);
@@ -404,6 +417,21 @@ export async function retrySystemAudio(): Promise<void> {
     s.sysGain.gain.value = 1;
     s.sysSrc.connect(s.sysGain).connect(s.dest);
     emit({ hasSystemAudio: true, systemAudioLost: null, systemAudioDevice: audio.deviceName, notice: null });
+}
+
+/** The native A/V anchor into puca.log: once per arm, and again whenever it
+ *  moves by 10 ms or more (both estimates are running mins, so they only
+ *  fall: a clock running FAST against the worker's shows as a run of
+ *  lines, one running slow cannot show at all). Silent -
+ *  measures how late the old code put audio without playing anything. */
+function logAvAnchor(s: Session, av: NonNullable<WorkerStatus['avAnchor']>): void {
+    if (!isTauri()) return;
+    if (s.avLoggedShiftMs !== undefined && Math.abs(av.shiftMs - s.avLoggedShiftMs) < 10) return;
+    s.avLoggedShiftMs = av.shiftMs;
+    const line = `clip-av video-origin=${av.videoOriginMs}ms shift=${av.shiftMs}ms legacy-late=${av.legacyLateMs}ms`;
+    void import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('log_stream_diag', { line }))
+        .catch(() => { /* best effort */ });
 }
 
 function postNativeVideoChunk(s: Session, c: { keyframe: boolean; tsUs: number; durUs: number; bytes: ArrayBuffer; codec?: string; codedWidth?: number; codedHeight?: number }): void {
@@ -493,6 +521,7 @@ function handleWorker(s: Session, m: FromWorker): void {
         case 'status': {
             const st: WorkerStatus = m.s;
             emit({ bufferedMs: st.bufferedMs, ringBytes: st.ringBytes, droppedFrames: st.droppedFrames, fps: st.fps, kbps: st.kbps, width: st.width, height: st.height });
+            if (st.avAnchor) logAvAnchor(s, st.avAnchor);
             break;
         }
         case 'sealed':

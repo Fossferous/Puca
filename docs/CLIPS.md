@@ -73,6 +73,14 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   until the server says everyone approved; then a worker-side MSE preview and
   a trim (a RE-MUX of the kept range into a fresh fMP4 whose timeline starts
   at 0, re-sealed under fresh indices — `clipTrim.ts`) precede the upload.
+  The press does NOT close the open unit (2026-09-21): the seal muxes a
+  zero-filled-after-use COPY of it, and the unit keeps growing until its
+  own next keyframe. Closing it cost the native path everything up to the
+  agent's next timed keyframe (up to 2 s, video and audio) in every later
+  clip spanning the press, because only the picker path can force one.
+  The seal reads a list of units snapshotted at the press, and eviction
+  waits while any seal runs, so GOPs closing mid-mux can neither enter
+  the clip nor pull (and zero-fill) a unit out from under it.
 - **Discard / disarm / leave / channel switch / suspend / lock / quit** zero
   the buffers and drop the key (table below).
 
@@ -82,7 +90,8 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   (`src/tests/clipNoDiskWrite.test.ts` greps for it; the spike scanned the
   WebView2 profile for clip-sized files and found only Chromium caches).
 - The ring is ciphertext under a non-extractable key; plaintext exists only in
-  flight (the open GOP, the seal's transient mux buffers) and is zero-filled.
+  flight (the open GOP, a seal's copy of it, the seal's transient mux
+  buffers) and is zero-filled.
 - Nothing is uploaded until every required approver has said yes (Phase 2:
   the server refuses `kind=clip` bytes for an unapproved proposal BEFORE it
   reads the body). The server never sees a frame; the clip key rides in the
@@ -275,6 +284,45 @@ needs no picker).
   every IDR, so `ParamSetCache` caches the first SPS/PPS seen and prepends
   them to any later keyframe missing its own — otherwise a `seal()`/`trim()`
   primed from a LATER keyframe could throw an opaque mediabunny error.
+- **The pointer on repeated frames (2026-09-21).** DXGI reports a
+  pointer-only change as a frame with `LastPresentTime == 0`, which
+  `next_frame` answers as `Timeout`; the loops then re-send the stored
+  frame, whose pointer was drawn at the last present, so over a still
+  window it froze and jumped at the next present. Both loops now call
+  `puca_clip_wire::refresh_repeat`, which calls
+  `ScreenCapture::redraw_cursor` and bumps `picture` only when that
+  changed the pixels, so the NV12 is converted again exactly then.
+  `redraw_cursor` is a save-under (puca-capture `CursorOverlay`): the
+  pixels under the pointer are kept at each present, put back, and the
+  pointer drawn at its new spot; restore before save, never
+  undo-by-redraw. Cost: the pointer's rectangle (4 KB at 32x32), and one
+  conversion per slot while the pointer moves over a still screen. The
+  remote-control stream never calls it, so a pointer-only update still
+  sends nothing there.
+- **A/V anchoring (2026-09-21).** The video timestamps count from the
+  capture loop's own start (never 0 at the first chunk); the AudioData
+  timestamps are on another clock entirely (~30 h at the first sample).
+  Until then the worker rebased audio against its own time origin, so
+  audio in every native clip was LATE by the agent's start-up time plus
+  the picker path's 40 ms. Now the worker estimates each clock's origin
+  in its own time as the running MIN of (arrival - ts): video stamped
+  when onmessage receives a chunk (never when a parked chunk is drained),
+  audio when the pump reads a sample. Audio entries stay on the audio
+  clock and `seal()` applies one shift per clip, so a later, tighter
+  estimate cannot make a clip's audio go backwards (mediabunny throws on
+  that). The native offset is 0 (`NATIVE_AUDIO_OFFSET_US`); the 40 ms is
+  the picker's. Residual, not corrected and not visible to the anchor:
+  the desktop-audio leg's own latency (WASAPI buffer, IPC, the loopback
+  AudioContext's scheduling lead, ~50 ms and drifting up to 500 ms before
+  it re-primes), minus the video stamp's lag behind the present (it is
+  taken after acquire and readback). Only an end-to-end sync test (flash
+  plus click) can calibrate that. A video timestamp going BACKWARDS is
+  another capture's clock (the old capture's tail after "Restart
+  buffer"; `clip-video-chunk` carries no generation) and restarts the
+  estimate. Silent field check: once both clocks have
+  5 s of samples, puca.log gets `[stream-diag] clip-av video-origin=..
+  shift=.. legacy-late=..` (again if the shift moves 10 ms), where
+  `legacy-late` is how much later the old code placed the audio.
 - **Indicator**: `armNative()` fires the roster "buffering" badge, the
   local status pill AND the tray tooltip ("Púca — clip buffer armed
   (recording your fullscreen app / primary monitor)",

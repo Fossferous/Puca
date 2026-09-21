@@ -145,8 +145,9 @@ pub fn run(args: ClipHostArgs) -> i32 {
     // GOP on a video keyframe, so silence would let audio grow it unbounded.
     let mut last_frame: Option<puca_capture::Frame> = None;
     // Names the pixels in last_frame for the encoder: bumped for every new
-    // picture, unchanged when the stored one is re-sent, so a still screen's
-    // repeats skip the colour conversion (encode_bgra_picture).
+    // picture, and for a re-send whose pointer had to be moved
+    // (refresh_repeat), unchanged otherwise, so a still screen's repeats
+    // skip the colour conversion (encode_bgra_picture).
     let mut picture: u64 = 0;
     let mut access_lost_streak: u32 = 0;
 
@@ -184,11 +185,13 @@ pub fn run(args: ClipHostArgs) -> i32 {
                 picture += 1;
             }
             Err(CaptureError::Timeout) => {
-                if last_frame.is_none() {
+                // No new picture within this slot's window: re-encode the
+                // stored frame, once per slot, with the pointer moved to
+                // where it is now (a pointer-only update is a Timeout too).
+                let Some(f) = last_frame.as_mut() else {
                     continue; // nothing captured yet at all
-                }
-                // No new picture within this slot's window (or only the
-                // pointer moved): re-encode the stored frame, once per slot.
+                };
+                puca_clip_wire::refresh_repeat(&mut picture, || capture.redraw_cursor(f));
             }
             Err(CaptureError::AccessLost) => {
                 // A locked screen or a sleeping panel returns this on every

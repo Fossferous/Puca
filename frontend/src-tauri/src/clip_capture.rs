@@ -457,7 +457,10 @@ struct ClipVideoChunkEvent {
     /// Base64 Annex-B bitstream (same wire convention as `audio-data`).
     data: String,
     keyframe: bool,
-    /// Capture-relative microseconds — the FIRST chunk of a session is 0.
+    /// Microseconds since the capture loop's own start instant, stamped
+    /// after the frame's acquire and readback. The FIRST chunk is not 0
+    /// (typically tens of ms) and nothing may assume it is: the worker
+    /// anchors this clock by measurement (replayWorker.ts vOriginMs).
     ts_us: u64,
     dur_us: u64,
     /// The SPS-derived `avc1.PPCCLL` string, present on EVERY keyframe
@@ -887,8 +890,9 @@ fn in_process_capture_loop(
     // rate that was asked for and no more.
     let mut last_frame: Option<puca_capture::Frame> = None;
     // Names the pixels in last_frame for the encoder: bumped for every new
-    // picture, unchanged when the stored one is re-sent, so a still screen's
-    // repeats skip the colour conversion (encode_bgra_picture).
+    // picture, and for a re-send whose pointer had to be moved
+    // (refresh_repeat), unchanged otherwise, so a still screen's repeats
+    // skip the colour conversion (encode_bgra_picture).
     let mut picture: u64 = 0;
     // Only for the wait before the FIRST frame. After that the pacer decides
     // when to look and for how long.
@@ -952,11 +956,13 @@ fn in_process_capture_loop(
                 picture += 1;
             }
             Err(CaptureError::Timeout) => {
-                if last_frame.is_none() {
+                // No new picture within this slot's window: re-encode the
+                // stored frame, once per slot, with the pointer moved to
+                // where it is now (a pointer-only update is a Timeout too).
+                let Some(f) = last_frame.as_mut() else {
                     continue; // nothing captured yet at all
-                }
-                // No new picture within this slot's window (or only the
-                // pointer moved): re-encode the stored frame, once per slot.
+                };
+                puca_clip_wire::refresh_repeat(&mut picture, || capture.redraw_cursor(f));
             }
             Err(CaptureError::AccessLost) => {
                 access_lost_streak += 1;
