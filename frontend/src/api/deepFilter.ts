@@ -18,9 +18,11 @@
  * ruled out the classic SAB design (COEP would break remote image embeds).
  * Main-thread stalls are structurally irrelevant: the audio thread only frames
  * and buffers, the Worker only infers, and if the Worker ever falls behind the
- * worklet emits the SAME time-aligned samples from its raw delay line instead
- * (crossfaded, no time jump), then flags sustained overload so the UI can
- * downgrade the mode. End-to-end added latency is 60 ms — the model's own
+ * worklet emits the SAME instant from an RNNoise rendering running beside it
+ * (the bridge; the raw delay line where RNNoise is not live), crossfaded, with
+ * no time jump, and swaps back once the Worker catches up. Overload episodes
+ * are reported so the call can decide whether DeepFilter is worth keeping
+ * (dfOverloadPolicy.ts). End-to-end added latency is 60 ms — the model's own
  * 30 ms (STFT framing + lookahead) plus a 30 ms framing/round-trip budget —
  * vs ~170 ms for the old design. (Through 0.8.87 this comment said "~30 ms":
  * the model delay was real but unaccounted for, which also mis-aligned the
@@ -33,6 +35,10 @@
 import workletUrl from './dfWorklet.js?url';
 import { isDeveloperMode } from '../components/settingsStore';
 import type { DfTuning } from './dfTuning';
+import { createRnnoiseNode, RNNOISE_WORKLET_LATENCY, type RnnoiseNode } from './rnnoiseNode';
+import {
+    DfOverloadPolicy, REPEAT_EPISODES, REPEAT_WINDOW_MS, SUSTAINED_MS, type SettleReason,
+} from './dfOverloadPolicy';
 
 export type DeepFilterNodes = {
     source: MediaStreamAudioSourceNode;
@@ -67,9 +73,17 @@ const READY_TIMEOUT_MS = 60000;
 /** Latest pipeline telemetry, for __pucaVoiceDiag() via noiseFilter. */
 let lastWorkletStats: Record<string, unknown> | null = null;
 let lastWorkerStats: Record<string, unknown> | null = null;
+/** The call graph's last 10 overload episodes (ms null while one is open),
+ *  and whether it settled on the bridge: the evidence for tuning the
+ *  thresholds, which used to vanish with the fallback that followed it. */
+let overloadLog: { episode: number; start: string; ms: number | null }[] = [];
+let lastSettle: { reason: SettleReason; at: string; episodes: number } | null = null;
 
 export function deepFilterDiagnostics(): Record<string, unknown> {
-    return { worklet: lastWorkletStats, worker: lastWorkerStats, captureAvailable: liveWorker !== null };
+    return {
+        worklet: lastWorkletStats, worker: lastWorkerStats, captureAvailable: liveWorker !== null,
+        overloadEpisodes: overloadLog, settled: lastSettle,
+    };
 }
 
 /** The Worker of the graph currently live (null between graphs). */
@@ -207,7 +221,7 @@ export async function applyDeepFilter(
         // this callback instead of the global 'sovereign:noise-graph-dead'
         // event (which would downgrade the LIVE CALL's mode), and it never
         // registers as the worker __pucaDfCapture() records from.
-        local?: { onDead: (why: string) => void };
+        local?: { onDead: (why: string) => void; onSettled?: (why: string) => void };
     },
 ): Promise<DeepFilterNodes> {
     // A suspended context transmits permanent silence — resume, and if autoplay
@@ -231,6 +245,7 @@ export async function applyDeepFilter(
     let node: AudioWorkletNode;
     let gain: GainNode;
     let destination: MediaStreamAudioDestinationNode;
+    let bridge: RnnoiseNode | null = null;
     try {
         await ctx.audioWorklet.addModule(workletUrl);
 
@@ -239,6 +254,19 @@ export async function applyDeepFilter(
         if (!opts?.local) {
             lastWorkletStats = null;
             lastWorkerStats = null;
+            overloadLog = [];
+            lastSettle = null;
+        }
+
+        // THE BRIDGE: RNNoise on the same source, into the worklet's second
+        // input, so a moment the Worker is late is covered by suppressed audio
+        // instead of the raw mic (dfWorklet.js). Optional by design: a
+        // DeepFilter that cannot have one still runs, with the raw fallback it
+        // always had, rather than failing over to a different tier entirely.
+        try {
+            bridge = await createRnnoiseNode(ctx);
+        } catch (err) {
+            console.warn('[DeepFilter] RNNoise bridge unavailable — a late Worker falls back to the raw mic:', err);
         }
 
         source = ctx.createMediaStreamSource(input);
@@ -247,7 +275,8 @@ export async function applyDeepFilter(
         // negotiate stereo Opus for an inherently mono voice track (see the
         // same fix in noiseFilter.ts).
         node = new AudioWorkletNode(ctx, 'sovereign-df-processor', {
-            numberOfInputs: 1,
+            numberOfInputs: 2, // 0: the mic, 1: the RNNoise bridge
+            // (channelCount/Mode below apply to both inputs.)
             numberOfOutputs: 1,
             outputChannelCount: [1],
             channelCount: 1,
@@ -261,19 +290,39 @@ export async function applyDeepFilter(
         destination.channelCount = 1;
 
         node.port.postMessage(
-            { type: 'init', hop, latency, modelDelay: hop * delayHops, port: channel.port2 },
+            {
+                type: 'init', hop, latency, modelDelay: hop * delayHops, port: channel.port2,
+                bridgeDelay: bridge ? RNNOISE_WORKLET_LATENCY : null,
+            },
             [channel.port2],
         );
     } catch (err) {
         worker.terminate();
+        try { bridge?.destroy(); } catch { /* never started */ }
         throw err;
     }
 
-    // A dead/overloaded pipeline must be REPORTED, not silently dry: the
-    // worklet's raw fallback keeps the mic transmitting either way, but the
-    // user chose this tier for the suppression, so let the UI downgrade.
+    // Is the bridge actually carrying anything? A crash says so outright
+    // (processorerror); a wasm that never instantiates says NOTHING (the
+    // library swallows it and emits zeros forever), so the worklet's own
+    // bridgeLive, from its latest report, is the other half of the answer.
+    let bridgeDead = bridge === null;
+    let bridgeLive: boolean | null = null;
+    let inputLive = true;
+    // A bridge that is silent while the mic is silent too has nothing to
+    // render; that is not a broken one. (If it really never loaded, the
+    // worklet says so once there is sound: 'bridge-failed' below.)
+    const bridgeWorks = () => !bridgeDead && (bridgeLive === true || (bridgeLive === false && !inputLive));
+
+    // A dead pipeline must be REPORTED, not silently dry: the worklet's
+    // fallback keeps the mic transmitting either way, but the user chose this
+    // tier for the suppression, so let the UI downgrade. (A Worker that is
+    // merely BEHIND is not dead; see the overload handling below.)
     let alive = true;
-    const reportDead = (why: string) => {
+    // `kind` rides on the event so the notice can say which it was: a
+    // DeepFilter that could not keep up (only when there is no bridge to
+    // settle on) is a different sentence from one that crashed.
+    const reportDead = (why: string, kind: 'overload' | 'crash' = 'crash') => {
         if (!alive) return;
         alive = false;
         if (opts?.local) {
@@ -288,14 +337,115 @@ export async function applyDeepFilter(
             return;
         }
         console.error('[DeepFilter] ' + why + ' — requesting mode fallback');
-        window.dispatchEvent(new CustomEvent('sovereign:noise-graph-dead'));
+        window.dispatchEvent(new CustomEvent('sovereign:noise-graph-dead', { detail: { kind } }));
     };
+    // Module-level diagnostics belong to the CALL's current graph: not a
+    // private mic-test graph, and not one already replaced (build-before-
+    // teardown keeps it running, reporting, while its successor is live).
+    const ownsDiagnostics = () => !opts?.local && (!opts?.stillCurrent || opts.stillCurrent());
+
+    // OVERLOAD. The worklet reports each episode (~500 ms behind) and its end
+    // (caught up for a second); the bridge has been covering the audio since
+    // the first late hop. The policy decides when DeepFilter stops being
+    // worth its CPU for this call (dfOverloadPolicy.ts). Settling means the
+    // Worker goes and the bridge carries the call from then on.
+    //
+    // Everything here rests on the bridge actually working. Without it, a
+    // late Worker means the RAW mic is on air, so a graph with no working
+    // bridge falls back for real at the FIRST episode, exactly as every
+    // overload did before the bridge existed, and a bridge that fails after
+    // settling does the same.
+    const policy = new DfOverloadPolicy();
+    let sustainTimer: ReturnType<typeof setTimeout> | null = null;
+    let episodeStart = 0;
+    const clearSustainTimer = () => {
+        if (sustainTimer !== null) clearTimeout(sustainTimer);
+        sustainTimer = null;
+    };
+    // The episode's clock is Date.now(); a timer can wake a hair before it
+    // agrees, and a one-shot that came up short would never settle.
+    const armSustainTimer = (ms: number) => {
+        clearSustainTimer();
+        sustainTimer = setTimeout(() => {
+            sustainTimer = null;
+            const late = policy.check(Date.now());
+            if (late) settle(late);
+            else if (policy.episodeOpen) armSustainTimer(250);
+        }, ms);
+    };
+    const noBridge = (what: string) =>
+        reportDead(`inference ${what}, and no RNNoise bridge is carrying the call (the raw mic would be on air)`, 'overload');
+    const settle = (reason: SettleReason) => {
+        clearSustainTimer();
+        const why = reason === 'sustained'
+            ? `stayed ~500 ms behind for ${SUSTAINED_MS / 1000} s`
+            : `fell behind ${REPEAT_EPISODES} times in ${REPEAT_WINDOW_MS / 60000} minutes`;
+        if (!bridgeWorks()) { noBridge(why); return; }
+        try { node.port.postMessage({ type: 'standby' }); } catch { /* context closed */ }
+        worker.terminate();
+        if (liveWorker === worker) liveWorker = null;
+        if (opts?.local) {
+            // The mic test says what is playing now, or it would go on
+            // naming DeepFilter while RNNoise plays.
+            console.warn('[DeepFilter] private graph: inference ' + why + ' — RNNoise is playing instead');
+            if (opts.local.onSettled) opts.local.onSettled(why);
+            else opts.local.onDead(`it ${why}, so RNNoise is playing instead`);
+            return;
+        }
+        if (ownsDiagnostics()) lastSettle = { reason, at: new Date().toISOString(), episodes: overloadLog.length };
+        if (opts?.stillCurrent && !opts.stillCurrent()) return; // replaced: nobody to tell
+        console.warn('[DeepFilter] inference ' + why + ' — RNNoise carries the call from here');
+        window.dispatchEvent(new CustomEvent('sovereign:df-settled', { detail: { reason } }));
+    };
+    if (bridge) {
+        bridge.onprocessorerror = () => {
+            bridgeDead = true;
+            if (policy.settled) {
+                reportDead('the RNNoise bridge DeepFilter settled on crashed', 'crash');
+            } else if (policy.episodeOpen) {
+                // Mid-episode: the raw mic is on air right now.
+                noBridge('fell ~500 ms behind, and its RNNoise bridge crashed');
+            } else {
+                // Still DeepFilter and keeping up: nothing on air changes yet.
+                // The next episode finds no working bridge and falls back for
+                // real (above).
+                console.warn('[DeepFilter] RNNoise bridge crashed — a late Worker falls back to the raw mic');
+            }
+        };
+    }
     node.port.onmessage = (e: MessageEvent) => {
-        const d = e.data as { type?: string; stats?: Record<string, unknown> };
-        if (d?.type === 'stats' && d.stats) { if (!opts?.local) lastWorkletStats = d.stats; }
+        const d = e.data as { type?: string; episode?: number; stats?: Record<string, unknown> };
+        if (d?.stats && typeof d.stats.bridgeLive === 'boolean') bridgeLive = d.stats.bridgeLive;
+        if (d?.stats && typeof d.stats.inputLive === 'boolean') inputLive = d.stats.inputLive;
+        if (d?.type === 'stats' && d.stats) { if (ownsDiagnostics()) lastWorkletStats = d.stats; }
         else if (d?.type === 'overloaded') {
-            if (!opts?.local) lastWorkletStats = d.stats ?? lastWorkletStats;
-            reportDead('inference cannot keep up on this device (worker ~500 ms behind)');
+            if (ownsDiagnostics()) {
+                lastWorkletStats = d.stats ?? lastWorkletStats;
+                overloadLog = [...overloadLog.slice(-9), { episode: d.episode ?? 0, start: new Date().toISOString(), ms: null }];
+            }
+            episodeStart = Date.now();
+            if (!bridgeWorks()) { noBridge('fell ~500 ms behind'); return; }
+            console.warn(`[DeepFilter] overload episode ${d.episode ?? '?'}: worker ~500 ms behind — RNNoise covering`);
+            const verdict = policy.onOverload(episodeStart);
+            if (verdict) { settle(verdict); return; }
+            armSustainTimer(SUSTAINED_MS);
+        } else if (d?.type === 'recovered') {
+            clearSustainTimer();
+            policy.onRecovered();
+            const ms = Date.now() - episodeStart;
+            if (ownsDiagnostics()) {
+                lastWorkletStats = d.stats ?? lastWorkletStats;
+                const last = overloadLog[overloadLog.length - 1];
+                if (last && last.episode === d.episode) overloadLog = [...overloadLog.slice(0, -1), { ...last, ms }];
+            }
+            console.log(`[DeepFilter] overload episode ${d.episode ?? '?'} over after ${ms} ms — DeepFilter back`);
+        } else if (d?.type === 'bridge-failed') {
+            // The bridge was meant to be carrying the call (an episode, or
+            // after settling) and the raw mic is on air instead: it never
+            // loaded or has died since. Nothing here can recover it.
+            bridgeDead = true;
+            if (policy.settled) reportDead('the RNNoise bridge DeepFilter settled on is not producing audio', 'crash');
+            else noBridge('fell ~500 ms behind, and its RNNoise bridge is not producing audio');
         }
     };
     worker.onmessage = (e: MessageEvent) => {
@@ -322,7 +472,7 @@ export async function applyDeepFilter(
             return;
         }
         if (d?.type === 'stats') {
-            if (opts?.local) return; // private graph: not the call's telemetry
+            if (!ownsDiagnostics()) return; // a mic-test or replaced graph: not the call's telemetry
             lastWorkerStats = {
                 avgMs: d.avgMs, maxMs: d.maxMs, hops: d.hops,
                 levelGain: d.levelGain, levelEnv: d.levelEnv,
@@ -353,12 +503,16 @@ export async function applyDeepFilter(
     worker.onerror = (e: ErrorEvent) => reportDead('inference worker crashed: ' + e.message);
     // A throw inside DfProcessor.process() makes the browser permanently
     // disable the processor — the node then emits pure silence and, because
-    // process() no longer runs, neither the overload latch nor stats can ever
-    // fire again. This is the only detector for that death. (Same guard as the
-    // RNNoise node in noiseFilter.ts.)
+    // process() no longer runs, neither the overload reports nor stats can
+    // ever fire again. This is the only detector for that death. (Same guard
+    // as the RNNoise node in noiseFilter.ts.)
     node.onprocessorerror = () => reportDead('worklet processor crashed — output would be silence');
 
     source.connect(node);
+    if (bridge) {
+        source.connect(bridge);
+        bridge.connect(node, 0, 1);
+    }
     node.connect(gain);
     gain.connect(destination);
     // Only the CALL's graph is what __pucaDfCapture() records from; a
@@ -369,10 +523,18 @@ export async function applyDeepFilter(
     // cleanupNoiseFilter() calls destroy() before disconnecting.
     worklet.destroy = () => {
         alive = false; // a torn-down graph must not request a mode fallback
+        // ...nor settle, from a timer armed while it was live.
+        clearSustainTimer();
+        node.port.onmessage = null;
         if (liveWorker === worker) liveWorker = null;
         try { node.port.postMessage({ type: 'stop' }); } catch { /* context closed */ }
         worker.terminate();
+        if (bridge) {
+            try { bridge.disconnect(); } catch { /* already disconnected */ }
+            try { bridge.destroy(); } catch { /* context closed */ }
+        }
     };
-    console.log('[DeepFilter] pipeline up: hop', hop, '- model delay', hop * delayHops, '- emit latency', latency, 'samples');
+    console.log('[DeepFilter] pipeline up: hop', hop, '- model delay', hop * delayHops, '- emit latency', latency, 'samples',
+        bridge ? '- RNNoise bridge on' : '- no bridge (raw fallback)');
     return { source, worklet, gain, destination };
 }

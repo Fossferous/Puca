@@ -13,7 +13,8 @@
  *                   Settings → Advanced → Experimental; ~60 ms latency (30 of
  *                   it the model's own look-ahead), real CPU cost. Falls back
  *                   to 'rnnoise' if it can't initialise,
- *                   and downgrades live if inference can't keep up.
+ *                   and rides out CPU spikes on an RNNoise bridge built
+ *                   beside it (deepFilter.ts, dfOverloadPolicy.ts).
  *
  * Echo cancellation and auto-gain come from the Settings → Voice toggles in
  * EVERY mode (they used to be hardcoded per mode, which made those two
@@ -31,6 +32,7 @@ import { applyDeepFilter, isDeepFilterAvailable, deepFilterDiagnostics, captureD
 import { DEFAULT_TUNING, POST_FILTER_BETA, type DfTuning } from './dfTuning';
 import { inputGain, loadSettings, isDeveloperMode } from '../components/settingsStore';
 import { saveAttachment } from './saveAttachment';
+import { createRnnoiseNode } from './rnnoiseNode';
 
 export type NoiseSuppressionMode = 'off' | 'standard' | 'rnnoise' | 'deepfilter';
 
@@ -247,27 +249,11 @@ async function buildRnnoiseGraph(
     initialGain: number,
     onCrash: () => void,
 ): Promise<SuppressorNodes> {
-    const [lib, workletMod, wasmMod, wasmSimdMod] = await Promise.all([
-        import('@sapphi-red/web-noise-suppressor'),
-        import('@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url'),
-        import('@sapphi-red/web-noise-suppressor/rnnoise.wasm?url'),
-        import('@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url'),
-    ]);
-    const wasmBinary = await lib.loadRnnoise({ url: wasmMod.default, simdUrl: wasmSimdMod.default });
-    await ctx.audioWorklet.addModule(workletMod.default);
+    // Mono in and out (see rnnoiseNode.ts for why that is not optional).
+    const worklet = await createRnnoiseNode(ctx);
     await ensureRunning(ctx);
 
     const source = ctx.createMediaStreamSource(inputStream);
-    const worklet = new lib.RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary });
-    // Force the graph MONO end to end. Chromium can deliver a 2-channel mic
-    // track (the channelCount:1 constraint is only an ideal hint), and the
-    // RNNoise worklet writes ONLY output channel 0 — so a stereo input yields
-    // a left-only track that LiveKit then negotiates as stereo Opus and every
-    // receiver hears in one ear. Explicit mono makes the worklet process the
-    // proper (L+R)/2 mix and the destination emit symmetric audio. (Verified
-    // live in Chromium: settable post-construction, no exceptions.)
-    worklet.channelCount = 1;
-    worklet.channelCountMode = 'explicit';
     // Mic gain (Input Volume × Manual Gain) sits AFTER the suppressor: RNNoise
     // expects speech at natural level, and a pre-suppressor boost would also
     // boost the noise it's trying to model.
@@ -574,6 +560,10 @@ export async function processAudioStream(inputStream: MediaStream): Promise<Medi
                 watchGraphLiveness(ctx, result.source, result.worklet, graphGeneration, 'DeepFilter');
                 watchRawInputSignal(ctx, result.source, graphGeneration);
                 console.log('[NoiseFilter] DeepFilterNet active (worklet + inference worker)');
+                // A fresh DeepFilter graph (any rebuild: a mic restart, a
+                // device change, "Try DeepFilter again") answers an offer left
+                // up by the graph it replaced.
+                window.dispatchEvent(new CustomEvent('sovereign:df-graph-live'));
                 return buildOutput(result.destination, inputStream);
             } catch (err) {
                 if (stale()) throw err; // don't fall through to a stale rnnoise build
@@ -618,8 +608,12 @@ export async function buildMicTestGraph(
     inputStream: MediaStream,
     mode: NoiseSuppressionMode,
     hooks: {
-        /** The running suppressor died mid-test (worklet crash / DeepFilter overload). */
+        /** The running suppressor died mid-test (a worklet crash, or a
+         *  DeepFilter overload with no RNNoise bridge to carry it). */
         onDead: (why: string) => void;
+        /** DeepFilter fell behind for good and settled on its RNNoise bridge:
+         *  still playing, but it is RNNoise now. */
+        onSettled?: (why: string) => void;
         /** A requested tier could not be built; `mode` says what runs instead. */
         onFallback: (from: NoiseSuppressionMode, to: NoiseSuppressionMode, why: string) => void;
     },
@@ -666,7 +660,7 @@ export async function buildMicTestGraph(
         try {
             const nodes = await applyDeepFilter(ctx, inputStream, inputGain(), {
                 tuning: dfTuningFromSettings(),
-                local: { onDead: hooks.onDead },
+                local: { onDead: hooks.onDead, onSettled: hooks.onSettled },
             });
             return finish('deepfilter', nodes);
         } catch (err) {

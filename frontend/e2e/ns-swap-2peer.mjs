@@ -226,10 +226,18 @@ try {
         const dfDiag = await a.evaluate(() => {
             const d = window.__pucaVoiceDiag?.();
             const w = d?.noise?.deepFilter?.worklet;
-            return { mode: d?.noise?.mode, processed: w?.processedSamples ?? 0, dry: w?.drySamples ?? -1, overloaded: w?.overloaded };
+            // Fallback is the raw delay line AND, since the RNNoise bridge,
+            // the bridge: counting only dry would pass a DeepFilter that the
+            // bridge is quietly covering. An episode is overloadEpisodes (the
+            // overloaded flag now ends with the episode).
+            return {
+                mode: d?.noise?.mode, processed: w?.processedSamples ?? 0,
+                fallback: w ? (w.drySamples ?? 0) + (w.bridgeSamples ?? 0) : -1,
+                episodes: w ? (w.overloadEpisodes ?? (w.overloaded ? 1 : 0)) : -1,
+            };
         });
-        const dfLive = dfDiag.mode === 'deepfilter' && dfDiag.processed > 0 && dfDiag.dry === 0 && dfDiag.overloaded === false;
-        check('deepfilter graph LIVE (worklet telemetry flowing, zero dry fallback)', dfLive);
+        const dfLive = dfDiag.mode === 'deepfilter' && dfDiag.processed > 0 && dfDiag.fallback === 0 && dfDiag.episodes === 0;
+        check('deepfilter graph LIVE (worklet telemetry flowing, zero fallback, never overloaded)', dfLive);
         if (!dfLive) console.log('  df diag:', JSON.stringify(dfDiag));
 
         console.log('== deepfilter -> rnnoise (DF teardown path) ==');

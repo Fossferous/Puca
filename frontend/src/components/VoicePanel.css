@@ -1304,10 +1304,12 @@
         padding: 8px 10px 8px 14px;
     }
 
-    /* Full-width rows under the bar: error/mic notices and (touch-laptop
-       only) the clip status line. The bar itself stays one row because
-       info (flex:1) + the four buttons always fit at 320px and up. */
+    /* Full-width rows of their own in the collapsed bar: error/mic notices,
+       the offers (share quality, DeepFilter) and (touch-laptop only) the
+       clip status line. The bar itself stays one row because info (flex:1) +
+       the four buttons always fit at 320px and up. */
     .voice-panel-compact.vp-collapsed .voice-error-mini,
+    .voice-panel-compact.vp-collapsed .voice-load-offer,
     .voice-panel-compact.vp-collapsed .voice-clip-status {
         flex-basis: 100%;
     }
