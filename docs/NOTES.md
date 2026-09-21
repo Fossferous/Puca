@@ -101,7 +101,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   key has not arrived — is not copied at all, rather than copied with the
   unreadable part quietly missing; and a note whose items have not loaded is not
   copied yet, which used to make an empty note and still say "Copied". A copy
-  with pictures needs the network: like the composer, it never queues.
+  with pictures needs the network: like the composer, it never queues — and
+  a copy that fails says so, so a copy that did not happen can never look
+  like one that did.
 - **Copy as text / Export / Share** — a note as a Markdown
   checklist to the clipboard, or every note as
   Markdown or JSON from the account menu: a download in the browser, a file in

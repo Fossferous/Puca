@@ -16,7 +16,9 @@ one-line summary; this file is the full story. Versions follow
   against your storage twice. Two things it no longer does quietly: a note
   holding something this device cannot read is refused with a message instead
   of copied with that part missing, and a note whose items are still loading
-  is no longer copied to an empty note that says "Copied".
+  is no longer copied to an empty note that says "Copied". A copy that fails
+  — offline, or because the server said no — now says so, rather than
+  leaving the screen unchanged with nothing to tell you it did not happen.
 
 ### Added
 - **Undo a deleted item.** Deleting an item inside a note now offers Undo for

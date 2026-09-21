@@ -10,8 +10,10 @@
  * disjoint.
  *
  * The rest: children land under the COPY's parent, a ticked item comes back
- * ticked, and a copy whose uploads fail part-way leaves nothing behind on the
- * server for the owner to be billed for.
+ * ticked, a copy whose uploads fail part-way leaves nothing behind on the
+ * server for the owner to be billed for, and a copy that fails SAYS SO — it
+ * is asked for from a card menu with nowhere to report a null, and a copy
+ * never queues, so silence looked exactly like a copy that worked.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, useEffect } from 'react';
@@ -43,10 +45,11 @@ vi.mock('../api/attachments', async (orig) => {
 });
 vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 
-import { apiClient } from '../api/client';
+import { apiClient, ApiError } from '../api/client';
 import { decryptToBlobUrl, encryptAndUploadRef } from '../api/attachments';
 import { createTaskListWithContent, deleteFiles } from '../api/listContent';
 import { createListTask, patchTaskTiming, updateListTaskAttachments, type Task, type TaskAttachmentRef, type TaskList } from '../api/tasks';
+import { pushMessageToast } from '../components/messageToastBus';
 import { type CopyPlan } from '../notes/model/noteText';
 import { useNoteActions, type NoteActions } from '../notes/model/notesQueries';
 
@@ -164,6 +167,22 @@ describe('copyNote', () => {
         // Both halves of the rollback: resealRefs cleans its own partial, and
         // createNoteFromPlan cleans everything the copy had uploaded.
         expect(vi.mocked(deleteFiles).mock.calls.flat(2).filter(Boolean).sort()).toEqual(['new1', 'new2']);
+    });
+
+    it('says so when the copy fails with no reason of its own — offline, or a 500', async () => {
+        vi.mocked(createTaskListWithContent).mockRejectedValue(new TypeError('Failed to fetch'));
+        const actions = mountActions();
+        let out: unknown = 'unset';
+        await act(async () => { out = await actions().copyNote(plan({ items: [item('Milk')] })); });
+        expect(out).toBeNull();
+        expect(vi.mocked(pushMessageToast).mock.calls).toEqual([[{ title: 'Couldn’t copy the note — check your connection' }]]);
+    });
+
+    it('POSITIVE CONTROL: when the server gives a reason, that reason is shown instead — once', async () => {
+        vi.mocked(createTaskListWithContent).mockRejectedValue(new ApiError('Notes to self cannot be copied', 400));
+        const actions = mountActions();
+        await act(async () => { await actions().copyNote(plan({ items: [item('Milk')] })); });
+        expect(vi.mocked(pushMessageToast).mock.calls).toEqual([[{ title: 'Notes to self cannot be copied' }]]);
     });
 
     it('POSITIVE CONTROL: a note with no pictures uploads nothing and still copies its items', async () => {

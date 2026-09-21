@@ -246,8 +246,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             list = await createTaskListWithContent(plan.title, { body: plan.body || undefined, refs: noteRefs });
         } catch (err) {
             // Never queued (its uploads could not wait), and nothing names
-            // what was uploaded for it now.
-            explain('copy failed', err);
+            // what was uploaded for it now. A copy is asked for from a menu
+            // with nowhere to report a null, so it says so itself — a
+            // failed copy must never look like a copy that happened.
+            if (!explain('copy failed', err)) {
+                pushMessageToast({ title: 'Couldn’t copy the note — check your connection' });
+            }
             await deleteFiles(fileIdsOf(uploaded));
             return null;
         }
