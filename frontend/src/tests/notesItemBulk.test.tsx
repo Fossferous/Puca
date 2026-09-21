@@ -260,6 +260,37 @@ describe('Delete checked', () => {
         expect(f.log.filter(l => l.includes(',true)'))).toEqual(['toggle(901,true)', 'toggle(903,true)']);
     });
 
+    it('Undo puts a ticked child back UNDER the open parent it was under, not at the top', async () => {
+        // The case the test above cannot reach: a completed item under an
+        // OPEN parent is a checked root of its own (noteItemBulk.checkedRoots),
+        // so its parent is never deleted and never enters the id map. Looking
+        // the parent up in that map alone finds nothing, and the item comes
+        // back at the top level — the nesting quietly lost, while the confirm
+        // and the docs both promise the items come back as they were.
+        const tasks = [
+            task(1, { description: 'Parent' }),                                   // OPEN — survives
+            task(2, { description: 'Child', parent_id: 1, is_completed: true }),
+            task(3, { description: 'Root', is_completed: true }),
+            task(4, { description: 'P2', is_completed: true }),                    // deleted parent...
+            task(5, { description: 'C2', parent_id: 4, is_completed: true }),      // ...and its child
+        ];
+        const f = fakeActions(tasks);
+        mount(f);
+        open();
+        await act(async () => { menuButton(/Delete checked/).click(); });
+        await settle(400);
+        await act(async () => { document.querySelector<HTMLButtonElement>('.notes-undo button')!.click(); });
+        await settle(400);
+        expect(f.log.filter(l => l.startsWith('add('))).toEqual([
+            'add(Child,1)',     // the surviving parent, by its own id
+            'add(Root,-)',      // no parent to find, and none invented
+            'add(P2,-)',
+            'add(C2,903)',      // POSITIVE CONTROL: a parent that WAS deleted
+                                // still comes from the id map — the NEW id,
+                                // never the stale one it had before.
+        ]);
+    });
+
     it('says how many DELETES failed — counted per request, never per swept child', async () => {
         // The two units this must not mix: a delete names a branch TOP, but
         // it sweeps that branch's whole subtree. Counting "swept ids that did

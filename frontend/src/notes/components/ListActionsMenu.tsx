@@ -192,7 +192,17 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
             run: async () => {
                 const idMap = new Map<number, number>();
                 for (const t of left) {
-                    const parent = t.parent_id === null ? undefined : idMap.get(t.parent_id);
+                    // Where it goes back: under its re-created parent when
+                    // the parent went too, otherwise under the SAME parent it
+                    // had, which is still there. A completed item under an
+                    // OPEN parent is a checked root of its own
+                    // (noteItemBulk.checkedRoots), so that parent is never
+                    // deleted and never enters this map — the map alone would
+                    // put the item back at the top level and lose the nesting.
+                    const stillThere = t.parent_id !== null && tasksRef.current.some(x => x.id === t.parent_id);
+                    const parent = t.parent_id === null
+                        ? undefined
+                        : (idMap.get(t.parent_id) ?? (stillThere ? t.parent_id : undefined));
                     const made = await actions.addTask(note, t.description, parent);
                     if (!made) continue;
                     idMap.set(t.id, made.id);

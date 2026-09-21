@@ -33,8 +33,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   Tasks view. A **List actions** button appears in its foot as soon
   as something is ticked, with *Uncheck all* and *Delete checked* — what a
   weekly shopping list needs to start again. Both offer Undo, and Undo after a
-  delete brings the items back with their dates, repeats, pictures and their
-  ticks. *Uncheck all* asks first when a ticked repeating to-do whose series
+  delete brings the items back with their dates, repeats, pictures, their
+  ticks and their nesting — a ticked subtask under a parent that was not
+  ticked goes back under that parent, not to the top of the list. *Uncheck all* asks first when a ticked repeating to-do whose series
   has already finished is among them, because unticking that one reopens a
   repeat with no next time. Both are refused while offline or while changes are
   waiting to sync, for the same reason *Show checkboxes* is — a hundred writes
