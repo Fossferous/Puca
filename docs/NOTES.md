@@ -67,8 +67,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
 
   Deleting an ITEM inside a note shows the same snackbar, and Undo puts the
   item and everything under it back: its text, its nesting, its date, repeat
-  and snooze, its pictures, and whether it was ticked. A repeating to-do
-  comes back on the date it was on, not the next one. Two things the Undo
+  and snooze, its pictures, and whether it was ticked. A subtask deleted on
+  its own goes back under the item it was under. A branch that was part done
+  comes back part done — a subtask that was still open under a ticked parent
+  stays open. A repeating to-do comes back on the date it was on, not the next
+  one. Two things the Undo
   cannot promise, because a note's items have no undelete on the wire and the
   item is CREATED again: it comes back as a new item, so in a shared note it
   is now yours (the byline changes, and with it who may edit it), and it lands

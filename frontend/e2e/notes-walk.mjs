@@ -303,6 +303,23 @@ ck('item undo: Undo brings the subtree back, still nested',
     await page.locator('.notes-editor .tt-item', { hasText: 'Bread' }).count() === 1
     && await page.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1
     && await page.locator('.notes-undo').count() === 0);
+// A NESTED item on its own: its snapshot's root names the live parent it
+// hangs under, which is not in the snapshot at all. Deleting a top-level item
+// never exercises that, and for one release Undo here restored nothing.
+const sourdough = () => page.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).first();
+await sourdough().hover();
+await sourdough().locator('.tt-btn[title="Delete"]').click();
+await page.waitForSelector('.notes-undo-text:has-text("Deleted")', { timeout: 5000 });
+ck('item undo: a nested item leaves on its own, and its parent stays',
+    await page.locator('.notes-editor .tt-item', { hasText: 'Sourdough' }).count() === 0
+    && await page.locator('.notes-editor .tt-item', { hasText: 'Bread' }).count() === 1
+    && /Sourdough/.test(await page.locator('.notes-undo-text').innerText()));
+await page.locator('.notes-undo button').click();
+await page.waitForFunction(() => [...document.querySelectorAll('.notes-editor .tt-nest .tt-item')].some(li => li.textContent.includes('Sourdough')), null, { timeout: 15000 }).catch(() => {});
+ck('item undo: Undo puts a nested item back UNDER its live parent',
+    await page.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1
+    && await page.locator('.notes-undo').count() === 0);
+
 // ...and letting the window close really does delete it.
 const butter = () => page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first();
 await butter().hover();

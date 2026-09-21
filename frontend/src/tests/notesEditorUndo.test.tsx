@@ -147,6 +147,24 @@ describe('deleting an item in the open note', () => {
         expect(fileDeletes()).toEqual([]);
     });
 
+    it('Undo of a NESTED item puts it back under the live parent it hung under', async () => {
+        const actions = fakeActions();
+        shownTasks.current = ALL;
+        render(actions);
+        await act(async () => { rowButton('Semi-skimmed', 'Delete').click(); });
+        await flush();
+        shownTasks.current = [MILK, EGGS];
+        render(actions);
+        await flush();
+        expect(actions.deleteTaskFrom).toHaveBeenCalledWith(card.ref, 2);
+        await act(async () => { undoButton()!.click(); });
+        await flush();
+        // Milk is untouched and alive, so the child goes straight back under
+        // its id — not dropped for want of a mapping the snapshot never had.
+        expect(vi.mocked(actions.addTask).mock.calls.map(c => [c[1], c[2]]))
+            .toEqual([['Semi-skimmed', 1]]);
+    });
+
     it('keeps the pictures while Undo is offered, and deletes them once it is gone', async () => {
         await deleteMilk(fakeActions());
         expect(fileDeletes()).toEqual([]);

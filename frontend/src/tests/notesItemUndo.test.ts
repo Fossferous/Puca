@@ -143,12 +143,68 @@ describe('recreateSubtree', () => {
         expect(c.attachments).toEqual([[901, [fileRef('f1'), fileRef('f2')]]]);
     });
 
+    it('puts a deleted SUBTREE back under the live item it hung under', async () => {
+        const c = fakes();
+        // What the editor hands it when a NESTED item is deleted: the root of
+        // the snapshot still names its parent, which is alive and untouched.
+        const out = await recreateSubtree(c.actions, note, [
+            task(3, { parent_id: 2 }), task(4, { parent_id: 3 }),
+        ]);
+        expect(c.added.map(a => [a[0], a[1]])).toEqual([['item 3', 2], ['item 4', 900]]);
+        expect(out.missing).toBe(0);
+        expect(out.idMap.get(3)).toBe(900);
+    });
+
     it('drops the children of an item that could not be put back, rather than raising them to the top', async () => {
         const c = fakes(['item 2']);
+        // POSITIVE CONTROL for the case above: this parent WAS in the
+        // snapshot and did not come back, so its child is not put back under
+        // the old id either — that id is gone.
         const out = await recreateSubtree(c.actions, note, [task(2), task(3, { parent_id: 2 }), task(4)]);
         expect(c.added.map(a => a[0])).toEqual(['item 2', 'item 4']);
         expect(out.missing).toBe(2);
         expect(out.idMap.has(3)).toBe(false);
+    });
+
+    it('marks a done parent BEFORE an open child exists, so the sweep cannot tick it', async () => {
+        const c = fakes();
+        // Reachable: an item added under a parent that was already ticked.
+        // The server's sweep ticks the subtree as it stands, and re-opening
+        // the child afterwards would un-tick the parent, so the only order
+        // that reproduces this is mark-then-create.
+        await recreateSubtree(c.actions, note, [
+            task(2, { description: 'Milk', is_completed: true }),
+            task(3, { description: 'Semi-skimmed', parent_id: 2 }),
+        ]);
+        expect(c.order).toEqual(['add Milk', 'done Milk', 'add Semi-skimmed']);
+        expect(c.completed).toEqual([900]);
+    });
+
+    it('waits for the done half of a mixed branch, then marks, then adds the open half', async () => {
+        const c = fakes();
+        await recreateSubtree(c.actions, note, [
+            task(2, { description: 'Milk', is_completed: true }),
+            task(3, { description: 'Semi-skimmed', parent_id: 2, is_completed: true }),
+            task(4, { description: 'One pint', parent_id: 3 }),
+            task(5, { description: 'Bread', parent_id: 2 }),
+        ]);
+        expect(c.order).toEqual([
+            'add Milk', 'add Semi-skimmed', 'done Milk', 'add One pint', 'add Bread',
+        ]);
+        // Only the top of the completed branch is marked; the sweep does the rest.
+        expect(c.completed).toEqual([900]);
+    });
+
+    it('marks a done item under an open one on its own, after everything', async () => {
+        const c = fakes();
+        await recreateSubtree(c.actions, note, [
+            task(2, { description: 'Milk', is_completed: true }),
+            task(3, { description: 'Semi-skimmed', parent_id: 2 }),
+            task(4, { description: 'One pint', parent_id: 3, is_completed: true }),
+        ]);
+        // Marking 'One pint' sweeps downwards only, so it cannot un-tick Milk.
+        expect(c.order).toEqual(['add Milk', 'done Milk', 'add Semi-skimmed', 'add One pint', 'done One pint']);
+        expect(c.completed).toEqual([900, 902]);
     });
 
     it('puts an item with an unreadable date back WITHOUT it, and says so', async () => {

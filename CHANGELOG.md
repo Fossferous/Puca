@@ -22,7 +22,9 @@ one-line summary; this file is the full story. Versions follow
 - **Undo a deleted item.** Deleting an item inside a note now offers Undo for
   a few seconds, and brings the item and everything under it back with its
   date, repeat, snooze, pictures and tick state — a repeating to-do comes
-  back on the date it was on, not the next one. Its pictures are kept for as
+  back on the date it was on, not the next one. A subtask deleted on its own
+  comes back under the item it was under, and a branch that was only part
+  done comes back part done. Its pictures are kept for as
   long as Undo is offered and deleted afterwards; before, they stayed on the
   server counting against your storage for good. An item brought back is a
   new item: in a shared note it is now yours, and it comes back at the end of
