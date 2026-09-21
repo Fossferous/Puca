@@ -1396,9 +1396,17 @@ try {
     const shareBox = await a.locator('.notes-quickadd-sheet').boundingBox();
     ck('share-in: the seeded composer fits the viewport', !!shareBox && shareBox.x >= -0.5 && shareBox.x + shareBox.width <= 390.5, JSON.stringify(shareBox));
     const shareTaps = await a.evaluate(() => [...document.querySelectorAll('.notes-quickadd-sheet button')]
-        .map(b => Math.min(b.getBoundingClientRect().width, b.getBoundingClientRect().height)).filter(n => n > 0));
+        .map(b => ({ c: b.className, n: Math.min(b.getBoundingClientRect().width, b.getBoundingClientRect().height) }))
+        .filter(t => t.n > 0));
+    // 43.5 (the 44px floor, less sub-pixel layout), NOT the 24 this check
+    // shipped with. mobile.css gives every `button` min-height/min-width 44px
+    // under a coarse pointer and the Notes page imports it, so all six
+    // controls here measure exactly 44 — measured, class by class. A bar at
+    // 24 could not go red for the regression it names: a control shrinking to
+    // 28px would still have passed it. The class comes out with the number so
+    // a failure says WHICH control lost its size.
     ck('share-in: every button in the seeded composer is a full tap target',
-        shareTaps.length > 0 && Math.min(...shareTaps) >= 24, JSON.stringify(shareTaps));
+        shareTaps.length > 0 && Math.min(...shareTaps.map(t => t.n)) >= 43.5, JSON.stringify(shareTaps));
     await shotOf(a)('share-in-composer');
     // Saving it is the positive control that a seeded composer is a real one.
     await a.locator('.notes-quickadd-sheet .notes-textbtn').tap();
