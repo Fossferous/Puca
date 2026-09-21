@@ -14,6 +14,7 @@
  * it, and a removed picture's plaintext does not linger in the document.
  */
 import { decryptParkedBlobUrl } from './attachments';
+import { registerLogoutCleanup } from './logoutHooks';
 import { bytesFromB64, parseParkedRef } from './parkedMedia';
 
 /** What a registered store hands back for one parked id. */
@@ -29,7 +30,12 @@ type Reader = (id: string) => Promise<ParkedBytes | null>;
 
 let reader: Reader | null = null;
 
-/** Called once by the store that holds parked media. */
+/** Called once by the store that holds parked media. A sign-out does NOT
+ *  unregister it and must not: the store answers nothing once the account's
+ *  seed is gone (notesBlobs.ts `ctx`), and a sign-in as the same account in
+ *  the same document would otherwise be left with no reader at all, because
+ *  the registration happens when the module is first imported. What a
+ *  sign-out does clear is the decrypted previews below. */
 export function setParkedReader(r: Reader | null): void {
     reader = r;
 }
@@ -73,7 +79,21 @@ export function revokeParkedPreviews(ids: Iterable<string>): void {
     }
 }
 
-/** Revoke every parked preview (sign-out). */
+/**
+ * Revoke every parked preview.
+ *
+ * Registered below as a sign-out cleanup, and that is what makes it run: the
+ * ciphertext goes with the account's database (api/notesCacheScrub.ts), but
+ * a decrypted picture's object URL lives in the DOCUMENT, and Notes' sign-out
+ * navigates to its login inside the same page rather than reloading it.
+ *
+ * Through the registry rather than an import from `auth.ts`: these URLs
+ * belong to the document that made them, which is exactly what a per-document
+ * hook covers, and `auth.ts` importing this module puts it on the same import
+ * path as the whole attachment stack (see api/logoutHooks.ts).
+ */
 export function clearParkedPreviews(): void {
     revokeParkedPreviews([...urls.keys()]);
 }
+
+registerLogoutCleanup(clearParkedPreviews);

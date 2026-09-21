@@ -152,7 +152,10 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   that opens it, so that record is only as private as the seal around it —
   which is why it goes in the same sealed database and nowhere else. It is at
   rest under the same trust as the seed itself, which already sits in this
-  browser while you are signed in, and sign-out deletes it. Edits made offline reach the
+  browser while you are signed in, and sign-out deletes it — along with the
+  decrypted previews of any picture still waiting, which are object URLs held
+  by the page rather than by the database (Notes' sign-out does not reload
+  the page, so they would otherwise outlive the account). Edits made offline reach the
   server when the queue replays: it sees them arrive together after the device
   reconnects, stamped with the replay time, not when they were made.
 
