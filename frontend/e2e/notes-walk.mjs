@@ -222,6 +222,22 @@ await page.getByRole('button', { name: 'Close', exact: true }).click();
 await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 await shot('text-photo-drawing-cards');
 
+// ---- the reminder times: the setting, then the one-tap row that reads it ----------------------
+// Set Morning to 07:30 FIRST, so "the preset used the setting" cannot pass by
+// landing on the old hardcoded 09:00.
+await page.click('button[aria-label="Account and settings"]');
+await page.waitForSelector('.notes-menu', { timeout: 5000 });
+ck('settings: the account menu has the four reminder times',
+    await page.locator('#notes-remind-morning, #notes-remind-afternoon, #notes-remind-evening, #notes-remind-default').count() === 4);
+await page.fill('#notes-remind-morning', '07:30');
+await page.keyboard.press('Escape');
+await sleep(300);
+await page.click('button[aria-label="Account and settings"]');
+await page.waitForSelector('.notes-menu', { timeout: 5000 });
+ck('settings: the changed Morning is kept', await page.locator('#notes-remind-morning').inputValue() === '07:30');
+await page.keyboard.press('Escape');
+await sleep(200);
+
 // ---- 5. The editor is Púca's TaskTree ----------------------------------------------
 await page.locator('.notes-card', { hasText: 'Groceries' }).click();
 await page.waitForSelector('.notes-editor .task-tree', { timeout: 15000 });
@@ -256,21 +272,6 @@ ck('editor: a subtask nests under its parent', await page.locator('.notes-editor
 await page.keyboard.press('Escape');
 await sleep(150);
 ck('editor: Escape closes the subtask input and keeps the note open', await page.locator('.notes-editor .tt-subtask-add').count() === 0 && await page.locator('.notes-editor').count() === 1);
-// ---- the reminder times: the setting, then the one-tap row that reads it ----------------------
-// Set Morning to 07:30 FIRST, so "the preset used the setting" cannot pass by
-// landing on the old hardcoded 09:00.
-await page.click('button[aria-label="Account and settings"]');
-await page.waitForSelector('.notes-menu', { timeout: 5000 });
-ck('settings: the account menu has the four reminder times',
-    await page.locator('#notes-remind-morning, #notes-remind-afternoon, #notes-remind-evening, #notes-remind-default').count() === 4);
-await page.fill('#notes-remind-morning', '07:30');
-await page.keyboard.press('Escape');
-await sleep(300);
-await page.click('button[aria-label="Account and settings"]');
-await page.waitForSelector('.notes-menu', { timeout: 5000 });
-ck('settings: the changed Morning is kept', await page.locator('#notes-remind-morning').inputValue() === '07:30');
-await page.keyboard.press('Escape');
-await sleep(200);
 
 const dueCount = () => Number(sql(`SELECT count(*) FROM channel_tasks t JOIN task_lists l ON l.id = t.list_id JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}' AND t.due_at IS NOT NULL`));
 const duesBefore = psqlDsn ? dueCount() : null;
@@ -291,7 +292,6 @@ if (psqlDsn) {
 } else {
     skip('database: the preset wrote one plaintext due_at', 'no psql DSN given');
 }
-
 // due time on Eggs (tomorrow 09:00)
 const eggsRow = page.locator('.notes-editor .tt-item', { hasText: 'Eggs' }).first();
 await eggsRow.hover();
@@ -442,10 +442,31 @@ ck('reminders: a plain dated item retimes from the row, with the note closed',
     await page.locator('.notes-retime input[type="datetime-local"]').count() === 1 && await page.locator('.notes-editor').count() === 0);
 const later = new Date(); later.setDate(later.getDate() + 3); later.setHours(18, 45, 0, 0);
 const p2 = x => String(x).padStart(2, '0');
-await page.fill('.notes-retime input[type="datetime-local"]', `${later.getFullYear()}-${p2(later.getMonth() + 1)}-${p2(later.getDate())}T18:45`);
+const retimeTo = `${later.getFullYear()}-${p2(later.getMonth() + 1)}-${p2(later.getDate())}T18:45`;
+await page.fill('.notes-retime input[type="datetime-local"]', retimeTo);
+// Let React take the typed value before Set: fill() and click() land in
+// consecutive events, which no human can do, and a Set that ran against the
+// old draft would look exactly like a broken retime.
+await sleep(250);
+ck('reminders: the field took the typed time', await page.locator('.notes-retime input[type="datetime-local"]').inputValue() === retimeTo);
+// Watch the write itself: "the row did not change" could mean the client
+// never sent anything OR that the server refused it, and those are different
+// bugs. The PATCH answers that without guessing.
+const retimePatch = page.waitForResponse(r => r.request().method() === 'PATCH' && /\/tasks\/\d+/.test(r.url()), { timeout: 15000 }).catch(() => null);
 await page.locator('.notes-retime button', { hasText: 'Set' }).click();
+const retimeResp = await retimePatch;
+ck('reminders: the retime reached the server and was accepted', !!retimeResp && retimeResp.status() < 300,
+    retimeResp ? `${retimeResp.status()} ${retimeResp.url().replace(/^https?:\/\/[^/]+/, '')}` : 'no PATCH was sent at all');
+// Wait on THIS item's row, not on the first row in the list: another
+// reminder sits above it, so `document.querySelector('.notes-reminder-when')`
+// already reads a different time and the wait would return at once — leaving
+// the assertion to race the re-render.
 await page.waitForFunction(
-    prev => { const el = document.querySelector('.notes-reminder-row .notes-reminder-when'); return !!el && el.textContent.trim() !== prev; },
+    prev => {
+        const row = [...document.querySelectorAll('.notes-reminder-row')].find(r => r.textContent.includes('Eggs'));
+        const el = row && row.querySelector('.notes-reminder-when');
+        return !!el && el.textContent.trim() !== prev;
+    },
     whenBefore, { timeout: 10000 },
 ).catch(() => {});
 const whenAfter = await eggsReminder.locator('.notes-reminder-when').innerText();

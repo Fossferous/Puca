@@ -674,7 +674,8 @@
     padding: 6px 10px;
     font-size: 13px;
 }
-.notes-menu-row select {
+.notes-menu-row select,
+.notes-menu-row input[type="time"] {
     padding: 5px 8px;
     border: none;
     border-radius: 6px;
@@ -682,6 +683,9 @@
     color: var(--text-normal);
     font-size: 13px;
 }
+/* The native time picker draws its own chrome from the scheme. */
+.notes-menu-row input[type="time"] { color-scheme: dark; }
+[data-theme="light"] .notes-menu-row input[type="time"] { color-scheme: light; }
 .notes-menu-sep { height: 1px; background: var(--border-faint); margin: 4px 0; }
 /* Android app only: location reminders in the account menu (notes/native/). */
 .notes-menu-location { max-width: 300px; }
@@ -993,14 +997,17 @@
     .notes-swatch { width: 40px; height: 40px; }
     .notes-labels-list label { padding: 10px 6px; font-size: 15px; }
     .notes-menu-item { padding: 12px 10px; font-size: 15px; }
-    /* <select> is a form control too: below 16px iOS zooms the page. */
-    .notes-menu-row select, .notes-menu-row label { font-size: 16px; }
+    /* <select> and the reminder-time <input> are form controls too: below
+       16px iOS zooms the page. The input carries its own [type="time"]
+       selector above, so this one has to match it or the 13px wins. */
+    .notes-menu-row select, .notes-menu-row input[type="time"], .notes-menu-row label { font-size: 16px; }
     .notes-reminder-row { padding: 12px 10px; flex-wrap: wrap; }
     .notes-reminder-row input[type="checkbox"] { width: 20px; height: 20px; }
-    /* Two icon buttons now sit at the end of the row: DESIGN_PHILOSOPHY §7's
-       44px applies to both, and the inline time field gets its own line at
-       16px so iOS does not zoom into it. */
-    .notes-iconbtn.small { width: 44px; height: 44px; }
+    /* Two icon buttons now sit at the end of a reminder row (retime and
+       snooze): DESIGN_PHILOSOPHY §7's 44px applies to both. Scoped to the
+       row — the 40px above is right for a card's own tools, and widening
+       every small icon button would grow the composer's whole cluster. */
+    .notes-reminder-row .notes-iconbtn.small { width: 44px; height: 44px; }
     .notes-retime-edit { flex-basis: 100%; margin-top: 6px; }
     .notes-retime-edit input { font-size: 16px; flex: 1; min-width: 0; }
     .notes-retime-edit .notes-textbtn { min-height: 44px; padding: 6px 14px; font-size: 16px; }

@@ -276,12 +276,29 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
         await c.locator('.notes-kbd-grid').count() === 0 && await c.locator('.sched-dialog').count() === 1);
     await c.locator('.sched-dialog .sched-btn', { hasText: 'Cancel' }).click();
     await c.waitForSelector('.sched-dialog', { state: 'detached', timeout: 5000 });
-    // Positive control: with the dialog gone, `?` works again.
-    await c.keyboard.press('?');
-    await c.waitForSelector('.notes-kbd-grid', { timeout: 5000 }).catch(() => {});
-    ck('reminders: …and they come back when it closes (control)', await c.locator('.notes-kbd-grid').count() === 1);
+    // Positive control: with the dialog gone, `?` works again. The listener is
+    // re-registered by an effect when the dialog closes, so give React a frame
+    // and press again if the first key beat it — a control that is merely slow
+    // must not read as a broken one.
+    let helpBack = false;
+    for (let i = 0; i < 4 && !helpBack; i++) {
+        await sleep(400);
+        await c.keyboard.press('?');
+        helpBack = await c.waitForSelector('.notes-kbd-grid', { timeout: 2000 }).then(() => true, () => false);
+    }
+    ck('reminders: …and they come back when it closes (control)', helpBack);
     await c.keyboard.press('Escape');
     await c.waitForSelector('.notes-kbd-grid', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+    // Snooze's Tomorrow is the account's own morning time (the reminder-time
+    // setting), so read it rather than assume 09:00 — the notes walk hands
+    // this run an account whose morning has been changed.
+    await c.click('button[aria-label="Account and settings"]');
+    await c.waitForSelector('#notes-remind-morning', { timeout: 5000 });
+    const morning = await c.locator('#notes-remind-morning').inputValue();
+    ck('reminders: the account carries a morning time for Tomorrow to use', /^\d{2}:\d{2}$/.test(morning), morning);
+    await c.keyboard.press('Escape');
+    await sleep(300);
 
     await standupRow.locator('button[aria-label="Snooze"]').click();
     await standupRow.locator('.notes-snooze-menu button', { hasText: 'Tomorrow' }).click();
@@ -292,10 +309,11 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
         const [n, leak, head] = s.split('|');
         ck('database: one sealed snooze, nothing readable in it', n === '1' && leak === 'false' && head.startsWith('{"v":'), s);
         // L15 on the phone: the snooze moved the plaintext due_at to the snooze
-        // instant (tomorrow 09:00 Dublin = 2026-03-29T08:00Z, IST), so a phone
-        // reminding with Notes closed fires it then.
+        // instant — tomorrow at the account's morning time, Dublin. The 29th is
+        // IST (UTC+1), so the stored UTC is that time less an hour.
         const moved = sql(`SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI') FROM channel_tasks WHERE list_id IN (${mine}) AND snooze IS NOT NULL`);
-        ck('database: the snooze moved due_at to the snooze instant (tomorrow 09:00 IST)', moved === '2026-03-29T08:00', moved);
+        const want = `2026-03-29T${String(Number(morning.slice(0, 2)) - 1).padStart(2, '0')}:${morning.slice(3)}`;
+        ck(`database: the snooze moved due_at to the snooze instant (tomorrow ${morning} IST)`, moved === want, `${moved} want ${want}`);
     });
     await shot('cal-reminders-snoozed');
 
