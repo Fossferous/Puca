@@ -358,6 +358,17 @@ export async function runCapacitorOta(opts: RunCapacitorOtaOptions): Promise<Ota
         // this run's stall watchdog (a device check in docs/NOTES.md). A
         // missing label, or the plugin's 'builtin' fallback for a null one,
         // is let through: dropping this run's own events would fake a stall.
+        //
+        // How OFTEN a label is usable is a device question, and the answer is
+        // "less than it looks". Android builds the event's bundle with
+        // getBundleInfo(id) (CapgoUpdater.java), which returns version=null
+        // for a bundle whose info is not stored yet - the normal state WHILE
+        // it downloads - and BundleInfo.getVersionName() turns a null version
+        // into the string 'builtin'. So mid-download both runs' events can
+        // read 'builtin' and both are let through, by design: a labelled
+        // event is the case this drops, and the device check is what covers
+        // the rest. Never narrow the 'builtin' escape hatch on the strength
+        // of the unit tests - it is the common path, not the rare one.
         const wanted = updateInfo.version;
         dlListener = await CapacitorUpdater.addListener('download', (info: { percent?: number; bundle?: { version?: unknown } }) => {
             const label = info.bundle?.version;

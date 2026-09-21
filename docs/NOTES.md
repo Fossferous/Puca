@@ -485,7 +485,13 @@ launch — on **its own channel**:
   spinner), exactly one reload into the new version, and no *Update failed*
   when the first download finishes late. The unit tests
   (`notesUpdateGate.test.tsx`) cover each run's own listener and an event
-  labelled with another version, which the engine drops — not this.
+  labelled with another version, which the engine drops — not this. Note the
+  version filter does less on a device than it reads: Android labels an event
+  for a bundle whose info is not stored yet (the normal state mid-download)
+  `builtin`, and `builtin` is deliberately let through, so mid-download events
+  from BOTH runs usually pass the filter. This walk is what covers that, and a
+  run that ends in *Update failed* without the network ever dropping again is
+  the symptom of narrowing that escape hatch.
 
 **Existing installs need one manual install.** Notes APKs up to and including
 0.9.815 have no updater, so nothing can reach them over the air; they stay as
