@@ -13,6 +13,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::Claims;
+use crate::protocol::{ServerMessage, UserInfo};
 use crate::state::AppState;
 
 // --- DTOs ---
@@ -809,6 +810,49 @@ pub async fn send_message(
             let (sender_username, sender_display_name) = sender
                 .map(|(u, d)| (u, d))
                 .unwrap_or_else(|| ("Unknown".to_string(), None));
+
+            // Everything below the INSERT is what the WebSocket send path
+            // (ws.rs, ClientMessage::DirectMessage) has always done, and what
+            // this handler did NOT: bump the conversation, fan the frame out,
+            // and park-and-wake a recipient with nobody home. Without it a
+            // message sent over REST was stored and never announced — no live
+            // bubble, no notification, no phone wake, and the conversation
+            // stayed wherever it was in the other person's list. That is worse
+            // than a refusal: the sender is told it went.
+            //
+            // Púca Notes' "Send to Púca…" is the caller that made this matter
+            // (it must never open a socket — notesQueries.ts's header), but the
+            // fix is for the route, not for Notes: the two DM send paths now
+            // agree, whoever calls them. The HTTP contract is unchanged.
+            let timestamp = chrono::Utc::now().timestamp();
+            let _ = sqlx::query("UPDATE dm_conversations SET updated_at = NOW() WHERE id = $1")
+                .bind(&conversation_id)
+                .execute(&state.pool)
+                .await;
+
+            let dm = ServerMessage::DirectMessage {
+                message_id: message_id.clone(),
+                conversation_id: conversation_id.clone(),
+                sender: UserInfo::new(claims.sub, sender_username.clone()),
+                content: payload.content.clone(),
+                timestamp,
+            };
+            // A note to self is its own recipient: deliver it once (the echo
+            // below), never park-and-wake the sender for their own message.
+            if !state.send_to_user(recipient_id, dm.clone()) && recipient_id != claims.sub {
+                state.enqueue_undelivered(recipient_id, dm.clone());
+                crate::wake::sender::wake_user_kind(
+                    &state,
+                    recipient_id,
+                    crate::wake::sender::WakeKind::DirectMessage,
+                );
+            }
+            // Echo to the sender's OTHER sessions — the phone, and the Púca
+            // tab next to the Notes one — so an open conversation renders it
+            // live. The sending client dedups by message id.
+            if recipient_id != claims.sub {
+                state.send_to_user(claims.sub, dm);
+            }
 
             Json(DMMessageResponse {
                 id: message_id,
