@@ -18,7 +18,7 @@ export function readableBody(body: string | null | undefined): string {
  *  line of text, else its first item, else what it is. */
 export function deriveContentTitle(
     title: string,
-    content: { body?: string; items?: string[]; images?: number; drawing?: boolean },
+    content: { body?: string; items?: string[]; images?: number; drawing?: boolean; fileNames?: string[] },
 ): string {
     if (title.replace(/\s+/g, ' ').trim()) return deriveQuickTitle(title, []);
     const firstLine = (content.body ?? '').split('\n').map(l => l.trim()).find(l => l !== '');
@@ -26,6 +26,11 @@ export function deriveContentTitle(
     if (content.items && content.items.some(i => i.trim())) return deriveQuickTitle('', content.items);
     if (content.drawing) return 'Drawing';
     if ((content.images ?? 0) > 0) return 'Photo';
+    // A note that is nothing but an attached file is named after it, without
+    // the extension — "Untitled note" for a note called tickets.pdf helps
+    // nobody find it again.
+    const first = (content.fileNames ?? []).map(n => n.trim()).find(n => n !== '');
+    if (first) return deriveQuickTitle('', [first.replace(/\.[^./\\]+$/, '') || first]);
     return 'Untitled note';
 }
 

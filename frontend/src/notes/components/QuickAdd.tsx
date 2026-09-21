@@ -10,17 +10,26 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
+import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PaperclipIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
 import { DrawingCanvas } from './DrawingCanvas';
+import '../../components/NoteImages.css';
 import '../noteContent.css';
 
-/** A picture waiting in the composer, with its on-device preview URL. */
-interface PendingPicture { key: number; url: string; photo?: File; drawing?: DrawingFiles }
+/**
+ * Something waiting in the composer. A picture carries an on-device preview
+ * URL; anything else — a PDF, a spreadsheet — carries none, because it has
+ * no preview: rendering it as an <img> would show a broken image, and giving
+ * it a live blob: URL would be the security hole api/saveAttachment.ts
+ * exists to avoid. It shows as a named chip until it is saved.
+ */
+interface PendingPicture { key: number; url: string | null; photo?: File; drawing?: DrawingFiles }
 let pictureSeq = 0;
+
+const isImageFile = (f: File | undefined) => !!f && f.type.startsWith('image/');
 
 interface QuickAddProps {
     /** Called with the typed title and items; resolves true once the note
@@ -48,11 +57,12 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const [pictures, setPictures] = useState<PendingPicture[]>([]);
     const [drawingOpen, setDrawingOpen] = useState(false);
     const pickRef = useRef<HTMLInputElement>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
     const cameraRef = useRef<HTMLInputElement>(null);
     const picturesRef = useRef(pictures);
     useEffect(() => { picturesRef.current = pictures; });
     // Previews are object URLs of files on this device; free them on the way out.
-    useEffect(() => () => { for (const p of picturesRef.current) URL.revokeObjectURL(p.url); }, []);
+    useEffect(() => () => { for (const p of picturesRef.current) if (p.url) URL.revokeObjectURL(p.url); }, []);
     const itemRefs = useRef<(HTMLInputElement | null)[]>([]);
     const rootRef = useRef<HTMLDivElement>(null);
     const focusItem = (i: number) => requestAnimationFrame(() => itemRefs.current[i]?.focus());
@@ -63,27 +73,34 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
 
     const reset = () => {
         setTitle(''); setItems(['']); setBody(''); setMode('list');
-        for (const p of pictures) URL.revokeObjectURL(p.url);
+        for (const p of pictures) if (p.url) URL.revokeObjectURL(p.url);
         setPictures([]);
     };
     const extras = (): NoteExtras | undefined => {
-        const photos = pictures.flatMap(p => (p.photo ? [p.photo] : []));
+        const picked = pictures.flatMap(p => (p.photo ? [p.photo] : []));
+        const photos = picked.filter(isImageFile);
+        const files = picked.filter(f => !isImageFile(f));
         const drawing = pictures.find(p => p.drawing)?.drawing;
         const text = mode === 'text' ? body : '';
-        if (!text.trim() && photos.length === 0 && !drawing) return undefined;
-        return { body: text.trim() ? text : undefined, photos, drawing };
+        if (!text.trim() && picked.length === 0 && !drawing) return undefined;
+        return { body: text.trim() ? text : undefined, photos, files, drawing };
     };
+    // No MIME filter: a note holds any file. Only an image gets a preview URL.
     const addPictures = (files: File[]) => {
-        setPictures(prev => [...prev, ...files.map(f => ({ key: ++pictureSeq, url: URL.createObjectURL(f), photo: f }))]);
+        setPictures(prev => [...prev, ...files.map(f => ({
+            key: ++pictureSeq,
+            url: isImageFile(f) ? URL.createObjectURL(f) : null,
+            photo: f,
+        }))]);
     };
     const onPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = Array.from(e.target.files ?? []).filter(f => f.type.startsWith('image/') || f.type === '');
+        const files = Array.from(e.target.files ?? []);
         e.target.value = '';
         if (files.length > 0) addPictures(files);
     };
     const removePicture = (key: number) => setPictures(prev => {
         const gone = prev.find(p => p.key === key);
-        if (gone) URL.revokeObjectURL(gone.url);
+        if (gone?.url) URL.revokeObjectURL(gone.url);
         return prev.filter(p => p.key !== key);
     });
     const hasDrawing = pictures.some(p => p.drawing);
@@ -184,8 +201,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     <div className="notes-quickadd-media">
                         {pictures.map(p => (
                             <figure key={p.key}>
-                                <img src={p.url} alt={p.drawing ? 'Drawing' : (p.photo?.name ?? 'Photo')} />
-                                <button type="button" className="ni-tool" aria-label="Remove picture" title="Remove" onClick={() => removePicture(p.key)}>
+                                {p.url
+                                    ? <img src={p.url} alt={p.drawing ? 'Drawing' : (p.photo?.name ?? 'Photo')} />
+                                    : <span className="ni-file"><PaperclipIcon /><span className="ni-file-name">{p.photo?.name ?? 'File'}</span></span>}
+                                <button type="button" className="ni-tool" aria-label={p.url ? 'Remove picture' : 'Remove file'} title="Remove" onClick={() => removePicture(p.key)}>
                                     <CloseIcon size={14} />
                                 </button>
                             </figure>
@@ -265,6 +284,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                                 <ImageIcon />
                             </button>
                             <input ref={pickRef} type="file" accept="image/*" multiple onChange={onPicked} />
+                            <button type="button" className="notes-iconbtn small" aria-label="Add file" title="Add file" onClick={() => fileRef.current?.click()}>
+                                <PaperclipIcon />
+                            </button>
+                            <input ref={fileRef} type="file" multiple onChange={onPicked} data-testid="qa-pick-file" />
                             {content.camera && (
                                 <>
                                     <button type="button" className="notes-iconbtn small" aria-label="Take photo" title="Take photo" onClick={() => cameraRef.current?.click()}>

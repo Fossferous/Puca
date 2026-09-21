@@ -54,12 +54,17 @@ interface RowProps {
 function TrashRow({ list, content, now, restoreNote, queued }: RowProps) {
     const title = list.title.trim() ? list.title : 'Untitled note';
     const body = list.body && !isUndecryptable(list.body) ? list.body : '';
-    const pictures = galleryItems(list.attachments).filter(i => i.kind !== 'file').length;
+    const gallery = galleryItems(list.attachments);
+    const pictures = gallery.filter(i => i.kind !== 'file').length;
+    // Files were counted as nothing, so the trash under-stated what Delete
+    // forever destroys for a note holding a PDF.
+    const files = gallery.filter(i => i.kind === 'file').length;
     const purge = trashPurgeAt(list.trashed_at, content.features.trashRetentionDays);
     const trashed = list.trashed_at ? parseServerTimestamp(list.trashed_at) : NaN;
     const parts: string[] = [];
     if (list.total_tasks > 0) parts.push(`${list.total_tasks} item${list.total_tasks === 1 ? '' : 's'}`);
     if (pictures > 0) parts.push(`${pictures} picture${pictures === 1 ? '' : 's'}`);
+    if (files > 0) parts.push(`${files} file${files === 1 ? '' : 's'}`);
     if (Number.isFinite(trashed)) parts.push(`trashed ${new Date(trashed).toLocaleDateString()}`);
     // Counted on the server's clock when it gave one: it is the server that deletes.
     if (purge !== null) parts.push(`deleted forever ${purgeCountdown(purge, serverNowFrom(content.features, now) ?? now, 60_000)}`);

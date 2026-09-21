@@ -41,11 +41,15 @@ export interface SaveResult {
 /**
  * Save a blob URL's contents under `name`.
  *
+ * `folder` is the Documents/ folder a PHONE writes into; it defaults to
+ * Púca's, and Púca Notes passes its own so a file saved out of a note lands
+ * beside the Notes export rather than in the chat app's folder.
+ *
  * Throws on failure so callers can show a real error rather than leaving the
  * user clicking a button that silently does nothing — which is the bug this
  * replaces.
  */
-export async function saveAttachment(blobUrl: string, name: string): Promise<SaveResult> {
+export async function saveAttachment(blobUrl: string, name: string, folder: string = PUCA_FOLDER): Promise<SaveResult> {
     const safeName = name || 'attachment';
 
     if (isTauri()) {
@@ -79,7 +83,7 @@ export async function saveAttachment(blobUrl: string, name: string): Promise<Sav
     // writing over that name fails. A failure throws; it never falls through.
     if (isMobile()) {
         try {
-            return await saveBytesToDevice(PUCA_FOLDER, timestampedName(safeName), blobUrl);
+            return await saveBytesToDevice(folder, timestampedName(safeName), blobUrl);
         } catch (e) {
             console.warn('[attachment] could not write to this device:', e);
             throw new Error(deviceWriteFailedMessage(null, 'the file'));

@@ -7,6 +7,14 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **A note can hold any file, not just pictures.** Attach a PDF, a ticket, a
+  spreadsheet — to a whole note or to a single item — and it is end-to-end
+  encrypted like everything else. The note shows it by name and saves it back
+  to your device when you tap it (on a phone, into Documents/Puca Notes). For
+  safety a file is always a download and never opens inside Púca. Files are
+  capped at 25 MB each and count towards your storage, and the old caution
+  still applies: a note that expires from the Trash while no Púca Notes is
+  open leaves its files on the server.
 - **Notes written and photographed with no connection.** A note's text and
   its photos, drawings and files no longer need a signal. Type a note on a
   plane and it is kept on your device — the field says so — and sent as one

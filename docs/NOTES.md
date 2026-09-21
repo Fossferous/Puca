@@ -586,10 +586,27 @@ Migration 065 gives a personal list three nullable columns, and
   reads these fields STRICTLY (`frontend/src/api/listSeal.ts`): unlike titles,
   they never held plaintext, so a non-envelope value shows as unreadable
   instead of as your own words.
-- **`attachments`** — the note's own photos and drawings, the same sealed
-  sidecar a task item carries, pointing at ordinary end-to-end encrypted
-  uploads. Photos are shrunk on the device before encryption
-  (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
+- **`attachments`** — the note's own photos, drawings **and any other file**,
+  the same sealed sidecar a task item carries, pointing at ordinary
+  end-to-end encrypted uploads. Photos are shrunk on the device before
+  encryption (`api/imagePrep.ts`, long edge 2048 px); anything that is not a
+  picture is not — there is nothing to shrink, and pulling a 25 MB PDF
+  through the image decoder only stalls a phone. The server never learns the
+  real name or type of any of them: everything goes up as `attachment.enc` /
+  `application/octet-stream`, and the name and type live in the sealed
+  sidecar. A file's display name is clamped to 120 characters before it is
+  sealed, because the sidecar's envelope has a 16 KiB cap
+  (`MAX_LIST_ATTACHMENTS_LEN`, `src/list_content.rs`) and a pathological
+  filename would make the note's save fail with a 400 nobody could explain.
+  A non-picture is **download-only, by design**: it is shown as a button that
+  writes it to your device (`api/saveAttachment.ts` — into
+  `Documents/Puca Notes/` on a phone), never as an inline preview and never as
+  a link to a `blob:` URL. A `blob:` document inherits the app's own origin
+  and takes its type from the ref, so an in-origin document could read the stored token and
+  the E2EE key material; `safeBlobType` reduces anything that is not an
+  image, video or audio file to opaque bytes, and that must not be relaxed
+  to make a PDF preview. Each upload is capped at 25 MB, and a note holds 12
+  sidecar slots (a drawing takes two). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`notes/model/drawing.ts`). On a phone, *Photo* offers the
   camera (`<input accept="image/*" capture>`); on Android that needs the
@@ -652,7 +669,11 @@ wrong must not delete early), skipping any note whose files it cannot name.
 A note whose window runs out while no Notes is open is deleted by the
 server's sweep and its uploads stay behind, counted against your quota — the
 same as any delete made by a client older than this, or by Púca's own
-immediate delete. *Hide checkboxes* deletes the files of items it drops once
+immediate delete. **That gap costs more now that a note can hold any file:**
+what it strands used to be a photo shrunk to 2048 px, and can now be up to
+25 MB per file against a 512 MiB quota. Nothing but `DELETE /files/:id` by
+hand reclaims it, so open Púca Notes before a long trip if the trash is
+full of large files. *Hide checkboxes* deletes the files of items it drops once
 its Undo is gone — only of items whose delete went through, and never a file
 a live item names at that moment. An item whose delete failed stays an item,
 with its pictures, and only the other items become lines of text.

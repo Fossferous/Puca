@@ -1,9 +1,18 @@
 /**
- * Uploading a note's own photos and drawings: shrink (photos), encrypt,
- * upload, and hand back the refs for the list's sealed sidecar
+ * Uploading a note's own photos, drawings and files: shrink (photos only),
+ * encrypt, upload, and hand back the refs for the list's sealed sidecar
  * (api/listContent.ts). All-or-nothing per call: if one upload fails, the
  * ones that already landed are deleted again, so a failed save never leaves
  * files counting against the quota that no note names.
+ *
+ * A NOTE HOLDS ANY FILE, not only pictures. The upload primitive never cared
+ * — everything goes up as `attachment.enc` and the real name and type live
+ * in the sealed sidecar — so what is here is the shrink being skipped for a
+ * non-image (pulling a 25 MB PDF through the image decoder only stalls a
+ * phone) and the display name being CLAMPED: the sealed sidecar has a 16 KiB
+ * envelope cap (MAX_LIST_ATTACHMENTS_LEN, src/list_content.rs), and a
+ * pathological 4 KB filename would push a note past it and make the save
+ * fail with a 400 the user cannot explain.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
 import { type SealedFile, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
@@ -32,12 +41,25 @@ export function slotsNeeded(files: number, drawings: number): number {
     return files + drawings * 2;
 }
 
+/** The longest display name a sidecar ref may carry. Twelve of these still
+ *  leave room inside the 16 KiB sealed envelope. */
+export const MAX_ATTACHMENT_NAME_LEN = 120;
+
+/** `name`, short enough for the sidecar, keeping the extension — which is
+ *  what tells a download what it is. */
+export function clampAttachmentName(name: string): string {
+    if (name.length <= MAX_ATTACHMENT_NAME_LEN) return name;
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 && name.length - dot <= 12 ? name.slice(dot) : '';
+    return `${name.slice(0, MAX_ATTACHMENT_NAME_LEN - ext.length - 1)}…${ext}`;
+}
+
 async function uploadAll(files: File[]): Promise<TaskAttachmentRef[]> {
     const done: TaskAttachmentRef[] = [];
     try {
         for (const f of files) {
             const r = await encryptAndUploadRef(f);
-            done.push({ href: r.href, name: r.name });
+            done.push({ href: r.href, name: clampAttachmentName(r.name) });
         }
         return done;
     } catch (err) {
@@ -60,7 +82,7 @@ async function filesForUpload(photos: File[], drawings: { files: DrawingFiles; b
     return files;
 }
 
-/** Upload photos (shrunk first) and drawings; `base(i)` names drawing i
+/** Upload photos and files (photos shrunk first) and drawings; `base(i)` names drawing i
  *  (`drawing-<n>`, see notes/model/noteContent.ts). Throws — with nothing
  *  left behind — on any failure, including a sidecar that would overflow. */
 export async function uploadNoteMedia(
@@ -109,7 +131,7 @@ export async function sealNoteMedia(
     for (const f of files) {
         const sealed: SealedFile = await sealFileForUpload(f);
         const bytes = new Uint8Array(await sealed.blob.arrayBuffer());
-        out.push({ id: parkedId(), name: sealed.name, mime: sealed.mime, key: sealed.key, data: bytesToB64(bytes), bytes: bytes.length });
+        out.push({ id: parkedId(), name: clampAttachmentName(sealed.name), mime: sealed.mime, key: sealed.key, data: bytesToB64(bytes), bytes: bytes.length });
     }
     return out;
 }
@@ -134,7 +156,7 @@ export async function uploadParkedMedia(records: SealedMedia[]): Promise<TaskAtt
                 mime: rec.mime,
                 name: rec.name,
             });
-            done.push({ href: r.href, name: r.name });
+            done.push({ href: r.href, name: clampAttachmentName(r.name) });
         }
         return done;
     } catch (err) {

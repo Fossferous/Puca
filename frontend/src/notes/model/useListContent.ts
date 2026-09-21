@@ -67,6 +67,10 @@ export const listContentKeys = {
 export interface NoteExtras {
     body?: string;
     photos?: File[];
+    /** Anything that is not a picture — a PDF, a ticket, a spreadsheet.
+     *  Encrypted and uploaded exactly like a photo, but never put through
+     *  the image decoder and never shrunk. */
+    files?: File[];
     drawing?: DrawingFiles;
 }
 
@@ -75,7 +79,7 @@ export interface NoteExtras {
 export type SaveOutcome = 'saved' | 'queued' | 'failed';
 
 export function hasExtras(extra: NoteExtras | undefined): extra is NoteExtras {
-    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing);
+    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || (extra.files?.length ?? 0) > 0 || !!extra.drawing);
 }
 
 export function useListFeatures(): { features: ListFeatures; known: boolean } {
@@ -242,9 +246,14 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             .filter((e): e is { text: string; timing: NewTaskTiming | undefined } => e.text !== undefined);
         const cleanItems = entries.map(e => e.text);
         const body = extra.body?.replace(/\s+$/, '') ?? '';
-        const photos = extra.photos ?? [];
+        const files = extra.files ?? [];
+        // Both go up the same way; only the picture is shrunk first.
+        const photos = [...(extra.photos ?? []), ...files];
         const drawings = extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [];
-        const noteTitle = deriveContentTitle(title, { body, items: cleanItems, images: photos.length, drawing: !!extra.drawing });
+        const noteTitle = deriveContentTitle(title, {
+            body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing,
+            fileNames: files.map(f => f.name),
+        });
         // Offline, or behind a queue this must not overtake: the note is made
         // through the outbox instead. It briefly exists without its picture
         // (three ops, not one request) — which is the price of a photo note

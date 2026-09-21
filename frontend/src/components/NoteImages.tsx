@@ -1,8 +1,16 @@
 /**
- * A note's own pictures — photos and drawings stored in the personal list's
- * sealed attachments sidecar (api/listContent.ts, api/noteMedia.ts). Shared
- * by Púca Notes' editor and Púca's Tasks view, so a note shows the same
- * pictures through both front doors.
+ * A note's own attachments — photos, drawings and any other FILE, stored in
+ * the personal list's sealed attachments sidecar (api/listContent.ts,
+ * api/noteMedia.ts). Shared by Púca Notes' editor and Púca's Tasks view, so
+ * a note shows the same things through both front doors.
+ *
+ * A NON-PICTURE IS A DOWNLOAD BUTTON, never a link, and never an inline
+ * preview. `safeBlobType` (api/attachments.ts) reduces a PDF to opaque bytes
+ * on purpose: a `blob:` document inherits this app's origin and its MIME
+ * comes from the ref, so an in-origin document could read the stored token
+ * and the E2EE key material. Saving it to disk is the whole affordance, and
+ * the button mirrors TaskAttachments.tsx, which has had it all along while a
+ * note's own gallery rendered a dead <span> nobody could act on.
  *
  * Every picture is decrypted on this device (decryptToBlobUrl); the server
  * only ever holds ciphertext. A LOCKED sidecar (the identity is locked, the
@@ -24,9 +32,51 @@ import { decryptToBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItems } from '../api/noteMedia';
 import { isParkedRef, parseParkedRef } from '../api/parkedMedia';
 import { parkedObjectUrl } from '../api/parkedPreview';
+import { saveAttachment } from '../api/saveAttachment';
 import { ImageLightbox } from './ImageLightbox';
-import { CameraIcon, CloseIcon, ImageIcon, LockIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
+import { CameraIcon, CheckCircleIcon, CloseIcon, ImageIcon, LockIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import './NoteImages.css';
+
+/**
+ * A file in a note's sidecar: decrypt on this device, then hand the bytes to
+ * the platform's own save path (api/saveAttachment.ts — a Tauri command, the
+ * filesystem plugin on a phone, a transient anchor on the web). A parked file
+ * is saved from the copy this device is already holding.
+ */
+function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?: string }) {
+    const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [where, setWhere] = useState('');
+    const parked = isParkedRef(refItem);
+    return (
+        <button
+            type="button"
+            className={`ni-file ${state}`}
+            title={state === 'saved' ? `Saved to ${where}` : refItem.name}
+            disabled={state === 'saving'}
+            onClick={async () => {
+                setState('saving');
+                try {
+                    const p = parseEncAttachment(refItem.href);
+                    const url = p
+                        ? await decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
+                        : await parkedObjectUrl(refItem.href);
+                    if (!url) throw new Error('nothing to save');
+                    const res = await saveAttachment(url, refItem.name, folder);
+                    if (res.cancelled) { setState('idle'); return; }
+                    setWhere(res.where);
+                    setState('saved');
+                } catch (err) {
+                    console.error('[note attachment] save failed:', err);
+                    setState('error');
+                }
+            }}
+        >
+            {state === 'saved' ? <CheckCircleIcon /> : state === 'error' ? <WarningIcon /> : <PaperclipIcon />}
+            <span className="ni-file-name">{refItem.name}</span>
+            {parked && state === 'idle' && <span className="ni-file-note">on this device</span>}
+        </button>
+    );
+}
 
 function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url: string) => void }) {
     const [url, setUrl] = useState<string | null>(null);
@@ -67,6 +117,9 @@ export interface NoteImagesProps {
     busy?: boolean;
     onAddPhotos?: (files: File[]) => void;
     onRemove?: (item: GalleryItem) => void;
+    /** The Documents/ folder a phone saves a file into; Púca Notes passes
+     *  its own so a note's file does not land in the chat app's folder. */
+    saveFolder?: string;
     /** Open the drawing editor: a new drawing, or `item` to edit it. Absent
      *  where drawings cannot be edited (they still show as pictures). */
     onDraw?: (item?: GalleryItem) => void;
@@ -74,16 +127,21 @@ export interface NoteImagesProps {
     showCamera?: boolean;
 }
 
-export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false }: NoteImagesProps) {
+export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false, saveFolder }: NoteImagesProps) {
     const [zoom, setZoom] = useState<{ url: string; name: string } | null>(null);
     const pickRef = useRef<HTMLInputElement>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
     const cameraRef = useRef<HTMLInputElement>(null);
     const locked = isAttachmentsLocked(opened ?? null);
     const items = galleryItems(opened);
     const canEdit = editable && !locked && !busy;
 
+    // No MIME filter. It was the real gate (the three `accept` attributes are
+    // only the dialog's default), and it dropped a file a user had deliberately
+    // chosen — while the OS dialog's "All files" walked past `accept` and put
+    // that same file in the sidecar anyway, where nothing could open it again.
     const onPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = Array.from(e.target.files ?? []).filter(f => f.type.startsWith('image/') || f.type === '');
+        const files = Array.from(e.target.files ?? []);
         e.target.value = '';   // the same file can be picked again
         if (files.length > 0) onAddPhotos?.(files);
     };
@@ -99,7 +157,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                         <figure key={item.ref.href} className={`ni-item ${item.kind}`} data-parked={isParkedRef(item.ref) ? 'true' : undefined}>
                             {isParkedRef(item.ref) && <span className="ni-unsent" title="Waiting for a connection">Not sent yet</span>}
                             {item.kind === 'file'
-                                ? <span className="ni-file"><PaperclipIcon /> {item.ref.name}</span>
+                                ? <FileDownload refItem={item.ref} folder={saveFolder} />
                                 : <Picture refItem={item.ref} onOpen={url => setZoom({ url, name: item.ref.name })} />}
                             {canEdit && (
                                 <div className="ni-tools">
@@ -127,6 +185,12 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                                 <ImageIcon /> Add photo
                             </button>
                             <input ref={pickRef} type="file" accept="image/*" multiple hidden onChange={onPicked} data-testid="ni-pick" />
+                            <button type="button" className="ni-action" onClick={() => fileRef.current?.click()}>
+                                <PaperclipIcon /> Add file
+                            </button>
+                            {/* The camera input below keeps accept+capture: widening
+                                it would send the camera button to a file browser. */}
+                            <input ref={fileRef} type="file" multiple hidden onChange={onPicked} data-testid="ni-pick-file" />
                             {showCamera && (
                                 <>
                                     <button type="button" className="ni-action" onClick={() => cameraRef.current?.click()}>

@@ -32,6 +32,7 @@ import { type GalleryItem, fileIdsOf, readStrokes, refsOfItem, withoutItem } fro
 import { NoteBodyField } from '../../components/NoteBodyField';
 import { bodyBytes, deleteFiles, MAX_BODY_BYTES } from '../../api/listContent';
 import { NoteImages } from '../../components/NoteImages';
+import { NOTES_FOLDER } from '../../api/saveToDevice';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from '../model/notesModel';
@@ -239,6 +240,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             )}
             {showImages && (
                 <NoteImages
+                    saveFolder={NOTES_FOLDER}
                     opened={opened}
                     editable
                     busy={busy}
