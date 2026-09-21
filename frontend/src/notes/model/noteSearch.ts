@@ -63,6 +63,14 @@ export function normalizeWithMap(input: string): Mapped {
             if (started && runStart < 0) runStart = at;
             continue;
         }
+        const folded = ch.normalize('NFD').replace(COMBINING, '').toLocaleLowerCase();
+        // Folded to NOTHING — an orphan combining mark, the one thing COMBINING
+        // strips on its own. It emits no character, so it must not end the
+        // whitespace run either: `normalizeForSearch` sees "a  b" there and
+        // collapses it to one space, and emitting the run around the mark gave
+        // "a  b" back — two characters where the search has one, and every
+        // highlight in the field shifted by one from that point on.
+        if (folded.length === 0) continue;
         if (runStart >= 0) {
             // The whole run collapses to one space, and owns the run's span,
             // so a match across it highlights the real gap and no more.
@@ -71,7 +79,6 @@ export function normalizeWithMap(input: string): Mapped {
             endMap.push(at);
             runStart = -1;
         }
-        const folded = ch.normalize('NFD').replace(COMBINING, '').toLocaleLowerCase();
         // By UTF-16 UNIT, not by code point: `norm.indexOf` works in units, so
         // one map entry per unit is what keeps the two in step. An emoji folds
         // to a surrogate PAIR, and pushing it as one entry left the map one

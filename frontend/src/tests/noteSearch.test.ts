@@ -12,7 +12,7 @@
  * normaliser must produce EXACTLY what the search's own normaliser produces.
  * If it ever stopped doing so, search would mark up text it had not matched.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
     findRanges, mergeRanges, normalizeWithMap, searchTerms, snippetAround,
 } from '../notes/model/noteSearch';
@@ -25,6 +25,12 @@ const CORPUS = [
     '', ' ', '   ', 'plain text', 'Plain Text', 'CAFÉ au lait', 'café', 'café',   // composed and decomposed
     'a   b', '  leading and trailing  ', 'line\nbreak\there', 'ÀÉÎÕÜ àéîõü', 'Straße',
     'ID İstanbul', 'emoji 🎉 stays', 'ünïcödé wörds', 'tabs\t\tand\nnewlines\n\n', 'x'.repeat(200),
+    // ORPHAN combining marks - a paste from a broken source. They are the one
+    // thing the stripper removes on its own, so they fold to NOTHING, and a
+    // fold that emits nothing must not end a whitespace run either: emitting
+    // the run around one gave "a  b" where the search sees "a b", and every
+    // highlight after it in that field was off by one.
+    'a ́ b', '́ abc', 'abc ́', '́', ' ́ ', 'onétwo',
 ];
 
 describe('normalizeWithMap', () => {
@@ -170,28 +176,46 @@ describe('snippetAround', () => {
 describe('cost', () => {
     const body = ('lorem ipsum dolor sit amet '.repeat(1_500)).slice(0, 40_000);
 
+    /** Every String.prototype.normalize call made while `fn` runs.
+     *  normalizeForSearch normalises the WHOLE string once; normalizeWithMap
+     *  normalises one character at a time. One call per field therefore means
+     *  the cheap pass ran and the map was never built - a STRUCTURAL bound,
+     *  where a wall-clock one is the flake this repo has already been bitten by.
+     */
+    const normalizeCalls = (fn: () => void): number => {
+        const spy = vi.spyOn(String.prototype, 'normalize');
+        try {
+            fn();
+            return spy.mock.calls.length;
+        } finally {
+            spy.mockRestore();
+        }
+    };
+
     it('does NOT build the index map for a field that cannot match', () => {
         // The common case by far: a grid of matching cards, most of whose
         // FIELDS do not contain the term (the title matched, or one item did).
         // 40 KB is the body cap (MAX_BODY_BYTES is 48,000). Building the two
-        // index arrays for every one of them costs ~20ms each; this bound is
-        // the guard against someone dropping the cheap first pass.
+        // index arrays for one of them costs ~20ms and one normalize call per
+        // character; this is the guard against dropping the cheap first pass.
         const terms = searchTerms('zzzznothing');
-        const t0 = Date.now();
         let total = 0;
-        for (let i = 0; i < 200; i++) total += findRanges(body, terms).length;
-        const ms = Date.now() - t0;
+        const calls = normalizeCalls(() => {
+            for (let i = 0; i < 200; i++) total += findRanges(body, terms).length;
+        });
         expect(total).toBe(0);
-        expect(ms).toBeLessThan(1_500);
+        expect(calls).toBe(200);          // one per field, not one per character
     });
 
-    it('stays usable over a screenful of long notes that DO match', () => {
+    it('POSITIVE CONTROL: a field that DOES match pays for the map, and only then', () => {
         const terms = searchTerms('ipsum');
-        const t0 = Date.now();
         let total = 0;
-        for (let i = 0; i < 20; i++) total += findRanges(body, terms).length;
-        const ms = Date.now() - t0;
+        const calls = normalizeCalls(() => { total += findRanges(body, terms).length; });
         expect(total).toBeGreaterThan(0);
-        expect(ms).toBeLessThan(3_000);
+        // The cheap pass, plus exactly one call per NON-SPACE character of the
+        // mapped pass (a whitespace run is collapsed before anything is
+        // folded). Thirty thousand against the other test's 200: the count
+        // that proves it is measuring the right thing.
+        expect(calls).toBe(body.replace(/\s/g, '').length + 1);
     });
 });
