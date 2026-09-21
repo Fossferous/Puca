@@ -82,6 +82,8 @@ type OpBody =
     | { k: 'restoreList'; listId: number }
     | { k: 'createTask'; note: NoteRef; tempId: number; description: string; parentId?: number; timing?: NewTaskTiming }
     | { k: 'editTask'; note: NoteRef; taskId: number; description: string; createdBy: number }
+    // A due time (setDue). Ticks are `timing` ops: a plain is_completed
+    // update is refused for a scheduled item by migration 066's guard.
     | { k: 'updateTask'; note: NoteRef; taskId: number; updates: { is_completed?: boolean; due_at?: string } }
     // A tick, a date & repeat, or a snooze (api/tasks.ts patchTaskTiming):
     // sealed for the server when it RUNS, like every other op, and always
@@ -123,8 +125,6 @@ export const ops = {
         withMeta({ k: 'createTask', note, tempId, description, parentId, ...(timing ? { timing } : {}) }, `new item ${q(description)}`),
     editTask: (note: NoteRef, task: Task, description: string) =>
         withMeta({ k: 'editTask', note, taskId: task.id, description, createdBy: task.created_by }, `edit ${q(description)}`),
-    toggle: (note: NoteRef, task: Task, completed: boolean) =>
-        withMeta({ k: 'updateTask', note, taskId: task.id, updates: { is_completed: completed } }, `${completed ? 'tick' : 'untick'} ${q(task.description)}`),
     setDue: (note: NoteRef, task: Task, dueAt: string | null) =>
         withMeta({ k: 'updateTask', note, taskId: task.id, updates: { due_at: dueAt ?? '' } }, `due time on ${q(task.description)}`),
     move: (note: NoteRef, task: Task, direction: 'up' | 'down') =>
@@ -332,6 +332,9 @@ export interface Outbox {
     /** How many ops are queued (this page's last view of it). */
     pending(): number;
     queuedKeys(): Set<string>;
+    /** The notes whose delete (a move to the trash) is still queued. The
+     *  same Set until that changes, so it can be a store snapshot. */
+    queuedListDeletes(): ReadonlySet<number>;
     subscribe(cb: () => void): () => void;
     load(): Promise<void>;
     send<T>(op: NoteOp): Promise<{ queued: true } | { queued: false; value: T }>;
@@ -342,9 +345,12 @@ export interface Outbox {
 
 export function createOutbox(deps: OutboxDeps): Outbox {
     let view: OutboxState = EMPTY;
+    let deletes: ReadonlySet<number> = new Set();
     const listeners = new Set<() => void>();
     const publish = (s: OutboxState) => {
         view = s;
+        const nextDeletes = new Set(s.queue.flatMap(o => (o.k === 'deleteList' ? [o.listId] : [])));
+        if (nextDeletes.size !== deletes.size || [...nextDeletes].some(id => !deletes.has(id))) deletes = nextDeletes;
         setQueuedNotes(queuedKeysOf(s));
         for (const cb of listeners) cb();
     };
@@ -408,6 +414,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     const outbox: Outbox = {
         pending: () => view.queue.length,
         queuedKeys: () => queuedKeysOf(view),
+        queuedListDeletes: () => deletes,
         subscribe: cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
         realId: tempId => view.ids[String(tempId)],
 
@@ -600,6 +607,14 @@ export function pendingOutboxCount(): number {
 /** Whether a card has changes that have not reached the server. */
 export function useNoteUnsynced(key: string): boolean {
     return useSyncExternalStore(appOutbox.subscribe, () => appOutbox.queuedKeys().has(key), () => false);
+}
+
+/** Notes whose move to the trash has not reached the server yet: the Trash
+ *  view lists them (deleteNote puts them there at once) but must not restore
+ *  or delete them for good until it has — a direct call would run BEFORE the
+ *  queued trash and be undone by it. */
+export function useQueuedListDeletes(): ReadonlySet<number> {
+    return useSyncExternalStore(appOutbox.subscribe, appOutbox.queuedListDeletes, appOutbox.queuedListDeletes);
 }
 
 export function useOutboxPending(): number {

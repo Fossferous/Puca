@@ -265,7 +265,16 @@ export function applyTaskEvent(qc: QueryClient, ev: TaskEventMsg, isReconnect: b
             break;
         }
         case 'lists':
-            invalidate(LISTS_KEY, ['notes', 'lists']);
+            // The trash too (useListContent.ts listContentKeys.trash), in the
+            // SAME deferred refetch — noteBusy keeps one waiter per key, so a
+            // second invalidate() under LISTS_KEY would be dropped while a
+            // write is in flight. A note trashed on another device or in
+            // Púca leaves the listing at once; pins and moves must see it in
+            // the trash then too, or keepHiddenSlots drops its slot.
+            whenNoteSettled(LISTS_KEY, () => {
+                void qc.invalidateQueries({ queryKey: ['notes', 'lists'] });
+                void qc.invalidateQueries({ queryKey: ['notes', 'trash'] });
+            });
             break;
         case 'prefs':
             invalidate(PREFS_KEY, ['notes', 'prefs']);

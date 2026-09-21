@@ -35,6 +35,7 @@ import { listContentKeys } from '../notes/model/useListContent';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { resetNotesPrune, useNoteActions, useNoteCards, type NoteActions } from '../notes/model/notesQueries';
 import { PRUNE_GRACE_MS } from '../notes/model/notesPrune';
+import { applyTaskEvent } from '../notes/model/taskEvents';
 import { getNotesPrefs, invalidateNotesPrefs, setNoteColor, setNoteLabels } from '../notes/model/notesPrefs';
 import { type TaskTabPref } from '../api/tasks';
 
@@ -248,6 +249,20 @@ describe('a note trashed ELSEWHERE keeps its device-local state', () => {
         await listFetchAfterGrace(qc);
         expect(trashReads()).toBe(readsBefore);   // the prune had nothing to ask about
         expect(getNotesPrefs().colors['list:2']).toBe('mint');
+    });
+
+    it('a live "lists" event brings the trash with it: a pin right after keeps the trashed note’s slot', async () => {
+        const qc = await mount();
+        expect(latest!.actions.content.trashedKeys.size).toBe(0);   // the trash as first read: empty
+        server.live = [1, 3];
+        server.trashed = [2];                                         // trashed in Púca / on another device
+        await act(async () => { applyTaskEvent(qc, { t: 'lists' }, false); });
+        await settle();
+        expect(latest!.keys).toEqual(['list:1', 'list:3']);
+        expect(latest!.actions.content.trashedKeys.has('list:2')).toBe(true);
+        await act(async () => { latest!.actions.togglePin({ kind: 'list', id: 3 }); });
+        await settle();
+        expect(server.prefs.map(p => p.ref_id)).toEqual([3, 2, 1]);   // not [3, 1, 2]
     });
 
     it('POSITIVE CONTROL: deleted elsewhere (not trashed), the same refetches do prune it', async () => {

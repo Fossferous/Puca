@@ -398,7 +398,10 @@ export interface NoteActions {
     toggleTask: (note: NoteRef, task: Task, completed: boolean) => Promise<void>;
     editTask: (note: NoteRef, task: Task, description: string) => Promise<void>;
     addTask: (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming) => Promise<Task | null>;
-    deleteTaskFrom: (note: NoteRef, taskId: number) => Promise<void>;
+    /** True once the item is gone: deleted on the server, or its delete
+     *  queued offline (it replays). False when it was refused and put back —
+     *  a caller must not treat its files as unused then. */
+    deleteTaskFrom: (note: NoteRef, taskId: number) => Promise<boolean>;
     moveTaskIn: (note: NoteRef, task: Task, direction: 'up' | 'down') => Promise<void>;
     reorderTaskIn: (note: NoteRef, task: Task, afterId: number | null, reparent?: { parentId: number | null }) => Promise<void>;
     setDue: (note: NoteRef, task: Task, dueAt: string | null) => Promise<void>;
@@ -534,7 +537,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [qc, snapshot, restore, syncListCounts]);
 
-    const deleteTaskFrom = useCallback(async (note: NoteRef, taskId: number) => {
+    const deleteTaskFrom = useCallback(async (note: NoteRef, taskId: number): Promise<boolean> => {
         const original = await snapshot(note);
         const doomed = collectSubtreeIds(original, taskId);
         const next = original.filter(t => !doomed.has(t.id));
@@ -542,10 +545,12 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         syncListCounts(note, next);
         try {
             await sendNoteOp(ops.deleteTask(note, taskId, original.find(t => t.id === taskId)?.description ?? ''));
+            return true;
         } catch (err) {
             explain('delete failed', err);
             restore(note, original);
             syncListCounts(note, original);
+            return false;
         }
     }, [snapshot, restore, syncListCounts]);
 
@@ -640,8 +645,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
         // A note with text or pictures goes through the content path: its
         // uploads cannot wait for a connection, so it never queues (it says
-        // so when it fails) and it carries no item timing (docs/NOTES.md).
-        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra);
+        // so when it fails). Its items keep their timing, as here — a copy
+        // of a text note keeps its items' dates and repeats.
+        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra, timing);
         // Timing rides with its item through the blank-dropping clean.
         const timingOf = new Map<number, NewTaskTiming | undefined>();
         const cleanItems = cleanQuickItems(items.filter((raw, i) => {

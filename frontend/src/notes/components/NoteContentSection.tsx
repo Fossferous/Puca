@@ -6,12 +6,24 @@
  * (useListContent.ts); against an older server this renders nothing and the
  * editor is exactly what it was.
  *
+ * "Show checkboxes" never half-applies. It is refused while offline or while
+ * anything waits in the offline outbox (every new item would queue behind
+ * it while the text, which never queues, was cleared at once), and it clears
+ * the text FIRST: if that fails nothing has changed, and if an item is then
+ * refused the text is put back and the items made so far are removed. An
+ * item that only QUEUES (the connection dropped mid-way) is not a failure —
+ * it replays, in order, with the rest.
+ *
  * Both conversions offer Undo. "Hide checkboxes" is lossy when items nest,
  * carry due times or attachments, or are done — it asks first, and its Undo
  * re-creates the items with those properties (so the attachment files are
  * kept while Undo is offered). Once the Undo window closes — it expires, a
  * newer Undo replaces it, or the note closes — nothing names those files any
- * more, and they are deleted rather than left on the server.
+ * more, and they are deleted rather than left on the server. Only the files
+ * of items whose delete actually went through, and never one a live item
+ * still names at that moment: an item whose delete failed is put back WITH
+ * its pictures, so it stays an item (the text gets only the lines that
+ * left), and its files are its own again.
  */
 import { useEffect, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
@@ -23,6 +35,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
+import { pendingOutboxCount } from '../model/notesOutbox';
 import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
@@ -30,6 +43,11 @@ import { UndoBar } from './UndoBar';
 import '../noteContent.css';
 
 const COARSE = '(pointer: coarse) and (max-width: 1024px)';
+
+/** An item's attachment refs, when this device can read them. */
+function attachmentsOf(t: Task) {
+    return t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [];
+}
 
 interface Props {
     card: NoteCard;
@@ -51,6 +69,9 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
     const undoRef = useRef<Undo | null>(null);
+    // The items as they are NOW, for a commit that runs after they changed.
+    const tasksRef = useRef(tasks);
+    useEffect(() => { tasksRef.current = tasks; });
     /** Replace the pending Undo; the one replaced can no longer happen. */
     const setUndo = (next: Undo | null, committed = true) => {
         const prev = undoRef.current;
@@ -96,20 +117,30 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const showCheckboxes = async () => {
         const items = bodyToItems(text);
         if (items.length === 0) return;
+        if (!navigator.onLine || pendingOutboxCount() > 0) {
+            pushMessageToast({ title: 'Can’t turn the text into a checklist while offline or while changes are waiting to sync — try again once they have' });
+            return;
+        }
         setConverting(true);
         const created: Task[] = [];
+        const before = text;
         try {
+            if (!await c.setBody(listId, '')) {
+                pushMessageToast({ title: 'Couldn’t turn the text into a checklist — the text is kept' });
+                return;
+            }
             for (const t of items) {
                 const made = await actions.addTask(ref, t);
                 if (!made) break;
                 created.push(made);
             }
             if (created.length < items.length) {
+                // Refused part-way: back to the text alone, as it was.
+                await c.setBody(listId, before);
+                for (const t of created) await actions.deleteTaskFrom(ref, t.id);
                 pushMessageToast({ title: 'Not every line became an item — the text is kept' });
                 return;
             }
-            const before = text;
-            if (!await c.setBody(listId, '')) return;
             setUndo({
                 token: ++undoSeq,
                 message: 'Turned the text into a checklist',
@@ -138,12 +169,24 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             return;
         }
         setConverting(true);
-        const snapshot = recreationOrder(tasks);
+        const all = recreationOrder(tasks);
         try {
             if (!await c.setBody(listId, next)) return;
-            for (const t of snapshot) if (t.parent_id === null) await actions.deleteTaskFrom(ref, t.id);
-            // The dropped items' uploads: kept for the Undo, deleted after it.
-            const orphaned = fileIdsOf(snapshot.flatMap(t => (t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [])));
+            // Deleting a top-level item takes its subtree with it.
+            const gone = new Set<number>();
+            for (const t of all) if (t.parent_id === null && await actions.deleteTaskFrom(ref, t.id)) gone.add(t.id);
+            for (const t of all) if (t.parent_id !== null && gone.has(t.parent_id)) gone.add(t.id);   // parents come first
+            const snapshot = all.filter(t => gone.has(t.id));
+            if (snapshot.length < all.length) {
+                // Some stayed items: the text gets only the lines that left.
+                const partial = [before, itemsToBody(snapshot)].filter(s => s !== '').join('\n');
+                await c.setBody(listId, partial);
+                pushMessageToast({ title: snapshot.length === 0 ? 'Couldn’t turn the checklist into text — the items are kept' : 'Not every item became text — the rest are still items' });
+                if (snapshot.length === 0) return;
+            }
+            // The dropped items' uploads: kept for the Undo, deleted after it —
+            // never one a live item names by then.
+            const orphaned = fileIdsOf(snapshot.flatMap(attachmentsOf));
             setUndo({
                 token: ++undoSeq,
                 message: 'Turned the checklist into text',
@@ -165,7 +208,11 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     }
                     await c.setBody(listId, before);
                 },
-                commit: orphaned.length > 0 ? () => { void deleteFiles(orphaned); } : undefined,
+                commit: orphaned.length > 0 ? () => {
+                    const named = new Set(fileIdsOf(tasksRef.current.flatMap(attachmentsOf)));
+                    const unused = orphaned.filter(id => !named.has(id));
+                    if (unused.length > 0) void deleteFiles(unused);
+                } : undefined,
             });
         } finally {
             setConverting(false);
