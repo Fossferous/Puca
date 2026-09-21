@@ -668,7 +668,12 @@ through `POST /dms/:conversation_id/messages` — **not** the socket, which
 Notes still never opens (*Sessions*, above). That REST route now delivers,
 parks-and-wakes and bumps the conversation's timestamp the way the socket path
 always has, so a note sent from Notes is indistinguishable from a message
-typed in Púca.
+typed in Púca. That fan-out is not a pure function and is not provable by
+reading, so it has its own live two-client harness —
+`frontend/e2e/notes-send-verify.mjs`, run against a throwaway backend. Its
+header says how to confirm it can fail: revert the block in
+`src/dm_handlers.rs` and the delivery, echo, park and timestamp stages go red
+while the WebSocket control stage stays green.
 
 **Save to Notes** is the other direction, on a message's menu in Púca (right
 click, or long press on a phone). It keeps the message as a new note or as an
