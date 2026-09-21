@@ -12,10 +12,14 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
+import { pushMessageToast } from '../../components/messageToastBus';
 import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
+import { filesFromTransfer, linesFromPaste, pasteAsOneLine } from '../model/noteContent';
 import { DrawingCanvas } from './DrawingCanvas';
+import { PastedLinesDialog } from './PastedLinesDialog';
+import { hasTransferFiles, ONLY_PICTURES } from '../model/pasteDrop';
 import '../noteContent.css';
 
 /** A picture waiting in the composer, with its on-device preview URL. */
@@ -88,6 +92,69 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     });
     const hasDrawing = pictures.some(p => p.drawing);
 
+    // --- Paste and drop ---------------------------------------------------------
+    // Pictures go through addPictures, the SAME entry point the picker uses,
+    // so they inherit its object-URL bookkeeping here and, at save, the
+    // shrink-then-seal upload path. Nothing new touches the network.
+    const [paste, setPaste] = useState<{ lines: string[]; text: string; at: number } | null>(null);
+    const [dragging, setDragging] = useState(false);
+
+    /** Pictures out of a paste or a drop; `others` is reported, not dropped
+     *  silently. True when something was taken. */
+    const takePictures = (dt: React.ClipboardEvent['clipboardData'] | React.DragEvent['dataTransfer'] | null): boolean => {
+        const { images, others } = filesFromTransfer(dt);
+        if (images.length > 0) addPictures(images);
+        if (others.length > 0) pushMessageToast({ title: ONLY_PICTURES });
+        return images.length > 0 || others.length > 0;
+    };
+
+    /** A paste anywhere in the composer: a picture is taken here. Multi-line
+     *  TEXT is the item fields' business (onPasteItem) — this must not
+     *  intercept a paste into the note's text, where lines are what is
+     *  wanted. */
+    const onPasteRoot = (e: React.ClipboardEvent) => {
+        if (e.defaultPrevented) return;
+        const { images } = filesFromTransfer(e.clipboardData);
+        if (images.length === 0) return;
+        e.preventDefault();
+        addPictures(images);
+    };
+
+    /** A paste into an item field. More than one line asks first — items are
+     *  removed one at a time, so a silent forty-item paste is unrecoverable. */
+    const onPasteItem = (i: number, e: React.ClipboardEvent<HTMLInputElement>) => {
+        const { images } = filesFromTransfer(e.clipboardData);
+        if (images.length > 0) return;          // the root handler takes it
+        const text = e.clipboardData?.getData('text') ?? '';
+        const lines = linesFromPaste(text);
+        if (lines.length < 2) return;           // one line pastes as normal
+        e.preventDefault();
+        setPaste({ lines, text, at: i });
+    };
+
+    /** Put the pasted lines in at `at`: over that field when it is empty,
+     *  after it when something is already typed there. */
+    const applyPasteSeparate = () => {
+        if (!paste) return;
+        const { lines, at } = paste;
+        setItems(prev => {
+            const next = [...prev];
+            const blank = (next[at] ?? '').trim() === '';
+            next.splice(blank ? at : at + 1, blank ? 1 : 0, ...lines);
+            return next;
+        });
+        setPaste(null);
+        focusItem(at + lines.length);
+    };
+    const applyPasteOne = () => {
+        if (!paste) return;
+        const { text, at } = paste;
+        const one = pasteAsOneLine(text).slice(0, 500);
+        setItems(prev => prev.map((v, idx) => (idx === at ? (v.trim() === '' ? one : `${v}${one}`).slice(0, 500) : v)));
+        setPaste(null);
+        focusItem(at);
+    };
+
     const close = async () => {
         const cleaned = mode === 'list' ? cleanQuickItems(items) : [];
         const extra = extras();
@@ -120,7 +187,9 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     useEffect(() => {
         if (!open || sheet) return;
         const onDown = (e: PointerEvent) => {
-            if (drawingOpen) return;   // the drawing editor is portaled outside this card
+            // The drawing editor and the paste confirmation are portaled
+            // outside this card: a click in either is not a click "outside".
+            if (drawingOpen || paste) return;
             if (rootRef.current && !rootRef.current.contains(e.target as Node)) void close();
         };
         document.addEventListener('pointerdown', onDown);
@@ -165,7 +234,30 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     }
 
     const composer = (
-        <div className={`notes-quickadd ${sheet ? 'sheet' : ''}`} ref={rootRef} role="dialog" aria-label="New note">
+        <div
+            className={`notes-quickadd ${sheet ? 'sheet' : ''} ${dragging ? 'dropping' : ''}`}
+            ref={rootRef}
+            role="dialog"
+            aria-label="New note"
+            onPaste={onPasteRoot}
+            onDragOver={e => {
+                // Only a drag carrying FILES: a text selection or an internal
+                // drag must keep its own default handling.
+                if (!hasTransferFiles(e.dataTransfer)) return;
+                e.preventDefault();
+                if (!dragging) setDragging(true);
+            }}
+            onDragLeave={e => {
+                if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                setDragging(false);
+            }}
+            onDrop={e => {
+                if (!hasTransferFiles(e.dataTransfer)) return;
+                e.preventDefault();
+                setDragging(false);
+                takePictures(e.dataTransfer);
+            }}
+        >
             <div className="notes-quickadd-open">
                 <input
                     className="notes-quickadd-title"
@@ -213,6 +305,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                             maxLength={500}
                             onChange={e => setItems(prev => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
                             onKeyDown={e => onKeyItem(i, e)}
+                            onPaste={e => onPasteItem(i, e)}
                             aria-label={`Item ${i + 1}`}
                         />
                         {items.length > 1 && (
@@ -288,6 +381,14 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     </button>
                 </div>
             </div>
+            {paste && (
+                <PastedLinesDialog
+                    lines={paste.lines}
+                    onAddSeparate={applyPasteSeparate}
+                    onAddOne={applyPasteOne}
+                    onCancel={() => { setPaste(null); focusItem(paste.at); }}
+                />
+            )}
             {drawingOpen && (
                 <DrawingCanvas
                     onCancel={() => setDrawingOpen(false)}

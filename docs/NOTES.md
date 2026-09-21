@@ -629,10 +629,40 @@ its Undo is gone — only of items whose delete went through, and never a file
 a live item names at that moment. An item whose delete failed stays an item,
 with its pictures, and only the other items become lines of text.
 
+**Paste and drop.** A picture can be pasted (Ctrl+V) or dropped onto the
+composer or onto an open note, instead of being saved to disk and picked
+again. It takes exactly the same path a picked one does — shrink, encrypt on
+this device, upload — because the paste and drop handlers only produce a
+`File[]` and hand it to the entry point the picker already fed
+(`addPictures` in `QuickAdd.tsx`, `addPhotos` in `NoteContentSection.tsx`).
+There is no second upload call site, and a drop of more pictures than a note
+can hold is refused by the sidecar cap before anything is uploaded, never
+half-applied. A picture pasted with no connection is refused *before* the
+attempt, with a message: an upload never queues (see *Offline*), so failing
+afterwards would be the same outcome with worse manners. The drop outline
+appears only while a drag carrying files is actually over the target, so it
+never promises something a shell that does not deliver drops could not do.
+
+**Pasting a list.** Paste several lines into an item field, or into *Add an
+item…*, and Púca Notes asks first — showing the lines it is about to add, with
+*Add N items*, *Add as one item* and *Cancel*. It asks because items are
+removed one at a time and an item delete has no Undo: a stray paste of a
+document would otherwise make forty items nobody can take back in one go. The
+lines are split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `,
+`[ ]` and `[x]` are dropped and blank lines are ignored. A paste of ONE line is
+never intercepted — it lands in the field as any paste would.
+
 ## Not built (and why)
 
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
+- **Pasting a picture inside the Android app.** Android's keyboard inserts a
+  picture through a different mechanism than the clipboard, so a paste there
+  is unreliable; the camera and the picker stay the way in on a phone, and the
+  app does not claim otherwise.
+- **Púca Notes in Android's Share sheet.** There is no receiving share intent
+  yet, so "Share → Púca Notes" from the gallery does not appear. That is a
+  native change (a new APK), not something an over-the-air update can add.
 - **A desktop Notes app.** Notes on a computer is the browser page; the
   desktop installer deliberately carries no copy of it (see *Building and
   serving*).

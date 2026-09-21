@@ -165,6 +165,52 @@ await page.waitForFunction(() => document.querySelectorAll('.notes-card-item').l
 ck('quick add: three items in typed order', (await page.locator('.notes-card-item-text').allInnerTexts()).join(',') === 'Milk,Bread,Eggs');
 await shot('one-card');
 
+// ---- 4a. Paste into the composer ----------------------------------------------------
+// Playwright cannot put a picture on the real clipboard, so the events are
+// synthesized — but they are REAL ClipboardEvents carrying a real
+// DataTransfer, dispatched at the element a person would be typing in, so a
+// handler wired to the wrong node fails here instead of passing silently.
+const pasteText = (selector, text) => page.evaluate(([sel, t]) => {
+    const el = document.querySelector(sel);
+    if (!el) throw new Error(`no ${sel}`);
+    const dt = new DataTransfer();
+    dt.setData('text/plain', t);
+    el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+}, [selector, text]);
+const pastePicture = (selector, b64) => page.evaluate(([sel, data]) => {
+    const bin = atob(data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'pasted.png', { type: 'image/png' }));
+    document.querySelector(sel).dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+}, [selector, b64]);
+
+await openComposer();
+await pasteText('.notes-quickadd-item input', 'Tea\n- Coffee\n[x] Sugar');
+await page.waitForSelector('.notes-paste-dialog', { timeout: 5000 }).catch(() => {});
+ck('paste: a multi-line paste asks before it creates', await page.locator('.notes-paste-dialog').count() === 1);
+ck('paste: the dialog previews every line it will add', (await page.locator('.notes-paste-line').allInnerTexts()).join(',') === 'Tea,Coffee,Sugar');
+ck('paste: nothing is created until the dialog is answered', await page.locator('.notes-quickadd-item input').count() === 1);
+await shot('paste-confirm');
+await page.getByRole('button', { name: 'Add 3 items' }).click();
+await page.waitForFunction(() => document.querySelectorAll('.notes-quickadd-item input').length === 3, null, { timeout: 5000 }).catch(() => {});
+ck('paste: "Add 3 items" creates one item per line, in order',
+    (await page.locator('.notes-quickadd-item input').evaluateAll(els => els.map(e => e.value))).join(',') === 'Tea,Coffee,Sugar');
+// A ONE-line paste is never intercepted.
+await pasteText('.notes-quickadd-item input', 'Just one');
+await sleep(150);
+ck('paste: a one-line paste does NOT open the dialog', await page.locator('.notes-paste-dialog').count() === 0);
+// A picture pasted into the composer previews like a picked one.
+await pastePicture('.notes-quickadd', PNG.toString('base64'));
+await page.waitForSelector('.notes-quickadd-media img', { timeout: 5000 }).catch(() => {});
+ck('paste: a picture lands in the composer as a picture', await page.locator('.notes-quickadd-media img').count() === 1);
+// Discard: this note must not exist for the count/order checks further down.
+page.once('dialog', d => d.accept());
+await page.click('.notes-quickadd-foot button[aria-label="Discard note"]');
+await page.waitForSelector('.notes-quickadd-open', { state: 'detached', timeout: 5000 }).catch(() => {});
+ck('paste: the discarded composer left no extra note', await page.locator('.notes-card').count() === 1);
+
 // ---- 4b. Text, photo and drawing notes -----------------------------------------------
 await openComposer();
 await page.fill('.notes-quickadd-title', 'Poem');
@@ -230,6 +276,26 @@ ck('editor: three TaskTree rows', await page.locator('.notes-editor .tt-item').c
 await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday');
 await sleep(1500);
 ck('editor: note text saves without a button', await page.locator('.notes-editor .nb-status.failed').count() === 0);
+// A picture DROPPED on the open note takes the picker's own seal-and-upload
+// path: it must come back decrypted from the server, not merely appear.
+await page.evaluate(([sel, data]) => {
+    const bin = atob(data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'dropped.png', { type: 'image/png' }));
+    const el = document.querySelector(sel);
+    el.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+}, ['.notes-editor-content', PNG.toString('base64')]);
+await page.waitForFunction(() => document.querySelector('.notes-editor .note-images .ni-open img')?.naturalWidth > 0, null, { timeout: 20000 })
+    .then(() => ck('drop: a picture dropped on the open note is uploaded, sealed and shown decrypted', true))
+    .catch(() => ck('drop: a picture dropped on the open note is uploaded, sealed and shown decrypted', false));
+// Put the note back as it was — later checks count this note's pictures.
+page.once('dialog', d => d.accept());
+await page.click('.notes-editor .note-images button[aria-label="Remove picture"]');
+await page.waitForSelector('.notes-editor .note-images .ni-item', { state: 'detached', timeout: 15000 }).catch(() => {});
+ck('drop: the dropped picture can be removed again', await page.locator('.notes-editor .note-images .ni-item').count() === 0);
 // toggle Milk. click(), not check(): the box is a CONTROLLED input whose DOM
 // state React restores until the optimistic update commits a frame later,
 // and check() asserts the flip synchronously — the completed section is the
@@ -855,6 +921,31 @@ await m.tap('.notes-fab');
 await m.waitForSelector('.notes-quickadd.sheet', { timeout: 5000 });
 r = await audit();
 ck('phone: composer inputs ≥ 16px', r.fonts['.notes-quickadd-title'] >= 16 && r.fonts['.notes-quickadd-item input'] >= 16, JSON.stringify(r.fonts));
+// The paste confirmation must be answerable on a phone: inside the viewport,
+// no sideways scroll, and every button a real tap target.
+await m.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', 'Socks\nShirt\nShoes\nSunglasses\nSuncream');
+    document.querySelector('.notes-quickadd-item input')
+        .dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+});
+await m.waitForSelector('.notes-paste-dialog', { timeout: 5000 }).catch(() => {});
+ck('phone: a multi-line paste asks here too', await m.locator('.notes-paste-dialog').count() === 1);
+const pasteBox = await m.locator('.notes-dialog').boundingBox();
+const pasteVh = await m.evaluate(() => window.innerHeight);
+ck('phone: the paste confirmation is inside the viewport',
+    pasteBox && pasteBox.x >= 0 && pasteBox.x + pasteBox.width <= 390.5 && pasteBox.y >= 0 && pasteBox.y + pasteBox.height <= pasteVh + 0.5,
+    JSON.stringify(pasteBox));
+const pasteBtns = await m.locator('.notes-paste-actions button').all();
+const pasteHs = await Promise.all(pasteBtns.map(async b => (await b.boundingBox())?.height ?? 0));
+ck('phone: every paste-confirmation button is a full tap target', pasteHs.length === 3 && pasteHs.every(h => h >= 44), JSON.stringify(pasteHs));
+ck('phone: the paste confirmation does not scroll the page sideways',
+    await m.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+await mshot('phone-paste-confirm');
+await m.getByRole('button', { name: 'Cancel' }).tap();
+await m.waitForSelector('.notes-paste-dialog', { state: 'detached', timeout: 5000 }).catch(() => {});
+ck('phone: Cancel leaves the composer with its one empty item',
+    await m.locator('.notes-quickadd-item input').count() === 1);
 await m.fill('.notes-quickadd-title', 'Phone note');
 await m.locator('.notes-quickadd-item input').first().fill('Charger');
 // A long list must keep Done reachable: the sheet scrolls, nothing is clipped.

@@ -29,6 +29,8 @@ import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
+import { PastedLinesDialog } from './PastedLinesDialog';
+import { linesFromPaste, pasteAsOneLine } from '../model/noteContent';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { EditedStamp } from './EditedStamp';
 
@@ -107,6 +109,26 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         addRef.current?.focus();
     };
 
+    // A multi-line paste into "Add an item…" asks before it creates: an item
+    // is removed one at a time with no Undo (onDelete below goes straight to
+    // deleteTaskFrom), so forty silent items would be unrecoverable.
+    const [paste, setPaste] = useState<{ lines: string[]; text: string } | null>(null);
+    const onPasteNewItem = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        const lines = linesFromPaste(e.clipboardData?.getData('text') ?? '');
+        if (lines.length < 2) return;   // one line pastes as normal
+        e.preventDefault();
+        setPaste({ lines, text: e.clipboardData?.getData('text') ?? '' });
+    };
+    const addPastedLines = async (lines: string[]) => {
+        setPaste(null);
+        // One create per line, in order, through the SAME addTask a typed
+        // item uses — so each is sealed here and queues offline like any other.
+        for (const line of lines) {
+            if (!await actions.addTask(ref, line)) break;
+        }
+        addRef.current?.focus();
+    };
+
     return createPortal(
         <div className="notes-editor-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
             <div className="notes-editor" data-color={card.color} role="dialog" aria-modal="true" aria-label={card.title || 'Untitled note'}>
@@ -167,6 +189,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                                 placeholder="Add an item…"
                                 maxLength={500}
                                 aria-label="New item"
+                                onPaste={onPasteNewItem}
                                 autoFocus={tasks.length === 0}
                             />
                             <button type="submit" aria-label="Add item" disabled={!newItem.trim()}><PlusIcon /></button>
@@ -219,6 +242,14 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="More actions" title="More" onClick={e => onMenu(e, card, e.currentTarget)}><MoreVerticalIcon /></button>
                     <button type="button" className="notes-textbtn" onClick={onClose}>Close</button>
                 </div>
+                {paste && (
+                    <PastedLinesDialog
+                        lines={paste.lines}
+                        onAddSeparate={() => void addPastedLines(paste.lines)}
+                        onAddOne={() => { setPaste(null); setNewItem(v => `${v}${pasteAsOneLine(paste.text)}`.slice(0, 500)); addRef.current?.focus(); }}
+                        onCancel={() => { setPaste(null); addRef.current?.focus(); }}
+                    />
+                )}
             </div>
         </div>,
         document.body,

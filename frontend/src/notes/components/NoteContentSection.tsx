@@ -36,7 +36,8 @@ import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { pendingOutboxCount } from '../model/notesOutbox';
-import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
+import { bodyToItems, conversionLosses, describeLosses, filesFromTransfer, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
+import { hasTransferFiles, ONLY_PICTURES, PASTE_OFFLINE } from '../model/pasteDrop';
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
 import { UndoBar } from './UndoBar';
@@ -66,6 +67,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const c = actions.content;
     const [drawing, setDrawing] = useState<{ item?: GalleryItem; initial?: DrawingDoc } | null>(null);
     const [busy, setBusy] = useState(false);
+    const [dragging, setDragging] = useState(false);
     const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
     const undoRef = useRef<Undo | null>(null);
@@ -96,6 +98,23 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const addPhotos = async (files: File[]) => {
         setBusy(true);
         try { await c.addNoteMedia(listId, files, []); } finally { setBusy(false); }
+    };
+    /** Pictures pasted into, or dropped on, the open note. They go to the
+     *  SAME addPhotos the picker feeds, so they are shrunk and sealed on this
+     *  device exactly as a picked one is — no second upload call site.
+     *
+     *  Refused BEFORE the attempt when there is no connection: a picture is an
+     *  upload, and uploads never queue (notesQueries.ts). Only navigator.onLine
+     *  — a full outbox is no reason to refuse an upload, which does not go
+     *  through the outbox at all. */
+    const takePictures = (dt: React.ClipboardEvent['clipboardData'] | React.DragEvent['dataTransfer'] | null): boolean => {
+        const { images, others } = filesFromTransfer(dt);
+        if (images.length === 0 && others.length === 0) return false;
+        if (images.length === 0) { pushMessageToast({ title: ONLY_PICTURES }); return true; }
+        if (!navigator.onLine) { pushMessageToast({ title: PASTE_OFFLINE }); return true; }
+        if (others.length > 0) pushMessageToast({ title: ONLY_PICTURES });
+        void addPhotos(images);
+        return true;
     };
     const remove = async (item: GalleryItem) => {
         if (!window.confirm(`Remove this ${item.kind === 'drawing' ? 'drawing' : 'picture'}? It is deleted for good.`)) return;
@@ -220,7 +239,28 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     };
 
     return (
-        <div className="notes-editor-content">
+        <div
+            className={`notes-editor-content ${dragging ? 'dropping' : ''}`}
+            onPaste={showImages ? (e => {
+                if (e.defaultPrevented) return;
+                if (takePictures(e.clipboardData)) e.preventDefault();
+            }) : undefined}
+            onDragOver={showImages ? (e => {
+                if (!hasTransferFiles(e.dataTransfer)) return;
+                e.preventDefault();
+                if (!dragging) setDragging(true);
+            }) : undefined}
+            onDragLeave={showImages ? (e => {
+                if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                setDragging(false);
+            }) : undefined}
+            onDrop={showImages ? (e => {
+                if (!hasTransferFiles(e.dataTransfer)) return;
+                e.preventDefault();
+                setDragging(false);
+                takePictures(e.dataTransfer);
+            }) : undefined}
+        >
             {showBody && (
                 <NoteBodyField
                     key={card.key}

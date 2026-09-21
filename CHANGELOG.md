@@ -7,6 +7,13 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Paste and drop into a note.** Paste a screenshot straight into a note, or
+  drop a picture onto it, instead of saving it to disk first. Pasted pictures
+  are made smaller and encrypted on your device exactly like picked ones, and a
+  paste with no connection says so rather than half-adding it. Paste several
+  lines into a list and Púca Notes asks whether to make one item per line,
+  showing you the lines first — items are removed one at a time, so it asks
+  before it creates.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with
