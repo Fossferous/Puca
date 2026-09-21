@@ -4,7 +4,12 @@
 // requests by default, so target="_blank" anchors and window.open are silent
 // no-ops in the desktop shell. Desktop routes through the existing
 // `open_external` Rust command (scheme-allowlisted, same one the update
-// banner uses); web and Capacitor keep normal browser semantics.
+// banner uses).
+//
+// The Capacitor apps are the same story for a different reason:
+// @capacitor/android never calls setSupportMultipleWindows, so window.open is
+// refused there too. They get a top-level navigation instead, which the
+// bridge turns into ACTION_VIEW. Only the browser keeps plain window.open.
 
 import { isMobile, isTauri } from './platform';
 
@@ -52,8 +57,9 @@ export function openExternalUrl(url: string): void {
 /**
  * One document-level click interceptor for the Tauri shell: any anchor with an
  * external href opens in the system browser. Registered once at boot
- * (main.tsx) and ONLY under Tauri — on web/Capacitor the anchors' own
- * target="_blank" already works and must stay untouched.
+ * (main.tsx) and ONLY under Tauri — in a browser the anchors' own
+ * target="_blank" already works and must stay untouched, and in the Capacitor
+ * apps every link that matters routes through openExternalUrl by hand.
  */
 export function installTauriLinkInterceptor(): void {
     if (!isTauri()) return;

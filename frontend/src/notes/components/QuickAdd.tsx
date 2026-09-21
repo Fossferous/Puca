@@ -99,13 +99,12 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const [paste, setPaste] = useState<{ lines: string[]; text: string; at: number } | null>(null);
     const [dragging, setDragging] = useState(false);
 
-    /** Pictures out of a paste or a drop; `others` is reported, not dropped
-     *  silently. True when something was taken. */
-    const takePictures = (dt: React.ClipboardEvent['clipboardData'] | React.DragEvent['dataTransfer'] | null): boolean => {
+    /** Pictures out of a paste or a drop; anything else is REPORTED, not
+     *  dropped silently. */
+    const takePictures = (dt: React.ClipboardEvent['clipboardData'] | React.DragEvent['dataTransfer'] | null): void => {
         const { images, others } = filesFromTransfer(dt);
         if (images.length > 0) addPictures(images);
         if (others.length > 0) pushMessageToast({ title: ONLY_PICTURES });
-        return images.length > 0 || others.length > 0;
     };
 
     /** A paste anywhere in the composer: a picture is taken here. Multi-line

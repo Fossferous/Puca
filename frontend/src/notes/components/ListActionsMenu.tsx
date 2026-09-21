@@ -81,6 +81,18 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
     // Closing the note ends the Undo too.
     useEffect(() => () => { undoRef.current?.commit?.(); undoRef.current = null; }, []);
 
+    /** Wait for the effect-written `tasksRef` to stop changing, so a count
+     *  taken from it reflects the writes just made. Bounded: a ref that never
+     *  settles must leave the button working, not hang it. A fixed delay
+     *  would be a guess that goes wrong exactly when the machine is busy. */
+    const settled = async () => {
+        for (let i = 0; i < 25; i++) {
+            const before = tasksRef.current;
+            await sleep(20);
+            if (tasksRef.current === before) return;
+        }
+    };
+
     const done = checkedCount(tasks);
     if (note.kind !== 'list') return null;
 
@@ -112,7 +124,7 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
             // toggleTask reports a refusal by rolling the item BACK, not by
             // throwing, so the honest count is what is still ticked once the
             // last rollback has landed — not a guess made per call.
-            await sleep(PACE_MS);
+            await settled();
         } finally {
             setBusy(false);
         }

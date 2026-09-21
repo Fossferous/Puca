@@ -16,7 +16,7 @@
  *
  * `interactive={false}` marks a link without making it tappable. The card
  * grid uses that on purpose: the card's own tap opens the note, and a 44px
- * tap target cannot live inside a two-line clamped preview at 390px.
+ * tap target cannot live inside a line-clamped card preview at 390px.
  */
 import { linkSegments } from '../utils/linkSegments';
 import { openExternalUrl } from '../api/openExternal';

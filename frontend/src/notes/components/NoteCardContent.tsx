@@ -40,6 +40,6 @@ export function NoteBodyPreview({ body }: { body: string | null | undefined }) {
     if (!body) return null;
     if (isUndecryptable(body)) return <p className="notes-card-body unreadable">{body}</p>;
     // Marked, not tappable: the card's own tap opens the note, and a 44px tap
-    // target cannot live inside a clamped two-line preview at 390px.
+    // target cannot live inside a line-clamped preview at 390px.
     return <p className="notes-card-body"><NoteLinkText text={body} interactive={false} /></p>;
 }
