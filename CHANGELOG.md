@@ -18,7 +18,9 @@ one-line summary; this file is the full story. Versions follow
   When Púca Notes sends a new note or item and the answer never arrives, it
   sends it again — and the server now recognises the repeat and gives back
   the note it already made, instead of making a second one. Duplicates used
-  to turn up with no way to tell which copy held your later edits.
+  to turn up with no way to tell which copy held your later edits. Púca's own
+  Tasks view and its calendar do the same when you press the button again
+  after a create fails.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

@@ -37,3 +37,41 @@ export function newOpKey(): string {
 /** What the server accepts (src/task_handlers.rs `validate_op_key`). Exported
  *  so a test can prove the minted shape and the server's agree. */
 export const OP_KEY_SHAPE = /^[A-Za-z0-9_-]{16,64}$/;
+
+/** One create key, held across the user's OWN retries. */
+export interface HeldOpKey {
+    /** The key for `intent`: the same one every time until it lands. */
+    keyFor(intent: string): string;
+    /** That create landed — the next one is a new intent. */
+    landed(): void;
+}
+
+/**
+ * A create key for a form that has no automatic retry.
+ *
+ * The offline outbox stores its key on the queued op, and the .ics import
+ * mints one outside `withRetry`; a plain "type it and press the button"
+ * create has neither. What it has is the user: a create that fails leaves the
+ * typed text in the box and they press the button again. That second attempt
+ * is the SAME intent, so it has to carry the SAME key, or a create the server
+ * committed but could not answer becomes two rows — exactly what migration
+ * 070 exists to stop.
+ *
+ * `intent` is a caller-made string that says "this is the same thing again"
+ * (the target and the text). It never leaves the device and is never sent:
+ * the key handed out is random, as api/opKey.ts's one rule requires. Only the
+ * last intent is held, which is the shape of a retry — press the button
+ * again, or change what you typed and start afresh.
+ */
+export function heldOpKey(): HeldOpKey {
+    let held: { intent: string; key: string } | null = null;
+    return {
+        keyFor(intent: string): string {
+            if (!held || held.intent !== intent) held = { intent, key: newOpKey() };
+            return held.key;
+        },
+        landed(): void {
+            held = null;
+        },
+    };
+}

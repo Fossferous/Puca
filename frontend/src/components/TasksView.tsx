@@ -64,6 +64,7 @@ import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
 import { fetchListFeatures, flushBodySave, keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { heldOpKey } from '../api/opKey';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -122,6 +123,12 @@ export function TasksView() {
     const [tasks, setTasks] = useState<Task[]>([]);
     const [loading, setLoading] = useState(true);
     const [newListTitle, setNewListTitle] = useState('');
+    // One create key per intent, held while the user retries by hand
+    // (api/opKey.ts). Nothing here retries on its own: a failed create leaves
+    // the words in the box and the user presses the button again, and that
+    // second press must not be able to make a second row.
+    const listKey = useRef(heldOpKey());
+    const itemKey = useRef(heldOpKey());
     const [addingList, setAddingList] = useState(false);
     const [newTaskText, setNewTaskText] = useState('');
     const [editingTitle, setEditingTitle] = useState(false);
@@ -309,7 +316,8 @@ export function TasksView() {
         const title = newListTitle.trim();
         if (!title) return;
         try {
-            const created = await createTaskList(title);
+            const created = await createTaskList(title, listKey.current.keyFor(title));
+            listKey.current.landed();
             setLists(prev => [...prev, created]);
             setSelected({ kind: 'list', id: created.id });
             setNewListTitle('');
@@ -391,7 +399,8 @@ export function TasksView() {
         const text = newTaskText.trim();
         if (!text || selectedList === null) return;
         try {
-            const created = await createListTask(selectedList.id, text);
+            const created = await createListTask(selectedList.id, text, undefined, undefined, itemKey.current.keyFor(`${selectedList.id}\u0000${text}`));
+            itemKey.current.landed();
             const next = [...tasks, created];
             setTasks(next);
             syncListCounts(selectedList.id, next);
@@ -404,7 +413,8 @@ export function TasksView() {
     const handleAddSubtask = async (parentId: number, text: string) => {
         if (selectedList === null) return;
         try {
-            const created = await createListTask(selectedList.id, text, parentId);
+            const created = await createListTask(selectedList.id, text, parentId, undefined, itemKey.current.keyFor(`${selectedList.id}\u0000${parentId}\u0000${text}`));
+            itemKey.current.landed();
             const next = [...tasks, created];
             setTasks(next);
             syncListCounts(selectedList.id, next);

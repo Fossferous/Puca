@@ -19,7 +19,7 @@ vi.mock('../api/client', async () => {
 });
 
 import { ApiError } from '../api/client';
-import { newOpKey, OP_KEY_SHAPE } from '../api/opKey';
+import { heldOpKey, newOpKey, OP_KEY_SHAPE } from '../api/opKey';
 import { NoteConflictError, setTaskListBody, setTaskListAttachments, createTaskListWithContent } from '../api/listContent';
 import { createTaskList, createListTask, renameTaskList } from '../api/tasks';
 import { sealSelfField, openSelfField } from '../api/listSeal';
@@ -37,6 +37,36 @@ beforeEach(() => {
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset();
     post.mockResolvedValue({ id: 1, title: '', created_at: 'x', total_tasks: 0, completed_tasks: 0 });
     patch.mockResolvedValue({});
+});
+
+describe('a key held across the user’s own retries', () => {
+    it('the same intent gets the same key until it lands, and a new one after', () => {
+        const held = heldOpKey();
+        const first = held.keyFor('list\u0000Shopping');
+        expect(first).toMatch(OP_KEY_SHAPE);
+        expect(held.keyFor('list\u0000Shopping')).toBe(first);   // the retry replays it
+        expect(held.keyFor('list\u0000Shopping')).toBe(first);   // and again
+        held.landed();
+        expect(held.keyFor('list\u0000Shopping')).not.toBe(first);   // a NEW create
+    });
+
+    it('a different intent is never answered with the held key', () => {
+        const held = heldOpKey();
+        const a = held.keyFor('list\u0000Shopping');
+        const b = held.keyFor('list\u0000Hardware');
+        expect(b).not.toBe(a);
+        // ...and going back to the first intent is a fresh create too: only
+        // the LAST attempt is held, which is the shape of a retry.
+        expect(held.keyFor('list\u0000Shopping')).not.toBe(a);
+    });
+
+    it('the key is still random: two holders, one intent, two keys', () => {
+        // The one rule of api/opKey.ts. An intent string that produced a
+        // STABLE key would be a content fingerprint by another route.
+        const keys = Array.from({ length: 50 }, () => heldOpKey().keyFor('list\u0000Shopping'));
+        expect(new Set(keys).size).toBe(50);
+        expect(keys.every(k => OP_KEY_SHAPE.test(k))).toBe(true);
+    });
 });
 
 describe('a create key is random, never a fingerprint of the content', () => {
