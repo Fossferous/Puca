@@ -100,10 +100,20 @@ export function noteScheduleSearchText(note: { schedule?: string | null }): stri
     return p.state === 'ok' ? p.schedule.location ?? '' : '';
 }
 
-/** The schedule as export data: parsed when readable, else why not. */
-export function scheduleForExport(task: Task): unknown {
+/** The schedule as export data: parsed when readable, else why not. Takes
+ *  only the field it reads, so a NOTE's own schedule (migration 068) goes
+ *  through the SAME rule rather than a second copy of it. */
+export function scheduleForExport(task: Pick<Task, 'schedule'>): unknown {
     const p = parseSchedule(task.schedule);
     if (p.state === 'none') return null;
     if (p.state === 'readonly') return { unreadable: p.reason };
     return { ...p.raw, ...p.schedule };
+}
+
+/** The NOTE's own schedule as export data, beside noteScheduleSearchText.
+ *  An export that carried every item's time but not the note's would lose
+ *  the reminder on a note that has no items at all — which is exactly the
+ *  note 068 exists for. */
+export function noteScheduleForExport(note: { schedule?: string | null }): unknown {
+    return scheduleForExport({ schedule: note.schedule ?? null });
 }

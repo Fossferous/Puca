@@ -9,7 +9,7 @@ import { type NoteCard } from './notesModel';
 import { isMobile } from '../../api/platform';
 import { type SaveResult } from '../../api/saveAttachment';
 import { NOTES_FOLDER, deviceWriteFailedMessage, saveTextToDevice, timestampedName } from '../../api/saveToDevice';
-import { scheduleForExport } from './notesTiming';
+import { noteScheduleForExport, scheduleForExport } from './notesTiming';
 import { type NewTaskTiming } from '../../api/tasks';
 import { newUid, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import { describeSchedule } from '../../api/scheduleFormat';
@@ -81,6 +81,11 @@ export function notesToJson(cards: NoteCard[], exportedAt: string): string {
         createdAt: c.createdAt ?? null,
         text: c.body ?? null,
         textUnreadable: !!c.body && isUndecryptable(c.body),
+        // The NOTE's own reminder (migration 068), beside the items' — a
+        // backup that kept every item's time and quietly dropped the note's
+        // would restore a note nobody is reminded about.
+        dueAt: c.dueAt ?? null,
+        schedule: noteScheduleForExport(c),
         pictures: parseTaskAttachments(isAttachmentsLocked(c.noteAttachments ?? null) ? null : c.noteAttachments ?? null).map(r => r.name),
         items: (c.tasks ?? []).map((t: Task) => ({
             id: t.id,

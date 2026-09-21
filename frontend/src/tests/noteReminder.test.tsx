@@ -35,7 +35,7 @@ import {
 } from '../notes/model/notesModel';
 import { noteReminderSlotOf } from '../notes/model/notesTiming';
 import { ops } from '../notes/model/notesOutbox';
-import { noteToMarkdown } from '../notes/model/noteText';
+import { noteToMarkdown, notesToJson } from '../notes/model/noteText';
 import { NoteDueChip, NoteReminderControl } from '../components/schedule/NoteReminderControl';
 import { BellIcon, ClockIcon } from '../components/Icons';
 import { RemindersView } from '../notes/components/RemindersView';
@@ -128,6 +128,32 @@ describe('a note reminds by itself', () => {
         expect(noteToMarkdown(c)).toContain('reminder: 2026-09-22T09:00:00Z');
         const [plain] = cards([textNote(2, 'Nothing due')], { 'list:2': [] });
         expect(noteToMarkdown(plain)).not.toContain('reminder:');
+    });
+
+    it('rides the machine-readable export too — the other half of the pair', () => {
+        const sched = JSON.stringify({ v: 1, kind: 'task', uid: 'u9', allDay: false, start: '2026-09-22T09:00', tz: 'UTC' });
+        // A note with a reminder AND an item with one, so an export that
+        // carried only the item's would still look plausible.
+        const [timed] = cards(
+            [textNote(1, 'Call the vet', { dueAt: '2026-09-22T09:00:00Z', schedule: sched })],
+            { 'list:1': [task(7, { due_at: '2026-09-23T09:00:00Z' })] },
+        );
+        const [bare] = cards([textNote(2, 'Nothing due')], { 'list:2': [] });
+        const out = JSON.parse(notesToJson([timed, bare], '2026-09-21T12:00:00Z'));
+        expect(out.notes[0].items[0].dueAt).toBe('2026-09-23T09:00:00Z');   // it did carry the item's
+        expect(out.notes[0].dueAt).toBe('2026-09-22T09:00:00Z');
+        expect(out.notes[0].schedule).toMatchObject({ uid: 'u9', start: '2026-09-22T09:00' });
+        // Positive control: a note with no reminder carries the same two keys,
+        // empty — an export that simply omitted them could not be told apart
+        // from one that dropped them.
+        expect(bare.dueAt ?? null).toBeNull();
+        expect(out.notes[1].dueAt).toBeNull();
+        expect(out.notes[1].schedule).toBeNull();
+        // And a schedule this device cannot open says WHY, as an item's does,
+        // rather than exporting as "no reminder".
+        const [locked] = cards([textNote(3, 'Sealed', { schedule: 'not json at all' })], { 'list:3': [] });
+        const lockedOut = JSON.parse(notesToJson([locked], '2026-09-21T12:00:00Z')).notes[0];
+        expect(lockedOut.schedule).toHaveProperty('unreadable');
     });
 });
 

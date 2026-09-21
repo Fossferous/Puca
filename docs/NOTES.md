@@ -716,6 +716,11 @@ wrote, in the card preview, in Reminders and on the calendar, and ticking it
   alert fires exactly as an item's is, on the list rather than on a task.
 - **Offline**, setting or clearing a note's reminder queues like every item
   date and replays in order.
+- **It leaves with the note.** Both exports carry it: the Markdown one as a
+  `reminder:` line in the note's meta row, the JSON one as the note's own
+  `dueAt` and `schedule` beside each item's. An export that kept every item's
+  time and quietly dropped the note's would restore a note nobody is
+  reminded about.
 - **Version skew.** `GET /task-lists/features` answers `note_reminders`. A
   listing cannot be read as the probe: on a 067 server and a 068 one, an
   account whose notes have no reminders looks identical.
