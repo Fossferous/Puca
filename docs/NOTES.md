@@ -43,7 +43,10 @@ Púca's reminders. Anything you do in one is what you see in the other.
   reminder feed covers the shared items *you* created, so that one never
   alerts you. **Púca's own Tasks view pins the same view as a Reminders
   tab**, over every personal list and checklist channel, and a due-item
-  notification opens it — so this is not a Notes-only surface, and the
+  notification opens it — whether Tasks was closed or already on screen: the
+  tap and the web notification click both raise one window event, which a
+  mounted Tasks view answers by switching tabs — so this is not a Notes-only
+  surface, and the
   "Reminds whoever set it" line matters more there, because Púca's rows
   include items every other member set.
 - **Calendar, repeats, snooze, Edited** — a Calendar in the rail, dates and

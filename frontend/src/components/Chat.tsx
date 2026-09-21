@@ -3265,8 +3265,13 @@ export function Chat({ onLogout }: ChatProps) {
     // notification wants. The tab is asked for BEFORE the view opens, because
     // opening it is what mounts it (api/tasksViewIntent.ts); the event the
     // dispatcher also fires covers a Tasks view already on screen.
+    //
+    // ONLY when it is not already up: a mounted TasksView answers that event
+    // itself, and the handover is a one-slot module — a request nobody is
+    // about to read would sit there until some unrelated later open of Tasks
+    // spent it and jumped to Reminders out of nowhere.
     const openRemindersView = () => {
-        requestTasksTab('reminders');
+        if (!(showFriendsPanel && friendsTab === 'tasks')) requestTasksTab('reminders');
         openTasksView();
     };
 
@@ -3683,7 +3688,14 @@ export function Chat({ onLogout }: ChatProps) {
                 // list, not the board. An APK older than this target simply
                 // passes the string through (it is opaque in Java), so the
                 // web bundle is the only place that has to know it.
-                openRemindersView();
+                //
+                // The EVENT, not openRemindersView() directly — the same door
+                // the web notification click uses (api/desktopNotify.ts). Our
+                // own listener below opens Tasks for a cold tap, and a Tasks
+                // view ALREADY on screen (tapped with the board open) hears it
+                // too and switches tabs; calling the helper would only refill
+                // a slot nothing is about to read.
+                window.dispatchEvent(new CustomEvent('sovereign:open-reminders'));
             } else if (target === 'dms') {
                 // The launcher's "Messages" shortcut: the home view, where the
                 // sidebar is the DM list (HomeSidebar renders only with no

@@ -47,7 +47,7 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
-import { consumeTasksTab } from '../api/tasksViewIntent';
+import { consumeTasksTab, peekTasksTab } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
 import { useScheduleSetter, useSnoozeSetter } from './schedule/useScheduleSetter';
@@ -125,7 +125,7 @@ export function TasksView() {
     // null = the pinned "All tasks" board (the default view) — unless
     // something asked for a tab on the way in (a due-item notification asks
     // for Reminders, api/tasksViewIntent.ts).
-    const [selected, setSelected] = useState<Selected>(() => (consumeTasksTab() === 'reminders' ? { kind: 'reminders', id: 0 } : null));
+    const [selected, setSelected] = useState<Selected>(() => (peekTasksTab() === 'reminders' ? { kind: 'reminders', id: 0 } : null));
     const [lists, setLists] = useState<TaskList[]>([]);
     const [prefs, setPrefs] = useState<TaskTabPref[]>([]);
     const [tasks, setTasks] = useState<Task[]>([]);
@@ -151,6 +151,12 @@ export function TasksView() {
     // Already on screen when a due-item notification is clicked: switch to
     // Reminders (the initial state above covers a cold open).
     useEffect(() => {
+        // Spend the one-slot request now that the view exists. The initial
+        // state only PEEKED at it, so a second render of this same mount
+        // (StrictMode, in development) still opened on Reminders — but
+        // leaving it unspent would make some later, unrelated mount of this
+        // view jump to Reminders out of nowhere.
+        consumeTasksTab();
         const onOpenReminders = () => {
             consumeTasksTab();
             setSelected({ kind: 'reminders', id: 0 });
