@@ -838,10 +838,12 @@
 .notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
 .notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
 .notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
-/* Retime from the row. The inline field wraps onto its own line rather than
-   squeezing the text out of a 390px row (the dialog path portals itself). */
+/* Retime from the row. On a phone the OPEN cluster takes a line of its own
+   inside the row rather than squeezing the item text out of 390px — see the
+   coarse-pointer block below, which is where `.open` earns its keep. (The
+   dialog path portals itself and is not laid out here at all.) */
 .notes-retime { position: relative; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.notes-retime-edit { display: inline-flex; align-items: center; gap: 6px; }
+.notes-retime-edit { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .notes-retime-edit input {
     padding: 4px 8px;
     border: 1px solid var(--border-subtle);
@@ -1008,7 +1010,12 @@
        row — the 40px above is right for a card's own tools, and widening
        every small icon button would grow the composer's whole cluster. */
     .notes-reminder-row .notes-iconbtn.small { width: 44px; height: 44px; }
-    .notes-retime-edit { flex-basis: 100%; margin-top: 6px; }
+    /* The row wraps (above), so a full basis on the OPEN cluster moves it —
+       clock button and field together — onto a line of its own. The field
+       itself is not a flex item of the ROW, so a basis on IT could never do
+       that; it just fills what the button leaves. */
+    .notes-retime.open { flex-basis: 100%; margin-top: 6px; }
+    .notes-retime-edit { flex: 1; min-width: 0; }
     .notes-retime-edit input { font-size: 16px; flex: 1; min-width: 0; }
     .notes-retime-edit .notes-textbtn { min-height: 44px; padding: 6px 14px; font-size: 16px; }
 }

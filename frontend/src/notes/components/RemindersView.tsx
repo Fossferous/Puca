@@ -15,16 +15,15 @@
  * task manager, any personal note), which is what the server enforces — NOT
  * the snooze right, which is a different permission on a different field.
  */
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
 import { canCompleteTasks, canEditTask, dueToLocalInput, formatDueShort, localInputToIso } from '../../api/tasks';
 import { parseSchedule, snoozeLocked } from '../../api/taskSchedule';
 import { ScheduleEditor } from '../../components/schedule/ScheduleEditor';
-import { ClockIcon } from '../../components/Icons';
 import { useReminderTimes } from '../model/notesPrefs';
 import { PlaceReminders } from '../native/PlaceReminders';
 import { type PlaceItem } from '../native/useNotesPlaces';
-import { BellIcon } from '../../components/Icons';
+import { BellIcon, ClockIcon } from '../../components/Icons';
 import { ReminderTimingMarks, SnoozeControl } from './SnoozeControl';
 import { type DueItem, type NoteCard, type ReminderGroups } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
@@ -92,17 +91,24 @@ function RetimeControl({ item, actions, canSchedule, onModal }: { item: DueItem;
     const [draft, setDraft] = useState('');
     const times = useReminderTimes();
     const scheduled = parseSchedule(item.task.schedule).state !== 'none';
+    // The shell's flag is driven from the state, not from the two call sites:
+    // a row can UNMOUNT with the dialog still up — the item crosses
+    // Today/Overdue on the half-minute tick, another device completes or
+    // retimes it, a refresh re-groups the feed — and a close() that never
+    // runs would leave `c`, `r`, `?` and `/` dead for the rest of the
+    // session. The cleanup runs on unmount as well as on close.
+    useEffect(() => {
+        if (!(editing && scheduled)) return;
+        onModal?.(true);
+        return () => onModal?.(false);
+    }, [editing, scheduled, onModal]);
     if (scheduled && !canSchedule) return null;
 
-    const close = () => {
-        setEditing(false);
-        if (scheduled) onModal?.(false);
-    };
+    const close = () => setEditing(false);
     const openIt = () => {
         if (editing) { close(); return; }
         setDraft(dueToLocalInput(item.task.due_at));
         setEditing(true);
-        if (scheduled) onModal?.(true);
     };
     const commit = () => {
         const iso = localInputToIso(draft);
@@ -113,7 +119,7 @@ function RetimeControl({ item, actions, canSchedule, onModal }: { item: DueItem;
     };
 
     return (
-        <span className="notes-retime" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+        <span className={`notes-retime${editing && !scheduled ? ' open' : ''}`} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
             <button
                 type="button"
                 className="notes-iconbtn small"

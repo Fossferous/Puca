@@ -45,20 +45,23 @@ const card = (myPerms: number | undefined, kind: 'list' | 'channel', t: Task = t
     total: 1, completed: 0, myPerms,
 } as unknown as NoteCard);
 
-function reminders(c: NoteCard, t: Task = task, opts: { canSchedule?: boolean; onOpen?: () => void } = {}) {
+function reminders(c: NoteCard, t: Task = task, opts: { canSchedule?: boolean; onOpen?: () => void; onModal?: (open: boolean) => void; empty?: boolean } = {}) {
     const actions = { setDue: vi.fn(), setSchedule: vi.fn(), snoozeTask: vi.fn(), toggleTask: vi.fn() } as unknown as NoteActions;
     const host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
-    act(() => root!.render(
+    const view = (empty: boolean) => (
         <RemindersView
-            groups={{ overdue: [], today: [], upcoming: [{ task: t, note: c, at: Date.parse(t.due_at ?? DUE), slot: reminderSlotOf(t, NOW) ?? undefined }] }}
+            groups={{ overdue: [], today: [], upcoming: empty ? [] : [{ task: t, note: c, at: Date.parse(t.due_at ?? DUE), slot: reminderSlotOf(t, NOW) ?? undefined }] }}
             actions={actions} now={NOW} onOpen={opts.onOpen ?? (() => {})}
             notificationsState="granted" onEnableNotifications={() => {}} canSnooze
-            canSchedule={opts.canSchedule ?? true}
-        />,
-    ));
-    return { host, actions };
+            canSchedule={opts.canSchedule ?? true} onModal={opts.onModal}
+        />
+    );
+    act(() => root!.render(view(false)));
+    /** Re-render with the row gone, as a refresh that re-groups the feed does. */
+    const dropTheRow = () => act(() => root!.render(view(true)));
+    return { host, actions, dropTheRow };
 }
 
 const retimeBtn = (host: HTMLElement) => host.querySelector<HTMLButtonElement>('.notes-retime button');
@@ -194,5 +197,40 @@ describe('what the retime writes', () => {
         // Positive control: the row itself still opens the note.
         act(() => host.querySelector<HTMLElement>('.notes-reminder-text')!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
         expect(onOpen).toHaveBeenCalledTimes(1);
+    });
+});
+
+// The shell turns its single-key shortcuts off while the schedule dialog is
+// up. Turning them back ON is the half that has no visible symptom: a row
+// that unmounts mid-edit (the item crosses Today/Overdue on the clock tick,
+// another device retimes it, the feed re-groups) takes the portalled dialog
+// with it, and a flag left true kills `c`, `r`, `?` and `/` for the rest of
+// the session.
+describe('the shortcut flag always comes back', () => {
+    it('Cancel clears it', () => {
+        const onModal = vi.fn();
+        const { host } = reminders(card(undefined, 'list', scheduled), scheduled, { onModal });
+        act(() => retimeBtn(host)!.click());
+        expect(onModal.mock.calls.map(c => c[0])).toEqual([true]);
+        act(() => [...document.body.querySelectorAll('.sched-dialog button')].find(b => b.textContent === 'Cancel')!.click());
+        expect(onModal.mock.calls.map(c => c[0])).toEqual([true, false]);
+    });
+
+    it('so does the row disappearing under the open dialog', () => {
+        const onModal = vi.fn();
+        const { host, dropTheRow } = reminders(card(undefined, 'list', scheduled), scheduled, { onModal });
+        act(() => retimeBtn(host)!.click());
+        expect(document.body.querySelector('.sched-dialog')).not.toBeNull();
+        dropTheRow();
+        expect(document.body.querySelector('.sched-dialog')).toBeNull();   // it went with the row
+        expect(onModal.mock.calls.map(c => c[0])).toEqual([true, false]);
+    });
+
+    it('a plain due-time field never claimed it in the first place (control)', () => {
+        const onModal = vi.fn();
+        const { host, dropTheRow } = reminders(card(undefined, 'list'), task, { onModal });
+        act(() => retimeBtn(host)!.click());
+        dropTheRow();
+        expect(onModal).not.toHaveBeenCalled();
     });
 });

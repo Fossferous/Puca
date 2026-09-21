@@ -1290,6 +1290,35 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
             && retimeBox.height >= 44 && retimeBox.width >= 44 && snoozeBox.height >= 44 && snoozeBox.width >= 44,
             JSON.stringify({ retimeBox, snoozeBox }));
         ck('phone: they stay inside the row, which stays inside 390 px', !!retimeBox && retimeBox.x + retimeBox.width <= vw + 0.5);
+        // The OPEN field, which the two closed buttons above never measure:
+        // the cluster takes a line of its own inside the row rather than
+        // squeezing the item out of 390 px, and the field is 16px so iOS does
+        // not zoom the page. 'My shared errand' is mine and plain-dated, so
+        // the retime is offered and it is the inline field, not the dialog.
+        const mineRow = pg.locator('.notes-reminder-row', { hasText: 'My shared errand' }).first();
+        await mineRow.locator('button[aria-label^="Change the time"]').tap();
+        await pg.waitForSelector('.notes-retime-edit input[type="datetime-local"]', { timeout: 5000 });
+        const open = await pg.evaluate(() => {
+            const row = [...document.querySelectorAll('.notes-reminder-row')].find(r => r.textContent.includes('My shared errand'));
+            const box = el => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right, t: b.top, b: b.bottom }; };
+            const field = row.querySelector('.notes-retime-edit');
+            const input = field.querySelector('input');
+            return {
+                row: box(row), text: box(row.querySelector('.notes-reminder-text')),
+                clock: box(row.querySelector('.notes-retime button')), field: box(field), input: box(input),
+                px: parseFloat(getComputedStyle(input).fontSize),
+                wide: document.documentElement.scrollWidth > window.innerWidth + 1,
+            };
+        });
+        ck('phone: the open retime field stays inside 390 px and adds no page scroll',
+            open.field.l >= -0.5 && open.field.r <= vw + 0.5 && open.input.r <= vw + 0.5 && !open.wide, JSON.stringify(open));
+        ck('phone: it takes a line of its own under the item text, not a squeeze beside it',
+            open.field.t >= open.text.b - 0.5 && Math.abs(open.field.t - open.clock.t) <= 22 && open.field.b <= open.row.b + 0.5,
+            JSON.stringify(open));
+        ck('phone: the retime field is 16 px, so iOS does not zoom', open.px >= 16, String(open.px));
+        await shotOf(pg)('retime-open-phone');
+        await pg.keyboard.press('Escape');
+        ck('phone: Escape closes it again', await pg.locator('.notes-retime-edit').count() === 0);
         await shotOf(pg)('hint-phone');
         await pctx.close();
     } catch (e) {
