@@ -348,6 +348,24 @@ check "FAILS a cacheable worker" "$(has "$out" 'FAIL  notes worker cache')" "$ou
 check "and counts it in the verdict" "$([ "$(has "$out" 'sandbox/notes-sw-cache')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
 # The operator reads the FAIL line, not the README: it must carry the fix.
 check "and the FAIL carries the exact Caddy lines, the reload and the CDN purge" "$([ "$(has "$out" '@notesSw path /notes/sw.js')" = 1 ] && [ "$(has "$out" 'header @notesSw Cache-Control "no-cache"')" = 1 ] && [ "$(has "$out" 'systemctl reload caddy')" = 1 ] && [ "$(has "$out" 'purge https://app.invalid/notes/sw.js')" = 1 ] && echo 1 || echo 0)" "$out"
+# The FAIL line is what an EXISTING deployment's operator reads. A fresh
+# self-hoster never sees it: they copy deploy/Caddyfile.example.com, and the
+# upgrade note in deploy/webapp/README.md is what an existing one follows by
+# hand. All three must say the same two lines, so the two lines are taken OUT
+# of the FAIL output and required verbatim in both files — whichever of the
+# three is edited next, the other two are held to it.
+sw_lines="$(printf '%s
+' "$out" | grep -oE '@notesSw path /notes/sw\.js|header @notesSw Cache-Control "no-cache"' | sort -u)"
+check "the FAIL names exactly the two @notesSw lines" "$([ "$(printf '%s
+' "$sw_lines" | grep -c .)" = 2 ] && echo 1 || echo 0)" "$sw_lines"
+for sw_f in deploy/Caddyfile.example.com deploy/webapp/README.md; do
+	sw_missing=""
+	while IFS= read -r sw_line; do
+		[ -n "$sw_line" ] || continue
+		grep -qF "$sw_line" "$REPO/$sw_f" || sw_missing="$sw_missing$sw_line; "
+	done <<< "$sw_lines"
+	check "$sw_f carries both lines verbatim" "$([ -z "$sw_missing" ] && echo 1 || echo 0)" "missing: $sw_missing"
+done
 serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\n'
 out="$(versions)"
 check "FAILS a worker with no Cache-Control at all" "$(has "$out" 'FAIL  notes worker cache')" "$out"
