@@ -13,6 +13,7 @@ import { scheduleForExport } from './notesTiming';
 import { type NewTaskTiming } from '../../api/tasks';
 import { newUid, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import { describeSchedule } from '../../api/scheduleFormat';
+import { scrubClipRefs } from '../../components/contextMenuUtils';
 
 function lines(nodes: TaskNode[], depth: number, out: string[]): void {
     for (const n of nodes) {
@@ -51,6 +52,57 @@ export function noteToMarkdown(card: NoteCard): string {
         lines(buildTaskTree(card.tasks), 0, out);
     }
     return out.join('\n') + '\n';
+}
+
+/**
+ * A note as the text of a CHAT message — what "Send to Púca…" posts.
+ *
+ * Deliberately NOT noteToMarkdown. An export is a file the author keeps, so a
+ * row it cannot read is written as its marker; a message is read by other
+ * people, and `[encrypted — key unavailable]` in their channel is noise
+ * pretending to be content. Every row this device cannot read is LEFT OUT and
+ * counted, so the sheet can say how many before anything is sent (the
+ * openItemsOf rule, applied to a destination instead of a file).
+ *
+ * Pictures do not ride along: a note's photos and drawings are sealed under
+ * the note's own key, and re-sealing them for a channel is an upload path this
+ * feature does not have. They are NAMED, the way the export names them, and
+ * returned so the sheet can say plainly that they are not sent.
+ *
+ * Clip refs lose their payload (scrubClipRefs): the packed manifest IS the
+ * clip's decryption key, and a note's text can hold one pasted from anywhere.
+ * Attachment keys are left alone, exactly as Forward leaves them — the send
+ * re-encrypts the whole text for the destination, so they never leave E2EE.
+ */
+export function noteToMessage(card: NoteCard): { text: string; omitted: number; pictures: string[] } {
+    let omitted = 0;
+    const pictures: string[] = [];
+    const namePictures = (opened: string | null | undefined) => {
+        if (isAttachmentsLocked(opened ?? null)) { omitted++; return; }
+        for (const r of parseTaskAttachments(opened ?? null)) pictures.push(r.name);
+    };
+
+    // A title this device cannot read is a marker too: no heading rather than
+    // a heading that says the note could not be decrypted.
+    const out: string[] = isUndecryptable(card.title) ? (omitted++, []) : [`# ${card.title}`];
+    const body = card.body && isUndecryptable(card.body) ? (omitted++, '') : (card.body ?? '');
+    if (body) out.push('', body);
+    namePictures(card.noteAttachments);
+
+    const rows: string[] = [];
+    const walk = (nodes: TaskNode[], depth: number) => {
+        for (const n of nodes) {
+            if (isUndecryptable(n.task.description)) { omitted++; continue; }
+            rows.push(`${'  '.repeat(depth)}- ${n.task.is_completed ? '[x]' : '[ ]'} ${n.task.description}`);
+            namePictures(n.task.attachments);
+            walk(n.children, depth + 1);
+        }
+    };
+    walk(buildTaskTree(card.tasks ?? []), 0);
+    if (rows.length) out.push('', ...rows);
+    if (pictures.length) out.push('', `(${pictures.length} picture${pictures.length === 1 ? '' : 's'} not sent: ${pictures.join(', ')})`);
+
+    return { text: scrubClipRefs(out.join('\n').trim()), omitted, pictures };
 }
 
 export function notesToMarkdown(cards: NoteCard[]): string {

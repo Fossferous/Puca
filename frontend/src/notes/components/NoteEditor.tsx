@@ -23,7 +23,7 @@ import { isUndecryptable } from '../../api/decryptMarkers';
 import { TaskTree } from '../../components/TaskTree';
 import {
     ArchiveIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
-    RefreshIcon, TagIcon, WarningIcon,
+    RefreshIcon, SendIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
@@ -41,6 +41,11 @@ interface NoteEditorProps {
     onPickLabels: (card: NoteCard, anchor: HTMLElement) => void;
     /** Archive/unarchive through the owner (Undo snackbar). */
     onArchive: (card: NoteCard, archived: boolean) => void;
+    /** Post this note into a channel or DM ("Send to Púca…"). In its own
+     *  footer button as well as the menu: the Notes Android shell has no
+     *  "Open in Púca" to fall back on (NotesRail's isMobile gate), so this is
+     *  its only route into a conversation. */
+    onSendToPuca: () => void;
     /** Where this note lives in Púca (web only; null hides the link). */
     pucaHref: string | null;
     /** A layer above the editor is open (context menu, popover, dialog):
@@ -50,7 +55,7 @@ interface NoteEditorProps {
     escapeBlocked?: boolean;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false }: NoteEditorProps) {
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
     const tasksQuery = useNoteTasks(ref, { live: true });
@@ -212,6 +217,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="Labels" title="Labels" onClick={e => onPickLabels(card, e.currentTarget)}><TagIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label={card.archived ? 'Unarchive' : 'Archive'} title={card.archived ? 'Unarchive' : 'Archive'} onClick={() => onArchive(card, !card.archived)}><ArchiveIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label="Refresh this note" title="Refresh" onClick={() => void actions.refreshNote(ref)}><RefreshIcon /></button>
+                    <button type="button" className="notes-iconbtn" aria-label="Send to Púca" title="Send to Púca…" onClick={onSendToPuca}><SendIcon /></button>
                     {pucaHref && (
                         <a className="notes-iconbtn" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
                     )}

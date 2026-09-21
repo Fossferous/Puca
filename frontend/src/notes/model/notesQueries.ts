@@ -45,6 +45,8 @@ import {
     buildPrefsForOrder, isFavoriteTab, canEditTask,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
+import { hasPerm, PERM } from '../../api/permissionBits';
+import { listDMConversations, type DMConversation } from '../../api/dms';
 import { ApiError } from '../../api/client';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { planToggle } from '../../api/taskCompletion';
@@ -100,6 +102,7 @@ export const notesKeys = {
     servers: ['notes', 'servers'] as const,
     channels: (serverId: string) => ['notes', 'servers', serverId, 'channels'] as const,
     members: (serverId: string) => ['notes', 'servers', serverId, 'members'] as const,
+    dms: ['notes', 'dms'] as const,
     tasks: (ref: NoteRef) => ['notes', 'tasks', ref.kind, ref.id] as const,
 };
 
@@ -199,6 +202,54 @@ export function useChannelSources(): { sources: NoteSource[]; complete: boolean;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [servers, serversDone, allChannelsSettled, ...channelData, ...memberData]);
     return useMemo(() => ({ ...memo, updatedAt, oldestAt }), [memo, updatedAt, oldestAt]);
+}
+
+/** Existing DM conversations, for "Send to Púca…". Its own key, its own
+ *  cadence: Notes never renders DMs, so this is fetched only when the sheet
+ *  asks for it (`enabled`). */
+export function useDMTargetsQuery(enabled: boolean) {
+    return useQuery({ queryKey: notesKeys.dms, queryFn: listDMConversations, enabled, staleTime: 60_000 });
+}
+
+/** One send destination: a text channel of a joined server. */
+export interface SendChannelTarget {
+    server: Server;
+    channel: Channel;
+}
+
+/**
+ * Where a note may be POSTED as a message: text channels of joined servers
+ * that this account can actually send in, plus existing DM conversations.
+ *
+ * The filter is the exact INVERSE of useChannelSources' — a checklist channel
+ * IS a note already, and posting a note's text into its own feed is nonsense —
+ * with one thing ForwardModal deliberately cannot do: `my_permissions` is in
+ * hand here, so a channel this account cannot post in is not offered at all
+ * rather than offered and 403'd. It reuses the SAME query keys the grid
+ * already primes, so opening the sheet costs no extra fetch for channels.
+ */
+export function useSendTargets(enabled: boolean): { channels: SendChannelTarget[]; dms: DMConversation[]; loading: boolean } {
+    const { data: servers = [], isPending: serversPending } = useServersQuery();
+    const channelQueries = useQueries({
+        queries: servers.map((s: Server) => ({
+            queryKey: notesKeys.channels(s.id),
+            queryFn: () => listChannels(s.id),
+        })),
+    });
+    const dmQuery = useDMTargetsQuery(enabled);
+    // Computed on every render rather than memoised: the dependency would be
+    // a variable-length spread of the per-server query results, which React
+    // warns about ("the final argument passed to useMemo changed size"), and
+    // the list is a handful of channels — the sheet is the only consumer.
+    const channels = servers.flatMap((server: Server, i: number) =>
+        ((channelQueries[i]?.data as Channel[] | undefined) ?? [])
+            .filter(c => c.channel_type === 0 && !c.has_checklist && hasPerm(c.my_permissions, PERM.SEND_MESSAGES))
+            .map(channel => ({ server, channel })));
+    return {
+        channels,
+        dms: dmQuery.data ?? [],
+        loading: serversPending || channelQueries.some(q => q.isPending) || dmQuery.isPending,
+    };
 }
 
 function listSource(l: TaskList): NoteSource {
