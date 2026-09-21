@@ -3,7 +3,8 @@
 // Forward (the "> ↪ Forwarded" prefix composed before re-encryption for the
 // target channel/DM).
 import { describe, it, expect } from 'vitest';
-import { formatQuote, buildForwardText, stripAttachmentKeys } from '../components/contextMenuUtils';
+import { formatQuote, buildForwardText, stripAttachmentKeys, canSaveToNotes, menuItems } from '../components/contextMenuUtils';
+import { ENC_KEY_UNAVAILABLE } from '../api/decryptMarkers';
 
 describe('formatQuote', () => {
     it('quotes a single line and ends with a newline', () => {
@@ -125,5 +126,32 @@ describe('replyPreviewText', () => {
         expect(replyPreviewText('[Clip 2:04](sovereign-clip:v1)', 50)).toBe('Clip (removed)');
         expect(replyPreviewText('hello world', 5)).toBe('hello...');
         expect(replyPreviewText('hi', 5)).toBe('hi');
+    });
+});
+
+describe('canSaveToNotes (the "Save to Notes" guard, shared by both call sites)', () => {
+    it('offers it on an ordinary message (positive control)', () => {
+        expect(canSaveToNotes('pack the tent')).toBe(true);
+        expect(canSaveToNotes('![p](sovereign-enc:id?k=K&m=image/png)')).toBe(true);
+    });
+
+    it('refuses a message this device cannot decrypt — a marker is not content', () => {
+        expect(canSaveToNotes(ENC_KEY_UNAVAILABLE)).toBe(false);
+    });
+
+    it('refuses a clip post — the body carries the clip key, and a note outlives the consent window', async () => {
+        const { encodeClipRef } = await import('../api/clips/clipRef');
+        const href = encodeClipRef({
+            key: new Uint8Array(32).fill(1), noncePrefix: new Uint8Array(8).fill(2), clipId: '0f5b4b1a-6a1c-4d5e-8f2b-1c3d4e5f6a7b',
+            videoCodec: 'avc1.640029', audioCodec: 'mp4a.40.2', durationMs: 5_000, width: 1920, height: 1080, totalCipherBytes: 12,
+            parts: ['11111111-1111-4111-8111-111111111111'], partDurMs: [0],
+        });
+        expect(canSaveToNotes(`[Clip 0:05](${href})`)).toBe(false);
+    });
+
+    it('the menu entry and Quote no longer share one icon', () => {
+        expect(menuItems.message.saveToNotes(() => undefined).id).toBe('save-to-notes');
+        expect(menuItems.message.saveToNotes(() => undefined).icon).toBe('note');
+        expect(menuItems.message.quote(() => undefined).icon).not.toBe('note');
     });
 });

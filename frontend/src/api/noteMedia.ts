@@ -31,7 +31,11 @@ export function slotsNeeded(files: number, drawings: number): number {
     return files + drawings * 2;
 }
 
-async function uploadAll(files: File[]): Promise<TaskAttachmentRef[]> {
+/** Encrypt and upload files that are ALREADY the bytes to store (no shrink),
+ *  all or nothing: a failure deletes whatever already landed. Exported for
+ *  api/captureToNote.ts, which re-uploads a chat attachment the sender had
+ *  already prepared — it reuses this rollback rather than copying it. */
+export async function uploadPreparedFiles(files: File[]): Promise<TaskAttachmentRef[]> {
     const done: TaskAttachmentRef[] = [];
     try {
         for (const f of files) {
@@ -60,7 +64,7 @@ export async function uploadNoteMedia(
         files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));
         files.push(new File([d.files.strokes], `${d.base}.json`, { type: DRAWING_STROKES_MIME }));
     }
-    return uploadAll(files);
+    return uploadPreparedFiles(files);
 }
 
 /** Decrypt a drawing's strokes file back to its JSON text. */
