@@ -303,6 +303,39 @@ describe('what replay does with parked media', () => {
         vi.resetModules();
     });
 
+    it('execOp answers each uploaded ref PAIRED with the record it came from', async () => {
+        // What `removeForgotten` above maps by. `uploadParkedMedia` answers
+        // one ref per record in order, and a bare list of refs would make
+        // "which of these two was the one the user removed" a guess.
+        const up = (n: string) => ({ href: `sovereign-enc:${n}?k=K&m=image%2Fjpeg`, name: `${n}.jpg` });
+
+        const { parked } = parkedHarness();
+        await parked.park([media('first'), media('second')]);
+
+        vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return {
+                ...real,
+                uploadParkedMedia: vi.fn(async (records: SealedMedia[]) => records.map(r => up(r.id))),
+                addNoteRefs: vi.fn(async () => undefined),
+            };
+        });
+        // The unmock in a finally: a red assertion here must not leave
+        // '../api/noteMedia' mocked for every test after it.
+        try {
+            const fresh = await import('../notes/model/notesOutbox');
+            const answer = await fresh.execOp(fresh.ops.addMedia(4, ['first', 'second'], [], [], '2 pictures'), {}, true, parked);
+            expect(answer).toEqual([
+                { id: 'first', ref: up('first') },
+                { id: 'second', ref: up('second') },
+            ]);
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.resetModules();
+        }
+    });
+
     it('an op the server REFUSES takes its parked bytes with it', async () => {
         const h = harness();
         h.setOnline(false);
@@ -368,6 +401,124 @@ describe('what replay does with parked media', () => {
         await ob.forgetParked(['b']);
         expect(ob.pending()).toBe(0);
         expect((await h.parked.waiting()).items).toBe(0);
+    });
+
+    /**
+     * A Remove that lands WHILE the upload is out.
+     *
+     * `replay` awaits `exec` outside the queue lock, and `execOp`'s addMedia
+     * arm has read the ciphertext and uploaded it before it writes the note's
+     * sidecar. `forgetParked` in that window rewrites a queued op that is
+     * about to be dropped by oid anyway, so without the in-flight bookkeeping
+     * the ref reaches the server with nothing left to take it out again: the
+     * removed picture comes back on the next fetch, and its upload is charged
+     * to the owner's quota for good.
+     *
+     * The gate is the upload: `exec` says it has started, waits, and only
+     * then answers with the refs — exactly the window the real one has.
+     */
+    function gatedHarness() {
+        const { parked } = parkedHarness();
+        const queue = memoryStore();
+        const ran: NoteOp[] = [];
+        let startedResolve = () => {};
+        const started = new Promise<void>(res => { startedResolve = res; });
+        let release = () => {};
+        const gate = new Promise<void>(res => { release = res; });
+        const uploads: Record<string, { href: string; name: string }> = {
+            a: { href: 'sovereign-enc:up-a?k=K&m=image%2Fjpeg', name: 'a.jpg' },
+            b: { href: 'sovereign-enc:up-b?k=K&m=image%2Fjpeg', name: 'b.jpg' },
+        };
+        let online = false;                   // the picture was added with no connection
+        const exec = vi.fn(async (op: NoteOp) => {
+            ran.push(op);
+            if (op.k !== 'addMedia') return {};
+            startedResolve();
+            await gate;                       // the upload is out; the sidecar is not written yet
+            return op.blobIds.map(id => ({ id, ref: uploads[id] }));
+        });
+        const ob = createOutbox({
+            sub: () => 7,
+            identity: () => identity,
+            store: () => queue,
+            exec: exec as never,
+            online: () => online,
+            lock: realLock,
+            onReplayed: () => {},
+            parked,
+        });
+        return { parked, ran, ob, started, release, uploads, goOnline: () => { online = true; } };
+    }
+
+    it('a picture removed while its upload is IN FLIGHT is taken back off the server', async () => {
+        const h = gatedHarness();
+        await h.parked.park([media('a'), media('b')]);
+        await h.ob.load();
+        await h.ob.send(ops.addMedia(4, ['a', 'b'], [], [], '2 pictures'));
+        expect(h.ob.pending()).toBe(1);        // queued, so replay is what runs it
+
+        h.goOnline();
+        const replayed = h.ob.replay();
+        await h.started;                       // the upload is out
+        await h.ob.forgetParked(['a']);        // the user removes that picture now
+        h.release();
+        await replayed;
+
+        const removals = h.ran.filter(o => o.k === 'removeMedia');
+        expect(removals).toHaveLength(1);
+        expect(removals[0]).toMatchObject({ k: 'removeMedia', listId: 4, removing: [h.uploads.a.href] });
+        // The one the user KEPT is not named by it, the queue is empty, and
+        // the removed picture's bytes are off this device. (`b` is still
+        // parked only because this fake `exec` is not the real `execOp`,
+        // which is what clears a sent record.)
+        expect(h.ob.pending()).toBe(0);
+        expect(await h.parked.read(['a'])).toEqual([]);
+    });
+
+    it('...and a picture nobody removed queues no such removal (positive control)', async () => {
+        const h = gatedHarness();
+        await h.parked.park([media('a'), media('b')]);
+        await h.ob.load();
+        await h.ob.send(ops.addMedia(4, ['a', 'b'], [], [], '2 pictures'));
+
+        h.goOnline();
+        const replayed = h.ob.replay();
+        await h.started;
+        h.release();
+        await replayed;
+
+        expect(h.ran.filter(o => o.k === 'removeMedia')).toEqual([]);
+        expect(h.ob.pending()).toBe(0);
+    });
+
+    it('a picture removed AFTER its upload landed, before the refetch, is taken back off too', async () => {
+        // The second window. `onReplayed` invalidates the queries only when
+        // the whole run ends, and the refetch is a request: until it answers
+        // the editor still knows the picture by its `puca-parked:` name, so
+        // `setNoteAttachments` queues nothing server-side and would leave the
+        // ref on the server for good.
+        const h = gatedHarness();
+        await h.parked.park([media('a'), media('b')]);
+        await h.ob.load();
+        await h.ob.send(ops.addMedia(4, ['a', 'b'], [], [], '2 pictures'));
+
+        h.goOnline();
+        const replayed = h.ob.replay();
+        await h.started;
+        h.release();
+        await replayed;
+        expect(h.ran.filter(o => o.k === 'removeMedia')).toEqual([]);   // nothing removed yet
+
+        await h.ob.forgetParked(['b']);      // the editor still shows the parked name
+        await until(() => h.ran.some(o => o.k === 'removeMedia'));
+
+        const removals = h.ran.filter(o => o.k === 'removeMedia');
+        expect(removals).toHaveLength(1);
+        expect(removals[0]).toMatchObject({ k: 'removeMedia', listId: 4, removing: [h.uploads.b.href] });
+        // And only once: asking again names a ref the editor now knows by its
+        // real href, which is the ordinary removal path.
+        await h.ob.forgetParked(['b']);
+        expect(h.ran.filter(o => o.k === 'removeMedia')).toHaveLength(1);
     });
 
     it('queuedBlobIds names every parked record the queue still depends on', () => {

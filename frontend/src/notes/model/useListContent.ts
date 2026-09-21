@@ -326,7 +326,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
      *
      * A picture still waiting on this device never reached the server at all:
      * its ciphertext is deleted and the queued op that would have sent it
-     * forgets it.
+     * forgets it — so `serverGone` can be empty and nothing is queued here.
+     * That holds even once its upload has left: an op in flight, or one that
+     * landed while this cache still names the parked ref, is no longer in
+     * the queue for `forgetParked` to rewrite — so the outbox queues that
+     * removal itself, by the href the upload became (notesOutbox.ts,
+     * `forgottenInFlight` and `sentAs`).
      */
     const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);

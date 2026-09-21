@@ -245,7 +245,14 @@ is open. The poll is off only while the stream is live.
     sent it; a change the server refuses takes its ciphertext with it; and
     anything no queued change names is swept when the queue next loads (with a
     minute's grace, so a photo taken a moment ago is never swept before its
-    change exists).
+    change exists). Remove one after its upload has already gone out — too
+    late to drop it from the change waiting, and before the note has been
+    re-read and knows the uploaded file by name — and the queue raises the
+    removal itself, so the picture does not come back on the next fetch with
+    its bytes charged to your storage. That covers both halves of the gap:
+    the upload still in the air, and the one that has landed while the screen
+    still shows the copy on your device (`notesOutbox.ts`:
+    `forgottenInFlight` and `sentAs`).
   - **Uploads are added to the sidecar the server holds at that moment**, never
     to the copy this device last saw, so a picture added on another phone in
     the meantime is not deleted by a replay. Removing a picture works the same
