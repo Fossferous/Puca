@@ -36,7 +36,7 @@ import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { pendingOutboxCount } from '../model/notesOutbox';
-import { bodyToItems, conversionLosses, describeLosses, filesFromTransfer, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
+import { bodyToItems, conversionLosses, describeLosses, filesFromTransfer, isTextPaste, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
 import { hasTransferFiles, ONLY_PICTURES, PASTE_OFFLINE } from '../model/pasteDrop';
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
@@ -243,6 +243,11 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             className={`notes-editor-content ${dragging ? 'dropping' : ''}`}
             onPaste={showImages ? (e => {
                 if (e.defaultPrevented) return;
+                // A paste carrying TEXT is a text paste, whatever picture
+                // Chromium put on the clipboard beside it (isTextPaste) —
+                // pasting a table out of Excel into the note's text must put
+                // the table's text in the note, not a screenshot of it.
+                if (isTextPaste(e.clipboardData)) return;
                 if (takePictures(e.clipboardData)) e.preventDefault();
             }) : undefined}
             onDragOver={showImages ? (e => {

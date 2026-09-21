@@ -39,6 +39,8 @@ import { QuickAdd } from '../notes/components/QuickAdd';
 import { NoteContentSection } from '../notes/components/NoteContentSection';
 import { NoteEditor } from '../notes/components/NoteEditor';
 import { ONLY_PICTURES, PASTE_OFFLINE } from '../notes/model/pasteDrop';
+import { PACE_MS } from '../api/icsImport';
+import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 import { setMessageToastSink } from '../components/messageToastBus';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
@@ -48,14 +50,21 @@ const card = { key: 'list:1', ref: LIST, title: 'Shopping', body: '', noteAttach
 
 const png = (name = 'shot.png') => new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png' });
 
-/** A paste, as the browser delivers it: a real event carrying a transfer. */
-function paste(el: Element, data: { text?: string; files?: File[] }) {
+/** A paste, as the browser delivers it: a real event carrying a transfer.
+ *  `sidecar` is the image Chromium puts on the clipboard BESIDE rich text (a
+ *  Word paragraph, an Excel range), reachable only through `items` — the way
+ *  filesFromTransfer's fallback finds it. */
+function paste(el: Element, data: { text?: string; files?: File[]; sidecar?: File }) {
     const ev = new Event('paste', { bubbles: true, cancelable: true });
+    const items = data.sidecar ? [{ kind: 'file', type: data.sidecar.type, getAsFile: () => data.sidecar }] : [];
     Object.defineProperty(ev, 'clipboardData', {
         value: {
             files: data.files ?? [],
-            items: [],
-            types: data.files?.length ? ['Files'] : ['text/plain'],
+            items,
+            types: [
+                ...(data.files?.length || data.sidecar ? ['Files'] : []),
+                ...(data.text ? ['text/plain'] : []),
+            ],
             getData: () => data.text ?? '',
         },
     });
@@ -77,6 +86,12 @@ let toasts: string[];
 let onLine = true;
 let onLineSpy: ReturnType<typeof vi.spyOn> | null = null;
 const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); }); };
+/** Real time, not microtasks: a fan-out of creates is PACED (icsImport's
+ *  PACE_MS), so a paste of N lines takes (N-1) pauses to finish. */
+const paced = async (lines: number) => {
+    await act(async () => { await new Promise(r => { setTimeout(r, PACE_MS * lines + 60); }); });
+    await flush();
+};
 
 beforeEach(() => {
     toasts = [];
@@ -132,6 +147,15 @@ describe('a multi-line paste asks before it creates anything', () => {
         expect(dialog()).toBeNull();
     });
 
+    it('a pasted line longer than a typed one can be is truncated to the same limit', () => {
+        // `maxLength` on the field refuses a 501st character by typing; a
+        // paste must not be the one route that gets past it.
+        composer();
+        paste(itemInputs()[0], { text: `${'a'.repeat(800)}\nshort` });
+        act(() => { button('Add 2 items').click(); });
+        expect(itemInputs().map(i => i.value.length)).toEqual([MAX_ITEM_LENGTH, 'short'.length]);
+    });
+
     it('"Add as one item" makes exactly one, on one line', () => {
         composer();
         paste(itemInputs()[0], { text: 'Milk\nBread\nEggs' });
@@ -170,6 +194,22 @@ describe('a picture pasted or dropped into the composer', () => {
         composer();
         drop(document.querySelector('.notes-quickadd')!, [png('a.png'), png('b.png')]);
         expect(document.querySelectorAll('.notes-quickadd-media img')).toHaveLength(2);
+    });
+
+    it('a TEXT paste that carries a picture beside it stays text — Excel, Word, a web page', () => {
+        // Chromium puts an image/png on the clipboard next to the text for
+        // any rich copy, so "there is an image" is not "a picture was
+        // copied": a pasted table must arrive as the table's text.
+        composer();
+        const ev = paste(itemInputs()[0], { text: 'Apples\tBread\nMilk\tEggs', sidecar: png('table.png') });
+        expect(document.querySelectorAll('.notes-quickadd-media img')).toHaveLength(0);
+        // ...and the multi-line question is still asked, by the item field.
+        expect(dialog()).not.toBeNull();
+        expect(ev.defaultPrevented).toBe(true);
+        // POSITIVE CONTROL: the same side-car with NO text IS a picture.
+        act(() => { button('Cancel').click(); });
+        paste(itemInputs()[0], { sidecar: png('shot.png') });
+        expect(document.querySelectorAll('.notes-quickadd-media img')).toHaveLength(1);
     });
 
     it('anything that is not a picture is reported, not silently dropped', () => {
@@ -231,15 +271,31 @@ describe('a picture pasted or dropped onto the open note', () => {
         expect(ev.defaultPrevented).toBe(false);
         expect(addNoteMedia).not.toHaveBeenCalled();
     });
+
+    it('...not even when that text arrives with a picture side-car', async () => {
+        const { addNoteMedia, content } = openNote();
+        const ev = paste(content, { text: 'Apples\tBread\nMilk\tEggs', sidecar: png('table.png') });
+        await flush();
+        expect(ev.defaultPrevented).toBe(false);
+        expect(addNoteMedia).not.toHaveBeenCalled();
+        // POSITIVE CONTROL: the side-car alone, with no text, IS uploaded.
+        paste(content, { sidecar: png('shot.png') });
+        await flush();
+        expect(addNoteMedia).toHaveBeenCalledTimes(1);
+    });
 });
 
 // --- The open note's "Add an item…" row ---------------------------------------------
 
 describe('a multi-line paste into "Add an item…"', () => {
-    function editor() {
+    function editor(opts: { addOk?: (text: string) => boolean } = {}) {
         const added: string[] = [];
         const actions = {
-            addTask: vi.fn(async (_n: unknown, text: string) => { added.push(text); return { id: added.length } as never; }),
+            addTask: vi.fn(async (_n: unknown, text: string) => {
+                added.push(text);
+                if (opts.addOk && !opts.addOk(text)) return null as never;
+                return { id: added.length } as never;
+            }),
             content: { features: { body: false, attachments: false }, setBody: vi.fn(async () => true) },
             toggleTask: vi.fn(), deleteTaskFrom: vi.fn(), editTask: vi.fn(), moveTaskIn: vi.fn(),
             reorderTaskIn: vi.fn(), setDue: vi.fn(), setAttachments: vi.fn(), refreshNote: vi.fn(), togglePin: vi.fn(),
@@ -267,8 +323,34 @@ describe('a multi-line paste into "Add an item…"', () => {
         expect(dialogLines()).toEqual(['Milk', 'Bread', 'Eggs']);
         expect(e.actions.addTask).not.toHaveBeenCalled();   // nothing yet
         act(() => { button('Add 3 items').click(); });
-        await flush();
+        await paced(3);
         expect(e.added).toEqual(['Milk', 'Bread', 'Eggs']);
+    });
+
+    it('stops at the first refusal and SAYS how many landed', async () => {
+        const e = editor({ addOk: text => text !== 'Eggs' });
+        paste(e.input, { text: 'Milk\nBread\nEggs\nFlour' });
+        act(() => { button('Add 4 items').click(); });
+        await paced(4);
+        expect(e.added).toEqual(['Milk', 'Bread', 'Eggs']);   // Eggs was attempted and refused
+        expect(toasts).toContain('Added 2 of 4 items');
+        // POSITIVE CONTROL: nothing is said when every line lands.
+        toasts.length = 0;
+        const ok = editor();
+        paste(ok.input, { text: 'Tea\nCoffee' });
+        act(() => { button('Add 2 items').click(); });
+        await paced(2);
+        expect(ok.added).toEqual(['Tea', 'Coffee']);
+        expect(toasts.join('|')).not.toMatch(/Added/);
+    });
+
+    it('a pasted line longer than a typed one can be is truncated to the same limit', async () => {
+        const e = editor();
+        paste(e.input, { text: `${'a'.repeat(800)}\nshort` });
+        act(() => { button('Add 2 items').click(); });
+        await paced(2);
+        expect(e.added[0]).toHaveLength(MAX_ITEM_LENGTH);
+        expect(e.added[1]).toBe('short');
     });
 
     it('Cancel creates nothing, and a one-line paste never asks', () => {

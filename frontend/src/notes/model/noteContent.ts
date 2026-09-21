@@ -59,10 +59,29 @@ export function pasteAsOneLine(text: string): string {
 }
 
 /** The minimum of a `DataTransfer` this module reads: a clipboard paste and
- *  an OS drop both satisfy it, and a test can hand-build one. */
+ *  an OS drop both satisfy it, and a test can hand-build one. A drop has no
+ *  `getData` worth reading; a paste does. */
 export interface TransferLike {
     files?: ArrayLike<File> | null;
     items?: ArrayLike<DataTransferItem> | null;
+    getData?: (format: string) => string;
+}
+
+/** True when this paste is TEXT that merely carries a picture alongside it.
+ *
+ *  Chromium puts an `image/png` on the clipboard NEXT TO the text whenever
+ *  rich content is copied — a Word paragraph, a range of Excel cells, a
+ *  selection of a web page — so "the clipboard holds an image" is not "a
+ *  picture was copied", and a picture handler that only asks the first
+ *  question turns a pasted table into a screenshot of a table. A real
+ *  screenshot, or "Copy image", carries no text at all, which is what tells
+ *  the two apart. Drops are unaffected: an OS drop of files has no text.
+ *
+ *  (Púca's chat composer, Chat.tsx, takes the images-first branch on purpose
+ *  — an image pasted there IS the message. A note's text is not.) */
+export function isTextPaste(dt: TransferLike | null | undefined): boolean {
+    if (!dt || typeof dt.getData !== 'function') return false;
+    return (dt.getData('text/plain') || '').trim() !== '';
 }
 
 /** The files carried by a paste or a drop, split into pictures and the rest.

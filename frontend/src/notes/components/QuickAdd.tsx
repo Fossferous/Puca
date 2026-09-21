@@ -13,10 +13,10 @@ import { createPortal } from 'react-dom';
 import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
 import { pushMessageToast } from '../../components/messageToastBus';
-import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
+import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
-import { filesFromTransfer, linesFromPaste, pasteAsOneLine } from '../model/noteContent';
+import { filesFromTransfer, isTextPaste, linesFromPaste, pasteAsOneLine } from '../model/noteContent';
 import { DrawingCanvas } from './DrawingCanvas';
 import { PastedLinesDialog } from './PastedLinesDialog';
 import { hasTransferFiles, ONLY_PICTURES } from '../model/pasteDrop';
@@ -110,9 +110,11 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     /** A paste anywhere in the composer: a picture is taken here. Multi-line
      *  TEXT is the item fields' business (onPasteItem) — this must not
      *  intercept a paste into the note's text, where lines are what is
-     *  wanted. */
+     *  wanted. A paste that carries text is text, whatever picture Chromium
+     *  put beside it (isTextPaste). */
     const onPasteRoot = (e: React.ClipboardEvent) => {
         if (e.defaultPrevented) return;
+        if (isTextPaste(e.clipboardData)) return;
         const { images } = filesFromTransfer(e.clipboardData);
         if (images.length === 0) return;
         e.preventDefault();
@@ -122,9 +124,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     /** A paste into an item field. More than one line asks first — items are
      *  removed one at a time, so a silent forty-item paste is unrecoverable. */
     const onPasteItem = (i: number, e: React.ClipboardEvent<HTMLInputElement>) => {
-        const { images } = filesFromTransfer(e.clipboardData);
-        if (images.length > 0) return;          // the root handler takes it
         const text = e.clipboardData?.getData('text') ?? '';
+        // A picture goes to the root handler — but only when the root handler
+        // will actually take it, which it does not for a text paste.
+        if (!isTextPaste(e.clipboardData) && filesFromTransfer(e.clipboardData).images.length > 0) return;
         const lines = linesFromPaste(text);
         if (lines.length < 2) return;           // one line pastes as normal
         e.preventDefault();
@@ -139,7 +142,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         setItems(prev => {
             const next = [...prev];
             const blank = (next[at] ?? '').trim() === '';
-            next.splice(blank ? at : at + 1, blank ? 1 : 0, ...lines);
+            // Truncated like every other route into an item: the field below
+            // refuses a 600th character by typing, so a paste must not slip
+            // one in behind it.
+            next.splice(blank ? at : at + 1, blank ? 1 : 0, ...lines.map(l => l.slice(0, MAX_ITEM_LENGTH)));
             return next;
         });
         setPaste(null);
@@ -148,8 +154,8 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const applyPasteOne = () => {
         if (!paste) return;
         const { text, at } = paste;
-        const one = pasteAsOneLine(text).slice(0, 500);
-        setItems(prev => prev.map((v, idx) => (idx === at ? (v.trim() === '' ? one : `${v}${one}`).slice(0, 500) : v)));
+        const one = pasteAsOneLine(text).slice(0, MAX_ITEM_LENGTH);
+        setItems(prev => prev.map((v, idx) => (idx === at ? (v.trim() === '' ? one : `${v}${one}`).slice(0, MAX_ITEM_LENGTH) : v)));
         setPaste(null);
         focusItem(at);
     };
@@ -301,7 +307,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                             ref={el => { itemRefs.current[i] = el; }}
                             value={it}
                             placeholder={i === 0 ? 'List item' : ''}
-                            maxLength={500}
+                            maxLength={MAX_ITEM_LENGTH}
                             onChange={e => setItems(prev => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
                             onKeyDown={e => onKeyItem(i, e)}
                             onPaste={e => onPasteItem(i, e)}
