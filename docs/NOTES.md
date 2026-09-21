@@ -524,19 +524,23 @@ launch — on **its own channel**:
   the network mid-download), wait for *Retry*, restore the network and press
   it. Capacitor delivers every download's progress to every listener, and the
   first download of the same version cannot be told apart from the retry's
-  (its bundle id is only known when it finishes), so both run at once and the
-  bar may jump between their two percentages; the stall watchdog is fed by
-  either. Expect: the gate still ends in the app or a control (never a bare
+  (its bundle id is only known when it finishes), so both run at once, the bar
+  follows whichever is further along (it never goes backwards), and the stall
+  watchdog is fed by either. Expect: the gate still ends in the app or a control (never a bare
   spinner), exactly one reload into the new version, and no *Update failed*
   when the first download finishes late. The unit tests
   (`notesUpdateGate.test.tsx`) cover each run's own listener and an event
-  labelled with another version, which the engine drops — not this. Note the
-  version filter does less on a device than it reads: Android labels an event
-  for a bundle whose info is not stored yet (the normal state mid-download)
-  `builtin`, and `builtin` is deliberately let through, so mid-download events
-  from BOTH runs usually pass the filter. This walk is what covers that, and a
-  run that ends in *Update failed* without the network ever dropping again is
-  the symptom of narrowing that escape hatch.
+  labelled with another version, which the engine drops. They cannot reach
+  the case above: the plugin commits the bundle's info, real version string
+  included, before it sends the first progress event (CapgoUpdater.java's
+  download: saveBundleInfo, then notifyDownload), so a live run's events do
+  carry a usable label and the filter really does drop another version's
+  events on a device; it is the SAME version's abandoned download that no
+  label can separate. The `builtin` escape hatch stays for ids with no stored
+  info (the built-in bundle, a deleted entry, an unknown id) and for payloads
+  with no label at all, where dropping the event would fake a stall; a run
+  that ends in *Update failed* without the network ever dropping again is the
+  symptom of narrowing it.
 
 **Existing installs need one manual install.** Notes APKs up to and including
 0.9.815 have no updater, so nothing can reach them over the air; they stay as

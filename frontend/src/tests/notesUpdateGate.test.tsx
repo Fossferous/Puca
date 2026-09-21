@@ -273,6 +273,12 @@ describe('a stalled download never holds the app — including after Retry', () 
         // reason to drop it, or this run's own progress could fake a stall.
         await act(async () => { live({ percent: 40, bundle: { version: 'builtin' } }); });
         expect(container.textContent).toContain('40% downloaded');
+        // And the bar is monotonic: the abandoned download of the SAME version
+        // (no label can separate it) reporting a lower figure does not pull
+        // it back, which would read as a second failure.
+        await act(async () => { live({ percent: 30 }); });
+        expect(container.textContent).toContain('40% downloaded');
+        expect(container.textContent).not.toContain('30% downloaded');
     });
 
     it('after Retry, the new run is still the only one: a menu check shares it', async () => {

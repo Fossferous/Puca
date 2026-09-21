@@ -200,6 +200,7 @@ public final class ReminderRules {
         if (!s.notificationsAllowed) return false;
         if (s.alarmNeeded && !s.alarmPresent) return false;
         if (ask.due == null || ask.due.isEmpty()) return false;
+        if (s.entries == null) return false; // anything unknown is no, the armed list included
         Set<String> armed = new HashSet<>();
         for (ReminderPlan.Entry e : s.entries) armed.add(e.id + "|" + e.mark);
         for (Due d : ask.due) {

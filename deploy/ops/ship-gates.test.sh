@@ -360,6 +360,7 @@ check "the FAIL names exactly the two @notesSw lines" "$([ "$(printf '%s
 ' "$sw_lines" | grep -c .)" = 2 ] && echo 1 || echo 0)" "$sw_lines"
 for sw_f in deploy/Caddyfile.example.com deploy/webapp/README.md; do
 	sw_missing=""
+	[ "$(grep -c . <<< "$sw_lines")" = 2 ] || sw_missing="fewer than two lines to check; "
 	while IFS= read -r sw_line; do
 		[ -n "$sw_line" ] || continue
 		grep -qF "$sw_line" "$REPO/$sw_f" || sw_missing="$sw_missing$sw_line; "
@@ -632,6 +633,9 @@ out="$(preflight "$TMP/src-commentflag.tgz")"; rc=$?
 check "and one whose set_ignore_missing is commented out" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'no migration file for applied version 3')" = 1 ] && echo 1 || echo 0)" "$out"
 # A pipe race passes most runs and fails some, so one green run proves little:
 # the same rollback, twenty times in a row, with a main.rs far past 64 KB.
+# This is the suite's slowest case by design (twenty full pre-flights, two
+# tar extractions each); the count IS the proof (0/20 with the old pipeline),
+# so do not trim it on runtime grounds.
 big_ok=0; big_last=""
 for _ in $(seq 1 20); do
 	out="$(preflight "$TMP/src-big.tgz")"; rc=$?
@@ -720,6 +724,7 @@ echo "ssh \$*" >> "$LOG"
 case "\$*" in
 	*http_code*variant=notes*) if [ -f "$TMP/notes-code" ]; then cat "$TMP/notes-code"; elif [ -f "$TMP/notes-ota.json" ]; then echo 200; else echo 404; fi ;;
 	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
+	*'test -e '*mobile-update-notes.json*) if [ -f "$TMP/notes-file" ]; then echo present; else echo absent; fi ;;
 esac
 exit 0
 STUB
@@ -844,6 +849,20 @@ STUB
 	echo 200 > "$TMP/notes-code"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "and a 200 whose body is an HTML page, not a manifest" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered its Notes manifest with something that is not JSON")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
+	# The backend also answers 404 for a manifest file it cannot parse
+	# (src/update_routes.rs serve_json_file), and a corrupt manifest still
+	# carried a floor: a 404 makes the ship probe the file, and only a
+	# missing file means "no floor".
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}
+' > "$TMP/notes-ota.json"
+	echo 404 > "$TMP/notes-code"
+	touch "$TMP/notes-file"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "a 404 with the manifest FILE still on the host (corrupt) REFUSES before anything is written" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: sandbox answers 404 for its Notes manifest, but')" = 1 ] && [ "$(has "$out" 'mobile-update-notes.json exists on it')" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
+	rm -f "$TMP/notes-file"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "and a 404 with no file (before the first Notes OTA) ships: no floor to keep (positive control)" "$(grep -q 'test -e' "$LOG" && grep -q 'cat > mobile-update-notes.json' "$LOG" && [ "$(has "$out" 'PASS  sandbox notes OTA endpoint serves native.min 9.9.8')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
+	rm -f "$TMP/notes-code"
 	rm -f "$TMP/notes-code" "$TMP/notes-ota.json"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "a 404 (no Notes manifest on the host yet) proceeds to write one (positive control)" "$([ "$(has "$out" 'REFUSING')" = 0 ] && grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -q '"min": "9.9.8"' "$LOG" && echo 1 || echo 0)" "$out"

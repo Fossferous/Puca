@@ -359,27 +359,31 @@ export async function runCapacitorOta(opts: RunCapacitorOtaOptions): Promise<Ota
         // missing label, or the plugin's 'builtin' fallback for a null one,
         // is let through: dropping this run's own events would fake a stall.
         //
-        // How OFTEN a label is usable is a device question, and the answer is
-        // "less than it looks". Android builds the event's bundle with
-        // getBundleInfo(id) (CapgoUpdater.java), which returns version=null
-        // for a bundle whose info is not stored yet - the normal state WHILE
-        // it downloads - and BundleInfo.getVersionName() turns a null version
-        // into the string 'builtin'. So mid-download both runs' events can
-        // read 'builtin' and both are let through, by design: a labelled
-        // event is the case this drops, and the device check is what covers
-        // the rest. Never narrow the 'builtin' escape hatch on the strength
-        // of the unit tests - it is the common path, not the rare one.
+        // A label is usable more often than the plugin's fallback suggests:
+        // Android commits the bundle's info, real version string included,
+        // before it sends the first progress event (CapgoUpdater.java's
+        // download: saveBundleInfo, then notifyDownload), so a live run's
+        // events do carry the version and this filter really drops another
+        // version's events on a device. getBundleInfo(id) answers 'builtin'
+        // only for an id with no stored info (the built-in bundle, one whose
+        // entry was deleted, an unknown id), and some payloads carry no label
+        // at all: both are let through, because dropping this run's own
+        // events would fake a stall. Never narrow that escape hatch on the
+        // strength of the unit tests; the device check is what covers it.
         const wanted = updateInfo.version;
         dlListener = await CapacitorUpdater.addListener('download', (info: { percent?: number; bundle?: { version?: unknown } }) => {
             const label = info.bundle?.version;
             if (typeof label === 'string' && label && label !== 'builtin' && label !== wanted) return;
             if (typeof info.percent === 'number') {
                 const pct = Math.min(100, Math.max(0, Math.round(info.percent)));
+                // Monotonic: the abandoned same-version download (above) can
+                // report a lower figure than this run's, and a bar that goes
+                // backwards reads as a second failure.
                 if (pct > lastPct) {
                     lastPct = pct;
                     lastAdvanceAt = Date.now();
+                    setState(s => ({ ...s, progress: pct }));
                 }
-                setState(s => ({ ...s, progress: pct }));
             }
         });
 

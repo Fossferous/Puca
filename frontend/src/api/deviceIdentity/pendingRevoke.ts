@@ -168,7 +168,12 @@ let inFlight: Promise<'none' | RevokeOutcome> | null = null;
  */
 export function settlePendingDeviceRevoke(token: string | null, uid: number | null): Promise<'none' | RevokeOutcome> {
     if (inFlight) return inFlight;
-    if (!readPendingRevoke() || !token) return Promise.resolve('none');
+    const m = readPendingRevoke();
+    if (!m || !token) return Promise.resolve('none');
+    // Another account's marker is not this call's to settle, so it does not
+    // wait for the cross-tab lock either (an enrolment holds that across
+    // POST /devices). The locked body re-reads the marker and checks again.
+    if (m.uid !== null && uid !== null && m.uid !== uid) return Promise.resolve('none');
     inFlight = withDeviceRevokeLock(() => settlePendingDeviceRevokeLocked(token, uid))
         .catch((): 'failed' => 'failed')
         .finally(() => { inFlight = null; });

@@ -223,4 +223,13 @@ public class ReminderRulesTest {
     public void noStateAtAllDoesNotOwnThem() {
         assertFalse(ReminderRules.ownsDueReminders(null, ask("42"), NOW));
     }
+
+    @Test
+    public void aStateWithNoEntryListDoesNotOwnThem() {
+        // Unreachable through the provider (the store always hands over a
+        // list), but the rule is the tested unit: unknown is no, never a throw.
+        ReminderRules.OwnerState s = new ReminderRules.OwnerState(true, LIVE_EXP, "42", SERVER,
+                NOW - 30 * 60_000L, true, true, true, null);
+        assertFalse(ReminderRules.ownsDueReminders(s, ask("42"), NOW));
+    }
 }

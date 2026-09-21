@@ -720,18 +720,31 @@ cmd_mobile_notes() {
 	# anywhere: lowering it re-exposes every APK between the two versions to
 	# web code calling a plugin they do not have.
 	# A host that cannot be read cannot be proved safe: refuse rather than
-	# guess. curl -s exits 0 on ANY status, so the status is read first: 404
-	# is the one answer that means "no Notes manifest here yet" (no floor to
-	# keep); 200 must carry a JSON manifest; a 502/503 or an HTML error page
-	# from a backend mid-restart proves nothing and used to read as "no floor".
-	local entry served_code served_body served_min lowered=() json_re='^[[:space:]]*[{]'
+	# guess. curl -s exits 0 on ANY status, so the status is read first. 404
+	# means the backend has no manifest it can serve: EITHER no Notes manifest
+	# yet (no floor to keep) OR a file it could not parse (src/update_routes.rs
+	# answers 404 for both), and a corrupt manifest still carried a floor, so a
+	# 404 probes the file and its presence refuses. 200 must carry a JSON
+	# manifest; a 502/503 or an HTML error page from a backend mid-restart
+	# proves nothing and used to read as "no floor".
+	local entry served_code served_body served_min probe lowered=() json_re='^[[:space:]]*[{]'
 	for entry in "${HOSTS[@]}"; do
 		if ! served_code="$(remote_code "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
 			echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
 			exit 1
 		fi
 		case "$served_code" in
-			404) served_body="" ;;
+			404)
+				probe="$(ssh_to "$entry" "test -e '$INSTALL_DIR/mobile-update-notes.json' && echo present || echo absent")" || probe=""
+				case "$probe" in
+					absent) served_body="" ;;
+					present)
+						echo "REFUSING: $(label_of "$entry") answers 404 for its Notes manifest, but $INSTALL_DIR/mobile-update-notes.json exists on it: a manifest the backend cannot parse still carried a floor, and nothing proves this release keeps it."
+						exit 1 ;;
+					*)
+						echo "REFUSING: could not tell whether $(label_of "$entry") has a Notes manifest file ($INSTALL_DIR/mobile-update-notes.json), so nothing proves this release keeps its native.min."
+						exit 1 ;;
+				esac ;;
 			200)
 				if ! served_body="$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
 					echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
