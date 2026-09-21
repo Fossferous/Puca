@@ -5,6 +5,13 @@
  * happen — the window expires, or the note closes — nothing names those
  * files any more, so they are deleted instead of left on the server counting
  * against the owner's quota. Undo itself deletes nothing.
+ *
+ * The cleanup asks what the note holds AT THAT MOMENT and never deletes a
+ * file a live item still names, so these drive the component the way the app
+ * does: the deletes empty the note's task cache, and the editor re-renders
+ * without the items before the Undo window runs out. The guard itself (a
+ * refetch bringing an item back, one delete refused) is in
+ * notesConvertChecklist.test.tsx.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -58,6 +65,10 @@ async function hideCheckboxes(actions: NoteActions) {
     await act(async () => { btn.click(); });
     await flush();
     expect(document.body.textContent).toMatch(/Turned the checklist into text/);
+    // The items are gone from the server and from the note's cache: the
+    // editor renders the note without them, as it does in the app.
+    act(() => { root.render(<NoteContentSection card={card} actions={actions} tasks={[]} tasksLoaded />); });
+    await flush();
 }
 
 beforeEach(() => {
