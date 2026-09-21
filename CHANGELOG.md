@@ -146,6 +146,17 @@ one-line summary; this file is the full story. Versions follow
   before.
 
 ### Fixed
+- **Sound in automatically recorded clips no longer runs 100 to 200 ms
+  behind the picture, and no longer drifts.** The desktop-audio player the
+  clip buffer records through schedules each packet a little ahead, and
+  that lead grew over a session whenever the sound device's clock and the
+  app's disagreed; the clip carried the sound where it was played, not
+  where it happened. The buffer now records the lead with each packet and
+  takes it back out when the clip is made; your microphone is held back
+  by the same amount so it stays in step with the game audio. A rare
+  clock-drift reset in that player now leaves a short gap in the clip
+  instead of playing a stretch of sound twice. Measured silently in an
+  emulated end-to-end run (`frontend/e2e/clip-av-emulation.mjs`).
 - **Saving an attachment on Android saves it.** In both apps the Save button
   on a file reported success without writing anything. Files now land in
   Documents/Puca under a unique name, or you are told why they could not.

@@ -29,7 +29,8 @@
     "noUncheckedSideEffectImports": true
   },
   "include": [
-    "src"
+    "src",
+    "e2e/av-emulation/main.ts"
   ],
   "exclude": [
     "src/**/*.test.ts",
