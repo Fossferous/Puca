@@ -108,7 +108,11 @@ async function run(runIndex) {
     const errors = [];
     page.on('pageerror', e => errors.push(String(e)));
     page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') errors.push(m.text().slice(0, 200)); });
-    await page.addInitScript((p) => { window.__AV_PARAMS__ = p; }, { bursts: [{ frame: FLASHES[0], offsetMs: 0 }, { frame: FLASHES[1], offsetMs: CONTROL_MS }] });
+    // AV_RUST_MODEL=zero: no modelled Rust-side latency at all, so the number
+    // is the JS pipeline's own constant (what NATIVE_AUDIO_OFFSET_US can
+    // correct); the default keeps the shell's measured-shape latencies.
+    const rust = process.env.AV_RUST_MODEL === 'zero' ? { readbackLagMs: 0, videoIpcMs: [0, 0], audioDeliveryMs: [0, 0] } : {};
+    await page.addInitScript((p) => { window.__AV_PARAMS__ = p; }, { bursts: [{ frame: FLASHES[0], offsetMs: 0 }, { frame: FLASHES[1], offsetMs: CONTROL_MS }], ...rust });
     await page.goto(origin + '/');
     await page.waitForFunction(() => !!window.__av, null, { timeout: 15000 });
     const loaded = await page.evaluate((f) => window.__av.load('/flash.h264', f), FLASHES[0]);
@@ -138,6 +142,8 @@ try {
         const [e0, e1] = m.errorsMs;
         console.log(`  run ${r.runIndex}: A/V error ${e0?.toFixed(1)} ms (+ = audio late); control burst ${e1?.toFixed(1)} ms, i.e. shift seen as ${(e1 - e0).toFixed(1)} ms for ${CONTROL_MS}`);
         console.log(`  run ${r.runIndex}: clip-av diagnostic: ${r.sealed.diag.filter(l => l.includes('clip-av')).join(' | ') || '(not emitted)'}`);
+        const L = r.truth.lead;
+        console.log(`  run ${r.runIndex}: loopback scheduling lead: first ${L.first?.toFixed(1)} ms (${L.firstAtMs.toFixed(0)} ms after the first present), min ${L.min?.toFixed(1)}, p50 ${L.p50?.toFixed(1)}, max ${L.max?.toFixed(1)} ms over ${L.n} packets; around the bursts ${L.aroundBursts.map(x => x?.toFixed(1)).join(' / ')} ms; ${L.suspendedStarts} scheduled while suspended`);
         const noise = r.errors.filter(e => !/favicon|404/.test(e));
         if (noise.length) console.log('  run ' + r.runIndex + ': page errors/warnings: ' + noise.slice(0, 4).join(' || '));
         ck(e0 !== null && e1 !== null && Math.abs((e1 - e0) - CONTROL_MS) < 12, `run ${r.runIndex}: the oracle sees the ${CONTROL_MS} ms control as ${CONTROL_MS} ms`, `${(e1 - e0).toFixed(1)} ms`);
@@ -145,7 +151,7 @@ try {
     }
     const errs = results.map(r => r.m.errorsMs[0]);
     console.log(`\nA/V ERROR of the JS pipeline under this emulation: ${errs.map(e => e.toFixed(1)).join(' / ')} ms (audio late)`);
-    console.log(`  modelled Rust side: agent head start ${r0.truth.params.agentHeadStartMs} ms, readback lag ${r0.truth.params.readbackLagMs} ms, video IPC ${r0.truth.params.videoIpcMs} ms, audio delivery ${r0.truth.params.audioDeliveryMs} ms after each 10 ms packet`);
+    console.log(`  modelled Rust side${process.env.AV_RUST_MODEL === 'zero' ? ' (ZEROED)' : ''}: agent head start ${r0.truth.params.agentHeadStartMs} ms, readback lag ${r0.truth.params.readbackLagMs} ms, video IPC ${r0.truth.params.videoIpcMs} ms, audio delivery ${r0.truth.params.audioDeliveryMs} ms after each 10 ms packet`);
     ck(errs.every(e => Math.abs(e) < 250), 'A/V error under 250 ms (the number is the finding, not a pass/fail)', errs.map(e => e.toFixed(1)).join(' / '));
 } finally {
     await browser.close();

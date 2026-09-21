@@ -109,15 +109,19 @@ function notifyArmed(armed: boolean): void {
  *  The picker path's figure (headless synthetic run, spike S4). */
 export const AUDIO_OFFSET_US = 40_000;
 /** The native path anchors audio by measuring both clocks in the worker
- *  (replayWorker.ts vOriginMs); the picker's 40 ms would only add lag.
- *  UNCALIBRATED. What the anchor cannot see is the desktop-audio leg's own
- *  lead (WASAPI period, IPC, nativeCapture's loopback scheduling ~50 ms
- *  ahead, the mixing hop) and the video stamp's lag behind the present.
- *  Setting this needs an end-to-end sync measurement through the real
- *  pipeline (a flash and a click); the puca.log `clip-av` line records
- *  only the anchor and how late the old code was, not this residual.
- *  Negative moves audio earlier. */
-export const NATIVE_AUDIO_OFFSET_US = 0;
+ *  (replayWorker.ts vOriginMs) and subtracts the loopback context's
+ *  scheduling lead per sample (nativeCapture.ts onLead); the picker's
+ *  40 ms would only add lag. What remains and is NOT corrected by either:
+ *  the WASAPI period and IPC on the Rust side, the mixing hop, and the
+ *  video stamp's lag behind the present. e2e/clip-av-emulation.mjs
+ *  measures the JS part of that residual; the Rust part needs a flash and
+ *  a click through the real app. Negative moves audio earlier.
+ *  CALIBRATED 2026-09-21 by that emulation with the modelled Rust side
+ *  zeroed: the JS pipeline alone (the 10 ms packet, the mixing hop, the
+ *  track processor) put audio 32-51 ms late over two runs. -30 ms takes
+ *  the certain part back and leaves the rest late, never early (early is
+ *  noticed at ~45 ms, late only at ~125 ms). */
+export const NATIVE_AUDIO_OFFSET_US = -30_000;
 
 export function isClipCaptureSupported(): boolean {
     if (!isTauri()) return false;
@@ -148,6 +152,9 @@ interface Session {
     previewSeq: number;
     /** The native A/V anchor last written to puca.log (logAvAnchor). */
     avLoggedShiftMs?: number;
+    /** The loopback scheduling lead last forwarded to the worker (leadReporter). */
+    leadSentMs?: number;
+    leadSentAt?: number;
     /** Native (no-picker) session teardown - stops the Rust-side capture
      *  threads. disarm() calls this before anything else if present. Reads
      *  `sysAudioStop` at CALL time, so a retried audio capture is the one
@@ -315,7 +322,7 @@ export async function armNative(): Promise<void> {
 
         let audio: Awaited<ReturnType<typeof startNativeSystemAudioTrack>> | null = null;
         try {
-            audio = await startNativeSystemAudioTrack(onAudioError, await preferredLoopbackDeviceName());
+            audio = await startNativeSystemAudioTrack(onAudioError, await preferredLoopbackDeviceName(), leadReporter(s));
         } catch (e) {
             // System audio is a nice-to-have here (unlike video, without which
             // there is nothing to clip) - arm mic-only rather than fail the
@@ -408,7 +415,7 @@ export async function retrySystemAudio(): Promise<void> {
             notice: `System audio capture ended: ${message}`,
         });
     };
-    const audio = await startNativeSystemAudioTrack(onAudioError, await preferredLoopbackDeviceName());
+    const audio = await startNativeSystemAudioTrack(onAudioError, await preferredLoopbackDeviceName(), leadReporter(s));
     if (session !== s) { await audio.stop(); return; }
 
     s.sysAudioStop = audio.stop;
@@ -417,6 +424,21 @@ export async function retrySystemAudio(): Promise<void> {
     s.sysGain.gain.value = 1;
     s.sysSrc.connect(s.sysGain).connect(s.dest);
     emit({ hasSystemAudio: true, systemAudioLost: null, systemAudioDevice: audio.deviceName, notice: null });
+}
+
+/** Forward the loopback context's scheduling lead (nativeCapture.ts) to the
+ *  worker: every change of 2 ms or more, and at least once a second, so the
+ *  worker's lookup has a point near every sample without a message per
+ *  10 ms packet. */
+function leadReporter(s: Session): (renderAtMs: number, leadMs: number) => void {
+    return (renderAtMs, leadMs) => {
+        if (session !== s) return;
+        const now = performance.now();
+        if (s.leadSentMs !== undefined && Math.abs(leadMs - s.leadSentMs) < 2 && s.leadSentAt !== undefined && now - s.leadSentAt < 1000) return;
+        s.leadSentMs = leadMs; s.leadSentAt = now;
+        const msg: ToWorker = { t: 'audioLead', renderAtMs, leadMs };
+        try { s.worker.postMessage(msg); } catch { /* worker gone */ }
+    };
 }
 
 /** The native A/V anchor into puca.log: once per arm, and again whenever it
@@ -428,7 +450,7 @@ function logAvAnchor(s: Session, av: NonNullable<WorkerStatus['avAnchor']>): voi
     if (!isTauri()) return;
     if (s.avLoggedShiftMs !== undefined && Math.abs(av.shiftMs - s.avLoggedShiftMs) < 10) return;
     s.avLoggedShiftMs = av.shiftMs;
-    const line = `clip-av video-origin=${av.videoOriginMs}ms shift=${av.shiftMs}ms legacy-late=${av.legacyLateMs}ms`;
+    const line = `clip-av video-origin=${av.videoOriginMs}ms shift=${av.shiftMs}ms legacy-late=${av.legacyLateMs}ms lead=${av.leadMs ?? 'n/a'}ms`;
     void import('@tauri-apps/api/core')
         .then(({ invoke }) => invoke('log_stream_diag', { line }))
         .catch(() => { /* best effort */ });

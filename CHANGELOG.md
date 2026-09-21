@@ -4,6 +4,18 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Sound in automatically recorded clips no longer runs 100 to 200 ms
+  behind the picture, and no longer drifts.** The desktop-audio player the
+  clip buffer records through schedules each packet a little ahead, and
+  that lead grew over a session whenever the sound device's clock and the
+  app's disagreed; the clip carried the sound where it was played, not
+  where it happened. The buffer now records the lead with each packet and
+  takes it back out when the clip is made. Measured silently in an
+  emulated end-to-end run (`frontend/e2e/clip-av-emulation.mjs`).
+
 ## 0.9.816 — 2026-09-21
 
 Clips that cost a sixth of the CPU, no longer lose two seconds after a press, no longer put their sound late by the recorder's start-up time, and keep their pointer moving; DeepFilter rides out CPU spikes instead of giving up.

@@ -217,6 +217,10 @@ export async function preferredLoopbackDeviceName(): Promise<string | null> {
 export async function startNativeSystemAudioTrack(
     onError?: (message: string) => void,
     deviceName?: string | null,
+    // Called per packet with the wall time (performance.now ms) its first
+    // sample will RENDER at and the scheduling lead that puts it there.
+    // The clip worker subtracts that lead: see the comment at src.start.
+    onLead?: (renderAtMs: number, leadMs: number) => void,
 ): Promise<NativeAudioHandle> {
     if (!isTauri()) throw new Error('native capture is desktop only');
     const { invoke } = await import('@tauri-apps/api/core');
@@ -266,6 +270,18 @@ export async function startNativeSystemAudioTrack(
             if (playhead < now + 0.01) playhead = now + JITTER_S; // prime / recover from underrun
             else if (playhead > now + MAX_BACKLOG_S) playhead = now + JITTER_S; // drift reset
             src.start(playhead);
+            // THE SCHEDULING LEAD is A/V error. This packet was captured up to
+            // now, and renders `playhead - now` later: JITTER_S at a prime,
+            // then whatever the gap between the capture device's clock and
+            // this context's clock has accumulated, up to MAX_BACKLOG_S. The
+            // clip pipeline downstream sees only render times, so without
+            // this figure a clip's system audio lands late by the lead — 100
+            // to 200 ms, and drifting within one session, measured 2026-09-21
+            // by e2e/clip-av-emulation.mjs. Reported with the wall time the
+            // packet renders at, which is what the worker can look up an
+            // audio sample by (replayWorker.ts leadUsAt).
+            const leadMs = (playhead - now) * 1000;
+            onLead?.(performance.now() + leadMs, leadMs);
             playhead += buf.duration;
         } catch (err) {
             console.warn('[nativeCapture] Dropped malformed desktop-audio chunk:', err);

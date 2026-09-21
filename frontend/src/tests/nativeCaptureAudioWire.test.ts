@@ -41,9 +41,10 @@ function fire(name: string, payload: unknown) {
 }
 
 class StubAudioContext {
+    static last: StubAudioContext | null = null;
     state = 'running';
     currentTime = 0;
-    constructor(_opts?: unknown) {}
+    constructor(_opts?: unknown) { StubAudioContext.last = this; }
     createMediaStreamDestination() {
         return { channelCount: 2, stream: { getAudioTracks: () => [{ kind: 'audio' }] } };
     }
@@ -103,6 +104,38 @@ describe('the clip-audio invoke wire', () => {
         // POSITIVE CONTROL: our own generation's death gets through.
         fire('clip-audio-capture-error', { message: 'device invalidated', generation: 5 });
         expect(errors).toEqual(['device invalidated']);
+        await h.stop();
+    });
+
+    /** The scheduling lead (playhead - currentTime) IS the A/V error the clip
+     *  worker subtracts, so what is reported must be exactly what start()
+     *  was given: JITTER_S at a prime, growing by each packet's duration
+     *  while the context's clock stands still (the loopback device running
+     *  ahead of it), back to JITTER_S after an underrun, and never past
+     *  MAX_BACKLOG_S (the drift reset). */
+    test('reports each packet\'s scheduling lead with the wall time it renders at', async () => {
+        invokeMock.mockResolvedValue({ device_name: 'Speakers', generation: 9 });
+        const leads: { renderAt: number; leadMs: number }[] = [];
+        const { startNativeSystemAudioTrack } = await subject();
+        const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs) => leads.push({ renderAt, leadMs }));
+        const ctx = StubAudioContext.last!;
+        const pcm = new Float32Array(480 * 2); // one 10 ms stereo packet
+        const packet = () => ({ data: btoa(String.fromCharCode(...new Uint8Array(pcm.buffer))), sample_rate: 48000, channels: 2, bits_per_sample: 32, silent: false, generation: 9 });
+        ctx.currentTime = 0;
+        fire('clip-audio-data', packet()); // primes at now + 50 ms
+        fire('clip-audio-data', packet()); // appended: 60 ms ahead of a clock that did not move
+        ctx.currentTime = 1;               // the clock jumped past the playhead: an underrun
+        fire('clip-audio-data', packet()); // re-primed at now + 50 ms
+        expect(leads.map(l => Math.round(l.leadMs))).toEqual([50, 60, 50]);
+        const now = performance.now();
+        for (const l of leads) expect(Math.abs(l.renderAt - l.leadMs - now)).toBeLessThan(500);
+        // The drift reset: 60 more packets on a still clock push the playhead
+        // 600 ms ahead; past MAX_BACKLOG_S (500) it re-primes at 50.
+        for (let i = 0; i < 60; i++) fire('clip-audio-data', packet());
+        const drift = leads.slice(3).map(l => Math.round(l.leadMs));
+        expect(Math.max(...drift)).toBeLessThanOrEqual(500);
+        expect(Math.max(...drift)).toBeGreaterThanOrEqual(490); // it really climbed to the cap before resetting
+        expect(drift[drift.length - 1]).toBeLessThanOrEqual(250); // and came back down (50 + a few 10 ms packets)
         await h.stop();
     });
 });

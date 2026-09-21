@@ -36,6 +36,12 @@ export interface ArmConfig {
 export type ToWorker =
     | { t: 'arm'; cfg: ArmConfig; video: ReadableStream<VideoFrame> | null; audio: ReadableStream<AudioData> | null }
     | { t: 'rebindAudio'; audio: ReadableStream<AudioData> | null }
+    /** Native captures: the loopback context's scheduling lead changed. The
+     *  packet scheduled now renders at `renderAtMs` (performance.now ms in
+     *  the main thread; the worker's clock is the same origin), `leadMs`
+     *  after it was captured. The worker subtracts the lead in effect for
+     *  each audio sample at seal (replayWorker.ts leadUsAt). */
+    | { t: 'audioLead'; renderAtMs: number; leadMs: number }
     /** One already-encoded Annex-B access unit from clip_capture.rs, in
      *  capture order. `bytes` is TRANSFERRED. `codec`/`codedWidth`/`codedHeight`
      *  are present only on the chunk that carries a fresh SPS (in practice the
@@ -90,7 +96,7 @@ export interface WorkerStatus {
     /** Native captures only, once both clocks have 5 s of samples: the A/V
      *  anchor seal() applies (replayWorker.ts vOriginMs). Diagnostic;
      *  replayBuffer writes it to puca.log. */
-    avAnchor?: { videoOriginMs: number; shiftMs: number; legacyLateMs: number };
+    avAnchor?: { videoOriginMs: number; shiftMs: number; legacyLateMs: number; leadMs: number | null };
 }
 
 export interface SealedInfo {

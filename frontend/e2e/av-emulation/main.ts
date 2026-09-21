@@ -20,7 +20,7 @@ declare global {
         __AV_CODEC__: string;
         __AV_FLASH_FRAME__: number;
         __AV_TRUTH__: { bursts: { frame: number; flashAt: number; burstAt: number; offsetMs: number }[]; v0: number; agentStart: number } | undefined;
-        __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; presented: () => { k: number; presentAt: number; tsUs: number }[] };
+        __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; leads: { at: number; leadMs: number; state: string }[]; presented: () => { k: number; presentAt: number; tsUs: number }[] };
         __av: typeof api;
     }
 }
@@ -171,6 +171,16 @@ const api = {
         };
     },
     async disarm() { await disarm('harness'); },
-    truth() { return { truth: window.__AV_TRUTH__, presented: window.__AV_EMU__.presented().length, invoked: window.__AV_EMU__.log, diag: window.__AV_EMU__.diag, params: window.__AV_EMU__.params }; },
+    truth() {
+        const leads = window.__AV_EMU__.leads.map(l => l.leadMs);
+        const sorted = [...leads].sort((a, b) => a - b);
+        const q = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : null;
+        const t0 = window.__AV_TRUTH__?.v0 ?? 0;
+        // The lead in effect around each burst (the packets scheduled within 200 ms after it).
+        const around = (window.__AV_TRUTH__?.bursts ?? []).map(b => { const ls = window.__AV_EMU__.leads.filter(l => l.at >= b.burstAt && l.at < b.burstAt + 200).map(l => l.leadMs); return ls.length ? ls.reduce((x, y) => x + y, 0) / ls.length : null; });
+        const suspendedStarts = window.__AV_EMU__.leads.filter(l => l.state !== 'running').length;
+        return { truth: window.__AV_TRUTH__, presented: window.__AV_EMU__.presented().length, invoked: window.__AV_EMU__.log, diag: window.__AV_EMU__.diag, params: window.__AV_EMU__.params,
+            lead: { n: leads.length, min: q(0), p50: q(0.5), max: q(0.999), first: leads[0] ?? null, aroundBursts: around, suspendedStarts, firstAtMs: (window.__AV_EMU__.leads[0]?.at ?? 0) - t0 } };
+    },
 };
 window.__av = api;

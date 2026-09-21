@@ -298,7 +298,10 @@ describe('native ring: audio lands where it happened', () => {
      *  some ms after it happened (video's first 12 as a backlog, as the
      *  WASAPI-init queue delivers them), then seal. Returns, per audio packet,
      *  how far its clip time is from where it truly belongs, in ms. */
-    async function audioErrorsMs(audioOffsetUs: number, opts: { staleTail?: boolean } = {}): Promise<number[]> {
+    /** `lead(j)`: the loopback scheduling lead, ms, sample j was rendered with
+     *  (it renders that much after it happened); `reported(j)`: what the
+     *  main thread tells the worker the lead was (defaults to the truth). */
+    async function audioErrorsMs(audioOffsetUs: number, opts: { staleTail?: boolean; lead?: (j: number) => number; reported?: (j: number) => number } = {}): Promise<number[]> {
         let clock = 0;
         vi.spyOn(performance, 'now').mockImplementation(() => clock);
         let ctrl!: ReadableStreamDefaultController<AudioData>;
@@ -331,13 +334,24 @@ describe('native ring: audio lands where it happened', () => {
             prev = Math.max(prev, V0 + 450, V0 + tsOf(k) / 1000 + 3 + ((k * 7) % 15));
             evs.push({ at: prev, video: k });
         }
-        for (let j = 0; j < 400; j++) evs.push({ at: A0 + (j * AUDIO_US) / 1000 + 2 + ((j * 5) % 10), audio: j });
+        const lead = opts.lead ?? (() => 0);
+        const reported = opts.reported ?? lead;
+        // Sample j happens at A0 + j*21.333 ms and RENDERS lead(j) later; the
+        // pump reads it 2-12 ms after that, and its AudioData timestamp is
+        // the render time on the audio clock.
+        for (let j = 0; j < 400; j++) evs.push({ at: A0 + (j * AUDIO_US) / 1000 + lead(j) + 2 + ((j * 5) % 10), audio: j });
         evs.sort((a, b) => a.at - b.at);
         for (const e of evs) {
             clock = e.at;
             if (e.video !== undefined) ingestOne(ring, e.video);
             else {
-                ctrl.enqueue({ timestamp: RAW0 + e.audio! * AUDIO_US, index: e.audio!, close() { } } as unknown as AudioData);
+                const j = e.audio!;
+                // The main thread reports the lead with each packet that changes it
+                // (and at least once a second: replayBuffer.leadReporter).
+                if (opts.lead && (j === 0 || reported(j) !== reported(j - 1) || j % 46 === 0)) {
+                    ring.noteAudioLead({ renderAtMs: A0 + (j * AUDIO_US) / 1000 + lead(j), leadMs: reported(j) });
+                }
+                ctrl.enqueue({ timestamp: RAW0 + j * AUDIO_US + Math.round(lead(j) * 1000), index: j, close() { } } as unknown as AudioData);
                 await new Promise(r => setTimeout(r, 0)); // the pump reads it at THIS clock
             }
         }
@@ -371,6 +385,24 @@ describe('native ring: audio lands where it happened', () => {
         for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
     }, 60_000);
 
+    it('the loopback scheduling lead is taken back out, per sample, through a lead jump', async () => {
+        // The lead the desktop-audio player runs at (nativeCapture.ts): 80 ms,
+        // then an underrun re-prime leaves it at 130 ms from sample 200 on.
+        // Without the correction every sample would land that late.
+        const errs = await audioErrorsMs(0, { lead: j => (j < 200 ? 80 : 130) });
+        expect(errs.length).toBeGreaterThan(300);
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
+    }, 60_000);
+
+    it('positive control: the correction uses the REPORTED lead', async () => {
+        // Samples really render 120 ms late but the main thread reports 60:
+        // the clip must show 60 ms of lateness, which proves the subtraction
+        // takes the reported figure and nothing else.
+        const errs = await audioErrorsMs(0, { lead: () => 120, reported: () => 60 });
+        // 60 ms late, give or take the model's 1 ms transport difference.
+        for (const e of errs) expect(Math.abs(e - 60)).toBeLessThanOrEqual(2);
+    }, 60_000);
+
     it('a stale chunk from the previous capture does not move the anchor', async () => {
         // Taken as a clock sample it would put audio 600 s late; the stale
         // keyframe would also have opened a unit ten minutes in the future.
@@ -383,6 +415,20 @@ describe('native ring: audio lands where it happened', () => {
         const errs = await audioErrorsMs(300_000);
         for (const e of errs) expect(e).toBeCloseTo(299, 0);
     }, 60_000);
+});
+
+describe("the worker wires the main thread's lead reports to the ring", () => {
+    it('an audioLead message reaches the armed ring', async () => {
+        // The ring tests above call noteAudioLead directly; this pins the one
+        // line that connects it to replayBuffer's leadReporter messages.
+        const spy = vi.spyOn(Ring.prototype, 'noteAudioLead');
+        const onmessage = (self as unknown as { onmessage: (ev: { data: unknown }) => Promise<void> }).onmessage;
+        await onmessage({ data: { t: 'arm', cfg: { preset: { id: '1440p30', label: 'test', maxWidth: 2560, maxHeight: 1440, fps: 30, videoBitrate: 8_000_000, audioBitrate: 128_000 }, width: codedWidth, height: codedHeight, ringMs: 60_000, maxRingBytes: 64 << 20, audioOffsetUs: 0, audioCodec: 'aac', nativeVideo: { fps: 30 } }, video: null, audio: null } });
+        await onmessage({ data: { t: 'audioLead', renderAtMs: 1234.5, leadMs: 88 } });
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({ renderAtMs: 1234.5, leadMs: 88 }));
+        await onmessage({ data: { t: 'wipe' } });
+        spy.mockRestore();
+    });
 });
 
 describe('native ring: the status bitrate', () => {

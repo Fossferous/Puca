@@ -140,6 +140,12 @@ export class Ring {
     vOriginMs = Infinity; aOriginMs = Infinity;
     vOriginSince: number | null = null; aOriginSince: number | null = null;
     lastNativeTsUs = -Infinity;
+    /** Native captures: the loopback context's scheduling lead over time
+     *  (main-thread `audioLead` messages; nativeCapture.ts explains the
+     *  lead). Each entry: the wall time a packet renders at and the lead
+     *  it was scheduled with. `leadUsAt` looks a sample up by its render
+     *  time. Bounded; the oldest half is dropped past the cap. */
+    audioLeads: { renderAtMs: number; leadUs: number }[] = [];
     /** Seals muxing right now. Eviction waits for them: it splices `gops`
      *  and zero-fills what it drops, which would pull units out from under
      *  a mux still reading them. The next close (or the last seal to
@@ -489,6 +495,44 @@ export class Ring {
         }
     }
 
+    noteAudioLead(m: { renderAtMs: number; leadMs: number }): void {
+        if (!this.cfg?.nativeVideo) return;
+        this.audioLeads.push({ renderAtMs: m.renderAtMs, leadUs: Math.round(m.leadMs * 1000) });
+        if (this.audioLeads.length > 8192) this.audioLeads.splice(0, 4096);
+    }
+
+    /** The scheduling lead a native audio entry was rendered with, in µs:
+     *  the last lead reported for a packet rendering at or before this
+     *  entry's render time (its raw timestamp mapped through the audio
+     *  clock's origin). Before the first report, the first report's lead
+     *  (it is the same packet); with none, 0. */
+    private leadUsAt(rawTsUs: number): number {
+        const leads = this.audioLeads;
+        if (leads.length === 0 || !Number.isFinite(this.aOriginMs)) return 0;
+        const renderMs = this.aOriginMs + rawTsUs / 1000;
+        let lo = 0, hi = leads.length - 1, found = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (leads[mid].renderAtMs <= renderMs) { found = mid; lo = mid + 1; } else hi = mid - 1;
+        }
+        return leads[found < 0 ? 0 : found].leadUs;
+    }
+
+    /** Native audio entries onto the video timeline: the clip's one shift,
+     *  minus each entry's own scheduling lead, kept monotonic (a lead that
+     *  grew between two packets would move the later one before the
+     *  earlier; mediabunny refuses a decreasing audio timestamp). `last`
+     *  carries the clamp across units. */
+    private placeAudio(entries: ChunkIndexEntry[], shiftUs: number, last: { tsUs: number }): ChunkIndexEntry[] {
+        if (!this.cfg.nativeVideo) return shiftUs === 0 ? entries : entries.map(a => ({ ...a, tsUs: a.tsUs + shiftUs }));
+        return entries.map(a => {
+            let tsUs = a.tsUs + shiftUs - this.leadUsAt(a.tsUs);
+            if (tsUs <= last.tsUs) tsUs = last.tsUs + 1;
+            last.tsUs = tsUs;
+            return { ...a, tsUs };
+        });
+    }
+
     /** What seal() adds to a native audio entry's timestamp to put it on
      *  the video timeline (see vOriginMs); 0 on the picker path, whose
      *  entries were rebased at ingest. */
@@ -508,7 +552,8 @@ export class Ring {
         const shiftMs = this.audioShiftUs() / 1000;
         const legacyMs = this.wallA - this.firstAudioTs / 1000 + 40;
         const r = (x: number) => Math.round(x * 10) / 10;
-        return { videoOriginMs: r(this.vOriginMs), shiftMs: r(shiftMs), legacyLateMs: r(legacyMs - shiftMs) };
+        const lead = this.audioLeads.length ? r(this.audioLeads[this.audioLeads.length - 1].leadUs / 1000) : null;
+        return { videoOriginMs: r(this.vOriginMs), shiftMs: r(shiftMs), legacyLateMs: r(legacyMs - shiftMs), leadMs: lead };
     }
 
     bufferedUs(): number {
@@ -600,6 +645,7 @@ export class Ring {
         await output.start();
 
         let firstV = true, firstA = true;
+        const lastAudio = { tsUs: -Infinity };
         for (const g of chosen) {
             // A disarm mid-seal zero-fills the ring and this seal's tail.
             if (!this.running) throw new Error('the buffer was disarmed');
@@ -612,9 +658,9 @@ export class Ring {
                     await vsrc.add(pkt, firstV ? { decoderConfig: vcfg } : undefined);
                     firstV = false;
                 }
-                // Native entries are on the audio clock until here (shiftUs);
-                // one shift per clip keeps its audio monotonic.
-                const audio = shiftUs === 0 ? g.audio : g.audio.map(a => ({ ...a, tsUs: a.tsUs + shiftUs }));
+                // Native entries are on the audio clock until here: one shift
+                // per clip, minus each one's scheduling lead (placeAudio).
+                const audio = this.placeAudio(g.audio, shiftUs, lastAudio);
                 const audioEntries = g === chosen[0] ? trimLeadingAudio(audio, win.startUs) : audio;
                 // audio bytes follow the video bytes; walk the FULL index to keep offsets right
                 let aoff = off;
@@ -903,6 +949,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
             }
             case 'rebindAudio': ring?.bindAudio(m.audio); break;
             case 'nativeVideoChunk': ring?.ingestNativeVideoChunk(m, nowMs()); break;
+            case 'audioLead': ring?.noteAudioLead(m); break;
             case 'seal': {
                 if (!ring) throw new Error('not armed');
                 discardSealed();

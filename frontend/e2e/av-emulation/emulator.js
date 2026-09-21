@@ -52,6 +52,15 @@
     const diag = [];
     let videoGen = 0, audioGen = 0;
     let video = null, audio = null;        // running emitters
+    // PROBE: every AudioBufferSourceNode.start(when) in the page, as the lead
+    // (when - currentTime, ms) it was scheduled with. nativeCapture's loopback
+    // context is the only caller, so this is its scheduling lead over time.
+    const leads = [];
+    const origStart = AudioBufferSourceNode.prototype.start;
+    AudioBufferSourceNode.prototype.start = function (when) {
+        if (typeof when === 'number') leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state });
+        return origStart.apply(this, arguments);
+    };
 
     function emit(event, payload) {
         const ls = listeners.get(event);
@@ -174,5 +183,5 @@
             }
         },
     };
-    window.__AV_EMU__ = { log, diag, params: cfg, presented: () => (video ? video.presented : []) };
+    window.__AV_EMU__ = { log, diag, params: cfg, leads, presented: () => (video ? video.presented : []) };
 })();
