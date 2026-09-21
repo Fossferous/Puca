@@ -243,6 +243,12 @@ export async function startNativeSystemAudioTrack(
     const dest = ctx.createMediaStreamDestination();
     dest.channelCount = 2;
     let playhead = 0;
+    // Sources scheduled ahead of the clock. A drift reset DROPS the backlog
+    // they hold: they are stopped rather than left to play over the
+    // re-primed packets (a summed overlap of up to MAX_BACKLOG_S), so the
+    // mix carries a gap of about JITTER_S there and the clip worker's lead
+    // correction stays exact on both sides of it.
+    const pending = new Set<AudioBufferSourceNode>();
 
     // Set once the start resolves. Events carrying a DIFFERENT generation are
     // another capture's (a predecessor's tail, or a successor after this one
@@ -271,7 +277,13 @@ export async function startNativeSystemAudioTrack(
             src.connect(dest);
             const now = ctx.currentTime;
             if (playhead < now + 0.01) playhead = now + JITTER_S; // prime / recover from underrun
-            else if (playhead > now + MAX_BACKLOG_S) playhead = now + JITTER_S; // drift reset
+            else if (playhead > now + MAX_BACKLOG_S) { // drift reset: the backlog is dropped
+                for (const p of pending) { try { p.stop(); } catch { /* already ended */ } }
+                pending.clear();
+                playhead = now + JITTER_S;
+            }
+            pending.add(src);
+            src.onended = () => { pending.delete(src); };
             src.start(playhead);
             // THE SCHEDULING LEAD is A/V error. This packet was captured up to
             // now, and renders `playhead - now` later: JITTER_S at a prime,

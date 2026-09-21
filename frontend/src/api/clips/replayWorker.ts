@@ -497,7 +497,9 @@ export class Ring {
     }
 
     noteAudioLead(m: { renderAtMs: number; leadMs: number }): void {
-        if (!this.cfg?.nativeVideo) return;
+        // Kept whether or not the ring is configured yet: the report replayed
+        // right after the arm message lands while arm() is still awaiting,
+        // and placeAudio decides (a non-native session reports none).
         // INVARIANT: sorted by renderAtMs (leadUsAt binary-searches it). The
         // one thing that breaks it is nativeCapture's drift reset, which
         // moves the playhead BACK by up to MAX_BACKLOG_S: the packets it
@@ -512,8 +514,11 @@ export class Ring {
     /** The scheduling lead a native audio entry was rendered with, in µs:
      *  the last lead reported for a packet rendering at or before this
      *  entry's render time (its raw timestamp mapped through the audio
-     *  clock's origin). Before the first report, the first report's lead
-     *  (it is the same packet); with none, 0. */
+     *  clock's origin). Before the first report, 0: nothing with a lead had
+     *  rendered yet (a mic-only stretch before system audio was retried, or
+     *  the mic alone before the first packet), and the lookup key runs a
+     *  transport hop LATE, never early, so a sample of the first packet
+     *  itself still finds its report. */
     private leadUsAt(rawTsUs: number): number {
         const leads = this.audioLeads;
         if (leads.length === 0 || !Number.isFinite(this.aOriginMs)) return 0;
@@ -523,7 +528,7 @@ export class Ring {
             const mid = (lo + hi) >> 1;
             if (leads[mid].renderAtMs <= renderMs) { found = mid; lo = mid + 1; } else hi = mid - 1;
         }
-        return leads[found < 0 ? 0 : found].leadUs;
+        return found < 0 ? 0 : leads[found].leadUs;
     }
 
     /** Native audio entries onto the video timeline: the clip's one shift,

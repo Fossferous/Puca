@@ -169,6 +169,11 @@ interface Session {
     /** The loopback scheduling lead last forwarded to the worker (leadReporter). */
     leadSentMs?: number;
     leadSentAt?: number;
+    /** The last lead reported: replayed to a consumer that appears after it
+     *  (the mic delay, the armed worker), so neither starts a second behind. */
+    lastLead?: { renderAtMs: number; leadMs: number };
+    /** The worker has its arm message (it drops audioLead messages before it). */
+    armed?: boolean;
     /** The lead last written to puca.log (logAvAnchor). */
     avLoggedLeadMs?: number | null;
     /** Native (no-picker) session teardown - stops the Rust-side capture
@@ -212,11 +217,8 @@ function buildMicSource(s: Session): void {
     if (!s.micGain) { s.micGain = s.ctx.createGain(); s.micGain.connect(s.dest); }
     s.micGain.gain.value = Math.max(0, Math.min(2, (loadSettings().clipMicGain ?? 100) / 100));
     // Native sessions with a system-audio leg: mic -> delay(lead) -> gain.
-    // Created once per session so a re-tap keeps the delay it had; it
-    // starts at 0 and follows the first lead report within milliseconds.
     if (s.nativeStop !== null && s.sysSrc) {
-        if (!s.micDelay) { s.micDelay = s.ctx.createDelay(MIC_DELAY_MAX_S); s.micDelay.delayTime.value = 0; s.micDelay.connect(s.micGain); }
-        s.micSrc.connect(s.micDelay);
+        s.micSrc.connect(ensureMicDelay(s, s.ctx, s.micGain));
     } else {
         s.micSrc.connect(s.micGain);
     }
@@ -373,6 +375,8 @@ export async function armNative(): Promise<void> {
         const transfer: Transferable[] = audioReadable ? [audioReadable as unknown as Transferable] : [];
         const msg: ToWorker = { t: 'arm', cfg, video: null, audio: audioReadable };
         worker.postMessage(msg, transfer);
+        s.armed = true;
+        if (s.lastLead) applyLead(s, s.lastLead.renderAtMs, s.lastLead.leadMs);
         // Flush the lead-in captured while audio was initialising, IN ORDER,
         // after the arm message (postMessage is FIFO per sender; the worker
         // additionally buffers chunks that interleave with arm()'s own awaits
@@ -447,9 +451,15 @@ export async function retrySystemAudio(): Promise<void> {
     s.sysGain = s.ctx.createGain();
     s.sysGain.gain.value = 1;
     s.sysSrc.connect(s.sysGain).connect(s.dest);
-    // The mic leg is re-tapped so it gets its lead delay now that there is
-    // a system-audio leg to keep in step with (buildMicSource).
-    buildMicSource(s);
+    // The mic leg is re-tapped through its lead delay now that there is a
+    // system-audio leg to keep in step with: the existing source is rewired
+    // (no node rebuilt, so no quantum of mic is lost); with none yet, built.
+    if (s.micSrc && s.micGain) {
+        try { s.micSrc.disconnect(); } catch { /* not connected */ }
+        s.micSrc.connect(ensureMicDelay(s, s.ctx, s.micGain));
+    } else {
+        buildMicSource(s);
+    }
     emit({ hasSystemAudio: true, systemAudioLost: null, systemAudioDevice: audio.deviceName, notice: null });
 }
 
@@ -460,15 +470,49 @@ export async function retrySystemAudio(): Promise<void> {
 function leadReporter(s: Session): (renderAtMs: number, leadMs: number) => void {
     return (renderAtMs, leadMs) => {
         if (session !== s) return;
+        s.lastLead = { renderAtMs, leadMs };
+        // Throttled only once both consumers exist (the mic delay is built
+        // after the audio leg, the worker armed after that): a report that
+        // reached neither must not silence the next one for a second.
+        const consumers = !!s.micDelay && s.armed === true;
         const now = performance.now();
-        if (s.leadSentMs !== undefined && Math.abs(leadMs - s.leadSentMs) < 2 && s.leadSentAt !== undefined && now - s.leadSentAt < 1000) return;
-        s.leadSentMs = leadMs; s.leadSentAt = now;
-        // The mic leg follows the same lead (a ramp, never a step: a step in
-        // delayTime is a pitch glitch), so the mix is uniformly late by it.
-        if (s.micDelay && s.ctx) s.micDelay.delayTime.setTargetAtTime(Math.min(MIC_DELAY_MAX_S, Math.max(0, leadMs / 1000)), s.ctx.currentTime, 0.05);
-        const msg: ToWorker = { t: 'audioLead', renderAtMs, leadMs };
-        try { s.worker.postMessage(msg); } catch { /* worker gone */ }
+        if (consumers && s.leadSentMs !== undefined && Math.abs(leadMs - s.leadSentMs) < 2 && s.leadSentAt !== undefined && now - s.leadSentAt < 1000) return;
+        if (consumers) { s.leadSentMs = leadMs; s.leadSentAt = now; }
+        applyLead(s, renderAtMs, leadMs);
     };
+}
+
+/** One lead report to its two consumers. The mic leg follows the same lead
+ *  so the mix is uniformly late by it: a LINEAR ramp over the size of the
+ *  change (20 ms at least), during which the delay line reads at 0x or 2x,
+ *  a brief pitch shift rather than a click (an exponential approach read at
+ *  9x on a drift reset). The worker applies the change as a step at the
+ *  packet it was reported for, so the mic sits off by up to the change for
+ *  that long: 10-40 ms after an underrun re-prime (docs/CLIPS.md). */
+function applyLead(s: Session, renderAtMs: number, leadMs: number): void {
+    if (s.micDelay && s.ctx) {
+        const p = s.micDelay.delayTime;
+        const target = Math.min(MIC_DELAY_MAX_S, Math.max(0, leadMs / 1000));
+        const now = s.ctx.currentTime;
+        const cur = p.value;
+        p.cancelScheduledValues(now);
+        p.setValueAtTime(cur, now);
+        p.linearRampToValueAtTime(target, now + Math.max(0.02, Math.abs(target - cur)));
+    }
+    const msg: ToWorker = { t: 'audioLead', renderAtMs, leadMs };
+    try { s.worker.postMessage(msg); } catch { /* worker gone */ }
+}
+
+/** The mic leg's delay, created once per session (a re-tap keeps the delay
+ *  it had) and started on the last lead seen, not on 0. */
+function ensureMicDelay(s: Session, ctx: AudioContext, micGain: GainNode): DelayNode {
+    if (!s.micDelay) {
+        s.micDelay = ctx.createDelay(MIC_DELAY_MAX_S);
+        s.micDelay.delayTime.value = 0;
+        s.micDelay.connect(micGain);
+        if (s.lastLead) applyLead(s, s.lastLead.renderAtMs, s.lastLead.leadMs);
+    }
+    return s.micDelay;
 }
 
 /** The native A/V anchor into puca.log: once per arm, and again whenever it
@@ -480,7 +524,7 @@ function logAvAnchor(s: Session, av: NonNullable<WorkerStatus['avAnchor']>): voi
     if (!isTauri()) return;
     // Written again when the shift OR the lead moved: the lead is what
     // drifts within a session, and it is not part of the shift.
-    const leadMoved = (av.leadMs ?? 0) !== (s.avLoggedLeadMs ?? 0) && Math.abs((av.leadMs ?? 0) - (s.avLoggedLeadMs ?? 0)) >= 20;
+    const leadMoved = Math.abs((av.leadMs ?? 0) - (s.avLoggedLeadMs ?? 0)) >= 20;
     if (s.avLoggedShiftMs !== undefined && Math.abs(av.shiftMs - s.avLoggedShiftMs) < 10 && !leadMoved) return;
     s.avLoggedShiftMs = av.shiftMs; s.avLoggedLeadMs = av.leadMs;
     const line = `clip-av video-origin=${av.videoOriginMs}ms shift=${av.shiftMs}ms legacy-late=${av.legacyLateMs}ms lead=${av.leadMs ?? 'n/a'}ms`;

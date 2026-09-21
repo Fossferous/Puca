@@ -301,7 +301,7 @@ describe('native ring: audio lands where it happened', () => {
     /** `lead(j)`: the loopback scheduling lead, ms, sample j was rendered with
      *  (it renders that much after it happened); `reported(j)`: what the
      *  main thread tells the worker the lead was (defaults to the truth). */
-    async function audioErrorsMs(audioOffsetUs: number, opts: { staleTail?: boolean; lead?: (j: number) => number; reported?: (j: number) => number; skip?: (j: number) => boolean } = {}): Promise<number[]> {
+    async function audioErrorsMs(audioOffsetUs: number, opts: { staleTail?: boolean; lead?: (j: number) => number; reported?: (j: number) => number; skip?: (j: number) => boolean; reportFrom?: number } = {}): Promise<number[]> {
         let clock = 0;
         vi.spyOn(performance, 'now').mockImplementation(() => clock);
         let ctrl!: ReadableStreamDefaultController<AudioData>;
@@ -344,7 +344,8 @@ describe('native ring: audio lands where it happened', () => {
         // ~12 ms after the packet was captured), not when it renders: on a
         // drift reset the report with the small lead therefore comes AFTER
         // reports of old packets that will still render later than it.
-        if (opts.lead) for (let j = 0; j < 400; j++) if (j === 0 || reported(j) !== reported(j - 1) || j % 46 === 0) evs.push({ at: A0 + (j * AUDIO_US) / 1000 + 12, sched: j });
+        const from = opts.reportFrom ?? 0; // reports only exist from this sample on (system audio retried later)
+        if (opts.lead) for (let j = from; j < 400; j++) if (j === from || reported(j) !== reported(j - 1) || j % 46 === 0) evs.push({ at: A0 + (j * AUDIO_US) / 1000 + 12, sched: j });
         evs.sort((a, b) => a.at - b.at);
         for (const e of evs) {
             clock = e.at;
@@ -421,6 +422,17 @@ describe('native ring: audio lands where it happened', () => {
         const errs = await audioErrorsMs(0, { lead: () => 120, reported: () => 60 });
         // 60 ms late, give or take the model's 1 ms transport difference.
         for (const e of errs) expect(Math.abs(e - 60)).toBeLessThanOrEqual(2);
+    }, 60_000);
+
+    it('system audio that starts after a mic-only stretch: the earlier samples get no correction', async () => {
+        // No loopback before sample 200 (mic only, no lead), then a retry
+        // schedules with an 80 ms lead. The first report must not be applied
+        // backwards: before it the lead was 0, from it 80 is taken out.
+        // (The first version returned leads[0] before the first report and
+        // pulled the whole mic-only stretch 80 ms early.)
+        const errs = await audioErrorsMs(0, { lead: j => (j < 200 ? 0 : 80), reportFrom: 200 });
+        expect(errs.length).toBeGreaterThan(300);
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
     }, 60_000);
 
     it('a stale chunk from the previous capture does not move the anchor', async () => {

@@ -325,7 +325,15 @@ needs no picker).
   it is delayed by the same lead (a DelayNode driven from the same
   reports) and the one subtraction is right for the whole mix; without
   that the mic would have been pulled early by the lead (caught in
-  review). Residual, not corrected: the WASAPI period and IPC
+  review). After a lead CHANGE the mic converges on its new delay over
+  the size of the change (a linear ramp; the worker applies the change as
+  a step at the packet it was reported for), so the mic sits off by up to
+  that change for that long: 10-40 ms after an underrun re-prime. A drift
+  reset (rare: MAX_BACKLOG_S of clock drift, or a suspended context) drops
+  the backlog, so the clip's system audio has a gap of that size there and
+  the mic converges across it. Before the first report the lead is 0, so
+  system audio retried after a mic-only stretch is not applied backwards.
+  Residual, not corrected: the WASAPI period and IPC
   on the Rust side and the mixing hop, minus the video stamp's lag behind
   the present (it is taken after acquire and readback, and the async MFT
   holds a frame or two in flight); the emulation measures the JS part, a
@@ -530,7 +538,7 @@ Off per server until the owner turns it on.** spike numbers: `frontend/e2e/spike
 | hardware encoder engaged | encode call ≈0.02 ms/frame, keyframes 2 s | 2026-08-18 (spike S2, headless Edge) |
 | A/V sync | flash/beep pairing, −42 ms → `AUDIO_OFFSET_US = 40_000` | 2026-08-18 (spike S4) |
 | native A/V anchor's clock assumptions | `e2e/clip-audio-clock-headless.mjs` (muted, never connected to an output): AudioData clock vs worker `performance.now` drift 0.0 ms over 60 s, median 1.4 ms above the min; AAC encoder output ts = input ts, decoded content 5-11 ms later than its ts (varies by run) | 2026-09-21, headless Edge on the owner's desktop |
-| native A/V sync end to end, EMULATED | `e2e/clip-av-emulation.mjs` (muted headless Edge): the real armNative -> nativeCapture -> worker -> seal -> upload against an emulated Rust side delivering a real H.264 flash stream and 10 ms WASAPI-shaped PCM on one clock; the sealed clip is decrypted, demuxed and decoded; a second flash+burst 300 ms apart in the same clip is the oracle's control (seen as 300.0 ms) | 2026-09-21, before the lead fix: audio 106 and 215 ms LATE in two runs, the error tracking the loopback context's scheduling lead (79-121 ms) packet for packet; after `onLead`/`placeAudio` and `NATIVE_AUDIO_OFFSET_US = -30 ms`: 21.9 and 27.2 ms late with the lead at ~90 ms (the modelled Rust side contributes ~15-25 ms of that) |
+| native A/V sync end to end, EMULATED | `e2e/clip-av-emulation.mjs` (muted headless Edge): the real armNative -> nativeCapture -> worker -> seal -> upload against an emulated Rust side delivering a real H.264 flash stream and 10 ms WASAPI-shaped PCM on one clock; the sealed clip is decrypted, demuxed and decoded; a second flash+burst 300 ms apart in the same clip is the oracle's control (seen as 300.0 ms) | 2026-09-21, before the lead fix: audio 106 and 215 ms LATE in two runs, the error tracking the loopback context's scheduling lead (79-121 ms) packet for packet; after `onLead`/`placeAudio` and `NATIVE_AUDIO_OFFSET_US = -30 ms`: 21.5 to 36.4 ms late over four runs (the last: 24.1 and 21.5, the mic leg 5.8 and 9.4) with the lead at 50-90 ms (the modelled Rust side contributes ~15-25 ms of that) |
 | native A/V sync end to end, REAL | flash + click through the real app (the only way to add the real WASAPI and DXGI latencies to the number above) | — |
 | pointer moves on repeated native frames | old vs new agent side by side on the same screen and mouse | 2026-09-21: NOT exercised: the screen presented every slot (754 new pictures, 0 repeats in 30 s); needs a genuinely still screen |
 | 10-min ring memory plateau | ~500 MB renderer working set, flat through eviction | 2026-08-18 (spike S6) |

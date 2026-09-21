@@ -111,8 +111,20 @@ async function run(runIndex) {
     // Every request the page makes must stay on this machine: the check is
     // on the NETWORK, so a request that succeeds against a real server
     // fails it too (a console-error check could not see a success).
-    const offHost = [];
-    page.on('request', r => { try { const h = new URL(r.url()).hostname; if (h !== '127.0.0.1' && h !== 'localhost') offHost.push(r.url()); } catch { /* data: */ } });
+    // Every request and websocket the page opens (data:/blob: URLs have no
+    // host and are skipped); the count is asserted too, so a silent event
+    // stream cannot pass as a clean one. Playwright does not report a
+    // dedicated worker's fetches here in every version: the upload itself is
+    // proved by the harness server receiving the sealed parts.
+    const offHost = []; let requests = 0;
+    const note = (u) => {
+        let url; try { url = new URL(u); } catch { offHost.push(u); return; }
+        if (url.protocol === 'data:' || url.protocol === 'blob:') return;
+        requests++;
+        if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') offHost.push(u);
+    };
+    page.on('request', r => note(r.url()));
+    page.on('websocket', ws => note(ws.url()));
     page.on('pageerror', e => errors.push(String(e)));
     page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') errors.push(m.text().slice(0, 200)); });
     // AV_RUST_MODEL=zero: no modelled Rust-side latency at all, so the number
@@ -133,7 +145,7 @@ async function run(runIndex) {
     await page.evaluate(() => window.__av.disarm()).catch(() => { });
     await ctx.close();
     parts.clear();
-    return { runIndex, loaded, armed, buffered, sealed, m, truth, errors, offHost, micState };
+    return { runIndex, loaded, armed, buffered, sealed, m, truth, errors, offHost, requests, micState };
 }
 
 try {
@@ -155,8 +167,8 @@ try {
         const noise = r.errors.filter(e => !/favicon|404/.test(e));
         if (noise.length) console.log('  run ' + r.runIndex + ': page errors/warnings: ' + noise.slice(0, 4).join(' || '));
         ck(e0 !== null && e1 !== null && Math.abs((e1 - e0) - CONTROL_MS) < 12, `run ${r.runIndex}: the oracle sees the ${CONTROL_MS} ms control as ${CONTROL_MS} ms`, `${(e1 - e0).toFixed(1)} ms`);
-        ck(r.offHost.length === 0, `run ${r.runIndex}: nothing reached a real server`, r.offHost.slice(0, 3).join(' '));
-        ck(eMic !== null && eMic !== undefined && Math.abs(eMic) < 60, `run ${r.runIndex}: the mic leg is within 60 ms (it has no scheduling lead; an over-correction would pull it early)`, `${eMic?.toFixed(1)} ms`);
+        ck(r.offHost.length === 0 && r.requests > 0, `run ${r.runIndex}: nothing reached a real server (${r.requests} requests seen, all loopback)`, r.offHost.slice(0, 3).join(' '));
+        ck(eMic !== null && eMic !== undefined && Math.abs(eMic) < 60 && Math.abs(eMic - e0) < 30, `run ${r.runIndex}: the mic leg is within 60 ms and within 30 ms of the system audio (it has no scheduling lead; without its delay it would sit a full lead, 50-90 ms here, earlier)`, `mic ${eMic?.toFixed(1)} ms, system ${e0?.toFixed(1)} ms`);
     }
     const errs = results.map(r => r.m.errorsMs[0]);
     console.log(`\nA/V ERROR of the JS pipeline under this emulation: system audio ${errs.map(e => e.toFixed(1)).join(' / ')} ms, mic ${results.map(r => r.m.errorsMs[2]?.toFixed(1)).join(' / ')} ms (+ = late)`);

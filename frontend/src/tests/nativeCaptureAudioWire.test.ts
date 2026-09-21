@@ -44,14 +44,15 @@ class StubAudioContext {
     static last: StubAudioContext | null = null;
     state = 'running';
     currentTime = 0;
-    constructor(_opts?: unknown) { StubAudioContext.last = this; }
+    constructor(_opts?: unknown) { StubAudioContext.last = this; StubAudioContext.stopped = 0; }
     createMediaStreamDestination() {
         return { channelCount: 2, stream: { getAudioTracks: () => [{ kind: 'audio' }] } };
     }
     createBuffer(channels: number, frames: number, _rate: number) {
         return { duration: frames / 48000, getChannelData: () => new Float32Array(frames * channels) };
     }
-    createBufferSource() { return { buffer: null, connect: () => {}, start: () => {} }; }
+    static stopped = 0;
+    createBufferSource() { return { buffer: null, onended: null as null | (() => void), connect: () => {}, start: () => {}, stop: () => { StubAudioContext.stopped++; } }; }
     async resume() {}
     async close() {}
 }
@@ -127,6 +128,7 @@ describe('the clip-audio invoke wire', () => {
         ctx.currentTime = 1;               // the clock jumped past the playhead: an underrun
         fire('clip-audio-data', packet()); // re-primed at now + 50 ms
         expect(leads.map(l => Math.round(l.leadMs))).toEqual([50, 60, 50]);
+        expect(StubAudioContext.stopped, 'an underrun re-prime stops nothing (nothing is pending)').toBe(0);
         // Epoch time, so a worker with its own time origin can look it up.
         const now = performance.timeOrigin + performance.now();
         for (const l of leads) expect(Math.abs(l.renderAt - l.leadMs - now)).toBeLessThan(500);
@@ -137,6 +139,9 @@ describe('the clip-audio invoke wire', () => {
         expect(Math.max(...drift)).toBeLessThanOrEqual(500);
         expect(Math.max(...drift)).toBeGreaterThanOrEqual(490); // it really climbed to the cap before resetting
         expect(drift[drift.length - 1]).toBeLessThanOrEqual(250); // and came back down (50 + a few 10 ms packets)
+        // The reset DROPPED the backlog: every source still scheduled ahead was
+        // stopped, not left to play over the re-primed packets.
+        expect(StubAudioContext.stopped).toBeGreaterThanOrEqual(40);
         await h.stop();
     });
 });
