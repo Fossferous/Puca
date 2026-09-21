@@ -36,6 +36,7 @@ import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { pendingOutboxCount } from '../model/notesOutbox';
+import { noteSaved } from '../model/useListContent';
 import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
@@ -125,7 +126,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         const created: Task[] = [];
         const before = text;
         try {
-            if (!await c.setBody(listId, '')) {
+            if (!noteSaved(await c.setBody(listId, ''))) {
                 pushMessageToast({ title: 'Couldn’t turn the text into a checklist — the text is kept' });
                 return;
             }
@@ -145,7 +146,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                 token: ++undoSeq,
                 message: 'Turned the text into a checklist',
                 run: async () => {
-                    if (!await c.setBody(listId, before)) return;
+                    if (!noteSaved(await c.setBody(listId, before))) return;
                     for (const t of created) await actions.deleteTaskFrom(ref, t.id);
                 },
             });
@@ -171,7 +172,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         setConverting(true);
         const all = recreationOrder(tasks);
         try {
-            if (!await c.setBody(listId, next)) return;
+            if (!noteSaved(await c.setBody(listId, next))) return;
             // Deleting a top-level item takes its subtree with it.
             const gone = new Set<number>();
             for (const t of all) if (t.parent_id === null && await actions.deleteTaskFrom(ref, t.id)) gone.add(t.id);
@@ -226,7 +227,8 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     key={card.key}
                     listId={listId}
                     value={card.body}
-                    onSave={t => c.setBody(listId, t)}
+                    contentRev={card.contentRev}
+                    onSave={(t, baseRev) => c.setBody(listId, t, baseRev)}
                     placeholder={tasks.length > 0 ? 'Add some text…' : 'Take a note…'}
                 />
             )}

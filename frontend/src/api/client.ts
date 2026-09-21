@@ -16,12 +16,18 @@ export class ApiError extends Error {
      *  Retry-After / x-ratelimit-after header, or a `retry_after_ms` body),
      *  in ms. Undefined when it did not say. */
     readonly retryAfterMs?: number;
+    /** The refusal's body, verbatim. `message` is the readable part of it,
+     *  which is all most callers want; a refusal that carries STRUCTURE —
+     *  a note's current copy alongside a 409 (api/listConflict.ts) — needs
+     *  the whole thing, and re-reading the response is not possible by then. */
+    readonly body?: string;
 
-    constructor(message: string, status: number, retryAfterMs?: number) {
+    constructor(message: string, status: number, retryAfterMs?: number, body?: string) {
         super(message);
         this.name = 'ApiError';
         this.status = status;
         if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs;
+        if (body !== undefined) this.body = body;
     }
 }
 
@@ -215,6 +221,7 @@ class ApiClient {
                 throw new ApiError(
                     errorMessageFromBody(errorText, response.status), response.status,
                     response.status === 429 || response.status === 503 ? retryAfterMsOf(response.headers, errorText) : undefined,
+                    errorText,
                 );
             }
 

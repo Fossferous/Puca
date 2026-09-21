@@ -58,11 +58,19 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const [newItem, setNewItem] = useState('');
     const [titleDraft, setTitleDraft] = useState(card.title);
     // A rename that landed from elsewhere (another device, a refetch) replaces
-    // the draft — the "adjust state while rendering" pattern, not an effect.
+    // the draft — the "adjust state while rendering" pattern, not an effect —
+    // UNLESS this title is being typed right now. Without that guard a rename
+    // arriving mid-keystroke wiped what the user was writing, with no way to
+    // get it back; the note's text has never behaved that way
+    // (components/NoteBodyField.tsx) and the title should not either. What is
+    // typed here stays until it is committed or abandoned, and the commit
+    // itself names the revision it was based on, so it cannot land over the
+    // other rename either.
+    const [titleDirty, setTitleDirty] = useState(false);
     const [seenTitle, setSeenTitle] = useState(card.title);
     if (seenTitle !== card.title) {
         setSeenTitle(card.title);
-        setTitleDraft(card.title);
+        if (!titleDirty) setTitleDraft(card.title);
     }
     const addRef = useRef<HTMLInputElement>(null);
     const currentUserId = currentUserIdFromToken() ?? undefined;
@@ -93,6 +101,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
 
     const commitTitle = () => {
         const t = titleDraft.trim();
+        setTitleDirty(false);
         if (isChannel || titleUnreadable || !t || t === card.title) { setTitleDraft(card.title); return; }
         void actions.renameNote(ref, t);
     };
@@ -119,11 +128,11 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         readOnly={isChannel || titleUnreadable}
                         title={isChannel ? 'Channel checklists are renamed from the channel settings in Púca' : 'Click to rename'}
                         aria-label="Note title"
-                        onChange={e => setTitleDraft(e.target.value)}
+                        onChange={e => { setTitleDirty(true); setTitleDraft(e.target.value); }}
                         onBlur={commitTitle}
                         onKeyDown={e => {
                             if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
-                            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setTitleDraft(card.title); (e.target as HTMLInputElement).blur(); }
+                            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setTitleDirty(false); setTitleDraft(card.title); (e.target as HTMLInputElement).blur(); }
                         }}
                     />
                     <button

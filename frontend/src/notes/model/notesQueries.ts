@@ -54,6 +54,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { toastRefusal } from '../../api/refusalToast';
 import {
     type ListDeleteOutcome,
+    NoteConflictError,
     fetchListFeatures,
     flushBodySave,
     keepHiddenSlots,
@@ -212,6 +213,7 @@ function listSource(l: TaskList): NoteSource {
         body: l.body,
         noteAttachments: l.attachments,
         updatedAt: l.updated_at,
+        contentRev: l.content_rev,
     };
 }
 
@@ -692,13 +694,26 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const renameNote = useCallback(async (note: NoteRef, title: string): Promise<boolean> => {
         if (note.kind !== 'list') return false;
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
+        // The revision this rename is based on, so it cannot land on top of a
+        // rename made somewhere else in the meantime (migration 069). Absent
+        // against a server without it: last write wins, as before.
+        const base = contentRef.current.features.contentRev
+            ? prev?.find(l => l.id === note.id)?.content_rev
+            : undefined;
         qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.map(l => (l.id === note.id ? { ...l, title } : l)));
         try {
-            await sendNoteOp(ops.renameList(note.id, title));
+            await sendNoteOp(ops.renameList(note.id, title, base));
             return true;
         } catch (err) {
-            explain('rename failed', err);
             qc.setQueryData(notesKeys.lists, prev);
+            if (err instanceof NoteConflictError) {
+                // Nothing was written. A title is one line, so there is no
+                // half to keep: say what happened and show the name that won.
+                pushMessageToast({ title: 'This note was renamed somewhere else, so your new name wasn’t saved' });
+                void qc.invalidateQueries({ queryKey: notesKeys.lists });
+                return false;
+            }
+            explain('rename failed', err);
             return false;
         }
     }, [qc]);

@@ -27,6 +27,7 @@ import { PERM, hasPerm } from './permissionBits';
 import * as MARKERS from './decryptMarkers';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { openListContent } from './listSeal';
+import { patchListContent } from './listConflict';
 
 export interface Task {
     id: number;
@@ -96,6 +97,12 @@ export interface TaskList {
     /** The "Notes to self" list, which the server will not trash (absent
      *  from servers older than the trash). */
     is_self?: boolean;
+    /** How many times this note's own content — its title, its text, its
+     *  pictures — has been written (migration 069). A save names the
+     *  revision it was based on, so an edit made somewhere else in the
+     *  meantime is refused instead of silently replaced. Absent from servers
+     *  older than 069. Ticking or reordering an item never moves it. */
+    content_rev?: number;
 }
 
 /** The one list title the server writes itself, as a plain label. */
@@ -174,13 +181,14 @@ export async function listTasks(channelId: number): Promise<Task[]> {
     }));
 }
 
-export async function createTask(channelId: number, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task> {
+export async function createTask(channelId: number, description: string, parentId?: number, timing?: NewTaskTiming, opKey?: string): Promise<Task> {
     const me = currentUserIdFromToken();
     if (me === null) throw new Error('Signed out; cannot store checklist item');
     const created: Task = await apiClient.post(`/channels/${channelId}/tasks`, {
         description: await sealChannel(channelId, description, 'chan-task', me),
         parent_id: parentId ?? null,
         ...(timing ? await timingForCreate(timing, { channelId, ownerId: me }) : {}),
+        ...(opKey ? { op_key: opKey } : {}),
     });
     // Show the plaintext locally — the timing too, never the sealed copy.
     return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
@@ -351,13 +359,25 @@ export async function listTaskLists(): Promise<TaskList[]> {
     }));
 }
 
-export async function createTaskList(title: string): Promise<TaskList> {
-    const created: TaskList = await apiClient.post('/task-lists', { title: await sealSelf(title) });
+/** `opKey`: this create's random id (api/opKey.ts), so a retry after a lost
+ *  answer is recognised instead of making a second note. A server older than
+ *  migration 070 ignores the field. */
+export async function createTaskList(title: string, opKey?: string): Promise<TaskList> {
+    const created: TaskList = await apiClient.post('/task-lists', {
+        title: await sealSelf(title),
+        ...(opKey ? { op_key: opKey } : {}),
+    });
     return { ...created, title };
 }
 
-export async function renameTaskList(listId: number, title: string): Promise<void> {
-    return apiClient.patch(`/task-lists/${listId}`, { title: await sealSelf(title), reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+/** `expectRev`: the `content_rev` this rename is based on. A mismatch throws
+ *  NoteConflictError and nothing is written (api/listConflict.ts). Resolves
+ *  to the note's new revision, or null from a server older than 069. */
+export async function renameTaskList(listId: number, title: string, expectRev?: number): Promise<number | null> {
+    return patchListContent(listId, {
+        title: await sealSelf(title),
+        ...(expectRev === undefined ? {} : { expect_rev: expectRev }),
+    });
 }
 
 export function deleteTaskList(listId: number): Promise<void> {
@@ -379,11 +399,12 @@ export async function listListTasks(listId: number): Promise<Task[]> {
     }));
 }
 
-export async function createListTask(listId: number, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task> {
+export async function createListTask(listId: number, description: string, parentId?: number, timing?: NewTaskTiming, opKey?: string): Promise<Task> {
     const created: Task = await apiClient.post(`/task-lists/${listId}/tasks`, {
         description: await sealSelf(description),
         parent_id: parentId ?? null,
         ...(timing ? await timingForCreate(timing, null) : {}),
+        ...(opKey ? { op_key: opKey } : {}),
     });
     return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
 }
