@@ -1304,6 +1304,11 @@ fn run(
     // the number that says whether the encoder-reuse path actually shortened
     // the freeze in the field.
     let mut switch_started: Option<Instant> = None;
+    // A switch whose destination screen stands still gets its picture from a
+    // provoked repaint (repaint.rs); how many this switch has asked for, and
+    // when the last one was.
+    let mut stranded_repaints: u8 = 0;
+    let mut stranded_repainted_at: Option<Instant> = None;
     {
         let scope_for_worker = Arc::clone(&file_scope);
         if let Err(e) = std::thread::Builder::new()
@@ -1442,7 +1447,23 @@ fn run(
                             // switch (cloned monitors) now costs only an IDR.
                             want_keyframe = true;
                             switch_started = Some(Instant::now());
+                            stranded_repaints = 0;
+                            stranded_repainted_at = None;
                             eprintln!("[switch] capture committed -> monitor {target_monitor}");
+                            // OUT OF THE COMPOSITE the taken tile's duplication
+                            // has long delivered its pictures, and a still
+                            // destination screen presents nothing more, so the
+                            // stream holds nothing to re-send: on 2026-09-21
+                            // two phone sessions sat at "150 consecutive
+                            // skips" from this line until they were torn down,
+                            // every click landing on a frozen picture. A
+                            // provoked repaint makes the compositor present
+                            // (repaint.rs); the net below repeats it if the
+                            // first one is missed.
+                            #[cfg(windows)]
+                            if from_monitor == crate::composite::ALL_DISPLAYS {
+                                crate::repaint::provoke_present(target_monitor);
+                            }
                             current_monitor = target_monitor;
                             // A switch re-enumerates DXGI too; refresh the
                             // self-heal baseline so it is not tripped by the
@@ -1606,6 +1627,11 @@ fn run(
                             Some((w, h)) => eprintln!("[stream] viewer stage -> {w}x{h} device px"),
                             None => eprintln!("[stream] viewer stage -> native (no fit)"),
                         }
+                        // The fit is decided on a pumped picture, and a still
+                        // screen pumps none: zooming in over a static desktop
+                        // never sharpened until something on it repainted.
+                        // Ask the pump to re-send the held picture instead.
+                        fit.stage_changed();
                     }
                     view_size = next;
                 }
@@ -1620,12 +1646,19 @@ fn run(
                     }
                     // The retained still-frame holds the OLD cursor baked into
                     // its pixels, and a motionless desktop re-encodes exactly
-                    // that frame — so without dropping it the pointer would
-                    // sit frozen on screen until something else moved. The
+                    // that frame. It used to be DROPPED here, which on a still
+                    // screen left nothing to re-send at all (a pointer-only
+                    // update is not a picture), so the stream froze until the
+                    // desktop repainted by itself. The capture can repaint the
+                    // pointer on a repeated frame since 0.9.816, so the frame
+                    // is kept and corrected; a frame from an earlier capture
+                    // is left as it is and replaced by the next real one. The
                     // keyframe makes the correction land on a decodable frame
                     // rather than a delta against a picture the controller no
                     // longer has.
-                    last_frame = None;
+                    if let (Some(f), Some(AnyCapture::Single(c))) = (last_frame.as_mut(), capture.as_mut()) {
+                        c.redraw_cursor(f);
+                    }
                     want_keyframe = true;
                 }
                 StreamCommand::RequestKeyframe => {
@@ -2168,6 +2201,7 @@ fn run(
                                 t0.elapsed().as_millis()
                             );
                         }
+                        stranded_repainted_at = None;
                     }
                     skipped = 0;
                     if blocked_since.take().is_some() {
@@ -2204,6 +2238,44 @@ fn run(
                     skipped += 1;
                     if skipped == 30 || skipped == 150 {
                         eprintln!("[stream] {skipped} consecutive skips (still screen)");
+                    }
+                    // A SWITCH THAT NEVER GETS ITS FIRST PICTURE: the
+                    // destination screen stands still and the capture holds
+                    // nothing to re-send, so every keyframe request, zoom and
+                    // click stays invisible until the desktop repaints by
+                    // itself. Two reasons a screen presents nothing, and the
+                    // net answers both: the PANEL IS ASLEEP (the wake at
+                    // session start is the only one, and a sleeping panel
+                    // presents nothing whatever the scene does: measured
+                    // 2026-09-22, every probe against a sleeping panel came
+                    // back empty), so the same nudge as the cold start; and
+                    // the screen is awake but STILL, so the scene is changed
+                    // invisibly to make the compositor present (repaint.rs:
+                    // a pointer-only update and a re-opened duplication do
+                    // not). The commit out of the composite provokes once at
+                    // once; this is the net under it and under any other
+                    // switch that landed on such a screen: three tries,
+                    // three quarters of a second apart, each in the log.
+                    if let Some(t0) = switch_started {
+                        let due = stranded_repainted_at.unwrap_or(t0) + Duration::from_millis(750);
+                        if last_frame.is_none() && stranded_repaints < 3 && now >= due {
+                            if matches!(capture, Some(AnyCapture::Single(_))) {
+                                stranded_repaints += 1;
+                                stranded_repainted_at = Some(now);
+                                want_keyframe = true;
+                                #[cfg(windows)]
+                                crate::display_wake::nudge();
+                                #[cfg(windows)]
+                                let accepted = crate::repaint::provoke_present(current_monitor);
+                                #[cfg(not(windows))]
+                                let accepted = false;
+                                eprintln!(
+                                    "[switch] no picture {} ms after commit: woke the panel and provoked a present ({stranded_repaints}/3{})",
+                                    t0.elapsed().as_millis(),
+                                    if accepted { "" } else { ", the nudge window was refused" }
+                                );
+                            }
+                        }
                     }
                     // NO FIRST FRAME EVER is not a still screen — a still
                     // screen was captured once and is re-sent on demand; this
@@ -2858,6 +2930,10 @@ fn pump_frame(
     fit: &mut crate::composite::FitState,
 ) -> Result<bool, PumpError> {
     let t_capture = Instant::now();
+    // Something WAITING for a picture: a keyframe (a rebuilt encoder, a peer's
+    // request) or the viewer fit (a stage change, a step settling). Either is
+    // a reason to re-send the held picture of a still screen.
+    let need_picture = *want_keyframe || fit.needs_frame();
     // BORROWED, not owned. The composite path used to hand back a cloned
     // canvas every tick — 56 MB per frame on a three-screen desktop, competing
     // for memory bandwidth with the encoder that is about to read it.
@@ -2880,10 +2956,10 @@ fn pump_frame(
                 // STILL SCREEN — see the long note on the Single arm below.
                 // Same rule, same function: an inline copy of this condition
                 // meant the test covered one arm of two.
-                Err(CaptureError::AccessLost) if !should_resend_still(*want_keyframe, holding) => {
+                Err(CaptureError::AccessLost) if !should_resend_still(need_picture, holding) => {
                     return Err(PumpError::SecureDesktop)
                 }
-                Err(CaptureError::Timeout) if !should_resend_still(*want_keyframe, holding) => {
+                Err(CaptureError::Timeout) if !should_resend_still(need_picture, holding) => {
                     return Err(PumpError::NoChange)
                 }
                 Err(CaptureError::Timeout) | Err(CaptureError::AccessLost) => {}
@@ -2915,7 +2991,7 @@ fn pump_frame(
                     // So while a keyframe is outstanding, re-send the last
                     // picture we captured. It is the same image, which is
                     // exactly what a still screen means.
-                    if !should_resend_still(*want_keyframe, last_frame.is_some()) {
+                    if !should_resend_still(need_picture, last_frame.is_some()) {
                         return Err(if secure {
                             PumpError::SecureDesktop
                         } else {
@@ -4023,5 +4099,11 @@ mod tests {
         assert!(!should_resend_still(false, true), "no keyframe wanted: stay free");
         assert!(should_resend_still(true, true), "keyframe outstanding: re-send");
         assert!(!should_resend_still(true, false), "nothing held to re-send");
+        // The pump's first argument is `want_keyframe || fit.needs_frame()`
+        // since the 2026-09-21 report: a stage change over a still screen is
+        // a reason to re-send too, or the zoom never sharpens.
+        let mut fit = crate::composite::FitState::new();
+        fit.stage_changed();
+        assert!(should_resend_still(false || fit.needs_frame(), true), "a changed stage re-sends the held picture");
     }
 }
