@@ -28,8 +28,14 @@ vi.mock('../api/client', async (orig) => {
     return { ...real, apiClient: { ...real.apiClient, get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn(), put: vi.fn() } };
 });
 vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
+vi.mock('../notes/model/notesPrefsSync', () => ({ pullNotesPrefs: vi.fn() }));
+vi.mock('../api/noteMedia', async (orig) => ({ ...(await orig<typeof import('../api/noteMedia')>()), uploadNoteMedia: vi.fn() }));
 
 import { apiClient, ApiError } from '../api/client';
+import { isNoteBusy, resetNoteBusy } from '../notes/model/noteBusy';
+import { applyTaskEvent } from '../notes/model/taskEvents';
+import { uploadNoteMedia } from '../api/noteMedia';
+import { type TaskAttachmentRef } from '../api/tasks';
 import { sealSelfField } from '../api/listSeal';
 import { type TaskList } from '../api/tasks';
 import { noteSaved, useListContentActions, listContentKeys, type ListContentActions } from '../notes/model/useListContent';
@@ -81,7 +87,7 @@ async function staleRefusal(theirText: string, rev = 9) {
     }));
 }
 
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); resetNoteBusy(); });
 afterEach(() => {
     act(() => { root?.unmount(); });
     root = null;
@@ -141,6 +147,72 @@ describe('a note’s text saved on top of someone else’s edit', () => {
         let ok: unknown;
         await act(async () => { ok = await actions().setBody(5, 'my words'); });
         expect(noteSaved(ok as never)).toBe(true);
+    });
+
+    // The base being right at SEND time is only half of it: the cached
+    // revision must not move while the save is out. A note's text, title and
+    // pictures live in the LISTING query, and a task_lists UPDATE raises the
+    // 'lists' event (migration 067) — so it is the listing's refetch that has
+    // to wait, not this note's items. Marking `list:5` (the items key) left
+    // that refetch entirely undeferred: it landed the pre-save body AND the
+    // other device's revision in the cache, and the next save then named a
+    // base the user had already moved past and was refused — a conflict
+    // banner over the user's OWN earlier words, with nobody else involved.
+    it('holds the LISTING’s refetch while a text save is out, not this note’s items', async () => {
+        const actions = await mount(FEATURES_069);
+        let land: (v: unknown) => void = () => {};
+        vi.mocked(apiClient.patch).mockImplementationOnce(() => new Promise(r => { land = r; }));
+        const qc2 = new QueryClient();
+        const spy = vi.spyOn(qc2, 'invalidateQueries');
+
+        expect(isNoteBusy('lists')).toBe(false);
+        let save!: Promise<unknown>;
+        await act(async () => { save = actions().setBody(5, 'my words'); await Promise.resolve(); });
+        expect(isNoteBusy('lists')).toBe(true);
+        // A live event for the notes now waits...
+        applyTaskEvent(qc2, { t: 'lists' }, false);
+        expect(spy).not.toHaveBeenCalled();
+        // ...while this note's ITEMS are not held: a text save changes none.
+        expect(isNoteBusy('list:5')).toBe(false);
+        applyTaskEvent(qc2, { t: 'list', id: 5 }, false);
+        expect(spy).toHaveBeenCalledWith({ queryKey: ['notes', 'tasks', 'list', 5] });
+
+        await act(async () => { land({ content_rev: 4 }); await save; });
+        expect(isNoteBusy('lists')).toBe(false);
+        expect(spy).toHaveBeenCalledWith({ queryKey: ['notes', 'lists'] });
+    });
+
+    // A picture is the same story with a much longer window: the sidecar to
+    // save is read BEFORE the upload, which is seconds on a phone. The base
+    // has to be read there too, or the save names a revision its own payload
+    // never saw and the check cannot refuse the race it exists for.
+    it('a picture names the revision its sidecar was read from, not the one the upload finished on', async () => {
+        const actions = await mount(FEATURES_069);
+        let finish!: (refs: TaskAttachmentRef[]) => void;
+        vi.mocked(uploadNoteMedia).mockImplementationOnce(() => new Promise(r => { finish = r; }));
+        vi.mocked(apiClient.patch).mockResolvedValueOnce({ content_rev: 10 });
+
+        let add!: Promise<boolean>;
+        await act(async () => {
+            add = actions().addNoteMedia(5, [new File(['x'], 'a.png', { type: 'image/png' })], []);
+            await Promise.resolve();
+        });
+        // Mid-upload, the other device's picture lands in the cache.
+        qc.setQueryData<TaskList[]>(LISTS_KEY, [note({ content_rev: 9 })]);
+        await act(async () => { finish([{ href: 'file:1', name: 'a.png' }]); await add; });
+
+        const sent = vi.mocked(apiClient.patch).mock.calls[0][1] as Record<string, unknown>;
+        expect(sent.expect_rev).toBe(3);   // what `kept` was read from — so the server refuses
+    });
+
+    it('POSITIVE CONTROL: a picture added with nothing in flight names the current revision', async () => {
+        const actions = await mount(FEATURES_069);
+        qc.setQueryData<TaskList[]>(LISTS_KEY, [note({ content_rev: 9 })]);
+        vi.mocked(uploadNoteMedia).mockResolvedValueOnce([{ href: 'file:1', name: 'a.png' }]);
+        vi.mocked(apiClient.patch).mockResolvedValueOnce({ content_rev: 10 });
+        await act(async () => { await actions().addNoteMedia(5, [new File(['x'], 'a.png', { type: 'image/png' })], []); });
+        const sent = vi.mocked(apiClient.patch).mock.calls[0][1] as Record<string, unknown>;
+        expect(sent.expect_rev).toBe(9);
     });
 
     it('VERSION SKEW: against a server without the revision, no base is named at all', async () => {

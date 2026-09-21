@@ -50,7 +50,7 @@ import {
 } from '../../api/listContent';
 import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
 import { newOpKey } from '../../api/opKey';
-import { beginNoteWrite } from './noteBusy';
+import { LISTS_KEY, beginNoteWrite } from './noteBusy';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
@@ -153,7 +153,10 @@ export interface ListContentActions {
      *  server's copy is in `conflict.theirs` (null = they cleared it), the
      *  cache now holds it, and NOTHING was written. */
     setBody: (listId: number, body: string, baseRev?: number) => Promise<SaveOutcome>;
-    setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
+    /** Replace a note's sidecar. `baseRev` is the revision `next` was built
+     *  from — pass it whenever that was read before an await, or the check
+     *  is judged against a revision the payload never saw. */
+    setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[], baseRev?: number) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
     /** Every trashed note but `keep` (whose move to the trash is still
@@ -237,11 +240,14 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // another device's since (see components/NoteBodyField.tsx).
         const base = features.contentRev && baseRev !== undefined ? baseRev : revOf(lists(), listId, features);
         patchList(listId, l => ({ ...l, body: body === '' ? null : body }));
-        // Mark the note busy for as long as the save is out, so a live event
-        // arriving mid-flight defers its refetch instead of landing the OLD
-        // text over the optimistic one — which would also move the base this
-        // save is being judged against.
-        const done = beginNoteWrite(`list:${listId}`);
+        // Busy under LISTS_KEY, not `list:<id>`. A note's text, title and
+        // pictures live in the LISTING query (['notes','lists']), and a
+        // task_lists UPDATE raises the 'lists' event (migration 067), whose
+        // refetch taskEvents.ts defers under LISTS_KEY. `list:<id>` gates
+        // only that note's ITEMS — which this write does not touch — so
+        // marking it left the refetch that lands the OLD text, and the OLD
+        // revision, entirely undeferred.
+        const done = beginNoteWrite(LISTS_KEY);
         try {
             const rev = await setTaskListBody(listId, body, base);
             patchList(listId, l => ({ ...l, ...(rev === null ? {} : { content_rev: rev }) }));
@@ -266,16 +272,21 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
 
     /** Replace the sidecar; `dropped` refs are no longer named anywhere and
      *  their uploads are deleted once the new sidecar is saved. */
-    const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = []): Promise<boolean> => {
+    const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = [], baseRev?: number): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
         if (current && isAttachmentsLocked(current.attachments ?? null)) {
             pushMessageToast({ title: 'This note’s pictures can’t be read on this device yet, so they can’t be changed here' });
             return false;
         }
         const before = lists();
-        const base = revOf(lists(), listId, features);
+        // As for the text: the caller's base wins, because `next` was built
+        // from the sidecar as it stood THEN (addNoteMedia reads it before an
+        // upload that can take seconds). A base read here would be the
+        // revision after that window, and the check could not refuse the very
+        // race it exists for.
+        const base = features.contentRev && baseRev !== undefined ? baseRev : revOf(lists(), listId, features);
         patchList(listId, l => ({ ...l, attachments: next.length === 0 ? null : JSON.stringify(next.map(({ href, name }) => ({ href, name }))) }));
-        const done = beginNoteWrite(`list:${listId}`);
+        const done = beginNoteWrite(LISTS_KEY);
         try {
             const rev = await setTaskListAttachments(listId, next, base);
             patchList(listId, l => ({ ...l, ...(rev === null ? {} : { content_rev: rev }) }));
@@ -309,6 +320,14 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         const replaceSet = new Set(replacing.map(r => r.href));
         const kept = parseTaskAttachments(opened).filter(r => !replaceSet.has(r.href));
+        // The revision `kept` was read from, captured HERE — the upload below
+        // is a multi-second window on a phone, and another device adding a
+        // picture during it moves the cached revision. Saving against that
+        // one would name THEIRS and drop their picture from the sidecar.
+        const baseRev = revOf(lists(), listId, features);
+        // And hold the listing's refetches off for the whole window, so the
+        // optimistic cache this save is built on cannot be replaced under it.
+        const held = beginNoteWrite(LISTS_KEY);
         let added: TaskAttachmentRef[];
         try {
             const bases: string[] = [];
@@ -320,14 +339,20 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             }
             added = await uploadNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length);
         } catch (err) {
+            held();
             explain('upload failed', err);
             pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
             return false;
         }
-        const ok = await setNoteAttachments(listId, [...kept, ...added], replacing);
+        let ok: boolean;
+        try {
+            ok = await setNoteAttachments(listId, [...kept, ...added], replacing, baseRev);
+        } finally {
+            held();
+        }
         if (!ok) await deleteFiles(fileIdsOf(added));
         return ok;
-    }, [lists, setNoteAttachments]);
+    }, [lists, setNoteAttachments, features]);
 
     const ensureFeatures = useCallback(async (): Promise<ListFeatures | null> => {
         try {

@@ -54,7 +54,16 @@ export interface ListFeatures {
      *  the last save wins as it always did. */
     contentRev: boolean;
     /** Migration 070: a create may carry a random id, so a create whose
-     *  answer was lost is not made twice. */
+     *  answer was lost is not made twice.
+     *
+     *  DELIBERATELY NOT GATED ON, unlike every other flag here. The key is a
+     *  short random field an older server drops on the floor, so sending it
+     *  unconditionally is byte-for-byte the old behaviour there and needs no
+     *  probe; gating would only add a way to stop sending it. It is parsed
+     *  and advertised so an operator (and the walk) can see whether the
+     *  server they are on de-duplicates creates — the server's matching
+     *  `op_key` entry in GET /task-features says the same for the item
+     *  routes. If a reader is ever added, it must not be "skip the key". */
     idempotentCreates: boolean;
 }
 
