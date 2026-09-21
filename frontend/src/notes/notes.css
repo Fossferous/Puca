@@ -545,6 +545,26 @@
 .notes-card-tools .notes-iconbtn { width: 34px; height: 34px; font-size: 16px; }
 .notes-card-tools .spacer { flex: 1; }
 
+/* Drag to reorder (NoteGrid). The grip is the ONLY handle: a whole-card touch
+   drag would fight the long press that starts a bulk selection, and
+   touch-action: none is what keeps Android's WebView from claiming the
+   gesture as a scroll. */
+.notes-card-grip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    opacity: 0;
+}
+.notes-card:hover .notes-card-grip,
+.notes-card:focus-within .notes-card-grip { opacity: 1; }
+.notes-card-grip svg { width: 14px; height: 14px; }
 .notes-card.dragging { opacity: 0.6; }
 .notes-grid-drop-indicator {
     position: absolute;
@@ -995,7 +1015,10 @@
     .notes-rail-item { padding: 13px 14px; font-size: 15px; }
 
     .notes-main { padding: 12px 12px 120px; }
-    .notes-grid { column-width: auto; column-count: 1; }
+    .notes-grid { column-width: auto; column-count: 1; position: relative; }
+    /* Touch: the grip is always visible and a full 44px target. */
+    .notes-card-grip { opacity: 0.6; width: 44px; min-height: 44px; }
+    .notes-card-grip svg { width: 18px; height: 18px; }
     .notes-quickadd { display: none; }   /* the FAB is the phone's composer */
     .notes-fab { display: inline-flex; }
 

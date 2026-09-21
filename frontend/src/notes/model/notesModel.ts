@@ -244,12 +244,64 @@ export function noteMatches(card: NoteCard, query: string): boolean {
 }
 
 /**
+ * Reordering is only meaningful against the SAVED order: a display sort
+ * (title / created / edited) is not stored anywhere, and a search result is
+ * not a section of it. Both the card menu's Move items and the grid drag
+ * start here, so the two can never disagree about when ordering is offered.
+ */
+export function canReorder(sort: string, filterKind: NoteFilter['kind']): boolean {
+    return sort === 'puca' && filterKind !== 'search';
+}
+
+/**
+ * DRAGGING additionally needs the section to really be ONE COLUMN.
+ * useDragReorder is one-axis and sorts items by their y-start, which across
+ * the grid's CSS columns is meaningless — so drag is offered in list view, or
+ * in any view on a coarse pointer, where notes.css forces `column-count: 1`
+ * (the JS side of that media query is NotesShell's COARSE). Masonry on a fine
+ * pointer keeps the card menu, which is the tap and keyboard path everywhere
+ * anyway.
+ */
+export function canDragReorder(sort: string, filterKind: NoteFilter['kind'], view: 'grid' | 'list', coarse: boolean): boolean {
+    return canReorder(sort, filterKind) && (view === 'list' || coarse);
+}
+
+/**
+ * Splice a rearranged VISIBLE order back into the FULL order, so the saved
+ * prefs (which Púca's Tasks tab bar renders from) keep every hidden note —
+ * archived, filtered out, in another label, in the trash — exactly where it
+ * was. Passing only the visible subset to buildPrefsForOrder would push every
+ * hidden note to the tail of Púca's bar.
+ *
+ * `nextVisible` must be a permutation of the visible keys that actually exist
+ * in `fullKeys`; anything else (a stale key, a dropped one, or the identity)
+ * returns null, so a no-op never becomes a full-replace PUT. Both the card
+ * menu's moves and the grid drag come through here — one splice, one place.
+ */
+export function applyVisibleOrder(
+    fullKeys: readonly string[],
+    visibleKeys: readonly string[],
+    nextVisible: readonly string[],
+): string[] | null {
+    const vis = visibleKeys.filter(k => fullKeys.includes(k));
+    if (nextVisible.length !== vis.length) return null;
+    const want = new Set(vis);
+    const seen = new Set<string>();
+    for (const k of nextVisible) {
+        if (!want.has(k) || seen.has(k)) return null;   // not a permutation
+        seen.add(k);
+    }
+    if (nextVisible.every((k, idx) => k === vis[idx])) return null;   // no-op
+    // The visible notes keep their SLOTS in the full order; only which
+    // visible note sits in which slot changes.
+    let n = 0;
+    return fullKeys.map(k => (want.has(k) ? nextVisible[n++] : k));
+}
+
+/**
  * Move one note within the VISIBLE order and splice the result back into the
- * FULL order, so the saved prefs (which Púca's Tasks tab bar renders from)
- * keep every hidden note — archived, filtered out, in another label — exactly
- * where it was. Passing only the visible subset to buildPrefsForOrder would
- * push every hidden note to the tail of Púca's bar. Returns null when the move
- * is a no-op (already at the edge, or the key is not visible).
+ * full order (applyVisibleOrder has that story). Returns null when the move is
+ * a no-op — already at the edge, or the key is not visible.
  */
 export function moveNoteInOrder(
     fullKeys: readonly string[],
@@ -267,12 +319,7 @@ export function moveNoteInOrder(
             : target === 'up' ? Math.max(0, i - 1)
                 : Math.min(next.length, i + 1);
     next.splice(at, 0, key);
-    if (next.every((k, idx) => k === vis[idx])) return null;
-    // The visible notes keep their SLOTS in the full order; only which
-    // visible note sits in which slot changes.
-    const visibleSet = new Set(vis);
-    let n = 0;
-    return fullKeys.map(k => (visibleSet.has(k) ? next[n++] : k));
+    return applyVisibleOrder(fullKeys, vis, next);
 }
 
 export function searchNotes(cards: NoteCard[], query: string): NoteCard[] {

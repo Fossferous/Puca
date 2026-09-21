@@ -373,6 +373,65 @@ await page.locator('.context-menu-item', { hasText: 'Move to top' }).click();
 await sleep(400);
 ck('move: "Move to top" reorders the others (and never touches the pinned one)', (await othersTitles()).join(',') === 'Reading,Poem,Holiday photo,Sketch,Packing' && await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 await shot('three-cards');
+// Move to bottom — the model has had the branch since ordering landed; until
+// now the menu stopped at 'Move down', so sending a note 200 places took 199
+// menu invocations.
+await page.locator('.notes-card', { hasText: 'Poem' }).hover();
+await page.locator('.notes-card', { hasText: 'Poem' }).locator('button[aria-label="More actions"]').click();
+await page.waitForSelector('.context-menu', { timeout: 5000 });
+await page.locator('.context-menu-item', { hasText: 'Move to bottom' }).click();
+await sleep(400);
+ck('move: "Move to bottom" sends the note to the end of the others',
+    (await othersTitles()).join(',') === 'Reading,Holiday photo,Sketch,Packing,Poem', (await othersTitles()).join(','));
+ck('move: the pinned section is untouched by a bottom move', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
+
+// Drag to reorder, in LIST view (one column — masonry has no one-axis order).
+ck('grid view (fine pointer): no drag grips, masonry is two-dimensional', await page.locator('.notes-card-grip').count() === 0);
+await page.click('button[aria-label="Switch to list view"]');
+await page.waitForSelector('.notes-grid.list', { timeout: 5000 });
+ck('list view: every card shows a drag grip',
+    await page.locator('.notes-grid.list .notes-card-grip').count() === await page.locator('.notes-grid.list .notes-card').count()
+    && await page.locator('.notes-card-grip').count() > 1);
+// A real Pointer Events drag: press the grip, move past the third card's
+// midpoint in steps, release. Playwright's drag helpers do not drive this.
+const otherCard = i => page.locator('section[aria-label="Other notes"] .notes-card').nth(i);
+const gripBox = await otherCard(0).locator('.notes-card-grip').boundingBox();
+const thirdBox = await otherCard(2).boundingBox();
+let indicatorSeen = false;
+if (gripBox && thirdBox) {
+    const gx = gripBox.x + gripBox.width / 2;
+    const gy = gripBox.y + gripBox.height / 2;
+    await page.mouse.move(gx, gy);
+    await page.mouse.down();
+    const targetY = thirdBox.y + thirdBox.height * 0.75;
+    for (let i = 1; i <= 10; i++) {
+        await page.mouse.move(gx, gy + (targetY - gy) * (i / 10));
+        await sleep(20);
+    }
+    indicatorSeen = await page.locator('.notes-grid-drop-indicator').count() === 1;
+    await page.mouse.up();
+    await sleep(600);
+}
+ck('drag: the insertion line appears while dragging', indicatorSeen);
+ck('drag: dropping a card lower down reorders the others',
+    (await othersTitles()).join(',') === 'Holiday photo,Sketch,Reading,Packing,Poem', (await othersTitles()).join(','));
+ck('drag: the drop did not open the note (the ghost click is swallowed)', await page.locator('.notes-editor').count() === 0);
+ck('drag: the pinned card kept its section', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
+await shot('list-drag');
+// The order must have REACHED task_tab_prefs, not just the local cache.
+await page.reload();
+await page.waitForSelector('.notes-card', { timeout: 20000 });
+await sleep(1000);
+ck('drag: the new order survived a reload (it reached the saved tab order)',
+    (await othersTitles()).join(',') === 'Holiday photo,Sketch,Reading,Packing,Poem', (await othersTitles()).join(','));
+await page.fill('.notes-search input', 'a');
+await sleep(300);
+ck('drag: a search removes the grips (a result is not a section of the order)', await page.locator('.notes-card-grip').count() === 0);
+await page.click('button[aria-label="Clear search"]');
+await sleep(200);
+await page.click('button[aria-label="Switch to grid view"]');
+await page.waitForSelector('.notes-grid:not(.list)', { timeout: 5000 });
+
 await page.fill('.notes-search input', 'bread');
 await sleep(300);
 ck('search: matches an item inside a note', await page.locator('.notes-card').count() === 1 && /Groceries/.test(await page.locator('.notes-card-title').first().innerText()));
@@ -1093,6 +1152,15 @@ await mshot('phone-label-manager');
 await m.keyboard.press('Escape');
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-dialog', { state: 'detached', timeout: 5000 });
+
+// Ordering on a phone: notes.css forces ONE column in both views there, so
+// the grip is offered in grid view too — and it must be a real tap target
+// that does not scroll the page when dragged.
+ck('phone: cards carry a grip in grid view too (one column there)', await m.locator('.notes-card-grip').count() > 1);
+const pg = await m.locator('.notes-card-grip').first().boundingBox();
+ck('phone: the grip is a 44px tap target', !!pg && pg.width >= 44 && pg.height >= 44, JSON.stringify(pg));
+ck('phone: the grip declares touch-action none (no scroll to fight)',
+    await m.locator('.notes-card-grip').first().evaluate(el => getComputedStyle(el).touchAction) === 'none');
 
 // bulk selection by LONG PRESS (the phone's way in), then the bar at 390px.
 // Poem, not Phone note: that one is in the trash by now (the Trash section above).

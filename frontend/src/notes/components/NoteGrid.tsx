@@ -1,14 +1,26 @@
 /**
  * The grid: PINNED first, then OTHERS, each a masonry of NoteCards (CSS
- * columns; single column in list view and on phones). No card drag —
- * CSS-columns layout is two-dimensional and useDragReorder is one-axis, so
- * ordering is done from the card menu (Move to top / up / down), which is
- * also the tap alternative the design rules require.
+ * columns; single column in list view and on phones).
+ *
+ * DRAG is offered only where the section really is ONE COLUMN — list view, or
+ * any view on a coarse pointer, where notes.css forces `column-count: 1`.
+ * useDragReorder is one-axis and sorts items by their y-start, which across
+ * CSS columns is meaningless, so masonry on a fine pointer keeps the card menu
+ * alone (Move to top / up / down / to bottom), which is also the tap and
+ * keyboard alternative the design rules require everywhere.
+ *
+ * Each section mounts its OWN hook instance and its cards carry that section's
+ * `data-drag-group`, so a card can never be dragged from Others into Pinned:
+ * splitPinned re-splits on every render, so nothing visible would change while
+ * Púca's tab bar was silently rewritten (NotesShell's menuFor has that story).
  */
+import { useDragReorder } from '../../hooks/useDragReorder';
 import { NoteIcon, ArchiveIcon, SearchIcon, TagIcon } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, type NoteFilter } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteCard } from './NoteCard';
+
+export type GridSection = 'pinned' | 'others';
 
 interface NoteGridProps {
     pinned: NoteCardModel[];
@@ -26,6 +38,10 @@ interface NoteGridProps {
     onLabelClick: (label: string) => void;
     onArchive: (card: NoteCardModel, archived: boolean) => void;
     registerEl: (key: string, el: HTMLElement | null) => void;
+    /** Drag to reorder is allowed at all (saved order, no search, one column). */
+    canDrag?: boolean;
+    /** A drop: the section's keys in their new visible order. */
+    onDropReorder?: (section: GridSection, nextVisible: string[]) => void;
     /** Bulk selection (optional). */
     selected?: ReadonlySet<string>;
     onSelect?: (card: NoteCardModel, e: { shiftKey: boolean }) => void;
@@ -50,8 +66,40 @@ function Empty({ filter }: { filter: NoteFilter }) {
     }
 }
 
+function DropLine({ indicator }: { indicator: { x: number; y: number; width: number; height: number } | null }) {
+    if (!indicator) return null;
+    return (
+        <div
+            className="notes-grid-drop-indicator"
+            style={{ left: indicator.x, top: indicator.y, width: indicator.width, height: indicator.height }}
+        />
+    );
+}
+
 export function NoteGrid(props: NoteGridProps) {
-    const { pinned, others, filter, view, loading } = props;
+    const { pinned, others, filter, view, loading, canDrag = false, onDropReorder } = props;
+
+    // Both hooks are called unconditionally, ABOVE the early returns below —
+    // rules-of-hooks is a required gate here and a hook under a return shipped
+    // as far as a signed installer once. Destructured on purpose: passing
+    // `hook.setContainer` straight to a JSX ref makes the refs lint treat the
+    // whole returned object as a ref (see useDragReorder's own note).
+    const dragFor = (section: GridSection, count: number) => ({
+        axis: 'y' as const,
+        handleSelector: '.notes-card-grip',
+        touchHoldMs: 0,            // the grip has touch-action: none — no scroll to fight
+        enabled: canDrag && !!onDropReorder && count > 1,
+        onDrop: ({ key, order, insertAt }: { key: string; order: string[]; insertAt: number }) => {
+            const next = [...order];
+            next.splice(insertAt, 0, key);
+            onDropReorder?.(section, next);
+        },
+    });
+    const { setContainer: setPinnedContainer, state: pinnedDrag, onPointerDown: onPinnedPointerDown } =
+        useDragReorder(dragFor('pinned', pinned.length));
+    const { setContainer: setOthersContainer, state: othersDrag, onPointerDown: onOthersPointerDown } =
+        useDragReorder(dragFor('others', others.length));
+
     if (loading && pinned.length === 0 && others.length === 0) {
         return <div className="notes-loading"><span className="notes-spinner" /> Loading your notes…</div>;
     }
@@ -64,21 +112,43 @@ export function NoteGrid(props: NoteGridProps) {
         onSelect: props.onSelect,
         selecting: (props.selected?.size ?? 0) > 0,
     };
+    const pinnedDraggable = canDrag && !!onDropReorder && pinned.length > 1;
+    const othersDraggable = canDrag && !!onDropReorder && others.length > 1;
     return (
         <>
             {pinned.length > 0 && (
                 <section aria-label="Pinned notes">
                     <h2 className="notes-section-title">Pinned</h2>
-                    <div className={`notes-grid ${view === 'list' ? 'list' : ''}`}>
-                        {pinned.map(c => <NoteCard key={c.key} card={c} {...cardProps} selected={props.selected?.has(c.key) ?? false} />)}
+                    <div className={`notes-grid ${view === 'list' ? 'list' : ''}`} ref={setPinnedContainer} onPointerDown={onPinnedPointerDown}>
+                        <DropLine indicator={pinnedDrag.indicator} />
+                        {pinned.map(c => (
+                            <NoteCard
+                                key={c.key}
+                                card={c}
+                                {...cardProps}
+                                draggable={pinnedDraggable}
+                                draggingKey={pinnedDrag.dragging?.key ?? null}
+                                selected={props.selected?.has(c.key) ?? false}
+                            />
+                        ))}
                     </div>
                 </section>
             )}
             {others.length > 0 && (
                 <section aria-label={pinned.length > 0 ? 'Other notes' : 'Notes'}>
                     {pinned.length > 0 && <h2 className="notes-section-title">Others</h2>}
-                    <div className={`notes-grid ${view === 'list' ? 'list' : ''}`}>
-                        {others.map(c => <NoteCard key={c.key} card={c} {...cardProps} selected={props.selected?.has(c.key) ?? false} />)}
+                    <div className={`notes-grid ${view === 'list' ? 'list' : ''}`} ref={setOthersContainer} onPointerDown={onOthersPointerDown}>
+                        <DropLine indicator={othersDrag.indicator} />
+                        {others.map(c => (
+                            <NoteCard
+                                key={c.key}
+                                card={c}
+                                {...cardProps}
+                                draggable={othersDraggable}
+                                draggingKey={othersDrag.dragging?.key ?? null}
+                                selected={props.selected?.has(c.key) ?? false}
+                            />
+                        ))}
                     </div>
                 </section>
             )}

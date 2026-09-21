@@ -27,10 +27,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
   `+` button opens the same composer as a sheet. Where the server has
   migration 065 the composer also takes free text, photos (the camera on a
   phone) and a drawing.
-- **Open a note** — Púca's own task tree: inline edit, subtasks, drag to reorder
-  and to nest, due times, attachments, the collapsible Completed section. It is
-  the same component Púca renders, so a note lays out exactly as it does in the
-  Tasks view.
+- **Open a note** — Púca's own task tree: inline edit, subtasks, drag an item
+  to reorder it and to nest it, due times, attachments, the collapsible
+  Completed section. It is the same component Púca renders, so a note lays out
+  exactly as it does in the Tasks view. (Dragging a whole NOTE into place is a
+  different thing — see *How it maps onto Púca*.)
 - **Search** — over decrypted titles, items, labels and server names, on the
   device; nothing about the query leaves it.
 - **Reminders** — every open item with a due time, grouped Overdue / Today /
@@ -94,7 +95,7 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Items, nesting, completed, due times, attachments | The tasks (`channel_tasks`), through `frontend/src/api/tasks.ts` |
 | A note's text, photos and drawings; the Trash | `task_lists.body` / `.attachments` (encrypt-to-self) and `.trashed_at` — personal notes only (below) |
 | Pin | `task_tab_prefs.is_favorite` — the same favourite as the Tasks tab bar |
-| Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
+| Note order (drag in one-column views; `Move to top / up / down / to bottom`) | `task_tab_prefs` order — the Tasks tab bar's order |
 | An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
 | Edited | `updated_at` on the list and its items (066) |
 | Reminders | `due_at` + `frontend/src/api/taskReminders.ts` |
@@ -104,7 +105,20 @@ Púca's reminders. Anything you do in one is what you see in the other.
 Pin and order are shared **by design**: pinning in Notes pulls that tab to the
 front of Púca's bar, as favouriting does there. A reorder made while notes
 are filtered or archived keeps every hidden note in place (the saved order is
-always the full set — `moveNoteInOrder` in `frontend/src/notes/model/notesModel.ts`).
+always the full set — `applyVisibleOrder` in
+`frontend/src/notes/model/notesModel.ts`, which both the menu's moves and the
+grid drag go through).
+
+**Reordering a note.** The card menu always offers *Move to top*, *Move up*,
+*Move down* and *Move to bottom* — the tap and keyboard path, on every
+layout. Where a section really is one column — list view, or either view on
+a phone — a note can also be **dragged by the grip beside its title**, with a
+line showing where it will land. Pinned notes reorder among the pinned ones
+and others among the others: the two sections are two drag groups, so a card
+cannot cross between them (nothing visible would change, yet Púca's tab bar
+would be rewritten). The grid's masonry on a mouse is two-dimensional and the
+drag is one-axis, so it keeps the menu alone. Ordering is offered only against
+the saved order, never a display sort or a search result.
 
 ## What follows the account
 

@@ -18,7 +18,7 @@ import { parseEncAttachment, decryptToBlobUrl } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import {
-    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
+    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
@@ -46,6 +46,11 @@ interface NoteCardProps {
     compactTools: boolean;
     /** The card registers its element so menus opened elsewhere can anchor to it. */
     registerEl: (key: string, el: HTMLElement | null) => void;
+    /** Drag to reorder is on for this section (NoteGrid decides): show the
+     *  grip and mark the article for useDragReorder. */
+    draggable?: boolean;
+    /** The key currently being dragged, so this card can dim itself. */
+    draggingKey?: string | null;
     /** Bulk selection (useNoteSelection.tsx): absent = no selection UI. */
     selected?: boolean;
     selecting?: boolean;
@@ -73,10 +78,21 @@ function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible:
 
 function NoteCardImpl({
     card, actions, now, onOpen, onMenu, onPickColor, onPickLabels, onLabelClick, onArchive, compactTools, registerEl,
-    selected = false, selecting = false, onSelect,
+    draggable = false, draggingKey = null, selected = false, selecting = false, onSelect,
 }: NoteCardProps) {
     const elRef = useRef<HTMLElement | null>(null);
     const press = useLongPress(onSelect ? () => onSelect(card, { shiftKey: false }) : undefined);
+    // A press that STARTS on the grip is a drag (useDragReorder), never the
+    // long press that opens bulk selection. Cancelling immediately rather than
+    // skipping the handler keeps press.wasTouch() honest, which is what turns
+    // Android's long-press `contextmenu` into a selection instead of the menu.
+    const pressHandlers = {
+        ...press.handlers,
+        onPointerDown: (e: React.PointerEvent) => {
+            press.handlers.onPointerDown(e);
+            if ((e.target as Element | null)?.closest?.('.notes-card-grip')) press.handlers.onPointerCancel();
+        },
+    };
     const unsynced = useNoteUnsynced(card.key);
     // No observer (an old WebView, jsdom) → decrypt right away rather than never.
     const [onScreen, setOnScreen] = useState(() => typeof IntersectionObserver === 'undefined');
@@ -125,10 +141,12 @@ function NoteCardImpl({
     return (
         <article
             ref={el => { elRef.current = el; registerEl(card.key, el); }}
-            className={`notes-card ${card.pinned ? 'pinned' : ''} ${selected ? 'selected' : ''}`}
+            className={`notes-card ${card.pinned ? 'pinned' : ''} ${selected ? 'selected' : ''} ${draggingKey === card.key ? 'dragging' : ''}`}
             data-selected={selected ? 'true' : undefined}
             data-color={card.color}
             data-note-key={card.key}
+            data-drag-key={draggable ? card.key : undefined}
+            data-drag-group={draggable ? (card.pinned ? 'pinned' : 'others') : undefined}
             tabIndex={0}
             role="button"
             aria-label={`${untitled ? 'Untitled note' : card.title}${card.pinned ? ', pinned' : ''}${card.archived ? ', archived' : ''}${colorName}`}
@@ -139,7 +157,7 @@ function NoteCardImpl({
                 if (onSelect && (selecting || e.shiftKey || e.ctrlKey || e.metaKey)) { onSelect(card, { shiftKey: e.shiftKey }); return; }
                 onOpen(card);
             }}
-            {...press.handlers}
+            {...pressHandlers}
             // The card itself only: Enter/Space on a control INSIDE it (pin,
             // a checkbox, a chip, the tools) bubbles here too, and must keep
             // its native activation rather than open the note.
@@ -168,6 +186,7 @@ function NoteCardImpl({
             )}
             <NoteHero items={hero} visible={onScreen} />
             <div className="notes-card-head">
+                {draggable && <span className="notes-card-grip" title="Drag to reorder" aria-hidden="true"><GripIcon /></span>}
                 <h3 className={`notes-card-title ${untitled ? 'untitled' : ''}`}>
                     {untitled ? 'Untitled note' : card.title}
                     {card.titleEncState === 'legacy' && !titleUnreadable && (

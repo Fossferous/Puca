@@ -7,6 +7,14 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Drag a note into place, and *Move to bottom*.** In list view — and on a
+  phone in either view — a note can be dragged by the grip beside its title
+  to reorder it, with a line showing where it will land. Pinned notes
+  reorder among the pinned ones. The card menu keeps *Move to top*, *Move
+  up*, *Move down* and now *Move to bottom* as well, so ordering still works
+  without a drag, on any screen. The order is the same one Púca's Tasks tab
+  bar uses, and notes hidden by a filter, by the archive or sitting in the
+  trash keep their places.
 - **Rename, merge or delete a label everywhere.** *Edit labels*, beside
   Labels in Púca Notes' sidebar, lists your labels with how many notes
   carry each one — archived notes included — and lets you fix a typo,

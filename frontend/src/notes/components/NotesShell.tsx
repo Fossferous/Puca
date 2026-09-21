@@ -19,7 +19,8 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { PlusIcon, WarningIcon } from '../../components/Icons';
 import {
     type NoteCard, type NoteFilter, type NoteRef,
-    allLabels, filterNotes, groupReminders, moveNoteInOrder, reminderBadgeCount, splitPinned,
+    allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, moveNoteInOrder,
+    reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { restoreLabels } from '../model/notesBulk';
@@ -35,7 +36,7 @@ import { NotesUpdateStripSlot } from './NotesUpdateGate';
 import { LabelPicker } from './LabelPicker';
 import { LabelManager } from './LabelManager';
 import { NoteEditor } from './NoteEditor';
-import { NoteGrid } from './NoteGrid';
+import { NoteGrid, type GridSection } from './NoteGrid';
 import { Popover } from './Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
@@ -319,8 +320,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         const section = card.pinned ? pinned : others;
         const visibleKeys = section.map(c => c.key);
         const fullKeys = allCards.map(c => c.key);
-        const canMove = local.sort === 'puca' && filter.kind !== 'search' && section.length > 1;
-        const move = (target: 'top' | 'up' | 'down') => {
+        const canMove = canReorder(local.sort, filter.kind) && section.length > 1;
+        const move = (target: 'top' | 'up' | 'down' | 'bottom') => {
             const next = moveNoteInOrder(fullKeys, visibleKeys, card.key, target);
             if (next) actions.reorderNotes(next);
         };
@@ -337,6 +338,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                 { id: 'move-top', label: 'Move to top', icon: 'arrow-up-circle', onClick: () => move('top') },
                 { id: 'move-up', label: 'Move up', icon: 'chevron-up', onClick: () => move('up') },
                 { id: 'move-down', label: 'Move down', icon: 'chevron-down', onClick: () => move('down') },
+                { id: 'move-bottom', label: 'Move to bottom', icon: 'arrow-down-circle', onClick: () => move('bottom') },
                 { id: 'sep2', label: '', separator: true },
             );
         }
@@ -361,6 +363,18 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         }
         return items;
     };
+    // Drag to reorder, same three conditions as the menu's Move items plus
+    // "this section is one column": list view, or any view on a coarse
+    // pointer (notes.css forces column-count: 1 there). The drop goes through
+    // actions.reorderNotes like the menu does, so it inherits the two refusals
+    // in savePrefs (prefs not read, trash not settled) and keepHiddenSlots.
+    const canDrag = canDragReorder(local.sort, filter.kind, local.view, coarse);
+    const onDropReorder = useCallback((section: GridSection, nextVisible: string[]) => {
+        const visible = (section === 'pinned' ? pinned : others).map(c => c.key);
+        const next = applyVisibleOrder(allCards.map(c => c.key), visible, nextVisible);
+        if (next) actions.reorderNotes(next);
+    }, [allCards, pinned, others, actions]);
+
     // Stable identities, so memo(NoteCard) can actually skip renders: the
     // menu builder closes over the current view and is read through a ref.
     const menuForRef = useRef(menuFor);
@@ -507,6 +521,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                     onLabelClick={onLabelClick}
                                     onArchive={archiveWithUndo}
                                     registerEl={registerEl}
+                                    canDrag={canDrag}
+                                    onDropReorder={onDropReorder}
                                     selected={selection.selected}
                                     onSelect={selection.onSelect}
                                 />
