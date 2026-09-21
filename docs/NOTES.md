@@ -42,6 +42,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
   from text this device has already decrypted: it is never stored, never
   cached and never sent, the query still never reaches the address bar, and
   text that cannot be decrypted is neither searched nor highlighted.
+  Each "also matched" line is windowed around its own match: the row is a
+  single ellipsised line, and the match is the only thing it exists to show.
 - **Reminders** — every open item with a due time, grouped Overdue / Today /
   Upcoming; tick it done from there. In a browser, Notes runs Púca's reminder
   loop, so a due item notifies while the Notes tab is open (allow

@@ -18,22 +18,24 @@ import { parseEncAttachment, decryptToBlobUrl } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import {
-    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
+    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, SearchIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
-import { findRanges, searchTerms, type Range } from '../model/noteSearch';
+import { findRanges, searchTerms, snippetAround, type Range } from '../model/noteSearch';
 import { scheduleSearchText } from '../model/notesTiming';
 import { Highlight } from './Highlight';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
 import { heroItems } from '../../api/noteMedia';
 import { ScheduleChip } from '../../components/schedule/ScheduleChip';
-import { SearchIcon } from '../../components/Icons';
 import { useNoteUnsynced } from '../model/notesOutbox';
 import { useLongPress } from './useLongPress';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
+/** Characters of context around a match in an "also matched" row, which is one
+ *  ellipsised line — much tighter than the body preview's window. */
+const FOUND_RADIUS = 40;
 
 interface NoteCardProps {
     card: NoteCardModel;
@@ -118,15 +120,23 @@ function NoteCardImpl({
         if (terms.length === 0 || !tasksForHits) return [];
         const shown = new Set(previewRows(tasksForHits, PREVIEW_ROWS).rows.map(r => r.task.id));
         const out: { what: string; text: string; ranges: Range[] }[] = [];
+        // One line each, clipped with an ellipsis by CSS — so the row is
+        // windowed AROUND its match first. A long item whose match sits past
+        // the card's width otherwise rendered its opening words and hid the
+        // <mark>, which is the only thing the row exists to show.
+        const row = (what: string, text: string, ranges: Range[]) => {
+            const s = snippetAround(text, ranges, FOUND_RADIUS);
+            out.push({ what, text: s.text, ranges: s.ranges });
+        };
         for (const t of tasksForHits) {
             if (!shown.has(t.id)) {
                 const desc = isUndecryptable(t.description) ? '' : t.description;
                 const r = findRanges(desc, terms);
-                if (r.length > 0) out.push({ what: t.is_completed ? 'ticked' : 'further down', text: desc, ranges: r });
+                if (r.length > 0) row(t.is_completed ? 'ticked' : 'further down', desc, r);
             }
             const place = scheduleSearchText(t);
             const pr = place ? findRanges(place, terms) : [];
-            if (pr.length > 0) out.push({ what: 'a place', text: place, ranges: pr });
+            if (pr.length > 0) row('a place', place, pr);
         }
         return out.slice(0, 3);
     }, [terms, tasksForHits]);
@@ -224,6 +234,9 @@ function NoteCardImpl({
             )}
             <NoteHero items={hero} visible={onScreen} />
             <div className="notes-card-head">
+                {/* aria-hidden: the keyboard and screen-reader route to reordering is the
+                    card menu's Move items, as the design rules require. The title is a
+                    mouse tooltip only — inert for assistive tech on this node, by design. */}
                 {draggable && <span className="notes-card-grip" title="Drag to reorder" aria-hidden="true"><GripIcon /></span>}
                 <h3 className={`notes-card-title ${untitled ? 'untitled' : ''}`}>
                     {untitled ? 'Untitled note' : <Highlight text={card.title} ranges={titleRanges} />}

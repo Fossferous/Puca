@@ -102,6 +102,27 @@ describe('search highlighting on a card', () => {
         expect(marks()).toEqual(['Butter']);
     });
 
+    it('a LONG ticked item is windowed around its match, not ellipsised before it', () => {
+        // The row is one line with `text-overflow: ellipsis`. Pushing the whole
+        // item text put the <mark> past the card's right edge for any item
+        // longer than the card is wide: a row whose only job is to show where
+        // it matched, showing the opening words instead.
+        const long = 'Remember to bring the ' + 'something else '.repeat(8) + 'and finally the Butter';
+        render({}, [task(1, { description: 'Milk' }), task(2, { description: long, is_completed: true })], 'butter');
+        expect(foundRows().length).toBe(1);
+        expect(foundRows()[0]).toContain('Butter');
+        expect(foundRows()[0]).toContain('…');            // it WAS clipped
+        expect(foundRows()[0]).not.toContain('Remember to bring');
+        expect(foundRows()[0].length).toBeLessThan(140);
+        expect(marks()).toEqual(['Butter']);
+    });
+
+    it('POSITIVE CONTROL: a short ticked item keeps its whole text, unclipped', () => {
+        render({}, [task(1, { description: 'Milk' }), task(2, { description: 'Salted Butter', is_completed: true })], 'butter');
+        expect(foundRows()[0]).toContain('Salted Butter');
+        expect(foundRows()[0]).not.toContain('…');
+    });
+
     it('a match on an item past the eighth is reported', () => {
         const items = [];
         for (let i = 1; i <= 8; i++) items.push(task(i, { description: `thing ${i}` }));
