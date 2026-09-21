@@ -123,6 +123,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
     const canSnooze = useTaskFeature('snooze') === true;
+    /** A Reminders row has the Date & repeat dialog open. */
+    const [reminderModal, setReminderModal] = useState(false);
     const scheduleOnServer = useTaskFeature('schedule') === true;
 
     const [drawer, setDrawer] = useState(false);
@@ -355,7 +357,10 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         onNew: () => { if (isCoarse()) setSheet(true); else setQuickSignal(n => n + 1); },
         onHelp: () => setHelp(true),
         onRefresh: () => { void actions.refreshAll(); },
-    }, !openCard && !popup && !help && !sheet && !contextMenu);
+        // A dialog opened from a Reminders row is none of the shell's own
+        // popups, and hotkeys.isEditableTarget says false for a <select> —
+        // without this, `c` and `r` fire behind the open schedule editor.
+    }, !openCard && !popup && !help && !sheet && !contextMenu && !reminderModal);
 
     // --- Account -------------------------------------------------------------------------------------
     const username = (() => {
@@ -442,6 +447,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 nativeBanner={<NativeReminderBanners />}
                                 placeItems={placeItems}
                                 canSnooze={canSnooze}
+                                canSchedule={scheduleOnServer}
+                                onModal={setReminderModal}
                             />
                         ) : calendarView ? (
                             <CalendarView

@@ -37,6 +37,12 @@ one-line summary; this file is the full story. Versions follow
   the server sees the next reminder time, so reminders reach your other
   devices. A per-item *Keep the time private from the server* switch hides that
   too, and then the item gets no reminders.
+- **Change a reminder's time from the Reminders list.** Moving a reminder is
+  the commonest thing to do with one, and it no longer means opening the note
+  and finding the item: a clock on the row changes when it is due, and an item
+  that repeats or is an event opens the same date-and-repeat editor as the
+  calendar. It is offered only to people allowed to edit that item's time. A
+  snooze on an item you move simply lapses.
 - **Reminder times that are yours.** Give an item a time with one tap —
   *Morning*, *Afternoon* or *Evening* — instead of filling in a date and a
   time. What those three mean, and the time a new reminder starts at, is

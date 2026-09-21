@@ -34,7 +34,13 @@ Púca's reminders. Anything you do in one is what you see in the other.
 - **Search** — over decrypted titles, items, labels and server names, on the
   device; nothing about the query leaves it.
 - **Reminders** — every open item with a due time, grouped Overdue / Today /
-  Upcoming; tick it done from there. In a browser, Notes runs Púca's reminder
+  Upcoming; tick it done from there, or move it: a clock on the row changes
+  when it is due without opening the note, and an item that repeats or is an
+  event opens the same *Date & repeat* editor the calendar uses. It is
+  offered only to people who may edit the item's time — its creator, a task
+  manager, anything in a personal note — which is what the server enforces;
+  on a server that stores no schedules only a plain due time can be moved
+  this way. In a browser, Notes runs Púca's reminder
   loop, so a due item notifies while the Notes tab is open (allow
   notifications from the Reminders view). The Android app notifies whether it
   is open or closed (see *The Android app*), and adds an **At a place**
@@ -720,6 +726,17 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   Snooze or Unsnooze on that item (`taskSchedule.snoozeLocked`): putting
   `due_at` back needs the edit right, and a sealed-only re-snooze would
   either not apply or overwrite the time Unsnooze restores.
+- **Retime** (from the Reminders row): writes the same plaintext `due_at`, or
+  the same sealed `schedule`, that the editor inside the note writes, through
+  the same optimistic path and the same outbox — so a retime made offline
+  queues and replays like any other change, and the reminder feed is poked
+  either way. An active snooze **lapses by itself** when the time moves
+  (`activeSnooze` matches neither `forDue` nor `until` any more) and nothing
+  clears it explicitly: a snooze rides the completion right while a retime
+  rides the edit right, so sending both would 403 for a channel-task creator
+  without COMPLETE_TASKS. A retime carries **no** `expect_due_at`, so two
+  devices retiming at once is last-writer-wins — exactly as it already is
+  from the calendar and from inside a note.
   Every reminder engine reads the same entries, `{id, at, mark, due}`
   (`frontend/src/api/reminderFeed.ts`): `at` is the snooze time while one is in
   force, `mark` changes whenever the item must fire again, and `due` is the raw

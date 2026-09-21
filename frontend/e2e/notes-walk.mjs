@@ -431,6 +431,27 @@ ck('reminders: the due item is listed under Upcoming', await page.locator('.note
 // positive control: the same page in the Android shell MUST show both.)
 ck('reminders (web): no native status banner', await page.locator('[data-native-banner]').count() === 0);
 ck('reminders (web): no "At a place" section', await page.locator('section[aria-label="At a place"]').count() === 0);
+
+// Moving a reminder from the row itself — the commonest thing to do with one,
+// and it must not mean opening the note.
+const eggsReminder = page.locator('.notes-reminder-row', { hasText: 'Eggs' });
+const whenBefore = await eggsReminder.locator('.notes-reminder-when').innerText();
+await eggsReminder.locator('button[aria-label^="Change the time"]').click();
+await page.waitForSelector('.notes-retime input[type="datetime-local"]', { timeout: 5000 });
+ck('reminders: a plain dated item retimes from the row, with the note closed',
+    await page.locator('.notes-retime input[type="datetime-local"]').count() === 1 && await page.locator('.notes-editor').count() === 0);
+const later = new Date(); later.setDate(later.getDate() + 3); later.setHours(18, 45, 0, 0);
+const p2 = x => String(x).padStart(2, '0');
+await page.fill('.notes-retime input[type="datetime-local"]', `${later.getFullYear()}-${p2(later.getMonth() + 1)}-${p2(later.getDate())}T18:45`);
+await page.locator('.notes-retime button', { hasText: 'Set' }).click();
+await page.waitForFunction(
+    prev => { const el = document.querySelector('.notes-reminder-row .notes-reminder-when'); return !!el && el.textContent.trim() !== prev; },
+    whenBefore, { timeout: 10000 },
+).catch(() => {});
+const whenAfter = await eggsReminder.locator('.notes-reminder-when').innerText();
+ck('reminders: the row shows the new time and the note never opened',
+    whenAfter !== whenBefore && /18:45/.test(whenAfter) && await page.locator('.notes-editor').count() === 0, `${whenBefore} -> ${whenAfter}`);
+ck('reminders: the field closed itself after Set', await page.locator('.notes-retime input[type="datetime-local"]').count() === 0);
 await shot('reminders');
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
@@ -1239,6 +1260,15 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
             && hinted.row.r <= vw + 0.5 && hinted.sub.r <= hinted.row.r + 0.5 && hinted.when.r <= hinted.row.r + 0.5 && hinted.when.l >= hinted.text.r - 0.5,
             JSON.stringify({ vw, overflow, hinted }));
         ck('phone hint: nothing covers it', await onTop(pg, '.notes-reminder-sub'));
+        // Two icon buttons now sit at the end of a reminder row (retime and
+        // snooze): both are real buttons, so both are 44px under a coarse
+        // pointer, and neither pushes the row past 390.
+        const retimeBox = await pg.locator('.notes-reminder-row .notes-retime button').first().boundingBox();
+        const snoozeBox = await pg.locator('.notes-reminder-row .notes-snooze button').first().boundingBox();
+        ck('phone: the retime and snooze buttons are both at least 44 px', !!retimeBox && !!snoozeBox
+            && retimeBox.height >= 44 && retimeBox.width >= 44 && snoozeBox.height >= 44 && snoozeBox.width >= 44,
+            JSON.stringify({ retimeBox, snoozeBox }));
+        ck('phone: they stay inside the row, which stays inside 390 px', !!retimeBox && retimeBox.x + retimeBox.width <= vw + 0.5);
         await shotOf(pg)('hint-phone');
         await pctx.close();
     } catch (e) {

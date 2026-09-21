@@ -331,10 +331,13 @@ export function TaskTree({
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
 
     /** One tap: the preset's next instant, set and closed. The date form is
-     *  never opened, which is the whole point on a phone. */
+     *  never opened, which is the whole point on a phone. `now` is the
+     *  half-minute store above, not a bare Date.now() (an impure render
+     *  call); a preset is a wall-clock time, so 30s of staleness cannot
+     *  change which day it lands on by more than that boundary. */
     const setDuePreset = (task: Task, time: string) => {
         setDueFor(null);
-        onSetDue?.(task, new Date(presetInstant(time, Date.now())).toISOString());
+        onSetDue?.(task, new Date(presetInstant(time, now)).toISOString());
     };
 
     const commitDue = (task: Task) => {

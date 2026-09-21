@@ -262,6 +262,27 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     await c.waitForSelector('.notes-reminders', { timeout: 10000 });
     const standupRow = c.locator('.notes-reminder-row', { hasText: 'Standup' });
     ck('reminders: the event is listed, and not as overdue', await standupRow.count() === 1 && await c.locator('.notes-reminder-group.overdue .notes-reminder-row', { hasText: 'Standup' }).count() === 0);
+    // Retime from the row: an item that repeats opens the same Date & repeat
+    // dialog the calendar uses, and the shell's single-key shortcuts must stop
+    // while it is up (isEditableTarget says false for a <select>, and that
+    // dialog is full of them). Cancel, so the snooze checks below still
+    // measure an untouched item.
+    await standupRow.locator('button[aria-label^="Change the time"]').click();
+    await c.waitForSelector('.sched-dialog[aria-label="Date and repeat"]', { timeout: 10000 });
+    ck('reminders: a repeating item retimes through the Date & repeat dialog', await c.locator('.sched-dialog[aria-label="Date and repeat"]').count() === 1);
+    await c.keyboard.press('?');
+    await sleep(300);
+    ck('reminders: single-key shortcuts are off while that dialog is open',
+        await c.locator('.notes-kbd-grid').count() === 0 && await c.locator('.sched-dialog').count() === 1);
+    await c.locator('.sched-dialog .sched-btn', { hasText: 'Cancel' }).click();
+    await c.waitForSelector('.sched-dialog', { state: 'detached', timeout: 5000 });
+    // Positive control: with the dialog gone, `?` works again.
+    await c.keyboard.press('?');
+    await c.waitForSelector('.notes-kbd-grid', { timeout: 5000 }).catch(() => {});
+    ck('reminders: …and they come back when it closes (control)', await c.locator('.notes-kbd-grid').count() === 1);
+    await c.keyboard.press('Escape');
+    await c.waitForSelector('.notes-kbd-grid', { state: 'detached', timeout: 5000 }).catch(() => {});
+
     await standupRow.locator('button[aria-label="Snooze"]').click();
     await standupRow.locator('.notes-snooze-menu button', { hasText: 'Tomorrow' }).click();
     await standupRow.locator('[aria-label="snoozed"]').waitFor({ timeout: 10000 }).catch(() => {});
