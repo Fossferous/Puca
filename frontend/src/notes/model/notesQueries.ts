@@ -41,7 +41,7 @@ import {
     listListTasks, updateListTaskAttachments,
     listTasks, updateChannelTaskAttachments,
     getTaskTabPrefs,
-    applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
+    applyMove, applyReorder, applyToggle, collectSubtreeIds, serializeTaskAttachments,
     buildPrefsForOrder, isFavoriteTab, canEditTask,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
@@ -646,7 +646,10 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         // schedule of its own, so the series stays exactly where the
         // restored schedule put it.
         const original = await snapshot(note);
-        const next = original.map(t => (t.id === task.id ? { ...t, is_completed: true } : t));
+        // applyToggle, not a one-item map: the server sweeps the whole
+        // subtree when an item is completed (task_handlers.rs), and the
+        // children are already there by the time this runs.
+        const next = applyToggle(original, task, true);
         restore(note, next);
         syncListCounts(note, next);
         try {
