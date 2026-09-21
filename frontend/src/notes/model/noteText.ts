@@ -37,6 +37,15 @@ export function noteToMarkdown(card: NoteCard): string {
     if (card.pinned) meta.push('pinned');
     if (card.archived) meta.push('archived');
     if (card.labels.length) meta.push(`labels: ${card.labels.join(', ')}`);
+    // The NOTE's own reminder (migration 068), beside the other note-level
+    // facts — an export that drops it loses the reason the note exists.
+    const own = parseSchedule(card.schedule);
+    if (own.state === 'ok') {
+        const d = describeSchedule(own.schedule, Date.now());
+        meta.push(`reminder: ${d.when}${d.repeat ? `, ${d.repeat}` : ''}${own.schedule.location ? `, at ${own.schedule.location}` : ''}`);
+    } else if (card.dueAt) {
+        meta.push(`reminder: ${card.dueAt}`);
+    }
     if (meta.length) out.push(`_${meta.join(' · ')}_`);
     out.push('');
     // The note's own text and pictures (a marker is written as itself, as

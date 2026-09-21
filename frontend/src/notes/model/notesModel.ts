@@ -28,7 +28,7 @@ import {
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type MessageEncState } from '../../api/e2ee';
 import { parseServerTimestamp } from '../../utils/serverTime';
-import { type ReminderSlot, noteUpdatedAt, reminderSlotOf, scheduleSearchText } from './notesTiming';
+import { type ReminderSlot, noteReminderSlotOf, noteScheduleSearchText, noteUpdatedAt, reminderSlotOf, scheduleSearchText } from './notesTiming';
 
 /** Which checklist a note is: a personal list or a channel checklist. */
 export interface NoteRef {
@@ -101,6 +101,11 @@ export interface NoteSource {
     noteAttachments?: string | null;
     /** The list row's last edit (066+ servers; personal lists only). */
     updatedAt?: string;
+    /** The NOTE's own reminder (migration 068; personal lists only): the
+     *  plaintext next-reminder instant and the OPENED schedule it came from.
+     *  Absent on a server without them, null when the note does not remind. */
+    dueAt?: string | null;
+    schedule?: string | null;
 }
 
 /** Everything one card renders from. */
@@ -156,6 +161,8 @@ export function buildNoteCards(
             createdAt: s.createdAt,
             body: s.body,
             noteAttachments: s.noteAttachments,
+            dueAt: s.dueAt,
+            schedule: s.schedule,
             // The newest of the list's own stamp and its items' (notesTiming).
             updatedAt: noteUpdatedAt(s.updatedAt, tasks),
             key,
@@ -236,6 +243,7 @@ export function noteMatches(card: NoteCard, query: string): boolean {
         readable(card.title),
         readable(card.body ?? ''),
         card.serverName ?? '',
+        noteScheduleSearchText(card),
         ...card.labels,
         ...(card.tasks ?? []).map(t => readable(t.description)),
         ...(card.tasks ?? []).map(scheduleSearchText),
@@ -338,14 +346,34 @@ export function nearestDue(tasks: Task[]): Task | null {
     return best;
 }
 
-/** A due task with the note it belongs to, for the Reminders view. */
-export interface DueItem {
-    task: Task;
-    note: NoteCard;
-    /** Epoch ms. */
-    at: number;
-    /** How the item's timing reads (notesTiming.reminderSlotOf). */
-    slot?: ReminderSlot;
+/**
+ * One row of the Reminders view (and of the calendar's day list): either an
+ * ITEM inside a note, or the NOTE'S OWN reminder (migration 068), which has
+ * no item to tick and no snooze column behind it. A union rather than an
+ * optional `task`, so every consumer has to say what it does with a note row
+ * instead of reading `undefined.description`.
+ */
+export type DueItem =
+    | {
+        kind: 'task';
+        task: Task;
+        note: NoteCard;
+        /** Epoch ms. */
+        at: number;
+        /** How the item's timing reads (notesTiming.reminderSlotOf). */
+        slot?: ReminderSlot;
+    }
+    | {
+        kind: 'note';
+        note: NoteCard;
+        at: number;
+        slot?: ReminderSlot;
+    };
+
+/** A stable React key for a reminder row. Note ids and task ids come from
+ *  different sequences, so the kind is part of the key. */
+export function dueItemKey(item: DueItem): string {
+    return item.kind === 'note' ? `note:${item.note.key}` : `task:${item.task.id}`;
 }
 
 export interface ReminderGroups {
@@ -369,18 +397,31 @@ function sameLocalDay(a: number, b: number): boolean {
 export function groupReminders(cards: NoteCard[], now: number): ReminderGroups {
     const items: DueItem[] = [];
     for (const note of cards) {
+        // The NOTE's own reminder (068): a note with no items at all can have
+        // one, which is the whole point — no invented to-do to hang it on.
+        const own = noteReminderSlotOf(note, now);
+        if (own) items.push({ kind: 'note', note, at: own.at, slot: own });
         for (const task of note.tasks ?? []) {
             // Snoozes, repeats and events (notesTiming.reminderSlotOf): an
             // event is never overdue, a snoozed item sorts by its snooze.
             const slot = reminderSlotOf(task, now);
             if (!slot) continue;
-            items.push({ task, note, at: slot.at, slot });
+            items.push({ kind: 'task', task, note, at: slot.at, slot });
         }
     }
-    items.sort((a, b) => a.at - b.at || a.task.id - b.task.id);
+    // Ties break exactly as they did before a note could remind: by item id,
+    // numerically. A note's own reminder has no item id, so it sorts before
+    // the items it shares an instant with, and two notes fall back to their
+    // keys — stable across renders either way.
+    items.sort((a, b) => {
+        if (a.at !== b.at) return a.at - b.at;
+        if (a.kind !== b.kind) return a.kind === 'note' ? -1 : 1;
+        if (a.kind === 'task' && b.kind === 'task') return a.task.id - b.task.id;
+        return dueItemKey(a).localeCompare(dueItemKey(b));
+    });
     const groups: ReminderGroups = { overdue: [], today: [], upcoming: [] };
     for (const it of items) {
-        if (it.slot ? it.slot.overdue : isTaskOverdue(it.task, now)) groups.overdue.push(it);
+        if (it.slot ? it.slot.overdue : it.kind === 'task' && isTaskOverdue(it.task, now)) groups.overdue.push(it);
         else if (sameLocalDay(it.at, now)) groups.today.push(it);
         else groups.upcoming.push(it);
     }

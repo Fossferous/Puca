@@ -212,6 +212,8 @@ function listSource(l: TaskList): NoteSource {
         body: l.body,
         noteAttachments: l.attachments,
         updatedAt: l.updated_at,
+        dueAt: l.due_at,
+        schedule: l.schedule,
     };
 }
 
@@ -409,6 +411,11 @@ export interface NoteActions {
     setSchedule: (note: NoteRef, task: Task, schedule: string | null, dueAt: string | null) => Promise<void>;
     /** Snooze the item's current reminder until an instant (null = unsnooze). */
     snoozeTask: (note: NoteRef, task: Task, until: number | null) => Promise<void>;
+    /** The NOTE's own reminder (migration 068): its plaintext due_at and its
+     *  sealed schedule. Three-state — a field left out is kept, null clears
+     *  it. `what` is the words the offline queue shows the user. Personal
+     *  notes only (a channel checklist has no list row): false for one. */
+    setNoteTiming: (note: NoteRef, patch: { dueAt?: string | null; schedule?: string | null }, what?: string) => Promise<boolean>;
     setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
@@ -607,6 +614,34 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             restore(note, original);
         }
     }, [snapshot, setTasks, restore, sendTiming]);
+
+    /**
+     * The NOTE's own reminder (migration 068): its plaintext due_at and its
+     * sealed schedule, set together so a note never carries a schedule whose
+     * derived reminder time is stale. Optimistic over the LIST cache (the
+     * time lives on the list row, not on any task), queued offline like an
+     * item's date, and it pokes the reminder loop so a time minutes away
+     * does not wait out the five-minute poll.
+     */
+    const setNoteTiming = useCallback(async (note: NoteRef, patch: { dueAt?: string | null; schedule?: string | null }, what = 'reminder on') => {
+        if (note.kind !== 'list') return false;
+        const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
+        const title = prev?.find(l => l.id === note.id)?.title ?? '';
+        qc.setQueryData<TaskList[]>(notesKeys.lists, p => p?.map(l => (l.id === note.id ? {
+            ...l,
+            ...(patch.dueAt !== undefined ? { due_at: patch.dueAt } : {}),
+            ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
+        } : l)));
+        try {
+            const sent = await sendNoteOp(ops.setListTiming(note.id, title, patch, what));
+            if (!sent.queued) pokeTaskReminders();
+            return true;
+        } catch (err) {
+            explain('note reminder failed', err);
+            qc.setQueryData(notesKeys.lists, prev);
+            return false;
+        }
+    }, [qc]);
 
     const snoozeTask = useCallback(async (note: NoteRef, task: Task, until: number | null) => {
         // A snooze moves the item's plaintext due_at to the snooze instant
@@ -864,11 +899,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [qc]);
 
     return useMemo(() => ({
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, setAttachments,
         createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, setAttachments,
         createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);

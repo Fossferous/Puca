@@ -18,6 +18,12 @@ import {
 } from '../../api/taskSchedule';
 import { parseServerTimestamp } from '../../utils/serverTime';
 
+/** Everything reminderSlotOf needs. A task has all four; a NOTE's own
+ *  reminder (migration 068) has a due_at and a schedule, is never
+ *  "completed", and has no snooze column yet — so it passes the same rule
+ *  through this shape rather than a second copy of it. */
+export type TimingLike = Pick<Task, 'is_completed' | 'due_at' | 'schedule' | 'snooze'>;
+
 export interface ReminderSlot {
     /** Epoch ms the row sorts and reads by. */
     at: number;
@@ -29,7 +35,7 @@ export interface ReminderSlot {
 
 const RECENT_EVENT_MS = 60 * 60_000;
 
-export function reminderSlotOf(task: Task, now: number): ReminderSlot | null {
+export function reminderSlotOf(task: TimingLike, now: number): ReminderSlot | null {
     if (task.is_completed) return null;
     const parsed = parseSchedule(task.schedule);
     const snooze = activeSnooze(task.due_at, task.snooze);
@@ -73,9 +79,24 @@ export function noteUpdatedAt(listUpdatedAt: string | undefined, tasks: Task[] |
     return Number.isFinite(best) ? new Date(best).toISOString() : listUpdatedAt;
 }
 
+/** The same rule for a NOTE's own reminder: never completed, no snooze. */
+export function noteReminderSlotOf(
+    note: { dueAt?: string | null; schedule?: string | null },
+    now: number,
+): ReminderSlot | null {
+    if (!note.dueAt && !note.schedule) return null;
+    return reminderSlotOf({ is_completed: false, due_at: note.dueAt ?? null, schedule: note.schedule ?? null, snooze: null }, now);
+}
+
 /** Searchable text a schedule adds (its place). */
 export function scheduleSearchText(task: Task): string {
     const p = parseSchedule(task.schedule);
+    return p.state === 'ok' ? p.schedule.location ?? '' : '';
+}
+
+/** Searchable text the NOTE's own schedule adds (its place). */
+export function noteScheduleSearchText(note: { schedule?: string | null }): string {
+    const p = parseSchedule(note.schedule);
     return p.state === 'ok' ? p.schedule.location ?? '' : '';
 }
 
