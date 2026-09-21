@@ -480,7 +480,10 @@ launch — on **its own channel**:
   `"variant": "notes"` (`otaChannelMatches`), so that skew leaves Notes where it
   is rather than installing Púca into it.
 - Bundles are signed with a **separate Notes key** (`notes-updater-rsa.key` in
-  the keys directory, backed up by `deploy/ops/backup-keys.sh`); the APK embeds
+  the keys directory, backed up by `deploy/ops/backup-keys.sh` — **run it, and
+  store both bundles off the machine, before the first OTA-capable Notes APK
+  ships**: once phones embed its public half, losing the key freezes Notes
+  updates until everyone installs an APK with a new one); the APK embeds
   only its public half (`notes-app/capacitor.config.ts`). A Púca bundle cannot
   decrypt or verify inside Notes, nor a Notes bundle inside Púca, whatever an
   unsigned manifest claims. `deploy/mobile/verify-bundle.mjs` proves a bundle
@@ -517,6 +520,23 @@ launch — on **its own channel**:
   the release that first ships it, then re-records the surface.
 - The account menu shows the running version and a **Check for updates** that
   re-runs the check without closing an open note.
+- **Device check, not yet done (no test can reach it):** stall a download (cut
+  the network mid-download), wait for *Retry*, restore the network and press
+  it. Capacitor delivers every download's progress to every listener, and the
+  first download of the same version cannot be told apart from the retry's
+  (its bundle id is only known when it finishes), so both run at once and the
+  bar may jump between their two percentages; the stall watchdog is fed by
+  either. Expect: the gate still ends in the app or a control (never a bare
+  spinner), exactly one reload into the new version, and no *Update failed*
+  when the first download finishes late. The unit tests
+  (`notesUpdateGate.test.tsx`) cover each run's own listener and an event
+  labelled with another version, which the engine drops — not this. Note the
+  version filter does less on a device than it reads: Android labels an event
+  for a bundle whose info is not stored yet (the normal state mid-download)
+  `builtin`, and `builtin` is deliberately let through, so mid-download events
+  from BOTH runs usually pass the filter. This walk is what covers that, and a
+  run that ends in *Update failed* without the network ever dropping again is
+  the symptom of narrowing that escape hatch.
 
 **Existing installs need one manual install.** Notes APKs up to and including
 0.9.815 have no updater, so nothing can reach them over the air; they stay as

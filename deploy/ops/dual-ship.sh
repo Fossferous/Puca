@@ -720,13 +720,32 @@ cmd_mobile_notes() {
 	# anywhere: lowering it re-exposes every APK between the two versions to
 	# web code calling a plugin they do not have.
 	# A host that cannot be read cannot be proved safe: refuse rather than
-	# guess (curl -s answers a 404 with exit 0, so this is a real failure).
-	local entry served_body served_min lowered=()
+	# guess. curl -s exits 0 on ANY status, so the status is read first: 404
+	# is the one answer that means "no Notes manifest here yet" (no floor to
+	# keep); 200 must carry a JSON manifest; a 502/503 or an HTML error page
+	# from a backend mid-restart proves nothing and used to read as "no floor".
+	local entry served_code served_body served_min lowered=() json_re='^[[:space:]]*[{]'
 	for entry in "${HOSTS[@]}"; do
-		if ! served_body="$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
+		if ! served_code="$(remote_code "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
 			echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
 			exit 1
 		fi
+		case "$served_code" in
+			404) served_body="" ;;
+			200)
+				if ! served_body="$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=notes')"; then
+					echo "REFUSING: could not read $(label_of "$entry")'s current Notes manifest, so nothing proves this release keeps its native.min."
+					exit 1
+				fi
+				if [[ ! "$served_body" =~ $json_re ]]; then
+					echo "REFUSING: $(label_of "$entry") answered its Notes manifest with something that is not JSON, so nothing proves this release keeps its native.min."
+					exit 1
+				fi ;;
+			*)
+				echo "REFUSING: $(label_of "$entry") answered HTTP ${served_code:-<none>} for its current Notes manifest (expected 200, or 404 before the first Notes OTA)."
+				echo "Nothing proves this release keeps its native.min; wait for the host to answer and re-run."
+				exit 1 ;;
+		esac
 		served_min="$(notes_served_min "$served_body")"
 		if [ -n "$served_min" ] && ver_gt "$served_min" "$native_min"; then
 			lowered+=("$(label_of "$entry") serves $served_min")
@@ -1081,13 +1100,24 @@ cmd_installer_lite() {
 # tolerates it. A migration the tarball DOES carry must still byte-match: that
 # check is what stops the crash-loop above, and ignore_missing does not relax
 # it. See "Rolling back the backend" in deploy/ops/README.md.
+#
+# Both files are read the same way: `//` comments are cut first, so neither a
+# commented-out set_ignore_missing nor a comment naming app_migrator() counts
+# (that binary would refuse the newer database and crash-loop). ONE awk over
+# the file, no pipe: `grep -v … | grep -q` under pipefail ends in 141 when -q
+# stops reading before the writer is done (the real main.rs is past 50 KB), and
+# that refused every legitimate rollback. The patterns say [(] rather than \(
+# so awk -v's escape processing leaves them alone.
+code_names() { # <file> <ERE> -> how many lines name it outside // comments
+	awk -v re="$2" '{ sub(/\/\/.*/, "") } $0 ~ re { n++ } END { print n + 0 }' "$1"
+}
 tarball_tolerates_newer_db() { # <tarball> <extract-dir>
 	local tarball="$1" tmp="$2"
 	tar xzf "$tarball" -C "$tmp" src/migrator.rs 2>/dev/null || return 1
 	tar xzf "$tarball" -C "$tmp" src/main.rs 2>/dev/null || return 1
-	grep -q 'set_ignore_missing(true)' "$tmp/src/migrator.rs" || return 1
+	[ "$(code_names "$tmp/src/migrator.rs" 'set_ignore_missing[(]true[)]')" -gt 0 ] || return 1
 	# The binary must actually USE that migrator (not a comment naming it).
-	grep -v '^[[:space:]]*//' "$tmp/src/main.rs" | grep -q 'app_migrator()' || return 1
+	[ "$(code_names "$tmp/src/main.rs" 'app_migrator[(][)]')" -gt 0 ] || return 1
 }
 
 verify_migrations_against() {

@@ -163,8 +163,16 @@ one-line summary; this file is the full story. Versions follow
   or earlier** still needs the database backup taken before the update: those
   releases refuse to start on a newer database, and the script refuses to
   ship them over one.
-- Serve `/notes/sw.js` with `Cache-Control: no-cache` (two lines in the web app's
-  Caddy block, `deploy/webapp/README.md`). `check-versions.sh` fails until it is.
+- Serve `/notes/sw.js` with `Cache-Control: no-cache` on every host before
+  shipping this web app: add `@notesSw path /notes/sw.js` and
+  `header @notesSw Cache-Control "no-cache"` inside the web app's Caddy block
+  (`deploy/webapp/README.md`, step 3), reload Caddy, then purge that one URL
+  from the CDN cache. `check-versions.sh` fails on `notes-sw-cache` until it
+  is, and its FAIL line prints these steps.
+- Run `deploy/ops/backup-keys.sh` and store both bundles off the machine
+  BEFORE publishing the first Púca Notes APK that updates itself: it signs
+  with its own key (`notes-updater-rsa.key`), and once phones embed that key,
+  losing it stops Notes updates until everyone installs a new APK.
 - New optional setting `TASK_EVENTS_MAX_PER_IP` (default 32): live Notes streams
   per address.
 

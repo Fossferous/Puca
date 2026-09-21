@@ -636,7 +636,8 @@ the crowd. Three checks, cheapest first:
   be compared directly — it is built on the deploy host and checked from a
   Windows tree — and a gate that can never pass is a gate nobody reads.
 - `backup-keys.sh` — bundles the **developer-machine** signing keys (Tauri
-  updater key, mobile OTA RSA key, Android keystore, FCM credential) into two
+  updater key, mobile OTA RSA key, Púca Notes' own OTA RSA key, Android
+  keystore, FCM credential) into two
   tarballs, keys and passphrases SEPARATELY, for off-machine storage. Never
   runs on the server. Losing any of those keys permanently breaks that
   distribution channel; run this the day you generate them and after every

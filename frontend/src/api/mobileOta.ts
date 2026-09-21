@@ -347,7 +347,32 @@ export async function runCapacitorOta(opts: RunCapacitorOtaOptions): Promise<Ota
 
         // Reflect real download progress on the screen — without a listener the
         // bar sits at 0% for the whole download.
-        dlListener = await CapacitorUpdater.addListener('download', (info: { percent?: number }) => {
+        //
+        // Capacitor delivers EVERY download's events to EVERY listener, so a
+        // download this run did not start (one an abandoned run left going
+        // after a stall and Retry) reaches this listener too. Each event names
+        // its bundle, and one labelled with another version is not ours, so
+        // it is dropped. One of the SAME version cannot be told apart: its
+        // bundle id is random and only known once download() resolves, so an
+        // abandoned download of this version still moves this bar and feeds
+        // this run's stall watchdog (a device check in docs/NOTES.md). A
+        // missing label, or the plugin's 'builtin' fallback for a null one,
+        // is let through: dropping this run's own events would fake a stall.
+        //
+        // How OFTEN a label is usable is a device question, and the answer is
+        // "less than it looks". Android builds the event's bundle with
+        // getBundleInfo(id) (CapgoUpdater.java), which returns version=null
+        // for a bundle whose info is not stored yet - the normal state WHILE
+        // it downloads - and BundleInfo.getVersionName() turns a null version
+        // into the string 'builtin'. So mid-download both runs' events can
+        // read 'builtin' and both are let through, by design: a labelled
+        // event is the case this drops, and the device check is what covers
+        // the rest. Never narrow the 'builtin' escape hatch on the strength
+        // of the unit tests - it is the common path, not the rare one.
+        const wanted = updateInfo.version;
+        dlListener = await CapacitorUpdater.addListener('download', (info: { percent?: number; bundle?: { version?: unknown } }) => {
+            const label = info.bundle?.version;
+            if (typeof label === 'string' && label && label !== 'builtin' && label !== wanted) return;
             if (typeof info.percent === 'number') {
                 const pct = Math.min(100, Math.max(0, Math.round(info.percent)));
                 if (pct > lastPct) {

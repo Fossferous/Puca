@@ -346,6 +346,26 @@ serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\ncache-contro
 out="$(versions)"
 check "FAILS a cacheable worker" "$(has "$out" 'FAIL  notes worker cache')" "$out"
 check "and counts it in the verdict" "$([ "$(has "$out" 'sandbox/notes-sw-cache')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+# The operator reads the FAIL line, not the README: it must carry the fix.
+check "and the FAIL carries the exact Caddy lines, the reload and the CDN purge" "$([ "$(has "$out" '@notesSw path /notes/sw.js')" = 1 ] && [ "$(has "$out" 'header @notesSw Cache-Control "no-cache"')" = 1 ] && [ "$(has "$out" 'systemctl reload caddy')" = 1 ] && [ "$(has "$out" 'purge https://app.invalid/notes/sw.js')" = 1 ] && echo 1 || echo 0)" "$out"
+# The FAIL line is what an EXISTING deployment's operator reads. A fresh
+# self-hoster never sees it: they copy deploy/Caddyfile.example.com, and the
+# upgrade note in deploy/webapp/README.md is what an existing one follows by
+# hand. All three must say the same two lines, so the two lines are taken OUT
+# of the FAIL output and required verbatim in both files — whichever of the
+# three is edited next, the other two are held to it.
+sw_lines="$(printf '%s
+' "$out" | grep -oE '@notesSw path /notes/sw\.js|header @notesSw Cache-Control "no-cache"' | sort -u)"
+check "the FAIL names exactly the two @notesSw lines" "$([ "$(printf '%s
+' "$sw_lines" | grep -c .)" = 2 ] && echo 1 || echo 0)" "$sw_lines"
+for sw_f in deploy/Caddyfile.example.com deploy/webapp/README.md; do
+	sw_missing=""
+	while IFS= read -r sw_line; do
+		[ -n "$sw_line" ] || continue
+		grep -qF "$sw_line" "$REPO/$sw_f" || sw_missing="$sw_missing$sw_line; "
+	done <<< "$sw_lines"
+	check "$sw_f carries both lines verbatim" "$([ -z "$sw_missing" ] && echo 1 || echo 0)" "missing: $sw_missing"
+done
 serve_sw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\n'
 out="$(versions)"
 check "FAILS a worker with no Cache-Control at all" "$(has "$out" 'FAIL  notes worker cache')" "$out"
@@ -563,6 +583,19 @@ mksrc() { # <dir> <tolerant 0|1|comment|noflag>
 		   printf 'fn main() {\n    // one day: migrator::app_migrator()\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
 		noflag) printf 'pub fn app_migrator() { sqlx::migrate!("./migrations") }\n' > "$d/src/migrator.rs"
 		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		# The flag only in a comment: that binary still refuses a newer database.
+		commentflag) printf 'pub fn app_migrator() {\n    let mut m = sqlx::migrate!("./migrations");\n    // m.set_ignore_missing(true);\n    m\n}\n' > "$d/src/migrator.rs"
+		   printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n}\n' > "$d/src/main.rs" ;;
+		# What is actually in this tree: the check must pass its own source.
+		real) cp "$REPO/src/migrator.rs" "$REPO/src/main.rs" "$d/src/" ;;
+		# The real main.rs is past 50 KB with app_migrator() early in it. A
+		# reader that stops at the first match while a writer still has most
+		# of the file to send dies of SIGPIPE under pipefail, so this one is
+		# padded to ~300 KB AFTER the call (well past a 64 KB pipe buffer).
+		big) printf 'pub fn app_migrator() { let mut m = sqlx::migrate!("./migrations"); m.set_ignore_missing(true); }\n' > "$d/src/migrator.rs"
+		   { printf 'fn main() {\n    migrator::app_migrator().run(&pool);\n'
+		     local i; for i in $(seq 1 3000); do printf '    let padding_%05d = "the rest of a large main.rs, kept going well past the pipe buffer";\n' "$i"; done
+		     printf '}\n'; } > "$d/src/main.rs" ;;
 		*) printf 'fn main() {\n    sqlx::migrate!("./migrations").run(&pool);\n}\n' > "$d/src/main.rs" ;;
 	esac
 	tar czf "$d.tgz" -C "$d" migrations src
@@ -576,6 +609,9 @@ mksrc "$TMP/src-new" 1
 mksrc "$TMP/src-old" 0
 mksrc "$TMP/src-comment" comment
 mksrc "$TMP/src-noflag" noflag
+mksrc "$TMP/src-commentflag" commentflag
+mksrc "$TMP/src-big" big
+mksrc "$TMP/src-real" real
 S1="$(sum_of "$TMP/src-new/migrations/001_a.sql")"; S2="$(sum_of "$TMP/src-new/migrations/002_b.sql")"
 
 printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
@@ -592,6 +628,22 @@ out="$(preflight "$TMP/src-comment.tgz")"; rc=$?
 check "and one whose main.rs only NAMES app_migrator in a comment" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
 out="$(preflight "$TMP/src-noflag.tgz")"; rc=$?
 check "and one whose app_migrator does not set ignore_missing" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
+out="$(preflight "$TMP/src-commentflag.tgz")"; rc=$?
+check "and one whose set_ignore_missing is commented out" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'no migration file for applied version 3')" = 1 ] && echo 1 || echo 0)" "$out"
+# A pipe race passes most runs and fails some, so one green run proves little:
+# the same rollback, twenty times in a row, with a main.rs far past 64 KB.
+big_ok=0; big_last=""
+for _ in $(seq 1 20); do
+	out="$(preflight "$TMP/src-big.tgz")"; rc=$?
+	if [ $rc -eq 0 ] && [ "$(has "$out" 'NOTE  sandbox: applied version 3 is newer than this tarball')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ]; then
+		big_ok=$((big_ok + 1))
+	else
+		big_last="$out"
+	fi
+done
+check "ROLLBACK with a main.rs well past 64 KB passes 20 runs in a row ($big_ok/20)" "$([ "$big_ok" = 20 ] && echo 1 || echo 0)" "$big_last"
+out="$(preflight "$TMP/src-real.tgz")"; rc=$?
+check "ROLLBACK with this tree's own src/main.rs and src/migrator.rs passes" "$([ $rc -eq 0 ] && [ "$(has "$out" 'NOTE  sandbox: applied version 3 is newer than this tarball')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "$out"
 
 printf '1|%s\n2|%s\n3|%s\n' "$S1" "0000" "$S2" > "$TMP/sqlx_rows"
 out="$(preflight "$TMP/src-new.tgz")"; rc=$?
@@ -665,7 +717,10 @@ else
 		cat > "$TMP/bin/ssh" <<STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
-case "\$*" in *variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;; esac
+case "\$*" in
+	*http_code*variant=notes*) if [ -f "$TMP/notes-code" ]; then cat "$TMP/notes-code"; elif [ -f "$TMP/notes-ota.json" ]; then echo 200; else echo 404; fi ;;
+	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
+esac
 exit 0
 STUB
 		chmod +x "$TMP/bin/ssh"
@@ -775,6 +830,24 @@ STUB
 	check "an unreadable host REFUSES the ship before anything is written" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: could not read sandbox's current Notes manifest")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
 	restore_recording_ssh
 
+	# A host whose backend is restarting answers 502 with Caddy's HTML page.
+	# That is not "no floor served": it proves nothing, so it must refuse, and
+	# so must a 200 whose body is not a JSON manifest. Only a 404 (no Notes
+	# manifest on that host yet) is an answer with no floor in it.
+	printf '<html><body>502 Bad Gateway</body></html>\n' > "$TMP/notes-ota.json"
+	echo 502 > "$TMP/notes-code"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "a host answering 502 on ?variant=notes REFUSES the ship before anything is written" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered HTTP 502 for its current Notes manifest")" = 1 ] && ! grep -q '^scp' "$LOG" && ! grep -q 'cat > mobile-update-notes.json' "$LOG" && echo 1 || echo 0)" "$out"
+	echo 503 > "$TMP/notes-code"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "and one answering 503" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered HTTP 503")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
+	echo 200 > "$TMP/notes-code"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "and a 200 whose body is an HTML page, not a manifest" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: sandbox answered its Notes manifest with something that is not JSON")" = 1 ] && ! grep -q '^scp' "$LOG" && echo 1 || echo 0)" "$out"
+	rm -f "$TMP/notes-code" "$TMP/notes-ota.json"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "a 404 (no Notes manifest on the host yet) proceeds to write one (positive control)" "$([ "$(has "$out" 'REFUSING')" = 0 ] && grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -q '"min": "9.9.8"' "$LOG" && echo 1 || echo 0)" "$out"
+
 	# THE ISOLATION CHECK MUST BE ABLE TO FAIL. The recording stub answers the
 	# full and lite endpoints with the same (empty) body before and after, so
 	# a check that compared nothing would pass there too. Here the stub's full
@@ -786,6 +859,7 @@ STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
 case "\$*" in
+	*http_code*variant=notes*) echo 200 ;;
 	*variant=notes*) cat "$TMP/notes-ota.json" ;;
 	*variant=lite*) [ "$which" = lite ] && { n=\$(( \$(cat "$TMP/reads" 2>/dev/null || echo 0) + 1 )); echo \$n > "$TMP/reads"; echo "{\"version\":\"9.9.\$n\",\"variant\":\"lite\"}"; } ;;
 	*mobile-updates/check*) [ "$which" = full ] && { n=\$(( \$(cat "$TMP/reads" 2>/dev/null || echo 0) + 1 )); echo \$n > "$TMP/reads"; echo "{\"version\":\"9.9.\$n\"}"; } ;;

@@ -20,14 +20,14 @@ const h = vi.hoisted(() => ({
     downloadImpl: null as null | (() => Promise<{ version: string }>),
     setCalls: [] as unknown[],
     /** Every 'download' progress listener, in the order runs added them. */
-    listeners: [] as Array<(info: { percent?: number }) => void>,
+    listeners: [] as Array<(info: { percent?: number; bundle?: { version?: string } }) => void>,
 }));
 
 vi.mock('@capgo/capacitor-updater', () => ({
     CapacitorUpdater: {
         notifyAppReady: async () => ({}),
         current: async () => h.current,
-        addListener: async (_ev: string, cb: (info: { percent?: number }) => void) => {
+        addListener: async (_ev: string, cb: (info: { percent?: number; bundle?: { version?: string } }) => void) => {
             h.listeners.push(cb);
             return { remove: async () => {} };
         },
@@ -231,7 +231,15 @@ describe('a stalled download never holds the app — including after Retry', () 
         expect(gateButtons()).toEqual(['Retry', 'Continue anyway']);
     });
 
-    it('the abandoned run’s progress events do not move the retried run’s bar', async () => {
+    // What the next two prove, and what they do not: this mock gives each run
+    // its own listener, but on a device Capacitor delivers every download's
+    // events to every listener. The first is about the abandoned run's OWN
+    // listener (its state writes are dead). The second is the engine dropping
+    // an event labelled with another version. An abandoned download of the
+    // SAME version still reaches the retried run's listener on a device and
+    // cannot be filtered (its bundle id is only known once download()
+    // resolves) — that is on the device-check list in docs/NOTES.md.
+    it('the abandoned run’s own listener no longer moves the bar after Retry', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => {});
         serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
         await mountGate();
@@ -243,6 +251,28 @@ describe('a stalled download never holds the app — including after Retry', () 
         expect(container.textContent, 'positive control: the live run moves the bar').toContain('20% downloaded');
         await act(async () => { h.listeners[0]({ percent: 90 }); });
         expect(container.textContent).toContain('20% downloaded');
+    });
+
+    it('a progress event labelled with another version does not move the retried run’s bar', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        serve({ version: '99.0.0', url: BUNDLE, variant: 'notes', ...SIGNED });
+        await mountGate();
+        await advance(STALLED);
+        serve({ version: '99.0.1', url: BUNDLE.replace('99.0.0', '99.0.1'), variant: 'notes', ...SIGNED });
+        await clickGate('Retry');
+        await advance(100);
+        expect(h.downloadCalls.map(c => c.version)).toEqual(['99.0.0', '99.0.1']);
+        const live = h.listeners[1];
+        await act(async () => { live({ percent: 20, bundle: { version: '99.0.1' } }); });
+        expect(container.textContent, 'positive control: its own version moves the bar').toContain('20% downloaded');
+        // What a device delivers to this listener from the abandoned 99.0.0 download.
+        await act(async () => { live({ percent: 90, bundle: { version: '99.0.0' } }); });
+        expect(container.textContent).toContain('20% downloaded');
+        expect(container.textContent).not.toContain('90% downloaded');
+        // The plugin labels a bundle with no stored version 'builtin': not a
+        // reason to drop it, or this run's own progress could fake a stall.
+        await act(async () => { live({ percent: 40, bundle: { version: 'builtin' } }); });
+        expect(container.textContent).toContain('40% downloaded');
     });
 
     it('after Retry, the new run is still the only one: a menu check shares it', async () => {
