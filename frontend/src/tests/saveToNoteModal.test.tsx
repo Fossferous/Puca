@@ -29,6 +29,14 @@ let features = { attachments: true };
 let createFails = false;
 let addItemFails = false;
 let deleteListFails = false;
+/** Holds `copyRefsIntoMyNote` open so a save can be observed IN FLIGHT. */
+let copyGate: { promise: Promise<void>; release: () => void } | null = null;
+function holdCopies(): () => void {
+    let release!: () => void;
+    const promise = new Promise<void>(r => { release = r; });
+    copyGate = { promise, release };
+    return release;
+}
 
 vi.mock('../api/tasks', async (orig) => {
     const real = await orig<typeof import('../api/tasks')>();
@@ -61,8 +69,10 @@ vi.mock('../api/captureToNote', async (orig) => {
     const real = await orig<typeof import('../api/captureToNote')>();
     return {
         ...real,
-        copyRefsIntoMyNote: vi.fn(async (refs: { href: string; name: string }[]) =>
-            refs.map((r, i) => ({ href: `sovereign-enc:COPY${i}?k=NEW${i}`, name: r.name }))),
+        copyRefsIntoMyNote: vi.fn(async (refs: { href: string; name: string }[]) => {
+            if (copyGate) await copyGate.promise;
+            return refs.map((r, i) => ({ href: `sovereign-enc:COPY${i}?k=NEW${i}`, name: r.name }));
+        }),
         discardCopies: vi.fn(async () => undefined),
     };
 });
@@ -93,6 +103,7 @@ const rows = () => [...document.querySelectorAll('.save-note-row')] as HTMLButto
 const rowText = () => rows().map(r => (r.textContent ?? '').trim());
 const click = (el: Element | null | undefined) => { if (!el) throw new Error('no element'); act(() => { (el as HTMLElement).click(); }); };
 const rowNamed = (t: string) => rows().find(r => (r.textContent ?? '').includes(t));
+const flush = async () => { for (let i = 0; i < 10; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); }); };
 
 beforeEach(() => {
     // Calls accumulate across tests otherwise, and mock.calls[0] would be the
@@ -103,6 +114,7 @@ beforeEach(() => {
     createFails = false;
     addItemFails = false;
     deleteListFails = false;
+    copyGate = null;
     lists = [
         list(1, 'Shopping'),
         list(2, ENC_KEY_UNAVAILABLE),
@@ -253,5 +265,50 @@ describe('saving', () => {
         expect(document.querySelector('.save-note-error')!.textContent).toMatch(/server said no/);
         expect(rowNamed('New note')!.className).toContain('picked');
         expect(discardCopies).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * Closing does not CANCEL a save. The copies keep uploading and the note keeps
+ * being written, so an exit taken mid-save hides work that then lands — and
+ * the obvious next move is to open the sheet and save again, which keeps the
+ * message twice and uploads a second set of copies against the quota. Cancel
+ * was already disabled while `saving`; the backdrop and the X were not.
+ */
+describe('the exits while a save is in flight', () => {
+    it('the backdrop and the X do nothing until it lands, and it lands once', async () => {
+        const release = holdCopies();
+        const { saved, isClosed } = await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        // In flight: the copies are held open.
+        expect(document.querySelector('.save-note-go')!.textContent).toMatch(/Saving/);
+        expect(createTaskListWithContent).not.toHaveBeenCalled();
+
+        click(document.querySelector('.save-note-overlay'));
+        click(document.querySelector('.save-note-close'));
+        expect(isClosed()).toBe(false);
+        expect((document.querySelector('.save-note-close') as HTMLButtonElement).disabled).toBe(true);
+        expect((document.querySelector('.save-note-cancel') as HTMLButtonElement).disabled).toBe(true);
+
+        release();
+        await flush();
+        expect(createTaskListWithContent).toHaveBeenCalledTimes(1);
+        expect(saved).toHaveLength(1);
+        expect(isClosed()).toBe(true);
+    });
+
+    it('positive control: the X closes when nothing is being saved', async () => {
+        const { isClosed } = await mount('pack the tent');
+        expect((document.querySelector('.save-note-close') as HTMLButtonElement).disabled).toBe(false);
+        click(document.querySelector('.save-note-close'));
+        expect(isClosed()).toBe(true);
+    });
+
+    it('positive control: the backdrop closes when nothing is being saved', async () => {
+        const { isClosed } = await mount('pack the tent');
+        click(document.querySelector('.save-note-overlay'));
+        expect(isClosed()).toBe(true);
     });
 });

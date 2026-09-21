@@ -46,7 +46,9 @@
     cursor: pointer;
     border-radius: 4px;
 }
-.save-note-close:hover { background: var(--bg-tertiary, #404249); color: #fff; }
+.save-note-close:hover:not(:disabled) { background: var(--bg-tertiary, #404249); color: #fff; }
+/* Shut while a save is in flight — closing would not cancel it. */
+.save-note-close:disabled { opacity: 0.5; cursor: default; }
 
 .save-note-error {
     background: var(--color-danger-bg, rgba(237, 66, 69, 0.1));
@@ -143,7 +145,7 @@
 }
 .save-note-cancel { background: transparent; color: var(--text-muted, #b5bac1); }
 .save-note-go { background: var(--brand-primary, #5865f2); color: #fff; }
-.save-note-go:disabled { opacity: 0.5; cursor: default; }
+.save-note-cancel:disabled, .save-note-go:disabled { opacity: 0.5; cursor: default; }
 
 /* ---- Mobile (coarse pointer) ---- */
 @media (pointer: coarse) and (max-width: 1024px) {

@@ -696,7 +696,9 @@ device has not got, and no device could ever read it again. That is the rule
 text for exactly the same reason. The refusal survives changing your mind about
 pictures after picking a note, and a save that half-succeeds — the note made,
 the item refused — undoes the note rather than leaving it behind with pictures
-that nothing names.
+that nothing names. And like the send sheet, this one cannot be dismissed while
+a save is in flight: neither the backdrop nor the X closes it, because closing
+does not cancel the upload and saving again would keep the message twice.
 
 Like every other picture and text save, a capture needs the network (see the
 offline bullet below); it is never queued.

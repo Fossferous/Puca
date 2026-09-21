@@ -24,7 +24,8 @@ one-line summary; this file is the full story. Versions follow
   chat. Only your own notes are offered, never a shared one, and a note whose
   text or pictures this device cannot read yet is not offered either — saving
   into one would write over what you still have elsewhere. Messages you cannot
-  read, and clips, are not offered.
+  read, and clips, are not offered. While it is saving, the window stays put —
+  closing it would not stop the save.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

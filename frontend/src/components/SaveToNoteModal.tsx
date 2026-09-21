@@ -119,6 +119,19 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
     const pickedList = typeof pick === 'number' ? (lists ?? []).find(l => l.id === pick) : undefined;
     const target = pickedList && lockedFor(pickedList) ? null : pick;
 
+    /**
+     * Every exit, while a save is in flight, does nothing.
+     *
+     * Closing does not CANCEL the request: the copies keep uploading and the
+     * note keeps being written. So a backdrop click or the X while "Saving…"
+     * is on screen would hide a save that then lands, the user would open the
+     * sheet and save again, and the message would be kept twice — two notes,
+     * two sets of uploaded copies against the same quota. Cancel was already
+     * disabled; these two were not. `NotesDialog` shuts the same two doors
+     * with `busy`.
+     */
+    const closeIfIdle = useCallback(() => { if (!saving) onClose(); }, [saving, onClose]);
+
     const save = async () => {
         if (target === null || saving) return;
         setSaving(true);
@@ -184,9 +197,9 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
     };
 
     return (
-        <div className="save-note-overlay" onClick={onClose}>
+        <div className="save-note-overlay" onClick={closeIfIdle}>
             <div className="save-note-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Save to Notes">
-                <button className="save-note-close" onClick={onClose} title="Close" aria-label="Close"><CloseIcon size={18} /></button>
+                <button className="save-note-close" onClick={closeIfIdle} disabled={saving} title="Close" aria-label="Close"><CloseIcon size={18} /></button>
                 <h2>Save to Notes</h2>
                 {error && <div className="save-note-error" role="alert">{error}</div>}
 
@@ -244,7 +257,7 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
                 </div>
 
                 <div className="save-note-actions">
-                    <button type="button" className="save-note-cancel" onClick={onClose} disabled={saving}>Cancel</button>
+                    <button type="button" className="save-note-cancel" onClick={closeIfIdle} disabled={saving}>Cancel</button>
                     <button type="button" className="save-note-go" disabled={target === null || saving} onClick={() => { void save(); }}>
                         {saving ? 'Saving…' : 'Save'}
                     </button>

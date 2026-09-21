@@ -909,6 +909,61 @@ await ctxB.close();
     }
     await np2.close();
 
+    // The exits are SHUT while a save is in flight. Closing does not cancel
+    // the request — the copies keep uploading and the note keeps being
+    // written — so a backdrop click that hid a running save would earn a
+    // second save, and the message would be kept twice. The route is held
+    // open deliberately, because the real one is far too quick to catch.
+    const listsBeforeHeld = psqlDsn ? Number(sql('SELECT count(*) FROM task_lists')) : null;
+    await cp.route('**/task-lists', async route => {
+        if (route.request().method() === 'POST') await new Promise(r => setTimeout(r, 4000));
+        // A held route can be torn down under us (the page navigates, or the
+        // walk unroutes while this one is still sleeping). Letting that reject
+        // would kill the run as an unhandled rejection, not fail a check.
+        await route.continue().catch(() => {});
+    });
+    await cp.locator('.message', { hasText: 'pack the tent' }).last().click({ button: 'right' });
+    await cp.waitForSelector('.context-menu', { timeout: 5000 });
+    await cp.locator('.context-menu-item', { hasText: 'Save to Notes' }).click();
+    await cp.waitForSelector('.save-note-row', { timeout: 15000 });
+    // No pictures: this is about the exits, not a second upload.
+    await cp.locator('.save-note-check input').uncheck().catch(() => {});
+    await cp.locator('.save-note-row', { hasText: 'New note' }).click();
+    await cp.locator('.save-note-go').click();
+    const inFlight = await cp.waitForFunction(
+        () => /Saving/.test(document.querySelector('.save-note-go')?.textContent ?? ''),
+        null, { timeout: 8000 }).then(() => true, () => false);
+    ck('capture: the save is held in flight (the harness caught it)', inFlight);
+    if (inFlight) {
+        ck('capture: the X is disabled while it saves', await cp.locator('.save-note-close').isDisabled());
+        ck('capture: Cancel is disabled while it saves', await cp.locator('.save-note-cancel').isDisabled());
+        await cp.locator('.save-note-overlay').click({ position: { x: 4, y: 4 } });
+        const stillOpen = await cp.locator('.save-note-modal').count() === 1;
+        ck('capture: the backdrop does not close a save in flight', stillOpen);
+        if (!stillOpen) {
+            // What a person does when the sheet vanishes mid-save: save it
+            // again. The note count below is what that costs — and it is why
+            // the count check, not just the two above, has to be here.
+            await cp.locator('.message', { hasText: 'pack the tent' }).last().click({ button: 'right' });
+            await cp.waitForSelector('.context-menu', { timeout: 5000 });
+            await cp.locator('.context-menu-item', { hasText: 'Save to Notes' }).click();
+            await cp.waitForSelector('.save-note-row', { timeout: 15000 });
+            await cp.locator('.save-note-check input').uncheck().catch(() => {});
+            await cp.locator('.save-note-row', { hasText: 'New note' }).click();
+            await cp.locator('.save-note-go').click();
+        }
+    }
+    await cp.waitForSelector('.save-note-modal', { state: 'detached', timeout: 30000 }).catch(() => {});
+    await sleep(6000);
+    await cp.unroute('**/task-lists').catch(() => {});
+    if (psqlDsn) {
+        const listsAfterHeld = Number(sql('SELECT count(*) FROM task_lists'));
+        ck('capture: the held save kept the message ONCE', listsAfterHeld === listsBeforeHeld + 1,
+            `${listsBeforeHeld} -> ${listsAfterHeld}`);
+    } else {
+        skip('capture: the held save kept the message ONCE', 'no psql DSN: the walk cannot count notes');
+    }
+
     // The phone: the picker is reached by long-press there, and must fit.
     const cpctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: await ctx.storageState() });
     const cpp = await cpctx.newPage();
