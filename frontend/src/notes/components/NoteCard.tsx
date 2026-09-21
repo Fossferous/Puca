@@ -25,6 +25,7 @@ import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
 import { heroItems } from '../../api/noteMedia';
 import { ScheduleChip } from '../../components/schedule/ScheduleChip';
+import { NoteDueChip } from '../../components/schedule/NoteReminderControl';
 import { useNoteUnsynced } from '../model/notesOutbox';
 import { useLongPress } from './useLongPress';
 
@@ -236,6 +237,9 @@ function NoteCardImpl({
                 {card.serverName && (
                     <span className="notes-chip shared" title={`Shared checklist in ${card.serverName}`}><MembersIcon /> {card.serverName}</span>
                 )}
+                {/* The NOTE's own reminder first, then the soonest ITEM
+                    due: two different things, so two chips. */}
+                <NoteDueChip note={{ title: card.title, dueAt: card.dueAt, schedule: card.schedule }} now={now} />
                 {due && (
                     <span className={`notes-chip ${isTaskOverdue(due, now) ? 'overdue' : ''}`} title={`Next due: ${new Date(due.due_at!).toLocaleString()}`}>
                         <ClockIcon /> {formatDueShort(due.due_at!, now)}

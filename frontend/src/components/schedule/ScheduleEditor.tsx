@@ -24,7 +24,10 @@ import { CalendarIcon, CloseIcon, EyeOffIcon, WarningIcon } from '../Icons';
 import './Schedule.css';
 
 export interface ScheduleEditorProps {
-    task: Task;
+    /** An item, or a NOTE's own reminder (migration 068) — this editor only
+     *  ever reads these three fields, so a note is handed in as itself
+     *  rather than dressed up as a fake Task. */
+    task: Pick<Task, 'description' | 'due_at' | 'schedule'>;
     /** Save: the plaintext schedule (null = remove it) and the due_at to write
      *  with it (derived here, the one place an editor derives it). */
     onSave: (schedule: string | null, dueAt: string | null) => void;

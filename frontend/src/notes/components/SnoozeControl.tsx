@@ -24,7 +24,12 @@ const PRESETS: { value: SnoozePreset; label: string }[] = [
 
 export function SnoozeControl({ item, actions, now }: { item: DueItem; actions: NoteActions; now: number }) {
     const [open, setOpen] = useState(false);
-    if (!item.task.due_at) return null;
+    // A NOTE's own reminder (migration 068) has no snooze column behind it,
+    // so it gets no button rather than one that does nothing. The caller
+    // hides it too; this is the guard that makes that true wherever it is
+    // mounted (docs/NOTES.md, "Not built").
+    if (item.kind === 'note' || !item.task.due_at) return null;
+    const task = item.task;
     const snoozed = item.slot?.snoozed === true;
     return (
         <span className="notes-snooze" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
@@ -42,12 +47,12 @@ export function SnoozeControl({ item, actions, now }: { item: DueItem; actions: 
                 <span className="notes-snooze-menu" role="group" aria-label="Snooze for">
                     {PRESETS.map(p => (
                         <button key={p.value} type="button" className="notes-textbtn"
-                            onClick={() => { setOpen(false); void actions.snoozeTask(item.note.ref, item.task, snoozeUntil(p.value, now)); }}>
+                            onClick={() => { setOpen(false); void actions.snoozeTask(item.note.ref, task, snoozeUntil(p.value, now)); }}>
                             {p.label}
                         </button>
                     ))}
                     {snoozed && (
-                        <button type="button" className="notes-textbtn" onClick={() => { setOpen(false); void actions.snoozeTask(item.note.ref, item.task, null); }}>
+                        <button type="button" className="notes-textbtn" onClick={() => { setOpen(false); void actions.snoozeTask(item.note.ref, task, null); }}>
                             Unsnooze
                         </button>
                     )}

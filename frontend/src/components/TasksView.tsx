@@ -15,7 +15,7 @@
 
 import { ApiError } from '../api/client';
 import { pushMessageToast } from './messageToastBus';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import {
     type Task,
@@ -63,7 +63,9 @@ import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
-import { fetchListFeatures, flushBodySave, keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { fetchListFeatures, flushBodySave, keepHiddenSlots, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
+import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -323,6 +325,28 @@ export function TasksView() {
      *  it), so where there is a trash it is not offered for that list. */
     const canDeleteList = (list: TaskList) => !(support.trashEnabled && list.is_self === true);
 
+    /** The list as the shared reminder control reads it. */
+    const noteTimingOf = (list: TaskList) => ({ title: list.title, dueAt: list.due_at, schedule: list.schedule });
+
+    /** Set the LIST's own reminder (migration 068). Optimistic over the same
+     *  local rows a rename patches, rolled back on a refusal, and it pokes
+     *  the reminder loop so a time minutes away gets a timer now. */
+    const saveListTiming = async (list: TaskList, patch: { dueAt?: string | null; schedule?: string | null }) => {
+        const before = { due_at: list.due_at, schedule: list.schedule };
+        patchList(list.id, {
+            ...(patch.dueAt !== undefined ? { due_at: patch.dueAt } : {}),
+            ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
+        });
+        try {
+            await setTaskListTiming(list.id, patch);
+            pokeTaskReminders();
+        } catch (err) {
+            console.error('Failed to set the list reminder:', err);
+            patchList(list.id, before);
+            pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t save the reminder — check your connection' });
+        }
+    };
+
     const handleDeleteList = async (list: TaskList) => {
         // Only a server KNOWN to have no trash gets the permanent delete.
         let features = support.features;
@@ -498,6 +522,9 @@ export function TasksView() {
 
     // Date & repeat: only against a server that stores it (taskFeatures).
     const scheduleOn = useTaskFeature('schedule') === true;
+    // The list reminder chip flips to "overdue" on its own; Date.now() in
+    // render is an impure call the lint gate refuses.
+    const listNow = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const handleSetSchedule = useScheduleSetter(tasks, setTasks);
 
     const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
@@ -793,6 +820,20 @@ export function TasksView() {
                             >
                                 {selectedList.title}
                             </h2>
+                        )}
+                        {/* The LIST's own reminder (migration 068) — the same
+                            control Púca Notes puts in a note's footer, so the
+                            two front doors cannot disagree. */}
+                        {support.features.noteReminders && (
+                            <>
+                                <NoteDueChip note={noteTimingOf(selectedList)} now={listNow} />
+                                <NoteReminderControl
+                                    note={noteTimingOf(selectedList)}
+                                    canSchedule={scheduleOn}
+                                    buttonClass="tasks-editor-delete"
+                                    onSave={patch => { void saveListTiming(selectedList, patch); }}
+                                />
+                            </>
                         )}
                         {canDeleteList(selectedList) && (
                             <button
