@@ -197,6 +197,10 @@ and marked-up text cannot live inside one. It is highlighted on the card,
 where it is read rather than edited; in the open note, the counter and the
 next/previous buttons step through the item matches.
 
+The counter counts the marks that are actually **on screen**, because those
+are the ones the arrows can reach: collapse the *Completed* section and its
+matches leave the count and the walk together.
+
 Nothing about any of this reaches the server, which holds ciphertext for
 every field a search reads (`docs/SECURITY_MODEL.md`): searching, matching
 and marking up all happen on the device, and the query is deliberately kept
