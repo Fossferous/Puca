@@ -972,6 +972,15 @@
     .notes-editor-title { font-size: 20px; }
     .notes-editor-add input, .notes-quickadd-title, .notes-quickadd-item input, .notes-labels-new input { font-size: 16px; }
     .notes-editor-foot .notes-textbtn { padding: 10px 12px; }
+    /* The foot gained a control (List actions) and at 390px the row could no
+       longer hold them all, so flex squeezed the Open-in-Púca ANCHOR down to
+       39px — an anchor is not a <button>, so mobile.css's 44px floor never
+       applied to it. Nothing in this row may be squeezed: it wraps to a
+       second line instead, which also leaves room for the next control
+       someone adds here. */
+    .notes-editor-foot { flex-wrap: wrap; row-gap: 4px; }
+    .notes-editor-foot .notes-iconbtn, .notes-editor-foot .notes-textbtn { flex-shrink: 0; }
+    .notes-editor-foot a.notes-iconbtn { min-width: 44px; min-height: 44px; }
 
     .notes-popover { left: 8px !important; right: 8px; max-width: none; top: auto !important; bottom: calc(8px + var(--safe-area-bottom, 0px)); }
     .notes-swatches { grid-template-columns: repeat(6, 1fr); }

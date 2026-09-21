@@ -301,7 +301,17 @@ ck('drop: the dropped picture can be removed again', await page.locator('.notes-
 // an OG scrape or an unfurl — the regression this block exists to catch, and
 // one no unit test can see.
 const foreignRequests = [];
-const watchForeign = rq => { if (!rq.url().startsWith(baseURL) && !rq.url().startsWith('data:') && !rq.url().startsWith('blob:')) foreignRequests.push(rq.url()); };
+// "Foreign" means OFF THIS MACHINE. The API is a second local origin in this
+// rig, so a baseURL prefix test would call every ordinary fetch a leak — and
+// a check that always fails is a check nobody reads.
+const watchForeign = rq => {
+    const u = rq.url();
+    if (/^(data|blob):/.test(u)) return;
+    try {
+        const h = new URL(u).hostname;
+        if (h !== '127.0.0.1' && h !== 'localhost' && h !== '::1') foreignRequests.push(u);
+    } catch { foreignRequests.push(u); }
+};
 page.on('request', watchForeign);
 await page.fill('.notes-editor-content textarea.nb-text',
     'Buy before Friday https://example.com/a and javascript:alert(1) and //evil.example/x');
@@ -388,6 +398,7 @@ await page.getByRole('button', { name: /Uncheck all/ }).click();
 await page.waitForSelector('.notes-editor .tt-completed-section', { state: 'detached', timeout: 20000 }).catch(() => {});
 ck('uncheck all: the Completed section is gone', await page.locator('.notes-editor .tt-completed-section').count() === 0);
 ck('uncheck all: no item was lost', await page.locator('.notes-editor .tt-item').count() === itemsBefore);
+await page.waitForSelector('.notes-undo', { timeout: 15000 }).catch(() => {});
 ck('uncheck all: an Undo is offered', await page.locator('.notes-undo').count() === 1);
 await page.click('.notes-undo .notes-textbtn');
 await page.waitForSelector('.notes-editor .tt-completed-section', { timeout: 20000 }).catch(() => {});
