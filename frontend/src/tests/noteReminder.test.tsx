@@ -37,6 +37,9 @@ import { noteReminderSlotOf } from '../notes/model/notesTiming';
 import { ops } from '../notes/model/notesOutbox';
 import { noteToMarkdown, notesToJson } from '../notes/model/noteText';
 import { NoteDueChip, NoteReminderControl } from '../components/schedule/NoteReminderControl';
+import { Calendar, type CalendarProps } from '../components/calendar/Calendar';
+import { type CalendarSource } from '../api/taskCalendar';
+import { localDayKey } from '../utils/calendarMath';
 import { BellIcon, ClockIcon } from '../components/Icons';
 import { RemindersView } from '../notes/components/RemindersView';
 import { type NoteActions } from '../notes/model/notesQueries';
@@ -327,5 +330,47 @@ describe('the UI', () => {
         act(() => clear!.click());
         expect(cleared).toHaveLength(1);
         expect(cleared[0]).toEqual([{ kind: 'list', id: 1 }, { dueAt: null, schedule: null }, 'clear the reminder on']);
+    });
+
+    /* The calendar's day list is the OTHER place a note's reminder stands
+       beside items, and it is the ONLY body a coarse pointer ever gets
+       (Calendar.tsx's phone gate), so a phone meets it before the menu. The
+       menu already refuses to tick a note (onToggleDone short-circuits on
+       isNote); the row must not offer the control either, or the calendar
+       ships a tick box that silently does nothing. */
+    it('the calendar day row gives a note’s reminder a bell, not a tick box that does nothing', () => {
+        const ticked: string[] = [];
+        const day = localDayKey(Date.parse(iso(60)));
+        const noteSource: CalendarSource = {
+            task: noteAsCalendarItem({ id: 1, title: 'Call the vet', dueAt: iso(60) }),
+            noteKey: 'list:1', noteTitle: 'Call the vet', canEdit: false, canComplete: false, isNote: true,
+        };
+        const itemSource: CalendarSource = {
+            task: task(3, { description: 'buy food', due_at: iso(90), list_id: 2 }),
+            noteKey: 'list:2', noteTitle: 'shopping', canEdit: true,
+        };
+        const props: CalendarProps = {
+            sources: [noteSource, itemSource], view: 'day', date: day, onNavigate: () => {},
+            showCompleted: true, showPlain: true, onToggleCompleted: () => {}, onTogglePlain: () => {},
+            weekStart: 1, now: NOW, coarse: true,
+            onOpen: () => {}, onMove: () => {}, onAdd: () => {},
+            onToggleDone: e => { ticked.push(e.source.task.description); },
+        };
+        act(() => root.render(<Calendar {...props} />));
+        const rows = [...host.querySelectorAll('.cal-row')];
+        const noteRow = rows.find(r => r.textContent?.includes('Call the vet'));
+        const itemRow = rows.find(r => r.textContent?.includes('buy food'));
+        expect(noteRow, 'the note’s own reminder is on the day list').toBeTruthy();
+        expect(itemRow, 'the item is on the same day list').toBeTruthy();
+        expect(noteRow!.querySelector('input[type="checkbox"]')).toBeNull();
+        expect(noteRow!.querySelector('.cal-row-mark')).not.toBeNull();
+
+        // Positive control, in the SAME render: the item keeps a tick box
+        // that really ticks — so the two assertions above are about the
+        // note, not about a day list that draws no checkboxes at all.
+        const box = itemRow!.querySelector<HTMLInputElement>('input[type="checkbox"]');
+        expect(box).not.toBeNull();
+        act(() => box!.click());
+        expect(ticked).toEqual(['buy food']);
     });
 });

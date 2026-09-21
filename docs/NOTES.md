@@ -670,7 +670,9 @@ with its pictures, and only the other items become lines of text.
 - **Editing a note's reminder from the calendar.** A note's reminder appears
   there, and its menu opens the note; dragging it to another day, skipping an
   occurrence and ticking it belong to controls a note does not have. Change
-  it from the note.
+  it from the note. The day list says so rather than leaving a dead control:
+  where an item has its tick box, a note's reminder has a **bell** — the same
+  mark Reminders puts on a note row.
 
 ## A reminder on the note itself
 

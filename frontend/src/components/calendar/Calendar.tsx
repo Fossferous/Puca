@@ -23,8 +23,8 @@ import {
 import { isEditableTarget } from '../../api/hotkeys';
 import { useDropOnTarget } from '../../hooks/useDropOnTarget';
 import {
-    CalendarIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, EyeOffIcon, MapPinIcon, MoreVerticalIcon, PlusIcon,
-    RepeatIcon, SnoozeIcon,
+    BellIcon, CalendarIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, EyeOffIcon, MapPinIcon, MoreVerticalIcon,
+    PlusIcon, RepeatIcon, SnoozeIcon,
 } from '../Icons';
 import './Calendar.css';
 
@@ -259,13 +259,23 @@ export function Calendar(props: CalendarProps) {
                     <ul className="cal-rows">
                         {list.map(e => (
                             <li key={e.id} className={`cal-row kind-${e.kind} ${e.completed ? 'done' : ''}`}>
-                                <input
-                                    type="checkbox"
-                                    checked={e.completed}
-                                    disabled={e.kind === 'task' && e.repeats && e.completed}
-                                    aria-label={`${e.completed ? 'Reopen' : 'Complete'}: ${titleOf(e)}`}
-                                    onChange={() => onToggleDone(e)}
-                                />
+                                {/* A note's own reminder (migration 068) is not
+                                    an item: there is nothing to tick, and
+                                    onToggleDone refuses it. The row says so with
+                                    a bell rather than shipping a checkbox that
+                                    silently does nothing — the same omission the
+                                    entry menu and Notes' Reminders view make. */}
+                                {e.source.isNote ? (
+                                    <span className="cal-row-mark" role="img" aria-label="Reminds about the note itself"><BellIcon /></span>
+                                ) : (
+                                    <input
+                                        type="checkbox"
+                                        checked={e.completed}
+                                        disabled={e.kind === 'task' && e.repeats && e.completed}
+                                        aria-label={`${e.completed ? 'Reopen' : 'Complete'}: ${titleOf(e)}`}
+                                        onChange={() => onToggleDone(e)}
+                                    />
+                                )}
                                 <span className="cal-row-when">{whenLabel(e, dayKey, locale)}</span>
                                 <button type="button" className="cal-row-title" onClick={() => onOpen(e)} title="Open its note">
                                     {titleOf(e)} <Marks e={e} />

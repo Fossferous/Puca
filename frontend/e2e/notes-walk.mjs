@@ -1038,6 +1038,40 @@ ck('phone: the note reminder row keeps its shape at 390 and is not covered',
     noteRowBox && noteRowBox.x >= -0.5 && noteRowBox.x + noteRowBox.width <= 390.5
     && !r.bodyScrollsHorizontally && r.under.length === 0 && await onTop(m, '.notes-reminder-row.note'),
     JSON.stringify({ noteRowBox, u: r.under }));
+
+// The calendar's day list is the ONLY body a coarse pointer gets, and it is
+// where a note's reminder stands beside items. A note has nothing to tick
+// (CalendarView's onToggleDone refuses it), so the row carries a bell — a
+// checkbox here would be a control that silently does nothing, on the one
+// surface a phone meets first.
+const mDay = `${mDue.getFullYear()}-${mpad(mDue.getMonth() + 1)}-${mpad(mDue.getDate())}`;
+await m.goto(`/notes/#/calendar?v=day&d=${mDay}`);
+await m.waitForSelector('.cal-daylist', { timeout: 10000 });
+const calNoteRow = m.locator('.cal-daylist .cal-row', { hasText: 'Poem' });
+await calNoteRow.first().waitFor({ timeout: 10000 }).catch(() => {});
+ck('phone calendar: a note’s own reminder has a bell, not a tick box',
+    await calNoteRow.count() === 1
+    && await calNoteRow.locator('input[type="checkbox"]').count() === 0
+    && await calNoteRow.locator('.cal-row-mark').count() === 1,
+    JSON.stringify({ rows: await calNoteRow.count() }));
+// Positive control on the same list, one day earlier: "Eggs" is a real item
+// with a due time, and it keeps the tick box this walk would otherwise never
+// have proved the day list draws at all.
+const mTom = new Date(); mTom.setDate(mTom.getDate() + 1);
+await m.goto(`/notes/#/calendar?v=day&d=${mTom.getFullYear()}-${mpad(mTom.getMonth() + 1)}-${mpad(mTom.getDate())}`);
+await m.waitForSelector('.cal-daylist', { timeout: 10000 });
+const calItemRow = m.locator('.cal-daylist .cal-row', { hasText: 'Eggs' });
+await calItemRow.first().waitFor({ timeout: 10000 }).catch(() => {});
+ck('phone calendar: an ITEM row still has its tick box (positive control)',
+    await calItemRow.count() === 1
+    && await calItemRow.locator('input[type="checkbox"]').count() === 1
+    && await calItemRow.locator('.cal-row-mark').count() === 0,
+    JSON.stringify({ rows: await calItemRow.count() }));
+await mshot('phone-calendar-note-reminder');
+await m.goto('/notes/#/reminders');
+await m.waitForSelector('.notes-reminders', { timeout: 10000 });
+await m.waitForSelector('.notes-reminder-row.note', { timeout: 10000 }).catch(() => {});
+
 // Put it back as the walk found it, so later sections see the same fixture.
 await m.locator('.notes-reminder-row.note .notes-reminder-clear').tap();
 await m.waitForTimeout(600);
