@@ -18,7 +18,7 @@ import { type CalendarEntry } from '../../api/taskCalendar';
 import { taskScopeKey, type TasksScopeChannel, useTaskSources } from '../taskSources';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozePatch, snoozeUntil } from '../../api/taskSchedule';
-import { MAX_ICS_BYTES, icsImportTargets } from '../../api/icsImport';
+import { icsImportTargets, icsPickRefusal } from '../../api/icsImport';
 import { planToggle } from '../../api/taskCompletion';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { useTaskFeature } from '../../api/taskFeatures';
@@ -156,7 +156,8 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     const pickImport = () => fileRef.current?.click();
     const onFile = async (f: File | undefined) => {
         if (!f) return;
-        if (f.size > MAX_ICS_BYTES) { pushMessageToast({ title: 'That file is over 5 MB — too big to import here' }); return; }
+        const refusal = icsPickRefusal(f.size);
+        if (refusal) { pushMessageToast({ title: refusal }); return; }
         setImporting({ name: f.name, parsed: parseIcs(await f.text()) });
     };
     const importTargets = icsImportTargets(lists, id => tasksIn('list', id));

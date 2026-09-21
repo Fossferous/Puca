@@ -21,6 +21,16 @@ import { type NewTaskTiming, type Task } from './tasks';
 export const PACE_MS = 50;
 /** An .ics bigger than this is refused before it is parsed. */
 export const MAX_ICS_BYTES = 5 * 1024 * 1024;
+/** What the refusal says. It names the cap, so it lives beside it: the two
+ *  front doors (Notes' /calendar, Púca's Calendar tab) must refuse the same
+ *  file with the same words, and a cap that existed twice would drift. */
+export const ICS_TOO_BIG = `That file is over ${MAX_ICS_BYTES / (1024 * 1024)} MB — too big to import here`;
+/** The picked file's verdict, BEFORE it is read and parsed: the toast to
+ *  show, or null to go ahead. Parsing a 20 MB calendar to then reject it
+ *  would block the main thread for exactly as long as accepting it. */
+export function icsPickRefusal(size: number): string | null {
+    return size > MAX_ICS_BYTES ? ICS_TOO_BIG : null;
+}
 /** Leave headroom under the server's MAX_TASKS_PER_CHECKLIST (2000). */
 export const MAX_PER_LIST = 1900;
 const MAX_RETRIES = 6;

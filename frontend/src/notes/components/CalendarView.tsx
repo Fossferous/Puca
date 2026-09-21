@@ -19,6 +19,7 @@ import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar'
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozeUntil } from '../../api/taskSchedule';
 import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
+import { icsPickRefusal } from '../../api/icsImport';
 import { currentIcsUid } from '../../api/icsUid';
 import { addToPhoneCalendar, canAddToPhoneCalendar, deliverIcs, phoneCalendarArgs } from '../../api/icsDelivery';
 import { canCompleteTasks, canEditTask, createListTask, createTaskList } from '../../api/tasks';
@@ -174,7 +175,10 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const pickImport = () => fileRef.current?.click();
     const onFile = async (f: File | undefined) => {
         if (!f) return;
-        if (f.size > 5 * 1024 * 1024) { pushMessageToast({ title: 'That file is over 5 MB — too big to import here' }); return; }
+        // The same cap and the same words as Púca's Calendar tab: one
+        // constant, checked before the file is read (api/icsImport).
+        const refusal = icsPickRefusal(f.size);
+        if (refusal) { pushMessageToast({ title: refusal }); return; }
         const text = await f.text();
         setImporting({ name: f.name, parsed: parseIcs(text) });
     };

@@ -771,7 +771,9 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   items in hand there is nothing to skip against, so a second import of the
   same file would bring every event in twice, and the per-note cap would be
   counted from zero. A file over 5 MB is refused
-  before it is parsed. It shows a preview that lists
+  before it is parsed (`icsPickRefusal`, one cap and one wording shared by both
+  front doors — parsing a large calendar in order to then reject it costs
+  exactly what accepting it would). It shows a preview that lists
   everything it cannot represent. It skips events whose UID is already there,
   and paces itself under the rate limiter, retrying after a 429 and able to
   resume. It starts a new note before one reaches the 2000-item cap. **Add to
