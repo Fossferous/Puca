@@ -19,9 +19,10 @@
 import { useState } from 'react';
 import { dueToLocalInput, formatDueShort, localInputToIso } from '../../api/tasks';
 import { parseSchedule } from '../../api/taskSchedule';
-import { CalendarIcon, ClockIcon } from '../Icons';
+import { BellIcon, CalendarIcon, ClockIcon } from '../Icons';
 import { ScheduleEditor } from './ScheduleEditor';
 import { ScheduleChip } from './ScheduleChip';
+import './NoteReminderControl.css';
 
 export interface NoteTiming {
     /** The note's title, shown as the editor's headline. */
@@ -92,7 +93,7 @@ export function NoteReminderControl({ note, onSave, canSchedule = false, buttonC
                 </button>
             )}
             {open === 'due' && (
-                <span className="notes-note-due-edit tt-due-edit" onClick={e => e.stopPropagation()}>
+                <span className="note-due-edit" onClick={e => e.stopPropagation()}>
                     <input
                         type="datetime-local"
                         value={draft}
@@ -129,12 +130,16 @@ export function NoteReminderControl({ note, onSave, canSchedule = false, buttonC
 
 /** The note's own reminder as a chip: the schedule's when it has one, else
  *  the plain time. Deliberately distinct from the `nearestDue` chip, which
- *  is about the note's ITEMS — the two must not read as one thing. */
+ *  is about the note's ITEMS — the two must not read as one thing, and on a
+ *  card that has both they sit side by side. The BELL says "this note", the
+ *  clock beside it says "something in it"; the outline (NoteReminderControl.css)
+ *  keeps them apart even where the icon style is `classic`. */
 export function NoteDueChip({ note, now }: { note: NoteTiming; now: number }) {
     const parsed = parseSchedule(note.schedule);
     if (parsed.state !== 'none') {
         return (
-            <span className="notes-chip note-due">
+            <span className="note-due-chip" title="This note's own reminder">
+                <BellIcon />
                 <ScheduleChip task={{ schedule: note.schedule ?? null, is_completed: false }} now={now} />
             </span>
         );
@@ -142,8 +147,8 @@ export function NoteDueChip({ note, now }: { note: NoteTiming; now: number }) {
     if (!note.dueAt) return null;
     const overdue = Date.parse(note.dueAt) <= now;
     return (
-        <span className={`notes-chip note-due ${overdue ? 'overdue' : ''}`} title={`This note reminds you at ${new Date(note.dueAt).toLocaleString()}`}>
-            <ClockIcon /> {formatDueShort(note.dueAt, now)}
+        <span className={`note-due-chip ${overdue ? 'overdue' : ''}`} title={`This note reminds you at ${new Date(note.dueAt).toLocaleString()}`}>
+            <BellIcon /> {formatDueShort(note.dueAt, now)}
         </span>
     );
 }

@@ -417,10 +417,31 @@ await page.fill('.notes-editor input[aria-label="Remind me at"]', noteDueLocal);
 await page.locator('.notes-editor .tt-due-set').click();
 await sleep(600);
 ck('note reminder: setting a time creates NO item', await page.locator('.notes-editor .tt-item').count() === 0);
-ck('note reminder: the open note shows its own chip', await page.locator('.notes-editor-sub .notes-chip.note-due').count() === 1);
+ck('note reminder: the open note shows its own chip', await page.locator('.notes-editor-sub .note-due-chip').count() === 1);
 await page.keyboard.press('Escape');
 await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
-ck('note reminder: the card shows the note\u2019s own due chip', await poem().locator('.notes-card-foot .notes-chip.note-due').count() === 1);
+ck('note reminder: the card shows the note\u2019s own due chip', await poem().locator('.notes-card-foot .note-due-chip').count() === 1);
+// Its own stylesheet travels with the control (NoteReminderControl.css): it is
+// a real chip here, and it does NOT read as the chip beside it, which is the
+// soonest ITEM due. Two identical clock pills would be one claim made twice.
+const noteChipLook = await page.evaluate(() => {
+    const el = document.querySelector('.notes-card-foot .note-due-chip');
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    const items = [...document.querySelectorAll('.notes-card-foot .notes-chip:not(.unsynced)')]
+        .map(c => parseFloat(getComputedStyle(c).borderTopWidth) || 0);
+    return {
+        border: parseFloat(cs.borderTopWidth) || 0,
+        radius: cs.borderTopLeftRadius,
+        pad: cs.paddingLeft,
+        itemChips: items.length,
+        widestItemBorder: items.length ? Math.max(...items) : 0,
+    };
+});
+ck('note reminder: the chip is styled by its own stylesheet and reads apart from an item chip',
+    noteChipLook && noteChipLook.border >= 1 && noteChipLook.radius === '999px'
+    && noteChipLook.itemChips > 0 && noteChipLook.widestItemBorder < 1,
+    JSON.stringify(noteChipLook));
 
 await page.locator('.notes-rail-item', { hasText: 'Reminders' }).click();
 await page.waitForSelector('.notes-reminders', { timeout: 5000 });
@@ -448,7 +469,7 @@ await sleep(700);
 ck('note reminder: clearing it removes the row', await poemRow().count() === 0);
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 await sleep(300);
-ck('note reminder: and the card chip goes with it', await poem().locator('.notes-card-foot .notes-chip.note-due').count() === 0);
+ck('note reminder: and the card chip goes with it', await poem().locator('.notes-card-foot .note-due-chip').count() === 0);
 
 // ---- 10. Archive with undo -----------------------------------------------------------------------------
 const packing = () => page.locator('.notes-card', { hasText: 'Packing' });
@@ -597,18 +618,47 @@ const pucaRemind = page.locator('.tasks-editor-header button[aria-label="Remind 
 ck('púca: the list header offers the note\u2019s own reminder', await pucaRemind.count() === 1);
 await pucaRemind.click();
 await page.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
+// Púca never loads notes.css, so a control that borrowed `.notes-chip` from it
+// rendered here as bare inline text with the item editor's 36px indent. Its own
+// stylesheet is what makes this a row of its own under the title.
+const pucaEdit = await page.evaluate(() => {
+    const el = document.querySelector('.tasks-editor-header .note-due-edit');
+    const hdr = document.querySelector('.tasks-editor-header');
+    const title = document.querySelector('.tasks-editor-title');
+    if (!el || !hdr || !title) return null;
+    const b = el.getBoundingClientRect(), h = hdr.getBoundingClientRect(), t = title.getBoundingClientRect();
+    return {
+        ownRow: b.top >= t.bottom - 0.5,
+        inside: b.left >= h.left - 0.5 && b.right <= h.right + 0.5,
+        width: Math.round(b.width),
+        padLeft: getComputedStyle(el).paddingLeft,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+});
+ck('púca: the due editor takes its own row in the header, not the title' + '\u2019' + 's width',
+    pucaEdit && pucaEdit.ownRow && pucaEdit.inside && pucaEdit.width > 150 && !pucaEdit.overflow,
+    JSON.stringify(pucaEdit));
 const pucaDue = new Date(Date.now() + 4 * 86400000);
 const ppad = n => String(n).padStart(2, '0');
 await page.fill('.tasks-editor-header input[aria-label="Remind me at"]', `${pucaDue.getFullYear()}-${ppad(pucaDue.getMonth() + 1)}-${ppad(pucaDue.getDate())}T09:00`);
 await page.locator('.tasks-editor-header .tt-due-set').click();
 await sleep(800);
-ck('púca: the chip appears beside the list title', await page.locator('.tasks-editor-header .notes-chip.note-due').count() === 1);
+ck('púca: the chip appears beside the list title', await page.locator('.tasks-editor-header .note-due-chip').count() === 1);
+const pucaChipLook = await page.evaluate(() => {
+    const el = document.querySelector('.tasks-editor-header .note-due-chip');
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    return { border: parseFloat(cs.borderTopWidth) || 0, radius: cs.borderTopLeftRadius, pad: cs.paddingLeft };
+});
+ck('púca: and it is a real chip there, not bare text (notes.css is not loaded in Púca)',
+    pucaChipLook && pucaChipLook.border >= 1 && pucaChipLook.radius === '999px' && pucaChipLook.pad !== '0px',
+    JSON.stringify(pucaChipLook));
 // Put it back: later sections (and Notes) expect the fixture unchanged.
 await page.locator('.tasks-editor-header button[aria-label="Edit this note\u2019s reminder"]').click();
 await page.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
 await page.locator('.tasks-editor-header .tt-delete').click();
 await sleep(800);
-ck('púca: clearing it from there removes the chip', await page.locator('.tasks-editor-header .notes-chip.note-due').count() === 0);
+ck('púca: clearing it from there removes the chip', await page.locator('.tasks-editor-header .note-due-chip').count() === 0);
 await page.locator('.tasks-tab', { hasText: 'Holiday photo' }).click();
 await page.waitForFunction(() => document.querySelector('.list-content-block .ni-open img')?.naturalWidth > 0, null, { timeout: 15000 })
     .then(() => ck('púca: a photo note shows its photo', true))
@@ -970,7 +1020,7 @@ const mDue = new Date(Date.now() + 2 * 86400000);
 const mpad = n => String(n).padStart(2, '0');
 await m.fill('.notes-editor input[aria-label="Remind me at"]', `${mDue.getFullYear()}-${mpad(mDue.getMonth() + 1)}-${mpad(mDue.getDate())}T09:00`);
 r = await audit();
-const dueBox = await m.locator('.notes-editor .notes-note-due-edit').boundingBox();
+const dueBox = await m.locator('.notes-editor .note-due-edit').boundingBox();
 ck('phone: the reminder popover fits the viewport and nothing is undersized',
     dueBox && dueBox.x >= -0.5 && dueBox.x + dueBox.width <= 390.5 && !r.bodyScrollsHorizontally && r.under.length === 0,
     JSON.stringify({ dueBox, u: r.under }));
@@ -992,6 +1042,46 @@ ck('phone: the note reminder row keeps its shape at 390 and is not covered',
 await m.locator('.notes-reminder-row.note .notes-reminder-clear').tap();
 await m.waitForTimeout(600);
 ck('phone: clearing it from the row works with a coarse pointer', await m.locator('.notes-reminder-row.note').count() === 0);
+
+// The OTHER front door at 390x844: Púca's Tasks view mounts the same control,
+// and notes-walk exercised it on desktop only. Its buttons are new UI, so they
+// take the 44px rule, and its date editor must take a row of its own here too.
+await m.goto('/');
+await m.waitForSelector('.mobile-nav-btn', { timeout: 20000 });
+await m.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+    .then(() => m.tap('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* already answered on this profile */ });
+await m.tap('.welcome-popup-close', { timeout: 2000 }).catch(() => { /* not shown */ });
+await m.locator('.mobile-nav-btn').nth(0).tap();
+await m.waitForTimeout(400);
+await m.locator('.server-icon.notes-self').tap();
+await m.waitForSelector('.tasks-tabbar', { timeout: 20000 });
+await m.locator('.tasks-tab', { hasText: 'Poem' }).first().tap();
+await m.waitForSelector('.tasks-editor-header', { timeout: 10000 });
+const mPucaRemind = m.locator('.tasks-editor-header button[aria-label="Remind me"]');
+const mPucaBox = await mPucaRemind.boundingBox();
+ck('phone: Púca' + '\u2019' + 's list header offers the reminder, at a 44px target',
+    mPucaBox && mPucaBox.width >= 43.5 && mPucaBox.height >= 43.5, JSON.stringify(mPucaBox));
+await mPucaRemind.tap();
+await m.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
+const mPucaEdit = await m.evaluate(() => {
+    const el = document.querySelector('.tasks-editor-header .note-due-edit');
+    const title = document.querySelector('.tasks-editor-title');
+    if (!el || !title) return null;
+    const b = el.getBoundingClientRect(), t = title.getBoundingClientRect();
+    const input = el.querySelector('input');
+    return {
+        ownRow: b.top >= t.bottom - 0.5,
+        inside: b.left >= -0.5 && b.right <= window.innerWidth + 0.5,
+        font: input ? parseFloat(getComputedStyle(input).fontSize) : 0,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+});
+ck('phone: the Púca due editor fits 390, takes its own row, and its input is 16px',
+    mPucaEdit && mPucaEdit.ownRow && mPucaEdit.inside && mPucaEdit.font >= 16 && !mPucaEdit.overflow,
+    JSON.stringify(mPucaEdit));
+await mshot('phone-puca-note-reminder');
+
 await m.goto('/notes/');
 await m.waitForSelector('.notes-card', { timeout: 10000 });
 

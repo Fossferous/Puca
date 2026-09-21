@@ -196,6 +196,11 @@
 
 .tasks-editor-header {
     display: flex;
+    /* The note's own reminder (migration 068) opens its date editor here,
+       and that editor asks for a whole row (.note-due-edit, flex: 1 0 100%,
+       in components/schedule/NoteReminderControl.css). Without wrapping it
+       would fight the title for width instead of dropping below it. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 16px 20px 8px;
@@ -223,6 +228,25 @@
 }
 .tasks-editor-delete:hover {
     color: var(--danger-color, #ed4245);
+    background: var(--bg-hover, #36393f);
+}
+
+/* A plain icon button in the list header. Deliberately NOT
+   .tasks-editor-delete: that one turns danger-red on hover, which is right
+   for Delete and wrong for "Remind me" — a control that reddens under the
+   pointer reads as one that destroys something. */
+.tasks-editor-iconbtn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted, #72767d);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+.tasks-editor-iconbtn:hover {
+    color: var(--text-primary, #fff);
     background: var(--bg-hover, #36393f);
 }
 
@@ -299,6 +323,14 @@
     .tasks-tab-newform input,
     .tasks-add input,
     .tasks-title-input { font-size: 16px; }
+    /* New UI takes the 44px rule (docs/DESIGN_PHILOSOPHY.md §7). */
+    .tasks-editor-iconbtn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 44px;
+        min-height: 44px;
+    }
 }
 
 /* "Open in Púca Notes" (web only; see notesUrl in TasksView.tsx). A link that

@@ -36,7 +36,8 @@ import {
 import { noteReminderSlotOf } from '../notes/model/notesTiming';
 import { ops } from '../notes/model/notesOutbox';
 import { noteToMarkdown } from '../notes/model/noteText';
-import { NoteReminderControl } from '../components/schedule/NoteReminderControl';
+import { NoteDueChip, NoteReminderControl } from '../components/schedule/NoteReminderControl';
+import { BellIcon, ClockIcon } from '../components/Icons';
 import { RemindersView } from '../notes/components/RemindersView';
 import { type NoteActions } from '../notes/model/notesQueries';
 
@@ -227,6 +228,34 @@ describe('the UI', () => {
         expect(clear).toBeTruthy();
         act(() => clear!.click());
         expect(saved).toEqual([{ dueAt: null }]);
+    });
+
+    it('the chip is its OWN chip, and does not draw the item clock', () => {
+        act(() => root.render(<NoteDueChip note={{ title: 'Call the vet', dueAt: '2026-09-22T09:00:00Z' }} now={NOW} />));
+        const chip = host.querySelector('.note-due-chip');
+        // Its own class, from its own stylesheet: Púca's Tasks view mounts
+        // this control and never loads notes.css, so a chip that asked for
+        // `.notes-chip` rendered there as bare inline text.
+        expect(chip).not.toBeNull();
+        expect(host.querySelector('.notes-chip')).toBeNull();
+
+        // And it draws the BELL, not the clock the ITEM chip beside it draws
+        // — two identical clock pills on one card would be one claim made
+        // twice. Compared against the icons themselves rather than a copied
+        // path string, so a redrawn bell does not fail this.
+        const iconHost = document.createElement('div');
+        document.body.appendChild(iconHost);
+        const iconRoot = createRoot(iconHost);
+        const paths = (el: Element) => [...el.querySelectorAll('svg path')].map(n => n.getAttribute('d')).join('|');
+        act(() => iconRoot.render(<BellIcon />));
+        const bell = paths(iconHost);
+        act(() => iconRoot.render(<ClockIcon />));
+        const clock = paths(iconHost);
+        expect(bell).not.toBe(clock);              // positive control for the comparison itself
+        expect(paths(chip!)).toBe(bell);
+        expect(paths(chip!)).not.toBe(clock);
+        act(() => iconRoot.unmount());
+        iconHost.remove();
     });
 
     it('hides the plain clock once the note carries a schedule (as an item does)', () => {

@@ -830,7 +830,7 @@ export function TasksView() {
                                 <NoteReminderControl
                                     note={noteTimingOf(selectedList)}
                                     canSchedule={scheduleOn}
-                                    buttonClass="tasks-editor-delete"
+                                    buttonClass="tasks-editor-iconbtn"
                                     onSave={patch => { void saveListTiming(selectedList, patch); }}
                                 />
                             </>

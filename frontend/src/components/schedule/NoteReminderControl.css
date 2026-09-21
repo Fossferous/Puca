@@ -1,0 +1,74 @@
+/*
+ * The NOTE's own reminder (migration 068) — its own styling, because the
+ * control has TWO front doors in two different bundles: Púca Notes' editor
+ * footer and card (frontend/src/notes/), and Púca's Tasks view header
+ * (frontend/src/components/TasksView.tsx). notes.css is imported by
+ * notes/main.tsx and by nothing else, so a control that borrowed
+ * `.notes-chip` from it rendered as a pill in Notes and as bare inline text
+ * in Púca — the same control telling two stories. Everything the control
+ * needs lives here and travels with it, the way ScheduleEditor carries
+ * Schedule.css.
+ *
+ * What it still borrows, legitimately, is TaskTree.css's `.tt-btn` /
+ * `.tt-due-set` / `.tt-delete`: both bundles render the tree (Notes' editor
+ * IS Púca's TaskTree), so those classes exist in both, and Set/Clear must
+ * read exactly as an item's Set/Clear does.
+ */
+
+/* The note's own reminder as a chip. Deliberately NOT the same picture as
+   the `nearestDue` chip beside it on a card: that one is the soonest ITEM,
+   this one is the note itself, and two identical clock pills would be one
+   claim made twice. The bell and the outline are drawn from currentColor,
+   so all eight themes in styles/theme.css and [data-contrast="high"] are
+   handled without a per-theme rule. */
+.note-due-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: var(--text-muted, #72767d);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.note-due-chip .svrn-icon { font-size: 11px; }
+.note-due-chip.overdue { color: var(--text-danger, #ed4245); font-weight: 600; }
+
+/* The inline due editor is a row of its own under whatever holds it — the
+   Notes footer of icon buttons, or the Tasks view's title row — so the date
+   input and its two buttons never compete with the rest for width. `order`
+   puts it last wherever it is mounted; `flex: 1 0 100%` gives it the row.
+   Both hosts set flex-wrap: wrap for it. */
+.note-due-edit {
+    order: 1;
+    flex: 1 0 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-top: 6px;
+}
+.note-due-edit input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-primary, #fff);
+    font-size: 13px;
+    /* The native picker's own chrome follows the app's theme, as the item
+       editor's does (TaskTree.css). */
+    color-scheme: dark;
+}
+[data-theme="light"] .note-due-edit input { color-scheme: light; }
+
+/* 16px or the phone browser zooms the page on focus (DESIGN_PHILOSOPHY §7). */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .note-due-edit input { font-size: 16px; }
+}
