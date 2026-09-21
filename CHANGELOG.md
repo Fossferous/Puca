@@ -6,7 +6,7 @@ one-line summary; this file is the full story. Versions follow
 
 ## 0.9.816 — 2026-09-21
 
-Clips that cost a sixth of the CPU, no longer lose two seconds after a press, keep their sound in step and their pointer moving; DeepFilter rides out CPU spikes instead of giving up.
+Clips that cost a sixth of the CPU, no longer lose two seconds after a press, no longer put their sound late by the recorder's start-up time, and keep their pointer moving; DeepFilter rides out CPU spikes instead of giving up.
 
 ### Changed
 - **DeepFilter rides out CPU spikes instead of giving up.** When a busy
@@ -33,7 +33,8 @@ Clips that cost a sixth of the CPU, no longer lose two seconds after a press, ke
   card's video encoder. The same number of seconds now takes less than half
   the memory. Each frame is also cheaper: a still screen no longer converts
   the same picture again every frame, the colour conversion uses the CPU's
-  vector instructions, the recorder no longer spins while the video encoder
+  vector instructions where it has them (AVX2), the recorder no longer spins
+  while the video encoder
   works, and it reuses one screen buffer instead of allocating a new one per
   frame. Together: about 14% of one CPU core, down from 81-95%.
 - **Saving a clip no longer leaves a gap in the clip buffer.** With the
