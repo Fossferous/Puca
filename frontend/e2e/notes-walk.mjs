@@ -618,6 +618,24 @@ await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button
 await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
     .then(() => ck('púca: Restore puts it back in the bar (still archived, so behind the Archive filter)', true))
     .catch(() => ck('púca: Restore puts it back in the bar (still archived, so behind the Archive filter)', false));
+// The Archive filter is still on (that is how Packing is on the bar at all).
+// A list created now must not be created BEHIND it: it has no labels and is
+// not archived, so every filter hides it, and the "Show all notes" way back
+// only renders on an EMPTY board — which this one is not.
+const underFilter = await barTabs().count();
+await page.click('.tasks-tabbar-actions button[aria-label="New list"]');
+await page.fill('.tasks-tab-newform input', 'Made under a filter');
+await page.press('.tasks-tab-newform input', 'Enter');
+await page.waitForSelector('.tasks-tab:has-text("Made under a filter")', { timeout: 10000 }).catch(() => {});
+const afterCreate = await barTabs().count();
+ck('púca: a list created while a filter was on is on the bar, and the filter is back to everything',
+    underFilter === 1 && await page.locator('.tasks-tab', { hasText: 'Made under a filter' }).count() === 1 && afterCreate === tabsAll + 1,
+    `underFilter=${underFilter} afterCreate=${afterCreate} all=${tabsAll}`);
+// Put the bar back as the checks below expect to find it.
+await page.locator('.tasks-tab', { hasText: 'Made under a filter' }).click({ button: 'right' });
+await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
+await page.waitForFunction(() => ![...document.querySelectorAll('.tasks-tab')].some(t => t.textContent.includes('Made under a filter')), null, { timeout: 10000 }).catch(() => {});
+ck('púca: …and the walk’s fixture is back as it was', await barTabs().count() === tabsAll);
 await page.goto('/notes/');
 await page.waitForSelector('.notes-card:has-text("Poem")', { timeout: 15000 });
 ck('notes: the colour set in Púca is on the card here', await page.locator('.notes-card[data-color="dusk"]').count() === 1);

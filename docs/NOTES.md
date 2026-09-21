@@ -113,6 +113,9 @@ and the tints they share live in `frontend/src/components/notes/` and
 `frontend/src/styles/noteChrome.css`). Púca's bar hides an archived note and
 its filter narrows to one label, and — exactly as in Notes — a favourite or a
 tab drag made while notes are hidden saves every hidden note back in its slot.
+Creating a list puts that filter back to everything: a brand-new note carries
+no label and is not archived, so any filter would hide it, and the *Show all
+notes* way back only appears on an empty board.
 Grid/list and sort stay Notes' own, per device.
 
 ## What follows the account
@@ -147,8 +150,8 @@ step:
   permanent, wherever the delete is made: Púca's Tasks view forgets them on
   its own *Delete List* and on *Delete forever* in its Trash section, rather
   than leaving a dead key for Notes' prune to find. A note moved to the trash
-  keeps them for a restore. Notes deleted
-  *outside* either app (a removed checklist channel) are pruned
+  keeps them for a restore. Notes deleted *outside* either app (a removed
+  checklist channel) are pruned
   only once they have been missing from two settled, complete fetches at least
   a minute apart, both made by this page (a view rebuilt from the device cache
   never counts), never while offline edits are queued, and a personal list

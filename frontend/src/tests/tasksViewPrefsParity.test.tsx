@@ -34,6 +34,12 @@ vi.mock('../api/auth', async (orig) => ({
     currentUserIdFromToken: () => 7,
     getToken: () => null,
 }));
+// Creating a list seals its title to the account, which needs an identity.
+vi.mock('../api/e2ee', async (orig) => {
+    const real = await orig<typeof import('../api/e2ee')>();
+    const id = real.makeIdentity(new Uint8Array(32).fill(4));
+    return { ...real, getActiveIdentity: () => id };
+});
 // The real engine talks to /sealed-blobs; its own suite covers it.
 const syncHook = vi.hoisted(() => ({ mounts: 0 }));
 vi.mock('../notes/model/notesPrefsSync', async (orig) => ({
@@ -156,6 +162,23 @@ async function showArchive() {
     await settle();
 }
 
+/** Type a name into the tab bar's New-list form and submit it. */
+async function createList(title: string) {
+    const add = [...container.querySelectorAll<HTMLElement>('.tasks-tabbar-actions button')]
+        .find(b => b.getAttribute('aria-label') === 'New list');
+    expect(add, 'the New list control is in the fixed actions block').toBeTruthy();
+    await act(async () => { add!.click(); });
+    const input = container.querySelector<HTMLInputElement>('.tasks-tab-newform input');
+    expect(input, 'the New list form opened').toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+        setter.call(input!, title);
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { input!.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+    await settle();
+}
+
 /** Favourite one list through its tab's context menu; returns the saved order. */
 async function favourite(label: string): Promise<string[]> {
     await openMenu(label);
@@ -179,6 +202,14 @@ beforeEach(() => {
     vi.mocked(window.localStorage.removeItem).mockImplementation((k: string) => { delete store[k]; });
     seedPrefs({});
     installServer();
+    // Selecting a list (what a create does) renders the note editor, which
+    // asks whether the pointer is coarse. jsdom has no matchMedia.
+    if (!window.matchMedia) {
+        Object.defineProperty(window, 'matchMedia', {
+            configurable: true,
+            value: (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false }),
+        });
+    }
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -291,6 +322,51 @@ describe('Púca Tasks view: a hidden note keeps its slot in the saved order', ()
         seedPrefs({ labels: { 'list:7': ['Shopping'], 'list:9': ['Shopping'] } });
         await mount();
         expect(await favourite('List 9')).toEqual(['list:9*', 'list:5', 'list:7']);
+    });
+});
+
+describe('Púca Tasks view: a new list is not created behind a filter', () => {
+    /** The server hands back a row; createTaskList puts the typed title on it. */
+    const createReturns = (id: number) => post.mockImplementation(async (path: string) => {
+        if (path === '/task-lists') return row(id);
+        return {};
+    });
+
+    it('creating a list while a LABEL FILTER is on puts the filter back to everything', async () => {
+        seedPrefs({ labels: { 'list:7': ['Shopping'] } });
+        createReturns(11);
+        await mount();
+        const entry = await pickFilter('Shopping');
+        await act(async () => { entry.click(); });
+        await settle();
+        expect(tabFor('List 5'), 'the filter is on and hiding the unlabelled notes').toBeUndefined();
+
+        await createList('Fresh');
+        // A new list has no labels, so the filter that was on would hide it —
+        // and the "Show all notes" way back only shows on an EMPTY board.
+        expect(tabFor('Fresh'), 'the list just created is on the bar').toBeTruthy();
+        expect(tabFor('List 5'), 'and so is everything the filter was hiding').toBeTruthy();
+    }, 15_000);
+
+    it('creating a list from the ARCHIVE does the same', async () => {
+        seedPrefs({ archived: { 'list:7': true } });
+        createReturns(12);
+        await mount();
+        await showArchive();
+        expect(tabFor('List 5'), 'the archive is showing, so the live notes are not').toBeUndefined();
+
+        await createList('Fresh');
+        expect(tabFor('Fresh'), 'the list just created is on the bar').toBeTruthy();
+        expect(tabFor('List 5'), 'and the archive filter is off').toBeTruthy();
+    }, 15_000);
+
+    it('POSITIVE CONTROL: with no filter on, the same create shows the same tab', async () => {
+        // Proves the fixture can create a list and see it at all, so a red
+        // above is the filter, not a broken New-list form.
+        createReturns(13);
+        await mount();
+        await createList('Fresh');
+        expect(tabFor('Fresh')).toBeTruthy();
     });
 });
 

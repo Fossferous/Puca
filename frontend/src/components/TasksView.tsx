@@ -393,6 +393,11 @@ export function TasksView() {
             const created = await createTaskList(title);
             setLists(prev => [...prev, created]);
             setSelected({ kind: 'list', id: created.id });
+            // A brand-new list has no labels and is not archived, so ANY
+            // filter hides it: the editor would open on a note with no tab and
+            // no card, and the "Show all notes" way back only appears when the
+            // board is empty — which it is not. Creating one means showing it.
+            setNoteFilter({ kind: 'all' });
             setNewListTitle('');
             setAddingList(false);
         } catch (err) {
