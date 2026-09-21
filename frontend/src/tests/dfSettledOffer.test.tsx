@@ -8,8 +8,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { DF_GRAPH_LIVE_EVENT, DF_SETTLED_EVENT, dfSettledText, useDfSettledOffer } from '../components/useDfSettledOffer';
-import { NOISE_MODE_EVENT, setNoiseSuppressionMode } from '../api/noiseFilter';
+import { DF_GRAPH_LIVE_EVENT, DF_SETTLED_EVENT, dfSettledText, keepRnnoiseForSession, useDfSettledOffer } from '../components/useDfSettledOffer';
+import { NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode } from '../api/noiseFilter';
 
 let root: Root | null = null;
 let div: HTMLDivElement | null = null;
@@ -68,6 +68,33 @@ describe('the settled-DeepFilter offer', () => {
         settle('repeated');
         expect(text()).not.toBe('');
         act(() => { window.dispatchEvent(new CustomEvent(DF_GRAPH_LIVE_EVENT)); });
+        expect(text()).toBe('');
+    });
+
+    it('"Keep RNNoise" makes RNNoise the mode for the session, not just this graph', () => {
+        setNoiseSuppressionMode('deepfilter', false);
+        // setup.ts mocks localStorage with recording stubs: persistence is
+        // the count of setItem calls for the key (noiseModeMicTest does the same).
+        const persisted = () => (localStorage.setItem as unknown as { mock: { calls: [string, string][] } }).mock.calls
+            .filter(c => c[0] === 'noiseSuppressionMode').length;
+        const text = mount();
+        settle('repeated');
+        expect(text()).not.toBe('');
+        // Until 0.9.817 the button only closed the notice and the mode stayed
+        // DeepFilter, so a mic restart rebuilt it. POSITIVE CONTROL for the
+        // assertion below: the mode really is DeepFilter before the click.
+        expect(getNoiseSuppressionMode()).toBe('deepfilter');
+        const before = persisted();
+        act(() => { keepRnnoiseForSession(); });
+        expect(getNoiseSuppressionMode(), 'the next graph builds RNNoise').toBe('rnnoise');
+        expect(text(), 'the mode change answers the offer').toBe('');
+        expect(persisted(), 'session-only: nothing written to the saved preference').toBe(before);
+        // POSITIVE CONTROL: a real pick does persist, so the count can move.
+        setNoiseSuppressionMode('deepfilter');
+        expect(persisted()).toBe(before + 1);
+        setNoiseSuppressionMode('rnnoise', false);
+        // And a later settle from a stale DeepFilter graph no longer shows.
+        settle('sustained');
         expect(text()).toBe('');
     });
 
