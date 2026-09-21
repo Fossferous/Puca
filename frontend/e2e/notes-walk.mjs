@@ -262,6 +262,28 @@ await openComposer();
 await page.evaluate(() => { window.__micOrder = []; });
 offMachineRequests.length = 0;
 ck('voice note: the composer offers one', await page.locator('.notes-quickadd-foot button[aria-label="Voice note"]').count() === 1);
+
+// A take ABANDONED mid-recording, first. A real MediaRecorder fires onstop in
+// a LATER task than the stop() that caused it, so this is the one path a unit
+// test with an inline fake cannot prove: the handler runs after the sheet is
+// gone, and a preview URL minted there is one nothing can ever revoke. Only
+// audio blobs are counted — the cards mint their own for pictures.
+await page.evaluate(() => {
+    window.__audioBlobs = 0;
+    const make = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = b => { if (b && typeof b.type === 'string' && b.type.startsWith('audio/')) window.__audioBlobs++; return make(b); };
+});
+await page.click('.notes-quickadd-foot button[aria-label="Voice note"]');
+await page.waitForSelector('.notes-recorder button[aria-label="Stop recording"]', { timeout: 10000 });
+await sleep(1200);
+await page.click('.notes-recorder button[aria-label="Close"]');
+await page.waitForSelector('.notes-recorder', { state: 'detached', timeout: 5000 });
+await sleep(1000);   // the browser getting round to onstop
+ck('voice note: Close while recording leaves no unreachable preview URL behind',
+    await page.evaluate(() => window.__audioBlobs) === 0, `audio blob urls=${await page.evaluate(() => window.__audioBlobs)}`);
+ck('voice note: ...and the abandoned take is not in the composer',
+    await page.locator('.notes-quickadd-media audio').count() === 0);
+
 await page.click('.notes-quickadd-foot button[aria-label="Voice note"]');
 await page.waitForSelector('.notes-recorder', { timeout: 10000 });
 const micOrder = await page.evaluate(() => (window.__micOrder || []).join(','));
@@ -283,6 +305,10 @@ await shot('voice-recorder');
 await page.getByRole('button', { name: 'Keep' }).click();
 await page.waitForSelector('.notes-quickadd-media audio', { timeout: 10000 });
 ck('voice note: the clip previews in the composer', await page.locator('.notes-quickadd-media audio').count() === 1);
+// POSITIVE CONTROL for the check above: keeping a take DOES mint one, so the
+// zero there means "not created", not "not counted".
+ck('voice note: (control) a kept take mints its preview URL',
+    await page.evaluate(() => window.__audioBlobs) > 0, `audio blob urls=${await page.evaluate(() => window.__audioBlobs)}`);
 ck('voice note: the composer preview never autoplays',
     await page.locator('.notes-quickadd-media audio').evaluate(a => a.autoplay === false && a.paused === true));
 // A take kept in the COMPOSER is written down like one kept in an open note —

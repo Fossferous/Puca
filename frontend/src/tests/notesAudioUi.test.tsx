@@ -35,22 +35,32 @@ let recorderInstances: FakeRecorder[] = [];
 
 class FakeRecorder {
     static isTypeSupported = (m: string) => m === 'audio/webm;codecs=opus';
+    /** A real MediaRecorder fires `onstop` in a LATER task than the stop()
+     *  that caused it. Firing it inline, as this fake does by default, hides
+     *  every bug that lives in that gap — so the tests that care set this and
+     *  fire the handler themselves. */
+    static defer = false;
     state = 'inactive';
     ondataavailable: ((e: { data: Blob }) => void) | null = null;
     onstop: (() => void) | null = null;
+    pendingStop: (() => void) | null = null;
     constructor(public stream: unknown, public opts: { mimeType: string }) { recorderInstances.push(this); }
     start() { this.state = 'recording'; }
     stop() {
         this.state = 'inactive';
         this.ondataavailable?.({ data: new Blob([new Uint8Array(64)], { type: this.opts.mimeType }) });
+        if (FakeRecorder.defer) { this.pendingStop = this.onstop; return; }
         this.onstop?.();
     }
+    /** The browser getting round to it. */
+    fireStop() { const f = this.pendingStop; this.pendingStop = null; f?.(); }
 }
 
 function installMic(grant = true) {
     order.length = 0;
     tracks = [];
     recorderInstances = [];
+    FakeRecorder.defer = false;
     (globalThis as unknown as { MediaRecorder: unknown }).MediaRecorder = FakeRecorder;
     // setup.ts defines navigator.mediaDevices non-configurably, so the method
     // is replaced on the object it already installed.
@@ -188,6 +198,51 @@ describe('AudioRecorder: the microphone', () => {
         await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
         expect(tracks[0].stopped).toBe(true);
         spy.mockRestore();
+    });
+
+    it('Discard WHILE recording leaves no preview URL nothing can free', async () => {
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const created: string[] = [];
+        const revoked: string[] = [];
+        const realCreate = URL.createObjectURL.bind(URL);
+        vi.spyOn(URL, 'createObjectURL').mockImplementation((b: Blob | MediaSource) => {
+            const u = realCreate(b as Blob);
+            created.push(u);
+            return u;
+        });
+        vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u: string) => { revoked.push(u); });
+        FakeRecorder.defer = true;
+
+        const onCancel = vi.fn();
+        await act(async () => { root.render(<AudioRecorder onSave={() => true} onCancel={onCancel} />); });
+        await settle();
+        expect(sheet('button[aria-label="Stop recording"]'), 'never reached the recording phase').not.toBeNull();
+        const rec = recorderInstances[0];
+
+        // The sheet's X, pressed mid-take: release() stops the recorder and
+        // onCancel takes the sheet away, exactly as the callers do.
+        await act(async () => { (sheet('button[aria-label="Close"]') as HTMLButtonElement).click(); });
+        expect(onCancel).toHaveBeenCalledTimes(1);
+        await act(async () => { root.render(<div />); });
+        expect(tracks.every(t => t.stopped), 'the microphone was left on').toBe(true);
+
+        const before = created.length;
+        await act(async () => { rec.fireStop(); });
+        expect(created.length, 'a preview URL was minted after the sheet was gone, and nothing can ever revoke it').toBe(before);
+        expect(created.filter(u => !revoked.includes(u)), 'a blob URL was left pinned for the life of the page').toEqual([]);
+    });
+
+    it('POSITIVE CONTROL: a late onstop on the Stop path still gives you the take', async () => {
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        FakeRecorder.defer = true;
+        await act(async () => { root.render(<AudioRecorder onSave={() => true} onCancel={() => {}} />); });
+        await settle();
+        await act(async () => { (sheet('button[aria-label="Stop recording"]') as HTMLButtonElement).click(); });
+        // Nothing yet — the browser has not called back.
+        expect(sheet('audio')).toBeNull();
+        await act(async () => { recorderInstances[0].fireStop(); });
+        await settle();
+        expect(sheet('audio'), 'the guard swallowed a take the user asked to keep').not.toBeNull();
     });
 
     it('a refused microphone says so and records nothing', async () => {

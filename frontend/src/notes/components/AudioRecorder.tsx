@@ -60,6 +60,12 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
     const startedAt = useRef(0);
     const takeRef = useRef<RecordedClip | null>(null);
     const keptRef = useRef(false);
+    /** True only while this sheet is on the screen. A MediaRecorder's `onstop`
+     *  arrives in a LATER task than the stop() that caused it, so Discard or
+     *  Close pressed WHILE recording runs that handler after this component is
+     *  gone — and a preview URL minted then belongs to a tree nobody can reach
+     *  and the unmount cleanup has already run, so nothing would revoke it. */
+    const alive = useRef(true);
     useEffect(() => { takeRef.current = take; });
 
     /** Every way out of holding the microphone. Safe to call twice. */
@@ -91,9 +97,16 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
     }, [release]);
 
     // Unmount: the microphone goes, and a take nobody kept is freed.
-    useEffect(() => () => {
-        release();
-        if (takeRef.current && !keptRef.current) URL.revokeObjectURL(takeRef.current.url);
+    // `alive` is set on the way IN as well, because StrictMode mounts, tears
+    // the effect down and mounts again — left false, the second life would
+    // throw away a perfectly good take.
+    useEffect(() => {
+        alive.current = true;
+        return () => {
+            alive.current = false;
+            release();
+            if (takeRef.current && !keptRef.current) URL.revokeObjectURL(takeRef.current.url);
+        };
     }, [release]);
 
     const stop = useCallback(() => {
@@ -134,6 +147,11 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
         rec.onstop = () => {
             const durationMs = Date.now() - startedAt.current;
             release();
+            // The microphone is freed above whatever happens; everything below
+            // builds a take for a sheet that may already be gone. Bail BEFORE
+            // the Blob and its URL exist — guarding only the setTake would
+            // leave the createObjectURL in the same expression still running.
+            if (!alive.current) return;
             const blob = new Blob(chunks, { type: mime });
             if (blob.size === 0) { setError('Nothing was recorded.'); setPhase('refused'); return; }
             const file = new File([blob], `voice.${extForMime(mime)}`, { type: mime });
