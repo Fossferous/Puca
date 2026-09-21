@@ -501,8 +501,10 @@ function EntryMenu({
     // member who would only be refused (a 403 the menu cannot explain) — nor
     // to one who may not edit its time once an editor's snooze has moved
     // due_at (taskSchedule.snoozeLocked: no change they could make works).
+    // A note's own reminder has neither a completion nor a snooze behind it
+    // (migration 068 adds no snooze column), so the menu offers neither.
     const canSnooze = !!onSnooze && !!t.due_at && !entry.completed && entry.source.canComplete !== false
-        && !snoozeLocked(t, entry.source.canEdit);
+        && !entry.source.isNote && !snoozeLocked(t, entry.source.canEdit);
     const snoozed = activeSnooze(t.due_at, t.snooze);
     const act = (fn: () => void) => () => { onClose(); fn(); };
     return createPortal(
@@ -523,7 +525,7 @@ function EntryMenu({
                 </div>
                 <div className="cal-menu-body">
                     <button type="button" className="cal-menu-item" onClick={act(() => onOpen(entry))}>Open its note</button>
-                    {!(entry.kind === 'task' && entry.repeats && entry.completed) && (
+                    {!entry.source.isNote && !(entry.kind === 'task' && entry.repeats && entry.completed) && (
                         <button type="button" className="cal-menu-item" onClick={act(() => onToggleDone(entry))}>
                             <CheckIcon /> {entry.completed ? 'Mark not done' : entry.kind === 'task' && entry.repeats ? 'Done — move to the next time' : 'Mark done'}
                         </button>

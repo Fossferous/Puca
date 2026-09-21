@@ -15,7 +15,7 @@ import { Calendar, type CalView, type CalendarAction } from '../../components/ca
 import { effectiveWeekStart, setCalendarPrefs, useCalendarPrefs } from '../../components/calendar/calendarPrefs';
 import { useCoarseCalendar } from '../../components/calendar/calendarGate';
 import { ScheduleEditor } from '../../components/schedule/ScheduleEditor';
-import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar';
+import { type CalendarEntry, type CalendarSource, noteAsCalendarItem } from '../../api/taskCalendar';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozeUntil } from '../../api/taskSchedule';
 import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
@@ -80,15 +80,31 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     }, [setParams]);
 
     // Every item of every note (archived too — archiving does not cancel a
-    // date, as Reminders already treats it).
-    const sources: CalendarSource[] = useMemo(() => cards.flatMap(c => (c.tasks ?? []).map(t => ({
-        task: t,
-        noteKey: c.key,
-        noteTitle: c.title,
-        serverName: c.serverName,
-        canEdit: c.ref.kind === 'list' || canEditTask(t, me, c.myPerms),
-        canComplete: c.ref.kind === 'list' || canCompleteTasks(c.myPerms),
-    }))), [cards, me]);
+    // date, as Reminders already treats it), plus each note's OWN reminder
+    // (migration 068). A note's reminder shows here but is not edited here:
+    // it is not an item, so dragging, ticking, skipping and snoozing all
+    // belong to controls it does not have. "Open its note" is its action.
+    const sources: CalendarSource[] = useMemo(() => cards.flatMap(c => [
+        ...(c.dueAt || c.schedule
+            ? [{
+                task: noteAsCalendarItem({ id: c.ref.id, title: c.title, dueAt: c.dueAt, schedule: c.schedule }),
+                noteKey: c.key,
+                noteTitle: c.title,
+                serverName: c.serverName,
+                canEdit: false,
+                canComplete: false,
+                isNote: true,
+            }]
+            : []),
+        ...(c.tasks ?? []).map(t => ({
+            task: t,
+            noteKey: c.key,
+            noteTitle: c.title,
+            serverName: c.serverName,
+            canEdit: c.ref.kind === 'list' || canEditTask(t, me, c.myPerms),
+            canComplete: c.ref.kind === 'list' || canCompleteTasks(c.myPerms),
+        })),
+    ]), [cards, me]);
 
     // Shared notes on the calendar: poll, as an open shared note does.
     const sharedKeys = useMemo(() => cards.filter(c => c.ref.kind === 'channel').map(c => c.ref), [cards]);
@@ -105,26 +121,30 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const onMove = (e: CalendarEntry, dayKey: string) => {
         const note = noteOf(e);
         const plan = planMove(e, dayKey, Date.now());
-        if (!note || !plan) return;
+        if (!note || !plan || e.source.isNote) return;
         if (plan.kind === 'due') void actions.setDue(note, e.source.task, plan.dueAt);
         else void actions.setSchedule(note, e.source.task, plan.schedule, plan.dueAt);
         if (plan.adjusted) pushMessageToast({ title: 'That time does not exist on the new day (the clocks go forward) — it moved to just after the change' });
     };
 
+    // A note's own reminder falls out of all three: it has no schedule
+    // occurrence to skip that it did not get from its own editor, nothing to
+    // tick, and no snooze column (068). The menu does not offer them either;
+    // these guards are what make that true however the entry is reached.
     const onSkip = (e: CalendarEntry) => {
         const note = noteOf(e);
         const plan = planSkip(e, Date.now());
-        if (note && plan) void actions.setSchedule(note, e.source.task, plan.schedule, plan.dueAt);
+        if (note && plan && !e.source.isNote) void actions.setSchedule(note, e.source.task, plan.schedule, plan.dueAt);
     };
 
     const onToggleDone = (e: CalendarEntry) => {
         const note = noteOf(e);
-        if (note) void actions.toggleTask(note, e.source.task, !e.source.task.is_completed);
+        if (note && !e.source.isNote) void actions.toggleTask(note, e.source.task, !e.source.task.is_completed);
     };
 
     const onSnooze = (e: CalendarEntry, preset: 'tomorrow' | '10m' | '1h') => {
         const note = noteOf(e);
-        if (note) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now()));
+        if (note && !e.source.isNote) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now()));
     };
 
     // --- Tap-to-add ------------------------------------------------------------------
@@ -230,7 +250,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
                 onToggleDone={onToggleDone}
                 onSnooze={snoozeOn ? onSnooze : undefined}
                 onSkip={scheduleOn ? onSkip : undefined}
-                onEditSchedule={scheduleOn ? (e => { const n = noteOf(e); if (n) setEditing({ note: n, taskId: e.source.task.id }); }) : undefined}
+                onEditSchedule={scheduleOn ? (e => { const n = noteOf(e); if (n && !e.source.isNote) setEditing({ note: n, taskId: e.source.task.id }); }) : undefined}
                 headerActions={headerActions}
                 entryActions={entryActions}
                 shortcutsEnabled={shortcutsEnabled && !adding && !editing && !importing}
