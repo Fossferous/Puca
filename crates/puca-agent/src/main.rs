@@ -62,6 +62,8 @@ mod power;
 
 #[cfg(windows)]
 mod display_wake;
+#[cfg(windows)]
+mod repaint;
 
 /// The environment variable the launcher puts this agent's token in.
 ///

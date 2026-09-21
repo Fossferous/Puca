@@ -146,6 +146,16 @@ one-line summary; this file is the full story. Versions follow
   before.
 
 ### Fixed
+- **Remote control no longer freezes on a screen that is not changing.**
+  Switching from *All Displays* to one screen, or handing the pointer to the
+  phone, could leave the stream with no picture to send while the desktop
+  stayed still: the phone then saw a frozen image, so taps and clicks looked
+  ignored (they were landing), zooming in never sharpened, and the picture
+  only came back when something on that screen repainted by itself. The
+  stream now wakes the screen if it has gone to sleep and nudges it to
+  present a picture when it has none to send, keeps the last one across a
+  pointer hand-over, and re-fits it when you zoom, so a still desktop
+  sharpens as you zoom in like a moving one.
 - **"Keep RNNoise" now keeps RNNoise.** When DeepFilter fell behind and the
   voice panel offered *Keep RNNoise*, the button only closed the notice: your
   sound was already on RNNoise, but the setting still said DeepFilter, so the

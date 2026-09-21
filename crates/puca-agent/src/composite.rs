@@ -213,6 +213,12 @@ pub(crate) struct FitState {
     applied: Option<u32>,
     /// A different step the viewer has been asking for, and since when.
     pending: Option<(u32, std::time::Instant)>,
+    /// The viewer's stage changed and no picture has been fitted since. The
+    /// fit is decided on a PUMPED picture, and a still screen pumps none: a
+    /// zoom over a static desktop used to wait for the desktop to repaint (or
+    /// for a keyframe request) before the stream sharpened. `needs_frame`
+    /// asks the pump to re-send the held picture instead.
+    dirty: bool,
     /// The fitted picture, reused frame to frame.
     pub(crate) buf: Vec<u8>,
     /// Set once the guard has found the fit too expensive on this host.
@@ -228,12 +234,26 @@ impl FitState {
         Self {
             applied: None,
             pending: None,
+            dirty: false,
             buf: Vec::new(),
             disabled: false,
             degraded_logged: false,
             cost_us: 0,
             cost_n: 0,
         }
+    }
+
+    /// The viewer's stage changed: the next pump must fit a picture.
+    pub(crate) fn stage_changed(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Whether the fit wants a picture pumped although the screen is still:
+    /// a stage change not yet fitted, or a step change waiting out
+    /// `FIT_SETTLE` (it is applied on a later frame, which a still screen
+    /// would never produce by itself).
+    pub(crate) fn needs_frame(&self) -> bool {
+        self.dirty || self.pending.is_some()
     }
 
     /// The step to use for this frame, given the one the viewer's stage wants.
@@ -278,6 +298,7 @@ impl FitState {
         now: std::time::Instant,
     ) -> Fitted {
         let wanted = view.map(|(vw, vh)| fit_step(width, height, vw, vh)).unwrap_or(1);
+        self.dirty = false;
         let before = self.applied;
         let step = self.decide(wanted, now);
         let native = Fitted { step: 1, w: width, h: height, stride, from_buffer: false };
@@ -1114,6 +1135,25 @@ mod tests {
 
     /// A media restart carries a known fit. Building the encoder native and
     /// reconfiguring it half a second later would be the freeze this avoids.
+    #[test]
+    fn a_stage_change_asks_for_a_picture_until_the_fit_has_settled() {
+        // The regression: on a still screen the fit is never re-decided, so
+        // zooming in never sharpened. A changed stage must ask for a pump,
+        // and so must a step change while it waits out FIT_SETTLE.
+        let t = std::time::Instant::now();
+        let mut f = FitState::new();
+        assert!(!f.needs_frame(), "nothing to do at birth");
+        f.stage_changed();
+        assert!(f.needs_frame(), "a changed stage wants a picture fitted");
+        let src = vec![0u8; 8 * 8 * 4];
+        f.apply(None, 8, 8, 32, &src, t); // native: applied = 1
+        assert!(!f.needs_frame(), "fitted: nothing pending");
+        assert_eq!(f.decide(2, t + ms(1)), 1, "a new step starts the settle clock");
+        assert!(f.needs_frame(), "and keeps asking for pictures while it settles");
+        assert_eq!(f.decide(2, t + ms(700)), 2, "applied after FIT_SETTLE");
+        assert!(!f.needs_frame(), "settled: quiet again");
+    }
+
     #[test]
     fn the_first_frame_takes_the_fit_at_once() {
         let mut f = FitState::new();
