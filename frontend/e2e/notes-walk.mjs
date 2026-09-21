@@ -824,6 +824,49 @@ ck('conflict: B\'s rename survived on B', await pageB.locator('.notes-editor-tit
 await closeNote(page);
 await closeNote(pageB);
 
+// AND AN UNANSWERED QUESTION IS NOT ANSWERED BY LEAVING. A gets a second
+// clash and simply closes the note. Nothing A typed may reach the server, and
+// B's words must still be there when A comes back to it. Every ordinary way
+// out of the field used to fire a save — the textarea's own blur, the unmount
+// that closing runs, the trash's flush — and that save always said "keep
+// mine", so B's copy went with nobody ever choosing.
+let releaseA2 = () => {};
+const aHeld2 = new Promise(res => { releaseA2 = res; });
+await page.route('**/task-lists/*', async route => {
+    if (route.request().method() !== 'PATCH') return route.continue();
+    await aHeld2;
+    return route.continue();
+});
+// The note answers to B's name by now — the rename check above left it there.
+const clashNote = 'B renamed it';
+await openNote(page, clashNote);
+await page.fill('.notes-editor textarea.nb-text', 'A typed this and walked away');
+await sleep(300);
+await openNote(pageB, clashNote);
+await pageB.fill('.notes-editor textarea.nb-text', 'B wins and keeps it');
+await pageB.locator('.notes-editor-title').click();
+await sleep(1500);
+releaseA2();
+await sleep(500);
+await page.unroute('**/task-lists/*');
+const banner2 = page.locator('.notes-editor [data-conflict="stale"]');
+const sawConflict2 = await banner2.first().waitFor({ timeout: 15000 }).then(() => true, () => false);
+ck('conflict: a second clash is raised, so there is a question to leave unanswered', sawConflict2);
+// A closes the note with the banner still up, and the page is then RELOADED
+// so what comes back is the server's copy and not this tab's cache.
+await closeNote(page);
+await sleep(2500);
+await page.goto('/notes/');
+await page.waitForSelector('.notes-card', { timeout: 20000 });
+await openNote(page, clashNote);
+const afterClose = await page.locator('.notes-editor textarea.nb-text').inputValue();
+ck('conflict: closing the note on an unanswered question saves nothing over the other copy',
+    sawConflict2 && afterClose === 'B wins and keeps it', JSON.stringify(afterClose));
+ck('conflict: and B still holds its own words',
+    (await pageB.locator('.notes-editor textarea.nb-text').inputValue()) === 'B wins and keeps it');
+await closeNote(page);
+await closeNote(pageB);
+
 // A CREATE WHOSE ANSWER WAS LOST. The note is made offline so it is QUEUED —
 // the queue is what retries a 5xx, which is the only place a create is ever
 // sent twice. Back online, the first attempt reaches the server and commits,

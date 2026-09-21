@@ -11,9 +11,9 @@ one-line summary; this file is the full story. Versions follow
   somewhere else while you were writing, Púca Notes now tells you and shows
   you both copies, with *Keep mine* and *Use theirs* — instead of quietly
   replacing one with the other. Your words stay in the field until you
-  choose, and a title you are typing is no longer wiped by a rename arriving
-  from another device. Ticking an item or reordering a note is never treated
-  as a clash.
+  choose, nothing is saved while the question is on screen, and a title you
+  are typing is no longer wiped by a rename arriving from another device.
+  Ticking an item or reordering a note is never treated as a clash.
 - **A note or item created on a flaky connection can no longer appear twice.**
   When Púca Notes sends a new note or item and the answer never arrives, it
   sends it again — and the server now recognises the repeat and gives back

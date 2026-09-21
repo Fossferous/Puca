@@ -194,6 +194,13 @@ back the copy it holds (migration 069, `expect_rev` on
   picture takes its revision when the sidecar it is being added to is read,
   before the upload, for the same reason: the upload is the window the other
   device's change arrives in.
+- **Nothing is saved while the question is on screen.** Leaving the field,
+  closing the note or moving it to the trash does not answer it: those all
+  used to save, and the save always said *keep mine*, so the other device's
+  words went with nobody choosing. Only three things answer it — *Keep mine*,
+  *Use theirs*, and simply writing more (which dismisses the line and keeps
+  what you wrote). Close the note without answering and the copy that won is
+  what stays; what you had typed is not saved.
 - **Ticking, adding, editing or reordering an ITEM is never a clash.** A note
   is one card holding both its text and its items, and the revision moves only
   for the note's own content.

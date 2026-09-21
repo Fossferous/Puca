@@ -18,6 +18,20 @@
  * thrown away before the user chooses. Before this, whichever save landed
  * last silently won and the other text was gone with no record of it.
  *
+ * AND THE QUESTION IS ANSWERED BY THE USER, NOT BY LEAVING. While it is on
+ * screen this field saves nothing at all: no blur, no close, no trash of the
+ * note commits the words being asked about. That guard is not a nicety. The
+ * field must stay dirty while the question is open (the words really are
+ * unsaved) and the cache by then holds the copy that WON, so every ordinary
+ * flush — the textarea's own onBlur, the unmount that closing the note runs,
+ * the trash's registered flush — saw "dirty, and different from what is
+ * stored", re-sent the typed text against the winning revision, and the
+ * server took it. The other device's words were gone with nobody ever
+ * choosing. Worse, the banner's buttons are siblings of the textarea, so
+ * pressing "Use theirs" blurred the field first and fired that very save on
+ * its way in. Only three things answer the question: "Keep mine", "Use
+ * theirs", and typing on over the banner (a deliberate keep-mine).
+ *
  * THE BASE IS TAKEN WHEN TYPING STARTS, not when the save fires. A live event
  * for this note arrives while the user is mid-sentence, and the cached
  * revision moves to the other device's — so a save that read the revision at
@@ -114,8 +128,17 @@ export function NoteBodyField({ value, contentRev, onSave, readOnly = false, pla
     // The save on its way to the server, if any (the cached value already
     // shows it, so "nothing to save" is not "nothing in flight").
     const inFlight = useRef<Promise<BodySaveOutcome> | null>(null);
+    // A refusal is on screen and the user has not answered it yet. Every
+    // save is held until they do — see the header. Cleared by the three
+    // things that ARE an answer, and by nothing else; in particular not by
+    // the clean-replace branch above, which cannot run while a question is
+    // open (an open question keeps the field dirty).
+    const awaitingChoice = useRef(false);
 
     const flush = useCallback(async () => {
+        // The user is being asked which copy to keep: saving now would answer
+        // for them, and the answer would always be "mine" (see the header).
+        if (awaitingChoice.current) return;
         if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; }
         const { draft: text, current: saved, onSave: save } = latest.current;
         if (!dirty.current || text === saved) { markDirty(false); return; }
@@ -143,6 +166,7 @@ export function NoteBodyField({ value, contentRev, onSave, readOnly = false, pla
             // so nothing is chosen blind. The next attempt is judged against
             // the revision that won, so "Keep mine" can win in its turn.
             if (clash.rev !== undefined) baseRev.current = clash.rev;
+            awaitingChoice.current = true;
             setConflict(clash);
             setState('conflict');
         }
@@ -178,6 +202,7 @@ export function NoteBodyField({ value, contentRev, onSave, readOnly = false, pla
     // Take the other device's copy: it becomes the field, and the save that
     // follows is based on it, so it can no longer clash.
     const useTheirs = () => {
+        awaitingChoice.current = false;
         setDraft(conflict?.theirs ?? '');
         markDirty(false);
         setConflict(null);
@@ -186,6 +211,7 @@ export function NoteBodyField({ value, contentRev, onSave, readOnly = false, pla
     // Keep what was typed: save it again, now against the revision the cache
     // took from the refusal, so this time it wins.
     const keepMine = () => {
+        awaitingChoice.current = false;
         setConflict(null);
         markDirty(true);
         void flush();
@@ -211,6 +237,12 @@ export function NoteBodyField({ value, contentRev, onSave, readOnly = false, pla
                 aria-label="Note text"
                 rows={2}
                 onChange={e => {
+                    // Writing more over the banner is a deliberate "keep
+                    // mine": the other copy has been read and the user has
+                    // carried on. It dismisses the banner, so it has to
+                    // release the hold too, or the field would never save
+                    // again.
+                    awaitingChoice.current = false;
                     markDirty(true);
                     setDraft(e.target.value);
                     setState('idle');

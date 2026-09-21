@@ -226,6 +226,103 @@ describe('NoteBodyField', () => {
             expect(onSave).toHaveBeenLastCalledWith('first and more', 4);
         });
 
+        // AN UNRESOLVED CONFLICT IS NOT ANSWERED BY LEAVING THE FIELD. The
+        // banner asks a question; a blur, a close or a trash must not answer
+        // it with "keep mine" on the user's behalf. It nearly did: the field
+        // stays dirty while the question is open (it has to — the words are
+        // still unsaved) and the cache now holds THEIR text, so the very next
+        // flush() saw dirty && draft !== value, re-sent the typed text
+        // against the revision that WON, and the server took it. The other
+        // device's copy was gone with nobody ever choosing — the exact loss
+        // this whole feature exists to prevent.
+        it('a blur while the question is open saves NOTHING over the other copy', async () => {
+            const onSave = vi.fn(async () => ({ conflict: { theirs: 'theirs', rev: 9 } }));
+            act(() => { root.render(<NoteBodyField value="v2" contentRev={3} onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { area().focus(); });
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(container.querySelector('[data-conflict="stale"]')).not.toBeNull();
+            // Nothing was written, so the data layer puts the copy that won
+            // in the cache: the field re-renders with THEIR text as `value`
+            // while the draft still holds the words being asked about.
+            act(() => { root.render(<NoteBodyField value="theirs" contentRev={9} onSave={onSave} />); });
+            expect(area().value).toBe('mine');
+
+            act(() => { area().blur(); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(1);
+            expect(container.querySelector('[data-conflict="stale"]')).not.toBeNull();   // still asking
+        });
+
+        it('POSITIVE CONTROL: a blur with no question open is still what saves the note', async () => {
+            const onSave = vi.fn(async () => true);
+            act(() => { root.render(<NoteBodyField value="v2" contentRev={3} onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { area().focus(); });
+            act(() => { area().blur(); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledWith('mine', 3);
+        });
+
+        it('closing the note on an open question leaves the other copy standing', async () => {
+            const onSave = vi.fn(async () => ({ conflict: { theirs: 'theirs', rev: 9 } }));
+            act(() => { root.render(<NoteBodyField listId={77} value="v2" contentRev={3} onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(1);
+            act(() => { root.render(<NoteBodyField value="theirs" contentRev={9} onSave={onSave} />); });
+
+            // Closing the note — and a trash, which goes through the same
+            // registered flush — must not commit the losing text.
+            act(() => { root.render(<></>); });
+            await act(async () => { await flushBodySave(77); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(1);
+        });
+
+        it('"Use theirs" is not preceded by a save of mine — the button blurs the field first', async () => {
+            const onSave = vi.fn(async () => ({ conflict: { theirs: 'theirs', rev: 9 } }));
+            act(() => { root.render(<NoteBodyField value="v2" contentRev={3} onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { area().focus(); });
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            act(() => { root.render(<NoteBodyField value="theirs" contentRev={9} onSave={onSave} />); });
+            // A real pointer press on a sibling button blurs the textarea
+            // BEFORE the click handler runs: the banner's own answer used to
+            // fire a winning save of my words on its way in, leaving the
+            // server holding mine while the screen showed theirs.
+            act(() => { area().blur(); });
+            await flushPromises();
+            act(() => { (container.querySelector('[data-action="use-theirs"]') as HTMLButtonElement).click(); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(1);
+            expect(area().value).toBe('theirs');
+            expect(container.querySelector('[data-conflict="stale"]')).toBeNull();
+        });
+
+        it('typing on over the banner IS an answer, and saves again', async () => {
+            // Dismissing the banner by writing more is a deliberate "keep
+            // mine": the user has read their copy and carried on. The guard
+            // above must not wedge the field shut.
+            const onSave = vi.fn()
+                .mockResolvedValueOnce({ conflict: { theirs: 'theirs', rev: 9 } })
+                .mockResolvedValueOnce({ rev: 10 });
+            act(() => { root.render(<NoteBodyField value="v2" contentRev={3} onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(container.querySelector('[data-conflict="stale"]')).not.toBeNull();
+            type(area(), 'mine and more');
+            expect(container.querySelector('[data-conflict="stale"]')).toBeNull();
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(2);
+            expect(onSave).toHaveBeenLastCalledWith('mine and more', 9);
+        });
+
         it('an ordinary failed save is still a failed save, not a conflict', async () => {
             const onSave = vi.fn(async () => false);
             act(() => { root.render(<NoteBodyField value="v2" onSave={onSave} />); });
