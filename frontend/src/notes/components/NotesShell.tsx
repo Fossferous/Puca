@@ -89,7 +89,9 @@ type Pending =
     | { kind: 'archive'; key: string; ref: NoteRef; title: string; token: number }
     // A label rename/merge/delete rewrote every note at once, so its Undo is
     // the whole label map as it was, not one note's (notesBulk.restoreLabels).
-    | { kind: 'labels'; message: string; snapshot: Record<string, string[]>; token: number };
+    // `returnTo` is the label route the change forced us OFF, if any: putting
+    // the map back has to put the view back with it.
+    | { kind: 'labels'; message: string; snapshot: Record<string, string[]>; returnTo: string | null; token: number };
 
 function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     if (sort === 'puca') return cards;
@@ -266,23 +268,31 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     // route has to follow, or the grid silently empties under a stale heading.
     const onLabelChanged = useCallback((from: string, to: string | null, before: Record<string, string[]>) => {
         commitPending(pendingRef.current);
+        // Undo restores the map, so the label we were looking at exists again
+        // — and the route we were moved off is the only one that shows it.
+        // Without this, Undo leaves you on /label/<new name> after the new
+        // name has ceased to exist: an empty grid under a heading naming a
+        // label that is no longer in the rail.
+        const leaving = filter.kind === 'label' && filter.label.toLocaleLowerCase() === from.toLocaleLowerCase();
         setPending({
             kind: 'labels',
             message: to === null ? `Removed “${from}” from every note` : `Renamed “${from}” to “${to}”`,
             snapshot: before,
+            returnTo: leaving ? path : null,
             token: ++tokenSeq.current,
         });
-        if (filter.kind === 'label' && filter.label.toLocaleLowerCase() === from.toLocaleLowerCase()) {
-            go(to === null ? '/' : `/label/${encodeURIComponent(to)}`);
-        }
-    }, [commitPending, filter, go]);
+        if (leaving) go(to === null ? '/' : `/label/${encodeURIComponent(to)}`);
+    }, [commitPending, filter, go, path]);
 
     const undoPending = () => {
         const p = pendingRef.current;
         if (!p) return;
         if (p.kind === 'archive') actions.setArchived(p.ref, false);
         if (p.kind === 'trash') void actions.restoreNote(p.ref);
-        if (p.kind === 'labels') restoreLabels(p.snapshot);
+        if (p.kind === 'labels') {
+            restoreLabels(p.snapshot);
+            if (p.returnTo) go(p.returnTo);
+        }
         setPending(null);
     };
     const expirePending = () => {

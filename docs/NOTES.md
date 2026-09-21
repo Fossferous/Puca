@@ -230,7 +230,9 @@ Each of the three is a SINGLE change to the sealed document — one
 compare-and-swap write, the same write the server already sees when you
 tick a label on one note. Nothing new reaches the server: it learns that
 you organised, never what into. No migration and no new route were needed.
-If you are looking at the label you renamed, the view follows it.
+If you are looking at the label you renamed, the view follows it — and an
+Undo brings both the labels and that view back, because the name the view
+was filtered by stops existing again.
 
 ## Live updates
 

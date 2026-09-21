@@ -646,10 +646,23 @@ await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
 await page.fill('.notes-labelmgr-row.editing input', 'Errands');
 await page.press('.notes-labelmgr-row.editing input', 'Enter');
 await sleep(400);
+const followed = await page.locator('h1.notes-section-title').textContent();
 ck('label manager: the open label view follows the rename',
-    /Label: Errands/.test(await page.locator('h1.notes-section-title').textContent())
-    && await page.locator('.notes-card').count() >= 1,
-    await page.locator('h1.notes-section-title').textContent());
+    /Label: Errands/.test(followed) && await page.locator('.notes-card').count() >= 1, followed);
+// ...and Undo has to bring the ROUTE back with the map. Restoring the labels
+// un-makes the name this view is filtered by, so staying here would leave an
+// empty grid under a heading naming a label that is no longer in the rail.
+await page.locator('.notes-undo button').click();
+await sleep(400);
+const restored = await page.locator('h1.notes-section-title').textContent();
+ck('label manager: Undo of a rename brings the label view back too',
+    /Label: Chores/.test(restored) && await page.locator('.notes-card').count() >= 1, restored);
+// Put the rename back: the rest of the walk (and the ciphertext check) names Errands.
+await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Errands');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(400);
+ck('label manager: the rename is back on', /Label: Errands/.test(await page.locator('h1.notes-section-title').textContent()));
 await page.keyboard.press('Escape');
 await sleep(200);
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();

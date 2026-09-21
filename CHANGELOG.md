@@ -26,7 +26,7 @@ one-line summary; this file is the full story. Versions follow
   Labels in Púca Notes' sidebar, lists your labels with how many notes
   carry each one — archived notes included — and lets you fix a typo,
   fold one label into another, or take one off every note at once, with
-  an Undo. Until now a label could only be changed one note at a time,
+  an Undo that puts the list — and the label view you were reading — back. Until now a label could only be changed one note at a time,
   and a label left on an archived note could not be reached at all.
   Labels stay encrypted with your own key: the change is one write of
   the same sealed list, and the server still cannot read a single name.
