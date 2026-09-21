@@ -5,22 +5,24 @@
  * panel-system work. Channel checklists stay live through the socket's
  * ChecklistUpdate, like their tabs.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Calendar, type CalView } from './Calendar';
+import { Calendar, type CalendarAction, type CalView } from './Calendar';
+import { IcsImportDialog } from './IcsImportDialog';
 import { CalendarAddSheet, type AddSheetResult } from './CalendarAddSheet';
 import { effectiveWeekStart, setCalendarPrefs, useCalendarPrefs } from './calendarPrefs';
 import { useCoarseCalendar } from './calendarGate';
 import { ScheduleEditor } from '../schedule/ScheduleEditor';
-import { type TaskList, createListTask, createTask, patchTaskTiming } from '../../api/tasks';
+import { type TaskList, createListTask, createTask, createTaskList, patchTaskTiming } from '../../api/tasks';
 import { type CalendarEntry } from '../../api/taskCalendar';
 import { taskScopeKey, type TasksScopeChannel, useTaskSources } from '../taskSources';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozePatch, snoozeUntil } from '../../api/taskSchedule';
+import { MAX_ICS_BYTES, icsImportTargets } from '../../api/icsImport';
 import { planToggle } from '../../api/taskCompletion';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { useTaskFeature } from '../../api/taskFeatures';
-import { buildIcs, type IcsItem } from '../../api/ics';
+import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
 import { currentIcsUid } from '../../api/icsUid';
 import { deliverIcs } from '../../api/icsDelivery';
 import { toastRefusal } from '../../api/refusalToast';
@@ -58,6 +60,8 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     const [date, setDate] = useState(() => localDayKey(Date.now()));
     const [adding, setAdding] = useState<{ dayKey: string; time?: string } | null>(null);
     const [editing, setEditing] = useState<{ kind: 'list' | 'channel'; scope: number; taskId: number } | null>(null);
+    const [importing, setImporting] = useState<{ name: string; parsed: IcsParseResult } | null>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
 
     // The same read the Reminders tab makes, under the same keys.
     const { sources, tasksIn, refetch: refetchScope } = useTaskSources(lists, channels, currentUserId);
@@ -146,6 +150,17 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
         }
     };
 
+    // .ics import. Into a PERSONAL list only — an import into a shared
+    // checklist would notify every member for every item — which the target
+    // list below enforces by construction: `channels` are never offered.
+    const pickImport = () => fileRef.current?.click();
+    const onFile = async (f: File | undefined) => {
+        if (!f) return;
+        if (f.size > MAX_ICS_BYTES) { pushMessageToast({ title: 'That file is over 5 MB — too big to import here' }); return; }
+        setImporting({ name: f.name, parsed: parseIcs(await f.text()) });
+    };
+    const importTargets = icsImportTargets(lists, id => tasksIn('list', id));
+
     const editingTask = editing ? tasksIn(editing.kind, editing.scope)?.find(t => t.id === editing.taskId) ?? null : null;
 
     return (
@@ -169,9 +184,14 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
                 onSnooze={snoozeOn ? onSnooze : undefined}
                 onSkip={scheduleOn ? onSkip : undefined}
                 onEditSchedule={scheduleOn ? (e => { const s = scopeOf(e); setEditing({ kind: s.kind, scope: s.id, taskId: e.source.task.id }); }) : undefined}
-                headerActions={[{ id: 'export', label: 'Export .ics…', onClick: () => { void exportIcs(); } }]}
+                headerActions={[
+                    { id: 'export', label: 'Export .ics…', onClick: () => { void exportIcs(); } },
+                    ...(scheduleOn ? [{ id: 'import', label: 'Import .ics…', onClick: pickImport }] : []),
+                ] as CalendarAction[]}
                 shortcutsEnabled={false}
             />
+            <input ref={fileRef} type="file" accept=".ics,text/calendar" style={{ display: 'none' }}
+                onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; void onFile(f); }} />
             {adding && (
                 <CalendarAddSheet
                     dayKey={adding.dayKey}
@@ -182,6 +202,20 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
                     onSubmit={submitAdd}
                     onClose={() => setAdding(null)}
                     allowNew={false}
+                />
+            )}
+            {importing && (
+                <IcsImportDialog
+                    fileName={importing.name}
+                    parsed={importing.parsed}
+                    targets={importTargets}
+                    io={{
+                        createList: title => createTaskList(title),
+                        createTask: (listId, text, parentId, timing) => createListTask(listId, text, parentId, timing),
+                        sleep: ms => new Promise(r => setTimeout(r, ms)),
+                    }}
+                    onClose={() => setImporting(null)}
+                    onImported={() => { for (const l of lists) void refetchScope('list', l.id); }}
                 />
             )}
             {editing && editingTask && (

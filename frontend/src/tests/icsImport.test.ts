@@ -1,10 +1,11 @@
 // The paced .ics import: dedupe by UID, split before the per-list cap, back
 // off on 429 and resume exactly where it stopped, cancel cleanly.
 import { describe, expect, it, vi } from 'vitest';
-import { MAX_PER_LIST, MAX_RETRY_WAIT_MS, PACE_MS, importSummary, runImport, type ImportIO } from '../api/icsImport';
+import { MAX_PER_LIST, MAX_RETRY_WAIT_MS, PACE_MS, icsImportTargets, importSummary, runImport, type ImportIO } from '../api/icsImport';
 import { type IcsImportItem } from '../api/ics';
 import { ApiError, apiClient, retryAfterMsOf } from '../api/client';
-import { parseSchedule } from '../api/taskSchedule';
+import { parseSchedule, serializeSchedule } from '../api/taskSchedule';
+import { type Task } from '../api/tasks';
 
 const item = (i: number, extra: Partial<IcsImportItem> = {}): IcsImportItem => ({
     kind: 'event', uid: `uid-${i}`, summary: `Event ${i}`, notes: [],
@@ -208,5 +209,39 @@ describe('resuming never overruns a list or duplicates an item', () => {
         expect(resumed).toMatchObject({ created: 2, skipped: 0, next: 2 });
         expect(resumed.pendingDescription).toBeUndefined();
         expect(resumed.listCounts).toEqual([3]);
+    });
+});
+
+// The picker's targets, shared by both calendars (Púca Notes' /calendar and
+// Púca's Calendar tab). Personal lists only is the whole point: an import
+// into a shared checklist would notify every member for every item, so the
+// builder is given lists and never channels, and a second run of the same
+// file finds its UIDs already there.
+describe('icsImportTargets', () => {
+    const task = (id: number, schedule?: string): Task => ({
+        id, channel_id: null, list_id: 1, parent_id: null, description: `t${id}`, is_completed: false, position: id,
+        created_at: '2026-09-01T00:00:00Z', created_by: 1, attachments: null, due_at: null, schedule: schedule ?? null,
+    });
+    const sched = (uid: string) => serializeSchedule({
+        v: 1, kind: 'event', uid, allDay: false, start: '2026-10-05T09:00', end: '2026-10-05T10:00', tz: 'UTC',
+    });
+
+    it('offers every personal list, with what it already holds', () => {
+        const targets = icsImportTargets(
+            [{ id: 1, title: 'Trips' }, { id: 2, title: 'Home' }],
+            id => (id === 1 ? [task(10, sched('uid-a')), task(11)] : []),
+        );
+        expect(targets.map(t => [t.listId, t.title, t.count])).toEqual([[1, 'Trips', 2], [2, 'Home', 0]]);
+        expect([...targets[0].uids]).toEqual(['uid-a']);
+        // The item with no schedule contributes no UID — importing its event
+        // again must not be skipped on the strength of a plain reminder.
+        expect(targets[0].uids.size).toBe(1);
+        expect([...targets[1].uids]).toEqual([]);
+    });
+
+    it('a list whose items have not been read yet is offered as empty, not skipped', () => {
+        const targets = icsImportTargets([{ id: 3, title: 'New' }], () => undefined);
+        expect(targets).toHaveLength(1);
+        expect(targets[0].count).toBe(0);
     });
 });

@@ -1,6 +1,8 @@
 /**
- * Púca Notes — the drawing model. A drawing is a list of strokes on a fixed
- * logical canvas; the editor renders it, the note stores it twice: as a PNG
+ * The drawing model, shared by both front doors (it was
+ * notes/model/drawing.ts until Púca's Tasks view grew the editor too).
+ *
+ * A drawing is a list of strokes on a fixed logical canvas; the editor renders it, the note stores it twice: as a PNG
  * (what every card and Púca's own gallery show) and as this JSON (what makes
  * it editable again), each uploaded as its own end-to-end encrypted file.
  *

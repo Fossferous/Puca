@@ -15,7 +15,7 @@ import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
-import { DrawingCanvas } from './DrawingCanvas';
+import { DrawingCanvas } from '../../components/DrawingCanvas';
 import '../noteContent.css';
 
 /** A picture waiting in the composer, with its on-device preview URL. */

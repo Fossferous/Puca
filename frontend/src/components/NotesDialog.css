@@ -1,0 +1,65 @@
+/* The small centred dialog (components/NotesDialog.tsx) — shared by Púca
+   Notes' sheets and Púca's .ics import, so the rules live beside the
+   component instead of in notes.css, which Púca never loads. */
+.notes-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    background: var(--bg-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+.notes-dialog {
+    width: min(480px, 100%);
+    max-height: 90dvh;
+    overflow: auto;
+    background: var(--bg-floating);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    color: var(--text-normal);
+}
+.notes-dialog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 12px 8px 16px;
+    border-bottom: 1px solid var(--border-faint);
+}
+.notes-dialog-head h3 { margin: 0; font-size: 15px; }
+.notes-dialog-body { padding: 14px 16px 16px; }
+
+.notes-dialog-body .notes-textbtn {
+    background: none;
+    border: none;
+    color: var(--text-normal);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.notes-dialog-body .notes-textbtn:hover { background: var(--bg-modifier-hover); }
+.notes-dialog-body .notes-textbtn:disabled { opacity: 0.5; cursor: default; }
+.notes-dialog-body .notes-textbtn.primary { color: var(--brand-primary); font-weight: 600; }
+.notes-dialog-body .notes-labels-hint { font-size: 11px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
+.notes-dialog-head .notes-iconbtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.notes-dialog-head .notes-iconbtn:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .notes-dialog-body .notes-textbtn { min-height: 44px; }
+    .notes-dialog-head .notes-iconbtn { width: 44px; height: 44px; }
+}

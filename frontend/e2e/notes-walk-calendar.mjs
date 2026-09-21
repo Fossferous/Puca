@@ -379,6 +379,42 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
         ck('database: imported events are sealed (no title, place or UID in the clear)', leaks === '0', leaks);
     });
     await shot('cal-imported');
+    // ---- the SAME import, driven from PÚCA's own Calendar tab -----------------------
+    // The dialog and its stylesheet moved out of notes/ so both calendars can
+    // offer it; an unstyled dialog here would look fine in Notes.
+    await c.goto('/chat');
+    await c.waitForSelector('.chat-container', { timeout: 20000 });
+    try { await c.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+    await c.click('.server-icon.home-button');
+    await c.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
+    await c.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+    await c.locator('.tasks-tab-calendar').click();
+    await c.waitForSelector('.tasks-calendar', { timeout: 15000 });
+    ck('púca calendar: Import .ics is offered beside Export', await c.locator('.cal-btn', { hasText: 'Import .ics' }).count() === 1);
+    const pucaFile = c.locator('.tasks-calendar input[type="file"][accept*=".ics"]');
+    await pucaFile.setInputFiles({ name: 'trip2.ics', mimeType: 'text/calendar', buffer: Buffer.from(ICS_IN) });
+    await c.waitForSelector('.ics-import', { timeout: 5000 });
+    const pucaPreview = await c.locator('.ics-import').innerText();
+    ck('púca import preview: counts the items', /3 items/.test(pucaPreview), pucaPreview.slice(0, 120));
+    ck('púca import preview: names what it cannot represent', /repeat rule not supported/.test(pucaPreview));
+    ck('púca import: the dialog is styled (its CSS travelled with it)',
+        await c.locator('.notes-dialog').evaluate(el => getComputedStyle(el).borderRadius) === '12px',
+        await c.locator('.notes-dialog').evaluate(el => getComputedStyle(el).borderRadius));
+    const pucaTargets = await c.locator('.ics-import select[aria-label="Import into"] option').allInnerTexts();
+    ck('púca import: only personal notes are offered, never a shared checklist',
+        pucaTargets.length > 1 && pucaTargets.every(t => !t.startsWith('#')), JSON.stringify(pucaTargets));
+    const tripAgain = await c.locator('.ics-import select[aria-label="Import into"] option', { hasText: 'Trip' }).first().getAttribute('value').catch(() => null);
+    if (tripAgain) {
+        await c.selectOption('.ics-import select[aria-label="Import into"]', tripAgain);
+        await c.locator('.ics-actions button', { hasText: 'Import 3' }).click();
+        await c.waitForSelector('.ics-actions button:has-text("Close")', { timeout: 20000 });
+        const pucaAgain = await c.locator('.ics-progress').innerText();
+        ck('púca import: a second run of the same file imports nothing (UID dedupe)', /0 imported/.test(pucaAgain), pucaAgain);
+    } else {
+        ck('púca import: the note the first import made is offered as a target', false, JSON.stringify(pucaTargets));
+    }
+    await shot('puca-cal-import');
+    await c.locator('.ics-actions button', { hasText: 'Close' }).first().click().catch(() => {});
     await ctx.close();
 
     // =========================================================================

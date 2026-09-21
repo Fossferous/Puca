@@ -31,7 +31,7 @@ import { PlusIcon } from '../../components/Icons';
 import { type NoteCard, type NoteRef, parseNoteKey } from '../model/notesModel';
 import { type NoteActions, SHARED_NOTE_POLL_MS, notesKeys } from '../model/notesQueries';
 import { CalendarAddSheet, type AddSheetResult } from '../../components/calendar/CalendarAddSheet';
-import { IcsImportDialog } from './IcsImportDialog';
+import { IcsImportDialog } from '../../components/calendar/IcsImportDialog';
 import { fileStamp } from '../model/noteText';
 import '../timing.css';
 

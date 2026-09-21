@@ -4,8 +4,8 @@
  * the trash here can be found again.
  *
  *  - `ListContentBlock`: a personal list's note text (editable) and its
- *    pictures (add photo, remove; drawings show as pictures and are edited in
- *    Púca Notes), above the list's tasks in TasksView.
+ *    pictures — add a photo, draw one, edit a drawing made in either app,
+ *    remove — above the list's tasks in TasksView.
  *  - `TasksTrash`: the trashed lists, with Restore and Delete forever, under
  *    the All-tasks board.
  *  (What the server supports, and the trashed ids, are
@@ -22,9 +22,11 @@ import {
     restoreTaskList, setTaskListAttachments, setTaskListBody, trashPurgeAt,
 } from '../api/listContent';
 import { listContentQueryKeys } from './useListContentSupport';
-import { type GalleryItem, fileIdsOf, refsOfItem, uploadNoteMedia, withoutItem } from '../api/noteMedia';
+import { type DrawingFiles, type GalleryItem, fileIdsOf, planDrawingReplace, readStrokes, refsOfItem, uploadNoteMedia, withoutItem } from '../api/noteMedia';
+import { type DrawingDoc, parseDrawing } from '../api/drawing';
 import { NoteBodyField } from './NoteBodyField';
 import { NoteImages } from './NoteImages';
+import { DrawingCanvas } from './DrawingCanvas';
 import { pushMessageToast } from './messageToastBus';
 import { ChevronDownIcon, ChevronRightIcon, TrashIcon } from './Icons';
 import './NoteImages.css';
@@ -39,6 +41,9 @@ interface BlockProps {
 
 export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps) {
     const [busy, setBusy] = useState(false);
+    // The open drawing editor: {} for a new one, or the drawing being
+    // changed with its strokes. Every hook stays ABOVE the early return.
+    const [drawing, setDrawing] = useState<{ item?: GalleryItem; initial?: DrawingDoc } | null>(null);
     if (!features.body && !features.attachments) return null;
     const opened = list.attachments ?? null;
     const refs: TaskAttachmentRef[] = isAttachmentsLocked(opened) ? [] : parseTaskAttachments(opened);
@@ -80,6 +85,39 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
             setBusy(false);
         }
     };
+    /** Save a drawing: the PNG and its strokes go up as one pair, and the
+     *  pair being replaced is dropped from the sidecar and deleted — both
+     *  files, or an edit would leave the old strokes behind for good. */
+    const saveDrawing = async (files: DrawingFiles): Promise<boolean> => {
+        setBusy(true);
+        try {
+            const { kept, dropped, base } = planDrawingReplace(refs, drawing?.item);
+            const added = await uploadNoteMedia([], [{ files, base }], kept.length);
+            const ok = await saveRefs([...kept, ...added], dropped);
+            if (!ok) await deleteFiles(fileIdsOf(added));
+            return ok;
+        } catch (err) {
+            console.error('Failed to save the drawing:', err);
+            pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t save the drawing' });
+            return false;
+        } finally {
+            setBusy(false);
+        }
+    };
+    /** Open the editor: empty for a new drawing, or on the strokes of one
+     *  already in the note (a drawing made in either app). */
+    const openDrawing = async (item?: GalleryItem) => {
+        if (!item?.strokes) { setDrawing({}); return; }
+        try {
+            const doc = parseDrawing(await readStrokes(item.strokes));
+            if (!doc) throw new Error('unreadable strokes');
+            setDrawing({ item, initial: doc });
+        } catch (err) {
+            console.error('Opening the drawing failed:', err);
+            pushMessageToast({ title: 'Couldn’t open that drawing for editing' });
+        }
+    };
+
     const remove = async (item: GalleryItem) => {
         if (!window.confirm('Remove this picture? It is deleted for good.')) return;
         setBusy(true);
@@ -98,7 +136,19 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
                     busy={busy}
                     onAddPhotos={files => void addPhotos(files)}
                     onRemove={item => void remove(item)}
+                    onDraw={item => void openDrawing(item)}
                     showCamera={coarse}
+                />
+            )}
+            {drawing && (
+                <DrawingCanvas
+                    initial={drawing.initial}
+                    onCancel={() => setDrawing(null)}
+                    onSave={async files => {
+                        const ok = await saveDrawing(files);
+                        if (ok) setDrawing(null);
+                        return ok;
+                    }}
                 />
             )}
         </div>

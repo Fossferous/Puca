@@ -15,10 +15,12 @@
  */
 import { ApiError } from './client';
 import { type IcsImportItem } from './ics';
-import { deriveDueAt, serializeSchedule } from './taskSchedule';
-import { type NewTaskTiming } from './tasks';
+import { deriveDueAt, parseSchedule, serializeSchedule } from './taskSchedule';
+import { type NewTaskTiming, type Task } from './tasks';
 
 export const PACE_MS = 50;
+/** An .ics bigger than this is refused before it is parsed. */
+export const MAX_ICS_BYTES = 5 * 1024 * 1024;
 /** Leave headroom under the server's MAX_TASKS_PER_CHECKLIST (2000). */
 export const MAX_PER_LIST = 1900;
 const MAX_RETRIES = 6;
@@ -185,4 +187,28 @@ export function importSummary(s: ImportState, total: number): string {
     if (s.cancelled && left > 0) parts.push(`${left} not imported (cancelled)`);
     if (s.stoppedBy) parts.push(s.stoppedBy);
     return parts.join(' · ');
+}
+
+
+/**
+ * The notes an import may go into, for the dialog's picker. It takes PERSONAL
+ * lists and nothing else: that is the personal-only rule, made structural at
+ * the one place both calendars build the list, rather than a check each host
+ * remembers to make.
+ *
+ * The UID set is what makes a second import of the same file a no-op — it
+ * comes from the schedules already in the note, read on this device.
+ */
+export function icsImportTargets(
+    lists: { id: number; title: string }[], tasksIn: (listId: number) => Task[] | undefined,
+): { listId: number; title: string; count: number; uids: ReadonlySet<string> }[] {
+    return lists.map(l => {
+        const items = tasksIn(l.id) ?? [];
+        return {
+            listId: l.id,
+            title: l.title,
+            count: items.length,
+            uids: new Set(items.map(t => parseSchedule(t.schedule)).flatMap(p => (p.state === 'ok' ? [p.schedule.uid] : []))),
+        };
+    });
 }

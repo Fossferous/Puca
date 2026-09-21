@@ -13,8 +13,8 @@ one-line summary; this file is the full story. Versions follow
   a pen and eraser; a drawing can be opened and changed again. Photos are
   made smaller on your device before they are encrypted and uploaded. The
   text and pictures are end-to-end encrypted like everything else in a note,
-  and Púca's Tasks view shows and edits the same text and photos, so both
-  apps agree.
+  and Púca's Tasks view shows and edits the same text, photos and drawings —
+  a drawing made in one app opens in the other's editor — so both apps agree.
 - **A Trash.** Deleting a note, in Púca Notes or in Púca's Tasks view, now
   moves it to the Trash (in Púca Notes, Undo brings it straight back). From
   the Trash you can restore a note or delete it forever. A note in the trash
@@ -43,8 +43,8 @@ one-line summary; this file is the full story. Versions follow
   the server sees the next reminder time, so reminders reach your other
   devices. A per-item *Keep the time private from the server* switch hides that
   too, and then the item gets no reminders.
-- **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
-  morning. The reminder time the server holds moves with the snooze, so a
+- **Snooze.** From Reminders, from the calendar, or from the item's own row
+  in a note or a list: 10 minutes, an hour, or tomorrow morning. The reminder time the server holds moves with the snooze, so a
   phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
   is only offered to people allowed to tick the item, and a snooze set by
   someone who may edit the item cannot be changed or undone by someone who
@@ -53,8 +53,10 @@ one-line summary; this file is the full story. Versions follow
 - **.ics export and import.** Export gives your dated items as a standard
   calendar file. The file is not encrypted, and the app says so first. Import
   brings a calendar file into a personal note. It first lists anything it
-  cannot bring across, and it skips events it already has. In the Púca Notes
-  Android app, *Add to phone calendar* copies one event to your phone's
+  cannot bring across, and it skips events it already has. Both are offered
+  in Púca Notes' calendar and in Púca's own Calendar tab; an import always
+  goes into one of your own notes, never a shared checklist. In the Púca
+  Notes Android app, *Add to phone calendar* copies one event to your phone's
   calendar.
 - **Colours, labels and archive follow your account.** They used to live in one
   browser and vanish when you signed out. They are now sealed with your own key

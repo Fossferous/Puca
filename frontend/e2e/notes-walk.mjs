@@ -557,6 +557,62 @@ await page.waitForSelector('.tasks-tab-all.active', { timeout: 5000 });
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('sovereign:open-reminders')));
 const landed = await page.waitForSelector('.tasks-tab-reminders.active', { timeout: 5000 }).then(() => true, () => false);
 ck('púca reminders: a clicked due-item notification lands on the Reminders tab', landed);
+// A drawing made in Púca Notes, opened and changed in PÚCA's own Tasks view
+// (the editor is shared now, and so is its stylesheet — an unstyled or
+// missing canvas here is exactly what this catches).
+await page.locator('.tasks-tab', { hasText: 'Sketch' }).click();
+await page.waitForSelector('.list-content-block .ni-item.drawing button[aria-label="Edit drawing"]', { timeout: 15000 })
+    .then(() => ck('púca: a drawing made in Notes can be edited in the Tasks view', true))
+    .catch(() => ck('púca: a drawing made in Notes can be edited in the Tasks view', false));
+ck('púca: a new drawing can be started there too', await page.locator('.list-content-block .ni-action', { hasText: 'Draw' }).count() === 1);
+await page.click('.list-content-block .ni-item.drawing button[aria-label="Edit drawing"]');
+await page.waitForSelector('.notes-draw-canvas', { timeout: 10000 });
+await sleep(300);
+const pucaInked = await page.evaluate(() => {
+    const c = document.querySelector('.notes-draw-canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let dark = 0;
+    for (let i = 0; i < d.length; i += 16) if (d[i] < 128 && d[i + 1] < 128 && d[i + 2] < 128) dark++;
+    return dark;
+});
+ck('púca: reopening the drawing restores the strokes', pucaInked > 50, `dark samples=${pucaInked}`);
+ck('púca: the editor is the full-size modal, not an unstyled block (its stylesheet travelled with it)',
+    await page.locator('.notes-draw').evaluate(el => getComputedStyle(el).borderRadius) !== '',
+    await page.locator('.notes-draw').evaluate(el => getComputedStyle(el).backgroundColor));
+await shot('puca-drawing-editor');
+// Draw a second stroke and save: ONE drawing remains (both old refs replaced).
+const pcb = await page.locator('.notes-draw-canvas').boundingBox();
+await page.mouse.move(pcb.x + pcb.width * 0.5, pcb.y + pcb.height * 0.6);
+await page.mouse.down();
+for (let i = 1; i <= 8; i++) await page.mouse.move(pcb.x + pcb.width * (0.5 + i * 0.03), pcb.y + pcb.height * (0.6 - i * 0.02));
+await page.mouse.up();
+await page.getByRole('button', { name: 'Save drawing' }).click();
+await page.waitForSelector('.notes-draw-canvas', { state: 'detached', timeout: 20000 });
+await sleep(1200);
+ck('púca: saving the edited drawing keeps ONE drawing in the note (the pair was replaced)',
+    await page.locator('.list-content-block .ni-item.drawing').count() === 1,
+    String(await page.locator('.list-content-block .ni-item').count()));
+// Snooze on the item ROW: the same control the calendar and Reminders offer.
+await page.locator('.tasks-tab', { hasText: 'Groceries' }).click();
+await page.waitForSelector('.tt-item', { timeout: 10000 });
+const eggsPuca = page.locator('.tt-item', { hasText: 'Eggs' }).first();
+await eggsPuca.hover();
+const snoozeBtn = eggsPuca.locator('.notes-snooze button').first();
+if (await snoozeBtn.count() === 1) {
+    await snoozeBtn.click();
+    await page.locator('.notes-snooze-menu button', { hasText: '1 hour' }).click();
+    await page.waitForSelector('.tt-item .tt-snoozed', { timeout: 10000 })
+        .then(() => ck('púca: Snooze on an item row pushes the reminder back', true))
+        .catch(() => ck('púca: Snooze on an item row pushes the reminder back', false));
+    await eggsPuca.hover();
+    await eggsPuca.locator('.notes-snooze button').first().click();
+    await page.locator('.notes-snooze-menu button', { hasText: 'Unsnooze' }).click();
+    await page.waitForSelector('.tt-item .tt-snoozed', { state: 'detached', timeout: 10000 })
+        .then(() => ck('púca: Unsnooze on the row clears it', true))
+        .catch(() => ck('púca: Unsnooze on the row clears it', false));
+} else {
+    skip('púca: snooze on an item row (this server has no snooze — taskFeatures)');
+}
 // Move to trash from Púca: the list leaves the bar and the Trash section offers it back.
 await page.locator('.tasks-tab', { hasText: 'Packing' }).click({ button: 'right' });
 await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();

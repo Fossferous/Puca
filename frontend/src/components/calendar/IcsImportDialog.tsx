@@ -7,8 +7,9 @@
 import { useMemo, useRef, useState } from 'react';
 import { type IcsParseResult } from '../../api/ics';
 import { type ImportIO, type ImportState, importSummary, runImport } from '../../api/icsImport';
-import { WarningIcon } from '../../components/Icons';
-import { NotesDialog } from './NotesDialog';
+import './IcsImport.css';
+import { WarningIcon } from '../Icons';
+import { NotesDialog } from '../NotesDialog';
 
 export interface ImportTargetOption {
     listId: number;

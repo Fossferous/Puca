@@ -567,7 +567,8 @@ Migration 065 gives a personal list three nullable columns, and
   uploads. Photos are shrunk on the device before encryption
   (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
-  edited again (`notes/model/drawing.ts`). On a phone, *Photo* offers the
+  edited again (`frontend/src/api/drawing.ts`; the editor is
+  `frontend/src/components/DrawingCanvas.tsx`, shared by both apps). On a phone, *Photo* offers the
   camera (`<input accept="image/*" capture>`); on Android that needs the
   `IMAGE_CAPTURE` entry under `<queries>` in each app's manifest, so the
   camera arrives with a new APK of each app, not with an OTA.
@@ -580,8 +581,12 @@ Migration 065 gives a personal list three nullable columns, and
   trash).
 
 **Both front doors agree.** Púca's Tasks view shows and edits a personal
-list's text and photos, and its *Delete list* becomes *Move to trash* on a
-server that has one. A client decides all of this from
+list's text, photos AND drawings — a drawing made in either app opens in the
+other's editor, and saving one replaces the pair (the picture and its
+strokes) so nothing is orphaned — and its *Delete list* becomes *Move to
+trash* on a server that has one. A sidecar this device cannot read still
+refuses every edit, in both apps, rather than writing over refs it cannot
+see. A client decides all of this from
 `GET /task-lists/features`, which does not depend on having any lists; an
 older server answers it with an error and every client behaves exactly as it
 did before 065. An older client on a newer server keeps working: it never
@@ -698,8 +703,10 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   whose subtree holds an open item that still repeats (or whose schedule it
   cannot read) says so and changes nothing — tick the repeating item on its
   own, or remove its repeat.
-- **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from Reminders and from
-  the calendar, for anyone who may tick the item. When the snoozer may also
+- **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from either Reminders
+  view, from the calendar, and from the item's own row inside a note or a list
+  (one control, `components/reminders/SnoozeControl.tsx`), for anyone who may
+  tick the item. When the snoozer may also
   edit the item's time (its creator, a task manager, any personal note), the
   snooze **moves the plaintext `due_at` to the snooze instant** — the server,
   and a phone reminding with Notes closed, see the next reminder — and the
@@ -707,7 +714,8 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   member who may only tick gets a sealed snooze alone, which applies while
   `due_at` is unchanged. Either way it lapses by itself when the item moves.
   Once an editor's snooze has moved `due_at`, such a member is not offered
-  Snooze or Unsnooze on that item (`taskSchedule.snoozeLocked`): putting
+  Snooze or Unsnooze on that item — on any of those surfaces, which all ask
+  the one question (`taskSchedule.maySnooze` over `snoozeLocked`): putting
   `due_at` back needs the edit right, and a sealed-only re-snooze would
   either not apply or overwrite the time Unsnooze restores.
   Every reminder engine reads the same entries, `{id, at, mark, due}`
@@ -746,7 +754,12 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   plaintext, and the app says so first. It goes out through the share sheet in
   Púca Notes on Android (when the installed app has `NotesNative.shareText`),
   through the Save As dialog on the desktop, or as a download in a browser.
-  **Import** is into personal notes only. It shows a preview that lists
+  **Import** is offered in Púca Notes' calendar and in Púca's own Calendar
+  tab, and is into personal notes only — an import into a shared checklist
+  would notify every member for every item, so the picker is built from
+  personal lists and cannot be handed a channel
+  (`api/icsImport.ts`'s `icsImportTargets`). A file over 5 MB is refused
+  before it is parsed. It shows a preview that lists
   everything it cannot represent. It skips events whose UID is already there,
   and paces itself under the rate limiter, retrying after a 429 and able to
   resume. It starts a new note before one reaches the 2000-item cap. **Add to

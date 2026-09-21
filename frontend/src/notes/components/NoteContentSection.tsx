@@ -37,8 +37,8 @@ import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { pendingOutboxCount } from '../model/notesOutbox';
 import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
-import { type DrawingDoc, parseDrawing } from '../model/drawing';
-import { DrawingCanvas } from './DrawingCanvas';
+import { type DrawingDoc, parseDrawing } from '../../api/drawing';
+import { DrawingCanvas } from '../../components/DrawingCanvas';
 import { UndoBar } from './UndoBar';
 import '../noteContent.css';
 

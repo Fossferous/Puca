@@ -1,0 +1,17 @@
+/* The .ics import dialog (IcsImportDialog.tsx) — shared by Púca Notes'
+   calendar and Púca's Calendar tab, so its rules travel with it (Púca never
+   loads notes/timing.css). Class names unchanged: the walks name them. */
+.ics-import { display: flex; flex-direction: column; gap: 10px; max-width: 520px; }
+.ics-import p { margin: 0; }
+.ics-notes { font-size: 13px; color: var(--text-warning, #f0b232); max-height: 200px; overflow-y: auto; }
+.ics-notes ul, .ics-failed { margin: 4px 0 0; padding-left: 18px; color: var(--text-muted); }
+.ics-row { display: flex; align-items: center; gap: 10px; }
+.ics-row > span { width: 64px; color: var(--text-muted); font-size: 13px; }
+.ics-row select, .ics-row input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-tertiary); color: var(--text-normal); font: inherit; }
+.ics-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ics-progress progress { width: 100%; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .ics-row select, .ics-row input { font-size: 16px; min-height: 44px; }
+    .ics-actions .notes-textbtn { min-height: 44px; }
+}
