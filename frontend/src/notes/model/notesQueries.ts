@@ -608,7 +608,10 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         // when this user may edit its time (taskSchedule.snoozePatch), so a
         // phone reminding with Notes closed fires it then, not at the old time.
         const patch = snoozePatch(task, until, canEditTime(note, task));
-        if (!patch) return;   // nothing to snooze: the reminder has no time on the server
+        // No patch: the reminder has no time on the server, or this is an
+        // editor's moved snooze and the user may not edit the time
+        // (taskSchedule.snoozeLocked — the control is hidden as well).
+        if (!patch) return;
         const original = await snapshot(note);
         setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, snooze: patch.snooze, ...(patch.due_at !== undefined ? { due_at: patch.due_at } : {}) } : t)));
         try {

@@ -134,6 +134,10 @@ export const DEVICE_REVOKE_LOCK = 'puca-device-revoke';
  * Not reentrant: never call it from inside `fn`. Where Web Locks are absent
  * (an insecure context, an old engine) or refuse, `fn` runs unlocked — the
  * per-tab guard below still holds, which is how this behaved before.
+ *
+ * The holder may keep it across a network call (attest.ts holds it over its
+ * POST /devices), so a waiting tab can wait as long as that request does. Only
+ * opportunistic work takes this lock, and nothing renders behind it.
  */
 export async function withDeviceRevokeLock<T>(fn: () => Promise<T>): Promise<T> {
     let locks: LockManager | undefined;

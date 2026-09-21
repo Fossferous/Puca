@@ -243,7 +243,12 @@ browser sends the revoke again before it enrols (the server answers 200 for a
 row it already revoked) and then enrols as a new device, so the browser is
 never left refused as a revoked device. A Púca tab and a Notes tab never both
 act on that marker: each takes one Web Locks lock (Púca across the revoke and
-its enrolment), and a tab that waited re-reads the marker first. The session itself is revoked after the
+its enrolment), and a tab that waited re-reads the marker first — so the
+waiting tab finds the marker the enrolment left, cleared. Púca holds that lock
+across its POST, so a hung enrolment delays the other tab's settle to the next
+page load; nothing the user is waiting on. Where Web Locks are missing (an
+insecure context, an old engine) each tab falls back to its own in-flight
+guard, which is how this behaved before. The session itself is revoked after the
 device, but never only after it: leaving the page or 1.5 s without an answer
 sends it anyway.
 

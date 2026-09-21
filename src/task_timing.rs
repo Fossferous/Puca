@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_item_takes_only_a_v3_channel_envelope() {
+    fn a_channel_item_takes_a_channel_envelope_of_v3_or_newer() {
         let v3 = r#"{"v":3,"t":"ch","epoch":2,"ct":"QUJD"}"#;
         let v2 = r#"{"v":2,"t":"ch","epoch":2,"ct":"QUJD"}"#;
         // Positive control: v3 in a channel, and anything sealed in a personal list.
