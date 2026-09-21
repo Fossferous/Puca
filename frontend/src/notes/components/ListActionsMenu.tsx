@@ -159,11 +159,18 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
             : `Delete ${swept.size} ticked items? Undo brings them back with their dates, repeats and pictures.`)) return;
         setBusy(true);
         const gone = new Set<number>();
+        // Counted directly, per REQUEST: `gone` holds swept subtree ids and
+        // `roots` holds branch tops, so subtracting one from the other is not
+        // a count of anything — and goes negative the moment a branch with
+        // children succeeds beside a lone item that fails.
+        let failed = 0;
         try {
             for (let i = 0; i < roots.length; i++) {
                 if (i > 0) await sleep(PACE_MS);
                 if (await actions.deleteTaskFrom(note, roots[i].id)) {
                     for (const id of collectSubtreeIds(tasks, roots[i].id)) gone.add(id);
+                } else {
+                    failed++;
                 }
             }
         } finally {
@@ -172,8 +179,8 @@ export function ListActionsMenu({ note, actions, tasks }: Props) {
         // Parents before children, so the Undo re-creates them in an order
         // that can carry the nesting.
         const left = recreationOrder(tasks).filter(t => gone.has(t.id));
-        if (gone.size < swept.size) {
-            pushMessageToast({ title: `Couldn’t delete ${roots.length - gone.size} of ${roots.length} items` });
+        if (failed > 0) {
+            pushMessageToast({ title: `Couldn’t delete ${failed} of ${roots.length} items` });
         }
         if (left.length === 0) return;
         // Their uploads: kept while Undo is offered, deleted after it — and

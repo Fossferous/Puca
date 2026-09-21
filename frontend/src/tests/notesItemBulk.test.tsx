@@ -260,6 +260,36 @@ describe('Delete checked', () => {
         expect(f.log.filter(l => l.includes(',true)'))).toEqual(['toggle(901,true)', 'toggle(903,true)']);
     });
 
+    it('says how many DELETES failed — counted per request, never per swept child', async () => {
+        // The two units this must not mix: a delete names a branch TOP, but
+        // it sweeps that branch's whole subtree. Counting "swept ids that did
+        // not go" against the number of roots is not a count of anything, and
+        // goes negative the moment a branch with children succeeds beside a
+        // lone item that fails.
+        const tasks = [
+            task(1, { is_completed: true }),
+            task(2, { parent_id: 1, is_completed: true }),
+            task(3, { parent_id: 1, is_completed: true }),
+            task(4, { is_completed: true }),
+        ];
+        const f = fakeActions(tasks, { deleteOk: id => id !== 4 });
+        mount(f);
+        open();
+        await act(async () => { menuButton(/Delete checked/).click(); });
+        await settle();
+        expect(f.log.filter(l => l.startsWith('delete'))).toEqual(['delete(1)', 'delete(4)']);
+        expect(toasts.join('|')).toContain('Couldn\u2019t delete 1 of 2 items');
+        // POSITIVE CONTROL: with both deletes accepted, nothing is said.
+        act(() => { root.unmount(); root = createRoot(host); });
+        toasts.length = 0;
+        const g = fakeActions(tasks);
+        mount(g);
+        open();
+        await act(async () => { menuButton(/Delete checked/).click(); });
+        await settle();
+        expect(toasts.join('|')).not.toMatch(/Couldn\u2019t delete/);
+    });
+
     it('once the Undo window closes, the orphaned uploads are deleted — and only those', async () => {
         const tasks = [
             task(1, { is_completed: true, attachments: '[{"href":"sovereign-enc:gone1?k=K&m=image%2Fpng","name":"a.png"}]' }),
