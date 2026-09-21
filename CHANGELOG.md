@@ -6,6 +6,18 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Changed
+- **Make a copy now copies the whole note.** A copy used to carry only a
+  note's text and its unticked items, flattened. It now brings the pictures
+  and drawings, every item including the ones already ticked, their nesting,
+  and their dates and repeats — and it takes the note's colour and labels
+  (never its pin, and never the archive). The pictures are encrypted again for
+  the copy, so deleting one note forever never affects the other's; they count
+  against your storage twice. Two things it no longer does quietly: a note
+  holding something this device cannot read is refused with a message instead
+  of copied with that part missing, and a note whose items are still loading
+  is no longer copied to an empty note that says "Copied".
+
 ### Added
 - **Undo a deleted item.** Deleting an item inside a note now offers Undo for
   a few seconds, and brings the item and everything under it back with its

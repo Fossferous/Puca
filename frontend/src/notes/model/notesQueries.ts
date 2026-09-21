@@ -64,6 +64,7 @@ import {
     type NoteCard, type NoteRef, type NoteSource, type NotesNoteState,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder, withCreatedList,
 } from './notesModel';
+import { type CopyPlan } from './noteText';
 import { useTaskEventsLive } from './taskEvents';
 import { ops, sendCreateList, sendCreateTask, sendNoteOp, type PrefsIntent } from './notesOutbox';
 import { anythingQueued } from './noteBusy';
@@ -420,6 +421,10 @@ export interface NoteActions {
      *  — even if some items failed (they are reported; the note is real) —
      *  and null only when nothing was saved. */
     createNote: (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
+    /** "Make a copy" (noteText.ts copyPlanOf). Always the content path: a
+     *  copy may carry pictures, which cannot wait for a connection, so it
+     *  never queues and says so when it fails. */
+    copyNote: (plan: CopyPlan) => Promise<NoteRef | null>;
     renameNote: (note: NoteRef, title: string) => Promise<boolean>;
     /** Moves the note to the trash where the server has one, else deletes it
      *  for good; queued while offline (the trash is probed when it runs). */
@@ -713,6 +718,10 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         return ref;
     }, [qc]);
 
+    const copyNote = useCallback(async (plan: CopyPlan): Promise<NoteRef | null> => {
+        return contentRef.current.createNoteFromPlan(plan);
+    }, []);
+
     const renameNote = useCallback(async (note: NoteRef, title: string): Promise<boolean> => {
         if (note.kind !== 'list') return false;
         const prev = qc.getQueryData<TaskList[]>(notesKeys.lists);
@@ -889,11 +898,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     return useMemo(() => ({
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, restoreCompleted, setAttachments,
-        createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
+        createNote, copyNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, restoreCompleted, setAttachments,
-        createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
+        createNote, copyNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);
 }

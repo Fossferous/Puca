@@ -63,6 +63,42 @@ export async function uploadNoteMedia(
     return uploadAll(files);
 }
 
+/**
+ * The same pictures again, as FRESH uploads under FRESH keys — what "Make a
+ * copy" gives the copy.
+ *
+ * Never re-point: putting the source's `href` into the copy's sidecar would
+ * leave two notes naming one upload, which is the hazard docs/SECURITY_MODEL.md
+ * §2 describes — *Delete forever* on either note would delete files the
+ * other still shows, and a trashed copy expiring would silently destroy the
+ * original's pictures. A shared note's pictures are sealed under its CHANNEL
+ * key as well, and a copy is always a personal note, so the upload here
+ * deliberately names no channel.
+ *
+ * The bytes are not shrunk again (they were shrunk on the way in, and a
+ * drawing's strokes file is not an image at all). All-or-nothing, like
+ * uploadNoteMedia: nothing is left counting against the quota that no note
+ * names.
+ */
+export async function resealRefs(refs: TaskAttachmentRef[]): Promise<TaskAttachmentRef[]> {
+    if (refs.length > MAX_TASK_ATTACHMENTS) throw new TooManyAttachmentsError();
+    const done: TaskAttachmentRef[] = [];
+    try {
+        for (const r of refs) {
+            const p = parseEncAttachment(r.href);
+            if (!p) throw new Error('Not an attachment ref');
+            const url = await decryptToBlobUrl(p.id, p.key, p.mime, p.cap);
+            const blob = await (await fetch(url)).blob();
+            const made = await encryptAndUploadRef(new File([blob], r.name, { type: p.mime }));
+            done.push({ href: made.href, name: r.name });
+        }
+        return done;
+    } catch (err) {
+        await deleteFiles(fileIdsOf(done));
+        throw err;
+    }
+}
+
 /** Decrypt a drawing's strokes file back to its JSON text. */
 export async function readStrokes(ref: TaskAttachmentRef): Promise<string> {
     const p = parseEncAttachment(ref.href);

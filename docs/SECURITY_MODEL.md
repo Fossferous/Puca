@@ -233,6 +233,14 @@ trashed note so that *Delete forever* deletes files a live note still uses. The 
 fix is a v3 self envelope that binds (list id, field) as associated data, so a moved or
 replayed field fails to open instead of opening in the wrong place.
 
+The client at least does not reproduce that last hazard itself: *Make a copy*
+re-encrypts a note's pictures into FRESH uploads under fresh keys rather than
+pointing the copy at the original's files
+([`frontend/src/api/noteMedia.ts`](../frontend/src/api/noteMedia.ts) `resealRefs`), so no
+two notes ever name one upload and *Delete forever* on either is safe. It also means a
+copy of a SHARED note, which is a personal note, holds no channel-scoped ref that would
+stop opening when you leave that server.
+
 ---
 
 ## 3. Is chat encrypted?

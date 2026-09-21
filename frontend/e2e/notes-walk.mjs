@@ -118,6 +118,15 @@ const shot = shotOf(page);
 // only inside the Notes Android app).
 const browserUpdateChecks = [];
 page.on('request', rq => { if (rq.url().includes('/api/mobile-updates/check')) browserUpdateChecks.push(rq.url()); });
+// Every upload this page has ever fetched to decrypt. "Make a copy" must give
+// the copy its OWN uploads: a copy that re-pointed at the original's would
+// need no new file at all (decryptToBlobUrl caches by id AND key), so a fresh
+// id appearing is the evidence that the pictures were encrypted again.
+const filesFetched = new Set();
+page.on('request', rq => {
+    const m = /\/files\/([A-Za-z0-9_-]+)(?:$|[?#])/.exec(rq.url());
+    if (m && rq.method() === 'GET') filesFetched.add(m[1]);
+});
 const openComposer = openComposerOn(page);
 
 // ---- 1. Notes before any sign-in: its OWN login card, not the main app ----------
@@ -558,6 +567,68 @@ ck('web card menu: "Copy as text" is there, "Share…" is not',
     await page.locator('.context-menu-item', { hasText: 'Copy as text' }).count() === 1
     && await page.locator('.context-menu-item', { hasText: 'Share…' }).count() === 0);
 await page.keyboard.press('Escape');
+
+// ---- 12c. Make a copy: the WHOLE note ---------------------------------------------------------
+// Groceries by now has mint, the label Errands, note text, a ticked item, a
+// nested subtask and a due time — a copy used to carry only the text and the
+// OPEN items, flattened.
+await webGroceries.hover();
+await webGroceries.locator('button[aria-label="More actions"]').click();
+await page.locator('.context-menu-item', { hasText: 'Make a copy' }).click();
+await page.waitForSelector('.notes-editor .task-tree', { timeout: 25000 });
+ck('copy: the copy opens, titled "Groceries (copy)"', (await page.locator('.notes-editor-title').inputValue()) === 'Groceries (copy)');
+ck('copy: the note text came too', (await page.locator('.notes-editor textarea.nb-text').inputValue()) === 'Buy before Friday');
+ck('copy: the TICKED item came too, still ticked', await page.locator('.notes-editor .tt-completed-section .tt-item', { hasText: 'Milk' }).count() === 1);
+ck('copy: nesting survived', await page.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1);
+ck('copy: a due time came with its item', await page.locator('.notes-editor .tt-item', { hasText: 'Eggs' }).first().locator('.tt-due').count() === 1);
+ck('copy: it takes the colour and the labels, and is not pinned',
+    await page.locator('.notes-editor[data-color="mint"]').count() === 1
+    && /Errands/.test(await page.locator('.notes-editor-sub').innerText())
+    && await page.locator('.notes-editor button[aria-label="Pin note"]').count() === 1);
+await shot('copy-of-a-note');
+await page.locator('.notes-editor-title').blur();
+await page.keyboard.press('Escape');
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+
+// A photo note: the pictures come too, as the copy's OWN uploads.
+const photoSrc = page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Holiday photo$/ }) });
+const knownFiles = new Set(filesFetched);
+await photoSrc.hover();
+await photoSrc.locator('button[aria-label="More actions"]').click();
+await page.locator('.context-menu-item', { hasText: 'Make a copy' }).click();
+await page.waitForFunction(() => {
+    const img = document.querySelector('.notes-editor .note-images img');
+    return !!img && img.naturalWidth > 0;
+}, null, { timeout: 30000 }).catch(() => {});
+ck('copy: the picture came with the copy, and it decrypts', await page.evaluate(() => {
+    const img = document.querySelector('.notes-editor .note-images img');
+    return !!img && img.naturalWidth > 0;
+}));
+const freshFiles = [...filesFetched].filter(id => !knownFiles.has(id));
+ck('copy: the picture is the COPY’s OWN upload, not the original’s',
+    freshFiles.length >= 1, JSON.stringify({ fresh: freshFiles.length, before: knownFiles.size }));
+await page.locator('.notes-editor-title').blur();
+await page.keyboard.press('Escape');
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+ck('copy: both notes are there — the original and its copy',
+    await page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Holiday photo$/ }) }).count() === 1
+    && await page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Holiday photo \(copy\)$/ }) }).count() === 1);
+// Put the copies away again: every section below names its fixtures by title,
+// and "Groceries" must go on meaning ONE card. (That the copy owns its own
+// uploads — so deleting either note forever never touches the other's
+// pictures — is pinned by the fresh-file check above and by
+// src/tests/notesCopyFidelity.test.tsx.)
+for (const title of ['Groceries (copy)', 'Holiday photo (copy)']) {
+    const copyCard = page.locator('.notes-card', { hasText: title });
+    await copyCard.hover();
+    await copyCard.locator('button[aria-label="More actions"]').click();
+    await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
+    await page.waitForSelector('.notes-undo-text:has-text("to the trash")', { timeout: 8000 });
+    await page.locator('.notes-undo').waitFor({ state: 'detached', timeout: 12000 });
+}
+ck('copy: the copies are put away, so one card means one note again',
+    await page.locator('.notes-card', { hasText: '(copy)' }).count() === 0
+    && await page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Groceries$/ }) }).count() === 1);
 await sleep(200);
 // ---- 12c. Púca's own Tasks view: the same note text, read AND edited there ----------------------------
 await page.goto('/chat');

@@ -31,6 +31,8 @@ import {
     type TaskList,
     createListTask,
     parseTaskAttachments,
+    patchTaskTiming,
+    updateListTaskAttachments,
     isAttachmentsLocked,
 } from '../../api/tasks';
 import {
@@ -47,12 +49,13 @@ import {
     setTaskListAttachments,
     setTaskListBody,
 } from '../../api/listContent';
-import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
+import { type DrawingFiles, fileIdsOf, nextDrawingName, resealRefs, uploadNoteMedia } from '../../api/noteMedia';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { type NoteRef, cleanQuickItems } from './notesModel';
 import { deriveContentTitle } from './noteContent';
+import { type CopyItem, type CopyPlan, flattenCopyItems } from './noteText';
 
 export const listContentKeys = {
     features: ['notes', 'features'] as const,
@@ -64,10 +67,13 @@ export interface NoteExtras {
     body?: string;
     photos?: File[];
     drawing?: DrawingFiles;
+    /** Refs that are ALREADY uploaded and sealed, to go straight into the new
+     *  note's sidecar — a copy encrypts the source's pictures again itself. */
+    refs?: TaskAttachmentRef[];
 }
 
 export function hasExtras(extra: NoteExtras | undefined): extra is NoteExtras {
-    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing);
+    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing || (extra.refs?.length ?? 0) > 0);
 }
 
 export function useListFeatures(): { features: ListFeatures; known: boolean } {
@@ -121,6 +127,10 @@ export interface ListContentActions {
     ensureFeatures: () => Promise<ListFeatures | null>;
     /** `timing[i]` is item i's date & repeat (a copy of a note keeps them). */
     createContentNote: (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
+    /** "Make a copy": the whole note again — text, pictures (re-encrypted
+     *  under fresh keys), and every item with its nesting, dates and tick
+     *  state. Never queued: its uploads cannot wait for a connection. */
+    createNoteFromPlan: (plan: CopyPlan) => Promise<NoteRef | null>;
     setBody: (listId: number, body: string) => Promise<boolean>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
@@ -155,11 +165,16 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         const body = extra.body?.replace(/\s+$/, '') ?? '';
         let refs: TaskAttachmentRef[] = [];
         try {
-            refs = await uploadNoteMedia(
-                extra.photos ?? [],
-                extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [],
-                0,
-            );
+            refs = [
+                ...await uploadNoteMedia(
+                    extra.photos ?? [],
+                    extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [],
+                    0,
+                ),
+                // Already uploaded and sealed by the caller: they go into the
+                // sidecar as they are, and into the rollback below.
+                ...(extra.refs ?? []),
+            ];
         } catch (err) {
             explain('upload failed', err);
             pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
@@ -192,6 +207,101 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         if (timed) pokeTaskReminders();
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
+        return ref;
+    }, [qc]);
+
+    /**
+     * Make the copy. The pictures are re-encrypted FIRST and all-or-nothing:
+     * if the list create then fails, every upload made for this copy is
+     * deleted again, so a failed copy never bills the owner for orphans.
+     * Items are created parents-first so a child lands under the copy's own
+     * parent id; a subtree whose parent failed is skipped rather than raised
+     * to the top level, and the count is reported.
+     */
+    const createNoteFromPlan = useCallback(async (plan: CopyPlan): Promise<NoteRef | null> => {
+        const uploaded: TaskAttachmentRef[] = [];
+        const reseal = async (refs: TaskAttachmentRef[]) => {
+            if (refs.length === 0) return [];
+            const made = await resealRefs(refs);
+            uploaded.push(...made);
+            return made;
+        };
+        const flat = flattenCopyItems(plan.items);
+        const itemRefs = new Map<CopyItem, TaskAttachmentRef[]>();
+        let noteRefs: TaskAttachmentRef[];
+        try {
+            noteRefs = await reseal(plan.noteRefs);
+            for (const { item } of flat) {
+                if (item.attachments.length > 0) itemRefs.set(item, await reseal(item.attachments));
+            }
+        } catch (err) {
+            if (!explain('copying the pictures failed', err)) {
+                pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t copy the pictures — check your connection' });
+            }
+            await deleteFiles(fileIdsOf(uploaded));
+            return null;
+        }
+        let list: TaskList;
+        try {
+            list = await createTaskListWithContent(plan.title, { body: plan.body || undefined, refs: noteRefs });
+        } catch (err) {
+            // Never queued (its uploads could not wait), and nothing names
+            // what was uploaded for it now.
+            explain('copy failed', err);
+            await deleteFiles(fileIdsOf(uploaded));
+            return null;
+        }
+        const ref: NoteRef = { kind: 'list', id: list.id };
+        const created: Task[] = [];
+        const newIdOf = new Map<CopyItem, number>();
+        let missing = 0;
+        let timed = false;
+        for (const { item, parent } of flat) {
+            const parentId = parent === null ? undefined : newIdOf.get(parent);
+            if (parent !== null && parentId === undefined) { missing++; continue; }
+            const timing: NewTaskTiming | undefined = item.schedule
+                ? { dueAt: item.dueAt, schedule: item.schedule }
+                : item.dueAt ? { dueAt: item.dueAt } : undefined;
+            let made: Task;
+            try {
+                made = await createListTask(list.id, item.text, parentId, timing);
+            } catch (err) {
+                explain('copying an item failed', err);
+                missing++;
+                continue;
+            }
+            newIdOf.set(item, made.id);
+            if (timing) timed = true;
+            const refs = itemRefs.get(item);
+            if (refs) {
+                try {
+                    await updateListTaskAttachments(made.id, refs);
+                    made = { ...made, attachments: JSON.stringify(refs.map(({ href, name }) => ({ href, name }))) };
+                } catch (err) {
+                    explain('copying an item’s pictures failed', err);
+                }
+            }
+            if (item.completed) {
+                // A timing patch, not a plain is_completed: migration 066's
+                // guard refuses the latter for a scheduled item, and the
+                // ordinary tick would advance a repeating one.
+                try {
+                    await patchTaskTiming(made, { is_completed: true });
+                    made = { ...made, is_completed: true };
+                } catch (err) {
+                    explain('copying an item’s tick failed', err);
+                }
+            }
+            created.push(made);
+        }
+        if (timed) pokeTaskReminders();
+        qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), {
+            ...list, total_tasks: created.length, completed_tasks: created.filter(t => t.is_completed).length,
+        }]);
+        if (missing > 0) {
+            pushMessageToast({ title: `The copy is missing ${missing} item${missing === 1 ? '' : 's'} — check it against the original` });
+        }
         return ref;
     }, [qc]);
 
@@ -330,6 +440,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const trashEnabled = known && features.trash;
     return useMemo(() => ({
         features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures,
-        createContentNote, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash,
-    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
+        createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash,
+    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
 }

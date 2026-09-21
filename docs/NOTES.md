@@ -86,10 +86,21 @@ Púca's reminders. Anything you do in one is what you see in the other.
   written to the offline copy, it starts again when text arrives from another
   device (so it can never put your older text back over their newer save),
   and it goes when you close the note or sign out.
-- **Copy as text / Make a copy / Export / Share** — a note as a Markdown
-  checklist to the clipboard, a copy as a fresh note (its text and its open
-  items, which keep their dates and repeats where the server stores them —
-  with or without text), or every note as
+- **Make a copy** — the whole note again: its text, its pictures and
+  drawings, and every item, ticked or not, with its nesting, its due time and
+  its date & repeat. The repeat is copied as a NEW series rather than the same
+  event twice, so ticking one does not touch the other. The pictures are
+  encrypted again for the copy, so it owns its own files: deleting either note
+  forever never touches the other's, and the copy counts against your storage
+  as well. The copy takes the note's colour and labels, and is never pinned
+  and never lands in the archive. A note holding something this device cannot
+  read — an item, a date, the text, or a pictures sidecar whose key has not
+  arrived — is not copied at all, rather than copied with the unreadable part
+  quietly missing; and a note whose items have not finished loading is not
+  copied yet, which used to make an empty note and still say "Copied". A copy
+  with pictures needs the network: like the composer, it never queues.
+- **Copy as text / Export / Share** — a note as a Markdown
+  checklist to the clipboard, or every note as
   Markdown or JSON from the account menu: a download in the browser, a file in
   `Documents/Puca Notes/` (name plus a timestamp) in the Android app, which
   also offers **Share** for every note or one note through Android's share

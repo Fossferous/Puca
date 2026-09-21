@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { Task } from '../api/tasks';
 import { buildNoteCards, groupReminders, nearestDue, noteMatches, reminderBadgeCount, type NoteSource } from '../notes/model/notesModel';
 import { noteUpdatedAt, reminderSlotOf } from '../notes/model/notesTiming';
-import { notesToJson, openItemTimingOf, openItemsOf } from '../notes/model/noteText';
+import { copyPlanOf, notesToJson } from '../notes/model/noteText';
 import { parseNotesPrefs } from '../notes/model/notesPrefs';
 import { parseSchedule, serializeSchedule, serializeSnooze, type EventSchedule } from '../api/taskSchedule';
 
@@ -101,16 +101,21 @@ describe('edited, search, export, copy', () => {
         expect(doc.notes[0].items[1].schedule).toEqual({ unreadable: '[Unable to decrypt]' });
     });
 
-    it('"Make a copy" carries each scheduled item under a NEW uid, aligned with its text', () => {
+    it('"Make a copy" carries each scheduled item under a NEW uid, and now a plain due time too', () => {
         const [c] = cardsOf([task(1), task(2, { schedule: ev({ rrule: 'FREQ=WEEKLY' }), due_at: '2026-10-12T08:50:00Z' }), task(3, { due_at: '2026-10-09T00:00:00Z' })]);
-        const texts = openItemsOf(c);
-        const timing = openItemTimingOf(c);
-        expect(texts).toEqual(['task 1', 'task 2', 'task 3']);
-        expect(timing[0]).toBeUndefined();
-        expect(timing[2]).toBeUndefined();   // a plain due time is not copied, as before
-        const copied = parseSchedule(timing[1]!.schedule!);
+        const plan = copyPlanOf(c);
+        expect(plan.items.map(i => i.text)).toEqual(['task 1', 'task 2', 'task 3']);
+        expect(plan.items[0]).toMatchObject({ schedule: null, dueAt: null });
+        // This line used to pin the LOSS: a plain item's due time was dropped,
+        // so a copy of a dated to-do came back undated. A copy is the whole
+        // note now, so it is carried.
+        expect(plan.items[2]).toMatchObject({ schedule: null, dueAt: '2026-10-09T00:00:00Z' });
+        const copied = parseSchedule(plan.items[1].schedule!);
         expect(copied.state === 'ok' && copied.schedule.rrule).toBe('FREQ=WEEKLY');
         expect(copied.state === 'ok' && copied.schedule.uid).not.toBe('uid-event-01');
-        expect(timing[1]!.dueAt).toBe('2026-10-12T08:50:00Z');
+        expect(plan.items[1].dueAt).toBe('2026-10-12T08:50:00Z');
+        // POSITIVE CONTROL: against a server with no schedules, only the due
+        // time goes (the field would be dropped silently).
+        expect(copyPlanOf(c, { schedules: false }).items[1]).toMatchObject({ schedule: null, dueAt: '2026-10-12T08:50:00Z' });
     });
 });
