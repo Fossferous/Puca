@@ -94,9 +94,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   forever never touches the other's, and the copy counts against your storage
   as well. The copy takes the note's colour and labels, and is never pinned
   and never lands in the archive. A note holding something this device cannot
-  read — its title, an item, a date, the text, or a pictures sidecar whose key
-  has not arrived — is not copied at all, rather than copied with the unreadable part
-  quietly missing; and a note whose items have not finished loading is not
+  read — its title, an item, a date, the text, or a pictures sidecar whose
+  key has not arrived — is not copied at all, rather than copied with the
+  unreadable part quietly missing; and a note whose items have not loaded is not
   copied yet, which used to make an empty note and still say "Copied". A copy
   with pictures needs the network: like the composer, it never queues.
 - **Copy as text / Export / Share** — a note as a Markdown
