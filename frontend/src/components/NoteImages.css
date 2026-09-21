@@ -50,17 +50,17 @@
     font: inherit;
     font-size: 13px;
     text-align: left;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
+    border: 1px solid var(--border-subtle);
     border-radius: 8px;
     cursor: pointer;
     word-break: break-word;
 }
-.ni-file:hover:not(:disabled) { background: var(--bg-quaternary); color: var(--text-primary); }
+.ni-file:hover:not(:disabled) { background: var(--bg-quaternary); color: var(--text-normal); }
 .ni-file:disabled { cursor: progress; opacity: 0.7; }
-.ni-file.saved { color: var(--success, #4caf50); }
-.ni-file.error { color: var(--danger, #e5534b); }
+.ni-file.saved { color: var(--text-positive); }
+.ni-file.error { color: var(--text-danger); }
 .ni-file .ni-file-name { flex: 1; min-width: 0; }
 .ni-file .ni-file-note { flex: none; font-size: 0.72rem; color: var(--text-muted); }
 .ni-file svg { flex: none; }
@@ -236,12 +236,15 @@
     border-radius: 6px;
     font-size: 0.72rem;
     line-height: 1.4;
-    background: var(--bg-elevated, rgba(0, 0, 0, 0.72));
-    color: var(--text-secondary, #ddd);
-    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.18));
+    /* A MATCHED PAIR of theme tokens, never a fixed colour: every theme
+       that moves --bg-secondary moves --text-muted with it, and a hex
+       fallback would ignore all eight of them and [data-contrast="high"]. */
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
     pointer-events: none;
 }
 
 /* "Kept on this device" under the note text (components/NoteBodyField.tsx):
-   quieter than a failure, louder than nothing. */
-.nb-status.queued { color: var(--text-secondary, #9aa); }
+   quieter than a failure, louder than the muted "Saving…" beside it. */
+.nb-status.queued { color: var(--text-normal); }
