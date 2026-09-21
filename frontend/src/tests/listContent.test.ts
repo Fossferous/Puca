@@ -119,9 +119,16 @@ describe('capability detection does not depend on having lists', () => {
 
     it('parses the answer field by field, never assuming support', async () => {
         get.mockResolvedValueOnce({ body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 });
-        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null });
+        // A 065-068 server says nothing about the two newer capabilities, and
+        // that must read as "no", never as "yes".
+        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null, contentRev: false, idempotentCreates: false });
         expect(parseListFeatures('nonsense')).toEqual(NO_LIST_FEATURES);
         expect(parseListFeatures({ body: 'yes', trash: true, trash_retention_days: -3 })).toEqual({ ...NO_LIST_FEATURES, trash: true });
+        // POSITIVE CONTROL: a 069/070 server's answer turns them on, and only
+        // the literal `true` does — a truthy string does not.
+        expect(parseListFeatures({ trash: true, content_rev: true, idempotent_creates: true }))
+            .toEqual({ ...NO_LIST_FEATURES, trash: true, contentRev: true, idempotentCreates: true });
+        expect(parseListFeatures({ content_rev: 'yes', idempotent_creates: 1 })).toEqual(NO_LIST_FEATURES);
     });
 });
 

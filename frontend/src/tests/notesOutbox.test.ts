@@ -21,7 +21,9 @@ vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 vi.mock('../components/messageToastBus', () => ({ pushMessageToast: vi.fn() }));
 
 import { makeIdentity } from '../api/e2ee';
-const { createOutbox, ops, applyPrefsIntent, referencesTemp } = await import('../notes/model/notesOutbox');
+import { OP_KEY_SHAPE } from '../api/opKey';
+import * as realTasks from '../api/tasks';
+const { createOutbox, execOp, ops, applyPrefsIntent, referencesTemp } = await import('../notes/model/notesOutbox');
 const { memoryStore } = await import('../notes/model/notesCache');
 const { isNoteBusy, resetNoteBusy } = await import('../notes/model/noteBusy');
 type NoteOp = import('../notes/model/notesOutbox').NoteOp;
@@ -246,3 +248,68 @@ describe('pins and order replay as intents against the server’s current set', 
         expect(next).toEqual([P('list', 2), P('list', 1), P('channel', 9, true)]);
     });
 });
+
+describe('a create carries the same key every time it is tried', () => {
+    it('a 5xx retry, and a reload, re-send the create with the key it was minted with', async () => {
+        const h = harness();
+        const ob = h.make();
+        h.setOnline(false);
+        const create = ops.createList(-1, 'Shopping');
+        expect(OP_KEY_SHAPE.test(create.key)).toBe(true);
+        await ob.send(create);
+
+        // The first attempt 5xxs; the op stays queued.
+        h.setOnline(true);
+        h.failures.set(create.label, new ApiError('bad gateway', 502));
+        await ob.replay();
+        expect(ob.pending()).toBe(1);
+
+        // A reload, then the retry that succeeds. Both attempts, across two
+        // instances of the outbox, carried the SAME key — which is the whole
+        // point: the server recognises the second as the first.
+        const afterReload = h.make();
+        await afterReload.load();
+        await afterReload.replay();
+        const keys = h.exec.mock.calls
+            .map(c => c[0] as NoteOp)
+            .filter(o => o.k === 'createList')
+            .map(o => (o as { key: string }).key);
+        expect(keys.length).toBe(2);
+        expect(new Set(keys)).toEqual(new Set([create.key]));
+    });
+
+    it('two creates of the SAME text get DIFFERENT keys — a key is never a fingerprint', () => {
+        const a = ops.createList(-1, 'Shopping');
+        const b = ops.createList(-2, 'Shopping');
+        expect(a.key).not.toBe(b.key);
+        const i = ops.createTask(LIST, -3, 'Milk');
+        const j = ops.createTask(LIST, -4, 'Milk');
+        expect(i.key).not.toBe(j.key);
+        expect([a.key, b.key, i.key, j.key].every(k => OP_KEY_SHAPE.test(k))).toBe(true);
+    });
+
+    it('the key the op holds is the key the request sends — through the real executor', async () => {
+        const create = ops.createList(-1, 'Shopping');
+        vi.mocked(realTasks.createTaskList).mockResolvedValue({ id: 80, title: 'Shopping', created_at: '', total_tasks: 0, completed_tasks: 0 });
+        await execOp(create, {}, true);
+        expect(realTasks.createTaskList).toHaveBeenCalledWith('Shopping', create.key);
+
+        const item = ops.createTask(LIST, -2, 'Milk');
+        vi.mocked(realTasks.createListTask).mockResolvedValue(task(81, 'Milk'));
+        await execOp(item, {}, true);
+        expect(realTasks.createListTask).toHaveBeenCalledWith(1, 'Milk', undefined, undefined, item.key);
+
+        // A shared checklist item goes down the channel path with the same key.
+        const chanItem = ops.createTask({ kind: 'channel', id: 12 }, -3, 'Milk');
+        vi.mocked(realTasks.createTask).mockResolvedValue(task(82, 'Milk'));
+        await execOp(chanItem, {}, true);
+        expect(realTasks.createTask).toHaveBeenCalledWith(12, 'Milk', undefined, undefined, chanItem.key);
+    });
+
+    it('an op that is not a create carries no key at all', () => {
+        for (const op of [ops.renameList(1, 'New'), tick(LIST, task(1), true), ops.deleteList(1, 'Old')]) {
+            expect(op).not.toHaveProperty('key');
+        }
+    });
+});
+

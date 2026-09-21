@@ -699,6 +699,181 @@ if (psqlDsn) {
 } else {
     skip('database: the offline note became exactly one real list; the prefs blob is ciphertext', 'no psql DSN given');
 }
+// ---- 12e. Two devices, one note; and a create whose answer was lost -------------------------------
+// The server must advertise both, or every check below would pass by doing
+// nothing (the client sends no base and no key against an older server).
+const featuresApi = await apiBaseOf(page);
+const featuresAnswer = featuresApi ? await authed(page, featuresApi, 'GET', '/task-lists/features') : null;
+let listFeatures = null;
+try { listFeatures = JSON.parse(featuresAnswer?.body ?? 'null'); } catch { /* not JSON */ }
+ck('conflict: the server advertises content_rev and idempotent creates',
+    listFeatures?.content_rev === true && listFeatures?.idempotent_creates === true, JSON.stringify(listFeatures));
+
+// A opens a note and starts typing in its text. B changes the SAME note's text
+// and saves it first. A's save is then made on top of B's, which is exactly
+// what used to be lost.
+const openNote = async (pg, title) => {
+    await pg.waitForSelector('.notes-editor', { state: 'detached', timeout: 10000 }).catch(() => {});
+    await pg.locator('.notes-card', { hasText: title }).first().click();
+    await pg.waitForSelector('.notes-editor', { timeout: 10000 });
+};
+// Escape belongs to whatever input has focus (TaskTree's editors, the title),
+// so the close button is the only reliable way out of the editor here.
+const closeNote = async (pg) => {
+    await pg.locator('.notes-editor button[aria-label="Close note"]').click().catch(() => {});
+    await pg.waitForSelector('.notes-editor', { state: 'detached', timeout: 10000 }).catch(() => {});
+};
+await page.goto('/notes/');
+await page.waitForSelector('.notes-card:has-text("Live note")', { timeout: 15000 });
+await pageB.goto('/notes/');
+await pageB.waitForSelector('.notes-card:has-text("Live note")', { timeout: 15000 });
+
+// THE REAL RACE, in the order it happens to people: A is already typing when
+// B's change lands. A's live event arrives mid-sentence — the field keeps A's
+// words, and the revision A is writing on top of stays the one A started
+// from, so the save that follows is judged against THAT and refused. (Taking
+// the revision at send time instead would name B's and quietly win.)
+//
+// Only the TIMING is arranged here: A's save is held at the network until B's
+// has landed, which is what a slow phone does by itself. Nothing about the
+// request is changed.
+let releaseA = () => {};
+const aHeld = new Promise(res => { releaseA = res; });
+await page.route('**/task-lists/*', async route => {
+    if (route.request().method() !== 'PATCH') return route.continue();
+    await aHeld;
+    return route.continue();
+});
+await openNote(page, 'Live note');
+await page.fill('.notes-editor textarea.nb-text', 'what A typed');
+await sleep(300);
+
+// Now B writes the same note's text and saves it, first.
+await openNote(pageB, 'Live note');
+await pageB.fill('.notes-editor textarea.nb-text', 'what B typed');
+await pageB.locator('.notes-editor-title').click();
+await pageB.waitForFunction(() => !document.querySelector('.notes-editor .nb-status'), null, { timeout: 10000 }).catch(() => {});
+await sleep(1500);
+
+// A's save is let go: it names the revision A started from, which is no
+// longer the current one.
+releaseA();
+await sleep(500);
+await page.unroute('**/task-lists/*');
+const banner = page.locator('.notes-editor [data-conflict="stale"]');
+const sawConflict = await banner.first().waitFor({ timeout: 15000 }).then(() => true, () => false);
+ck('conflict: B changed the text while A was writing, so A is told instead of one copy winning silently', sawConflict);
+ck('conflict: A\'s words are still in the field — nothing was thrown away', (await page.locator('.notes-editor textarea.nb-text').inputValue()) === 'what A typed');
+ck('conflict: the banner shows the other device\'s copy, so nothing is chosen blind',
+    sawConflict && /what B typed/.test(await banner.first().innerText()));
+await shot('conflict-banner');
+// Both choices are real tap targets even here on the desktop walk; the phone
+// pass below measures them at 390px.
+ck('conflict: both choices are offered', sawConflict
+    && await banner.locator('[data-action="keep-mine"]').count() === 1
+    && await banner.locator('[data-action="use-theirs"]').count() === 1);
+
+// Keep mine: saved against the revision the refusal handed back, so it wins —
+// and reaches B.
+if (sawConflict) {
+    await banner.locator('[data-action="keep-mine"]').click();
+    await page.waitForFunction(() => !document.querySelector('.notes-editor [data-conflict]'), null, { timeout: 10000 }).catch(() => {});
+    const reachedB = await pageB.waitForFunction(() => /what A typed/.test(document.body.innerText), null, { timeout: 15000 }).then(() => true, () => false);
+    ck('conflict: "Keep mine" wins and reaches the other device', reachedB);
+} else {
+    ck('conflict: "Keep mine" wins and reaches the other device', false, 'no conflict was raised to resolve');
+}
+await closeNote(page);
+
+// THE FALSE-POSITIVE TRAP. Ticking an ITEM is not editing the note's text, so
+// it must never raise a conflict — a note is one card holding both.
+await openNote(page, 'Live note');
+await pageB.locator('.notes-editor .task-item').first().locator('input[type="checkbox"]').click().catch(() => {});
+await sleep(1500);
+await page.fill('.notes-editor textarea.nb-text', 'A keeps typing while B ticks');
+await page.locator('.notes-editor-title').click();
+await sleep(2000);
+ck('conflict: an item ticked on B while A types is NOT a clash', await page.locator('.notes-editor [data-conflict]').count() === 0);
+await closeNote(page);
+
+// The title, the opposite loss: a rename arriving from B must not wipe what A
+// is typing mid-keystroke.
+await openNote(page, 'Live note');
+await page.locator('.notes-editor-title').fill('A is renaming this');
+await pageB.goto('/notes/');
+await pageB.waitForSelector('.notes-card', { timeout: 15000 });
+await openNote(pageB, 'Live note');
+await pageB.locator('.notes-editor-title').fill('B renamed it');
+await pageB.locator('.notes-editor textarea.nb-text').click();
+await sleep(2500);
+ck('conflict: a rename on B does not wipe the title A is typing',
+    (await page.locator('.notes-editor-title').inputValue()) === 'A is renaming this');
+await closeNote(page);
+await closeNote(pageB);
+
+// A CREATE WHOSE ANSWER WAS LOST. The note is made offline so it is QUEUED —
+// the queue is what retries a 5xx, which is the only place a create is ever
+// sent twice. Back online, the first attempt reaches the server and commits,
+// and the page is answered with a 502: the exact shape of a connection that
+// dropped after the write. The outbox sends it again, with the same key, and
+// there must be ONE note.
+if (psqlDsn) {
+    const countLists = () => Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`));
+    const openComposer = async () => {
+        if (await page.locator('.notes-quickadd-collapsed').count() > 0) await page.click('.notes-quickadd-collapsed');
+        await page.waitForSelector('.notes-quickadd-title', { timeout: 10000 });
+    };
+    // Back to a plain grid first: the composer is not reachable with the
+    // editor open, and a stale route from the checks above must be gone.
+    await page.goto('/notes/');
+    await page.waitForSelector('.notes-quickadd-collapsed', { timeout: 20000 });
+    await ctx.setOffline(true);
+    await openComposer();
+    await page.fill('.notes-quickadd-title', 'Lost answer');
+    await page.locator('.notes-quickadd-item input').first().fill('Only once');
+    await page.getByRole('button', { name: 'Done' }).click();
+    const queued = await page.waitForSelector('.notes-card:has-text("Lost answer")', { timeout: 20000 }).then(() => true, () => false);
+    ck('idempotent create: the note is queued, so the retry path is the one under test',
+        queued && await page.locator('[data-sync="pending"]').count() === 1, `card=${queued}`);
+    await shot('idempotent-queued');
+    const before = countLists();
+    let swallowed = 0;
+    let sentKeys = [];
+    await page.route('**/task-lists', async route => {
+        const req = route.request();
+        if (req.method() !== 'POST') return route.continue();
+        try { sentKeys.push(JSON.parse(req.postData() || '{}').op_key ?? null); } catch { sentKeys.push('unreadable'); }
+        if (swallowed > 0) return route.continue();
+        swallowed++;
+        // Let it through — the server commits — then throw the ANSWER away.
+        await route.fetch().catch(() => null);
+        return route.fulfill({ status: 502, contentType: 'text/plain', body: 'Bad Gateway' });
+    });
+    await ctx.setOffline(false);
+    await page.waitForSelector('[data-sync="pending"]', { state: 'detached', timeout: 40000 }).catch(() => {});
+    await sleep(1500);
+    await page.unroute('**/task-lists');
+    ck('idempotent create: the create really was sent twice (control for the count below)',
+        swallowed === 1 && sentKeys.length === 2, `swallowed=${swallowed} sent=${sentKeys.length}`);
+    ck('idempotent create: both attempts carried the SAME key', sentKeys.length === 2 && sentKeys[0] && sentKeys[0] === sentKeys[1], JSON.stringify(sentKeys));
+    const after = countLists();
+    ck('idempotent create: a create whose answer was lost leaves ONE note, not two', after === before + 1, `before=${before} after=${after}`);
+    ck('idempotent create: and it appears once on screen', await page.locator('.notes-card:has-text("Lost answer")').count() === 1);
+    const onB = await pageB.waitForFunction(() => document.querySelectorAll('.notes-card').length > 0 && [...document.querySelectorAll('.notes-card')].filter(c => /Lost answer/.test(c.innerText)).length === 1, null, { timeout: 15000 }).then(() => true, () => false);
+    ck('idempotent create: no duplicate reached the other device either', onB);
+    // POSITIVE CONTROL: an ordinary create still makes a second note, so the
+    // count above is not passing because nothing was created at all.
+    await openComposer();
+    await page.fill('.notes-quickadd-title', 'Second note');
+    await page.locator('.notes-quickadd-item input').first().fill('A different intent');
+    await page.getByRole('button', { name: 'Done' }).click();
+    await page.waitForSelector('.notes-card:has-text("Second note")', { timeout: 15000 }).catch(() => {});
+    await sleep(1500);
+    ck('idempotent create: POSITIVE CONTROL — a fresh create does make a second note', countLists() === after + 1, `after=${after} now=${countLists()}`);
+} else {
+    skip('idempotent create: a create whose answer was lost leaves exactly one note', 'no psql DSN given');
+}
+
 await ctxB.close();
 
 // ---- 13. Cross-tab: a Notes sign-out lands the main app's tab on its login ---------------------------
@@ -891,6 +1066,55 @@ await m.getByRole('button', { name: 'Cancel' }).tap();
 await m.waitForSelector('.notes-draw', { state: 'detached', timeout: 5000 });
 await m.locator('.notes-quickadd.sheet button[aria-label="Discard note"]').tap();
 await m.waitForSelector('.notes-quickadd.sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
+// The conflict banner at 390x844. The clash itself is scripted — the note's
+// own PATCH is answered with the server's refusal, carrying a sealed body the
+// page itself produced a moment earlier, so the banner opens REAL ciphertext
+// and offers both choices. Everything measured here (the component, its CSS,
+// the tap targets) is the shipping one.
+await m.goto('/notes/');
+await m.waitForSelector('.notes-card:has-text("Poem")', { timeout: 15000 });
+await m.locator('.notes-card', { hasText: 'Poem' }).first().tap();
+await m.waitForSelector('.notes-editor textarea.nb-text', { timeout: 10000 });
+let sealedFromThePage = null;
+await m.route('**/task-lists/*', async route => {
+    const req = route.request();
+    if (req.method() !== 'PATCH') return route.continue();
+    let sent = null;
+    try { sent = req.postDataJSON(); } catch { /* not JSON */ }
+    if (!sealedFromThePage && sent?.body) {
+        // The first save goes through, and its ciphertext becomes "their copy".
+        sealedFromThePage = sent.body;
+        return route.continue();
+    }
+    return route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ conflict: 'stale', content_rev: 9999, title: 'sealed', body: sealedFromThePage, attachments: null }),
+    });
+});
+await m.fill('.notes-editor textarea.nb-text', 'the copy that won');
+await m.locator('.notes-editor-title').tap();
+await sleep(1500);
+await m.fill('.notes-editor textarea.nb-text', 'what this phone typed');
+await m.locator('.notes-editor-title').tap();
+const phoneBanner = m.locator('.notes-editor [data-conflict="stale"]');
+const phoneSawConflict = await phoneBanner.first().waitFor({ timeout: 15000 }).then(() => true, () => false);
+ck('phone conflict: the banner appears, with the words this phone typed still in the field', phoneSawConflict
+    && (await m.locator('.notes-editor textarea.nb-text').inputValue()) === 'what this phone typed');
+const phoneChoices = phoneSawConflict ? await phoneBanner.locator('button').evaluateAll(els => els.map(e => {
+    const r = e.getBoundingClientRect();
+    return { t: e.textContent.trim(), w: Math.round(r.width), h: Math.round(r.height) };
+})) : [];
+ck('phone conflict: both choices are full tap targets', phoneChoices.length === 2 && phoneChoices.every(b => b.h >= 44 && b.w >= 44), JSON.stringify(phoneChoices));
+r = await audit();
+ck('phone conflict: the banner fits — no horizontal overflow, nothing under size', phoneSawConflict && !r.bodyScrollsHorizontally && r.widest <= r.vw + 1 && r.under.length === 0, JSON.stringify({ widest: r.widest, vw: r.vw, under: r.under }));
+await mshot('phone-conflict');
+await m.unroute('**/task-lists/*');
+// Leave the note as the server has it, so nothing downstream sees a half-save.
+if (phoneSawConflict) await phoneBanner.locator('[data-action="use-theirs"]').tap().catch(() => {});
+await m.keyboard.press('Escape');
+await sleep(300);
+
 // The Trash at phone size — with a note in it, or there is nothing to measure.
 const phoneNote = m.locator('.notes-card', { hasText: 'Phone note' });
 await phoneNote.locator('button[aria-label="More actions"]').tap().catch(() => {});

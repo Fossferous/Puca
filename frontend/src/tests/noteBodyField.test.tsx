@@ -48,7 +48,7 @@ describe('NoteBodyField', () => {
         act(() => { vi.advanceTimersByTime(1); });
         await flushPromises();
         expect(onSave).toHaveBeenCalledTimes(1);
-        expect(onSave).toHaveBeenCalledWith('Hello');
+        expect(onSave).toHaveBeenCalledWith('Hello', undefined);
     });
 
     it('a failed save keeps the typed text and offers a retry that saves it', async () => {
@@ -63,7 +63,7 @@ describe('NoteBodyField', () => {
         const retry = container.querySelector('.nb-retry') as HTMLButtonElement;
         act(() => { retry.click(); });
         await flushPromises();
-        expect(onSave).toHaveBeenLastCalledWith('new words');
+        expect(onSave).toHaveBeenLastCalledWith('new words', undefined);
         expect(container.textContent).not.toMatch(/Not saved/);
     });
 
@@ -73,7 +73,7 @@ describe('NoteBodyField', () => {
         type(area(), 'last thought');
         act(() => { root.render(<></>); });
         await flushPromises();
-        expect(onSave).toHaveBeenCalledWith('last thought');
+        expect(onSave).toHaveBeenCalledWith('last thought', undefined);
     });
 
     it('a trash of the list waits for text typed inside the save pause (flushBodySave)', async () => {
@@ -85,7 +85,7 @@ describe('NoteBodyField', () => {
         let flushed = false;
         const flushing = flushBodySave(41).then(() => { flushed = true; });
         await flushPromises();
-        expect(onSave).toHaveBeenCalledWith('typed a moment ago');
+        expect(onSave).toHaveBeenCalledWith('typed a moment ago', undefined);
         expect(flushed).toBe(false);   // ...and it waits for the save to LAND
         await act(async () => { resolveSave(true); await flushing; });
         expect(flushed).toBe(true);
@@ -102,7 +102,7 @@ describe('NoteBodyField', () => {
         let flushed = false;
         const flushing = flushBodySave(43).then(() => { flushed = true; });
         await flushPromises();
-        expect(onSave).toHaveBeenCalledWith('last words');
+        expect(onSave).toHaveBeenCalledWith('last words', undefined);
         expect(flushed).toBe(false);
         await act(async () => { resolveSave(true); await flushing; });
         expect(flushed).toBe(true);
@@ -116,6 +116,125 @@ describe('NoteBodyField', () => {
         type(area(), 'mine');
         act(() => { root.render(<NoteBodyField value="v3" onSave={onSave} />); });
         expect(area().value).toBe('mine');
+        // v3 is NOT lost here: the save that follows is refused by the server
+        // (it names the revision 'mine' was typed on top of) and the test
+        // below is what happens next. This test used to end at the line above
+        // and call the loss correct.
+    });
+
+    describe('two devices, one note', () => {
+        it('a refused save keeps what was typed, shows the other copy, and asks', async () => {
+            const onSave = vi.fn(async () => ({ conflict: { theirs: 'v3 from the phone' } }));
+            act(() => { root.render(<NoteBodyField value="v2" onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+
+            expect(onSave).toHaveBeenCalledWith('mine', undefined);
+            expect(area().value).toBe('mine');   // not a word of it thrown away
+            const banner = container.querySelector('[data-conflict="stale"]') as HTMLElement;
+            expect(banner).not.toBeNull();
+            expect(banner.textContent).toContain('v3 from the phone');   // nothing is chosen blind
+            expect(banner.querySelector('[data-action="keep-mine"]')).not.toBeNull();
+            expect(banner.querySelector('[data-action="use-theirs"]')).not.toBeNull();
+        });
+
+        it('"Use theirs" replaces the field with their copy and clears the banner', async () => {
+            const onSave = vi.fn(async () => ({ conflict: { theirs: 'theirs' } }));
+            act(() => { root.render(<NoteBodyField value="v2" onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            act(() => { (container.querySelector('[data-action="use-theirs"]') as HTMLButtonElement).click(); });
+            expect(area().value).toBe('theirs');
+            expect(container.querySelector('[data-conflict="stale"]')).toBeNull();
+            // And it does not immediately re-save: taking their copy is not
+            // an edit of it.
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS * 2); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(1);
+        });
+
+        it('"Keep mine" saves the typed text again — against the revision the refusal handed back', async () => {
+            // First call loses the race; the second (against the new base) wins.
+            const onSave = vi.fn()
+                .mockResolvedValueOnce({ conflict: { theirs: 'theirs' } })
+                .mockResolvedValueOnce(true);
+            act(() => { root.render(<NoteBodyField value="v2" onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            act(() => { (container.querySelector('[data-action="keep-mine"]') as HTMLButtonElement).click(); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledTimes(2);
+            expect(onSave).toHaveBeenLastCalledWith('mine', undefined);
+            expect(area().value).toBe('mine');
+            expect(container.querySelector('[data-conflict="stale"]')).toBeNull();
+        });
+
+        it('their copy cannot be read here: no preview, and no way to seal the error over it', async () => {
+            const onSave = vi.fn(async () => ({ conflict: { theirs: TASK_DECRYPT_FAILED } }));
+            act(() => { root.render(<NoteBodyField value="v2" onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            const banner = container.querySelector('[data-conflict="stale"]') as HTMLElement;
+            expect(banner).not.toBeNull();
+            expect(banner.querySelector('[data-theirs]')).toBeNull();
+            expect(banner.querySelector('[data-action="use-theirs"]')).toBeNull();
+            // POSITIVE CONTROL: the user can still keep their own words.
+            expect(banner.querySelector('[data-action="keep-mine"]')).not.toBeNull();
+        });
+
+        it('names the revision typing STARTED from, not the one the note has by the time it saves', async () => {
+            // The other device's change lands mid-sentence: the field keeps
+            // the words AND the base they were written on top of. Reading the
+            // revision at save time would name the newer one and win.
+            const onSave = vi.fn(async () => true);
+            act(() => { root.render(<NoteBodyField value="v2" contentRev={3} onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { root.render(<NoteBodyField value="v3 from the phone" contentRev={4} onSave={onSave} />); });
+            expect(area().value).toBe('mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledWith('mine', 3);
+
+            // POSITIVE CONTROL: with nothing typed, the remote text replaces
+            // the field and the NEXT edit names the newer revision.
+            act(() => { root.render(<NoteBodyField value="v4" contentRev={5} onSave={onSave} />); });
+            expect(area().value).toBe('v4');
+            type(area(), 'after');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(onSave).toHaveBeenLastCalledWith('after', 5);
+        });
+
+        it('a save that lands moves the base, so words typed while it was out are not refused', async () => {
+            let release = (_v: unknown) => {};
+            const onSave = vi.fn(() => new Promise(res => { release = res; }));
+            act(() => { root.render(<NoteBodyField value="" contentRev={3} onSave={onSave} />); });
+            type(area(), 'first');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(onSave).toHaveBeenCalledWith('first', 3);
+            // More typing while the save is still out.
+            type(area(), 'first and more');
+            await act(async () => { release({ rev: 4 }); await flushPromises(); });
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            // ...is based on what that save wrote, not on the revision before it.
+            expect(onSave).toHaveBeenLastCalledWith('first and more', 4);
+        });
+
+        it('an ordinary failed save is still a failed save, not a conflict', async () => {
+            const onSave = vi.fn(async () => false);
+            act(() => { root.render(<NoteBodyField value="v2" onSave={onSave} />); });
+            type(area(), 'mine');
+            act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+            await flushPromises();
+            expect(container.querySelector('[data-conflict="stale"]')).toBeNull();
+            expect(container.querySelector('.nb-status.failed')!.textContent).toContain('Not saved');
+        });
     });
 
     it('unreadable text is locked: no field to type into', () => {

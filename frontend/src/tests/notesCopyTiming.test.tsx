@@ -31,6 +31,7 @@ vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 
 import { apiClient } from '../api/client';
 import { createListTask, type NewTaskTiming, type Task } from '../api/tasks';
+import { OP_KEY_SHAPE } from '../api/opKey';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { useNoteActions, type NoteActions } from '../notes/model/notesQueries';
 
@@ -81,18 +82,27 @@ describe('a copy of a text note', () => {
             ref = await actions().createNote('Errands (copy)', ['Dentist', '   ', 'Milk', 'Bins'], { body: 'Remember the list' }, [dentist, undefined, undefined, bins]);
         });
         expect(ref).toEqual({ kind: 'list', id: 77 });
-        expect(vi.mocked(createListTask).mock.calls).toEqual([
+        // Each item also carries its own create key (api/opKey.ts): a
+        // random id, DIFFERENT per item even when the text repeats, so a
+        // retry cannot duplicate one and the key can never fingerprint what
+        // was written.
+        const calls = vi.mocked(createListTask).mock.calls;
+        expect(calls.map(c => c.slice(0, 4))).toEqual([
             [77, 'Dentist', undefined, dentist],
             [77, 'Milk', undefined, undefined],
             [77, 'Bins', undefined, bins],
         ]);
+        const keys = calls.map(c => c[4] as string);
+        expect(keys.every(k => OP_KEY_SHAPE.test(k))).toBe(true);
+        expect(new Set(keys).size).toBe(3);
         expect(pokeTaskReminders).toHaveBeenCalledTimes(1);   // a dated item is on the server now
     });
 
     it('POSITIVE CONTROL: with no timing given, items are created without any and nothing is poked', async () => {
         const actions = mountActions();
         await act(async () => { await actions().createNote('Plain (copy)', ['One', 'Two'], { body: 'Text' }); });
-        expect(vi.mocked(createListTask).mock.calls).toEqual([[77, 'One', undefined, undefined], [77, 'Two', undefined, undefined]]);
+        expect(vi.mocked(createListTask).mock.calls.map(c => c.slice(0, 4)))
+            .toEqual([[77, 'One', undefined, undefined], [77, 'Two', undefined, undefined]]);
         expect(pokeTaskReminders).not.toHaveBeenCalled();
     });
 });
