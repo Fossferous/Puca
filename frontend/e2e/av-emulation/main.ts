@@ -10,6 +10,7 @@
  * launched with --mute-audio, and nothing is ever played back.
  */
 import { armNative, disarm, getReplayState, seal, subscribeReplay, uploadAndBuild } from '../../src/api/clips/replayBuffer';
+import { webrtcManager } from '../../src/api/webrtc';
 import { decodeClipRef } from '../../src/api/clips/clipRef';
 import { openPart, uuidToBytes } from '../../src/api/clips/clipCrypto';
 import { Input, ALL_FORMATS, BufferSource, EncodedPacketSink } from 'mediabunny';
@@ -19,7 +20,7 @@ declare global {
         __AV_AUS__: { key: boolean; bytes: Uint8Array }[];
         __AV_CODEC__: string;
         __AV_FLASH_FRAME__: number;
-        __AV_TRUTH__: { bursts: { frame: number; flashAt: number; burstAt: number; offsetMs: number }[]; v0: number; agentStart: number } | undefined;
+        __AV_TRUTH__: { bursts: { frame: number; flashAt: number; burstAt: number; offsetMs: number }[]; micBurstAt: number; v0: number; agentStart: number } | undefined;
         __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; leads: { at: number; leadMs: number; state: string }[]; presented: () => { k: number; presentAt: number; tsUs: number }[] };
         __av: typeof api;
     }
@@ -67,6 +68,29 @@ const api = {
         window.__AV_CODEC__ = codecString(raw);
         window.__AV_FLASH_FRAME__ = flashFrame;
         return { accessUnits: window.__AV_AUS__.length, keyframes: window.__AV_AUS__.filter(a => a.key).length, codec: window.__AV_CODEC__ };
+    },
+    /** A MIC leg: what a call's processed microphone track is to the mix. A
+     *  second AudioContext (never connected to an output) plays one 30 ms
+     *  1 kHz burst at the third flash's present instant into a
+     *  MediaStreamDestination, and webrtcManager hands that stream to
+     *  replayBuffer as the local stream. The mic has NO scheduling lead, so
+     *  it is the leg that would land early if the lead were subtracted
+     *  from the whole mix without delaying it. */
+    installMic() {
+        const ctx = new AudioContext({ sampleRate: 48000 });
+        (ctx as unknown as { __avMic: boolean }).__avMic = true; // the lead probe skips this context
+        const dest = ctx.createMediaStreamDestination();
+        window.addEventListener('av-video-started', () => {
+            const at = window.__AV_TRUTH__!.micBurstAt;
+            const buf = ctx.createBuffer(1, 48000 * 0.03, 48000);
+            const d = buf.getChannelData(0);
+            for (let i = 0; i < d.length; i++) d[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / 48000);
+            const src = ctx.createBufferSource(); src.buffer = buf; src.connect(dest);
+            src.start(ctx.currentTime + (at - performance.now()) / 1000);
+        }, { once: true });
+        (webrtcManager as unknown as { getLocalStreamSync: () => MediaStream | null }).getLocalStreamSync = () => dest.stream;
+        (webrtcManager as unknown as { onMicTrackSwapped: (cb: () => void) => () => void }).onMicTrackSwapped = () => () => { };
+        return ctx.resume().then(() => ctx.state);
     },
     async arm() {
         const notices: string[] = [];
@@ -164,7 +188,7 @@ const api = {
         const flashes: number[] = [];
         for (const f of flash) if (!flashes.length || f.t - flashes[flashes.length - 1] > 0.5) flashes.push(f.t);
         return {
-            errors, durationMs: m.durationMs, videoFrames: lumas.length, yMin, yMax,
+            errors, durationMs: m.durationMs, videoFrames: lumas.length, yMin, yMax, hasMic: getReplayState().hasMic,
             flashes, brightFrames: flash.length, audioChunks: chunks.length, audioPeak: peak, onsets,
             // Per burst: audio onset minus its flash frame, ms (+ = audio late).
             errorsMs: flashes.map((t, i) => onsets[i] === undefined ? null : (onsets[i] - t) * 1000),

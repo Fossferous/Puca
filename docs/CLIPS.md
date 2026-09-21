@@ -311,7 +311,8 @@ needs no picker).
   clock and `seal()` applies one shift per clip, so a later, tighter
   estimate cannot make a clip's audio go backwards (mediabunny throws on
   that). The native offset is 0 (`NATIVE_AUDIO_OFFSET_US`); the 40 ms is
-  the picker's. The loopback AudioContext's SCHEDULING LEAD (JITTER_S at
+  the picker's (`NATIVE_AUDIO_OFFSET_US` is -30 ms, see its comment). The
+  loopback AudioContext's SCHEDULING LEAD (JITTER_S at
   a prime, then whatever the loopback device's clock and the context's
   clock accumulate, up to MAX_BACKLOG_S before a reset) is A/V error the
   anchor cannot see, because the worker only ever sees render times:
@@ -320,10 +321,15 @@ needs no picker).
   2026-09-21 nativeCapture reports each packet's lead with the wall time
   it renders at (`onLead`), replayBuffer forwards changes (`audioLead`),
   and seal() subtracts the lead in effect for each entry (`placeAudio`,
-  monotonic-clamped). Residual, not corrected: the WASAPI period and IPC
+  monotonic-clamped). The MIC leg of the mix reaches the graph live, so
+  it is delayed by the same lead (a DelayNode driven from the same
+  reports) and the one subtraction is right for the whole mix; without
+  that the mic would have been pulled early by the lead (caught in
+  review). Residual, not corrected: the WASAPI period and IPC
   on the Rust side and the mixing hop, minus the video stamp's lag behind
-  the present (it is taken after acquire and readback); the emulation
-  measures the JS part, a flash plus click through the real app the rest. `clip-video-chunk` carries the capture
+  the present (it is taken after acquire and readback, and the async MFT
+  holds a frame or two in flight); the emulation measures the JS part, a
+  flash plus click through the real app the rest. `clip-video-chunk` carries the capture
   generation (as `clip-audio-data` does) and `startNativeVideo` drops any
   other capture's chunks, so the old capture's tail after "Restart
   buffer" never reaches the new ring; as a backstop, a video timestamp

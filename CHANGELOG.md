@@ -13,8 +13,10 @@ one-line summary; this file is the full story. Versions follow
   that lead grew over a session whenever the sound device's clock and the
   app's disagreed; the clip carried the sound where it was played, not
   where it happened. The buffer now records the lead with each packet and
-  takes it back out when the clip is made. Measured silently in an
-  emulated end-to-end run (`frontend/e2e/clip-av-emulation.mjs`).
+  takes it back out when the clip is made; your microphone is held back
+  by the same amount so it stays in step with the game audio. Measured
+  silently in an emulated end-to-end run
+  (`frontend/e2e/clip-av-emulation.mjs`).
 
 ## 0.9.816 — 2026-09-21
 

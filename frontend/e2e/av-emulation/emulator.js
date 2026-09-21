@@ -37,6 +37,8 @@
         // the truth; a second burst +300 ms after a second flash in the SAME
         // clip is the oracle's positive control (run-to-run variance cancels).
         bursts: [{ frame: 150, offsetMs: 0 }, { frame: 240, offsetMs: 300 }],
+        // The MIC leg (main.ts builds it): a burst at this flash's present.
+        micBurstFrame: 330,
         burstMs: 30,
         // The first video frames sit in a queue for this long before the app's
         // worker is armed (the real WASAPI init wait) — modelled by the app
@@ -58,7 +60,9 @@
     const leads = [];
     const origStart = AudioBufferSourceNode.prototype.start;
     AudioBufferSourceNode.prototype.start = function (when) {
-        if (typeof when === 'number') leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state });
+        // The harness's own mic context (main.ts installMic tags it) schedules
+        // its burst seconds ahead; that is not a loopback lead.
+        if (typeof when === 'number' && !this.context.__avMic) leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state });
         return origStart.apply(this, arguments);
     };
 
@@ -158,7 +162,8 @@
                     video = startVideo(generation);
                     // Each burst starts at its flash frame's present instant (+ offset).
                     const bursts = cfg.bursts.map(b => ({ frame: b.frame, flashAt: video.v0 + b.frame * (1000 / cfg.fps), burstAt: video.v0 + b.frame * (1000 / cfg.fps) + b.offsetMs, offsetMs: b.offsetMs }));
-                    window.__AV_TRUTH__ = { bursts, v0: video.v0, agentStart: video.agentStart };
+                    window.__AV_TRUTH__ = { bursts, micBurstAt: video.v0 + cfg.micBurstFrame * (1000 / cfg.fps), v0: video.v0, agentStart: video.agentStart };
+                    window.dispatchEvent(new CustomEvent('av-video-started'));
                     return { output_index: 0, hmonitor: 65639, width: cfg.width, height: cfg.height, reason: 'primary', bitrate: 8000000, generation };
                 }
                 case 'stop_clip_video_capture': {

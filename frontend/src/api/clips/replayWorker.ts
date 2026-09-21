@@ -498,6 +498,13 @@ export class Ring {
 
     noteAudioLead(m: { renderAtMs: number; leadMs: number }): void {
         if (!this.cfg?.nativeVideo) return;
+        // INVARIANT: sorted by renderAtMs (leadUsAt binary-searches it). The
+        // one thing that breaks it is nativeCapture's drift reset, which
+        // moves the playhead BACK by up to MAX_BACKLOG_S: the packets it
+        // had scheduled past the new playhead are now overlapped by the new
+        // schedule, so their entries are dropped and the new lead governs
+        // those render times.
+        while (this.audioLeads.length && this.audioLeads[this.audioLeads.length - 1].renderAtMs >= m.renderAtMs) this.audioLeads.pop();
         this.audioLeads.push({ renderAtMs: m.renderAtMs, leadUs: Math.round(m.leadMs * 1000) });
         if (this.audioLeads.length > 8192) this.audioLeads.splice(0, 4096);
     }

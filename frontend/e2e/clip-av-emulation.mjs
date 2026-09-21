@@ -35,7 +35,9 @@ const FPS = 30, SECONDS = 14;
 // Two flashes, both mid-GOP (keys every 60 frames): the first carries the
 // burst at its true instant, the second a burst 300 ms LATE, the oracle's
 // positive control inside the same clip (so run-to-run variance cancels).
-const FLASHES = [150, 240], CONTROL_MS = 300;
+// A third flash carries the MIC leg's burst (main.ts installMic): the mic
+// has no scheduling lead, so it is where an over-correction would show.
+const FLASHES = [150, 240, 330], CONTROL_MS = 300;
 let fail = 0;
 const ck = (c, label, extra = '') => { console.log((c ? 'PASS  ' : 'FAIL  ') + label + (extra ? '  — ' + extra : '')); if (!c) fail++; };
 
@@ -106,6 +108,11 @@ async function run(runIndex) {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const errors = [];
+    // Every request the page makes must stay on this machine: the check is
+    // on the NETWORK, so a request that succeeds against a real server
+    // fails it too (a console-error check could not see a success).
+    const offHost = [];
+    page.on('request', r => { try { const h = new URL(r.url()).hostname; if (h !== '127.0.0.1' && h !== 'localhost') offHost.push(r.url()); } catch { /* data: */ } });
     page.on('pageerror', e => errors.push(String(e)));
     page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') errors.push(m.text().slice(0, 200)); });
     // AV_RUST_MODEL=zero: no modelled Rust-side latency at all, so the number
@@ -116,6 +123,7 @@ async function run(runIndex) {
     await page.goto(origin + '/');
     await page.waitForFunction(() => !!window.__av, null, { timeout: 15000 });
     const loaded = await page.evaluate((f) => window.__av.load('/flash.h264', f), FLASHES[0]);
+    const micState = await page.evaluate(() => window.__av.installMic());
     const armed = await page.evaluate(() => window.__av.arm());
     const buffered = await page.evaluate(() => window.__av.waitBuffered(12500));
     const sealed = await page.evaluate((o) => window.__av.sealAndUpload(11000, o + '/api'), origin);
@@ -125,7 +133,7 @@ async function run(runIndex) {
     await page.evaluate(() => window.__av.disarm()).catch(() => { });
     await ctx.close();
     parts.clear();
-    return { runIndex, loaded, armed, buffered, sealed, m, truth, errors };
+    return { runIndex, loaded, armed, buffered, sealed, m, truth, errors, offHost, micState };
 }
 
 try {
@@ -133,24 +141,25 @@ try {
     for (let i = 0; i < 2; i++) results.push(await run(i));
     const r0 = results[0];
     ck(r0.loaded.keyframes >= 6 && r0.loaded.accessUnits === FPS * SECONDS, "the stream has the agent's shape", `${r0.loaded.accessUnits} AUs, ${r0.loaded.keyframes} keys, ${r0.loaded.codec}`);
-    ck(r0.armed.state.phase === 'armed' && r0.armed.state.hasSystemAudio === true, 'the real pipeline armed with system audio', JSON.stringify({ phase: r0.armed.state.phase, sys: r0.armed.state.hasSystemAudio, notices: r0.armed.notices }));
+    ck(r0.armed.state.phase === 'armed' && r0.armed.state.hasSystemAudio === true && r0.armed.state.hasMic === true, 'the real pipeline armed with system audio AND a mic', JSON.stringify({ phase: r0.armed.state.phase, sys: r0.armed.state.hasSystemAudio, mic: r0.armed.state.hasMic, micCtx: r0.micState, notices: r0.armed.notices }));
     for (const r of results) {
         const m = r.m;
         ck(m.videoFrames > 250 && m.audioChunks > 100 && m.errors.length === 0, `run ${r.runIndex}: the sealed clip decoded`, `${m.videoFrames} frames, ${m.audioChunks} audio chunks, ${r.sealed.info.durationMs} ms${m.errors.length ? ', errors ' + m.errors.join('; ') : ''}`);
-        ck(m.flashes.length === 2 && m.brightFrames <= 4 && m.yMax - m.yMin > 100, `run ${r.runIndex}: exactly two flash frames are bright`, `y ${m.yMin.toFixed(0)}..${m.yMax.toFixed(0)}, flashes at ${m.flashes.map(t => t.toFixed(4)).join(', ')} s`);
-        ck(m.onsets.length === 2 && m.audioPeak > 0.3, `run ${r.runIndex}: both bursts are in the clip`, `onsets ${m.onsets.map(t => t.toFixed(4)).join(', ')} s, peak ${m.audioPeak.toFixed(2)}`);
-        const [e0, e1] = m.errorsMs;
-        console.log(`  run ${r.runIndex}: A/V error ${e0?.toFixed(1)} ms (+ = audio late); control burst ${e1?.toFixed(1)} ms, i.e. shift seen as ${(e1 - e0).toFixed(1)} ms for ${CONTROL_MS}`);
+        ck(m.flashes.length === 3 && m.brightFrames <= 6 && m.yMax - m.yMin > 100, `run ${r.runIndex}: exactly three flash frames are bright`, `y ${m.yMin.toFixed(0)}..${m.yMax.toFixed(0)}, flashes at ${m.flashes.map(t => t.toFixed(4)).join(', ')} s`);
+        ck(m.onsets.length === 3 && m.audioPeak > 0.3, `run ${r.runIndex}: all three bursts are in the clip (two system, one mic)`, `onsets ${m.onsets.map(t => t.toFixed(4)).join(', ')} s, peak ${m.audioPeak.toFixed(2)}`);
+        const [e0, e1, eMic] = m.errorsMs;
+        console.log(`  run ${r.runIndex}: A/V error ${e0?.toFixed(1)} ms (+ = audio late); control burst ${e1?.toFixed(1)} ms, i.e. shift seen as ${(e1 - e0).toFixed(1)} ms for ${CONTROL_MS}; MIC leg ${eMic?.toFixed(1)} ms`);
         console.log(`  run ${r.runIndex}: clip-av diagnostic: ${r.sealed.diag.filter(l => l.includes('clip-av')).join(' | ') || '(not emitted)'}`);
         const L = r.truth.lead;
         console.log(`  run ${r.runIndex}: loopback scheduling lead: first ${L.first?.toFixed(1)} ms (${L.firstAtMs.toFixed(0)} ms after the first present), min ${L.min?.toFixed(1)}, p50 ${L.p50?.toFixed(1)}, max ${L.max?.toFixed(1)} ms over ${L.n} packets; around the bursts ${L.aroundBursts.map(x => x?.toFixed(1)).join(' / ')} ms; ${L.suspendedStarts} scheduled while suspended`);
         const noise = r.errors.filter(e => !/favicon|404/.test(e));
         if (noise.length) console.log('  run ' + r.runIndex + ': page errors/warnings: ' + noise.slice(0, 4).join(' || '));
         ck(e0 !== null && e1 !== null && Math.abs((e1 - e0) - CONTROL_MS) < 12, `run ${r.runIndex}: the oracle sees the ${CONTROL_MS} ms control as ${CONTROL_MS} ms`, `${(e1 - e0).toFixed(1)} ms`);
-        ck(noise.every(e => !/svrn\.lol|chat\./.test(e)), `run ${r.runIndex}: nothing reached a real server`);
+        ck(r.offHost.length === 0, `run ${r.runIndex}: nothing reached a real server`, r.offHost.slice(0, 3).join(' '));
+        ck(eMic !== null && eMic !== undefined && Math.abs(eMic) < 60, `run ${r.runIndex}: the mic leg is within 60 ms (it has no scheduling lead; an over-correction would pull it early)`, `${eMic?.toFixed(1)} ms`);
     }
     const errs = results.map(r => r.m.errorsMs[0]);
-    console.log(`\nA/V ERROR of the JS pipeline under this emulation: ${errs.map(e => e.toFixed(1)).join(' / ')} ms (audio late)`);
+    console.log(`\nA/V ERROR of the JS pipeline under this emulation: system audio ${errs.map(e => e.toFixed(1)).join(' / ')} ms, mic ${results.map(r => r.m.errorsMs[2]?.toFixed(1)).join(' / ')} ms (+ = late)`);
     console.log(`  modelled Rust side${process.env.AV_RUST_MODEL === 'zero' ? ' (ZEROED)' : ''}: agent head start ${r0.truth.params.agentHeadStartMs} ms, readback lag ${r0.truth.params.readbackLagMs} ms, video IPC ${r0.truth.params.videoIpcMs} ms, audio delivery ${r0.truth.params.audioDeliveryMs} ms after each 10 ms packet`);
     ck(errs.every(e => Math.abs(e) < 250), 'A/V error under 250 ms (the number is the finding, not a pass/fail)', errs.map(e => e.toFixed(1)).join(' / '));
 } finally {

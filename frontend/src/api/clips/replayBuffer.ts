@@ -105,6 +105,10 @@ function notifyArmed(armed: boolean): void {
     }
 }
 
+/** The mic-leg DelayNode's ceiling: past nativeCapture's MAX_BACKLOG_S the
+ *  loopback resets its lead, so no larger delay is ever asked for. */
+const MIC_DELAY_MAX_S = 1;
+
 /** Spike-measured: audio arrived ~40 ms EARLY relative to video; delay it.
  *  The picker path's figure (headless synthetic run, spike S4). */
 export const AUDIO_OFFSET_US = 40_000;
@@ -119,8 +123,11 @@ export const AUDIO_OFFSET_US = 40_000;
  *  CALIBRATED 2026-09-21 by that emulation with the modelled Rust side
  *  zeroed: the JS pipeline alone (the 10 ms packet, the mixing hop, the
  *  track processor) put audio 32-51 ms late over two runs. -30 ms takes
- *  the certain part back and leaves the rest late, never early (early is
- *  noticed at ~45 ms, late only at ~125 ms). */
+ *  the certain part back and leaves the rest late in the emulation. The
+ *  video stamp's own lag behind the present (acquire, readback and the
+ *  async MFT's one or two frames in flight) pulls the other way and is
+ *  not in the emulation; only a flash and a click through the real app
+ *  can say whether the net result is a little late or a little early. */
 export const NATIVE_AUDIO_OFFSET_US = -30_000;
 
 export function isClipCaptureSupported(): boolean {
@@ -142,6 +149,13 @@ interface Session {
     sysGain: GainNode | null;
     micGain: GainNode | null;
     micSrc: MediaStreamAudioSourceNode | null;
+    /** Native sessions: the mic leg is delayed by the loopback player's
+     *  scheduling lead (leadReporter drives it), so the WHOLE mix is late
+     *  by the lead and the worker's per-sample subtraction of it
+     *  (replayWorker.ts placeAudio) is right for the mic too. Without it
+     *  the mic, which reaches the mix live, would be pulled EARLY by the
+     *  lead (the 2026-09-21 review). */
+    micDelay: DelayNode | null;
     unMic: (() => void) | null;
     resumeTimer: ReturnType<typeof setInterval> | null;
     pending: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
@@ -155,6 +169,8 @@ interface Session {
     /** The loopback scheduling lead last forwarded to the worker (leadReporter). */
     leadSentMs?: number;
     leadSentAt?: number;
+    /** The lead last written to puca.log (logAvAnchor). */
+    avLoggedLeadMs?: number | null;
     /** Native (no-picker) session teardown - stops the Rust-side capture
      *  threads. disarm() calls this before anything else if present. Reads
      *  `sysAudioStop` at CALL time, so a retried audio capture is the one
@@ -195,7 +211,15 @@ function buildMicSource(s: Session): void {
     s.micSrc = s.ctx.createMediaStreamSource(new MediaStream([track]));
     if (!s.micGain) { s.micGain = s.ctx.createGain(); s.micGain.connect(s.dest); }
     s.micGain.gain.value = Math.max(0, Math.min(2, (loadSettings().clipMicGain ?? 100) / 100));
-    s.micSrc.connect(s.micGain);
+    // Native sessions with a system-audio leg: mic -> delay(lead) -> gain.
+    // Created once per session so a re-tap keeps the delay it had; it
+    // starts at 0 and follows the first lead report within milliseconds.
+    if (s.nativeStop !== null && s.sysSrc) {
+        if (!s.micDelay) { s.micDelay = s.ctx.createDelay(MIC_DELAY_MAX_S); s.micDelay.delayTime.value = 0; s.micDelay.connect(s.micGain); }
+        s.micSrc.connect(s.micDelay);
+    } else {
+        s.micSrc.connect(s.micGain);
+    }
     emit({ hasMic: true });
 }
 
@@ -254,7 +278,7 @@ export async function armNative(): Promise<void> {
 
     const worker = new Worker(new URL('./replayWorker.ts', import.meta.url), { type: 'module' });
     const s: Session = {
-        worker, stream: new MediaStream(), ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null,
+        worker, stream: new MediaStream(), ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null, micDelay: null,
         unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0,
         nativeStop: null, sysAudioStop: null, sysSrc: null,
     };
@@ -423,6 +447,9 @@ export async function retrySystemAudio(): Promise<void> {
     s.sysGain = s.ctx.createGain();
     s.sysGain.gain.value = 1;
     s.sysSrc.connect(s.sysGain).connect(s.dest);
+    // The mic leg is re-tapped so it gets its lead delay now that there is
+    // a system-audio leg to keep in step with (buildMicSource).
+    buildMicSource(s);
     emit({ hasSystemAudio: true, systemAudioLost: null, systemAudioDevice: audio.deviceName, notice: null });
 }
 
@@ -436,6 +463,9 @@ function leadReporter(s: Session): (renderAtMs: number, leadMs: number) => void 
         const now = performance.now();
         if (s.leadSentMs !== undefined && Math.abs(leadMs - s.leadSentMs) < 2 && s.leadSentAt !== undefined && now - s.leadSentAt < 1000) return;
         s.leadSentMs = leadMs; s.leadSentAt = now;
+        // The mic leg follows the same lead (a ramp, never a step: a step in
+        // delayTime is a pitch glitch), so the mix is uniformly late by it.
+        if (s.micDelay && s.ctx) s.micDelay.delayTime.setTargetAtTime(Math.min(MIC_DELAY_MAX_S, Math.max(0, leadMs / 1000)), s.ctx.currentTime, 0.05);
         const msg: ToWorker = { t: 'audioLead', renderAtMs, leadMs };
         try { s.worker.postMessage(msg); } catch { /* worker gone */ }
     };
@@ -448,8 +478,11 @@ function leadReporter(s: Session): (renderAtMs: number, leadMs: number) => void 
  *  measures how late the old code put audio without playing anything. */
 function logAvAnchor(s: Session, av: NonNullable<WorkerStatus['avAnchor']>): void {
     if (!isTauri()) return;
-    if (s.avLoggedShiftMs !== undefined && Math.abs(av.shiftMs - s.avLoggedShiftMs) < 10) return;
-    s.avLoggedShiftMs = av.shiftMs;
+    // Written again when the shift OR the lead moved: the lead is what
+    // drifts within a session, and it is not part of the shift.
+    const leadMoved = (av.leadMs ?? 0) !== (s.avLoggedLeadMs ?? 0) && Math.abs((av.leadMs ?? 0) - (s.avLoggedLeadMs ?? 0)) >= 20;
+    if (s.avLoggedShiftMs !== undefined && Math.abs(av.shiftMs - s.avLoggedShiftMs) < 10 && !leadMoved) return;
+    s.avLoggedShiftMs = av.shiftMs; s.avLoggedLeadMs = av.leadMs;
     const line = `clip-av video-origin=${av.videoOriginMs}ms shift=${av.shiftMs}ms legacy-late=${av.legacyLateMs}ms lead=${av.leadMs ?? 'n/a'}ms`;
     void import('@tauri-apps/api/core')
         .then(({ invoke }) => invoke('log_stream_diag', { line }))
@@ -495,7 +528,7 @@ export async function arm(opts: { repick?: boolean } = {}): Promise<void> {
     const ringMs = Math.max(10_000, (settings.clipBufferSeconds ?? 300) * 1000);
 
     const worker = new Worker(new URL('./replayWorker.ts', import.meta.url), { type: 'module' });
-    const s: Session = { worker, stream, ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null, unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0, nativeStop: null, sysAudioStop: null, sysSrc: null };
+    const s: Session = { worker, stream, ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null, micDelay: null, unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0, nativeStop: null, sysAudioStop: null, sysSrc: null };
     session = s;
     try {
         const { audioReadable, micTrack } = buildMixedAudio(s, sysTrack);
