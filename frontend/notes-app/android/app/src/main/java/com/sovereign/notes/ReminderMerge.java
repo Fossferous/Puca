@@ -15,12 +15,28 @@ import java.util.Map;
  * (org.json is on the unit-test classpath, as for Púca's PushFrames), so it
  * runs under plain JUnit.
  *
- * The JS side owns the EFFECTIVE time: it may know things the server cannot
- * (a sealed snooze), so what it sent is kept for any id whose server due time
- * has NOT moved. A new id, or one whose due time changed on another device,
- * starts over from the server's due_at. An id the feed no longer lists
- * (completed, deleted, access lost) is dropped — that is how an item finished
- * elsewhere stops being announced here.
+ * The JS side owns the EFFECTIVE times: it can open what the server cannot (a
+ * sealed snooze, a repeating item's sealed rule), and it hands over SEVERAL
+ * entries for one id when the item repeats — its reminders in the next 14
+ * days, precomputed because this side cannot read the rule
+ * (frontend/src/api/reminderFeed.ts). So, per id in the feed:
+ *
+ *  - server due_at UNCHANGED: every stored entry of that id is kept as it
+ *    was (times and marks), so no future occurrence is lost to an hourly
+ *    refresh;
+ *  - due_at moved to one of the id's own stored reminder instants: the series
+ *    was advanced on another device (the reminder loop moves a fired event
+ *    on to its next reminder). The entries from that instant on are kept,
+ *    with their marks, so the one this phone may already have fired does not
+ *    fire again, and the rest of the series stays armed;
+ *  - any other move (an edit, a snooze on another device) or a new id:
+ *    everything stored for it is dropped and it starts over from the
+ *    server's due_at — marked the way the page would mark it (see
+ *    {@link #freshMark}).
+ *
+ * An id the feed no longer lists (completed, deleted, access lost) is
+ * dropped with all its entries — that is how an item finished elsewhere
+ * stops being announced here.
  */
 public final class ReminderMerge {
 
@@ -38,20 +54,83 @@ public final class ReminderMerge {
     }
 
     public static List<ReminderPlan.Entry> merge(List<ReminderPlan.Entry> stored, List<FeedRow> feed) {
-        Map<Long, ReminderPlan.Entry> byId = new HashMap<>();
-        for (ReminderPlan.Entry e : stored) byId.put(e.id, e);
+        Map<Long, List<ReminderPlan.Entry>> byId = new HashMap<>();
+        for (ReminderPlan.Entry e : stored) {
+            List<ReminderPlan.Entry> l = byId.get(e.id);
+            if (l == null) {
+                l = new ArrayList<>();
+                byId.put(e.id, l);
+            }
+            l.add(e);
+        }
         List<ReminderPlan.Entry> out = new ArrayList<>();
         for (FeedRow row : feed) {
             long ms = parseIsoMillis(row.dueAt);
             if (ms == Long.MIN_VALUE) continue; // unparseable: no alarm is better than a wrong one
-            ReminderPlan.Entry prev = byId.get(row.id);
-            if (prev != null && sameDue(prev, row.dueAt, ms)) {
-                out.add(new ReminderPlan.Entry(prev.id, prev.atMs, prev.mark, row.dueAt));
+            List<ReminderPlan.Entry> prev = byId.get(row.id);
+            List<ReminderPlan.Entry> kept = keep(prev, row.dueAt, ms);
+            if (kept.isEmpty()) {
+                out.add(new ReminderPlan.Entry(row.id, ms, freshMark(prev, row.dueAt, ms), row.dueAt));
             } else {
-                out.add(new ReminderPlan.Entry(row.id, ms, row.dueAt, row.dueAt));
+                out.addAll(kept);
             }
         }
         return out;
+    }
+
+    /** The stored entries of one id that survive a feed row saying `dueAt`
+     *  (see the class comment), re-stamped with that due so the next refresh
+     *  reads them as unchanged. Empty = start over. */
+    static List<ReminderPlan.Entry> keep(List<ReminderPlan.Entry> prev, String dueAt, long dueMs) {
+        List<ReminderPlan.Entry> out = new ArrayList<>();
+        if (prev == null || prev.isEmpty()) return out;
+        for (ReminderPlan.Entry e : prev) {
+            if (sameDue(e, dueAt, dueMs)) out.add(new ReminderPlan.Entry(e.id, e.atMs, e.mark, dueAt));
+        }
+        if (!out.isEmpty()) return out;
+        boolean advancedAlongSeries = false;
+        for (ReminderPlan.Entry e : prev) {
+            if (e.atMs == dueMs && e.mark.equals(isoMillis(e.atMs))) advancedAlongSeries = true;
+        }
+        if (!advancedAlongSeries) return out;
+        for (ReminderPlan.Entry e : prev) {
+            if (e.atMs >= dueMs) out.add(new ReminderPlan.Entry(e.id, e.atMs, e.mark, dueAt));
+        }
+        return out;
+    }
+
+    /**
+     * The mark for an entry started over from the server's due_at. The page
+     * marks a plain item with the raw due_at string, but a REPEATING one with
+     * the canonical ISO instant ("…T10:00:00.000Z"), which the server's own
+     * shape ("…T10:00:00Z") does not match. A different string is a new
+     * reminder, so guessing wrong fires the item twice once the page next
+     * syncs. An id is known to repeat when any stored entry of it carries
+     * the canonical ISO of its own time — that is only ever an occurrence
+     * mark.
+     */
+    static String freshMark(List<ReminderPlan.Entry> prev, String dueAt, long dueMs) {
+        if (prev != null) {
+            for (ReminderPlan.Entry e : prev) {
+                if (e.mark.equals(isoMillis(e.atMs))) return isoMillis(dueMs);
+            }
+        }
+        return dueAt;
+    }
+
+    /** Epoch ms → "yyyy-MM-ddTHH:mm:ss.SSSZ", exactly JS's toISOString()
+     *  (the shape of a repeating item's marks). Hand-rolled like the parser:
+     *  no java.time below API 26. */
+    public static String isoMillis(long ms) {
+        long days = Math.floorDiv(ms, 86_400_000L);
+        long rem = ms - days * 86_400_000L;
+        long[] ymd = civilFromDays(days);
+        long h = rem / 3_600_000L;
+        long mi = (rem / 60_000L) % 60;
+        long se = (rem / 1000L) % 60;
+        long frac = rem % 1000L;
+        return String.format(java.util.Locale.ROOT, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                ymd[0], ymd[1], ymd[2], h, mi, se, frac);
     }
 
     /** Has the server's due time for this entry stayed where it was? An entry
@@ -148,6 +227,20 @@ public final class ReminderMerge {
         } catch (NumberFormatException | IndexOutOfBoundsException e) {
             return Long.MIN_VALUE;
         }
+    }
+
+    /** The inverse of {@link #daysFromCivil}: {year, month, day} (H. Hinnant). */
+    static long[] civilFromDays(long z) {
+        z += 719468;
+        long era = (z >= 0 ? z : z - 146096) / 146097;
+        long doe = z - era * 146097;
+        long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        long y = yoe + era * 400;
+        long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        long mp = (5 * doy + 2) / 153;
+        long d = doy - (153 * mp + 2) / 5 + 1;
+        long m = mp + (mp < 10 ? 3 : -9);
+        return new long[] { m <= 2 ? y + 1 : y, m, d };
     }
 
     /** Days since 1970-01-01 for a proleptic Gregorian date (H. Hinnant). */

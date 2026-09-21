@@ -126,6 +126,114 @@ public class ReminderMergeTest {
         }
     }
 
+    // --- a repeating item: several entries per id ------------------------------
+
+    private static final long DAY = 86_400_000L;
+
+    /** What the page hands over for a weekly item due at DUE: its reminder
+     *  and the next two, each marked with its own canonical ISO instant. */
+    private static List<ReminderPlan.Entry> weekly(String due) {
+        return Arrays.asList(
+                new ReminderPlan.Entry(1, DUE_MS, ReminderMerge.isoMillis(DUE_MS), due),
+                new ReminderPlan.Entry(1, DUE_MS + 7 * DAY, ReminderMerge.isoMillis(DUE_MS + 7 * DAY), due),
+                new ReminderPlan.Entry(1, DUE_MS + 14 * DAY, ReminderMerge.isoMillis(DUE_MS + 14 * DAY), due));
+    }
+
+    private static void assertSameEntries(List<ReminderPlan.Entry> want, List<ReminderPlan.Entry> got) {
+        assertEquals(want.size(), got.size());
+        for (int i = 0; i < want.size(); i++) {
+            assertEquals(want.get(i).id, got.get(i).id);
+            assertEquals(want.get(i).atMs, got.get(i).atMs);
+            assertEquals(want.get(i).mark, got.get(i).mark);
+        }
+    }
+
+    @Test
+    public void anUnchangedDueKeepsEveryEntryOfTheId() {
+        List<ReminderPlan.Entry> stored = weekly(DUE);
+        List<ReminderPlan.Entry> once = ReminderMerge.merge(stored,
+                Collections.singletonList(new ReminderMerge.FeedRow(1, DUE)));
+        assertSameEntries(stored, once);
+        // ...and hour after hour: a refresh never loses a future occurrence
+        List<ReminderPlan.Entry> twice = ReminderMerge.merge(once,
+                Collections.singletonList(new ReminderMerge.FeedRow(1, DUE)));
+        assertSameEntries(stored, twice);
+    }
+
+    @Test
+    public void everyEntryOfAnIdGoesWhenTheIdLeavesTheFeed() {
+        List<ReminderPlan.Entry> out = ReminderMerge.merge(weekly(DUE),
+                Collections.singletonList(new ReminderMerge.FeedRow(2, DUE)));
+        assertEquals(1, out.size());
+        assertEquals(2L, out.get(0).id);
+    }
+
+    @Test
+    public void aDueMovedElsewhereDropsTheOccurrencesAndStartsOver() {
+        // Edited on another device to an hour later: the old series times are
+        // no longer known to be right.
+        String moved = "2026-09-19T11:00:00Z";
+        List<ReminderPlan.Entry> out = ReminderMerge.merge(weekly(DUE),
+                Collections.singletonList(new ReminderMerge.FeedRow(1, moved)));
+        assertEquals(1, out.size());
+        assertEquals(DUE_MS + 3_600_000L, out.get(0).atMs);
+        assertEquals(moved, out.get(0).due);
+        // marked as the page marks a repeating item, so its next sync does
+        // not see a new reminder and fire it twice
+        assertEquals("2026-09-19T11:00:00.000Z", out.get(0).mark);
+    }
+
+    @Test
+    public void aPlainItemStartedOverKeepsTheRawDueAsItsMark() {
+        // positive control for the ISO rule: nothing says this item repeats
+        ReminderPlan.Entry plain = new ReminderPlan.Entry(1, DUE_MS, DUE, DUE);
+        String moved = "2026-09-19T11:00:00Z";
+        List<ReminderPlan.Entry> out = ReminderMerge.merge(Collections.singletonList(plain),
+                Collections.singletonList(new ReminderMerge.FeedRow(1, moved)));
+        assertEquals(moved, out.get(0).mark);
+    }
+
+    @Test
+    public void advancedAlongItsSeriesOnAnotherDeviceKeepsTheRestOfTheSeries() {
+        // The reminder loop elsewhere moved due_at on to next week's reminder,
+        // which the page had already handed over as an occurrence.
+        String nextWeek = "2026-09-26T10:00:00Z";
+        List<ReminderPlan.Entry> out = ReminderMerge.merge(weekly(DUE),
+                Collections.singletonList(new ReminderMerge.FeedRow(1, nextWeek)));
+        assertEquals(2, out.size());
+        assertEquals(DUE_MS + 7 * DAY, out.get(0).atMs);
+        assertEquals("the mark it may already have fired under", ReminderMerge.isoMillis(DUE_MS + 7 * DAY), out.get(0).mark);
+        assertEquals(DUE_MS + 14 * DAY, out.get(1).atMs);
+        assertEquals(nextWeek, out.get(0).due);
+        // and the next refresh reads that as unchanged
+        assertEquals(2, ReminderMerge.merge(out,
+                Collections.singletonList(new ReminderMerge.FeedRow(1, nextWeek))).size());
+    }
+
+    @Test
+    public void aFiredOccurrenceDoesNotFireAgainWhenTheAdvanceLands() {
+        // The phone fired next week's reminder while Notes was closed; then
+        // another device advanced due_at to it. One alert, not two.
+        long at = DUE_MS + 7 * DAY;
+        java.util.Map<String, String> fired = new java.util.HashMap<>();
+        fired.put("1", ReminderMerge.isoMillis(at));
+        List<ReminderPlan.Entry> out = ReminderMerge.merge(weekly(DUE),
+                Collections.singletonList(new ReminderMerge.FeedRow(1, "2026-09-26T10:00:00Z")));
+        assertTrue(ReminderPlan.plan(out, fired, at + 60_000).dueNow.isEmpty());
+    }
+
+    @Test
+    public void isoMillisIsTheShapeOfJavaScriptToIsoString() {
+        assertEquals("2026-09-19T10:00:00.000Z", ReminderMerge.isoMillis(DUE_MS));
+        assertEquals("2026-09-19T10:00:00.123Z", ReminderMerge.isoMillis(DUE_MS + 123));
+        assertEquals("1970-01-01T00:00:00.000Z", ReminderMerge.isoMillis(0));
+        assertEquals("2000-02-29T00:00:00.000Z", ReminderMerge.isoMillis(951_782_400_000L));
+        assertEquals("1969-12-31T23:59:59.999Z", ReminderMerge.isoMillis(-1));
+        for (long ms : new long[] { DUE_MS, DUE_MS + 7 * DAY + 59_999, 4_102_444_800_000L }) {
+            assertEquals(ms, ReminderMerge.parseIsoMillis(ReminderMerge.isoMillis(ms)));
+        }
+    }
+
     @Test
     public void nullMarkBecomesEmptyAndDueStaysNull() {
         ReminderPlan.Entry e = new ReminderPlan.Entry(1, 5, null, null);

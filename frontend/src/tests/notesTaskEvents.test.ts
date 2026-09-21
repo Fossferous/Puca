@@ -106,6 +106,27 @@ describe('the stream client', () => {
         c.stop();
     });
 
+    it('a 401 for a token replaced while the request was out retries with the new one, and does not expire', async () => {
+        // Púca Notes resumed: the stream reconnected on the stale token, then
+        // the page adopted the background job's renewal.
+        const f = streamingFetch();
+        f.respond({ status: 401 });
+        let tok = 'stale';
+        const onUnauthorized = vi.fn();
+        const impl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+            const r = await (f.impl as unknown as (u: RequestInfo | URL, i?: RequestInit) => Promise<Response>)(url, init);
+            tok = 'renewed';
+            f.respond({ status: 200 });
+            return r;
+        });
+        const c = startTaskEvents({ url: 'u', token: () => tok, onEvent: () => {}, onState: () => {}, fetchImpl: impl as unknown as typeof fetch, onUnauthorized });
+        await flush();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(onUnauthorized).not.toHaveBeenCalled();
+        expect(f.calls.map(x => x.auth)).toEqual(['Bearer stale', 'Bearer renewed']);
+        c.stop();
+    });
+
     it('an evicted stream backs off for minutes instead of fighting for the slot', async () => {
         const f = streamingFetch();
         const c = startTaskEvents({ url: 'u', token: () => 't', onEvent: () => {}, onState: () => {}, fetchImpl: f.impl, random: () => 1 });

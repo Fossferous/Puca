@@ -42,12 +42,21 @@ import { activeSnooze, nextReminderAfter, parseSchedule, snoozeMovedDue } from '
 import { parseServerTimestamp } from '../utils/serverTime';
 import { ApiError } from './client';
 
+/**
+ * One reminder, as EVERY engine sees it — this loop, and Púca Notes' Android
+ * alarms (NotesNative.syncReminders; ReminderPlan.Entry is its Java twin).
+ * Ids and times only, never content.
+ */
 export interface ReminderEntry {
     id: number;
+    /** When to remind, epoch ms (a snooze included). */
     at: number;
+    /** Changes whenever the item must fire again. */
     mark: string;
-    /** The server's raw due_at this entry came from. */
-    due?: string;
+    /** The server's raw due_at this entry came from: how a native background
+     *  refresh tells "unchanged" (keep every entry of the id) from "moved on
+     *  another device" (start over from the server's time). */
+    due: string;
 }
 
 /** How far ahead a repeating item's later reminders are handed out. */

@@ -17,8 +17,9 @@
  */
 import { listTaskReminders, type TaskReminder } from './tasks';
 import { notifyTasksDue } from './desktopNotify';
-import { applyAdvances, openReminderFeed, planAdvances, planEntries, toReminderEntries } from './reminderFeed';
-import { parseServerTimestamp } from '../utils/serverTime';
+import {
+    applyAdvances, openReminderFeed, planAdvances, planEntries, toReminderEntries, type ReminderEntry,
+} from './reminderFeed';
 
 const FIRED_KEY = 'sovereignTaskRemindersFired';
 /** Re-fetch cadence: catches due times added/edited on other devices. */
@@ -54,39 +55,15 @@ export function planReminders(
     };
 }
 
-/**
- * One reminder as a native alarm engine sees it — the contract Púca Notes'
- * Android app (NotesNative.syncReminders) and the task-timing work share:
- * `at` is the EFFECTIVE fire time in epoch ms (snooze included once it
- * exists), `mark` changes whenever the item must fire again, and `due` is the
- * server's raw due_at, so a background refresh can tell "unchanged" from
- * "moved on another device". Ids and times only — never content.
- */
-export interface ReminderEntry {
-    id: number;
-    at: number;
-    mark: string;
-    due?: string;
-}
-
-/** The feed as ReminderEntry[]; rows with an unreadable time are dropped. */
-export function reminderEntries(reminders: TaskReminder[]): ReminderEntry[] {
-    const out: ReminderEntry[] = [];
-    for (const r of reminders) {
-        const at = parseServerTimestamp(r.due_at);
-        if (!Number.isFinite(at)) continue;
-        out.push({ id: r.id, at, mark: r.due_at, due: r.due_at });
-    }
-    return out;
-}
-
 /** Options for a caller that fires reminders some other way (Púca Notes'
  *  native alarms). Omitted, the loop behaves exactly as it always has. */
 export interface TaskReminderOptions {
     /** false: never post a notification from here (and keep no fired
      *  markers) — something else owns firing. Default true. */
     notify?: boolean;
-    /** Every successful fetch, as entries. Errors thrown here are swallowed. */
+    /** Every successful fetch, as the shared entries (api/reminderFeed.ts:
+     *  opened timing, snoozes applied, a repeating item's occurrences) —
+     *  what a native alarm engine needs. Errors thrown here are swallowed. */
     onFeed?: (entries: ReminderEntry[]) => void;
 }
 
@@ -154,7 +131,9 @@ export function startTaskReminders(opts: TaskReminderOptions = {}): () => void {
         const plan = planEntries(entries, notify ? loadFired() : {}, now);
         if (notify) {
             saveFired(plan.prunedFired);
-            if (plan.toFire.length > 0) notifyTasksDue(plan.toFire.length);
+            if (plan.toFire.length > 0) {
+                notifyTasksDue(plan.toFire.length, plan.toFire.map(e => ({ id: e.id, mark: e.mark })));
+            }
         }
         const { advances, nextCheckAt } = planAdvances(opened, now);
         if (advances.length > 0) void applyAdvances(advances);

@@ -26,7 +26,7 @@ vi.mock('@capacitor/core', () => ({
     registerPlugin: () => fake,
 }));
 
-const { rescueOrExpire, adoptFromNative, adoptOnResume } = await import('../notes/native/nativeSessionRescue');
+const { rescueOrExpire, rescueWhenOnline, adoptFromNative, adoptOnResume } = await import('../notes/native/nativeSessionRescue');
 
 function b64url(s: string): string {
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -128,5 +128,51 @@ describe('adoption on resume', () => {
         } finally {
             off();
         }
+    });
+});
+
+describe('the token expired while offline, then the network came back', () => {
+    it('the job renewed it meanwhile: adopted, NOT expired', async () => {
+        const renewed = RENEWED();
+        localStorage.setItem('auth_token', EXPIRED());
+        fake.takeRenewedToken.mockResolvedValue({ token: renewed, account: '7' });
+        const expire = vi.fn();
+        const onAdopted = vi.fn();
+        const off = rescueWhenOnline({ adopt: adoptFromNative, onAdopted, expire });
+        try {
+            expect(fake.takeRenewedToken).not.toHaveBeenCalled();   // nothing until online
+            window.dispatchEvent(new Event('online'));
+            await vi.waitFor(() => expect(onAdopted).toHaveBeenCalledTimes(1));
+            expect(expire).not.toHaveBeenCalled();
+            expect(localStorage.getItem('auth_token')).toBe(renewed);
+            window.dispatchEvent(new Event('online'));             // one shot
+            await new Promise(r => setTimeout(r, 0));
+            expect(fake.takeRenewedToken).toHaveBeenCalledTimes(1);
+        } finally {
+            off();
+        }
+    });
+
+    it('nothing to adopt: expires once online (control)', async () => {
+        localStorage.setItem('auth_token', EXPIRED());
+        fake.takeRenewedToken.mockResolvedValue({ token: null, account: null });
+        const expire = vi.fn();
+        const off = rescueWhenOnline({ adopt: adoptFromNative, onAdopted: vi.fn(), expire });
+        try {
+            window.dispatchEvent(new Event('online'));
+            await vi.waitFor(() => expect(expire).toHaveBeenCalledTimes(1));
+        } finally {
+            off();
+        }
+    });
+
+    it('unsubscribed before the network returns: nothing runs', async () => {
+        const expire = vi.fn();
+        const off = rescueWhenOnline({ adopt: adoptFromNative, onAdopted: vi.fn(), expire });
+        off();
+        window.dispatchEvent(new Event('online'));
+        await new Promise(r => setTimeout(r, 0));
+        expect(expire).not.toHaveBeenCalled();
+        expect(fake.takeRenewedToken).not.toHaveBeenCalled();
     });
 });

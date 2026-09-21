@@ -12,9 +12,9 @@ import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vite
 const listTaskReminders = vi.fn();
 const notifyTasksDue = vi.fn();
 vi.mock('../api/tasks', () => ({ listTaskReminders: () => listTaskReminders() }));
-vi.mock('../api/desktopNotify', () => ({ notifyTasksDue: (n: number) => notifyTasksDue(n) }));
+vi.mock('../api/desktopNotify', () => ({ notifyTasksDue: (...a: unknown[]) => notifyTasksDue(...a) }));
 
-const { reminderEntries, startTaskReminders } = await import('../api/taskReminders');
+const { startTaskReminders } = await import('../api/taskReminders');
 
 const settle = async () => {
     for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
@@ -36,26 +36,13 @@ const firedWrites = () => (localStorage.setItem as unknown as Mock).mock.calls.f
 let stop: (() => void) | null = null;
 afterEach(() => { stop?.(); stop = null; });
 
-describe('reminderEntries', () => {
-    it('maps the feed to {id, at, mark, due}', () => {
-        expect(reminderEntries([
-            { id: 5, channel_id: null, list_id: 2, due_at: PAST },
-        ])).toEqual([{ id: 5, at: Date.parse(PAST), mark: PAST, due: PAST }]);
-    });
-    it('drops a row whose time cannot be read', () => {
-        expect(reminderEntries([
-            { id: 1, channel_id: null, list_id: 2, due_at: 'never' },
-            { id: 2, channel_id: null, list_id: 2, due_at: FUTURE },
-        ]).map(e => e.id)).toEqual([2]);
-    });
-});
-
 describe('startTaskReminders', () => {
     it('default: a past-due item notifies (positive control)', async () => {
         listTaskReminders.mockResolvedValue([{ id: 1, channel_id: null, list_id: 2, due_at: PAST }]);
         stop = startTaskReminders();
         await settle();
-        expect(notifyTasksDue).toHaveBeenCalledWith(1);
+        // the count, and exactly which reminders: what Púca asks Notes about
+        expect(notifyTasksDue).toHaveBeenCalledWith(1, [{ id: 1, mark: PAST }]);
         expect(firedWrites().some(c => String(c[1]).includes(PAST))).toBe(true);
     });
 
@@ -69,7 +56,13 @@ describe('startTaskReminders', () => {
         await settle();
         expect(notifyTasksDue).not.toHaveBeenCalled();
         expect(onFeed).toHaveBeenCalledTimes(1);
-        expect(onFeed.mock.calls[0][0].map((e: { id: number }) => e.id)).toEqual([1, 2]);
+        // The ONE entry shape (api/reminderFeed.ts): the raw due_at rides
+        // along, which is how the native refresh tells an unchanged item
+        // (keep every entry of it) from one moved on another device.
+        expect(onFeed.mock.calls[0][0]).toEqual([
+            { id: 1, at: Date.parse(PAST), mark: PAST, due: PAST },
+            { id: 2, at: Date.parse(FUTURE), mark: FUTURE, due: FUTURE },
+        ]);
         // No fired markers either: this loop fired nothing.
         expect(firedWrites()).toEqual([]);
     });
@@ -78,7 +71,7 @@ describe('startTaskReminders', () => {
         listTaskReminders.mockResolvedValue([{ id: 1, channel_id: null, list_id: 2, due_at: PAST }]);
         stop = startTaskReminders({ onFeed: () => { throw new Error('bad consumer'); } });
         await settle();
-        expect(notifyTasksDue).toHaveBeenCalledWith(1);
+        expect(notifyTasksDue).toHaveBeenCalledTimes(1);
     });
 
     it('a failed fetch calls nothing', async () => {

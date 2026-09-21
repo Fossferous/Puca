@@ -202,8 +202,13 @@ class ApiClient {
                 // A 401 on a request that CARRIED a token means the session is
                 // dead — surface it once app-wide. (Tokenless 401s — e.g. a
                 // wrong password on /auth/* — are ordinary errors, and 403s
-                // are permission denials, not expiry.)
-                if (response.status === 401 && hadToken) {
+                // are permission denials, not expiry.) Only for the token
+                // still CURRENT: a 401 for one that has since been replaced
+                // (a renewal adopted from Púca Notes' background job while
+                // this request was out, a sign-in in another tab) refused the
+                // old credential, not this session — signalling it would sign
+                // the user out and delete the good token with it.
+                if (response.status === 401 && hadToken && getToken() === sentToken) {
                     signalAuthExpired();
                 }
                 const errorText = await response.text();

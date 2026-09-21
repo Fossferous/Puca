@@ -14,8 +14,11 @@
 import { loadSettings } from '../components/settingsStore';
 import { appIsForeground, isMobile, isTauri } from './platform';
 import { isBadgeWorthy, setUnreadBadge } from './unreadBadge';
-import { mobileAppAvailable, notesOwnsDueReminders, postMobileNotification, requestMobileNotificationPermission } from './mobileApp';
+import {
+    type DueReminder, mobileAppAvailable, notesOwnsDueReminders, postMobileNotification, requestMobileNotificationPermission,
+} from './mobileApp';
 import { currentUserIdFromToken } from './auth';
+import { API_BASE_URL } from './config';
 
 export type NotifyDecision =
     | { fire: true }
@@ -285,7 +288,7 @@ export function notifyNewMessage(opts: {
  * Clicking it (web path) raises the app and opens the Tasks view via the
  * `sovereign:open-tasks` event Chat listens for.
  */
-export function notifyTasksDue(count: number): void {
+export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
     if (count <= 0) return;
     const mobileNative = isMobile() && mobileAppAvailable();
     const settings = loadSettings();
@@ -301,15 +304,18 @@ export function notifyTasksDue(count: number): void {
 
     if (isMobile() && mobileNative) {
         void (async () => {
-            // Púca Notes on this phone AND able to deliver (its own answer:
-            // same account, keeping up, notifications on, alarm set): it owns
-            // due-item reminders, so Púca stays quiet and one due item is one
-            // notification. Anything else — no, not installed, an older Notes
-            // or an older Púca APK that cannot ask — Púca notifies. ONE
-            // diagnostics entry, written once the gate has answered, so the
-            // buffer never says 'fired' for something that was not posted.
+            // Púca Notes on this phone AND able to deliver THESE (its own
+            // answer: same account on the same server, keeping up,
+            // notifications on, alarm set, every one of `due` armed under
+            // the same mark): it owns them, so Púca stays quiet and one due
+            // item is one notification. Anything else — no, not installed, an
+            // older Notes or an older Púca APK that cannot ask, an item Notes
+            // has not fetched yet — Púca notifies. ONE diagnostics entry,
+            // written once the gate has answered, so the buffer never says
+            // 'fired' for something that was not posted.
             const uid = currentUserIdFromToken();
-            if (await notesOwnsDueReminders(uid === null ? null : String(uid)) === true) {
+            const account = uid === null ? null : String(uid);
+            if (await notesOwnsDueReminders({ account, server: API_BASE_URL, due }) === true) {
                 record('notes-app-owns');
                 return;
             }
