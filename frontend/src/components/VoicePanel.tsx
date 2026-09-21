@@ -73,7 +73,7 @@ import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
 import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon } from './Icons';
 import { Toast } from './Toast';
-import { useDfSettledOffer } from './useDfSettledOffer';
+import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from './useDfSettledOffer';
 import './VoicePanel.css';
 
 
@@ -3167,7 +3167,24 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     >
                         Try DeepFilter again
                     </button>
-                    <button className="voice-load-offer-btn ghost" onClick={() => setDfOffer(null)}>Keep RNNoise</button>
+                    <button
+                        className="voice-load-offer-btn ghost"
+                        onClick={() => {
+                            setDfOffer(null);
+                            // The bridge already carries the call, but the
+                            // MODE was still DeepFilter: the picker kept
+                            // naming it and the next mic restart rebuilt it.
+                            // Keep = the RNNoise tier for this session (the
+                            // picker follows via NOISE_MODE_EVENT), and the
+                            // mic rebuilt on that lighter graph.
+                            keepRnnoiseForSession();
+                            setNoiseMode('rnnoise');
+                            setMicNotice(KEEP_RNNOISE_NOTICE);
+                            void applyNoiseModeLive();
+                        }}
+                    >
+                        Keep RNNoise
+                    </button>
                 </div>
             )}
             {/* Permission Help Modal — per-platform instructions (MicPermissionHelp) */}

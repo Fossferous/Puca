@@ -7,6 +7,14 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
+- **"Keep RNNoise" now keeps RNNoise.** When DeepFilter fell behind and the
+  voice panel offered *Keep RNNoise*, the button only closed the notice: your
+  sound was already on RNNoise, but the setting still said DeepFilter, so the
+  panel kept naming it and the next microphone restart or device change
+  brought DeepFilter, and the overload, straight back. The button now switches
+  your microphone to RNNoise for the rest of the session and the picker says
+  so; pick DeepFilter to try it again, and the next launch starts on your
+  saved choice as before.
 - **Sound in automatically recorded clips no longer runs 100 to 200 ms
   behind the picture, and no longer drifts.** The desktop-audio player the
   clip buffer records through schedules each packet a little ahead, and
