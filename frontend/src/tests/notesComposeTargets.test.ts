@@ -11,11 +11,16 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { COMPOSE_TARGETS, composeModeFor } from '../notes/model/composeIntent';
 
-const JAVA = join(process.cwd(), 'notes-app', 'android', 'app', 'src', 'main', 'java', 'com', 'sovereign', 'notes');
-const RES = join(process.cwd(), 'notes-app', 'android', 'app', 'src', 'main', 'res');
+// From THIS file, not the cwd (notesNativeMin.test.ts does the same): run
+// from the repo root and a cwd-relative path reads as a broken test rather
+// than as the drift it is there to catch.
+const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const JAVA = join(FRONTEND, 'notes-app', 'android', 'app', 'src', 'main', 'java', 'com', 'sovereign', 'notes');
+const RES = join(FRONTEND, 'notes-app', 'android', 'app', 'src', 'main', 'res');
 const notifier = readFileSync(join(JAVA, 'NotesNotifier.java'), 'utf8');
 const shortcuts = readFileSync(join(RES, 'xml', 'shortcuts.xml'), 'utf8');
 
