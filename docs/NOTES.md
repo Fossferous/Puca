@@ -675,6 +675,18 @@ header says how to confirm it can fail: revert the block in
 `src/dm_handlers.rs` and the delivery, echo, park and timestamp stages go red
 while the WebSocket control stage stays green.
 
+**That fan-out must reach EVERY host before this bundle does.** The repo's
+standing order is clients first (CLAUDE.md), and the DM half is the exception:
+the client cannot tell an old server from a new one, so against a host without
+the fan-out *Send to Púca…* still says "Sent to …", the message is stored, and
+nothing is announced — no live bubble, no wake, no reorder, just a silent
+delivery whenever the recipient next opens that conversation. It is the
+failure the feature was built to avoid, and it looks like success from both
+ends. So ship `dual-ship.sh backend` to BOTH hosts first, then the Notes
+bundle that offers DM targets. ("No HTTP contract change" is true of the route
+and says nothing about the order: the route already existed, and what changed
+is what it DOES.)
+
 **Save to Notes** is the other direction, on a message's menu in Púca (right
 click, or long press on a phone). It keeps the message as a new note or as an
 item in one you already have, and only your OWN notes are offered — never a
