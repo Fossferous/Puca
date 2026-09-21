@@ -87,7 +87,8 @@ describe('copyBlockersOf / copyRefusal', () => {
 
     it('POSITIVE CONTROL: a readable note reports nothing and is copied', () => {
         expect(copyBlockersOf(clean)).toEqual({
-            itemsNotLoaded: false, unreadableItems: 0, unreadableSchedules: 0, unreadableBody: false, lockedSidecar: false,
+            itemsNotLoaded: false, unreadableItems: 0, unreadableSchedules: 0,
+            unreadableBody: false, unreadableTitle: false, lockedSidecar: false,
         });
         expect(copyRefusal(copyBlockersOf(clean))).toBeNull();
     });
@@ -105,6 +106,8 @@ describe('copyBlockersOf / copyRefusal', () => {
             cardOf([task(1)], { body: '[Unable to decrypt]' }),
             cardOf([task(1)], { noteAttachments: '[Unable to decrypt]' }),
             cardOf([task(1, { attachments: '[Unable to decrypt]' })]),
+            // Otherwise the copy would be called "[Unable to decrypt] (copy)".
+            cardOf([task(1)], { title: '[Unable to decrypt]' }),
         ];
         for (const c of cases) {
             expect(copyRefusal(copyBlockersOf(c)), JSON.stringify(copyBlockersOf(c))).toMatch(/can’t be read on this device/);

@@ -135,6 +135,9 @@ export interface CopyBlockers {
     unreadableItems: number;
     unreadableSchedules: number;
     unreadableBody: boolean;
+    /** The note's own title cannot be read here, so the copy would be called
+     *  "[Unable to decrypt] (copy)". */
+    unreadableTitle: boolean;
     lockedSidecar: boolean;
 }
 
@@ -144,6 +147,7 @@ export function copyBlockersOf(card: NoteCard): CopyBlockers {
         unreadableItems: 0,
         unreadableSchedules: 0,
         unreadableBody: !!card.body && isUndecryptable(card.body),
+        unreadableTitle: isUndecryptable(card.title),
         lockedSidecar: isAttachmentsLocked(card.noteAttachments ?? null),
     };
     for (const t of card.tasks ?? []) {
@@ -158,7 +162,7 @@ export function copyBlockersOf(card: NoteCard): CopyBlockers {
  *  can. The wording matches the "Hide checkboxes" refusal. */
 export function copyRefusal(b: CopyBlockers): string | null {
     if (b.itemsNotLoaded) return 'Still opening this note — try the copy again in a moment';
-    if (b.unreadableItems > 0 || b.unreadableSchedules > 0 || b.unreadableBody || b.lockedSidecar) {
+    if (b.unreadableItems > 0 || b.unreadableSchedules > 0 || b.unreadableBody || b.unreadableTitle || b.lockedSidecar) {
         return 'Some of this note can’t be read on this device, so it can’t be copied here';
     }
     return null;
