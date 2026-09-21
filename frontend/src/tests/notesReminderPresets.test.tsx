@@ -129,6 +129,44 @@ describe('the date & repeat dialog offers them too — with the privacy switch s
         expect(alert.value).toBe('0');
     });
 
+    it('the dialog opened from INSIDE a note gets them too — the commonest way in', () => {
+        // The due-editor row above it already uses the setting, so a dialog
+        // still on 09:00 would be the same account contradicting itself.
+        const el = mount(
+            <TaskTree
+                tasks={[task]} onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}}
+                onMove={() => {}} onSetDue={() => {}} onSetSchedule={() => {}} onSetAttachments={() => {}}
+                reminderTimes={TIMES}
+            />,
+        );
+        act(() => buttons(el).find(b => b.getAttribute('aria-label') === 'Add date & repeat')!.click());
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        expect(dialog).not.toBeNull();
+        // The presets say what they mean, and tapping one lands on it. (The
+        // start time itself is not the tell here: a dialog opened on TODAY
+        // starts at the next full hour, setting or no setting.)
+        expect([...dialog.querySelectorAll('.sched-presets button')].map(b => b.getAttribute('title')))
+            .toEqual(['Morning — 07:30', 'Afternoon — 13:15', 'Evening — 21:45']);
+        act(() => (dialog.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value).toBe('07:30');
+
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        // Positive control: Púca's own Tasks view passes no setting and still
+        // gets a working dialog, at the defaults.
+        const plain = mount(
+            <TaskTree
+                tasks={[task]} onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}}
+                onMove={() => {}} onSetDue={() => {}} onSetSchedule={() => {}} onSetAttachments={() => {}}
+            />,
+        );
+        act(() => buttons(plain).find(b => b.getAttribute('aria-label') === 'Add date & repeat')!.click());
+        const theirs = document.body.querySelector('.sched-dialog')!;
+        act(() => (theirs.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(theirs.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value)
+            .toBe(DEFAULT_REMINDER_TIMES.morning);
+    });
+
     it('a new schedule with no preset tapped starts at the account’s "new reminders at" time', () => {
         mount(<ScheduleEditor task={task} onSave={() => {}} onClose={() => {}} now={NOW} defaultDate="2030-10-09" times={TIMES} />);
         expect(document.body.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value).toBe('08:00');

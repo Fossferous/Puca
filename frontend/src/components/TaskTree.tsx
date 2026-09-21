@@ -645,6 +645,7 @@ export function TaskTree({
             {scheduleFor === node.task.id && onSetSchedule && (
                 <ScheduleEditor
                     task={node.task}
+                    times={reminderTimes}
                     onClose={() => setScheduleFor(null)}
                     onSave={(schedule, dueAt) => { setScheduleFor(null); onSetSchedule(node.task, schedule, dueAt); }}
                 />
