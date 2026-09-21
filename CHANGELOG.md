@@ -25,7 +25,9 @@ one-line summary; this file is the full story. Versions follow
   text or pictures this device cannot read yet is not offered either — saving
   into one would write over what you still have elsewhere. Messages you cannot
   read, and clips, are not offered. While it is saving, the window stays put —
-  closing it would not stop the save.
+  closing it would not stop the save — and if the pictures fail after the text
+  has gone in, it says the text was kept, so you do not save the same message
+  twice trying again.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

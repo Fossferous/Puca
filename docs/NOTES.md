@@ -696,9 +696,16 @@ device has not got, and no device could ever read it again. That is the rule
 text for exactly the same reason. The refusal survives changing your mind about
 pictures after picking a note, and a save that half-succeeds — the note made,
 the item refused — undoes the note rather than leaving it behind with pictures
-that nothing names. And like the send sheet, this one cannot be dismissed while
-a save is in flight: neither the backdrop nor the X closes it, because closing
-does not cancel the upload and saving again would keep the message twice.
+that nothing names.
+
+Into a note you ALREADY have there is nothing to undo: the item, or the text
+appended to it, is in a note you keep. So a failure after that point says the
+text was kept and the pictures were not, and points you at Notes to finish it
+— rather than "nothing was kept", which is a lie that earns a retry, and the
+retry writes the same line a second time. And like the send sheet, this one
+cannot be dismissed while a save is in flight: neither the backdrop nor the X
+closes it, because closing does not cancel the upload and saving again would
+keep the message twice.
 
 Like every other picture and text save, a capture needs the network (see the
 offline bullet below); it is never queued.

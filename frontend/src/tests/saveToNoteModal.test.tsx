@@ -29,6 +29,8 @@ let features = { attachments: true };
 let createFails = false;
 let addItemFails = false;
 let deleteListFails = false;
+let attachFails = false;
+let copyFails = false;
 /** Holds `copyRefsIntoMyNote` open so a save can be observed IN FLIGHT. */
 let copyGate: { promise: Promise<void>; release: () => void } | null = null;
 function holdCopies(): () => void {
@@ -62,7 +64,7 @@ vi.mock('../api/listContent', async (orig) => {
             return { id: 99, title } as TaskList;
         }),
         setTaskListBody: vi.fn(async () => undefined),
-        setTaskListAttachments: vi.fn(async () => undefined),
+        setTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); }),
     };
 });
 vi.mock('../api/captureToNote', async (orig) => {
@@ -71,6 +73,7 @@ vi.mock('../api/captureToNote', async (orig) => {
         ...real,
         copyRefsIntoMyNote: vi.fn(async (refs: { href: string; name: string }[]) => {
             if (copyGate) await copyGate.promise;
+            if (copyFails) throw new Error('the copies would not upload');
             return refs.map((r, i) => ({ href: `sovereign-enc:COPY${i}?k=NEW${i}`, name: r.name }));
         }),
         discardCopies: vi.fn(async () => undefined),
@@ -114,6 +117,8 @@ beforeEach(() => {
     createFails = false;
     addItemFails = false;
     deleteListFails = false;
+    attachFails = false;
+    copyFails = false;
     copyGate = null;
     lists = [
         list(1, 'Shopping'),
@@ -265,6 +270,53 @@ describe('saving', () => {
         expect(document.querySelector('.save-note-error')!.textContent).toMatch(/server said no/);
         expect(rowNamed('New note')!.className).toContain('picked');
         expect(discardCopies).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * An EXISTING note has no undo. The new-note branch deletes the note it
+     * made and can honestly say nothing was kept; here the item or the
+     * appended text is already in a note the user keeps, so "nothing was kept"
+     * would be a lie that earns a retry — and the retry appends the same line
+     * a second time.
+     */
+    it('pictures failing on an EXISTING note says the text was kept, and deletes nothing', async () => {
+        attachFails = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        // The item went in, and there is no note of ours to take away.
+        expect(calls.tasks).toEqual([{ listId: 1, description: 'look' }]);
+        expect(deleteTaskList).not.toHaveBeenCalled();
+        // Nothing names the copies now, so those DO go back.
+        expect(discardCopies).toHaveBeenCalledTimes(1);
+        const msg = document.querySelector('.save-note-error')!.textContent ?? '';
+        expect(msg).toMatch(/text was kept/i);
+        expect(msg).not.toMatch(/nothing was kept/i);
+    });
+
+    it('the same on an existing note saved AS ITS TEXT', async () => {
+        attachFails = true;
+        await mount('look at this\nand this ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        expect((document.querySelector('.save-note-shape button.active') as HTMLButtonElement).textContent)
+            .toMatch(/note’s text/);
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(setTaskListBody).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('.save-note-error')!.textContent).toMatch(/text was kept/i);
+    });
+
+    /** Positive control for the two above: when the failure comes BEFORE any
+     *  write lands, the honest message is still the blunt one. */
+    it('positive control: a failure before anything lands still says nothing was kept', async () => {
+        copyFails = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(calls.tasks).toEqual([]);
+        expect(document.querySelector('.save-note-error')!.textContent).toMatch(/would not upload/);
     });
 });
 

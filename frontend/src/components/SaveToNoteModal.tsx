@@ -139,6 +139,11 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
         const wanted = copyPictures && attachmentsSupported ? refs : [];
         let copied: TaskAttachmentRef[] = [];
         let createdId: number | null = null;
+        // A write into an EXISTING note that already landed. There is nothing
+        // to undo — the item or the appended text is in a note the user keeps
+        // — so the failure message must not say "nothing was kept", or the
+        // obvious retry writes the same line a second time.
+        let landedInExisting = false;
         let saved = '';
         try {
             // `target` is DERIVED past `lockedFor` (above), so by the time a
@@ -165,9 +170,11 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             } else {
                 if (shape === 'item' && body) {
                     await createListTask(target, body);
+                    landedInExisting = true;
                 } else if (body) {
                     const existingBody = list?.body ?? '';
                     await setTaskListBody(target, existingBody ? `${existingBody}\n\n${body}` : body);
+                    landedInExisting = true;
                 }
                 if (copied.length) {
                     const keep = parseTaskAttachments(list?.attachments ?? null);
@@ -188,7 +195,12 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             if (copied.length && !orphaned) await discardCopies(copied).catch(() => undefined);
             setError(orphaned
                 ? 'The note was made, but the rest couldn’t be added — open Notes to finish it.'
-                : (err instanceof Error && err.message ? err.message : 'Couldn’t save it — nothing was kept.'));
+                : landedInExisting
+                    // The text is in the note; only the pictures are missing.
+                    // Saying "nothing was kept" here would earn a retry that
+                    // appends the same line twice.
+                    ? 'The text was kept, but the pictures couldn’t be added — open Notes to finish it.'
+                    : (err instanceof Error && err.message ? err.message : 'Couldn’t save it — nothing was kept.'));
             setSaving(false);
             return;
         }
