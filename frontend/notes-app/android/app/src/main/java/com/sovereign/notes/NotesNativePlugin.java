@@ -265,8 +265,13 @@ public class NotesNativePlugin extends Plugin {
         Context ctx = getContext();
         if (ctx == null) return;
 
-        String text = intent.getStringExtra(Intent.EXTRA_TEXT);
-        String subject = intent.getStringExtra(Intent.EXTRA_SUBJECT);
+        // As CharSequence, NOT getStringExtra: both extras are documented
+        // CharSequence, and an app sharing styled or selected text puts a
+        // Spanned in them. Bundle.getString() answers null for one, silently,
+        // so a real share would arrive as nothing at all — the app would open
+        // on the notes grid with no sign that anything came.
+        String text = asText(intent.getCharSequenceExtra(Intent.EXTRA_TEXT));
+        String subject = asText(intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT));
         List<Uri> uris = new ArrayList<>();
         if (multiple) {
             ArrayList<Uri> many = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
@@ -299,8 +304,21 @@ public class NotesNativePlugin extends Plugin {
                 if (root.exists() || root.mkdirs()) {
                     File dir = ShareCache.newShareDir(root, now);
                     int allowed = ShareIntake.cap(uris.size());
-                    for (int i = 0; i < uris.size() && files.size() < allowed; i++) {
-                        SharedFile f = copyIn(ctx, uris.get(i), dir, i);
+                    for (int i = 0; i < uris.size(); i++) {
+                        Uri u = uris.get(i);
+                        // The mime is the one WE resolve, never the sender's.
+                        String mime = ctx.getContentResolver().getType(u);
+                        if (ShareIntake.isSharedText(mime)) {
+                            // A shared .txt is words, not an attachment: the
+                            // page has nowhere but the picture list to put a
+                            // file, and a .txt sealed as a photo is a note
+                            // with a picture nothing can render. The first
+                            // one fills a body the sender did not send.
+                            if (!hasText(text)) text = readTextIn(ctx, u);
+                            continue;
+                        }
+                        if (files.size() >= allowed) continue;
+                        SharedFile f = copyIn(ctx, u, mime, dir, i);
                         if (f != null) files.add(f);
                     }
                 }
@@ -311,19 +329,19 @@ public class NotesNativePlugin extends Plugin {
             }
         }
 
-        boolean hasText = text != null && !text.trim().isEmpty();
-        if (!hasText && files.isEmpty()) return;
-        pendingShare = new PendingShare(hasText ? text : null, subject, files);
+        boolean hasWords = hasText(text);
+        if (!hasWords && files.isEmpty()) return;
+        pendingShare = new PendingShare(hasWords ? text : null, subject, files);
         // A bare ping: the event carries NO content. The page then asks.
         if (announce) notifyListeners("share", new JSObject());
     }
 
-    /** Copy one shared stream into our own cache, or null if it is not
-     *  something a note can hold. The mime is the one WE resolve, never the
+    /** Copy one shared picture into our own cache, or null if it is not
+     *  something a note can hold. `mime` is the one WE resolved, never the
      *  sender's claim. */
-    private SharedFile copyIn(Context ctx, Uri uri, File dir, int index) {
-        String mime = ctx.getContentResolver().getType(uri);
-        if (!ShareIntake.acceptsMime(mime)) return null;
+    private SharedFile copyIn(Context ctx, Uri uri, String mime, File dir, int index) {
+        if (!ShareIntake.acceptsScheme(uri.getScheme())) return null;
+        if (!ShareIntake.acceptsPicture(mime)) return null;
         File out = new File(dir, ShareIntake.safeName(displayName(ctx, uri), index, mime));
         long written = 0;
         try (InputStream in = ctx.getContentResolver().openInputStream(uri);
@@ -346,6 +364,39 @@ public class NotesNativePlugin extends Plugin {
             return null;
         }
         return new SharedFile(out, out.getName(), ShareIntake.normalMime(mime), written);
+    }
+
+    /**
+     * Read a shared text stream into the note's body, capped. Same grant rule
+     * as copyIn — each entry point states it, rather than trusting the
+     * caller. Decoded as UTF-8 and not stored anywhere: it goes into the one
+     * static field the page drains, like any other shared text.
+     */
+    private String readTextIn(Context ctx, Uri uri) {
+        if (!ShareIntake.acceptsScheme(uri.getScheme())) return null;
+        try (InputStream in = ctx.getContentResolver().openInputStream(uri)) {
+            if (in == null) return null;
+            byte[] buf = new byte[8 * 1024];
+            java.io.ByteArrayOutputStream acc = new java.io.ByteArrayOutputStream();
+            int n;
+            while (acc.size() < ShareIntake.MAX_TEXT_BYTES && (n = in.read(buf)) > 0) {
+                acc.write(buf, 0, Math.min(n, ShareIntake.MAX_TEXT_BYTES - acc.size()));
+            }
+            String out = new String(acc.toByteArray(), StandardCharsets.UTF_8);
+            return hasText(out) ? out : null;
+        } catch (Exception e) {
+            // No message: it could quote what the user shared.
+            return null;
+        }
+    }
+
+    private static boolean hasText(String s) {
+        return s != null && !s.trim().isEmpty();
+    }
+
+    /** An extra that is documented CharSequence, as the String we need. */
+    private static String asText(CharSequence cs) {
+        return cs == null ? null : cs.toString();
     }
 
     /** The sender's own name for the file, if it offers one. */

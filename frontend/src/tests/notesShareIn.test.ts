@@ -8,7 +8,7 @@
  * notesNative.test.ts does it; `pluginPresent` flipping is each test's
  * control against the other.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 let pluginPresent = true;
 let shareQueue: { text: string | null; subject: string | null; files: { url: string | null; name: string; mime: string; size: number }[] }[] = [];
@@ -38,12 +38,19 @@ beforeEach(() => {
     for (const f of Object.values(fake)) f.mockClear();
     localStorage.clear();
 });
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('the shared payload', () => {
-    it('arrives once — a second ask is empty (one-shot)', async () => {
+    // The one-shot itself lives in Java (NotesNativePlugin.consumeLaunchShare
+    // nulls pendingShare before it answers) and cannot be reached from here —
+    // the fake queue is what empties. What this pins is THIS side of it: the
+    // bridge hands the payload straight through and does not cache it, so a
+    // second ask reports the empty answer instead of repeating the first.
+    it('hands each answer through as it comes, and holds nothing back for the next ask', async () => {
         shareQueue = [{ text: 'Milk and bread', subject: null, files: [] }];
         await expect(nn.consumeNativeLaunchShare()).resolves.toEqual({ text: 'Milk and bread', subject: null, files: [] });
         await expect(nn.consumeNativeLaunchShare()).resolves.toEqual({ text: null, subject: null, files: [] });
+        expect(fake.consumeLaunchShare).toHaveBeenCalledTimes(2);
     });
 
     it('an older APK (no such method) answers empty and does not throw', async () => {
@@ -69,6 +76,52 @@ describe('the shared payload', () => {
         const p = await nn.consumeNativeLaunchShare();
         expect(p.files).toEqual([]);
         expect(shapeSharedText(p.text, p.subject)).toEqual({ title: 'Line one', body: 'Line two' });
+    });
+});
+
+describe('the shared files', () => {
+    const payload = (files: { url: string | null; name: string; mime: string; size: number }[]) =>
+        ({ text: null, subject: null, files });
+
+    beforeEach(() => {
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob([new Uint8Array([1, 2, 3])]))));
+    });
+
+    it('only pictures reach the composer — the page has nowhere else to put a file', async () => {
+        // A .txt shared as a STREAM (a file manager, not a text share): the
+        // composer's one destination for a file is the picture list, so an
+        // unfiltered one would be sealed and stored as a photo that no view
+        // can render. The APK reads it into the body instead; this is the
+        // page's own half of that rule.
+        const files = await nn.fetchSharedFiles(payload([
+            { url: 'https://localhost/_capacitor_file_/a/notes.txt', name: 'notes.txt', mime: 'text/plain', size: 3 },
+            { url: 'https://localhost/_capacitor_file_/a/snap.png', name: 'snap.png', mime: 'image/png', size: 3 },
+        ]));
+        expect(files.map(f => f.name)).toEqual(['snap.png']);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(fetch).toHaveBeenCalledWith('https://localhost/_capacitor_file_/a/snap.png');
+    });
+
+    it('a picture is read over the app’s own origin, with its name and type (positive control)', async () => {
+        const files = await nn.fetchSharedFiles(payload([
+            { url: 'https://localhost/_capacitor_file_/a/snap.jpg', name: 'snap.jpg', mime: 'IMAGE/JPEG', size: 3 },
+        ]));
+        expect(files).toHaveLength(1);
+        expect(files[0].name).toBe('snap.jpg');
+        // A mime the filter had to lower-case to recognise still arrives as
+        // the file's type (File normalises it, as the composer expects).
+        expect(files[0].type).toBe('image/jpeg');
+    });
+
+    it('one file that cannot be read does not lose the rest of the share', async () => {
+        vi.stubGlobal('fetch', vi.fn(async (u: string) => (u.endsWith('gone.png')
+            ? new Response(null, { status: 404 })
+            : new Response(new Blob([new Uint8Array([1])])))));
+        const files = await nn.fetchSharedFiles(payload([
+            { url: 'https://localhost/_capacitor_file_/a/gone.png', name: 'gone.png', mime: 'image/png', size: 1 },
+            { url: 'https://localhost/_capacitor_file_/a/here.png', name: 'here.png', mime: 'image/png', size: 1 },
+        ]));
+        expect(files.map(f => f.name)).toEqual(['here.png']);
     });
 });
 

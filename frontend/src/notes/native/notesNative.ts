@@ -232,11 +232,18 @@ export function onNativeShare(cb: () => void): () => void {
  * over the app's own origin rather than base64 across the bridge, which would
  * copy a whole photo through the JSON channel. A file that cannot be read is
  * dropped: the rest of the share still arrives.
+ *
+ * PICTURES ONLY, and the APK agrees (ShareIntake.acceptsPicture — a shared
+ * .txt is read into the body instead). The filter stays because the page has
+ * exactly one place to put a shared file: `addPictures`, which object-URLs it
+ * and seals it as a photo. Anything that is not a picture would be stored as
+ * one, and the note would show a broken image for good.
  */
 export async function fetchSharedFiles(payload: NativeSharedPayload): Promise<File[]> {
     const out: File[] = [];
     for (const f of payload.files) {
         if (!f?.url) continue;
+        if (!(f.mime ?? '').toLowerCase().startsWith('image/')) continue;
         try {
             const res = await fetch(f.url);
             if (!res.ok) continue;

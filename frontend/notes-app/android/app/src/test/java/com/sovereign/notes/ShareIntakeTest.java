@@ -15,21 +15,51 @@ public class ShareIntakeTest {
     // --- what a note can take ------------------------------------------------
 
     @Test
-    public void acceptsTextAndPictures() {
-        assertTrue(ShareIntake.acceptsMime("text/plain"));
-        assertTrue(ShareIntake.acceptsMime("image/png"));
-        assertTrue(ShareIntake.acceptsMime("image/jpeg"));
-        assertTrue("a charset tail must not change the answer", ShareIntake.acceptsMime("text/plain; charset=utf-8"));
-        assertTrue("and neither must case", ShareIntake.acceptsMime("IMAGE/PNG"));
+    public void copiesPicturesAndOnlyPictures() {
+        assertTrue(ShareIntake.acceptsPicture("image/png"));
+        assertTrue(ShareIntake.acceptsPicture("image/jpeg"));
+        assertTrue("case must not change the answer", ShareIntake.acceptsPicture("IMAGE/PNG"));
+        assertFalse("the page can only put a file in the picture list, so a .txt"
+                + " copied here would be sealed and stored as a photo",
+                ShareIntake.acceptsPicture("text/plain"));
+        assertFalse(ShareIntake.acceptsPicture("text/plain; charset=utf-8"));
+    }
+
+    @Test
+    public void aSharedTextFileIsWordsNotAnAttachment() {
+        assertTrue(ShareIntake.isSharedText("text/plain"));
+        assertTrue("a charset tail must not change the answer", ShareIntake.isSharedText("text/plain; charset=utf-8"));
+        assertTrue(ShareIntake.isSharedText("TEXT/PLAIN"));
+        assertFalse("a clipping is not plain text", ShareIntake.isSharedText("text/html"));
+        assertFalse(ShareIntake.isSharedText("image/png"));
+        // And the body it fills has a ceiling: a "text/plain" that is really
+        // a 50 MB log must not be read into memory.
+        assertTrue(ShareIntake.MAX_TEXT_BYTES > 0);
+        assertTrue(ShareIntake.MAX_TEXT_BYTES <= 1024 * 1024);
     }
 
     @Test
     public void refusesEverythingElse() {
-        assertFalse(ShareIntake.acceptsMime("application/pdf"));
-        assertFalse("a clipping is not a note", ShareIntake.acceptsMime("text/html"));
-        assertFalse(ShareIntake.acceptsMime("video/mp4"));
-        assertFalse("a provider that would not say: refuse", ShareIntake.acceptsMime(null));
-        assertFalse(ShareIntake.acceptsMime(""));
+        assertFalse(ShareIntake.acceptsPicture("application/pdf"));
+        assertFalse(ShareIntake.isSharedText("application/pdf"));
+        assertFalse("a clipping is not a note", ShareIntake.acceptsPicture("text/html"));
+        assertFalse(ShareIntake.acceptsPicture("video/mp4"));
+        assertFalse("a provider that would not say: refuse", ShareIntake.acceptsPicture(null));
+        assertFalse(ShareIntake.isSharedText(null));
+        assertFalse(ShareIntake.acceptsPicture(""));
+    }
+
+    @Test
+    public void aShareIsAGrantNotAPath() {
+        assertTrue(ShareIntake.acceptsScheme("content"));
+        assertTrue("schemes are case-insensitive", ShareIntake.acceptsScheme("CONTENT"));
+        // file:// would be opened with THIS app's uid: another app could name
+        // a path inside Púca Notes' own sandbox and have Notes read it.
+        assertFalse(ShareIntake.acceptsScheme("file"));
+        assertFalse(ShareIntake.acceptsScheme("http"));
+        assertFalse(ShareIntake.acceptsScheme("android.resource"));
+        assertFalse(ShareIntake.acceptsScheme(null));
+        assertFalse(ShareIntake.acceptsScheme(""));
     }
 
     // --- the title -----------------------------------------------------------
@@ -99,11 +129,25 @@ public class ShareIntakeTest {
     }
 
     @Test
+    public void aNameTheUrlCouldNotSurviveIsReplaced() {
+        // The page fetches the copy back by URL, built by concatenation: a
+        // '#' would start a fragment and a '%' an escape, and the picture
+        // would be dropped with no message at all.
+        String hash = ShareIntake.safeName("party #2.jpg", 0, "image/jpeg");
+        assertFalse(hash, hash.contains("#"));
+        assertEquals("party _2.jpg", hash);
+        String pct = ShareIntake.safeName("100%.png", 0, "image/png");
+        assertFalse(pct, pct.contains("%"));
+        assertEquals("the rest of the name is left alone (positive control)",
+                "holiday.png", ShareIntake.safeName("holiday.png", 0, "image/png"));
+    }
+
+    @Test
     public void namesWhatTheSenderWouldNot() {
         assertEquals("shared-0.png", ShareIntake.safeName(null, 0, "image/png"));
         assertEquals("shared-2.jpg", ShareIntake.safeName("   ", 2, "image/jpeg"));
         assertEquals("an extension comes from the mime WE resolved", "photo.png", ShareIntake.safeName("photo", 0, "image/png"));
-        assertEquals("shared-0.txt", ShareIntake.safeName(null, 0, "text/plain"));
+        assertEquals("shared-1.webp", ShareIntake.safeName(null, 1, "image/webp"));
     }
 
     @Test

@@ -8,11 +8,12 @@ one-line summary; this file is the full story. Versions follow
 
 ### Added
 - **Share into Púca Notes.** On Android, Púca Notes now appears in the share
-  sheet. Send it text or a picture from any app and its composer opens with
-  that content already in it — you still choose the title, add whatever else
-  you want, and press Done. Nothing is saved until you do, and what you shared
-  is encrypted with your key like everything else in a note. It comes with the
-  new Púca Notes app, not with the web update.
+  sheet. Send it text, a text file or a picture from any app and its composer
+  opens with that content already in it — a shared text file arrives as the
+  note's words rather than as an attachment. You still choose the title, add
+  whatever else you want, and press Done. Nothing is saved until you do, and
+  what you shared is encrypted with your key like everything else in a note.
+  It comes with the new Púca Notes app, not with the web update.
 - **Faster ways into Púca Notes on Android.** Long-press the app icon for New
   note, New list or Reminders; add a Quick Settings tile that opens a new note
   from the notification shade; or put a home-screen widget on a home screen for

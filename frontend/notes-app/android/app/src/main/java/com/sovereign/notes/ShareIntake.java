@@ -30,21 +30,49 @@ final class ShareIntake {
      *  200 MB "image/*" from another app must not land on disk. */
     static final long MAX_FILE_BYTES = 32L * 1024 * 1024;
 
+    /** A shared text file goes into the note's body, and a body is typed by a
+     *  person: a "text/plain" that is really a 50 MB log must not be read into
+     *  memory, let alone handed to the editor. */
+    static final int MAX_TEXT_BYTES = 256 * 1024;
+
     /** Mirrors MAX_TITLE_LENGTH (frontend/src/notes/model/notesModel.ts). */
     static final int MAX_TITLE = 100;
 
     private ShareIntake() {}
 
     /**
-     * What the composer can take: plain text, and pictures. Everything else
-     * is refused — a PDF or a text/html clipping has nowhere to go in a note,
-     * and accepting it would put Púca Notes in share sheets it cannot serve.
-     * The mime must be one WE resolved (ContentResolver.getType), never the
-     * sender's claim.
+     * What may be COPIED into the cache as an attachment: pictures, and
+     * nothing else. A note holds words and pictures, and the page has exactly
+     * one destination for a shared file — the picture list — so anything
+     * else copied here would be sealed and stored as a photo that no view can
+     * render (a PDF or a text/html clipping has nowhere to go in a note
+     * either). The mime must be one WE resolved (ContentResolver.getType),
+     * never the sender's claim.
      */
-    static boolean acceptsMime(String mime) {
-        String m = normalMime(mime);
-        return m.equals("text/plain") || m.startsWith("image/");
+    static boolean acceptsPicture(String mime) {
+        return normalMime(mime).startsWith("image/");
+    }
+
+    /**
+     * A shared stream that is WORDS, not an attachment: a .txt from a file
+     * manager. The manifest offers Púca Notes for text/plain — that is how
+     * a plain "share this text" arrives at all — so the same filter also
+     * brings text FILES, and they belong in the note's body, read straight
+     * into it rather than copied to the picture list.
+     */
+    static boolean isSharedText(String mime) {
+        return normalMime(mime).equals("text/plain");
+    }
+
+    /**
+     * A share is a GRANT, not a path. Only content:// arrives with one; a
+     * file:// URI would be opened with this app's own uid, which lets any app
+     * on the phone name a file inside Púca Notes' sandbox and have Notes
+     * read it for them. Nothing legitimate sends one either — since Android
+     * 7 the sender throws FileUriExposedException for trying.
+     */
+    static boolean acceptsScheme(String scheme) {
+        return scheme != null && scheme.equalsIgnoreCase("content");
     }
 
     /** Lower-cased, trimmed, without the ";charset=…" tail. */
@@ -116,10 +144,17 @@ final class ShareIntake {
      * dots (a name starting with one hides the file and, on some pickers,
      * reads as a relative path), and short enough for any filesystem.
      * NotesNativePlugin.safeFileName is this, for names the page chose.
+     *
+     * '#' and '%' go too, though no filesystem minds them: the page reads a
+     * copied share back over the app's own origin, as a URL built by
+     * concatenation (FileUtils.getPortablePath), and there a '#' starts a
+     * fragment and a '%' reads as the start of an escape. A picture called
+     * "party #2.jpg" would fetch a path that does not exist and be dropped
+     * without a word. Replacing beats escaping: the name is only ever ours.
      */
     static String clean(String name, String fallback) {
         if (name == null) return fallback;
-        String s = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]+", "_").trim();
+        String s = name.replaceAll("[\\\\/:*?\"<>|#%\\p{Cntrl}]+", "_").trim();
         while (s.startsWith(".")) s = s.substring(1);
         s = s.trim();
         if (s.isEmpty()) return fallback;
@@ -129,10 +164,10 @@ final class ShareIntake {
     /** As long a file name as any filesystem here will take without fuss. */
     static final int MAX_NAME = 120;
 
-    /** A plausible extension from the mime we resolved, never from a name. */
+    /** A plausible extension from the mime we resolved, never from a name.
+     *  Only pictures are ever copied, so only pictures are ever named. */
     static String extensionFor(String mime) {
         String m = normalMime(mime);
-        if (m.equals("text/plain")) return ".txt";
         if (m.equals("image/jpeg")) return ".jpg";
         if (m.equals("image/png")) return ".png";
         if (m.equals("image/webp")) return ".webp";

@@ -76,10 +76,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
   under an app still uploading the first; copies older than 15 minutes go at
   the next share, and signing out removes them all.
 - **Share INTO Púca Notes (Android app).** Púca Notes appears in the phone's
-  share sheet. Send it text or a picture from any app and the composer opens
-  with that content already in it — you still choose the title, add anything
-  else, and press **Done**. Nothing is saved until you do, and what you shared
-  is sealed with your key exactly like anything you type. Being a share target
+  share sheet. Send it text, a text file or a picture from any app and the
+  composer opens with that content already in it — a shared text file becomes
+  the note's words, not an attachment — and you still choose the title, add
+  anything else, and press **Done**. Nothing is saved until you do, and what
+  you shared is sealed with your key exactly like anything you type. Being a share target
   does mean "Púca Notes" is visible in every share sheet on the phone, i.e. it
   discloses that the app is installed; that is unavoidable if the feature
   exists at all.
@@ -367,6 +368,28 @@ presses Done. The payload is capped the way a note is — a title no longer than
 the composer's own limit, at most 12 pictures, a size ceiling per file — and
 each file's type is the one the app resolved itself, not the one the sender
 claimed. The rules live in `ShareIntake.java`, tested off-device.
+
+Three refusals in that file are worth naming, because each one had a way of
+failing quietly:
+
+- **Only a `content://` URI is opened.** A share is a grant; a `file://` URI
+  would be opened with Púca Notes' own uid, which would let any app on the
+  phone name a path inside the app's sandbox and have Notes read it back to
+  the composer. Nothing legitimate sends one — since Android 7 the sender
+  throws for trying.
+- **Only pictures are copied.** The page has exactly one destination for a
+  shared file (the picture list), so a shared `.txt` copied as an attachment
+  would be sealed and stored as a photo no view can render. A shared text file
+  is read into the note's body instead, capped, and only when the sender did
+  not also send text.
+- **`#` and `%` are stripped from a shared name.** The page reads each copy
+  back over the app's own origin, by a URL built from the path: a `#` would
+  start a fragment and a `%` an escape, and the picture would be dropped
+  without a word.
+
+The text extras are read as `CharSequence`, not `String` — an app sharing
+styled or selected text puts a `Spanned` there, and `getStringExtra` answers
+null for one, silently.
 
 **Shortcuts, the quick tile and the widget.** Three launcher shortcuts
 (`res/xml/shortcuts.xml`), a quick-settings tile (`NotesTileService`) and a 4×1
