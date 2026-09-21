@@ -37,7 +37,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
-import { pendingOutboxCount } from '../model/notesOutbox';
+import { ensureOutboxLoaded, pendingOutboxCount } from '../model/notesOutbox';
 import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
@@ -123,6 +123,10 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         // then creates one item per line, and those two halves must not be
         // split across a queue (the text would vanish now and the items
         // appear whenever the connection came back).
+        //
+        // After the persisted queue has loaded: the count reads 0 until then,
+        // however much a previous page left waiting.
+        await ensureOutboxLoaded();
         if (!navigator.onLine || pendingOutboxCount() > 0) {
             pushMessageToast({ title: 'Turning the text into a checklist needs a connection, and nothing waiting to sync — your text and pictures are kept either way' });
             return;

@@ -44,14 +44,15 @@ import {
     listTrashedTaskLists,
     listsDueForClientPurge,
     serverNowFrom,
+    setTaskListAttachments,
 } from '../../api/listContent';
 import {
     type DrawingFiles, type SealedMedia,
-    fileIdsOf, nextDrawingName, refOfParked, sealNoteMedia, uploadNoteMedia,
+    fileIdsOf, fileIdsOfHrefs, mediaCountLabel, nextDrawingName, refOfParked, sealNoteMedia, uploadNoteMedia,
 } from '../../api/noteMedia';
 import { parkedIdsOf, withoutParked } from '../../api/parkedMedia';
 import { ParkedMediaFullError, appParkedStore } from './notesBlobs';
-import { forgetParkedMedia, ops, pendingOutboxCount, sendCreateList, sendCreateTask, sendNoteOp } from './notesOutbox';
+import { ensureOutboxLoaded, forgetParkedMedia, ops, pendingOutboxCount, sendCreateList, sendCreateTask, sendNoteOp } from './notesOutbox';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
@@ -211,8 +212,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (records.length > 0) {
             try {
-                const n = records.length;
-                await sendNoteOp(ops.addMedia(list.id, records.map(r => r.id), [], [], `${n} picture${n === 1 ? '' : 's'} on a new note`));
+                await sendNoteOp(ops.addMedia(list.id, records.map(r => r.id), [], [], `${mediaCountLabel(photos, drawings.length)} on a new note`));
             } catch (err) {
                 explain('upload failed', err);
                 await forgetParkedMedia(records.map(r => r.id));
@@ -258,6 +258,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // through the outbox instead. It briefly exists without its picture
         // (three ops, not one request) — which is the price of a photo note
         // taken with no signal existing at all.
+        //
+        // The persisted queue has to have LOADED before that count means
+        // anything: a note made in the first moments after a reload would
+        // otherwise be sent straight to the server, ahead of what the
+        // previous page left waiting.
+        await ensureOutboxLoaded();
         if (!navigator.onLine || pendingOutboxCount() > 0) {
             return queueContentNote(noteTitle, body, photos, drawings, entries);
         }
@@ -346,11 +352,20 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     }, [qc, lists, patchList]);
 
     /**
-     * Add pictures, drawings or files to a note. They are encrypted on this
-     * device FIRST and parked (notesBlobs.ts), and the upload is an outbox
-     * op — so a photo taken with no signal is sealed at once and sent when
-     * the connection is back, and the note shows it meanwhile from the
-     * parked bytes.
+     * Add pictures, drawings or files to a note.
+     *
+     * Online with nothing waiting, they are uploaded there and then, exactly
+     * as they always were. Otherwise they are encrypted on this device FIRST
+     * and parked (notesBlobs.ts) and the upload becomes an outbox op — so a
+     * photo taken with no signal is sealed at once and sent when the
+     * connection is back, and the note shows it meanwhile from the parked
+     * bytes.
+     *
+     * The two paths, and not one: parking a copy of a photo that is about to
+     * go up anyway costs a phone two more passes over the ciphertext and
+     * twice its size in IndexedDB, and it let the on-device cap refuse a
+     * picture on a device that was perfectly online — which is not true of
+     * an online device, and not a thing the user could act on.
      */
     const addNoteMedia = useCallback(async (listId: number, photos: File[], drawings: DrawingFiles[], replacing: TaskAttachmentRef[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
@@ -361,16 +376,43 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         const replaceSet = new Set(replacing.map(r => r.href));
         const kept = parseTaskAttachments(opened).filter(r => !replaceSet.has(r.href));
+        const bases: string[] = [];
+        let names = kept;
+        for (let i = 0; i < drawings.length; i++) {
+            const base = nextDrawingName(names);
+            bases.push(base);
+            names = [...names, { href: `pending:${base}`, name: `${base}.png` }];
+        }
+        const named = drawings.map((files, i) => ({ files, base: bases[i] }));
+        const goneHrefs = withoutParked(replacing).map(r => r.href);
+        await ensureOutboxLoaded();
+        if (navigator.onLine && pendingOutboxCount() === 0) {
+            let added: TaskAttachmentRef[];
+            try {
+                added = await uploadNoteMedia(photos, named, kept.length);
+            } catch (err) {
+                explain('upload failed', err);
+                pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
+                return false;
+            }
+            const before = lists();
+            patchList(listId, l => ({ ...l, attachments: JSON.stringify([...kept, ...added].map(({ href, name }) => ({ href, name }))) }));
+            try {
+                await setTaskListAttachments(listId, [...kept, ...added]);
+            } catch (err) {
+                explain('saving the pictures failed', err);
+                qc.setQueryData(keysRef.current.lists, before);
+                await deleteFiles(fileIdsOf(added));   // nothing names them now
+                return false;
+            }
+            const parkedOut = parkedIdsOf(replacing);
+            if (parkedOut.length > 0) await forgetParkedMedia(parkedOut);
+            if (goneHrefs.length > 0) void deleteFiles(fileIdsOfHrefs(goneHrefs));
+            return true;
+        }
         let records: SealedMedia[];
         try {
-            const bases: string[] = [];
-            let names = kept;
-            for (let i = 0; i < drawings.length; i++) {
-                const base = nextDrawingName(names);
-                bases.push(base);
-                names = [...names, { href: `pending:${base}`, name: `${base}.png` }];
-            }
-            records = await sealNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length);
+            records = await sealNoteMedia(photos, named, kept.length);
             await appParkedStore.park(records);
         } catch (err) {
             explain('keeping the picture failed', err);
@@ -383,13 +425,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         const parkedReplaced = parkedIdsOf(replacing);
         if (parkedReplaced.length > 0) await forgetParkedMedia(parkedReplaced);
         try {
-            const n = records.length;
             await sendNoteOp(ops.addMedia(
                 listId,
                 records.map(r => r.id),
-                withoutParked(replacing).map(r => r.href),
+                goneHrefs,
                 withoutParked(kept),
-                `${n} picture${n === 1 ? '' : 's'} on a note`,
+                `${mediaCountLabel(photos, drawings.length)} on a note`,
             ));
         } catch (err) {
             explain('upload failed', err);
