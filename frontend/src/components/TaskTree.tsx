@@ -12,7 +12,7 @@ import { isUndecryptable } from '../api/decryptMarkers';
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import {
     type Task, type TaskNode, type TaskAttachmentRef,
-    buildTaskTree, parseTaskAttachments, isAttachmentsLocked, canEditTask, collectSubtreeIds,
+    buildTaskTree, parseTaskAttachments, isAttachmentsLocked, canEditTask, collectSubtreeIds, subtreeInOrder,
     dueToLocalInput, localInputToIso, isTaskOverdue, formatDueShort, planDropTarget,
     MAX_TASK_DEPTH, MAX_TASK_ATTACHMENTS,
 } from '../api/tasks';
@@ -160,6 +160,14 @@ interface TaskTreeProps {
     tasks: Task[];
     onToggle: (task: Task, completed: boolean) => void;
     onDelete: (taskId: number) => void;
+    /** Delete, but with everything needed to put the item back: the whole
+     *  subtree in re-creation order (the deleted item first) and the
+     *  device-local place assignments read BEFORE they are dropped. Púca
+     *  Notes passes this to offer Undo; when it is absent the button behaves
+     *  exactly as it always did and calls `onDelete`. The Undo bar belongs to
+     *  the caller — `.notes-undo` is Notes' own CSS, and this component is
+     *  also Púca's Tasks view and its channel checklists. */
+    onDeleteSubtree?: (subtree: Task[], places: Array<[number, string]>) => void;
     onEdit: (task: Task, description: string) => void;
     onAddSubtask: (parentId: number, description: string) => void;
     onMove: (task: Task, direction: 'up' | 'down') => void;
@@ -198,7 +206,7 @@ interface TaskTreeProps {
 }
 
 export function TaskTree({
-    tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSetAttachments,
+    tasks, onToggle, onDelete, onDeleteSubtree, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSetAttachments,
     myPerms, currentUserId, resolveUserName, channelId,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
@@ -556,10 +564,20 @@ export function TaskTree({
                         className="tt-btn tt-delete"
                         title="Delete"
                         onClick={() => {
+                            // The subtree and its place assignments, read
+                            // BEFORE the unassign below drops them, so a
+                            // caller offering Undo can put them back.
+                            const subtree = onDeleteSubtree ? subtreeInOrder(tasksRef.current, task.id) : [];
+                            const places: Array<[number, string]> = [];
+                            for (const t of subtree) {
+                                const p = getTaskPlace(t.id);
+                                if (p) places.push([t.id, p.id]);
+                            }
                             // Device-local place assignments die with the
                             // subtree (children cascade server-side too).
                             if (isAndroidApp()) unassignTasks(collectSubtreeIds(tasksRef.current, task.id));
-                            onDelete(task.id);
+                            if (onDeleteSubtree) onDeleteSubtree(subtree, places);
+                            else onDelete(task.id);
                         }}
                     >
                         <TrashIcon />

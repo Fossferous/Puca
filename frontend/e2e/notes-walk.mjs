@@ -230,6 +230,18 @@ ck('editor: three TaskTree rows', await page.locator('.notes-editor .tt-item').c
 await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday');
 await sleep(1500);
 ck('editor: note text saves without a button', await page.locator('.notes-editor .nb-status.failed').count() === 0);
+// The text's own undo/redo (the browser's native stack is wiped by every
+// sync, so the field keeps its own). A paste-sized change is ONE step.
+const bodyText = () => page.locator('.notes-editor textarea.nb-text').inputValue();
+await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday, and flowers');
+await page.waitForSelector('.notes-editor .nb-histbtn[aria-label="Undo"]', { timeout: 5000 });
+await page.click('.notes-editor .nb-histbtn[aria-label="Undo"]');
+ck('text undo: one step back in the note text', (await bodyText()) === 'Buy before Friday');
+await page.click('.notes-editor .nb-histbtn[aria-label="Redo"]');
+ck('text redo: and forward again', (await bodyText()) === 'Buy before Friday, and flowers');
+await page.click('.notes-editor .nb-histbtn[aria-label="Undo"]');
+await sleep(1500);   // the undone text is what gets saved
+ck('text undo: the undone text saves, with no failure', (await bodyText()) === 'Buy before Friday' && await page.locator('.notes-editor .nb-status.failed').count() === 0);
 // toggle Milk. click(), not check(): the box is a CONTROLLED input whose DOM
 // state React restores until the optimistic update commits a frame later,
 // and check() asserts the flip synchronously — the completed section is the
@@ -266,6 +278,34 @@ await page.fill('.tt-due-edit input', `${d.getFullYear()}-${p(d.getMonth() + 1)}
 await page.click('.tt-due-set');
 await page.waitForSelector('.notes-editor .tt-due', { timeout: 10000 });
 ck('editor: a due time renders its chip', true);
+// ---- 5b. Deleting an item, and Undo -------------------------------------------------
+// Bread carries a subtask, so this is a whole subtree leaving and coming back.
+const bread = () => page.locator('.notes-editor .tt-item', { hasText: 'Bread' }).first();
+await bread().hover();
+await bread().locator('.tt-btn[title="Delete"]').click();
+await page.waitForSelector('.notes-undo-text:has-text("Deleted")', { timeout: 5000 });
+ck('item undo: the item and its subtask leave the list and the undo bar names it',
+    await page.locator('.notes-editor .tt-item', { hasText: 'Bread' }).count() === 0
+    && await page.locator('.notes-editor .tt-item', { hasText: 'Sourdough' }).count() === 0
+    && /Bread/.test(await page.locator('.notes-undo-text').innerText()));
+await page.locator('.notes-undo button').click();
+await page.waitForFunction(() => [...document.querySelectorAll('.notes-editor .tt-nest .tt-item')].some(li => li.textContent.includes('Sourdough')), null, { timeout: 15000 }).catch(() => {});
+ck('item undo: Undo brings the subtree back, still nested',
+    await page.locator('.notes-editor .tt-item', { hasText: 'Bread' }).count() === 1
+    && await page.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1
+    && await page.locator('.notes-undo').count() === 0);
+// ...and letting the window close really does delete it.
+const butter = () => page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first();
+await butter().hover();
+await butter().locator('.tt-btn[title="Delete"]').click();
+await page.waitForSelector('.notes-undo', { state: 'detached', timeout: 15000 });
+await page.click('.notes-editor-foot button[aria-label="Refresh this note"]');
+await sleep(1500);
+ck('item undo: after the window the delete is real', await page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).count() === 0);
+// Put Butter back the ordinary way: the checks below count on five items.
+await page.fill('.notes-editor-add input', 'Butter');
+await page.press('.notes-editor-add input', 'Enter');
+await page.waitForFunction(() => [...document.querySelectorAll('.notes-editor .tt-item')].some(li => li.textContent.includes('Butter')), null, { timeout: 15000 });
 // Escape INSIDE an inline item edit must not close the note
 await page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first().locator('.tt-description').click();
 await page.waitForSelector('.notes-editor .tt-edit-input', { timeout: 5000 });
@@ -1022,6 +1062,25 @@ ck('phone: inline item edit ≥ 16px', r.fonts['.tt-edit-input'] >= 16, `${r.fon
 await m.keyboard.press('Escape');
 await new Promise(res => setTimeout(res, 200));
 ck('phone: Escape in the item edit keeps the note open', await m.locator('.notes-editor').count() === 1);
+// The note text's undo is the only way to reach it here — there is no Ctrl key.
+await m.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday and flowers');
+await m.waitForSelector('.notes-editor .nb-histbtn[aria-label="Undo"]', { timeout: 5000 });
+const undoBtnBox = await m.locator('.notes-editor .nb-histbtn[aria-label="Undo"]').boundingBox();
+ck('phone: the note text undo is a real tap target', undoBtnBox && undoBtnBox.width >= 43.5 && undoBtnBox.height >= 43.5, JSON.stringify(undoBtnBox));
+await m.tap('.notes-editor .nb-histbtn[aria-label="Undo"]');
+await new Promise(res => setTimeout(res, 1500));
+ck('phone: tapping Undo puts the text back', (await m.locator('.notes-editor textarea.nb-text').inputValue()) === 'Buy before Friday');
+// An item delete offers the same snackbar, inside the viewport.
+const sour = () => m.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).first();
+await sour().locator('.tt-btn[title="Delete"]').tap();
+await m.waitForSelector('.notes-undo', { timeout: 8000 });
+const undoBarBox = await m.locator('.notes-undo').boundingBox();
+ck('phone: the item undo bar fits the viewport and clears the safe area',
+    undoBarBox && undoBarBox.x >= 0 && undoBarBox.x + undoBarBox.width <= 390.5, JSON.stringify(undoBarBox));
+await m.locator('.notes-undo button').tap();
+await new Promise(res => setTimeout(res, 1500));
+ck('phone: Undo puts the subtask back, still nested',
+    await m.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1);
 await mshot('phone-editor');
 // a popover from the footer stays inside the viewport
 await m.tap('.notes-editor-foot button[aria-label="Colour"]');

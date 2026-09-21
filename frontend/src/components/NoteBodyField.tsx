@@ -13,11 +13,22 @@
  * Given `listId`, it registers how to finish its save (api/listContent.ts,
  * `flushBodySave`), so moving the note to the trash waits for the last words
  * typed instead of racing them — also after the field has unmounted.
+ *
+ * UNDO AND REDO are the field's own (textHistory.ts), not the browser's: a
+ * textarea's native stack is wiped by the sync branch below writing the value
+ * programmatically, and a phone has no Ctrl key. Ctrl/Cmd+Z and
+ * Ctrl/Cmd+Shift+Z (or Ctrl+Y) drive it, and a pair of buttons appears once
+ * there is anything to go back to. The history holds DECRYPTED note text and
+ * lives in React state only — it is never written to the offline cache and
+ * goes when the note closes.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isUndecryptable } from '../api/decryptMarkers';
 import { BODY_SAVE_DELAY_MS, MAX_BODY_BYTES, bodyBytes, registerBodyFlush } from '../api/listContent';
-import { LockIcon } from './Icons';
+import { LockIcon, RedoIcon, UndoIcon } from './Icons';
+import {
+    type TextHistory, canRedoText, canUndoText, newTextHistory, pushText, redoText, undoText,
+} from './textHistory';
 import './NoteImages.css';
 
 interface NoteBodyFieldProps {
@@ -48,9 +59,13 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
     // A body that changed elsewhere (another device, a refetch) replaces the
     // draft — unless the user is mid-edit here, whose text wins until saved.
     const [seen, setSeen] = useState(current);
+    const [history, setHistory] = useState<TextHistory>(() => newTextHistory(current));
     if (seen !== current) {
         setSeen(current);
-        if (!isDirty) setDraft(current);
+        // A body that landed from elsewhere RESETS the history rather than
+        // becoming a step in it: Undo must not be able to put this device's
+        // older text back over another device's newer save.
+        if (!isDirty) { setDraft(current); setHistory(newTextHistory(current)); }
     }
 
     const latest = useRef({ draft, current, onSave });
@@ -105,6 +120,24 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
         el.style.height = `${el.scrollHeight}px`;
     }, [draft]);
 
+    /** Queue the save a pause from now, as typing does. */
+    const scheduleSave = useCallback(() => {
+        if (timer.current !== null) window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => { void flush(); }, BODY_SAVE_DELAY_MS);
+    }, [flush]);
+
+    /** Step through the history: the text it lands on is a real edit, so it
+     *  is dirty and saves itself like any other. */
+    const step = useCallback((next: TextHistory) => {
+        if (next === history) return;
+        setHistory(next);
+        setDraft(next.stack[next.index]);
+        markDirty(true);
+        setState('idle');
+        scheduleSave();
+        areaRef.current?.focus();
+    }, [history, markDirty, scheduleSave]);
+
     if (isUndecryptable(current)) {
         return <div className="nb-locked"><LockIcon /> This note’s text can’t be read yet: {current}</div>;
     }
@@ -121,14 +154,48 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
                 aria-label="Note text"
                 rows={2}
                 onChange={e => {
+                    const next = e.target.value;
                     markDirty(true);
-                    setDraft(e.target.value);
+                    setDraft(next);
+                    setHistory(h => pushText(h, next, Date.now()));
                     setState('idle');
-                    if (timer.current !== null) window.clearTimeout(timer.current);
-                    timer.current = window.setTimeout(() => { void flush(); }, BODY_SAVE_DELAY_MS);
+                    scheduleSave();
+                }}
+                onKeyDown={e => {
+                    // Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (Ctrl+Y as well). Taken
+                    // from the browser on purpose: its own stack is gone the
+                    // moment a sync writes the value.
+                    if (readOnly || e.altKey || !(e.ctrlKey || e.metaKey)) return;
+                    const key = e.key.toLowerCase();
+                    if (key === 'z' && !e.shiftKey) { e.preventDefault(); step(undoText(history)); }
+                    else if ((key === 'z' && e.shiftKey) || key === 'y') { e.preventDefault(); step(redoText(history)); }
                 }}
                 onBlur={() => { void flush(); }}
             />
+            {!readOnly && (canUndoText(history) || canRedoText(history)) && (
+                <div className="nb-actions">
+                    <button
+                        type="button"
+                        className="nb-histbtn"
+                        aria-label="Undo"
+                        title="Undo (Ctrl+Z)"
+                        disabled={!canUndoText(history)}
+                        onClick={() => step(undoText(history))}
+                    >
+                        <UndoIcon />
+                    </button>
+                    <button
+                        type="button"
+                        className="nb-histbtn"
+                        aria-label="Redo"
+                        title="Redo (Ctrl+Shift+Z)"
+                        disabled={!canRedoText(history)}
+                        onClick={() => step(redoText(history))}
+                    >
+                        <RedoIcon />
+                    </button>
+                </div>
+            )}
             {state === 'failed' && (
                 <div className="nb-status failed" role="alert">
                     Not saved.{' '}

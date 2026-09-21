@@ -968,6 +968,18 @@ export const RefreshIcon = makeIcon('RefreshIcon', <>
     <path d="M3.75 19.75V15.5H8" />
 </>);
 
+/** Undo a typed edit (note text). No classic glyph: the control is new. */
+export const UndoIcon = makeIcon('UndoIcon', <>
+    <path d="M4.25 9.25h10a5.5 5.5 0 0 1 0 11H8.5" />
+    <path d="M8.5 4.75 4 9.25l4.5 4.5" />
+</>);
+
+/** Redo a typed edit (note text). No classic glyph: the control is new. */
+export const RedoIcon = makeIcon('RedoIcon', <>
+    <path d="M19.75 9.25h-10a5.5 5.5 0 0 0 0 11h5.75" />
+    <path d="m15.5 4.75 4.5 4.5-4.5 4.5" />
+</>);
+
 export const ChevronDownIcon = makeIcon('ChevronDownIcon', <>
     <path d="m5.75 9.25 6.25 6.25 6.25-6.25" />
 </>);

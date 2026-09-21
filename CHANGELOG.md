@@ -7,6 +7,21 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Undo a deleted item.** Deleting an item inside a note now offers Undo for
+  a few seconds, and brings the item and everything under it back with its
+  date, repeat, snooze, pictures and tick state — a repeating to-do comes
+  back on the date it was on, not the next one. Its pictures are kept for as
+  long as Undo is offered and deleted afterwards; before, they stayed on the
+  server counting against your storage for good. An item brought back is a
+  new item: in a shared note it is now yours, and it comes back at the end of
+  its group.
+- **Undo and redo a note's text.** While a note is open you can step back and
+  forward through what you typed — with Ctrl+Z and Ctrl+Shift+Z, or the pair
+  of buttons that appears under the text, so it works on a phone as well. A
+  paste undoes in one step, even after the note has saved it. The history
+  lives only on the page you are typing on: it is never written to the
+  offline copy, it starts again when an edit arrives from another device, and
+  it goes when you close the note.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

@@ -409,6 +409,12 @@ export interface NoteActions {
     setSchedule: (note: NoteRef, task: Task, schedule: string | null, dueAt: string | null) => Promise<void>;
     /** Snooze the item's current reminder until an instant (null = unsnooze). */
     snoozeTask: (note: NoteRef, task: Task, until: number | null) => Promise<void>;
+    /** Mark an item done EXACTLY as it stands — never the tick path, which
+     *  advances a repeating to-do to its next occurrence
+     *  (api/taskCompletion.ts). Only for putting an item back as it was
+     *  (noteContent.ts recreateSubtree); everything a user ticks goes
+     *  through toggleTask. */
+    restoreCompleted: (note: NoteRef, task: Task) => Promise<void>;
     setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
@@ -628,6 +634,24 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             if (err instanceof ApiError && err.status === 409) restore(note, await fetchTasksFor(note).catch(() => original));
         }
     }, [snapshot, setTasks, restore, canEditTime, sendTiming]);
+
+    const restoreCompleted = useCallback(async (note: NoteRef, task: Task) => {
+        // A timing patch, not a plain is_completed update: migration 066's
+        // guard refuses the latter for a scheduled item. It carries no
+        // schedule of its own, so the series stays exactly where the
+        // restored schedule put it.
+        const original = await snapshot(note);
+        const next = original.map(t => (t.id === task.id ? { ...t, is_completed: true } : t));
+        restore(note, next);
+        syncListCounts(note, next);
+        try {
+            await sendTiming(note, task, { is_completed: true }, 'put back as done');
+        } catch (err) {
+            explain('restoring the tick failed', err);
+            restore(note, original);
+            syncListCounts(note, original);
+        }
+    }, [snapshot, restore, syncListCounts, sendTiming]);
 
     const setAttachments = useCallback(async (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => {
         const original = await snapshot(note);
@@ -864,11 +888,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [qc]);
 
     return useMemo(() => ({
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, restoreCompleted, setAttachments,
         createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, setAttachments,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, snoozeTask, restoreCompleted, setAttachments,
         createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);

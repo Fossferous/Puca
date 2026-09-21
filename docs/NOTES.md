@@ -64,6 +64,28 @@ Púca's reminders. Anything you do in one is what you see in the other.
   the move); against an older server a delete reaches the server only when
   the snackbar expires, as before. A bulk delete always waits out its Undo
   window first.
+
+  Deleting an ITEM inside a note shows the same snackbar, and Undo puts the
+  item and everything under it back: its text, its nesting, its date, repeat
+  and snooze, its pictures, and whether it was ticked. A repeating to-do
+  comes back on the date it was on, not the next one. Two things the Undo
+  cannot promise, because a note's items have no undelete on the wire and the
+  item is CREATED again: it comes back as a new item, so in a shared note it
+  is now yours (the byline changes, and with it who may edit it), and it lands
+  at the end of its group rather than in its old slot. An Undo made offline is
+  queued behind its own delete, so both land when the queue drains. The
+  editor shows one snackbar at a time: a second delete, or a checkbox
+  conversion, ends the Undo before it.
+
+- **Undo and redo the note's text** — while a note is open, Ctrl+Z and
+  Ctrl+Shift+Z (Ctrl+Y as well) step back and forward through what you typed,
+  and a pair of buttons appears under the text once there is anything to go
+  back to, so it works on a phone too. A burst of typing is one step and a
+  paste is its own, so undoing a paste the note has already saved is a single
+  step. The history lives only in the page you are typing on: it is never
+  written to the offline copy, it starts again when text arrives from another
+  device (so it can never put your older text back over their newer save),
+  and it goes when you close the note or sign out.
 - **Copy as text / Make a copy / Export / Share** — a note as a Markdown
   checklist to the clipboard, a copy as a fresh note (its text and its open
   items, which keep their dates and repeats where the server stores them —
@@ -627,7 +649,11 @@ same as any delete made by a client older than this, or by Púca's own
 immediate delete. *Hide checkboxes* deletes the files of items it drops once
 its Undo is gone — only of items whose delete went through, and never a file
 a live item names at that moment. An item whose delete failed stays an item,
-with its pictures, and only the other items become lines of text.
+with its pictures, and only the other items become lines of text. Deleting a
+single item does the same: its pictures are kept for as long as Undo is
+offered and deleted once it is gone. Before this they were orphaned on the
+server against your quota for good, because nothing could ever name them
+again.
 
 ## Not built (and why)
 
@@ -643,7 +669,13 @@ with its pictures, and only the other items become lines of text.
   network, and fail with a message when there is none.
 - **Exactly-once creates.** A create whose answer was lost replays and can
   leave a duplicate note or item (see *Offline*): the create routes take no
-  client op id yet.
+  client op id yet. This reaches the Undo of an item delete too, which
+  re-creates the item: an Undo whose answer is lost can leave the item twice.
+- **Undoing an item's position, or an edit to its text.** An item put back by
+  Undo is appended to its group rather than returned to its old slot, and
+  there is no undo of a committed item edit (Escape still cancels one that
+  has not been committed). A note's own TEXT has undo and redo; an item's does
+  not.
 - **Item text in a reminder or place notification.** It would put decrypted
   note content on the lock screen and in app storage; the phone's background
   code never holds it. The notification says "An item is due" and opens
