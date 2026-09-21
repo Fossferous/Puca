@@ -751,6 +751,15 @@ ck('offline: a photo added with no network previews on the card from this device
 ck('offline: the photo note says Not synced', await page.locator('.notes-card:has-text("Offline photo") .notes-chip.unsynced').count() === 1);
 ck('offline: the pending banner names the picture waiting',
     /picture/.test(await page.locator('[data-sync="pending"]').innerText()));
+// The editor's gallery is where a parked picture is visible as parked, so
+// the "nothing is left parked" check below has something it can observe.
+// Opened here FIRST as the positive control: it really is parked now.
+await page.locator('.notes-card', { hasText: 'Offline photo' }).click();
+await page.waitForSelector('.notes-editor .ni-item', { timeout: 10000 });
+ck('offline: the editor shows the picture as waiting on this device',
+    await page.locator('.notes-editor .ni-item[data-parked="true"]').count() === 1);
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 await shot('offline-photo');
 await ctx.setOffline(false);
 const synced = await page.waitForSelector('[data-sync="pending"]', { state: 'detached', timeout: 20000 }).then(() => true, () => false);
@@ -768,8 +777,17 @@ const photoOnB = await pageB.waitForFunction(
     () => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Offline photo') && c.querySelector('.notes-card-hero img[src^="blob:"]')),
     null, { timeout: 30000 }).then(() => true, () => false);
 ck('offline: the picture taken with no network uploaded and decrypts on device B', photoOnB);
+// In the EDITOR, where `.ni-item` exists at all: on the grid this counted
+// zero of nothing and could not have gone red for what it names.
+await page.locator('.notes-card', { hasText: 'Offline photo' }).click();
+await page.waitForSelector('.notes-editor .ni-item', { timeout: 10000 });
+const stillParked = await page.locator('.notes-editor .ni-item[data-parked="true"]').count();
+const galleryItems = await page.locator('.notes-editor .ni-item').count();
 ck('offline: nothing is left parked once the queue is empty',
-    await page.locator('.ni-item[data-parked="true"]').count() === 0 && await page.locator('[data-sync="pending"]').count() === 0);
+    stillParked === 0 && galleryItems === 1 && await page.locator('[data-sync="pending"]').count() === 0,
+    `parked=${stillParked} items=${galleryItems}`);
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 if (psqlDsn) {
     try {
         // EXACTLY one more than before it was written: not a lower bound the
