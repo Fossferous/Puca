@@ -77,22 +77,33 @@ fn validate_op_key(key: &str) -> Result<(), (StatusCode, &'static str)> {
 }
 
 /// Claim `key` for this user inside `tx`, returning the id the create that
-/// first used it made, and whether THIS call is that first create.
+/// first used it made, THE SCOPE it was made in, and whether THIS call is
+/// that first create.
 ///
 /// `DO UPDATE` rather than `DO NOTHING` on purpose: DO NOTHING returns no row
 /// when a CONCURRENT transaction holds the key uncommitted, leaving the loser
 /// with neither an insert nor an id. DO UPDATE takes the row lock and waits
 /// for the winner, then reads its `created_id`. `xmax = 0` is true only for a
 /// row this statement inserted.
+///
+/// The scope comes back because `created_id` alone does not identify a row:
+/// `task_lists.id` and `channel_tasks.id` are independent sequences, so a key
+/// first spent on a note and then replayed on an item names an id that CAN
+/// exist in the other table. Without comparing the scope, the caller's
+/// "wrong scope" refusal would only be an accident of those two id spaces not
+/// overlapping on this particular database.
 async fn claim_op_key(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: i64,
     key: &str,
     scope: &str,
     created_id: i64,
-) -> Result<(i64, bool), sqlx::Error> {
+) -> Result<(i64, String, bool), sqlx::Error> {
     sqlx::query_as(
-        "INSERT INTO task_create_keys (user_id, op_key, scope, created_id)          VALUES ($1, $2, $3, $4)          ON CONFLICT (user_id, op_key) DO UPDATE SET op_key = EXCLUDED.op_key          RETURNING created_id, (xmax = 0) AS inserted",
+        "INSERT INTO task_create_keys (user_id, op_key, scope, created_id) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (user_id, op_key) DO UPDATE SET op_key = EXCLUDED.op_key \
+         RETURNING created_id, scope, (xmax = 0) AS inserted",
     )
     .bind(user_id)
     .bind(key)
@@ -105,6 +116,12 @@ async fn claim_op_key(
 /// What a replay whose original row is gone gets: the create really did
 /// happen, and re-running it would resurrect something the user deleted.
 const REPLAY_GONE_MESSAGE: &str = "That was already created, and has since been removed";
+
+/// What a key spent on one kind of thing and replayed on another gets. Never
+/// a client doing what it is told to: one key is minted per create, for that
+/// create. Answering it with the row from the other scope would hand back
+/// something unrelated and throw the typed text away.
+const REPLAY_WRONG_SCOPE_MESSAGE: &str = "That create key was already used for something else";
 
 // --- DTOs ---
 
@@ -643,7 +660,7 @@ async fn insert_task(
         tx.commit().await.map_err(fail)?;
         return Ok((task_row_to_response(row), true));
     };
-    let (created_id, inserted) = claim_op_key(&mut tx, claims.sub, key, "task", row.0)
+    let (created_id, key_scope, inserted) = claim_op_key(&mut tx, claims.sub, key, "task", row.0)
         .await
         .map_err(fail)?;
     if inserted {
@@ -655,6 +672,11 @@ async fn insert_task(
     // so a key reused against a different note is refused rather than
     // answered with someone else's row.
     tx.rollback().await.map_err(fail)?;
+    // The key was spent on something that is not an item: `created_id` names
+    // a row in another table and must never be looked up here.
+    if key_scope != "task" {
+        return Err((StatusCode::CONFLICT, REPLAY_WRONG_SCOPE_MESSAGE));
+    }
     let re_serve = format!(
         "SELECT {TASK_COLUMNS} FROM channel_tasks          WHERE id = $1 AND created_by = $2          AND channel_id IS NOT DISTINCT FROM $3 AND list_id IS NOT DISTINCT FROM $4"
     );
@@ -1604,47 +1626,85 @@ pub async fn create_task_list(
             Err(e) => return oops(e).into_response(),
         },
     };
-    let answer: CreatedList = match claim {
-        None | Some((_, true)) => match tx.commit().await {
-            Ok(()) => row,
-            Err(e) => return oops(e).into_response(),
-        },
-        Some((created_id, false)) => {
+    let answer: TaskListResponse = match claim {
+        None | Some((_, _, true)) => {
+            if let Err(e) = tx.commit().await {
+                return oops(e).into_response();
+            }
+            let (id, title, created_at, body, attachments, updated_at, content_rev) = row;
+            // A row this statement just inserted: empty, live, not the
+            // "Notes to self" list. True here, and ONLY here.
+            TaskListResponse {
+                id,
+                title,
+                created_at,
+                total_tasks: 0,
+                completed_tasks: 0,
+                body,
+                attachments,
+                trashed_at: None,
+                is_self: false,
+                updated_at,
+                content_rev,
+            }
+        }
+        Some((created_id, key_scope, false)) => {
             // A REPLAY: throw this attempt away and re-serve the note that
             // create already made, scoped to this owner.
             if let Err(e) = tx.rollback().await {
                 return oops(e).into_response();
             }
-            let re_serve = format!(
-                "SELECT {LIST_CREATE_COLUMNS}, {LIST_UPDATED_AT}, content_rev FROM task_lists WHERE id = $1 AND owner_id = $2"
-            );
-            match sqlx::query_as(&re_serve)
+            // The key was spent on an item: `created_id` names a row in
+            // channel_tasks and must never be looked up here.
+            if key_scope != "list" {
+                return (StatusCode::CONFLICT, REPLAY_WRONG_SCOPE_MESSAGE).into_response();
+            }
+            // Read the note as the LISTING would: the original may have been
+            // trashed or filled with items since the answer this call is
+            // replaying was lost, and hard-coding "live, empty" here would
+            // put a phantom card back on the grid.
+            const RE_SERVE_LIST: &str =
+                "SELECT l.id, l.title, (replace((l.created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, \
+                        COUNT(t.id) AS total, \
+                        COUNT(t.id) FILTER (WHERE t.is_completed) AS done, \
+                        l.body, l.attachments, \
+                        (replace((l.trashed_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS trashed_at, \
+                        l.is_self, \
+                        (replace((COALESCE(l.updated_at, l.created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at, \
+                        l.content_rev \
+                 FROM task_lists l \
+                 LEFT JOIN channel_tasks t ON t.list_id = l.id \
+                 WHERE l.id = $1 AND l.owner_id = $2 \
+                 GROUP BY l.id";
+            type ReplayedList = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool, String, i64);
+            let existing: Option<ReplayedList> = match sqlx::query_as(RE_SERVE_LIST)
                 .bind(created_id)
                 .bind(claims.sub)
                 .fetch_optional(&state.pool)
                 .await
             {
+                Ok(r) => r,
                 Err(e) => return oops(e).into_response(),
-                Ok(None) => return (StatusCode::CONFLICT, REPLAY_GONE_MESSAGE).into_response(),
-                Ok(Some(existing)) => existing,
+            };
+            let Some((id, title, created_at, total, done, body, attachments, trashed_at, is_self, updated_at, content_rev)) = existing else {
+                return (StatusCode::CONFLICT, REPLAY_GONE_MESSAGE).into_response();
+            };
+            TaskListResponse {
+                id,
+                title,
+                created_at,
+                total_tasks: total,
+                completed_tasks: done,
+                body,
+                attachments,
+                trashed_at,
+                is_self,
+                updated_at,
+                content_rev,
             }
         }
     };
-    let (id, title, created_at, body, attachments, updated_at, content_rev) = answer;
-    Json(TaskListResponse {
-        id,
-        title,
-        created_at,
-        total_tasks: 0,
-        completed_tasks: 0,
-        body,
-        attachments,
-        trashed_at: None,
-        is_self: false,
-        updated_at,
-        content_rev,
-    })
-    .into_response()
+    Json(answer).into_response()
 }
 
 /// Get (or lazily create) the caller's single "Notes to self" checklist list —
@@ -2397,15 +2457,82 @@ mod db_tests {
         assert_ne!(second["id"], first["id"]);
         assert_eq!(count_items(&pool, list_id).await, 2);
 
-        // A key minted for a NOTE cannot be spent on an item, and vice versa:
-        // the row it names is not in this scope, so the replay is refused
-        // rather than answered with the wrong thing.
+        // A key minted for a NOTE cannot be spent on an item, and vice versa.
+        //
+        // task_lists.id and channel_tasks.id are INDEPENDENT sequences, so
+        // "the id it names is not in this table" is not a guard — on a fresh
+        // database both start near 1 and a cross-scope replay would be
+        // answered with a real, unrelated row. This test therefore MAKES the
+        // two ids collide: the note gets an id past every existing item, and
+        // an item is then forced to that exact id. Only a server that
+        // compares the SCOPE it stored can still refuse.
         let key_c = "cccccccccccccccc3";
+        let high = bump_ids_past_both(&pool).await;
         let (_, note) = post_list(&state, &alice, V2, Some(key_c)).await;
-        assert!(note["id"].is_i64());
-        let (status, _) = post_item(&state, &alice, list_id, V2, Some(key_c)).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(count_items(&pool, list_id).await, 2, "and made nothing");
+        let note_id = note["id"].as_i64().expect("the note was made");
+        assert!(note_id > high, "the note's id is past every item id that exists");
+        sqlx::query(
+            "INSERT INTO channel_tasks (id, list_id, description, created_by, position) \
+             OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, 99)",
+        )
+        .bind(note_id).bind(list_id).bind(V2).bind(alice.sub)
+        .execute(&pool).await.expect("an item wearing the note's id");
+        // That id was taken by hand, so move the sequence past it or the very
+        // next item insert collides with it (a 500, not the refusal under test).
+        sqlx::query("SELECT setval(pg_get_serial_sequence('channel_tasks', 'id'), $1, true)")
+            .bind(note_id).execute(&pool).await.unwrap();
+        let (status, body) = post_item(&state, &alice, list_id, V2, Some(key_c)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "a key spent on a note is refused on an item");
+        assert_eq!(body, Value::Null, "and no row of any kind comes back");
+        assert_eq!(count_items(&pool, list_id).await, 3, "and made nothing (2 + the planted collision)");
+
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Push both id sequences past the highest id in EITHER table, so the
+    /// next `task_lists` row is free to be duplicated in `channel_tasks`.
+    /// Returns that watermark.
+    async fn bump_ids_past_both(pool: &PgPool) -> i64 {
+        let (high,): (i64,) = sqlx::query_as(
+            "SELECT GREATEST((SELECT COALESCE(MAX(id), 0) FROM task_lists), \
+                             (SELECT COALESCE(MAX(id), 0) FROM channel_tasks)) + 1000",
+        )
+        .fetch_one(pool).await.unwrap();
+        for table in ["task_lists", "channel_tasks"] {
+            sqlx::query("SELECT setval(pg_get_serial_sequence($1, 'id'), $2, true)")
+                .bind(table).bind(high)
+                .execute(pool).await.unwrap();
+        }
+        high
+    }
+
+    /// A replay answers with the note AS IT STANDS, not as it was the instant
+    /// it was made. The original may have been trashed or filled with items
+    /// while the lost answer was being retried, and a client that is told
+    /// "live, empty" puts a phantom card back on the grid.
+    #[tokio::test]
+    async fn a_replayed_create_answers_with_the_note_as_it_stands() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "reserve").await;
+
+        let (_, made) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        let id = made["id"].as_i64().unwrap();
+        // The fresh insert IS live and empty — that much was never wrong.
+        assert_eq!(made["trashed_at"], Value::Null);
+        assert_eq!(made["total_tasks"], 0);
+        assert_eq!(made["is_self"], false);
+
+        // Everything that happens between the lost answer and the retry.
+        assert_eq!(post_item(&state, &alice, id, V2, None).await.0, StatusCode::OK);
+        let t = crate::list_content::trash_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert_eq!(t.status(), StatusCode::OK);
+
+        let (status, again) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["id"], made["id"], "still the same note");
+        assert!(again["trashed_at"].is_string(), "a trashed note is not answered as live");
+        assert_eq!(again["total_tasks"], 1, "nor is a note with an item answered as empty");
+        assert_eq!(count_lists(&pool, alice.sub).await, 1, "and the retry made nothing");
 
         cleanup(&pool, &[&alice]).await;
     }

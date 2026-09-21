@@ -134,7 +134,11 @@ pub const TASK_FEATURES: &[&str] = &[
     "reminder_feed_v2",
     // Migration 070: a create may carry a random `op_key`, and a replay of
     // one the server already made is answered with the row it made instead
-    // of a second one.
+    // of a second one. Advertised, not gated on: the client sends the key to
+    // every server, because an older one simply drops the field, so there is
+    // nothing for a reader to decide. It is here so an operator can see what
+    // the server they are on does — see ListFeatures.idempotentCreates in
+    // frontend/src/api/listContent.ts.
     "op_key",
 ];
 
