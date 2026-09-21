@@ -523,6 +523,14 @@ await sleep(200);
 await page.goto('/chat');
 await page.waitForSelector('.chat-container', { timeout: 20000 });
 try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+// Púca asks about a recovery code ~3 s after it mounts, and the overlay
+// swallows clicks wherever it lands. This used to be answered forty lines
+// below, on the assumption that the section outlasts it; under load it arrived
+// mid-section instead and intercepted the trash click. Answer it here, while
+// nothing else is happening. It is not under test.
+await page.waitForSelector('.recovery-done-btn', { timeout: 8000 })
+    .then(() => page.click('.recovery-done-btn'))
+    .catch(() => { /* not shown */ });
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
@@ -560,8 +568,8 @@ await sleep(1500);   // the prune (and any fresh read of the trash it asks for) 
 const archivedWhileTrashed = await np.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText().catch(() => '?');
 ck('notes (second tab): opened while Púca holds Packing in the trash — it is in the Notes trash, not counted as archived', packingInNotesTrash && archivedWhileTrashed === '0', `inTrash=${packingInNotesTrash} archived=${archivedWhileTrashed}`);
 await np.close();
-// Púca asks, 3 s after it mounts, about a recovery code generated at sign-up and
-// never confirmed; the walk above outlasts that. Answer it (it is not under test).
+// A second chance at the same reminder, in case it had not appeared yet when
+// this section started (it is answered above).
 await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
     .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
     .catch(() => { /* not shown */ });
