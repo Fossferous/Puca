@@ -10,19 +10,28 @@ interface NotesDialogProps {
     title: string;
     onClose: () => void;
     children: ReactNode;
+    /**
+     * Something INSIDE the dialog wants this Escape — an open row, a picker.
+     * The listener below is on document in the CAPTURE phase and is installed
+     * by this child's effect, i.e. before the parent's, so nothing the parent
+     * renders can beat it to the key: a synthetic onKeyDown runs later still.
+     * The only way to let an inner Escape through is for the parent to say so
+     * here and handle it itself (LabelManager.tsx does exactly that).
+     */
+    escapeBlocked?: boolean;
 }
 
-export function NotesDialog({ title, onClose, children }: NotesDialogProps) {
+export function NotesDialog({ title, onClose, children, escapeBlocked = false }: NotesDialogProps) {
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
-            if (e.key !== 'Escape') return;
+            if (e.key !== 'Escape' || escapeBlocked) return;
             e.preventDefault();
             e.stopPropagation();
             onClose();
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, escapeBlocked]);
     return createPortal(
         <div className="notes-dialog-backdrop" onClick={onClose}>
             <div className="notes-dialog" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>

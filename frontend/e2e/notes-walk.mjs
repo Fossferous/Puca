@@ -622,6 +622,19 @@ await page.locator('.notes-undo button').click();
 await sleep(400);
 ck('label manager: Undo brings the label back on every note',
     await page.locator('.notes-card', { hasText: 'Groceries' }).locator('.notes-chip', { hasText: 'Chores' }).count() === 1);
+// Escape while a row is open belongs to the ROW. NotesDialog listens for it on
+// document in the CAPTURE phase, so an onKeyDown on the input could never have
+// beaten it there: the dialog took `escapeBlocked` and LabelManager now listens
+// the same way (LabelManager.tsx).
+await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Nonsense');
+await page.keyboard.press('Escape');
+await sleep(200);
+ck('label manager: Escape cancels the rename and leaves the dialog open',
+    await page.locator('.notes-labelmgr-row.editing').count() === 0
+    && await page.locator('.notes-labelmgr-row').count() > 0
+    && await page.locator('.notes-rail-item', { hasText: 'Nonsense' }).count() === 0,
+    await mgrText());
 await page.keyboard.press('Escape');
 await sleep(200);
 ck('label manager: Escape closes the dialog', await page.locator('.notes-labelmgr-row').count() === 0);

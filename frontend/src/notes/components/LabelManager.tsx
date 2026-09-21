@@ -17,7 +17,7 @@
  * document they already lived in; the server sees a revision bump, never a
  * name.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { CheckIcon, CloseIcon, PencilIcon, TagIcon, TrashIcon } from '../../components/Icons';
 import { MAX_LABEL_LENGTH, normalizeLabel } from '../model/notesModel';
 import { getNotesPrefs, renameLabel } from '../model/notesPrefs';
@@ -55,10 +55,31 @@ export function LabelManager({ labels, counts, onClose, onChanged }: LabelManage
         setEditing(l);
         setDraft(l);
     };
-    const cancelRow = () => {
+    const cancelRow = useCallback(() => {
         setEditing(null);
         setConfirming(null);
-    };
+    }, []);
+
+    // Escape while a row is open cancels THAT ROW, not the whole dialog — and
+    // that cannot be done from the input's onKeyDown. NotesDialog closes on a
+    // document listener in the CAPTURE phase, installed by the child effect
+    // that runs before this one, so React's synthetic handlers (and any
+    // bubble-phase listener) only ever see the key after the dialog has gone.
+    // So: tell NotesDialog to stand down through `escapeBlocked`, and take the
+    // key here, on document, in the same phase. A confirm row gets it too,
+    // where there is no input to type into at all.
+    const rowOpen = editing !== null || confirming !== null;
+    useEffect(() => {
+        if (!rowOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            e.preventDefault();
+            e.stopPropagation();
+            cancelRow();
+        };
+        document.addEventListener('keydown', onKey, true);
+        return () => document.removeEventListener('keydown', onKey, true);
+    }, [rowOpen, cancelRow]);
 
     /** The one write path: snapshot, rename, tell the owner. */
     const commit = (from: string, to: string | null) => {
@@ -82,7 +103,7 @@ export function LabelManager({ labels, counts, onClose, onChanged }: LabelManage
     };
 
     return (
-        <NotesDialog title="Edit labels" onClose={onClose}>
+        <NotesDialog title="Edit labels" onClose={onClose} escapeBlocked={rowOpen}>
             {labels.length === 0 ? (
                 <div className="notes-labels-hint">No labels yet — add one from a note’s Labels button.</div>
             ) : (
@@ -129,10 +150,6 @@ export function LabelManager({ labels, counts, onClose, onChanged }: LabelManage
                                         aria-label={`New name for ${l}`}
                                         autoFocus
                                         onChange={e => setDraft(e.target.value)}
-                                        onKeyDown={e => {
-                                            // Escape cancels THIS row, not the dialog.
-                                            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelRow(); }
-                                        }}
                                     />
                                     <button
                                         type="submit"

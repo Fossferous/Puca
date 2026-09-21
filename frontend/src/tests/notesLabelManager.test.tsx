@@ -29,6 +29,7 @@ let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
 const changed = vi.fn();
+const closed = vi.fn();
 
 function counts(): Map<string, number> {
     const m = new Map<string, number>();
@@ -48,7 +49,7 @@ function labelsInUse(): string[] {
 
 function render() {
     act(() => {
-        root!.render(<LabelManager labels={labelsInUse()} counts={counts()} onClose={() => {}} onChanged={changed} />);
+        root!.render(<LabelManager labels={labelsInUse()} counts={counts()} onClose={closed} onChanged={changed} />);
     });
 }
 
@@ -74,9 +75,23 @@ const submitRow = () => {
     act(() => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
 };
 
+/**
+ * Escape as the browser delivers it: a real event on the focused element,
+ * which bubbles to document and so reaches BOTH NotesDialog's capture-phase
+ * listener and React's own (portal) listener, in that order. Dispatching on
+ * the input rather than calling the React handler is the whole point — the
+ * bug was the order, not the handler.
+ */
+const pressEscape = (sel = '.notes-dialog') => {
+    const el = document.querySelector<HTMLElement>(sel);
+    if (!el) throw new Error(`no element for ${sel}`);
+    act(() => { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+};
+
 beforeEach(() => {
     backing.clear();
     changed.mockClear();
+    closed.mockClear();
     (localStorage.getItem as Mock).mockImplementation((k: string) => backing.get(k) ?? null);
     (localStorage.setItem as Mock).mockImplementation((k: string, v: string) => { backing.set(k, v); });
     (localStorage.removeItem as Mock).mockImplementation((k: string) => { backing.delete(k); });
@@ -171,6 +186,34 @@ describe('LabelManager', () => {
             'list:2': ['Errands', 'Work'],
             'list:3': ['Errands'],
         });
+    });
+
+    it('Escape while renaming cancels the ROW and leaves the dialog open', () => {
+        click('button[aria-label="Rename Errands"]');
+        typeInto('.notes-labelmgr-row.editing input', 'Nonsense');
+        pressEscape('.notes-labelmgr-row.editing input');
+        expect(closed).not.toHaveBeenCalled();
+        expect(document.querySelectorAll('.notes-labelmgr-row.editing').length).toBe(0);
+        expect(rows().length).toBe(2);                       // still listing both labels
+        expect(getNotesPrefs().labels['list:3']).toEqual(['Errands']);
+        expect(changed).not.toHaveBeenCalled();
+    });
+
+    it('Escape while a confirm row is showing cancels the confirm, not the dialog', () => {
+        click('button[aria-label="Delete Errands"]');
+        expect(rowText().join(' ')).toMatch(/Remove “Errands”/);
+        pressEscape('.notes-labelmgr-row.confirm');
+        expect(closed).not.toHaveBeenCalled();
+        expect(rowText().join(' ')).not.toMatch(/Remove “Errands”/);
+        expect(getNotesPrefs().labels['list:3']).toEqual(['Errands']);
+    });
+
+    // The control for the two above: with no row open the SAME event must
+    // still close the dialog, or "Escape cancels the row" would be indis-
+    // tinguishable from an Escape nobody handles at all.
+    it('Escape with no row open closes the dialog', () => {
+        pressEscape();
+        expect(closed).toHaveBeenCalledTimes(1);
     });
 
     it('an empty new name cannot commit — deleting is the trash button, not a blank rename', () => {

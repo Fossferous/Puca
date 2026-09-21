@@ -222,6 +222,10 @@ renamed or cleared from anywhere. **Edit labels** (the pencil beside
 - **Delete** it from every note, after a confirmation that says how many
   notes it will change. One **Undo** puts the whole label list back.
 
+`Esc` belongs to whatever is open innermost: it cancels the name you are
+typing, or the confirmation you are being asked, and only closes the dialog
+when neither is up.
+
 Each of the three is a SINGLE change to the sealed document — one
 compare-and-swap write, the same write the server already sees when you
 tick a label on one note. Nothing new reaches the server: it learns that
