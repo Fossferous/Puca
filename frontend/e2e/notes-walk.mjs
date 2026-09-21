@@ -403,12 +403,13 @@ ck('list view: the one-card pinned section offers no grip (nothing to reorder it
 // One slot only, and scrolled into view first: a long drag reaches the
 // viewport edge, where the hook's auto-scroll moves the content under the
 // pointer and the landing slot stops being predictable from the boxes.
-await otherCard(0).scrollIntoViewIfNeeded();
-await sleep(200);
-const gripBox = await otherCard(0).locator('.notes-card-grip').boundingBox();
-const nextBox = await otherCard(1).boundingBox();
-let indicatorSeen = false;
-if (gripBox && nextBox) {
+// cardAt(i) is the nth card of ONE section: the drag never leaves it.
+const dragOneSlotDown = async cardAt => {
+    await cardAt(0).scrollIntoViewIfNeeded();
+    await sleep(200);
+    const gripBox = await cardAt(0).locator('.notes-card-grip').boundingBox();
+    const nextBox = await cardAt(1).boundingBox();
+    if (!gripBox || !nextBox) return false;
     const gx = gripBox.x + gripBox.width / 2;
     const gy = gripBox.y + gripBox.height / 2;
     await page.mouse.move(gx, gy);
@@ -418,10 +419,12 @@ if (gripBox && nextBox) {
         await page.mouse.move(gx, gy + (targetY - gy) * (i / 10));
         await sleep(20);
     }
-    indicatorSeen = await page.locator('.notes-grid-drop-indicator').count() === 1;
+    const seen = await page.locator('.notes-grid-drop-indicator').count() === 1;
     await page.mouse.up();
     await sleep(600);
-}
+    return seen;
+};
+const indicatorSeen = await dragOneSlotDown(otherCard);
 ck('drag: the insertion line appears while dragging', indicatorSeen);
 ck('drag: dropping a card one slot down reorders the others',
     (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
@@ -434,6 +437,43 @@ await page.waitForSelector('.notes-card', { timeout: 20000 });
 await sleep(1000);
 ck('drag: the new order survived a reload (it reached the saved tab order)',
     (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
+// The PINNED section has its own hook instance, its own drag group and its
+// own arm of the shell's section -> visible-keys lookup. Invert that one
+// ternary and every pinned drop hands applyVisibleOrder a list that is not a
+// permutation of the visible set: it returns null and the card silently snaps
+// back. Nothing below the shell can see that, so it is checked here, with two
+// pinned cards — the fixture has one the rest of the time.
+const pinnedTitles = async () => (await page.locator('section[aria-label="Pinned notes"] .notes-card-title').allInnerTexts()).map(t => t.trim());
+const pinnedCard = i => page.locator('section[aria-label="Pinned notes"] .notes-card').nth(i);
+await page.locator('section[aria-label="Other notes"] .notes-card', { hasText: 'Sketch' }).hover();
+await page.locator('section[aria-label="Other notes"] .notes-card', { hasText: 'Sketch' }).locator('.notes-card-pin').click();
+await page.waitForFunction(() => document.querySelectorAll('section[aria-label="Pinned notes"] .notes-card').length === 2, null, { timeout: 10000 });
+const pinnedBefore = (await pinnedTitles()).join(',');
+const othersBeforePinnedDrag = (await othersTitles()).join(',');
+ck('drag: a two-card pinned section offers grips', await page.locator('section[aria-label="Pinned notes"] .notes-card-grip').count() === 2);
+await dragOneSlotDown(pinnedCard);
+const pinnedAfter = (await pinnedTitles()).join(',');
+ck('drag: a drop INSIDE the pinned section reorders the pinned cards',
+    pinnedAfter === pinnedBefore.split(',').reverse().join(','), `${pinnedBefore} -> ${pinnedAfter}`);
+ck('drag: a pinned drop leaves the other notes exactly as they were',
+    (await othersTitles()).join(',') === othersBeforePinnedDrag, (await othersTitles()).join(','));
+await page.reload();
+await page.waitForSelector('.notes-card', { timeout: 20000 });
+await sleep(1000);
+ck('drag: the pinned order survived a reload too',
+    (await pinnedTitles()).join(',') === pinnedAfter, (await pinnedTitles()).join(','));
+// Put the fixture back: swap again (the inverse of a one-slot drag in a
+// two-card section), then unpin. WHERE an unpinned note lands is pin
+// behaviour, not the drag's — it does not keep its old slot — so only the
+// section it lands in is asserted here.
+await dragOneSlotDown(pinnedCard);
+await page.locator('section[aria-label="Pinned notes"] .notes-card', { hasText: 'Sketch' }).hover();
+await page.locator('section[aria-label="Pinned notes"] .notes-card', { hasText: 'Sketch' }).locator('.notes-card-pin').click();
+await page.waitForFunction(() => document.querySelectorAll('section[aria-label="Pinned notes"] .notes-card').length === 1, null, { timeout: 10000 });
+await sleep(400);
+ck('drag: unpinning puts the note back among the others',
+    (await othersTitles()).includes('Sketch') && (await othersTitles()).length === 5, (await othersTitles()).join(','));
+
 await page.fill('.notes-search input', 'a');
 await sleep(300);
 ck('drag: a search removes the grips (a result is not a section of the order)', await page.locator('.notes-card-grip').count() === 0);
@@ -713,6 +753,14 @@ try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* 
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+// Púca asks about the recovery code generated at sign-up 3 s after it mounts,
+// and its overlay swallows every click on the tab bar until it is answered.
+// It is not under test: answer it here, at the mount, rather than racing it.
+await sleep(3500);
+await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 2000 })
+    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* not shown */ });
+await page.waitForSelector('.recovery-modal-overlay', { state: 'detached', timeout: 5000 }).catch(() => {});
 await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
 ck('púca: the board card shows a text note\'s text', /Roses are red/.test(await page.locator('.checklist-card', { hasText: 'Poem' }).locator('.tasks-card-body').innerText().catch(() => '')));
 ck('púca: the board card says a photo note has a picture', /1 picture/.test(await page.locator('.checklist-card', { hasText: 'Holiday photo' }).locator('.tasks-card-body').innerText().catch(() => '')));
@@ -1211,6 +1259,23 @@ const pg = await m.locator('.notes-card-grip').first().boundingBox();
 ck('phone: the grip is a 44px tap target', !!pg && pg.width >= 44 && pg.height >= 44, JSON.stringify(pg));
 ck('phone: the grip declares touch-action none (no scroll to fight)',
     await m.locator('.notes-card-grip').first().evaluate(el => getComputedStyle(el).touchAction) === 'none');
+
+// A press that STARTS on the grip is a drag, and nothing else. Android fires
+// `contextmenu` after ~500 ms of a still finger; useDragReorder only swallows
+// that once a drag is LIVE (5px of movement), so a press-and-hold on the grip
+// used to open a bulk selection nobody asked for — the timer was cancelled,
+// the contextmenu was not.
+const gripCard = m.locator('.notes-card', { hasText: 'Poem' });
+const gcb = await gripCard.locator('.notes-card-grip').boundingBox();
+await gripCard.locator('.notes-card-grip').dispatchEvent('pointerdown',
+    { pointerType: 'touch', isPrimary: true, clientX: gcb.x + gcb.width / 2, clientY: gcb.y + gcb.height / 2, bubbles: true });
+await sleep(700);
+await gripCard.dispatchEvent('contextmenu', { bubbles: true, cancelable: true });
+await sleep(250);
+ck('phone: holding the grip starts NO selection (that press is a drag)', await m.locator('.notes-selectbar').count() === 0);
+await gripCard.dispatchEvent('pointerup',
+    { pointerType: 'touch', isPrimary: true, clientX: gcb.x + gcb.width / 2, clientY: gcb.y + gcb.height / 2, bubbles: true });
+await sleep(150);
 
 // bulk selection by LONG PRESS (the phone's way in), then the bar at 390px.
 // Poem, not Phone note: that one is in the trash by now (the Trash section above).
