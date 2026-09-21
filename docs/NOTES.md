@@ -661,6 +661,21 @@ afterwards would be the same outcome with worse manners. The drop outline
 appears only while a drag carrying files is actually over the target, so it
 never promises something a shell that does not deliver drops could not do.
 
+These are Púca **Notes'** gestures. Púca's Tasks view renders the same note
+text and the same pictures (`ListContentBlock.tsx` → `NoteBodyField`,
+`NoteImages`) and therefore shows the same links, but it wires no paste or
+drop handler: there, a picture still goes in through the picker.
+
+A paste that carries TEXT is text, whatever picture came with it. Chromium
+puts an `image/png` on the clipboard *beside* the text for any rich copy — a
+Word paragraph, a range of Excel cells, a selection of a web page — so a
+handler that asks only "is there an image?" turns a pasted table into a
+screenshot of a table. `isTextPaste` (`notes/model/noteContent.ts`) is the
+guard: a real screenshot, or *Copy image*, carries no text at all, which is
+what tells the two apart. Drops are unaffected; an OS drop of files has no
+text. (Púca's chat composer takes the other branch on purpose — an image
+pasted into a message IS the message.)
+
 **Pasting a list.** Paste several lines into an item field, or into *Add an
 item…*, and Púca Notes asks first — showing the lines it is about to add, with
 *Add N items*, *Add as one item* and *Cancel*. It asks because items are
@@ -669,6 +684,13 @@ document would otherwise make forty items nobody can take back in one go. The
 lines are split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `,
 `[ ]` and `[x]` are dropped and blank lines are ignored. A paste of ONE line is
 never intercepted — it lands in the field as any paste would.
+
+A pasted line is truncated to the same length the field itself accepts
+(`MAX_ITEM_LENGTH`, 500), so no route into a list can produce an item you
+could not have typed. In the open note the creates are **paced** like every
+other fan-out in the app (`icsImport`'s `PACE_MS`, well under the server's
+50/s per IP), and a run that stops part-way says how many items landed
+rather than leaving an arbitrary prefix of the list unexplained.
 
 **Links in a note.** A web address typed or pasted into a note's text, or
 into an item, becomes tappable. Púca Notes works out where it goes by looking

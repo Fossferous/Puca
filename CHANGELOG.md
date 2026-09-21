@@ -22,13 +22,17 @@ one-line summary; this file is the full story. Versions follow
   or site icon. Only ordinary web addresses become links, and they open in
   your browser rather than inside the app. On the card grid a link is marked
   but not tappable, so tapping the card still opens the note.
-- **Paste and drop into a note.** Paste a screenshot straight into a note, or
-  drop a picture onto it, instead of saving it to disk first. Pasted pictures
-  are made smaller and encrypted on your device exactly like picked ones, and a
-  paste with no connection says so rather than half-adding it. Paste several
-  lines into a list and Púca Notes asks whether to make one item per line,
-  showing you the lines first — items are removed one at a time, so it asks
-  before it creates.
+- **Paste and drop into a note.** In Púca Notes, paste a screenshot straight
+  into a note, or drop a picture onto it, instead of saving it to disk first.
+  Pasted pictures are made smaller and encrypted on your device exactly like
+  picked ones, and a paste with no connection says so rather than half-adding
+  it. Paste several lines into a list and Púca Notes asks whether to make one
+  item per line, showing you the lines first — items are removed one at a time,
+  so it asks before it creates. Pasting text that happens to carry a picture
+  alongside it — a table copied out of a spreadsheet, a paragraph out of a
+  document — puts the text in the note, not a picture of it. (Púca's Tasks
+  view shows the same notes and the same links, but pictures go in there
+  through the picker, as before.)
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with
