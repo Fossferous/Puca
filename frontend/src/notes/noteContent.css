@@ -216,3 +216,54 @@
 @media (prefers-reduced-motion: reduce) {
     .notes-hero-pending { animation: none; }
 }
+
+/* ---------- Voice notes ---------------------------------------------------------
+   The composer's pending recording, and the recorder sheet. Nothing here ever
+   plays by itself: every <audio> is `controls` with no autoplay. */
+.notes-quickadd-media .qa-clip { flex: 1 1 100%; min-width: 0; padding-right: 26px; }
+.notes-quickadd-media .qa-clip audio { display: block; width: 100%; min-width: 0; height: 36px; }
+
+.notes-recorder {
+    position: relative;
+    z-index: 1160;   /* above the editor backdrop, like the drawing editor */
+    width: min(420px, calc(100vw - 32px));
+    max-width: 100%;
+    box-sizing: border-box;
+    margin: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    color: var(--text-normal);
+    box-shadow: var(--elevation-high, 0 8px 24px rgb(0 0 0 / 40%));
+}
+.notes-recorder-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.notes-recorder-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.notes-recorder-time { font-size: 28px; font-variant-numeric: tabular-nums; text-align: center; }
+.notes-recorder-level {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-quaternary);
+    overflow: hidden;
+}
+.notes-recorder-level span { display: block; height: 100%; background: var(--text-link, #5865f2); transition: width 100ms linear; }
+.notes-recorder-hint { margin: 0; font-size: 13px; line-height: 1.45; color: var(--text-muted); }
+.notes-recorder-hint.warn { color: var(--text-warning, #faa61a); }
+.notes-recorder-preview { display: block; width: 100%; min-width: 0; height: 40px; }
+.notes-recorder-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.notes-recorder-foot .ni-action.primary { background: var(--brand-experiment, #5865f2); color: #fff; }
+.notes-transcribe-notice {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-quaternary);
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+@media (pointer: coarse) {
+    .notes-recorder { width: 100%; }
+    .notes-recorder-foot .ni-action { min-height: 44px; font-size: 15px; }
+}

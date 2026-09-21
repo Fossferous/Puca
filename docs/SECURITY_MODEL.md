@@ -92,14 +92,19 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 - Who talks to whom, and when
 - Message sizes and timing; channel membership; epoch numbers
 - Presence/online state, voice-channel join and leave events
-- For a personal note (Púca Notes, migration 065): whether it has text or
-  pictures and roughly how much (the sealed envelopes' sizes, which also hint
-  at how many pictures), the encrypted uploads themselves as it sees any
-  upload, and when you moved the note to the trash and restored it
-  (`trashed_at`, plaintext timing like a due time). The text, the pictures and
-  WHICH uploads a note uses stay sealed — which is also why the server cannot
-  delete a note's uploads itself when its trash time runs out
-  (`docs/NOTES.md`).
+- For a personal note (Púca Notes, migration 065): whether it has text,
+  pictures or a voice note and roughly how much (the sealed envelopes' sizes,
+  which also hint at how many pictures), the encrypted uploads themselves as
+  it sees any upload, and when you moved the note to the trash and restored it
+  (`trashed_at`, plaintext timing like a due time). The text, the pictures,
+  the recordings and WHICH uploads a note uses stay sealed — a recording is
+  uploaded through exactly the same seal as a photo, so the operator sees one
+  more encrypted blob and its size (which hints at how long it is) and cannot
+  tell a recording from a picture. That is also why the server cannot delete a
+  note's uploads itself when its trash time runs out (`docs/NOTES.md`). A
+  transcript, where the phone makes one, is made ON the phone and stored as
+  ordinary sealed note text; the recording is never sent anywhere to be
+  transcribed.
 - IP addresses and device tokens
 - When a phone with the Púca Notes app is alive: while signed in, the app
   asks `GET /task-reminders` about once an hour even while it is closed (and

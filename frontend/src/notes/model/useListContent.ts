@@ -47,7 +47,7 @@ import {
     setTaskListAttachments,
     setTaskListBody,
 } from '../../api/listContent';
-import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
+import { type DrawingFiles, fileIdsOf, nameAudioFiles, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
@@ -64,10 +64,12 @@ export interface NoteExtras {
     body?: string;
     photos?: File[];
     drawing?: DrawingFiles;
+    /** Voice notes: uploaded raw, sealed exactly as a photo is. */
+    audio?: File[];
 }
 
 export function hasExtras(extra: NoteExtras | undefined): extra is NoteExtras {
-    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing);
+    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing || (extra.audio?.length ?? 0) > 0);
 }
 
 export function useListFeatures(): { features: ListFeatures; known: boolean } {
@@ -82,6 +84,13 @@ export function useTrashedLists() {
     // Known = a pin, a move or a prune may rely on it: an unread trash looks empty.
     const settled = known && (!enabled || q.isSuccess);
     return { ...q, enabled, settled, features, featuresKnown: known };
+}
+
+/** What to tell the user when uploading a note's media failed. The size and
+ *  slot errors say the real numbers; anything else is a connection. */
+function mediaFailureText(err: unknown): string {
+    if (err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'ClipTooLargeError' || err.name === 'FileTooLargeError')) return err.message;
+    return 'Couldn’t upload that — check your connection';
 }
 
 /** Log a failure, and show the server's own words when it gave a reason
@@ -123,7 +132,7 @@ export interface ListContentActions {
     createContentNote: (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
     setBody: (listId: number, body: string) => Promise<boolean>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
-    addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
+    addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[], audio?: File[]) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
     /** Every trashed note but `keep` (whose move to the trash is still
      *  queued: deleting it now would run before that move). */
@@ -159,16 +168,17 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 extra.photos ?? [],
                 extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [],
                 0,
+                nameAudioFiles(extra.audio ?? [], []),
             );
         } catch (err) {
             explain('upload failed', err);
-            pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
+            pushMessageToast({ title: mediaFailureText(err) });
             return null;
         }
         let list: TaskList;
         try {
             list = await createTaskListWithContent(
-                deriveContentTitle(title, { body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing }),
+                deriveContentTitle(title, { body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing, audio: extra.audio?.length ?? 0 }),
                 { body: body || undefined, refs },
             );
         } catch (err) {
@@ -229,7 +239,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         return true;
     }, [qc, lists, patchList]);
 
-    const addNoteMedia = useCallback(async (listId: number, photos: File[], drawings: DrawingFiles[], replacing: TaskAttachmentRef[] = []): Promise<boolean> => {
+    const addNoteMedia = useCallback(async (listId: number, photos: File[], drawings: DrawingFiles[], replacing: TaskAttachmentRef[] = [], audio: File[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
         const opened = current?.attachments ?? null;
         if (isAttachmentsLocked(opened)) {
@@ -247,10 +257,10 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 bases.push(base);
                 names = [...names, { href: `pending:${base}`, name: `${base}.png` }];
             }
-            added = await uploadNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length);
+            added = await uploadNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length, nameAudioFiles(audio, names));
         } catch (err) {
             explain('upload failed', err);
-            pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
+            pushMessageToast({ title: mediaFailureText(err) });
             return false;
         }
         const ok = await setNoteAttachments(listId, [...kept, ...added], replacing);

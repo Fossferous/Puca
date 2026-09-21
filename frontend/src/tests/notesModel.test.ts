@@ -167,6 +167,23 @@ describe('search', () => {
     it('a note whose tasks have not loaded still matches on its title', () => {
         expect(searchNotes(c, 'sprint').map(x => x.key)).toEqual(['channel:2']);
     });
+
+    it('a voice note is found by its TRANSCRIPT, because the transcript is note text', () => {
+        const withTranscript = cards([source('list', 9, 'Voice note', { body: 'milk and bread from the corner shop' })]);
+        expect(noteMatches(withTranscript[0], 'bread')).toBe(true);
+        expect(noteMatches(withTranscript[0], 'corner shop')).toBe(true);
+    });
+
+    it('a voice note with NO transcript is NOT findable by its clip name — recorded on purpose', () => {
+        // noteMatches builds its haystack from title, body, server name, labels
+        // and items; attachment names are not in it, which is exactly why the
+        // transcript has to land in the note's TEXT. If someone later makes
+        // attachment names searchable, this case is the one to come and change.
+        const silent = cards([source('list', 10, 'Voice note', { noteAttachments: JSON.stringify([{ href: 'enc:x', name: 'voice-1.webm' }]) })]);
+        expect(noteMatches(silent[0], 'voice')).toBe(true);      // positive control: the TITLE matches
+        expect(noteMatches(silent[0], 'webm')).toBe(false);
+        expect(noteMatches(silent[0], 'voice-1')).toBe(false);
+    });
 });
 
 describe('previewRows', () => {

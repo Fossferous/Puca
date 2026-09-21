@@ -18,13 +18,14 @@ export function readableBody(body: string | null | undefined): string {
  *  line of text, else its first item, else what it is. */
 export function deriveContentTitle(
     title: string,
-    content: { body?: string; items?: string[]; images?: number; drawing?: boolean },
+    content: { body?: string; items?: string[]; images?: number; drawing?: boolean; audio?: number },
 ): string {
     if (title.replace(/\s+/g, ' ').trim()) return deriveQuickTitle(title, []);
     const firstLine = (content.body ?? '').split('\n').map(l => l.trim()).find(l => l !== '');
     if (firstLine) return deriveQuickTitle('', [firstLine]);
     if (content.items && content.items.some(i => i.trim())) return deriveQuickTitle('', content.items);
     if (content.drawing) return 'Drawing';
+    if ((content.audio ?? 0) > 0) return 'Voice note';
     if ((content.images ?? 0) > 0) return 'Photo';
     return 'Untitled note';
 }

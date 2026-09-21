@@ -1,6 +1,6 @@
 /**
- * The open note's OWN content, above its items: the note text, its photos
- * and drawings, and the two conversions — "Show checkboxes" (each line of
+ * The open note's OWN content, above its items: the note text, its photos,
+ * drawings and voice notes, and the two conversions — "Show checkboxes" (each line of
  * the text becomes an item) and "Hide checkboxes" (the items become lines of
  * text). Personal notes only, and only what the server supports
  * (useListContent.ts); against an older server this renders nothing and the
@@ -39,6 +39,9 @@ import { pendingOutboxCount } from '../model/notesOutbox';
 import { bodyToItems, conversionLosses, describeLosses, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
 import { type DrawingDoc, parseDrawing } from '../model/drawing';
 import { DrawingCanvas } from './DrawingCanvas';
+import { AudioRecorder, type RecordedClip } from './AudioRecorder';
+import { appendTranscript, canRecordAudio } from '../model/audioNote';
+import { transcribeClip } from '../model/transcribe';
 import { UndoBar } from './UndoBar';
 import '../noteContent.css';
 
@@ -65,6 +68,10 @@ let undoSeq = 0;
 export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props) {
     const c = actions.content;
     const [drawing, setDrawing] = useState<{ item?: GalleryItem; initial?: DrawingDoc } | null>(null);
+    const [recording, setRecording] = useState(false);
+    /** Why the last recording was not written down (an honest sentence), or
+     *  null. Shown under the media, never as a toast that scrolls away. */
+    const [transcribeNotice, setTranscribeNotice] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
@@ -102,6 +109,36 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         setBusy(true);
         try { await c.setNoteAttachments(listId, withoutItem(refs, item), refsOfItem(item)); } finally { setBusy(false); }
     };
+    /** Keep a recording, then try to write it down ON THIS PHONE. The clip is
+     *  saved either way: a device that cannot transcribe says so rather than
+     *  sending the audio anywhere (model/transcribe.ts). The transcript goes
+     *  into the note's TEXT, which is what makes a voice note searchable —
+     *  search never reads attachment names. */
+    const keepClip = async (clip: RecordedClip): Promise<boolean> => {
+        setBusy(true);
+        setTranscribeNotice(null);
+        try {
+            if (!await c.addNoteMedia(listId, [], [], [], [clip.file])) return false;
+        } finally {
+            setBusy(false);
+        }
+        setRecording(false);
+        try {
+            const r = await transcribeClip(clip.file, clip.durationMs);
+            if (r.text) {
+                const next = appendTranscript(text, r.text, MAX_BODY_BYTES, bodyBytes);
+                if (next === null) setTranscribeNotice('There is no room left in this note’s text for what was said — the recording is saved.');
+                else if (!await c.setBody(listId, next)) setTranscribeNotice('The recording is saved, but what was said couldn’t be added to the text.');
+            } else {
+                setTranscribeNotice(r.reason);
+            }
+        } catch (err) {
+            console.error('[notes] transcribing failed:', err);
+            setTranscribeNotice('The recording is saved, but this device couldn’t write it down.');
+        }
+        return true;
+    };
+
     const openDrawing = async (item?: GalleryItem) => {
         if (!item?.strokes) { setDrawing({}); return; }
         try {
@@ -239,6 +276,16 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     onRemove={item => void remove(item)}
                     onDraw={item => void openDrawing(item)}
                     showCamera={!!coarse}
+                    onRecord={canRecordAudio() ? () => { setTranscribeNotice(null); setRecording(true); } : undefined}
+                />
+            )}
+            {transcribeNotice && (
+                <p className="notes-transcribe-notice" role="status">{transcribeNotice}</p>
+            )}
+            {recording && (
+                <AudioRecorder
+                    onCancel={() => setRecording(false)}
+                    onSave={clip => keepClip(clip)}
                 />
             )}
             {showBody && tasksLoaded && !bodyLocked && (text !== '' || tasks.length > 0) && (

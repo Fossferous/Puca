@@ -1,11 +1,13 @@
 /**
- * A note's own pictures — photos and drawings stored in the personal list's
- * sealed attachments sidecar (api/listContent.ts, api/noteMedia.ts). Shared
- * by Púca Notes' editor and Púca's Tasks view, so a note shows the same
- * pictures through both front doors.
+ * A note's own pictures and recordings — photos, drawings and voice notes
+ * stored in the personal list's sealed attachments sidecar
+ * (api/listContent.ts, api/noteMedia.ts). Shared by Púca Notes' editor and
+ * Púca's Tasks view, so a note shows the same media through both front doors.
  *
- * Every picture is decrypted on this device (decryptToBlobUrl); the server
- * only ever holds ciphertext. A LOCKED sidecar (the identity is locked, the
+ * Every picture and every recording is decrypted on this device
+ * (decryptToBlobUrl); the server only ever holds ciphertext. A voice note
+ * gets a real player with controls and NEVER autoplays: sound on this device
+ * happens only because someone pressed play. A LOCKED sidecar (the identity is locked, the
  * value is not an envelope) renders a lock line and offers no edits: writing
  * over refs this device cannot read would orphan them for good.
  *
@@ -18,7 +20,7 @@ import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
 import { decryptToBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItems } from '../api/noteMedia';
 import { ImageLightbox } from './ImageLightbox';
-import { CameraIcon, CloseIcon, ImageIcon, LockIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
+import { CameraIcon, CloseIcon, ImageIcon, LockIcon, MicIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import './NoteImages.css';
 
 function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url: string) => void }) {
@@ -45,6 +47,34 @@ function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url
     );
 }
 
+/** A voice note: decrypted here, played only on purpose. `preload="metadata"`
+ *  fetches the duration from the blob URL and nothing else; `autoplay` is
+ *  never set, and there is no code path that calls play(). */
+function AudioClip({ refItem }: { refItem: TaskAttachmentRef }) {
+    const [url, setUrl] = useState<string | null>(null);
+    const [failed, setFailed] = useState(false);
+    const href = refItem.href;
+    useEffect(() => {
+        const p = parseEncAttachment(href);
+        if (!p) return;
+        let cancelled = false;
+        decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
+            .then(u => { if (!cancelled) setUrl(u); })
+            .catch(() => { if (!cancelled) setFailed(true); });
+        return () => { cancelled = true; };
+    }, [href]);
+    if (!parseEncAttachment(href) || failed) {
+        return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
+    }
+    if (!url) return <span className="ni-pending" aria-label={`Loading ${refItem.name}`} />;
+    return (
+        <span className="ni-audio">
+            <span className="ni-audio-name"><MicIcon /> {refItem.name}</span>
+            <audio src={url} controls preload="metadata" aria-label={refItem.name} />
+        </span>
+    );
+}
+
 export interface NoteImagesProps {
     /** The list's OPENED sidecar (null = none). */
     opened: string | null | undefined;
@@ -59,9 +89,13 @@ export interface NoteImagesProps {
     onDraw?: (item?: GalleryItem) => void;
     /** Phones: also offer the camera directly. */
     showCamera?: boolean;
+    /** Open the voice recorder. Absent where this device cannot record (no
+     *  MediaRecorder, no container, no microphone API) — the button is then
+     *  not offered at all rather than failing when pressed. */
+    onRecord?: () => void;
 }
 
-export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false }: NoteImagesProps) {
+export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false, onRecord }: NoteImagesProps) {
     const [zoom, setZoom] = useState<{ url: string; name: string } | null>(null);
     const pickRef = useRef<HTMLInputElement>(null);
     const cameraRef = useRef<HTMLInputElement>(null);
@@ -86,7 +120,9 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                         <figure key={item.ref.href} className={`ni-item ${item.kind}`}>
                             {item.kind === 'file'
                                 ? <span className="ni-file"><PaperclipIcon /> {item.ref.name}</span>
-                                : <Picture refItem={item.ref} onOpen={url => setZoom({ url, name: item.ref.name })} />}
+                                : item.kind === 'audio'
+                                    ? <AudioClip refItem={item.ref} />
+                                    : <Picture refItem={item.ref} onOpen={url => setZoom({ url, name: item.ref.name })} />}
                             {canEdit && (
                                 <div className="ni-tools">
                                     {item.kind === 'drawing' && onDraw && (
@@ -95,7 +131,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                                         </button>
                                     )}
                                     {onRemove && (
-                                        <button type="button" className="ni-tool" onClick={() => onRemove(item)} aria-label={`Remove ${item.kind === 'drawing' ? 'drawing' : 'picture'}`} title="Remove">
+                                        <button type="button" className="ni-tool" onClick={() => onRemove(item)} aria-label={`Remove ${item.kind === 'drawing' ? 'drawing' : item.kind === 'audio' ? 'voice note' : 'picture'}`} title="Remove">
                                             <CloseIcon />
                                         </button>
                                     )}
@@ -105,7 +141,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                     ))}
                 </div>
             )}
-            {canEdit && (onAddPhotos || onDraw) && (
+            {canEdit && (onAddPhotos || onDraw || onRecord) && (
                 <div className="ni-actions">
                     {onAddPhotos && (
                         <>
@@ -128,9 +164,14 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                             <PencilIcon /> Draw
                         </button>
                     )}
+                    {onRecord && (
+                        <button type="button" className="ni-action" onClick={onRecord} aria-label="Voice note">
+                            <MicIcon /> Voice note
+                        </button>
+                    )}
                 </div>
             )}
-            {busy && <div className="ni-busy" role="status">Saving pictures…</div>}
+            {busy && <div className="ni-busy" role="status">Saving…</div>}
             {zoom && <ImageLightbox url={zoom.url} name={zoom.name} onClose={() => setZoom(null)} />}
         </div>
     );

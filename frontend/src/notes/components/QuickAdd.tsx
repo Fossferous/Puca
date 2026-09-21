@@ -10,12 +10,14 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
+import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, MicIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
 import { DrawingCanvas } from './DrawingCanvas';
+import { AudioRecorder, type RecordedClip } from './AudioRecorder';
+import { canRecordAudio } from '../model/audioNote';
 import '../noteContent.css';
 
 /** A picture waiting in the composer, with its on-device preview URL. */
@@ -47,6 +49,12 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const [body, setBody] = useState('');
     const [pictures, setPictures] = useState<PendingPicture[]>([]);
     const [drawingOpen, setDrawingOpen] = useState(false);
+    const [clip, setClip] = useState<RecordedClip | null>(null);
+    const [recorderOpen, setRecorderOpen] = useState(false);
+    const clipRef = useRef<RecordedClip | null>(null);
+    useEffect(() => { clipRef.current = clip; });
+    // The recorded take is an object URL of a file on this device.
+    useEffect(() => () => { if (clipRef.current) URL.revokeObjectURL(clipRef.current.url); }, []);
     const pickRef = useRef<HTMLInputElement>(null);
     const cameraRef = useRef<HTMLInputElement>(null);
     const picturesRef = useRef(pictures);
@@ -65,13 +73,16 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         setTitle(''); setItems(['']); setBody(''); setMode('list');
         for (const p of pictures) URL.revokeObjectURL(p.url);
         setPictures([]);
+        if (clip) URL.revokeObjectURL(clip.url);
+        setClip(null);
     };
     const extras = (): NoteExtras | undefined => {
         const photos = pictures.flatMap(p => (p.photo ? [p.photo] : []));
         const drawing = pictures.find(p => p.drawing)?.drawing;
         const text = mode === 'text' ? body : '';
-        if (!text.trim() && photos.length === 0 && !drawing) return undefined;
-        return { body: text.trim() ? text : undefined, photos, drawing };
+        const audio = clip ? [clip.file] : [];
+        if (!text.trim() && photos.length === 0 && !drawing && audio.length === 0) return undefined;
+        return { body: text.trim() ? text : undefined, photos, drawing, audio };
     };
     const addPictures = (files: File[]) => {
         setPictures(prev => [...prev, ...files.map(f => ({ key: ++pictureSeq, url: URL.createObjectURL(f), photo: f }))]);
@@ -112,7 +123,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     };
 
     const discard = () => {
-        if ((pictures.length > 0 || body.trim()) && !window.confirm('Discard this note?')) return;
+        if ((pictures.length > 0 || clip || body.trim()) && !window.confirm('Discard this note?')) return;
         reset(); setOpen(false); onDismiss?.();
     };
 
@@ -120,7 +131,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     useEffect(() => {
         if (!open || sheet) return;
         const onDown = (e: PointerEvent) => {
-            if (drawingOpen) return;   // the drawing editor is portaled outside this card
+            // The drawing editor and the recorder are portaled outside this
+            // card, so a click inside either reads as "outside" and would
+            // save-and-close the composer under them.
+            if (drawingOpen || recorderOpen) return;
             if (rootRef.current && !rootRef.current.contains(e.target as Node)) void close();
         };
         document.addEventListener('pointerdown', onDown);
@@ -180,8 +194,17 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     autoFocus={sheet}
                     aria-label="Title"
                 />
-                {pictures.length > 0 && (
+                {(pictures.length > 0 || clip) && (
                     <div className="notes-quickadd-media">
+                        {clip && (
+                            <figure className="qa-clip">
+                                <audio src={clip.url} controls preload="metadata" aria-label="Recording preview" />
+                                <button type="button" className="ni-tool" aria-label="Remove recording" title="Remove"
+                                    onClick={() => { URL.revokeObjectURL(clip.url); setClip(null); }}>
+                                    <CloseIcon size={14} />
+                                </button>
+                            </figure>
+                        )}
                         {pictures.map(p => (
                             <figure key={p.key}>
                                 <img src={p.url} alt={p.drawing ? 'Drawing' : (p.photo?.name ?? 'Photo')} />
@@ -278,6 +301,11 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                                     <PencilIcon />
                                 </button>
                             )}
+                            {!clip && canRecordAudio() && (
+                                <button type="button" className="notes-iconbtn small" aria-label="Voice note" title="Voice note" onClick={() => setRecorderOpen(true)}>
+                                    <MicIcon />
+                                </button>
+                            )}
                         </>
                     )}
                     <button type="button" className="notes-iconbtn small" aria-label="Discard note" title="Discard" onClick={discard}>
@@ -288,6 +316,17 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     </button>
                 </div>
             </div>
+            {recorderOpen && (
+                <AudioRecorder
+                    onCancel={() => setRecorderOpen(false)}
+                    onSave={next => {
+                        if (clip) URL.revokeObjectURL(clip.url);
+                        setClip(next);
+                        setRecorderOpen(false);
+                        return true;
+                    }}
+                />
+            )}
             {drawingOpen && (
                 <DrawingCanvas
                     onCancel={() => setDrawingOpen(false)}
