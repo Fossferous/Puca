@@ -26,6 +26,7 @@ import { type GalleryItem, fileIdsOf, refsOfItem, uploadNoteMedia, withoutItem }
 import { NoteBodyField } from './NoteBodyField';
 import { NoteImages } from './NoteImages';
 import { pushMessageToast } from './messageToastBus';
+import { forgetNoteKeys } from '../notes/model/notesPrefs';
 import { ChevronDownIcon, ChevronRightIcon, TrashIcon } from './Icons';
 import './NoteImages.css';
 
@@ -132,6 +133,9 @@ export function TasksTrash({ features, trashed, onRestored }: TrashProps) {
         try {
             await deleteListForever(l);
             drop(l.id);
+            // Gone for good: its colour and labels go with it, here as in
+            // Notes. (A RESTORE keeps them, which is why the trash does not.)
+            forgetNoteKeys([`list:${l.id}`]);
         } catch (err) {
             console.error('Failed to delete list:', err);
             // Refused because its files cannot all be found: say so, in its words.
