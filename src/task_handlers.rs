@@ -113,6 +113,67 @@ async fn claim_op_key(
     .await
 }
 
+/// Is this key already spent, and on what? `Some((created_id, scope))` for a
+/// key whose create has COMMITTED; None for one this server has never seen
+/// (or one still uncommitted in another transaction, which `claim_op_key`
+/// then settles properly).
+///
+/// Read before the create's own checks so that a REPLAY is answered rather
+/// than re-validated: the request it repeats was validated when it landed,
+/// and the state it is judged against has moved on since — most sharply the
+/// per-checklist cap, which COUNTS the very item the key made. This is a
+/// short-circuit only; the transactional claim stays the authority for a key
+/// that is new or racing.
+async fn find_op_key(
+    pool: &sqlx::PgPool,
+    user_id: i64,
+    key: &str,
+) -> Result<Option<(i64, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT created_id, scope FROM task_create_keys WHERE user_id = $1 AND op_key = $2")
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The item an already-claimed key made, scoped to this caller and this
+/// checklist — so a key replayed against a different note is refused rather
+/// than answered with a row from somewhere else.
+async fn re_serve_task(
+    state: &AppState,
+    user_id: i64,
+    channel_id: Option<i64>,
+    list_id: Option<i64>,
+    created_id: i64,
+    key_scope: &str,
+) -> Result<TaskResponse, (StatusCode, &'static str)> {
+    // The key was spent on something that is not an item: `created_id` names
+    // a row in another table and must never be looked up here.
+    if key_scope != "task" {
+        return Err((StatusCode::CONFLICT, REPLAY_WRONG_SCOPE_MESSAGE));
+    }
+    let sql = format!(
+        "SELECT {TASK_COLUMNS} FROM channel_tasks \
+         WHERE id = $1 AND created_by = $2 \
+         AND channel_id IS NOT DISTINCT FROM $3 AND list_id IS NOT DISTINCT FROM $4"
+    );
+    let existing: Option<TaskRow> = sqlx::query_as(&sql)
+        .bind(created_id)
+        .bind(user_id)
+        .bind(channel_id)
+        .bind(list_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to re-serve a replayed item: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create task")
+        })?;
+    match existing {
+        Some(r) => Ok(task_row_to_response(r)),
+        None => Err((StatusCode::CONFLICT, REPLAY_GONE_MESSAGE)),
+    }
+}
+
 /// What a replay whose original row is gone gets: the create really did
 /// happen, and re-running it would resurrect something the user deleted.
 const REPLAY_GONE_MESSAGE: &str = "That was already created, and has since been removed";
@@ -567,6 +628,25 @@ async fn insert_task(
 ) -> Result<(TaskResponse, bool), (StatusCode, &'static str)> {
     if let Some(key) = payload.op_key.as_deref() {
         validate_op_key(key)?;
+        // A REPLAY IS ANSWERED, NOT RE-VALIDATED. Everything below judges a
+        // NEW item against the checklist as it stands now, and for a retry
+        // that state has moved on — the item this key already made is itself
+        // one of the rows the cap counts, so a list standing at exactly
+        // MAX_TASKS_PER_CHECKLIST answered the retry with 400 "This checklist
+        // has reached its task limit". The outbox treats a non-5xx as
+        // unrecoverable (notes/model/notesOutbox.ts): it drops the op and
+        // tells the user their item could not be saved, while the server has
+        // had it all along. The same goes for a parent deleted since.
+        if let Some((created_id, scope)) = find_op_key(&state.pool, claims.sub, key)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to read a create key: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create task")
+            })?
+        {
+            let row = re_serve_task(state, claims.sub, channel_id, list_id, created_id, &scope).await?;
+            return Ok((row, false));
+        }
     }
     if payload.description.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Description cannot be empty"));
@@ -672,26 +752,11 @@ async fn insert_task(
     // so a key reused against a different note is refused rather than
     // answered with someone else's row.
     tx.rollback().await.map_err(fail)?;
-    // The key was spent on something that is not an item: `created_id` names
-    // a row in another table and must never be looked up here.
-    if key_scope != "task" {
-        return Err((StatusCode::CONFLICT, REPLAY_WRONG_SCOPE_MESSAGE));
-    }
-    let re_serve = format!(
-        "SELECT {TASK_COLUMNS} FROM channel_tasks          WHERE id = $1 AND created_by = $2          AND channel_id IS NOT DISTINCT FROM $3 AND list_id IS NOT DISTINCT FROM $4"
-    );
-    let existing: Option<TaskRow> = sqlx::query_as(&re_serve)
-        .bind(created_id)
-        .bind(claims.sub)
-        .bind(channel_id)
-        .bind(list_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(fail)?;
-    match existing {
-        Some(r) => Ok((task_row_to_response(r), false)),
-        None => Err((StatusCode::CONFLICT, REPLAY_GONE_MESSAGE)),
-    }
+    // Reached only by a replay that RACED the original (the short-circuit at
+    // the top saw the key still uncommitted); the two paths must answer
+    // identically, so they share one re-serve.
+    let row = re_serve_task(state, claims.sub, channel_id, list_id, created_id, &key_scope).await?;
+    Ok((row, false))
 }
 
 // --- Channel checklist handlers ---
@@ -2477,10 +2542,9 @@ mod db_tests {
         )
         .bind(note_id).bind(list_id).bind(V2).bind(alice.sub)
         .execute(&pool).await.expect("an item wearing the note's id");
-        // That id was taken by hand, so move the sequence past it or the very
-        // next item insert collides with it (a 500, not the refusal under test).
-        sqlx::query("SELECT setval(pg_get_serial_sequence('channel_tasks', 'id'), $1, true)")
-            .bind(note_id).execute(&pool).await.unwrap();
+        // No setval here on purpose: `bump_ids_past_both` already left every
+        // future item id a million above this one, and dragging the sequence
+        // back down to it would undo exactly that.
         let (status, body) = post_item(&state, &alice, list_id, V2, Some(key_c)).await;
         assert_eq!(status, StatusCode::CONFLICT, "a key spent on a note is refused on an item");
         assert_eq!(body, Value::Null, "and no row of any kind comes back");
@@ -2489,18 +2553,98 @@ mod db_tests {
         cleanup(&pool, &[&alice]).await;
     }
 
-    /// Push both id sequences past the highest id in EITHER table, so the
-    /// next `task_lists` row is free to be duplicated in `channel_tasks`.
-    /// Returns that watermark.
+    /// Ballast: `n` extra items on `list_id`, straight into the table. The
+    /// cap counts rows, and what is in them does not matter.
+    ///
+    /// The ids are NEGATIVE, below everything in the table, so that filling a
+    /// checklist to 2000 never consumes 2000 values of the identity sequence
+    /// — which `bump_ids_past_both` below reasons about, on a database these
+    /// concurrent tests share. The sequence never hands out a negative, so
+    /// nothing can collide with these.
+    async fn fill_list(pool: &PgPool, list_id: i64, owner: i64, n: i64) {
+        sqlx::query(
+            "INSERT INTO channel_tasks (id, list_id, description, created_by, position) \
+             OVERRIDING SYSTEM VALUE \
+             SELECT (SELECT LEAST(COALESCE(MIN(id), 0), 0) FROM channel_tasks) - g, $1, $2, $3, 1000 + g \
+             FROM generate_series(1, $4) g",
+        )
+        .bind(list_id).bind(V2).bind(owner).bind(n)
+        .execute(pool).await.expect("fill the checklist to the cap");
+    }
+
+    /// A REPLAY IS ANSWERED EVEN WHEN THE CHECKLIST IS FULL.
+    ///
+    /// Every check in front of the insert judges a NEW item against the list
+    /// as it stands now, and the per-checklist cap counts the very item the
+    /// replayed key already made. So a list standing at exactly the cap
+    /// refused the retry with 400 "This checklist has reached its task
+    /// limit" — and the client's outbox treats a non-5xx as unrecoverable:
+    /// it drops the op and names the item in the "changes made offline
+    /// couldn't be saved" toast, telling the user it was lost when the
+    /// server has had it all along.
+    #[tokio::test]
+    async fn a_replayed_item_is_re_served_even_when_the_checklist_is_full() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "cap").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        // One real create through the handler, carrying its key...
+        let (s1, first) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s1, StatusCode::OK);
+        // ...and the list then fills to EXACTLY the cap, that item included.
+        fill_list(&pool, list_id, alice.sub, MAX_TASKS_PER_CHECKLIST - 1).await;
+        assert_eq!(count_items(&pool, list_id).await, MAX_TASKS_PER_CHECKLIST);
+
+        // The answer to the first attempt never arrived, so it is sent again.
+        let (s2, again) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s2, StatusCode::OK, "a replay is answered, not refused for being over the cap");
+        assert_eq!(again["id"], first["id"], "and it is the SAME item");
+        assert_eq!(again["position"], first["position"]);
+        assert_eq!(count_items(&pool, list_id).await, MAX_TASKS_PER_CHECKLIST, "nothing was added");
+
+        // POSITIVE CONTROL: the cap is still a cap. A genuinely new item is
+        // refused whether or not it carries a key of its own — the replay
+        // path is a way back to a row that exists, not a hole in the limit.
+        let (s3, _) = post_item(&state, &alice, list_id, V2, Some(KEY_B)).await;
+        assert_eq!(s3, StatusCode::BAD_REQUEST, "a NEW keyed item is still capped");
+        let (s4, _) = post_item(&state, &alice, list_id, V2, None).await;
+        assert_eq!(s4, StatusCode::BAD_REQUEST, "and so is a keyless one");
+        assert_eq!(count_items(&pool, list_id).await, MAX_TASKS_PER_CHECKLIST);
+
+        // And a replay whose row was deleted in the meantime still says so,
+        // rather than being answered by the cap.
+        sqlx::query("DELETE FROM channel_tasks WHERE id = $1")
+            .bind(first["id"].as_i64().unwrap()).execute(&pool).await.unwrap();
+        fill_list(&pool, list_id, alice.sub, 1).await;
+        let (s5, _) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s5, StatusCode::CONFLICT, "gone, not \"the list is full\"");
+
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Clear a band of ids that a `task_lists` row can take and a
+    /// `channel_tasks` row cannot, so the next note's id is free to be
+    /// duplicated by hand in `channel_tasks`. Returns the watermark below it.
+    ///
+    /// The note's id has to be UNREACHABLE by items, not merely unused right
+    /// now. These tests share one database and cargo runs them at the same
+    /// time, so setting both sequences to the same value — which is what this
+    /// did — left the next note and the next item racing for the same number,
+    /// and the planted row hit a 23505 whenever another test created an item
+    /// first. Items are therefore pushed a long way ABOVE the band: every id
+    /// that already exists is below `high`, and every item made from here on
+    /// is above `high + ITEM_GAP`, so anything in between belongs to notes.
     async fn bump_ids_past_both(pool: &PgPool) -> i64 {
+        const ITEM_GAP: i64 = 1_000_000;
         let (high,): (i64,) = sqlx::query_as(
             "SELECT GREATEST((SELECT COALESCE(MAX(id), 0) FROM task_lists), \
                              (SELECT COALESCE(MAX(id), 0) FROM channel_tasks)) + 1000",
         )
         .fetch_one(pool).await.unwrap();
-        for table in ["task_lists", "channel_tasks"] {
+        for (table, to) in [("task_lists", high), ("channel_tasks", high + ITEM_GAP)] {
             sqlx::query("SELECT setval(pg_get_serial_sequence($1, 'id'), $2, true)")
-                .bind(table).bind(high)
+                .bind(table).bind(to)
                 .execute(pool).await.unwrap();
         }
         high
