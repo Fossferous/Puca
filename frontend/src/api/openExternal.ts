@@ -6,7 +6,18 @@
 // `open_external` Rust command (scheme-allowlisted, same one the update
 // banner uses); web and Capacitor keep normal browser semantics.
 
-import { isTauri } from './platform';
+import { isMobile, isTauri } from './platform';
+
+/**
+ * A top-level navigation, behind an object so a test can replace it: jsdom's
+ * `location` cannot be stubbed. Same shape (and same reason) as
+ * `downloadPage` in notes/model/notesUpdate.ts.
+ */
+export const navigateAway = {
+    go(url: string): void {
+        window.location.assign(url);
+    },
+};
 
 /** Schemes we will hand to the OS. Mirrors the chat parser's SAFE_URL_SCHEMES
  *  minus the internal sovereign-enc scheme (never an external link). */
@@ -22,9 +33,20 @@ export function openExternalUrl(url: string): void {
         void import('@tauri-apps/api/core')
             .then(({ invoke }) => invoke('open_external', { url }))
             .catch(err => console.error('[openExternal] failed:', err));
-    } else {
-        window.open(url, '_blank', 'noopener,noreferrer');
+        return;
     }
+    if (isMobile()) {
+        // Capacitor: a top-level navigation to another host is handed to the
+        // system browser (Bridge.launchIntent → ACTION_VIEW) and the app
+        // stays where it is, because neither capacitor.config.ts lists an
+        // `allowNavigation` for foreign hosts. window.open / target="_blank"
+        // is NOT a substitute: @capacitor/android never calls
+        // setSupportMultipleWindows, so the new window is simply refused.
+        // Do not "simplify" this back to window.open.
+        navigateAway.go(url);
+        return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 /**

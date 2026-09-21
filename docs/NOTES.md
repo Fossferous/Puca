@@ -652,10 +652,44 @@ lines are split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `,
 `[ ]` and `[x]` are dropped and blank lines are ignored. A paste of ONE line is
 never intercepted — it lands in the field as any paste would.
 
+**Links in a note.** A web address typed or pasted into a note's text, or
+into an item, becomes tappable. Púca Notes works out where it goes by looking
+at the text it has already decrypted — **nothing is fetched to render a
+link**. No favicon, no page title, no description, no preview card, no site
+icon. The note stays as private on screen as it is on the server.
+
+That refusal is deliberate, and worth stating so nobody adds it back as an
+improvement: fetching a page's metadata or its icon would tell a third party
+the hostname, this device's IP address and the moment of reading — and for a
+note, which the server itself cannot read, it would additionally announce that
+someone is reading *this note* right now. `frontend/src/api/linkPreview.ts`
+records the same deletion for chat.
+
+- Only `http` and `https` become links. `javascript:`, `data:`, `file:`,
+  `mailto:` and a scheme-less `//host` stay plain text
+  (`frontend/src/utils/linkSegments.ts`, sharing chat's `URL_RE`).
+- A link opens OUTSIDE the app: a new browser tab on the web, the desktop
+  shell's `open_external` under Tauri, and the system browser from the
+  Android apps — where it is a top-level navigation the Capacitor bridge
+  turns into `ACTION_VIEW`, because `window.open` is not a path there.
+  Every anchor carries `rel="noopener noreferrer"`, so the destination does
+  not learn the origin and path of the page that was reading a sealed note.
+- Text holding an address swaps to a read view when it is not being edited;
+  tapping anywhere but the link puts the cursor back where you tapped. Text
+  with no address never leaves its editing field.
+- On the card grid a link is **marked but not tappable**: the card's own tap
+  opens the note, and a 44px tap target cannot live inside a clamped two-line
+  preview at 390px.
+- Púca's Tasks view shows the same links, because it renders the same text
+  through the same components.
+
 ## Not built (and why)
 
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
+- **Link previews.** A note shows the address itself — never a fetched title,
+  description or picture. See *Links in a note* above for why that is a
+  refusal and not a gap.
 - **Pasting a picture inside the Android app.** Android's keyboard inserts a
   picture through a different mechanism than the clipboard, so a paste there
   is unreliable; the camera and the picker stay the way in on a phone, and the

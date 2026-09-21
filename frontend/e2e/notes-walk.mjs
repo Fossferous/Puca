@@ -296,6 +296,39 @@ page.once('dialog', d => d.accept());
 await page.click('.notes-editor .note-images button[aria-label="Remove picture"]');
 await page.waitForSelector('.notes-editor .note-images .ni-item', { state: 'detached', timeout: 15000 }).catch(() => {});
 ck('drop: the dropped picture can be removed again', await page.locator('.notes-editor .note-images .ni-item').count() === 0);
+// ---- Links in a note's text (worked out here, never fetched) ------------------------
+// Anything this page asks for that is not our own origin would be a favicon,
+// an OG scrape or an unfurl — the regression this block exists to catch, and
+// one no unit test can see.
+const foreignRequests = [];
+const watchForeign = rq => { if (!rq.url().startsWith(baseURL) && !rq.url().startsWith('data:') && !rq.url().startsWith('blob:')) foreignRequests.push(rq.url()); };
+page.on('request', watchForeign);
+await page.fill('.notes-editor-content textarea.nb-text',
+    'Buy before Friday https://example.com/a and javascript:alert(1) and //evil.example/x');
+await page.locator('.notes-editor-sub').click();   // blur → read view
+await page.waitForSelector('.notes-editor-content .nb-rendered', { timeout: 10000 }).catch(() => {});
+ck('note links: a URL in the note text becomes a link',
+    await page.locator('.notes-editor-content .nb-rendered a.note-link').count() === 1);
+const noteHref = await page.locator('.notes-editor-content a.note-link').getAttribute('href').catch(() => null);
+const noteRel = await page.locator('.notes-editor-content a.note-link').getAttribute('rel').catch(() => null);
+ck('note links: the href is the address, opened with noopener AND noreferrer',
+    noteHref === 'https://example.com/a' && /noopener/.test(noteRel ?? '') && /noreferrer/.test(noteRel ?? ''),
+    `${noteHref} rel=${noteRel}`);
+ck('note links: javascript: and a scheme-less //host stay dead text',
+    await page.locator('.notes-editor-content a[href^="javascript:"]').count() === 0
+    && await page.locator('.notes-editor-content a[href^="//"]').count() === 0);
+ck('note links: nothing is fetched to render them', foreignRequests.length === 0, JSON.stringify(foreignRequests.slice(0, 3)));
+await page.locator('.notes-editor-content a.note-link').click({ trial: true });
+ck('note links: the link is hit-testable (a real tap target, not covered)', true);
+await shot('note-links');
+// Clicking the text — not the link — puts the field back, still editable.
+await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
+ck('note links: clicking the text (not the link) returns to editing',
+    await page.locator('.notes-editor-content textarea.nb-text:focus').count() === 1);
+await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
+await page.locator('.notes-editor-sub').click();
+await sleep(1500);
+page.off('request', watchForeign);
 // toggle Milk. click(), not check(): the box is a CONTROLLED input whose DOM
 // state React restores until the optimistic update commits a frame later,
 // and check() asserts the flip synchronously — the completed section is the
@@ -373,6 +406,9 @@ ck('card: carries the colour', await page.locator('.notes-card[data-color="mint"
 const groceries = () => page.locator('.notes-card', { hasText: 'Groceries' });
 ck('card: shows the label chip and progress', /Errands/.test(await groceries().locator('.notes-card-foot').innerText()) && /1\/5/.test(await groceries().locator('.notes-card-foot').innerText()));
 ck('card: shows the note text above the items', /Buy before Friday/.test(await groceries().locator('.notes-card-body').innerText()));
+ck('card: a link on the card is marked but NOT tappable (the card opens the note)',
+    await groceries().locator('.notes-card-body .note-link').count() === 1
+    && await groceries().locator('.notes-card-body a').count() === 0);
 ck('rail: the label appears', await page.locator('.notes-rail-item', { hasText: 'Errands' }).count() === 1);
 await page.locator('.notes-rail-item', { hasText: 'Errands' }).click();
 await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
@@ -1102,6 +1138,28 @@ ck('phone: editor is full-screen', box && box.height >= vh - 2 && box.width >= 3
 r = await audit();
 ck('phone: editor title + add row ≥ 16px', r.fonts['.notes-editor-title'] >= 16 && r.fonts['.notes-editor-add input'] >= 16, JSON.stringify(r.fonts));
 ck('phone: editor tap targets at size', r.under.length === 0, JSON.stringify(r.under));
+// A long web address must not widen the note. Seed one, measure, put it back.
+const LONG_URL = 'https://example.com/a/very/long/path/that/keeps/going/and/going/so/it/cannot/possibly/fit/on/one/line/at/390px?q=1';
+await m.tap('.notes-editor-content .nb-rendered');
+await m.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+await m.fill('.notes-editor-content textarea.nb-text', `Buy before Friday ${LONG_URL}`);
+await m.tap('.notes-editor-sub');
+await m.waitForSelector('.notes-editor-content .nb-rendered a.note-link', { timeout: 10000 }).catch(() => {});
+r = await audit();
+ck('phone: a long link in a note does not widen the page',
+    !r.bodyScrollsHorizontally && r.widest <= r.vw + 1, `widest=${r.widest} vw=${r.vw}`);
+ck('phone: the note text is still ≥ 16px in its read view', r.fonts['.nb-text'] >= 16, `${r.fonts['.nb-text']}px`);
+const linkBox = await m.locator('.notes-editor-content a.note-link').boundingBox();
+ck('phone: the link is inside the viewport and has real height',
+    linkBox && linkBox.x >= 0 && linkBox.x + linkBox.width <= 390.5 && linkBox.height > 0, JSON.stringify(linkBox));
+await mshot('phone-note-link');
+await m.tap('.notes-editor-content .nb-rendered', { position: { x: 4, y: 4 } });
+await m.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+ck('phone: tapping the text (not the link) returns to editing',
+    await m.locator('.notes-editor-content textarea.nb-text').count() === 1);
+await m.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
+await m.tap('.notes-editor-sub');
+await new Promise(res => setTimeout(res, 1500));
 const grip = await m.evaluate(() => { const g = document.querySelector('.notes-editor .tt-grip:not(.tt-grip-ghost)'); return g ? parseFloat(getComputedStyle(g).opacity) : -1; });
 ck('phone: the drag grip is visible (not the desktop hover state)', grip >= 0.5, String(grip));
 ck('phone: the move arrows (tap alternative) are shown', await m.locator('.notes-editor .tt-move').first().isVisible());

@@ -361,6 +361,15 @@ body.drag-reorder-active {
         min-width: 60%;
     }
 
+    /* A link in an item row is a real tap target without changing the row's
+       height: the padding is cancelled by an equal negative margin, so the
+       blanket 44px rule in mobile.css does not inflate every row. */
+    .tt-description a.note-link {
+        display: inline-block;
+        padding-block: 11px;
+        margin-block: -11px;
+    }
+
     /* When they do wrap, keep the cluster to the right where it belongs. */
     .tt-actions {
         margin-left: auto;

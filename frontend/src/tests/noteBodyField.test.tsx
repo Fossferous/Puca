@@ -118,6 +118,40 @@ describe('NoteBodyField', () => {
         expect(area().value).toBe('mine');
     });
 
+    it('a body with NO link never leaves the textarea', () => {
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="Buy milk" onSave={onSave} />); });
+        expect(container.querySelector('textarea')).not.toBeNull();
+        act(() => { area().dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+        expect(container.querySelector('textarea')).not.toBeNull();
+        expect(container.querySelector('.nb-rendered')).toBeNull();
+    });
+
+    it('typing a URL and blurring SAVES it and then shows it as a link', async () => {
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="" onSave={onSave} />); });
+        type(area(), 'read https://example.com/a');
+        // The blur flush must run BEFORE the read view replaces the textarea,
+        // or the last words typed are the ones that get lost.
+        act(() => { area().dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+        await flushPromises();
+        expect(onSave).toHaveBeenCalledWith('read https://example.com/a');
+        expect(container.querySelector('textarea')).toBeNull();
+        const a = container.querySelector('.nb-rendered a.note-link') as HTMLAnchorElement;
+        expect(a?.getAttribute('href')).toBe('https://example.com/a');
+    });
+
+    it('clicking the read view (not the link) puts a focused textarea back, with the text intact', async () => {
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="read https://example.com/a" onSave={onSave} />); });
+        const read = container.querySelector('.nb-rendered') as HTMLElement;
+        expect(read).not.toBeNull();
+        act(() => { read.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+        expect(area()).not.toBeNull();
+        expect(area().value).toBe('read https://example.com/a');
+        expect(document.activeElement).toBe(area());
+    });
+
     it('unreadable text is locked: no field to type into', () => {
         act(() => { root.render(<NoteBodyField value={TASK_DECRYPT_FAILED} onSave={vi.fn()} />); });
         expect(container.querySelector('textarea')).toBeNull();
@@ -125,5 +159,7 @@ describe('NoteBodyField', () => {
         // POSITIVE CONTROL: readable text is editable.
         act(() => { root.render(<NoteBodyField value="fine" onSave={vi.fn()} />); });
         expect(container.querySelector('textarea')).not.toBeNull();
+        // …and a marker is never linkified, whatever it happens to contain.
+        expect(container.querySelector('a.note-link')).toBeNull();
     });
 });

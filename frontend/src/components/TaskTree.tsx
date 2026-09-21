@@ -25,6 +25,7 @@ import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
 import { ApiError } from '../api/client';
 import { TaskAttachments } from './TaskAttachments';
+import { NoteLinkText } from './NoteLinkText';
 import { useDragReorder } from '../hooks/useDragReorder';
 import {
     CalendarIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, ClockIcon, GripIcon, LockIcon,
@@ -291,6 +292,14 @@ export function TaskTree({
     const bylineFor = (task: Task): string | null =>
         resolveUserName ? (resolveUserName(task.created_by) ?? `user #${task.created_by}`) : null;
 
+    /** An item's text, with any web address in it shown as a link
+     *  (NoteLinkText — nothing is fetched to render one). A failure marker is
+     *  NOT text to linkify: it is shown exactly as it is. A legacy PLAINTEXT
+     *  item is linkified like any other — it keeps its "Not encrypted"
+     *  warning beside the link, which is the point. */
+    const describe = (task: Task) =>
+        (isUndecryptable(task.description) ? task.description : <NoteLinkText text={task.description} />);
+
     const startEdit = (task: Task) => {
         // A failure marker is not text to edit: the editor would prefill with it
         // and a save would replace the real (still encrypted) item. The seal
@@ -437,10 +446,10 @@ export function TaskTree({
                 />
             ) : editable ? (
                 <span className="tt-description" onClick={() => startEdit(task)} title="Click to edit">
-                    {task.description}
+                    {describe(task)}
                 </span>
             ) : (
-                <span className="tt-description">{task.description}</span>
+                <span className="tt-description">{describe(task)}</span>
             )}
             {/* Flag a checklist item the server stored as plaintext (never
                 encrypted) — audit H-1. Everything else here is E2EE, so an

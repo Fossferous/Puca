@@ -20,6 +20,7 @@ import { PERM, hasPerm } from '../../api/permissionBits';
 import {
     ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
+import { NoteLinkText } from '../../components/NoteLinkText';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
@@ -203,7 +204,7 @@ function NoteCardImpl({
                                 onClick={e => e.stopPropagation()}
                                 onChange={e => toggle(task, e)}
                             />
-                            <span className="notes-card-item-text">{task.description}</span>
+                            <span className="notes-card-item-text"><NoteLinkText text={task.description} interactive={false} /></span>
                             {task.descEncState === 'legacy' && (
                                 <span className="tt-not-encrypted" title="Not encrypted — this item was stored as plaintext, not end-to-end encrypted."><WarningIcon /> Not encrypted</span>
                             )}

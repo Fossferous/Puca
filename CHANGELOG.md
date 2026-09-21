@@ -7,6 +7,14 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Tappable links in notes.** A web address in a note's text, or in one of
+  its items, is now a link you can tap — in Púca Notes and in Púca's Tasks
+  view. Púca works out where the link goes from the text on your device: it
+  never asks the internet anything to show you a link, so opening a note tells
+  nobody that you are reading it, and you will never see a fetched page title
+  or site icon. Only ordinary web addresses become links, and they open in
+  your browser rather than inside the app. On the card grid a link is marked
+  but not tappable, so tapping the card still opens the note.
 - **Paste and drop into a note.** Paste a screenshot straight into a note, or
   drop a picture onto it, instead of saving it to disk first. Pasted pictures
   are made smaller and encrypted on your device exactly like picked ones, and a
