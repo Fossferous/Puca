@@ -336,10 +336,13 @@ ck('note links: nothing is fetched to render them', foreignRequests.length === 0
 // Only a real click, with what it opened read back, can see that.
 await page.evaluate(() => {
     window.__opened = [];
+    window.__realOpen = window.open;
     window.open = url => { window.__opened.push(String(url)); return null; };
 });
 await page.locator('.notes-editor-content a.note-link').click();
-const opened = await page.evaluate(() => window.__opened);
+// Put window.open back before anything else runs on this page: a stub left
+// lying about would make a later step's link silently do nothing.
+const opened = await page.evaluate(() => { const o = window.__opened; window.open = window.__realOpen; return o; });
 const stillRead = await page.locator('.notes-editor-content textarea.nb-text').count() === 0;
 ck('note links: a real tap opens the address outside the app, and does NOT open the editor',
     opened.length === 1 && opened[0] === 'https://example.com/a' && stillRead,
