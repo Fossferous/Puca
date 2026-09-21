@@ -65,12 +65,16 @@ one-line summary; this file is the full story. Versions follow
   added from the calendar, and moving a note to the trash (and its Undo)
   included. If the server refuses one (for example a note deleted elsewhere,
   or a repeating item another device already moved on), you are told which.
-  Adding photos or drawings, a note's text and a note made with text or
-  pictures need a connection, and the app says so when there is none. The
-  copy on your device is encrypted with a key from your account.
+  Adding photos or drawings, a note's text, a note made with text or
+  pictures, and turning a note's text into a checklist need a connection, and
+  the app says so when there is none. Restoring from the Trash waits for a
+  move to the trash that has not synced yet, so that move can never undo it.
+  The copy on your device is encrypted with a key from your account.
 - **Select several notes at once** and pin, colour, label, archive, move to
   the trash, copy or duplicate them together: Ctrl-click, Shift-click or
-  Ctrl+A on a computer, a long press on a phone.
+  Ctrl+A on a computer, a long press on a phone. Selection is only on the
+  notes themselves — never in Reminders, the Trash or the Calendar. A copy
+  keeps the note's text and its items' dates and repeats.
 - **Púca Notes on Android reminds you even when it is closed.** A due item
   now raises a notification from the Notes app itself — open or closed,
   after a restart of the phone too — saying only "An item is due"; tapping it

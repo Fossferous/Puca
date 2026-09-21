@@ -54,7 +54,10 @@ Púca's reminders. Anything you do in one is what you see in the other.
   self are skipped and the button says so), makes copies or copies them as
   text, all at once. Pinning is one save of the full order, so notes hidden
   by a filter or sitting in the trash keep their slots; colour, labels and
-  archive are one sealed write.
+  archive are one sealed write. Selection exists only on the note grid:
+  Reminders, Trash and Calendar have none (Ctrl+A there selects nothing), and
+  leaving the grid drops a selection and sends a bulk delete that is still in
+  its Undo window.
 - **Undo** — archive and delete show an Undo snackbar. Against a server with
   the trash, *Move to trash* happens at once and Undo restores the note (both
   go through the offline queue, so an Undo made offline replays right behind
@@ -62,7 +65,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   the snackbar expires, as before. A bulk delete always waits out its Undo
   window first.
 - **Copy as text / Make a copy / Export / Share** — a note as a Markdown
-  checklist to the clipboard, a copy as a fresh note, or every note as
+  checklist to the clipboard, a copy as a fresh note (its text and its open
+  items, which keep their dates and repeats where the server stores them —
+  with or without text), or every note as
   Markdown or JSON from the account menu: a download in the browser, a file in
   `Documents/Puca Notes/` (name plus a timestamp) in the Android app, which
   also offers **Share** for every note or one note through Android's share
@@ -202,9 +207,15 @@ is open. The poll is off only while the stream is live.
   waits for the queue a previous page left behind before it may run.
 - **Not offline:** anything that uploads or seals a note's own content —
   adding an attachment, a photo or a drawing, saving a note's text, creating
-  a note with text or pictures — and the Trash view's *Restore*, *Delete
-  forever* and *Empty trash*. They fail with a message and nothing is
-  queued.
+  a note with text or pictures, *Show checkboxes* (turning the text into
+  items: it is refused, with a message, while offline or while anything is
+  queued, so it can never leave the text AND queued copies of its lines) —
+  and the Trash view's *Delete forever* and *Empty trash*. They fail with a
+  message and nothing is queued. The Trash view's *Restore* is the same
+  outbox op as Undo, so it queues. A note whose move to the trash is itself
+  still queued is listed in the Trash at once, but its *Restore* and *Delete
+  forever* wait until that move reaches the server, and *Empty trash* leaves
+  it alone: anything run before the queued move would be undone by it.
 - **A session that expires while offline** keeps the cached notes on screen with
   a banner (*Your session has expired. You're offline, so this is what this
   device last saw — sign in again when you're back online to sync.*) instead
@@ -537,7 +548,10 @@ it may have been trashed in Púca or on another device a moment ago), and so is 
 the saved order: a pin or a reorder made while it is in the trash saves it
 back where it was (`keepHiddenSlots` in `api/listContent.ts`), and neither
 front door saves the order before it has read the trash, so a restored note
-returns to its place. *Notes to self* cannot be trashed and is not offered for
+returns to its place. A note trashed elsewhere while this page is open
+reaches the trash through the live stream too — a `lists` event refreshes the
+listing and the trash together (`taskEvents.ts`), so the next pin still knows
+about it. *Notes to self* cannot be trashed and is not offered for
 it.
 
 **What the server cannot clean up.** The uploads behind a note's pictures and
@@ -553,7 +567,9 @@ A note whose window runs out while no Notes is open is deleted by the
 server's sweep and its uploads stay behind, counted against your quota — the
 same as any delete made by a client older than this, or by Púca's own
 immediate delete. *Hide checkboxes* deletes the files of items it drops once
-its Undo is gone.
+its Undo is gone — only of items whose delete went through, and never a file
+a live item names at that moment. An item whose delete failed stays an item,
+with its pictures, and only the other items become lines of text.
 
 ## Not built (and why)
 
