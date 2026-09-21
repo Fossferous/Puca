@@ -23,12 +23,13 @@ import {
     orderTaskTabs,
     isFavoriteTab,
     taskTabKey,
-    isTaskOverdue,
 } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type MessageEncState } from '../../api/e2ee';
 import { parseServerTimestamp } from '../../utils/serverTime';
-import { type ReminderSlot, noteUpdatedAt, reminderSlotOf, scheduleSearchText } from './notesTiming';
+import { type ReminderSlot, reminderSlotOf } from '../../api/reminderSlots';
+import { bucketDue, reminderBadgeCount as badgeCount, type Grouped } from '../../api/reminderGroups';
+import { noteUpdatedAt, scheduleSearchText } from './notesTiming';
 
 /** Which checklist a note is: a personal list or a channel checklist. */
 export interface NoteRef {
@@ -344,21 +345,11 @@ export interface DueItem {
     note: NoteCard;
     /** Epoch ms. */
     at: number;
-    /** How the item's timing reads (notesTiming.reminderSlotOf). */
+    /** How the item's timing reads (api/reminderSlots.reminderSlotOf). */
     slot?: ReminderSlot;
 }
 
-export interface ReminderGroups {
-    overdue: DueItem[];
-    today: DueItem[];
-    upcoming: DueItem[];
-}
-
-function sameLocalDay(a: number, b: number): boolean {
-    const x = new Date(a);
-    const y = new Date(b);
-    return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
-}
+export type ReminderGroups = Grouped<DueItem>;
 
 /**
  * Every open task with a due time, across every note (archived included —
@@ -370,26 +361,21 @@ export function groupReminders(cards: NoteCard[], now: number): ReminderGroups {
     const items: DueItem[] = [];
     for (const note of cards) {
         for (const task of note.tasks ?? []) {
-            // Snoozes, repeats and events (notesTiming.reminderSlotOf): an
-            // event is never overdue, a snoozed item sorts by its snooze.
+            // Snoozes, repeats and events (api/reminderSlots.reminderSlotOf):
+            // an event is never overdue, a snoozed item sorts by its snooze.
             const slot = reminderSlotOf(task, now);
             if (!slot) continue;
             items.push({ task, note, at: slot.at, slot });
         }
     }
-    items.sort((a, b) => a.at - b.at || a.task.id - b.task.id);
-    const groups: ReminderGroups = { overdue: [], today: [], upcoming: [] };
-    for (const it of items) {
-        if (it.slot ? it.slot.overdue : isTaskOverdue(it.task, now)) groups.overdue.push(it);
-        else if (sameLocalDay(it.at, now)) groups.today.push(it);
-        else groups.upcoming.push(it);
-    }
-    return groups;
+    // Sorting and bucketing are api/reminderGroups' — the same code Púca's
+    // own Reminders tab runs, so the two front doors cannot disagree.
+    return bucketDue(items, now);
 }
 
 /** How many reminders deserve a badge: overdue + due today. */
 export function reminderBadgeCount(groups: ReminderGroups): number {
-    return groups.overdue.length + groups.today.length;
+    return badgeCount(groups);
 }
 
 export const MAX_TITLE_LENGTH = 100;

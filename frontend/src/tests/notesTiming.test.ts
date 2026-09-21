@@ -4,7 +4,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Task } from '../api/tasks';
 import { buildNoteCards, groupReminders, nearestDue, noteMatches, reminderBadgeCount, type NoteSource } from '../notes/model/notesModel';
-import { noteUpdatedAt, reminderSlotOf } from '../notes/model/notesTiming';
+import { noteUpdatedAt } from '../notes/model/notesTiming';
+import { reminderSlotOf } from '../api/reminderSlots';
 import { notesToJson, openItemTimingOf, openItemsOf } from '../notes/model/noteText';
 import { parseNotesPrefs } from '../notes/model/notesPrefs';
 import { parseSchedule, serializeSchedule, serializeSnooze, type EventSchedule } from '../api/taskSchedule';

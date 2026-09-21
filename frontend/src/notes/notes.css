@@ -697,7 +697,6 @@
     cursor: pointer;
 }
 .notes-link-btn:disabled { color: var(--text-faint); text-decoration: none; cursor: default; }
-.notes-reminder-when .svrn-icon { vertical-align: -2px; }
 
 /* ---------- Editor (modal on desktop) ----------------------------------------- */
 .notes-editor-backdrop {
@@ -818,23 +817,8 @@
 }
 
 /* ---------- Reminders ----------------------------------------------------- */
-.notes-reminders { max-width: 760px; margin: 0 auto; }
-.notes-reminder-group { margin-bottom: 20px; }
-.notes-reminder-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    cursor: pointer;
-}
-.notes-reminder-row:hover { background: var(--bg-modifier-hover); }
-.notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
-.notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
-.notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
-.notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
-.notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
-.notes-reminder-group.overdue .notes-reminder-when { color: var(--text-danger); font-weight: 600; }
+/* The list itself is components/reminders/Reminders.css now — the view is
+   shared with Púca's own Reminders tab, and Púca never loads this file. */
 
 /* ---------- Shortcuts help -------------------------------------------------- */
 .notes-kbd-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; }
@@ -980,8 +964,6 @@
     .notes-menu-item { padding: 12px 10px; font-size: 15px; }
     /* <select> is a form control too: below 16px iOS zooms the page. */
     .notes-menu-row select, .notes-menu-row label { font-size: 16px; }
-    .notes-reminder-row { padding: 12px 10px; }
-    .notes-reminder-row input[type="checkbox"] { width: 20px; height: 20px; }
 }
 
 /* Reduced motion: the app-level [data-animations="false"] kills these too,
