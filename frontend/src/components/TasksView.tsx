@@ -126,7 +126,9 @@ export function TasksView() {
     const [newListTitle, setNewListTitle] = useState('');
     const [addingList, setAddingList] = useState(false);
     const [newTaskText, setNewTaskText] = useState('');
-    const [editingTitle, setEditingTitle] = useState(false);
+    /** The list whose title is being edited, not a bare flag: the editor and
+     *  its draft must not survive a change of tab and rename the next list. */
+    const [editingTitle, setEditingTitle] = useState<number | null>(null);
     const [titleDraft, setTitleDraft] = useState('');
     // Right-click / long-press menu on the tabs and board cards.
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
@@ -396,9 +398,10 @@ export function TasksView() {
     };
 
     const commitTitle = async () => {
-        setEditingTitle(false);
+        const editing = editingTitle;
+        setEditingTitle(null);
         const title = titleDraft.trim();
-        if (!selectedList || !title || title === selectedList.title) return;
+        if (!selectedList || editing !== selectedList.id || !title || title === selectedList.title) return;
         const original = lists;
         setLists(prev => prev.map(l => l.id === selectedList.id ? { ...l, title } : l));
         try {
@@ -578,7 +581,7 @@ export function TasksView() {
                     onClick: () => {
                         setSelected({ kind: 'list', id: list.id });
                         setTitleDraft(list.title);
-                        setEditingTitle(true);
+                        setEditingTitle(list.id);
                     },
                 });
                 if (canDeleteList(list)) {
@@ -797,7 +800,7 @@ export function TasksView() {
             ) : selectedList ? (
                 <div className="tasks-editor" {...contentSwipe}>
                     <div className="tasks-editor-header">
-                        {editingTitle ? (
+                        {editingTitle === selectedList.id ? (
                             <input
                                 className="tasks-title-input"
                                 value={titleDraft}
@@ -806,7 +809,7 @@ export function TasksView() {
                                 onBlur={commitTitle}
                                 onKeyDown={e => {
                                     if (e.key === 'Enter') commitTitle();
-                                    if (e.key === 'Escape') setEditingTitle(false);
+                                    if (e.key === 'Escape') setEditingTitle(null);
                                 }}
                             />
                         ) : (
@@ -815,7 +818,7 @@ export function TasksView() {
                                 title="Click to rename"
                                 onClick={() => {
                                     setTitleDraft(selectedList.title);
-                                    setEditingTitle(true);
+                                    setEditingTitle(selectedList.id);
                                 }}
                             >
                                 {selectedList.title}
@@ -828,6 +831,7 @@ export function TasksView() {
                             <>
                                 <NoteDueChip note={noteTimingOf(selectedList)} now={listNow} />
                                 <NoteReminderControl
+                                    key={selectedList.id}
                                     note={noteTimingOf(selectedList)}
                                     canSchedule={scheduleOn}
                                     buttonClass="tasks-editor-iconbtn"
