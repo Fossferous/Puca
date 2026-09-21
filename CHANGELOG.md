@@ -21,7 +21,7 @@ one-line summary; this file is the full story. Versions follow
   change when you are back. Take a picture with no signal and it is encrypted
   straight away, shown on the note from your own device meanwhile, marked
   *Not sent yet*, and uploaded when the connection returns. A banner counts
-  what is waiting, pictures included. There is a limit to how much can wait on
+  what is waiting, pictures and files included. There is a limit to how much can wait on
   the device, and Púca Notes tells you plainly when you reach it — and
   because the browser can clear a site's storage, pictures waiting are not a
   backup. Turning a note's text into a checklist still needs a connection.

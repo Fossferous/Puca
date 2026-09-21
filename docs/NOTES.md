@@ -217,15 +217,29 @@ is open. The poll is off only while the stream is live.
   `pucaNotesCache:<user>`, each record sealed with `sealLocal`), and it is
   uploaded when the queue replays. The picture shows on the card and in the
   editor from those local bytes meanwhile, marked *Not sent yet*, and the
-  banner counts pictures separately from other changes. A note made offline
+  banner counts what is waiting separately from the other changes — as
+  "pictures or files", because the queue counts records, not their kind, and
+  a waiting PDF is not a picture. A note made offline
   WITH text or pictures is three queued changes rather than one request, so
   for a moment it exists without its photo — unlike online, where the note and
   its pictures land together.
+  - **Online with nothing waiting, nothing is parked at all.** The photo is
+    uploaded there and then, as it always was. Sealing a second copy into
+    the device's own store first would cost a phone two more passes over the
+    ciphertext and twice its size on disk, and it let the on-device limit
+    below refuse a picture on a device that was perfectly online.
   - **There is a limit, and it is honest about it.** At most 64 MiB of
-    pictures may wait on the device at once; over that, adding one is refused
-    with a message and nothing of that pick is kept. The browser may also
-    evict the whole site's storage under pressure — `navigator.storage.persist()`
-    is a request, not a promise — so pictures waiting are not a backup.
+    pictures may wait on the device at once — or less, when the browser says
+    the site has less room than that (`navigator.storage.estimate()` is asked
+    first, so an over-quota park is the same plain refusal rather than
+    "Couldn't add the picture", which blames the picture). Over the limit,
+    adding one is refused with a message and nothing of that pick is kept.
+    The 64 MiB figure has NOT yet been measured against a real Android
+    WebView's quota; the estimate check is what stands in for that until it
+    is. The browser may also evict the whole site's storage under pressure —
+    `navigator.storage.persist()` is a request, not a promise — so pictures
+    waiting are not a backup. Signing out revokes the decrypted previews of
+    anything still waiting, as well as deleting the database behind them.
   - **Nothing is left behind.** A picture you remove before it was ever sent
     has its ciphertext deleted and is dropped from the change that would have
     sent it; a change the server refuses takes its ciphertext with it; and
@@ -235,7 +249,11 @@ is open. The poll is off only while the stream is live.
   - **Uploads are added to the sidecar the server holds at that moment**, never
     to the copy this device last saw, so a picture added on another phone in
     the meantime is not deleted by a replay. Removing a picture works the same
-    way round.
+    way round. Whatever that add or remove ACTUALLY took out of the sidecar
+    has its upload deleted straight after — only what was really there, so a
+    ref another device still names is never destroyed — which is the same
+    rule Púca's own Tasks view follows, kept in one place
+    (`api/noteMedia.ts`: `addNoteRefs`, `removeNoteRefs`).
 - **Not offline:** *Show checkboxes* (turning the text into items) — it clears
   the text and then creates one item per line, and a queue would put those
   halves hours apart, so it is refused with a message while offline or while
