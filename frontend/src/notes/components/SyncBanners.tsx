@@ -6,7 +6,7 @@
  */
 import { WarningIcon } from '../../components/Icons';
 import { acceptServerNotesPrefs, overwriteServerNotesPrefs, type PrefsSyncStatus } from '../model/notesPrefsSync';
-import { useOutboxPending } from '../model/notesOutbox';
+import { useOutboxPending, useOutboxPendingMedia } from '../model/notesOutbox';
 import '../sync.css';
 
 export function PrefsSyncBanner({ status }: { status: PrefsSyncStatus }) {
@@ -45,13 +45,18 @@ export function PrefsSyncBanner({ status }: { status: PrefsSyncStatus }) {
     }
 }
 
-/** Edits made offline that have not reached the server yet. */
+/** Edits made offline that have not reached the server yet. Pictures are
+ *  named separately: they are the part that takes room on the device, and
+ *  "3 changes" does not tell anyone a photo is still only here. */
 export function OutboxBanner() {
     const pending = useOutboxPending();
+    const media = useOutboxPendingMedia();
     if (pending === 0) return null;
     return (
         <div className="notes-status offline" role="status" data-sync="pending">
-            <WarningIcon /> {pending} change{pending === 1 ? '' : 's'} not synced yet — kept on this device and sent when the connection is back.
+            <WarningIcon /> {pending} change{pending === 1 ? '' : 's'} not synced yet
+            {media > 0 ? `, including ${media} picture${media === 1 ? '' : 's'}` : ''}
+            {' '}— kept on this device and sent when the connection is back.
         </div>
     );
 }

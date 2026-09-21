@@ -7,6 +7,16 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Notes written and photographed with no connection.** A note's text and
+  its photos, drawings and files no longer need a signal. Type a note on a
+  plane and it is kept on your device — the field says so — and sent as one
+  change when you are back. Take a picture with no signal and it is encrypted
+  straight away, shown on the note from your own device meanwhile, marked
+  *Not sent yet*, and uploaded when the connection returns. A banner counts
+  what is waiting, pictures included. There is a limit to how much can wait on
+  the device, and Púca Notes tells you plainly when you reach it — and
+  because the browser can clear a site's storage, pictures waiting are not a
+  backup. Turning a note's text into a checklist still needs a connection.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

@@ -195,3 +195,26 @@
     .tasks-trash-btn { padding: 8px 14px; }
     .tasks-trash-title { flex-basis: 100%; font-size: 15px; }
 }
+
+/* A picture that exists only on this device until the connection is back
+   (api/parkedMedia.ts). The mark sits over the tile, never replaces it: the
+   picture is real, it is only its upload that has not happened. */
+.ni-item[data-parked="true"] { position: relative; }
+.ni-unsent {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    z-index: 1;
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    background: var(--bg-elevated, rgba(0, 0, 0, 0.72));
+    color: var(--text-secondary, #ddd);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.18));
+    pointer-events: none;
+}
+
+/* "Kept on this device" under the note text (components/NoteBodyField.tsx):
+   quieter than a failure, louder than nothing. */
+.nb-status.queued { color: var(--text-secondary, #9aa); }

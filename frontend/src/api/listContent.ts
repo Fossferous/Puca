@@ -23,6 +23,7 @@ import {
     deleteTaskList,
     isFavoriteTab,
     listListTasks,
+    listTaskLists,
     openSelfTaskText,
     parseTaskAttachments,
     serializeTaskAttachments,
@@ -32,6 +33,7 @@ import {
 import { openListContent, sealSelfField } from './listSeal';
 import { MAX_READABLE_ENVELOPE_VERSION, messageEncState } from './e2ee';
 import { parseEncAttachment } from './attachments';
+import { withoutParked } from './parkedMedia';
 import { parseServerTimestamp } from '../utils/serverTime';
 
 export interface ListFeatures {
@@ -103,10 +105,53 @@ export async function setTaskListBody(listId: number, body: string): Promise<voi
     return apiClient.patch(`/task-lists/${listId}`, { body: sealed, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
 }
 
-/** Replace a list's own attachment refs; an empty array clears them. */
+/**
+ * Replace a list's own attachment refs; an empty array clears them.
+ *
+ * Anything still parked on this device (api/noteMedia.ts) is dropped first:
+ * a `puca-parked:` href names bytes only this device holds, and sealing one
+ * into the sidecar would give every other device a ref it can never open.
+ * The queued `addMedia` op puts the real ref there when the bytes go up.
+ */
 export async function setTaskListAttachments(listId: number, refs: TaskAttachmentRef[]): Promise<void> {
-    const sealed = refs.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(refs));
+    const real = withoutParked(refs);
+    const sealed = real.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(real));
     return apiClient.patch(`/task-lists/${listId}`, { attachments: sealed, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+}
+
+/** A list's OWN sidecar as the SERVER holds it now, opened. Null when the
+ *  list is gone, or its sidecar cannot be read on this device (a locked
+ *  identity: writing over refs we cannot read would orphan them). */
+export async function fetchListSidecar(listId: number): Promise<TaskAttachmentRef[] | null> {
+    const list = (await listTaskLists()).find(l => l.id === listId);
+    if (!list) return null;
+    const opened = list.attachments ?? null;
+    if (isAttachmentsLocked(opened)) return null;
+    return parseTaskAttachments(opened);
+}
+
+/**
+ * Add refs to whatever the server holds NOW, optionally dropping some — an
+ * INTENT, not a snapshot. A replayed full replace would silently delete a
+ * picture another device added in the meantime (and strand its upload); this
+ * cannot, because it never names refs it did not just read.
+ */
+export async function addTaskListAttachments(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<void> {
+    const current = await fetchListSidecar(listId);
+    if (current === null) throw new NoteFilesUnreadableError();
+    const drop = new Set(replacing);
+    const next = [...current.filter(r => !drop.has(r.href)), ...added];
+    return setTaskListAttachments(listId, next);
+}
+
+/** Remove refs from whatever the server holds now — the same intent form. */
+export async function removeTaskListAttachments(listId: number, removing: string[]): Promise<void> {
+    const current = await fetchListSidecar(listId);
+    if (current === null) throw new NoteFilesUnreadableError();
+    const drop = new Set(removing);
+    const next = current.filter(r => !drop.has(r.href));
+    if (next.length === current.length) return;   // already gone: nothing to say
+    return setTaskListAttachments(listId, next);
 }
 
 /** Create a list with its title, and optionally its note text and refs, in

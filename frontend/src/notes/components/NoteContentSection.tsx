@@ -6,13 +6,14 @@
  * (useListContent.ts); against an older server this renders nothing and the
  * editor is exactly what it was.
  *
- * "Show checkboxes" never half-applies. It is refused while offline or while
- * anything waits in the offline outbox (every new item would queue behind
- * it while the text, which never queues, was cleared at once), and it clears
- * the text FIRST: if that fails nothing has changed, and if an item is then
- * refused the text is put back and the items made so far are removed. An
- * item that only QUEUES (the connection dropped mid-way) is not a failure —
- * it replays, in order, with the rest.
+ * "Show checkboxes" never half-applies. The text and the pictures queue like
+ * everything else now (notes/model/notesOutbox.ts), but this conversion
+ * still is refused while offline or while anything waits in the queue: it
+ * clears the text and then creates one item per line, and a queue would put
+ * those halves hours apart. It clears the text FIRST: if that fails nothing
+ * has changed, and if an item is then refused the text is put back and the
+ * items made so far are removed. An item that only QUEUES (the connection
+ * dropped mid-way) is not a failure — it replays, in order, with the rest.
  *
  * Both conversions offer Undo. "Hide checkboxes" is lossy when items nest,
  * carry due times or attachments, or are done — it asks first, and its Undo
@@ -117,15 +118,21 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const showCheckboxes = async () => {
         const items = bodyToItems(text);
         if (items.length === 0) return;
+        // Still the one conversion that cannot wait: it CLEARS the text and
+        // then creates one item per line, and those two halves must not be
+        // split across a queue (the text would vanish now and the items
+        // appear whenever the connection came back).
         if (!navigator.onLine || pendingOutboxCount() > 0) {
-            pushMessageToast({ title: 'Can’t turn the text into a checklist while offline or while changes are waiting to sync — try again once they have' });
+            pushMessageToast({ title: 'Turning the text into a checklist needs a connection, and nothing waiting to sync — your text and pictures are kept either way' });
             return;
         }
         setConverting(true);
         const created: Task[] = [];
         const before = text;
         try {
-            if (!await c.setBody(listId, '')) {
+            // 'queued' cannot happen here (the guard above refuses while
+            // anything is waiting), but a failure must still be a failure.
+            if (await c.setBody(listId, '') === 'failed') {
                 pushMessageToast({ title: 'Couldn’t turn the text into a checklist — the text is kept' });
                 return;
             }
@@ -145,7 +152,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                 token: ++undoSeq,
                 message: 'Turned the text into a checklist',
                 run: async () => {
-                    if (!await c.setBody(listId, before)) return;
+                    if (await c.setBody(listId, before) === 'failed') return;
                     for (const t of created) await actions.deleteTaskFrom(ref, t.id);
                 },
             });
@@ -171,7 +178,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
         setConverting(true);
         const all = recreationOrder(tasks);
         try {
-            if (!await c.setBody(listId, next)) return;
+            if (await c.setBody(listId, next) === 'failed') return;
             // Deleting a top-level item takes its subtree with it.
             const gone = new Set<number>();
             for (const t of all) if (t.parent_id === null && await actions.deleteTaskFrom(ref, t.id)) gone.add(t.id);

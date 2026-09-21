@@ -206,13 +206,41 @@ is open. The poll is off only while the stream is live.
   item appears twice; delete the extra one. Closing that needs an idempotency
   key on the server's create routes. A change sent right after a cold start
   waits for the queue a previous page left behind before it may run.
-- **Not offline:** anything that uploads or seals a note's own content —
-  adding an attachment, a photo or a drawing, saving a note's text, creating
-  a note with text or pictures, *Show checkboxes* (turning the text into
-  items: it is refused, with a message, while offline or while anything is
-  queued, so it can never leave the text AND queued copies of its lines) —
-  and the Trash view's *Delete forever* and *Empty trash*. They fail with a
-  message and nothing is queued. The Trash view's *Restore* is the same
+- **A note's text and its pictures are queued too.** Type a note with no
+  connection and the words are kept on this device (*Kept on this device — it
+  will sync* under the field) and sent as one change when the connection
+  returns — one change however long you type, because a second save for the
+  same note replaces the one waiting rather than adding to it. Take or pick a
+  photo, make a drawing, or attach a file with no connection and it is
+  **encrypted on this device the moment you add it**; only the ciphertext is
+  kept, in the same sealed database as the rest of the queue (store `m` of
+  `pucaNotesCache:<user>`, each record sealed with `sealLocal`), and it is
+  uploaded when the queue replays. The picture shows on the card and in the
+  editor from those local bytes meanwhile, marked *Not sent yet*, and the
+  banner counts pictures separately from other changes. A note made offline
+  WITH text or pictures is three queued changes rather than one request, so
+  for a moment it exists without its photo — unlike online, where the note and
+  its pictures land together.
+  - **There is a limit, and it is honest about it.** At most 64 MiB of
+    pictures may wait on the device at once; over that, adding one is refused
+    with a message and nothing of that pick is kept. The browser may also
+    evict the whole site's storage under pressure — `navigator.storage.persist()`
+    is a request, not a promise — so pictures waiting are not a backup.
+  - **Nothing is left behind.** A picture you remove before it was ever sent
+    has its ciphertext deleted and is dropped from the change that would have
+    sent it; a change the server refuses takes its ciphertext with it; and
+    anything no queued change names is swept when the queue next loads (with a
+    minute's grace, so a photo taken a moment ago is never swept before its
+    change exists).
+  - **Uploads are added to the sidecar the server holds at that moment**, never
+    to the copy this device last saw, so a picture added on another phone in
+    the meantime is not deleted by a replay. Removing a picture works the same
+    way round.
+- **Not offline:** *Show checkboxes* (turning the text into items) — it clears
+  the text and then creates one item per line, and a queue would put those
+  halves hours apart, so it is refused with a message while offline or while
+  anything is queued — and the Trash view's *Delete forever* and *Empty
+  trash*. They fail with a message and nothing is queued. The Trash view's *Restore* is the same
   outbox op as Undo, so it queues. A note whose move to the trash is itself
   still queued is listed in the Trash at once, but its *Restore* and *Delete
   forever* wait until that move reaches the server, and *Empty trash* leaves
@@ -636,14 +664,11 @@ with its pictures, and only the other items become lines of text.
 - **A desktop Notes app.** Notes on a computer is the browser page; the
   desktop installer deliberately carries no copy of it (see *Building and
   serving*).
-- **Pictures and a note's text while offline.** The offline queue holds
-  intents it can replay (ticks, dates, snoozes, items, renames, the trash);
-  an upload cannot wait for a connection, so adding a photo or drawing,
-  saving a note's text, and creating a note with text or pictures need the
-  network, and fail with a message when there is none.
 - **Exactly-once creates.** A create whose answer was lost replays and can
   leave a duplicate note or item (see *Offline*): the create routes take no
-  client op id yet.
+  client op id yet. Now that a note made offline carries its pictures, a
+  duplicate also duplicates the uploads and what they cost against your
+  storage quota.
 - **Item text in a reminder or place notification.** It would put decrypted
   note content on the lock screen and in app storage; the phone's background
   code never holds it. The notification says "An item is due" and opens

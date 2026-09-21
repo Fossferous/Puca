@@ -9,6 +9,11 @@
  * value is not an envelope) renders a lock line and offers no edits: writing
  * over refs this device cannot read would orphan them for good.
  *
+ * A picture added with no connection has NOT been uploaded yet: its ref is a
+ * local `puca-parked:` one and its plaintext comes from this device's own
+ * sealed copy (api/parkedPreview.ts). It is marked "Not sent yet", so nobody
+ * is told a photo is safe elsewhere while it is only here.
+ *
  * Touch: every control is a visible button with a label (no hover-only
  * tools), and on phones a second picker opens the camera directly
  * (`capture`), the first the photo library.
@@ -17,6 +22,8 @@ import { useEffect, useRef, useState } from 'react';
 import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
 import { decryptToBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItems } from '../api/noteMedia';
+import { isParkedRef, parseParkedRef } from '../api/parkedMedia';
+import { parkedObjectUrl } from '../api/parkedPreview';
 import { ImageLightbox } from './ImageLightbox';
 import { CameraIcon, CloseIcon, ImageIcon, LockIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import './NoteImages.css';
@@ -25,16 +32,22 @@ function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
     const href = refItem.href;
+    const parked = isParkedRef(refItem);
     useEffect(() => {
         const p = parseEncAttachment(href);
-        if (!p) return;
+        // A parked ref has no server file: its plaintext comes from this
+        // device's own sealed copy, and null there means the bytes are gone.
+        if (!p && !parseParkedRef(href)) return;
         let cancelled = false;
-        decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
+        const load = p
+            ? decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
+            : parkedObjectUrl(href).then(u => { if (u === null) throw new Error('those bytes are no longer on this device'); return u; });
+        load
             .then(u => { if (!cancelled) setUrl(u); })
             .catch(() => { if (!cancelled) setFailed(true); });
         return () => { cancelled = true; };
     }, [href]);
-    if (!parseEncAttachment(href) || failed) {
+    if ((!parseEncAttachment(href) && !parked) || failed) {
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }
     if (!url) return <span className="ni-pending" aria-label={`Loading ${refItem.name}`} />;
@@ -83,7 +96,8 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
             {items.length > 0 && (
                 <div className={`ni-grid ${items.length === 1 ? 'single' : ''}`}>
                     {items.map(item => (
-                        <figure key={item.ref.href} className={`ni-item ${item.kind}`}>
+                        <figure key={item.ref.href} className={`ni-item ${item.kind}`} data-parked={isParkedRef(item.ref) ? 'true' : undefined}>
+                            {isParkedRef(item.ref) && <span className="ni-unsent" title="Waiting for a connection">Not sent yet</span>}
                             {item.kind === 'file'
                                 ? <span className="ni-file"><PaperclipIcon /> {item.ref.name}</span>
                                 : <Picture refItem={item.ref} onOpen={url => setZoom({ url, name: item.ref.name })} />}

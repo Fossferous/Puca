@@ -15,7 +15,14 @@
  *
  * ONE DATABASE PER ACCOUNT (`pucaNotesCache:<user id>`), deleted at sign-out
  * from either page (api/notesCacheScrub.ts). The offline edit queue lives in
- * the same database (notesOutbox.ts).
+ * the same database (notesOutbox.ts), and so do pictures sealed on this
+ * device and waiting to be uploaded (notesBlobs.ts) — so all three are
+ * retired by the same scrub and the same seed.
+ *
+ * VERSION 2 added the media store. Bumping the version fires
+ * `onversionchange` in a tab still holding version 1 open; that tab closes
+ * its connection (below) and works online-only until it is reloaded, which
+ * is the price of not keeping two schemas alive.
  *
  * DEGRADES TO ONLINE-ONLY. No IndexedDB (a private window that refuses it, an
  * old WebView), a read that takes too long, a record that will not open: each
@@ -38,7 +45,19 @@ export interface KV {
     del(key: string): Promise<void>;
 }
 
-export type StoreName = 'q' | 'o';
+/** `q` cached queries, `o` the offline edit queue, `m` media sealed on this
+ *  device and waiting to be uploaded (notesBlobs.ts). */
+export type StoreName = 'q' | 'o' | 'm';
+
+const STORES: StoreName[] = ['q', 'o', 'm'];
+
+/**
+ * Version 2 added `'m'`. The upgrade CREATES WHAT IS MISSING and drops
+ * nothing, so a database written by a shipped 0.9.816 — holding a note
+ * queued offline and everything that page last showed — opens here with its
+ * `'q'` and `'o'` records intact.
+ */
+export const NOTES_DB_VERSION = 2;
 
 const dbs = new Map<string, Promise<IDBDatabase>>();
 
@@ -46,11 +65,10 @@ function openDb(name: string): Promise<IDBDatabase> {
     let p = dbs.get(name);
     if (!p) {
         p = new Promise<IDBDatabase>((resolve, reject) => {
-            const req = indexedDB.open(name, 1);
+            const req = indexedDB.open(name, NOTES_DB_VERSION);
             req.onupgradeneeded = () => {
                 const db = req.result;
-                if (!db.objectStoreNames.contains('q')) db.createObjectStore('q');
-                if (!db.objectStoreNames.contains('o')) db.createObjectStore('o');
+                for (const s of STORES) if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
             };
             req.onsuccess = () => {
                 const db = req.result;

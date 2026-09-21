@@ -44,10 +44,14 @@ import {
     listTrashedTaskLists,
     listsDueForClientPurge,
     serverNowFrom,
-    setTaskListAttachments,
-    setTaskListBody,
 } from '../../api/listContent';
-import { type DrawingFiles, fileIdsOf, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
+import {
+    type DrawingFiles, type SealedMedia,
+    fileIdsOf, nextDrawingName, refOfParked, sealNoteMedia, uploadNoteMedia,
+} from '../../api/noteMedia';
+import { parkedIdsOf, withoutParked } from '../../api/parkedMedia';
+import { ParkedMediaFullError, appParkedStore } from './notesBlobs';
+import { forgetParkedMedia, ops, pendingOutboxCount, sendCreateList, sendCreateTask, sendNoteOp } from './notesOutbox';
 import { ApiError } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
@@ -65,6 +69,10 @@ export interface NoteExtras {
     photos?: File[];
     drawing?: DrawingFiles;
 }
+
+/** What a save of a note's own text did: reached the server, was kept on
+ *  this device for later, or was refused. */
+export type SaveOutcome = 'saved' | 'queued' | 'failed';
 
 export function hasExtras(extra: NoteExtras | undefined): extra is NoteExtras {
     return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing);
@@ -104,6 +112,13 @@ function reportDeleteFailure(err: unknown, many: boolean): void {
     }
 }
 
+/** What to tell the user when a picture could not even be kept. */
+function mediaFailureMessage(err: unknown): string {
+    if (err instanceof ParkedMediaFullError) return err.message;
+    if (err instanceof Error && err.name === 'TooManyAttachmentsError') return err.message;
+    return 'Couldn’t add the picture';
+}
+
 /** Lists purged this session (a purge must not be retried in a loop). */
 const purgedThisSession = new Set<number>();
 
@@ -121,7 +136,8 @@ export interface ListContentActions {
     ensureFeatures: () => Promise<ListFeatures | null>;
     /** `timing[i]` is item i's date & repeat (a copy of a note keeps them). */
     createContentNote: (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
-    setBody: (listId: number, body: string) => Promise<boolean>;
+    /** `queued` = kept on this device and sent when the connection is back. */
+    setBody: (listId: number, body: string) => Promise<SaveOutcome>;
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[]) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
@@ -146,6 +162,79 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => prev?.map(l => (l.id === id ? fn(l) : l)));
     }, [qc]);
 
+    /**
+     * A note with text or pictures, made with no connection (or behind a
+     * queue): the media is sealed and parked here and now, the note, its
+     * text, its pictures and its items are queued in that order, and the
+     * caller gets a temporary note it can open at once.
+     *
+     * The order matters: every op after the create names the note's
+     * temporary id, which the outbox rewrites when the create replays.
+     */
+    const queueContentNote = useCallback(async (
+        noteTitle: string,
+        body: string,
+        photos: File[],
+        drawings: { files: DrawingFiles; base: string }[],
+        entries: { text: string; timing: NewTaskTiming | undefined }[],
+    ): Promise<NoteRef | null> => {
+        let records: SealedMedia[] = [];
+        if (photos.length > 0 || drawings.length > 0) {
+            try {
+                records = await sealNoteMedia(photos, drawings, 0);
+                await appParkedStore.park(records);
+            } catch (err) {
+                explain('keeping the picture failed', err);
+                pushMessageToast({ title: mediaFailureMessage(err) });
+                return null;   // the composer keeps the draft
+            }
+        }
+        let list: TaskList;
+        try {
+            list = await sendCreateList(noteTitle);
+        } catch (err) {
+            explain('create failed', err);
+            await forgetParkedMedia(records.map(r => r.id));
+            return null;
+        }
+        const ref: NoteRef = { kind: 'list', id: list.id };
+        if (body) {
+            try {
+                await sendNoteOp(ops.setBody(list.id, body));
+            } catch (err) {
+                explain('saving the text failed', err);
+            }
+        }
+        if (records.length > 0) {
+            try {
+                const n = records.length;
+                await sendNoteOp(ops.addMedia(list.id, records.map(r => r.id), [], [], `${n} picture${n === 1 ? '' : 's'} on a new note`));
+            } catch (err) {
+                explain('upload failed', err);
+                await forgetParkedMedia(records.map(r => r.id));
+                records = [];
+            }
+        }
+        const created: Task[] = [];
+        for (const e of entries) {
+            try {
+                created.push(await sendCreateTask(ref, e.text, undefined, () => created, e.timing));
+            } catch (err) {
+                explain('create item failed', err);
+            }
+        }
+        const shown = records.map(refOfParked);
+        qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), {
+            ...list,
+            total_tasks: created.length,
+            completed_tasks: 0,
+            body: body || null,
+            attachments: shown.length === 0 ? null : JSON.stringify(shown.map(({ href, name }) => ({ href, name }))),
+        }]);
+        return ref;
+    }, [qc]);
+
     const createContentNote = useCallback(async (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
         // Each item's timing rides with it through the blank-dropping clean.
         const entries = items
@@ -153,13 +242,19 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             .filter((e): e is { text: string; timing: NewTaskTiming | undefined } => e.text !== undefined);
         const cleanItems = entries.map(e => e.text);
         const body = extra.body?.replace(/\s+$/, '') ?? '';
+        const photos = extra.photos ?? [];
+        const drawings = extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [];
+        const noteTitle = deriveContentTitle(title, { body, items: cleanItems, images: photos.length, drawing: !!extra.drawing });
+        // Offline, or behind a queue this must not overtake: the note is made
+        // through the outbox instead. It briefly exists without its picture
+        // (three ops, not one request) — which is the price of a photo note
+        // taken with no signal existing at all.
+        if (!navigator.onLine || pendingOutboxCount() > 0) {
+            return queueContentNote(noteTitle, body, photos, drawings, entries);
+        }
         let refs: TaskAttachmentRef[] = [];
         try {
-            refs = await uploadNoteMedia(
-                extra.photos ?? [],
-                extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [],
-                0,
-            );
+            refs = await uploadNoteMedia(photos, drawings, 0);
         } catch (err) {
             explain('upload failed', err);
             pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
@@ -167,13 +262,8 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         let list: TaskList;
         try {
-            list = await createTaskListWithContent(
-                deriveContentTitle(title, { body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing }),
-                { body: body || undefined, refs },
-            );
+            list = await createTaskListWithContent(noteTitle, { body: body || undefined, refs });
         } catch (err) {
-            // Never queued (its uploads could not wait): the composer says
-            // so when this resolves null, and keeps the draft.
             explain('create failed', err);
             await deleteFiles(fileIdsOf(refs));   // nothing names them now
             return null;
@@ -193,23 +283,36 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
         return ref;
-    }, [qc]);
+    }, [qc, queueContentNote]);
 
-    const setBody = useCallback(async (listId: number, body: string): Promise<boolean> => {
+    // Through the outbox: online with nothing queued this simply runs, and
+    // with no connection the typed text is kept on this device and replayed.
+    // A second save for the same note replaces the queued one, so a
+    // paragraph typed offline is one op, not one per pause in typing.
+    const setBody = useCallback(async (listId: number, body: string): Promise<SaveOutcome> => {
         const before = lists();
         patchList(listId, l => ({ ...l, body: body === '' ? null : body }));
         try {
-            await setTaskListBody(listId, body);
-            return true;
+            const r = await sendNoteOp(ops.setBody(listId, body));
+            return r.queued ? 'queued' : 'saved';
         } catch (err) {
             explain('saving the text failed', err);
             qc.setQueryData(keysRef.current.lists, before);
-            return false;
+            return 'failed';
         }
     }, [qc, lists, patchList]);
 
-    /** Replace the sidecar; `dropped` refs are no longer named anywhere and
-     *  their uploads are deleted once the new sidecar is saved. */
+    /**
+     * Remove `dropped` from the sidecar (`next` is what is left). Through the
+     * outbox, as an INTENT: replayed later it removes those refs from
+     * whatever the server holds then, so a picture added on another device in
+     * the meantime survives. The uploads behind them are deleted when the
+     * removal reaches the server (notesOutbox.ts), not before.
+     *
+     * A picture still waiting on this device never reached the server at all:
+     * its ciphertext is deleted and the queued op that would have sent it
+     * forgets it.
+     */
     const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
         if (current && isAttachmentsLocked(current.attachments ?? null)) {
@@ -218,17 +321,28 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         const before = lists();
         patchList(listId, l => ({ ...l, attachments: next.length === 0 ? null : JSON.stringify(next.map(({ href, name }) => ({ href, name }))) }));
+        const parkedGone = parkedIdsOf(dropped);
+        if (parkedGone.length > 0) await forgetParkedMedia(parkedGone);
+        const serverGone = withoutParked(dropped);
+        if (serverGone.length === 0) return true;
         try {
-            await setTaskListAttachments(listId, next);
+            const n = serverGone.length;
+            await sendNoteOp(ops.removeMedia(listId, serverGone.map(r => r.href), withoutParked(next), `remove ${n} picture${n === 1 ? '' : 's'}`));
         } catch (err) {
             explain('saving the pictures failed', err);
             qc.setQueryData(keysRef.current.lists, before);
             return false;
         }
-        if (dropped.length > 0) void deleteFiles(fileIdsOf(dropped));
         return true;
     }, [qc, lists, patchList]);
 
+    /**
+     * Add pictures, drawings or files to a note. They are encrypted on this
+     * device FIRST and parked (notesBlobs.ts), and the upload is an outbox
+     * op — so a photo taken with no signal is sealed at once and sent when
+     * the connection is back, and the note shows it meanwhile from the
+     * parked bytes.
+     */
     const addNoteMedia = useCallback(async (listId: number, photos: File[], drawings: DrawingFiles[], replacing: TaskAttachmentRef[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
         const opened = current?.attachments ?? null;
@@ -238,7 +352,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         const replaceSet = new Set(replacing.map(r => r.href));
         const kept = parseTaskAttachments(opened).filter(r => !replaceSet.has(r.href));
-        let added: TaskAttachmentRef[];
+        let records: SealedMedia[];
         try {
             const bases: string[] = [];
             let names = kept;
@@ -247,16 +361,36 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 bases.push(base);
                 names = [...names, { href: `pending:${base}`, name: `${base}.png` }];
             }
-            added = await uploadNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length);
+            records = await sealNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length);
+            await appParkedStore.park(records);
         } catch (err) {
-            explain('upload failed', err);
-            pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture — check your connection' });
+            explain('keeping the picture failed', err);
+            pushMessageToast({ title: mediaFailureMessage(err) });
             return false;
         }
-        const ok = await setNoteAttachments(listId, [...kept, ...added], replacing);
-        if (!ok) await deleteFiles(fileIdsOf(added));
-        return ok;
-    }, [lists, setNoteAttachments]);
+        const before = lists();
+        const shown = [...kept, ...records.map(refOfParked)];
+        patchList(listId, l => ({ ...l, attachments: JSON.stringify(shown.map(({ href, name }) => ({ href, name }))) }));
+        const parkedReplaced = parkedIdsOf(replacing);
+        if (parkedReplaced.length > 0) await forgetParkedMedia(parkedReplaced);
+        try {
+            const n = records.length;
+            await sendNoteOp(ops.addMedia(
+                listId,
+                records.map(r => r.id),
+                withoutParked(replacing).map(r => r.href),
+                withoutParked(kept),
+                `${n} picture${n === 1 ? '' : 's'} on a note`,
+            ));
+        } catch (err) {
+            explain('upload failed', err);
+            pushMessageToast({ title: 'Couldn’t add the picture' });
+            qc.setQueryData(keysRef.current.lists, before);
+            await forgetParkedMedia(records.map(r => r.id));
+            return false;
+        }
+        return true;
+    }, [qc, lists, patchList]);
 
     const ensureFeatures = useCallback(async (): Promise<ListFeatures | null> => {
         try {

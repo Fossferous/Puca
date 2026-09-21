@@ -6,8 +6,9 @@
  * files counting against the quota that no note names.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
-import { decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment } from './attachments';
+import { type SealedFile, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
+import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { deleteFiles } from './listContent';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
@@ -45,6 +46,20 @@ async function uploadAll(files: File[]): Promise<TaskAttachmentRef[]> {
     }
 }
 
+/** Photos ready to encrypt (shrunk; only images go through the decoder) plus
+ *  each drawing's PNG and strokes file. */
+async function filesForUpload(photos: File[], drawings: { files: DrawingFiles; base: string }[]): Promise<File[]> {
+    // A non-image (a PDF, a spreadsheet) is not shrinkable and pulling it
+    // through createImageBitmap only stalls a phone on a 25 MB file.
+    const prepared = await Promise.all(photos.map(f => (f.type.startsWith('image/') ? prepareImageForUpload(f) : Promise.resolve(f))));
+    const files: File[] = [...prepared];
+    for (const d of drawings) {
+        files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));
+        files.push(new File([d.files.strokes], `${d.base}.json`, { type: DRAWING_STROKES_MIME }));
+    }
+    return files;
+}
+
 /** Upload photos (shrunk first) and drawings; `base(i)` names drawing i
  *  (`drawing-<n>`, see notes/model/noteContent.ts). Throws — with nothing
  *  left behind — on any failure, including a sidecar that would overflow. */
@@ -54,13 +69,78 @@ export async function uploadNoteMedia(
     existing: number,
 ): Promise<TaskAttachmentRef[]> {
     if (existing + slotsNeeded(photos.length, drawings.length) > MAX_TASK_ATTACHMENTS) throw new TooManyAttachmentsError();
-    const prepared = await Promise.all(photos.map(prepareImageForUpload));
-    const files: File[] = [...prepared];
-    for (const d of drawings) {
-        files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));
-        files.push(new File([d.files.strokes], `${d.base}.json`, { type: DRAWING_STROKES_MIME }));
+    return uploadAll(await filesForUpload(photos, drawings));
+}
+
+// --- Media sealed on this device and not yet uploaded ------------------------------------
+
+/** One parked item: the ciphertext (base64), the key that opens it, and the
+ *  ref the note shows while it waits (api/parkedMedia.ts). */
+export interface SealedMedia {
+    id: string;
+    name: string;
+    mime: string;
+    /** The AES key, base64url — becomes the ref's `k=` once uploaded. */
+    key: string;
+    /** nonce || ciphertext, base64. */
+    data: string;
+    /** Ciphertext bytes, for the on-device cap. */
+    bytes: number;
+}
+
+let parkSeq = 0;
+function parkedId(): string {
+    return `${Date.now().toString(36)}-${(parkSeq++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Shrink (photos only), encrypt, and hand back the parked records — no
+ * network. The plaintext file is not kept: only its ciphertext is, so a
+ * photo taken offline is sealed before it is ever written to the device.
+ */
+export async function sealNoteMedia(
+    photos: File[],
+    drawings: { files: DrawingFiles; base: string }[],
+    existing: number,
+): Promise<SealedMedia[]> {
+    if (existing + slotsNeeded(photos.length, drawings.length) > MAX_TASK_ATTACHMENTS) throw new TooManyAttachmentsError();
+    const files = await filesForUpload(photos, drawings);
+    const out: SealedMedia[] = [];
+    for (const f of files) {
+        const sealed: SealedFile = await sealFileForUpload(f);
+        const bytes = new Uint8Array(await sealed.blob.arrayBuffer());
+        out.push({ id: parkedId(), name: sealed.name, mime: sealed.mime, key: sealed.key, data: bytesToB64(bytes), bytes: bytes.length });
     }
-    return uploadAll(files);
+    return out;
+}
+
+/** The ref a parked record shows as until it is uploaded. */
+export function refOfParked(rec: SealedMedia): TaskAttachmentRef {
+    return { href: parkedHref(rec.id, rec.mime), name: rec.name };
+}
+
+/**
+ * Upload parked ciphertext, in order and one at a time (the server caps
+ * concurrent uploads per IP — src/upload_handlers.rs). All-or-nothing, like
+ * `uploadNoteMedia`: a failure deletes what already landed.
+ */
+export async function uploadParkedMedia(records: SealedMedia[]): Promise<TaskAttachmentRef[]> {
+    const done: TaskAttachmentRef[] = [];
+    try {
+        for (const rec of records) {
+            const r = await uploadSealedRef({
+                key: rec.key,
+                blob: new Blob([bytesFromB64(rec.data) as BlobPart], { type: 'application/octet-stream' }),
+                mime: rec.mime,
+                name: rec.name,
+            });
+            done.push({ href: r.href, name: r.name });
+        }
+        return done;
+    } catch (err) {
+        await deleteFiles(fileIdsOf(done));
+        throw err;
+    }
 }
 
 /** Decrypt a drawing's strokes file back to its JSON text. */
@@ -94,7 +174,7 @@ function baseName(name: string): string {
 }
 
 function mimeOf(ref: TaskAttachmentRef): string {
-    return parseEncAttachment(ref.href)?.mime ?? '';
+    return parseEncAttachment(ref.href)?.mime ?? parseParkedRef(ref.href)?.mime ?? '';
 }
 
 /**

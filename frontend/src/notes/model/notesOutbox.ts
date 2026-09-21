@@ -35,12 +35,24 @@
  * replayed as intents against the server's CURRENT set, never as a stale
  * full replace.
  *
+ * A NOTE'S OWN CONTENT queues too. `setBody` carries the typed text and is
+ * sealed for the server when it runs, like every other op; a second one for
+ * the same note REPLACES the queued one, because the editor saves after
+ * every pause in typing. `addMedia` carries only the IDS of ciphertext
+ * parked on this device (notesBlobs.ts) — a photo is encrypted the moment it
+ * is taken, and replay uploads the bytes and then adds the real refs to
+ * whatever the server's sidecar holds at that moment. A dropped or forgotten
+ * media op deletes its ciphertext, and `load` sweeps anything the queue does
+ * not name.
+ *
  * CREATES ARE AT-LEAST-ONCE. The create routes take no client op id, so a
  * create the server COMMITTED whose answer was lost (the connection dropped
  * mid-response) looks exactly like one that never arrived: it is queued, or
  * kept, and replayed — and the note or item then exists twice. Deletes,
  * ticks and edits replay harmlessly (the same end state); a duplicate create
- * is visible and the user can delete it. Closing that needs a server-side
+ * is visible and the user can delete it — but since a note made offline now
+ * carries its pictures, a duplicate create also re-uploads them, against the
+ * owner's own storage quota. Closing that needs a server-side
  * idempotency key on POST /task-lists and the task create routes (docs/NOTES.md).
  *
  * COLD START. `send` waits for the persisted queue to load before deciding
@@ -58,7 +70,13 @@ import {
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
-import { keepHiddenSlots, restoreTaskList, trashOrDeleteList } from '../../api/listContent';
+import {
+    addTaskListAttachments, deleteFiles, keepHiddenSlots, removeTaskListAttachments, restoreTaskList,
+    setTaskListAttachments, setTaskListBody, trashOrDeleteList,
+} from '../../api/listContent';
+import { type TaskAttachmentRef } from '../../api/tasks';
+import { fileIdsOf, uploadParkedMedia } from '../../api/noteMedia';
+import { appParkedStore, type ParkedStore } from './notesBlobs';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { beginNoteWrite, LISTS_KEY, PREFS_KEY, setQueuedNotes } from './noteBusy';
@@ -94,7 +112,21 @@ type OpBody =
     | { k: 'moveTask'; note: NoteRef; taskId: number; direction: 'up' | 'down' }
     | { k: 'reorderTask'; note: NoteRef; taskId: number; afterId: number | null; reparent?: { parentId: number | null } }
     | { k: 'deleteTask'; note: NoteRef; taskId: number }
-    | { k: 'prefs'; prefs: TaskTabPref[]; intent: PrefsIntent };
+    | { k: 'prefs'; prefs: TaskTabPref[]; intent: PrefsIntent }
+    // A note's own text. Queued ops for the same note COLLAPSE (see `send`):
+    // NoteBodyField saves a pause after every keystroke, so a paragraph
+    // typed with no connection would otherwise be dozens of ops racing to
+    // overwrite each other.
+    | { k: 'setBody'; listId: number; body: string }
+    // Pictures and files sealed on this device (notesBlobs.ts) that still
+    // have to go up. Replay uploads them, then adds the real refs to
+    // whatever the server's sidecar holds THEN — an intent, so a picture
+    // added elsewhere in the meantime is not deleted by a stale replace.
+    // `refs` is this device's view of the finished sidecar, used only when
+    // the op runs inline (online, nothing queued), exactly as `prefs` does.
+    | { k: 'addMedia'; listId: number; blobIds: string[]; replacing: string[]; refs: TaskAttachmentRef[] }
+    // Removing a picture: the same intent/snapshot pair.
+    | { k: 'removeMedia'; listId: number; removing: string[]; refs: TaskAttachmentRef[] };
 
 export type NoteOp = OpBody & {
     /** Unique per op (replay removes by id, never by position). */
@@ -135,6 +167,12 @@ export const ops = {
         withMeta({ k: 'deleteTask', note, taskId }, `delete ${q(description)}`),
     timing: (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string) =>
         withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch }, `${what} ${q(task.description)}`),
+    setBody: (listId: number, body: string) =>
+        withMeta({ k: 'setBody', listId, body }, body === '' ? 'clear a note’s text' : `text ${q(body)}`),
+    addMedia: (listId: number, blobIds: string[], replacing: string[], refs: TaskAttachmentRef[], what: string) =>
+        withMeta({ k: 'addMedia', listId, blobIds, replacing, refs }, what),
+    removeMedia: (listId: number, removing: string[], refs: TaskAttachmentRef[], what: string) =>
+        withMeta({ k: 'removeMedia', listId, removing, refs }, what),
     prefs: (prefs: TaskTabPref[], intent: PrefsIntent) =>
         withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes' : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
 };
@@ -144,6 +182,8 @@ export function busyKeyOf(op: OpBody): string {
     switch (op.k) {
         case 'createList': case 'renameList': case 'deleteList': case 'restoreList': return LISTS_KEY;
         case 'prefs': return PREFS_KEY;
+        // The CARD, not the listing: what is unsynced is this one note.
+        case 'setBody': case 'addMedia': case 'removeMedia': return noteKey({ kind: 'list', id: op.listId });
         default: return noteKey(op.note);
     }
 }
@@ -153,6 +193,7 @@ function idsOf(op: OpBody): number[] {
     switch (op.k) {
         case 'createList': return [];
         case 'renameList': case 'deleteList': case 'restoreList': return [op.listId];
+        case 'setBody': case 'addMedia': case 'removeMedia': return [op.listId];
         case 'createTask': return [op.note.id, ...(op.parentId !== undefined ? [op.parentId] : [])];
         case 'editTask': case 'updateTask': case 'moveTask': case 'deleteTask': case 'timing': return [op.note.id, op.taskId];
         case 'reorderTask': return [op.note.id, op.taskId, ...(op.afterId !== null ? [op.afterId] : []), ...(op.reparent?.parentId != null ? [op.reparent.parentId] : [])];
@@ -178,7 +219,7 @@ type IdMap = Record<string, number>;
 
 /** Run one op against the server. `fromQueue` = a replay: pins and order are
  *  re-derived from the server's current set instead of PUT as captured. */
-export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Promise<unknown> {
+export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parked: ParkedStore = appParkedStore): Promise<unknown> {
     const r = (id: number): number => {
         if (id >= 0) return id;
         const real = idMap[String(id)];
@@ -225,6 +266,32 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Prom
         case 'timing': {
             const n = note(op.note);
             return patchTaskTiming({ id: r(op.taskId), channel_id: n.kind === 'channel' ? n.id : null, created_by: op.createdBy }, op.patch);
+        }
+        case 'setBody': return setTaskListBody(r(op.listId), op.body);
+        case 'addMedia': {
+            const listId = r(op.listId);
+            const records = await parked.read(op.blobIds);
+            // Swept, or a database cleared under us: there is nothing left to
+            // send, and the sidecar must not be rewritten from a stale
+            // snapshot that still names the parked refs.
+            if (records.length === 0) return undefined;
+            const added = await uploadParkedMedia(records);
+            try {
+                if (fromQueue) await addTaskListAttachments(listId, added, op.replacing);
+                else await setTaskListAttachments(listId, [...op.refs, ...added]);
+            } catch (err) {
+                // Nothing names the uploads now: do not leave them against
+                // the quota (the same rule as uploadNoteMedia).
+                await deleteFiles(fileIdsOf(added));
+                throw err;
+            }
+            await parked.remove(op.blobIds);
+            return added;
+        }
+        case 'removeMedia': {
+            const listId = r(op.listId);
+            if (fromQueue) return removeTaskListAttachments(listId, op.removing);
+            return setTaskListAttachments(listId, op.refs);
         }
         case 'prefs': {
             if (!fromQueue) return putTaskTabPrefs(op.prefs);
@@ -300,6 +367,9 @@ export interface OutboxDeps {
      *  across tabs; a same-page chain where Web Locks are unavailable. */
     lock: <T>(name: string, fn: () => Promise<T>, opts?: { ifAvailable?: boolean }) => Promise<T | undefined>;
     onReplayed: (summary: ReplaySummary) => void;
+    /** Ciphertext waiting to be uploaded (notesBlobs.ts): a dropped op's
+     *  records are deleted with it, and load() sweeps what no op names. */
+    parked: ParkedStore;
 }
 
 export interface ReplaySummary {
@@ -331,6 +401,8 @@ function webLock<T>(name: string, fn: () => Promise<T>, opts?: { ifAvailable?: b
 export interface Outbox {
     /** How many ops are queued (this page's last view of it). */
     pending(): number;
+    /** Pictures and files still waiting to be uploaded. */
+    pendingMedia(): number;
     queuedKeys(): Set<string>;
     /** The notes whose delete (a move to the trash) is still queued. The
      *  same Set until that changes, so it can be a store snapshot. */
@@ -341,6 +413,11 @@ export interface Outbox {
     replay(): Promise<ReplaySummary | undefined>;
     /** The id a temp id became, once its create has replayed. */
     realId(tempId: number): number | undefined;
+    /** Forget parked media that will never be sent — a picture removed from
+     *  the note before it got a connection. Drops it from any queued
+     *  `addMedia` (and the op with it, once it names nothing) and deletes
+     *  its ciphertext. */
+    forgetParked(blobIds: string[]): Promise<void>;
 }
 
 export function createOutbox(deps: OutboxDeps): Outbox {
@@ -413,10 +490,29 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 
     const outbox: Outbox = {
         pending: () => view.queue.length,
+        pendingMedia: () => view.queue.reduce((n, o) => n + (o.k === 'addMedia' ? o.blobIds.length : 0), 0),
         queuedKeys: () => queuedKeysOf(view),
         queuedListDeletes: () => deletes,
         subscribe: cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
         realId: tempId => view.ids[String(tempId)],
+
+        async forgetParked(blobIds) {
+            if (blobIds.length === 0) return;
+            const drop = new Set(blobIds);
+            const next = await mutate(s => ({
+                ...s,
+                queue: s.queue.flatMap((o): NoteOp[] => {
+                    if (o.k !== 'addMedia') return [o];
+                    const kept = o.blobIds.filter(id => !drop.has(id));
+                    if (kept.length === o.blobIds.length) return [o];
+                    // Nothing left to send: the op goes too, or replay would
+                    // rewrite the sidecar for no reason.
+                    return kept.length === 0 ? [] : [{ ...o, blobIds: kept }];
+                }),
+            }));
+            const still = queuedBlobIds(next);
+            await deps.parked.remove(blobIds.filter(id => !still.has(id)));
+        },
 
         load() {
             const c = ctx();
@@ -424,12 +520,17 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             const kv = c.kv;
             const sub = c.sub;
             const p = (async () => {
+                let state = EMPTY;
                 try {
-                    publish(await deps.lock(`pucaNotesOutbox:${sub}`, () => read(sub, c.id, kv)) ?? EMPTY);
+                    state = await deps.lock(`pucaNotesOutbox:${sub}`, () => read(sub, c.id, kv)) ?? EMPTY;
+                    publish(state);
                 } catch {
                     publish(EMPTY);
                 }
                 loadedFor = sub;
+                // Bytes no op names are nobody's: a page that died mid-park,
+                // or a queue cleared by a sign-in as the same account again.
+                try { await deps.parked.sweep(queuedBlobIds(state)); } catch { /* online-only */ }
             })().finally(() => { if (loading?.p === p) loading = null; });
             loading = { sub, p };
             return p;
@@ -440,7 +541,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             if (c0) await ensureLoaded(c0.sub);
             const mustQueue = view.queue.length > 0 || referencesTemp(op) || !deps.online();
             if (mustQueue) {
-                await mutate(s => ({ ...s, queue: [...s.queue, op] }));
+                await mutate(s => enqueue(s, op));
                 if (deps.online()) scheduleReplay(0);
                 return { queued: true as const };
             }
@@ -451,7 +552,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             } catch (err) {
                 if (!isNetworkError(err)) throw err;
                 // Never reached the server: keep it, and keep the screen as is.
-                await mutate(s => ({ ...s, queue: [...s.queue, op] }));
+                await mutate(s => enqueue(s, op));
                 scheduleReplay(backoffMs);
                 return { queued: true as const };
             } finally {
@@ -468,11 +569,19 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                     const state = await mutate(s => s);   // re-read: another tab may have changed it
                     const head = state.queue[0];
                     if (!head) break;
-                    const dropHead = (dead?: number) => mutate(s => ({
-                        ...s,
-                        queue: s.queue.filter(o => o.oid !== head.oid),
-                        dead: dead === undefined ? s.dead : [...s.dead, dead],
-                    }));
+                    const dropHead = async (dead?: number) => {
+                        const next = await mutate(s => ({
+                            ...s,
+                            queue: s.queue.filter(o => o.oid !== head.oid),
+                            dead: dead === undefined ? s.dead : [...s.dead, dead],
+                        }));
+                        // Its ciphertext is what nobody will ever name again.
+                        if (head.k === 'addMedia') {
+                            const still = queuedBlobIds(next);
+                            await deps.parked.remove(head.blobIds.filter(id => !still.has(id))).catch(() => undefined);
+                        }
+                        return next;
+                    };
                     if (idsOf(head).some(id => state.dead.includes(id))) {
                         summary.dropped.push(head);
                         await dropHead(head.k === 'createTask' || head.k === 'createList' ? head.tempId : undefined);
@@ -523,6 +632,30 @@ function queuedKeysOf(s: OutboxState): Set<string> {
     return new Set(s.queue.map(busyKeyOf));
 }
 
+/** Every parked record the queue still names. */
+export function queuedBlobIds(s: OutboxState): Set<string> {
+    return new Set(s.queue.flatMap(o => (o.k === 'addMedia' ? o.blobIds : [])));
+}
+
+/**
+ * Append an op — EXCEPT a second `setBody` for the same note, which replaces
+ * the queued one IN PLACE (keeping its position, so it still replays behind
+ * the create of a note made offline). NoteBodyField saves a pause after
+ * every keystroke; without this, a paragraph typed on a plane is dozens of
+ * ops, each overwriting the last, and the queue count is nonsense.
+ */
+export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
+    if (op.k === 'setBody') {
+        const i = s.queue.findIndex(o => o.k === 'setBody' && o.listId === op.listId);
+        if (i >= 0) {
+            const queue = [...s.queue];
+            queue[i] = { ...op, oid: queue[i].oid };
+            return { ...s, queue };
+        }
+    }
+    return { ...s, queue: [...s.queue, op] };
+}
+
 // --- The app's instance --------------------------------------------------------------
 
 let appQc: QueryClient | null = null;
@@ -556,6 +689,7 @@ export const appOutbox = createOutbox({
     online: () => typeof navigator === 'undefined' || navigator.onLine !== false,
     lock: webLock,
     onReplayed,
+    parked: appParkedStore,
 });
 
 /** Run (or queue) one note op. See the module header. */
@@ -602,6 +736,16 @@ export async function sendCreateList(title: string): Promise<TaskList> {
 
 export function pendingOutboxCount(): number {
     return appOutbox.pending();
+}
+
+/** Forget parked media removed from a note before it could be sent. */
+export function forgetParkedMedia(blobIds: string[]): Promise<void> {
+    return appOutbox.forgetParked(blobIds);
+}
+
+/** Pictures and files still waiting for a connection. */
+export function useOutboxPendingMedia(): number {
+    return useSyncExternalStore(appOutbox.subscribe, appOutbox.pendingMedia, () => 0);
 }
 
 /** Whether a card has changes that have not reached the server. */

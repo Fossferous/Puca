@@ -4,9 +4,13 @@
  * blur, and when it unmounts (closing the note). Shared by Púca Notes'
  * editor and Púca's Tasks view.
  *
- * A failed save keeps the typed text in the field and says so, with a retry;
- * the cached note reverts (the data layer's rollback), so what the grid shows
- * is always what the server holds. Text that does not decrypt renders as a
+ * A save has three ends. It reached the server; or it was KEPT ON THIS
+ * DEVICE and will be sent when the connection is back (Púca Notes' offline
+ * queue — notes/model/notesOutbox.ts), which the field says rather than
+ * claiming "Saved"; or it was refused, which keeps the typed text in the
+ * field and offers a retry while the cached note reverts (the data layer's
+ * rollback), so what the grid shows is always what the server holds.
+ * Púca's Tasks view has no queue and simply never returns `queued`. Text that does not decrypt renders as a
  * locked line and cannot be edited — a marker must never be sealed back over
  * the ciphertext it stands in for.
  *
@@ -23,8 +27,8 @@ import './NoteImages.css';
 interface NoteBodyFieldProps {
     /** The OPENED body (null = none). */
     value: string | null | undefined;
-    /** Resolves true once saved. */
-    onSave: (text: string) => Promise<boolean>;
+    /** `queued` = kept on this device; `failed` = refused, keep the text. */
+    onSave: (text: string) => Promise<SaveResult>;
     readOnly?: boolean;
     placeholder?: string;
     autoFocus?: boolean;
@@ -33,7 +37,11 @@ interface NoteBodyFieldProps {
     listId?: number;
 }
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'failed' | 'too-long';
+/** What a caller's save did. A plain boolean is still accepted so callers
+ *  with no offline queue (components/ListContentBlock.tsx) stay as they are. */
+export type SaveResult = boolean | 'saved' | 'queued' | 'failed';
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'queued' | 'failed' | 'too-long';
 
 export function NoteBodyField({ value, onSave, readOnly = false, placeholder = 'Note', autoFocus = false, listId }: NoteBodyFieldProps) {
     const current = value ?? '';
@@ -57,7 +65,7 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
     useEffect(() => { latest.current = { draft, current, onSave }; });
     // The save on its way to the server, if any (the cached value already
     // shows it, so "nothing to save" is not "nothing in flight").
-    const inFlight = useRef<Promise<boolean> | null>(null);
+    const inFlight = useRef<Promise<SaveResult> | null>(null);
 
     const flush = useCallback(async () => {
         if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; }
@@ -67,15 +75,16 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
         setState('saving');
         const request = save(text);
         inFlight.current = request;
-        const ok = await request;
+        const result = await request;
         if (inFlight.current === request) inFlight.current = null;
-        if (ok) {
-            // Only clean if nothing was typed while the request was out.
-            if (latest.current.draft === text) markDirty(false);
-            setState('saved');
-        } else {
+        const outcome = result === true ? 'saved' : result === false ? 'failed' : result;
+        if (outcome === 'failed') {
             setState('failed');
+            return;
         }
+        // Only clean if nothing was typed while the request was out.
+        if (latest.current.draft === text) markDirty(false);
+        setState(outcome);
     }, [markDirty]);
 
     // Everything typed, saved: the pending pause cut short, and whatever is
@@ -139,6 +148,7 @@ export function NoteBodyField({ value, onSave, readOnly = false, placeholder = '
                 <div className="nb-status failed" role="alert">Too long to save — a note holds about 48,000 characters of text.</div>
             )}
             {state === 'saving' && <div className="nb-status" role="status">Saving…</div>}
+            {state === 'queued' && <div className="nb-status queued" role="status">Kept on this device — it will sync.</div>}
         </div>
     );
 }

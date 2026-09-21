@@ -16,7 +16,9 @@ import {
     NO_LIST_FEATURES, parseListFeatures, fetchListFeatures, listTrashedTaskLists, keepHiddenSlots, serverNowFrom, NoteFilesUnreadableError, purgeCountdown,
     trashPurgeAt, listsDueForClientPurge, toggleFavoriteKeepingHidden, noteFileIds, deleteListForever, setTaskListBody,
     setTaskListAttachments, createTaskListWithContent, bodyBytes, MAX_BODY_BYTES,
+    addTaskListAttachments, removeTaskListAttachments, fetchListSidecar,
 } from '../api/listContent';
+import { parkedHref, withoutParked, parseParkedRef } from '../api/parkedMedia';
 import { openSelfField, openListContent, sealSelfField } from '../api/listSeal';
 import { buildPrefsForOrder, openSelfTaskText, toggleFavoritePrefs, type Task, type TaskTabPref } from '../api/tasks';
 import { encryptSelf, serializeEnvelope, setActiveIdentity, isEncrypted } from '../api/e2ee';
@@ -272,5 +274,88 @@ describe('the note text limit', () => {
         expect(bodyBytes('abc')).toBe(3);
         expect(bodyBytes('é')).toBe(2);
         expect(MAX_BODY_BYTES).toBeLessThan(65536 * 3 / 4);
+    });
+});
+
+
+// --- What a picture waiting on this device must never do --------------------------------
+
+const parked = (id: string, mime = 'image/jpeg', name = `${id}.jpg`) => ({ href: parkedHref(id, mime), name });
+
+/** The refs a PATCH of the sidecar actually sealed. */
+async function sealedRefs() {
+    const body = patch.mock.calls.at(-1)![1] as { attachments: string };
+    const opened = await openSelfField(body.attachments);
+    return JSON.parse(opened) as Array<{ href: string; name: string }>;
+}
+
+describe('a picture that is still only on this device', () => {
+    it('is recognised, and its type survives the round trip', () => {
+        const p = parseParkedRef(parkedHref('abc', 'application/pdf'));
+        expect(p).toEqual({ id: 'abc', mime: 'application/pdf' });
+        expect(parseParkedRef('sovereign-enc:x?k=K&m=image%2Fpng')).toBeNull();
+        expect(parseParkedRef('https://example.com/a.png')).toBeNull();
+        expect(parseParkedRef('puca-parked:')).toBeNull();
+    });
+
+    it('is NEVER sealed into the sidecar the server keeps', async () => {
+        patch.mockResolvedValue(undefined);
+        await setTaskListAttachments(3, [ref('one'), parked('waiting'), ref('two')]);
+        expect(await sealedRefs()).toEqual([ref('one'), ref('two')]);
+        // Positive control: without the parked one, the same call keeps both.
+        await setTaskListAttachments(3, [ref('one'), ref('two')]);
+        expect(await sealedRefs()).toHaveLength(2);
+        expect(withoutParked([parked('a')])).toEqual([]);
+    });
+
+    it('a sidecar of nothing but parked refs clears the server’s, rather than sealing a lie', async () => {
+        patch.mockResolvedValue(undefined);
+        await setTaskListAttachments(3, [parked('a'), parked('b')]);
+        expect((patch.mock.calls.at(-1)![1] as { attachments: string }).attachments).toBe('');
+    });
+});
+
+describe('adding and removing against what the server holds NOW', () => {
+    const serverHas = async (refs: Array<{ href: string; name: string }>) => {
+        const sealed = refs.length === 0 ? null : await sealSelfField(JSON.stringify(refs));
+        get.mockResolvedValue([{ id: 3, title: await sealSelfField('Trip'), attachments: sealed, created_at: '', total_tasks: 0, completed_tasks: 0 }]);
+    };
+
+    it('an add keeps a picture another device added in the meantime', async () => {
+        await serverHas([ref('theirs')]);
+        patch.mockResolvedValue(undefined);
+        await addTaskListAttachments(3, [ref('mine')]);
+        expect(await sealedRefs()).toEqual([ref('theirs'), ref('mine')]);
+    });
+
+    it('an add that REPLACES only drops what it names', async () => {
+        await serverHas([ref('old'), ref('theirs')]);
+        patch.mockResolvedValue(undefined);
+        await addTaskListAttachments(3, [ref('new')], [ref('old').href]);
+        expect(await sealedRefs()).toEqual([ref('theirs'), ref('new')]);
+    });
+
+    it('a remove takes only its own refs out', async () => {
+        await serverHas([ref('a'), ref('b'), ref('c')]);
+        patch.mockResolvedValue(undefined);
+        await removeTaskListAttachments(3, [ref('b').href]);
+        expect(await sealedRefs()).toEqual([ref('a'), ref('c')]);
+    });
+
+    it('a remove of something already gone says nothing at all', async () => {
+        await serverHas([ref('a')]);
+        patch.mockResolvedValue(undefined);
+        await removeTaskListAttachments(3, [ref('b').href]);
+        expect(patch).not.toHaveBeenCalled();
+    });
+
+    it('refuses rather than guessing when the note is gone or its sidecar is locked', async () => {
+        get.mockResolvedValue([]);
+        await expect(addTaskListAttachments(3, [ref('mine')])).rejects.toBeInstanceOf(NoteFilesUnreadableError);
+        expect(patch).not.toHaveBeenCalled();
+        get.mockResolvedValue([{ id: 3, title: await sealSelfField('Trip'), attachments: 'not-an-envelope', created_at: '', total_tasks: 0, completed_tasks: 0 }]);
+        expect(await fetchListSidecar(3)).toBeNull();
+        await expect(removeTaskListAttachments(3, [ref('a').href])).rejects.toBeInstanceOf(NoteFilesUnreadableError);
+        expect(patch).not.toHaveBeenCalled();
     });
 });

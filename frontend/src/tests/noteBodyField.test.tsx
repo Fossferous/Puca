@@ -1,8 +1,9 @@
 /**
  * The note-text field Púca Notes and Púca's Tasks view share: it saves a
  * pause after typing (not per keystroke), a failed save KEEPS what was typed
- * and offers a retry, and unreadable text is shown locked, never editable —
- * an edit there would seal the marker over the real ciphertext.
+ * and offers a retry, a save that only QUEUED says so instead of claiming it
+ * was saved, and unreadable text is shown locked, never editable — an edit
+ * there would seal the marker over the real ciphertext.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -125,5 +126,33 @@ describe('NoteBodyField', () => {
         // POSITIVE CONTROL: readable text is editable.
         act(() => { root.render(<NoteBodyField value="fine" onSave={vi.fn()} />); });
         expect(container.querySelector('textarea')).not.toBeNull();
+    });
+});
+
+
+describe('a save that was only kept on this device', () => {
+    it('says so, and does not claim the text is saved', async () => {
+        const onSave = vi.fn(async () => 'queued' as const);
+        act(() => { root.render(<NoteBodyField value="" onSave={onSave} />); });
+        type(area(), 'Written on a plane');
+        await act(async () => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+        await flushPromises();
+        const status = container.querySelector('.nb-status')!;
+        expect(status.textContent).toContain('Kept on this device');
+        expect(container.querySelector('.nb-status.failed')).toBeNull();
+        expect(status.textContent).not.toContain('Saving');
+        // The text is still there, and it is not dirty any more: a queued
+        // save is a save, it simply has not reached the server.
+        expect(area().value).toBe('Written on a plane');
+    });
+
+    it('still shows a refusal as a refusal, with the retry', async () => {
+        const onSave = vi.fn(async () => 'failed' as const);
+        act(() => { root.render(<NoteBodyField value="" onSave={onSave} />); });
+        type(area(), 'nope');
+        await act(async () => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });
+        await flushPromises();
+        expect(container.querySelector('.nb-status.failed')!.textContent).toContain('Not saved');
+        expect(container.querySelector('.nb-retry')).not.toBeNull();
     });
 });
