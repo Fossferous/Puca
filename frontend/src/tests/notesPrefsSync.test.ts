@@ -373,6 +373,30 @@ describe('the reminder times follow the account', () => {
         expect(decodePrefsDoc(withSome)!.state.times).toEqual(times({ morning: '07:30' }));
         // And a malformed times survives validation rather than throwing.
         expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: 'nope' } }))!.state.times).toBeUndefined();
+        // An OBJECT with not one usable field is unreadable too, not "the
+        // user chose the defaults": parsed it is all-defaults and would
+        // overwrite another device's real times on the fields it never
+        // carried.
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: 'x', evening: 25 } } }))!.state.times).toBeUndefined();
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: {} } }))!.state.times).toBeUndefined();
+        // Positive control: ONE usable field is a document that carries them,
+        // and the rest fall back to the defaults as they always did.
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: 'x', evening: '22:00' } } }))!.state.times)
+            .toEqual(times({ evening: '22:00' }));
+    });
+
+    it('a corrupt times does not overwrite another device’s real ones', async () => {
+        // The merge is what the decode protects: server.times absent means
+        // UNKNOWN, so the local value stands (and heals the document on the
+        // next push). Server.times present-and-default would win instead.
+        const base = times({ morning: '07:30' });
+        const local = times({ morning: '07:30' });
+        const corrupt = decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: 'half-typed' } } }))!.state.times;
+        expect(mergeTimes(base, local, corrupt)).toEqual(times({ morning: '07:30' }));
+        // Positive control: a READABLE server change to the same field wins,
+        // because this device did not touch it since `base`.
+        const real = decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: '10:00' } } }))!.state.times;
+        expect(mergeTimes(base, base, real)).toEqual(times({ morning: '10:00' }));
     });
 
     it('a time set on A reaches B', async () => {

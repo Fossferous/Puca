@@ -55,7 +55,7 @@ import { getActiveIdentity, openAccountBlob, sealAccountBlob, type Identity } fr
 import { isNetworkError } from '../../api/client';
 import { getSealedBlob, putSealedBlob, type GetBlobResult, type PutBlobResult } from '../../api/sealedBlobs';
 import { writeNotesUnsynced } from '../../api/notesCacheScrub';
-import { DEFAULT_REMINDER_TIMES, REMINDER_TIME_KEYS, type ReminderTimes } from '../../api/reminderTimes';
+import { DEFAULT_REMINDER_TIMES, REMINDER_TIME_KEYS, isReminderTime, type ReminderTimes } from '../../api/reminderTimes';
 import { MAX_LABELS_PER_NOTE, type NotesNoteState } from './notesModel';
 import { dedupeLabels, getNotesPrefs, parseNotesPrefs, replaceNoteState, subscribeNotesPrefs } from './notesPrefs';
 
@@ -105,9 +105,15 @@ export function decodePrefsDoc(text: string): { rev: number; state: NotesNoteSta
     if (typeof d.prefs !== 'object' || d.prefs === null) return null;
     const state = noteStateOf(parseNotesPrefs(JSON.stringify(d.prefs)));
     // parseNotesPrefs fills the times in; a document that CARRIED none must
-    // stay carrying none, or the merge cannot tell unknown from cleared.
-    const times = (d.prefs as { times?: unknown }).times;
-    if (typeof times !== 'object' || times === null || Array.isArray(times)) delete state.times;
+    // stay carrying none, or the merge cannot tell unknown from cleared. A
+    // present-but-unreadable `times` (not an object, or an object with not one
+    // usable field) counts as carrying none too: parsed it is indistinguishable
+    // from "the user chose the defaults", and that would let a corrupt document
+    // overwrite another device's real times.
+    const raw = (d.prefs as { times?: unknown }).times;
+    const carried = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+        && REMINDER_TIME_KEYS.some(k => isReminderTime((raw as Record<string, unknown>)[k]));
+    if (!carried) delete state.times;
     return { rev: d.rev, state };
 }
 
@@ -234,8 +240,8 @@ export interface PrefsSync {
      *  restored a backup) — this device's copy is replaced by it. A user
      *  action. */
     acceptServer(): Promise<PrefsSyncStatus>;
-    /** Whether this device holds colours, labels or archive flags the
-     *  account's document does not (a sign-out would lose them). */
+    /** Whether this device holds colours, labels, archive flags or reminder
+     *  times the account's document does not (a sign-out would lose them). */
     unsynced(): boolean;
     status(): PrefsSyncStatus;
     subscribe(cb: () => void): () => void;
