@@ -152,6 +152,20 @@ await mustStep('tasks-calendar-tab', async () => {
     if (!opened) throw new Error(`week grid opened at ${JSON.stringify(open)}`);
 });
 await shot('tasks-calendar-week');
+// The pinned Reminders tab beside it, and the door a clicked due-item
+// notification comes through (api/desktopNotify dispatches this very event).
+// One check here because the release gate list runs THIS file; notes-walk
+// drives the view itself.
+await mustStep('tasks-reminders-intent', async () => {
+    // Positive control: the Calendar tab is active right now, so the switch
+    // below is the event's doing and not a tab that was already selected.
+    if (await page.locator('.tasks-tab-reminders.active').count() !== 0) throw new Error('Reminders was already active — the event would prove nothing');
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('sovereign:open-reminders')));
+    await page.locator('.tasks-tab-reminders.active').waitFor({ timeout: 5000 });
+    await page.locator('.tasks-reminders .notes-reminders').waitFor({ timeout: 5000 });
+    console.log('tasks reminders: the notification event selects the pinned tab and mounts the list (should be true): true');
+});
+await shot('tasks-reminders');
 
 console.log('DONE user=', username);
 await browser.close();

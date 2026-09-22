@@ -202,7 +202,11 @@ await mustStep('tasks-calendar-tab', async () => {
         overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
         week: (() => { const b = document.querySelector('.tasks-calendar .cal-viewbtn.view-week'); return !!b && getComputedStyle(b).display !== 'none'; })(),
         // The pinned tab is a whole tap target, not squeezed to "C…".
-        tabW: Math.round(document.querySelector('.tasks-tab-calendar')?.getBoundingClientRect().width ?? 0),
+        // offsetWidth, NOT the drawn box: the tab was tapped a moment ago and
+        // mobile.css scales a pressed button to 0.98, which turned a 44 px
+        // target into a measured 43. A momentary animation is not the size of
+        // the thing a finger has to hit (notes-walk learned the same lesson).
+        tabW: document.querySelector('.tasks-tab-calendar')?.offsetWidth ?? 0,
     }));
     console.log('tasks calendar (phone): no overflow, no Week button, tab >= 44px (should be true):', !r.overflow && !r.week && r.tabW >= 44, r.tabW);
     if (r.overflow || r.week || r.tabW < 44) throw new Error(`phone calendar gate: ${JSON.stringify(r)}`);
@@ -218,6 +222,48 @@ await mustStep('tasks-calendar-tab', async () => {
     if (!d.list || d.grid !== 0 || d.overflow) throw new Error(`phone Day: ${JSON.stringify(d)}`);
 });
 await shot('tasks-calendar-phone');
+// The pinned Reminders tab beside it (0.9.817). notes-walk drives this view
+// deeply; these lines exist because the RELEASE gate list runs the walks in
+// e2e/mobile-walk*.mjs and does not run that one — the same phone rules, on
+// the surface a due-item notification opens: a whole tap target, nothing
+// wider than the screen, and a snooze button a finger can hit.
+await mustStep('tasks-reminders-tab', async () => {
+    // Something has to be DUE for a row to exist at all: give the item a time
+    // first, or an empty list would pass every measurement below.
+    await page.locator('.tasks-tabbar .tasks-tab', { hasText: 'Groceries' }).first().tap({ timeout: 4000 });
+    const row = page.locator('.tt-item', { hasText: 'oat milk' }).first();
+    await row.waitFor({ timeout: 8000 });
+    await row.locator('.tt-btn[title="Add due time"]').tap({ timeout: 4000 });
+    const at = new Date(Date.now() + 3600_000);
+    const pad = v => String(v).padStart(2, '0');
+    await page.locator('.tt-due-edit input').fill(`${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T${pad(at.getHours())}:${pad(at.getMinutes())}`);
+    await page.locator('.tt-due-edit .tt-due-set').tap({ timeout: 4000 });
+    await page.waitForTimeout(900);
+
+    await page.locator('.tasks-tab-reminders').tap({ timeout: 4000 });
+    await page.locator('.tasks-reminders .notes-reminders').waitFor({ timeout: 8000 });
+    await page.locator('.tasks-reminders .notes-reminder-row').first().waitFor({ timeout: 8000 });
+    const r = await page.evaluate(() => {
+        // The LAYOUT box, not the drawn one: a tab just tapped is still under
+        // the press effect, and a momentary animation is not the size of the
+        // thing a finger has to hit. The Calendar tab is the control for the
+        // convention.
+        const box = sel => { const el = document.querySelector(sel); return el ? { w: el.offsetWidth, h: el.offsetHeight } : null; };
+        return {
+            overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+            reminders: box('.tasks-tab-reminders'),
+            calendar: box('.tasks-tab-calendar'),
+            snooze: box('.tasks-reminders .notes-snooze button'),
+        };
+    });
+    const ok = !r.overflow
+        && !!r.reminders && r.reminders.w >= 44 && r.reminders.h >= 44
+        && !!r.calendar && r.calendar.w >= 44 && r.calendar.h >= 44
+        && !!r.snooze && r.snooze.w >= 44 && r.snooze.h >= 44;
+    console.log('tasks reminders (phone): the tab and the row snooze are 44px targets, no overflow (should be true):', ok, JSON.stringify(r));
+    if (!ok) throw new Error(`phone reminders gate: ${JSON.stringify(r)}`);
+});
+await shot('tasks-reminders-phone');
 // A server checklist opened as its own tab (channel tabs carry the kind glyph).
 await tryStep('tasks-channel-tab', async () => {
     await page.locator('.tasks-tab.tasks-tab-channel').first().tap({ timeout: 3000 });
