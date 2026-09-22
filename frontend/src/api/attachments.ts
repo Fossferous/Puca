@@ -142,12 +142,29 @@ export function parseEncAttachment(href: string): { id: string; key: string; mim
 }
 
 /**
- * Encrypt a file, upload the ciphertext, and return the parts of the ref:
- * the sovereign-enc href (carrying id + key + mime), the sanitized display
- * name, and the real mime. Building block for both the chat markdown form
- * (encryptAndUpload) and task attachment refs.
+ * A file encrypted on this device and not yet uploaded: the ciphertext, the
+ * key that opens it, and what it is called.
+ *
+ * The seal and the upload are separate steps so a photo taken with no
+ * connection can be encrypted THE MOMENT IT IS TAKEN and the plaintext
+ * dropped, with only the ciphertext parked on the device until the network
+ * comes back (notes/model/notesBlobs.ts). Nothing else about the format
+ * changes: `encryptAndUploadRef` below is the two steps back to back, and is
+ * still what chat, DMs and task attachments call.
  */
-export async function encryptAndUploadRef(file: File, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
+export interface SealedFile {
+    /** The AES-256-GCM key, base64url — the same string that becomes `k=`. */
+    key: string;
+    /** nonce(12) || ciphertext, exactly as it is uploaded. */
+    blob: Blob;
+    /** The real MIME, recorded in the ref's `m=`; the server never sees it. */
+    mime: string;
+    /** The display name, markdown-safe. */
+    name: string;
+}
+
+/** Encrypt a file for upload, without uploading it. See `SealedFile`. */
+export async function sealFileForUpload(file: File): Promise<SealedFile> {
     // Check BEFORE reading and encrypting: uploadFile checks too, but by then we
     // have already pulled the whole file into memory and encrypted it. Account
     // for what encryption adds, or a file of exactly the cap fails at the server.
@@ -158,8 +175,6 @@ export async function encryptAndUploadRef(file: File, opts?: { channelId?: numbe
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, raw as BufferSource));
     const blob = new Blob([nonce, ct], { type: 'application/octet-stream' });
-    const uploaded = await uploadFile(new File([blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId });
-
     // The browser's guess first; when it has none (mkv famously reports ""),
     // infer video types from the extension so the ref records something the
     // renderer can embed — old refs without this still get the same fallback
@@ -167,11 +182,40 @@ export async function encryptAndUploadRef(file: File, opts?: { channelId?: numbe
     const mime = file.type
         || videoMimeFor(file.name || '', '')
         || 'application/octet-stream';
-    const href = `${PREFIX}${uploaded.id}?k=${b64url(keyBytes)}&m=${encodeURIComponent(mime)}`
-        + (uploaded.cap ? `&c=${encodeURIComponent(uploaded.cap)}` : '');
     // Strip markdown-breaking chars from the display name (href has the real ref).
     const name = (file.name || 'attachment').replace(/[[\]()\n]/g, '_');
-    return { href, name, mime };
+    return { key: b64url(keyBytes), blob, mime, name };
+}
+
+/** Upload already-sealed ciphertext and build its ref. */
+export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
+    const uploaded = await uploadFile(new File([sealed.blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId });
+    const href = `${PREFIX}${uploaded.id}?k=${sealed.key}&m=${encodeURIComponent(sealed.mime)}`
+        + (uploaded.cap ? `&c=${encodeURIComponent(uploaded.cap)}` : '');
+    return { href, name: sealed.name, mime: sealed.mime };
+}
+
+/**
+ * Encrypt a file, upload the ciphertext, and return the parts of the ref:
+ * the sovereign-enc href (carrying id + key + mime), the sanitized display
+ * name, and the real mime. Building block for both the chat markdown form
+ * (encryptAndUpload) and task attachment refs.
+ */
+export async function encryptAndUploadRef(file: File, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
+    return uploadSealedRef(await sealFileForUpload(file), opts);
+}
+
+/**
+ * Open ciphertext this device sealed and never uploaded, as an object URL.
+ * Same `safeBlobType` rule as a fetched attachment: a parked PDF is an
+ * opaque binary blob, never an in-origin document.
+ */
+export async function decryptParkedBlobUrl(bytes: Uint8Array, keyB64url: string, mime: string): Promise<string> {
+    const nonce = bytes.slice(0, 12);
+    const ct = bytes.slice(12);
+    const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
+    return URL.createObjectURL(new Blob([pt], { type: safeBlobType(mime) }));
 }
 
 /**

@@ -109,6 +109,16 @@ describe('saveAttachment on Android', () => {
         expect(writeFile.mock.calls[0][0].encoding).toBeUndefined();
         expect(writeFile.mock.calls[0][0].data).toBe(btoa('hello'));
     });
+    it('a file saved out of Púca NOTES lands in its own folder, not the chat app’s', async () => {
+        writeFile.mockResolvedValue({ uri: 'file://x' });
+        const { NOTES_FOLDER } = await import('../api/saveToDevice');
+        const r = await saveAttachment('blob:x', 'tickets.pdf', NOTES_FOLDER);
+        expect(r.where).toMatch(/^Documents\/Puca Notes\/tickets-\d{8}-\d{6}\.pdf$/);
+        // Positive control: with no folder given it is still Púca's own.
+        const p = await saveAttachment('blob:x', 'tickets.pdf');
+        expect(p.where).toMatch(/^Documents\/Puca\/tickets-\d{8}-\d{6}\.pdf$/);
+    });
+
     it('in a browser it is still the transient anchor', async () => {
         android = false;
         const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});

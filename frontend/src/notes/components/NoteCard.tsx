@@ -23,7 +23,7 @@ import {
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
-import { heroItems } from '../../api/noteMedia';
+import { galleryItems, heroItems } from '../../api/noteMedia';
 import { ScheduleChip } from '../../components/schedule/ScheduleChip';
 import { NoteDueChip } from '../../components/schedule/NoteReminderControl';
 import { useNoteUnsynced } from '../model/notesOutbox';
@@ -106,7 +106,11 @@ function NoteCardImpl({
     // lock chip if ANY row's sidecar could not be opened.
     const thumbs: TaskAttachmentRef[] = [];
     let anyLocked = isAttachmentsLocked(card.noteAttachments ?? null);
-    let fileCount = 0;
+    // The note's OWN files (a PDF, a ticket) as well as its items'. `hero`
+    // above shows only pictures, so without this a note whose one attachment
+    // is a file renders as an empty card — the card would be lying about
+    // what the note holds.
+    let fileCount = galleryItems(card.noteAttachments).filter(i => i.kind === 'file').length;
     for (const t of tasks ?? []) {
         if (!t.attachments) continue;
         if (isAttachmentsLocked(t.attachments)) { anyLocked = true; continue; }
@@ -191,7 +195,8 @@ function NoteCardImpl({
             {preview === null ? (
                 <div className="notes-card-empty">Loading…</div>
             ) : preview.rows.length === 0 && preview.completedCount === 0 ? (
-                hasBody || hero.length > 0 ? null : <div className="notes-card-empty">Empty note</div>
+                // A note holding only a FILE is not empty; the chip below says so.
+                hasBody || hero.length > 0 || fileCount > 0 ? null : <div className="notes-card-empty">Empty note</div>
             ) : (
                 <ul className="notes-card-items">
                     {preview.rows.map(({ task, depth }) => (

@@ -764,11 +764,14 @@ export function TaskTree({
                 <div className="tt-empty">{canCreate ? 'No tasks yet. Add one above!' : 'No tasks yet.'}</div>
             )}
 
-            {/* Shared picker for the per-row attach buttons (target in attachTarget). */}
+            {/* Shared picker for the per-row attach buttons (target in attachTarget).
+                No `accept`: an item holds any file, and the filter here was
+                advisory anyway — the OS dialog's "All files" walked straight
+                past it and the rest of the path (upload, sidecar, download
+                button) has always handled a PDF correctly. */}
             <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*,video/*"
                 multiple
                 style={{ display: 'none' }}
                 onChange={e => {

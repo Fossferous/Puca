@@ -1,5 +1,6 @@
 /**
- * Uploading a note's own photos, drawings and voice notes: shrink (photos),
+ * Uploading a note's own photos, drawings, voice notes and any other file:
+ * shrink (photos only),
  * encrypt, upload, and hand back the refs for the list's sealed sidecar
  * (api/listContent.ts). All-or-nothing per call: if one upload fails, the
  * ones that already landed are deleted again, so a failed save never leaves
@@ -8,11 +9,20 @@
  * A recording goes up RAW — never through prepareImageForUpload, which is an
  * image path — but through exactly the same seal as a photo, so the server
  * cannot tell one kind of attachment from another.
+ * A NOTE HOLDS ANY FILE, not only pictures. The upload primitive never cared
+ * — everything goes up as `attachment.enc` and the real name and type live
+ * in the sealed sidecar — so what is here is the shrink being skipped for a
+ * non-image (pulling a 25 MB PDF through the image decoder only stalls a
+ * phone) and the display name being CLAMPED: the sealed sidecar has a 16 KiB
+ * envelope cap (MAX_LIST_ATTACHMENTS_LEN, src/list_content.rs), and a
+ * pathological 4 KB filename would push a note past it and make the save
+ * fail with a 400 the user cannot explain.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
-import { decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment } from './attachments';
+import { type SealedFile, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
-import { deleteFiles } from './listContent';
+import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
+import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
 import { assertClipUploadable, isAudioMime } from '../notes/model/audioNote';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
@@ -38,12 +48,25 @@ export function slotsNeeded(files: number, drawings: number): number {
     return files + drawings * 2;
 }
 
+/** The longest display name a sidecar ref may carry. Twelve of these still
+ *  leave room inside the 16 KiB sealed envelope. */
+export const MAX_ATTACHMENT_NAME_LEN = 120;
+
+/** `name`, short enough for the sidecar, keeping the extension — which is
+ *  what tells a download what it is. */
+export function clampAttachmentName(name: string): string {
+    if (name.length <= MAX_ATTACHMENT_NAME_LEN) return name;
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 && name.length - dot <= 12 ? name.slice(dot) : '';
+    return `${name.slice(0, MAX_ATTACHMENT_NAME_LEN - ext.length - 1)}…${ext}`;
+}
+
 async function uploadAll(files: File[]): Promise<TaskAttachmentRef[]> {
     const done: TaskAttachmentRef[] = [];
     try {
         for (const f of files) {
             const r = await encryptAndUploadRef(f);
-            done.push({ href: r.href, name: r.name });
+            done.push({ href: r.href, name: clampAttachmentName(r.name) });
         }
         return done;
     } catch (err) {
@@ -52,10 +75,26 @@ async function uploadAll(files: File[]): Promise<TaskAttachmentRef[]> {
     }
 }
 
-/** Upload photos (shrunk first), drawings, and recordings (raw); `base(i)`
- *  names drawing i (`drawing-<n>`, see notes/model/noteContent.ts). Throws —
- *  with nothing left behind — on any failure, including a sidecar that would
- *  overflow or a clip over the upload budget. */
+/** Photos and files ready to encrypt (shrunk; only images go through the
+ *  decoder) plus each drawing's PNG and strokes file. A recording is
+ *  already raw bytes and is appended by the caller, never shrunk. */
+async function filesForUpload(photos: File[], drawings: { files: DrawingFiles; base: string }[]): Promise<File[]> {
+    // A non-image (a PDF, a spreadsheet) is not shrinkable and pulling it
+    // through createImageBitmap only stalls a phone on a 25 MB file.
+    const prepared = await Promise.all(photos.map(f => (f.type.startsWith('image/') ? prepareImageForUpload(f) : Promise.resolve(f))));
+    const files: File[] = [...prepared];
+    for (const d of drawings) {
+        files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));
+        files.push(new File([d.files.strokes], `${d.base}.json`, { type: DRAWING_STROKES_MIME }));
+    }
+    return files;
+}
+
+/** Upload photos and files (photos shrunk first), drawings, and recordings
+ *  (raw); `base(i)` names drawing i (`drawing-<n>`, see
+ *  notes/model/noteContent.ts). Throws — with nothing left behind — on any
+ *  failure, including a sidecar that would overflow or a clip over the
+ *  upload budget. */
 export async function uploadNoteMedia(
     photos: File[],
     drawings: { files: DrawingFiles; base: string }[],
@@ -66,13 +105,81 @@ export async function uploadNoteMedia(
     // Before anything is read or encrypted: a clip too big for the server
     // must not cost an upload of everything beside it first.
     for (const a of audio) assertClipUploadable(a.size);
-    const prepared = await Promise.all(photos.map(prepareImageForUpload));
-    const files: File[] = [...prepared, ...audio];
-    for (const d of drawings) {
-        files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));
-        files.push(new File([d.files.strokes], `${d.base}.json`, { type: DRAWING_STROKES_MIME }));
+    return uploadAll([...await filesForUpload(photos, drawings), ...audio]);
+}
+
+// --- Media sealed on this device and not yet uploaded ------------------------------------
+
+/** One parked item: the ciphertext (base64), the key that opens it, and the
+ *  ref the note shows while it waits (api/parkedMedia.ts). */
+export interface SealedMedia {
+    id: string;
+    name: string;
+    mime: string;
+    /** The AES key, base64url — becomes the ref's `k=` once uploaded. */
+    key: string;
+    /** nonce || ciphertext, base64. */
+    data: string;
+    /** Ciphertext bytes, for the on-device cap. */
+    bytes: number;
+}
+
+let parkSeq = 0;
+function parkedId(): string {
+    return `${Date.now().toString(36)}-${(parkSeq++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Shrink (photos only), encrypt, and hand back the parked records — no
+ * network. The plaintext file is not kept: only its ciphertext is, so a
+ * photo taken offline is sealed before it is ever written to the device.
+ * A recording takes the same path, raw, beside the prepared files.
+ */
+export async function sealNoteMedia(
+    photos: File[],
+    drawings: { files: DrawingFiles; base: string }[],
+    existing: number,
+    audio: File[] = [],
+): Promise<SealedMedia[]> {
+    if (existing + slotsNeeded(photos.length + audio.length, drawings.length) > MAX_TASK_ATTACHMENTS) throw new TooManyAttachmentsError();
+    for (const a of audio) assertClipUploadable(a.size);
+    const files = [...await filesForUpload(photos, drawings), ...audio];
+    const out: SealedMedia[] = [];
+    for (const f of files) {
+        const sealed: SealedFile = await sealFileForUpload(f);
+        const bytes = new Uint8Array(await sealed.blob.arrayBuffer());
+        out.push({ id: parkedId(), name: clampAttachmentName(sealed.name), mime: sealed.mime, key: sealed.key, data: bytesToB64(bytes), bytes: bytes.length });
     }
-    return uploadAll(files);
+    return out;
+}
+
+/** The ref a parked record shows as until it is uploaded. */
+export function refOfParked(rec: SealedMedia): TaskAttachmentRef {
+    return { href: parkedHref(rec.id, rec.mime), name: rec.name };
+}
+
+/**
+ * Upload parked ciphertext, in order and one at a time (the server caps
+ * concurrent uploads per IP — src/upload_handlers.rs). All-or-nothing, like
+ * `uploadNoteMedia`: a failure deletes what already landed.
+ */
+export async function uploadParkedMedia(records: SealedMedia[]): Promise<TaskAttachmentRef[]> {
+    const done: TaskAttachmentRef[] = [];
+    try {
+        for (const rec of records) {
+            const r = await uploadSealedRef({
+                key: rec.key,
+                blob: new Blob([bytesFromB64(rec.data) as BlobPart], { type: 'application/octet-stream' }),
+                mime: rec.mime,
+                name: rec.name,
+            });
+            done.push({ href: r.href, name: clampAttachmentName(r.name) });
+        }
+        return done;
+    } catch (err) {
+        await deleteFiles(fileIdsOf(done));
+        throw err;
+    }
 }
 
 /** Decrypt a drawing's strokes file back to its JSON text. */
@@ -86,7 +193,44 @@ export async function readStrokes(ref: TaskAttachmentRef): Promise<string> {
 
 /** The uploaded file ids behind refs (for best-effort deletion). */
 export function fileIdsOf(refs: TaskAttachmentRef[]): string[] {
-    return refs.map(r => parseEncAttachment(r.href)?.id).filter((x): x is string => !!x);
+    return fileIdsOfHrefs(refs.map(r => r.href));
+}
+
+/** The same, from hrefs alone — a queued op carries hrefs, not whole refs. */
+export function fileIdsOfHrefs(hrefs: string[]): string[] {
+    return hrefs.map(h => parseEncAttachment(h)?.id).filter((x): x is string => !!x);
+}
+
+/**
+ * Add refs to a note's sidecar and delete the uploads behind whatever that
+ * dropped. ONE place for that rule: Púca Notes reaches it from the editor
+ * (online) and from the offline queue's replay, and the two front doors onto
+ * the same note must not disagree about whose files survive.
+ */
+export async function addNoteRefs(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<void> {
+    const dropped = await addTaskListAttachments(listId, added, replacing);
+    if (dropped.length > 0) await deleteFiles(fileIdsOf(dropped));
+}
+
+/** Remove refs from a note's sidecar, and delete their uploads. */
+export async function removeNoteRefs(listId: number, removing: string[]): Promise<void> {
+    const dropped = await removeTaskListAttachments(listId, removing);
+    if (dropped.length > 0) await deleteFiles(fileIdsOf(dropped));
+}
+
+/**
+ * What a batch of media is called in a queued op's label and in the toast
+ * that lists what could not be saved. A note holds any file now, so counting
+ * a PDF as a picture would tell the user something that is not true.
+ */
+export function mediaCountLabel(photos: File[], drawings: number): string {
+    const images = photos.filter(f => f.type.startsWith('image/')).length;
+    const pictures = images + drawings;
+    const files = photos.length - images;
+    const parts: string[] = [];
+    if (pictures > 0) parts.push(`${pictures} picture${pictures === 1 ? '' : 's'}`);
+    if (files > 0) parts.push(`${files} file${files === 1 ? '' : 's'}`);
+    return parts.length === 0 ? 'nothing' : parts.join(' and ');
 }
 
 // --- The gallery -------------------------------------------------------------------------
@@ -117,7 +261,7 @@ function baseName(name: string): string {
 }
 
 function mimeOf(ref: TaskAttachmentRef): string {
-    return parseEncAttachment(ref.href)?.mime ?? '';
+    return parseEncAttachment(ref.href)?.mime ?? parseParkedRef(ref.href)?.mime ?? '';
 }
 
 /**

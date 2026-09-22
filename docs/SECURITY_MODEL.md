@@ -152,11 +152,18 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   the user chooses: take it (a genuine restored backup) or overwrite it with
   this device's.
 - **On your device, not the server:** Notes keeps an offline copy of your
-  decrypted notes and any edits made offline in IndexedDB, sealed with a key
-  derived from your identity seed (`sealLocal` in
-  [`frontend/src/api/e2ee.ts`](../frontend/src/api/e2ee.ts)). It is at rest under
-  the same trust as the seed itself, which already sits in this browser while
-  you are signed in, and sign-out deletes it. Edits made offline reach the
+  decrypted notes, any edits made offline, and any picture or file added
+  offline in IndexedDB, sealed with a key derived from your identity seed
+  (`sealLocal` in
+  [`frontend/src/api/e2ee.ts`](../frontend/src/api/e2ee.ts)). A picture waiting
+  to be uploaded is kept as the ciphertext that will be uploaded PLUS the key
+  that opens it, so that record is only as private as the seal around it —
+  which is why it goes in the same sealed database and nowhere else. It is at
+  rest under the same trust as the seed itself, which already sits in this
+  browser while you are signed in, and sign-out deletes it — along with the
+  decrypted previews of any picture still waiting, which are object URLs held
+  by the page rather than by the database (Notes' sign-out does not reload
+  the page, so they would otherwise outlive the account). Edits made offline reach the
   server when the queue replays: it sees them arrive together after the device
   reconnects, stamped with the replay time, not when they were made.
 

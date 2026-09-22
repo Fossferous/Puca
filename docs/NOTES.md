@@ -309,13 +309,69 @@ back the copy it holds (migration 069, `expect_rev` on
   `NOTES_OP_KEY_RETENTION_HOURS`, 0 keeps them). A change sent right after a
   cold start waits for the queue a previous page left behind before it may
   run.
-- **Not offline:** anything that uploads or seals a note's own content —
-  adding an attachment, a photo or a drawing, saving a note's text, creating
-  a note with text or pictures, *Show checkboxes* (turning the text into
-  items: it is refused, with a message, while offline or while anything is
-  queued, so it can never leave the text AND queued copies of its lines) —
-  and the Trash view's *Delete forever* and *Empty trash*. They fail with a
-  message and nothing is queued. The Trash view's *Restore* is the same
+- **A note's text and its pictures are queued too.** Type a note with no
+  connection and the words are kept on this device (*Kept on this device — it
+  will sync* under the field) and sent as one change when the connection
+  returns — one change however long you type, because a second save for the
+  same note replaces the one waiting rather than adding to it. Take or pick a
+  photo, make a drawing, or attach a file with no connection and it is
+  **encrypted on this device the moment you add it**; only the ciphertext is
+  kept, in the same sealed database as the rest of the queue (store `m` of
+  `pucaNotesCache:<user>`, each record sealed with `sealLocal`), and it is
+  uploaded when the queue replays. The picture shows on the card and in the
+  editor from those local bytes meanwhile, marked *Not sent yet*, and the
+  banner counts what is waiting separately from the other changes — as
+  "pictures or files", because the queue counts records, not their kind, and
+  a waiting PDF is not a picture. A note made offline
+  WITH text or pictures is three queued changes rather than one request, so
+  for a moment it exists without its photo — unlike online, where the note and
+  its pictures land together.
+  - **Online with nothing waiting, nothing is parked at all.** The photo is
+    uploaded there and then, as it always was. Sealing a second copy into
+    the device's own store first would cost a phone two more passes over the
+    ciphertext and twice its size on disk, and it let the on-device limit
+    below refuse a picture on a device that was perfectly online.
+  - **There is a limit, and it is honest about it.** At most 64 MiB of
+    pictures may wait on the device at once — or less, when the browser says
+    the site has less room than that (`navigator.storage.estimate()` is asked
+    first, so an over-quota park is the same plain refusal rather than
+    "Couldn't add the picture", which blames the picture). Over the limit,
+    adding one is refused with a message and nothing of that pick is kept.
+    The 64 MiB figure has NOT yet been measured against a real Android
+    WebView's quota; the estimate check is what stands in for that until it
+    is. The browser may also evict the whole site's storage under pressure —
+    `navigator.storage.persist()` is a request, not a promise — so pictures
+    waiting are not a backup. Signing out revokes the decrypted previews of
+    anything still waiting, as well as deleting the database behind them.
+  - **Nothing is left behind.** A picture you remove before it was ever sent
+    has its ciphertext deleted and is dropped from the change that would have
+    sent it; a change the server refuses takes its ciphertext with it; and
+    anything no queued change names is swept when the queue next loads (with a
+    minute's grace, so a photo taken a moment ago is never swept before its
+    change exists). Remove one after its upload has already gone out — too
+    late to drop it from the change waiting, and before the note has been
+    re-read and knows the uploaded file by name — and the queue raises the
+    removal itself, so the picture does not come back on the next fetch with
+    its bytes charged to your storage. That covers both halves of the gap:
+    the upload still in the air, and the one that has landed while the screen
+    still shows the copy on your device (`notesOutbox.ts`:
+    `forgottenInFlight` and `sentAs`).
+  - **Uploads are added to the sidecar the server holds at that moment**, never
+    to the copy this device last saw, so a picture added on another phone in
+    the meantime is not deleted by a replay. Removing a picture works the same
+    way round. Whatever that add or remove ACTUALLY took out of the sidecar
+    has its upload deleted straight after — only what was really there, so a
+    ref another device still names is never destroyed — which is the same
+    rule Púca's own Tasks view follows, kept in one place
+    (`api/noteMedia.ts`: `addNoteRefs`, `removeNoteRefs`).
+- **Not offline:** *Show checkboxes* (turning the text into items) — it
+  clears the text and then creates one item per line, and a queue would put
+  those halves hours apart, so it is refused with a message while offline or
+  while anything is queued — and the Trash view's *Delete forever* and
+  *Empty trash*. They fail with a message and nothing is queued. Everything
+  else that seals a note's own content — a photo, a drawing, a recording, a
+  file, the note's text, a note created with any of them — is queued now,
+  not refused. The Trash view's *Restore* is the same
   outbox op as Undo, so it queues. A note whose move to the trash is itself
   still queued is listed in the Trash at once, but its *Restore* and *Delete
   forever* wait until that move reaches the server, and *Empty trash* leaves
@@ -813,10 +869,27 @@ Migration 065 gives a personal list three nullable columns, and
   reads these fields STRICTLY (`frontend/src/api/listSeal.ts`): unlike titles,
   they never held plaintext, so a non-envelope value shows as unreadable
   instead of as your own words.
-- **`attachments`** — the note's own photos, drawings and voice notes, the
-  same sealed sidecar a task item carries, pointing at ordinary end-to-end
-  encrypted uploads. Photos are shrunk on the device before encryption
-  (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
+- **`attachments`** — the note's own photos, drawings, voice notes **and any other file**,
+  the same sealed sidecar a task item carries, pointing at ordinary
+  end-to-end encrypted uploads. Photos are shrunk on the device before
+  encryption (`api/imagePrep.ts`, long edge 2048 px); anything that is not a
+  picture is not — there is nothing to shrink, and pulling a 25 MB PDF
+  through the image decoder only stalls a phone. The server never learns the
+  real name or type of any of them: everything goes up as `attachment.enc` /
+  `application/octet-stream`, and the name and type live in the sealed
+  sidecar. A file's display name is clamped to 120 characters before it is
+  sealed, because the sidecar's envelope has a 16 KiB cap
+  (`MAX_LIST_ATTACHMENTS_LEN`, `src/list_content.rs`) and a pathological
+  filename would make the note's save fail with a 400 nobody could explain.
+  A non-picture is **download-only, by design**: it is shown as a button that
+  writes it to your device (`api/saveAttachment.ts` — into
+  `Documents/Puca Notes/` on a phone), never as an inline preview and never as
+  a link to a `blob:` URL. A `blob:` document inherits the app's own origin
+  and takes its type from the ref, so an in-origin document could read the stored token and
+  the E2EE key material; `safeBlobType` reduces anything that is not an
+  image, video or audio file to opaque bytes, and that must not be relaxed
+  to make a PDF preview. Each upload is capped at 25 MB, and a note holds 12
+  sidecar slots (a drawing takes two). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`frontend/src/api/drawing.ts`; the editor is
   `frontend/src/components/DrawingCanvas.tsx`, shared by both apps). A **voice
@@ -898,7 +971,11 @@ wrong must not delete early), skipping any note whose files it cannot name.
 A note whose window runs out while no Notes is open is deleted by the
 server's sweep and its uploads stay behind, counted against your quota — the
 same as any delete made by a client older than this, or by Púca's own
-immediate delete. *Hide checkboxes* deletes the files of items it drops once
+immediate delete. **That gap costs more now that a note can hold any file:**
+what it strands used to be a photo shrunk to 2048 px, and can now be up to
+25 MB per file against a 512 MiB quota. Nothing but `DELETE /files/:id` by
+hand reclaims it, so open Púca Notes before a long trip if the trash is
+full of large files. *Hide checkboxes* deletes the files of items it drops once
 its Undo is gone — only of items whose delete went through, and never a file
 a live item names at that moment. An item whose delete failed stays an item,
 with its pictures, and only the other items become lines of text.
@@ -919,11 +996,6 @@ with its pictures, and only the other items become lines of text.
 - **A desktop Notes app.** Notes on a computer is the browser page; the
   desktop installer deliberately carries no copy of it (see *Building and
   serving*).
-- **Pictures and a note's text while offline.** The offline queue holds
-  intents it can replay (ticks, dates, snoozes, items, renames, the trash);
-  an upload cannot wait for a connection, so adding a photo or drawing,
-  saving a note's text, and creating a note with text or pictures need the
-  network, and fail with a message when there is none.
 - **Item text in a reminder or place notification.** It would put decrypted
   note content on the lock screen and in app storage; the phone's background
   code never holds it. The notification says "An item is due" and opens that

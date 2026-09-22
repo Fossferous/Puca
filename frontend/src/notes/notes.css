@@ -289,11 +289,18 @@
 .notes-quickadd-foot {
     display: flex;
     align-items: center;
+    /* WRAPS. The row carries up to seven controls (add item, text/checklist,
+       photo, file, camera, draw, discard) plus Done, and at 390 px that is
+       more than one line holds — without this the foot overflows the sheet
+       sideways (docs/DESIGN_PHILOSOPHY.md §7). */
+    flex-wrap: wrap;
     gap: 6px;
     padding-top: 6px;
     border-top: 1px solid var(--border-faint);
     margin-top: 4px;
 }
+/* Done sits at the end of the row it lands on, never on a line of its own
+   above the others: it is the last item, so auto margin only pushes it right. */
 .notes-quickadd-foot .notes-textbtn { margin-left: auto; }
 
 .notes-textbtn {

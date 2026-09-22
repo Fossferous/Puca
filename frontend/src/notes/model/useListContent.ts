@@ -46,9 +46,14 @@ import {
     listsDueForClientPurge,
     serverNowFrom,
     setTaskListAttachments,
-    setTaskListBody,
 } from '../../api/listContent';
-import { type DrawingFiles, fileIdsOf, nameAudioFiles, nextDrawingName, uploadNoteMedia } from '../../api/noteMedia';
+import {
+    type DrawingFiles, type SealedMedia,
+    fileIdsOf, fileIdsOfHrefs, mediaCountLabel, nameAudioFiles, nextDrawingName, refOfParked, sealNoteMedia, uploadNoteMedia,
+} from '../../api/noteMedia';
+import { parkedIdsOf, withoutParked } from '../../api/parkedMedia';
+import { ParkedMediaFullError, appParkedStore } from './notesBlobs';
+import { ensureOutboxLoaded, forgetParkedMedia, ops, pendingOutboxCount, sendCreateList, sendCreateTask, sendNoteOp } from './notesOutbox';
 import { newOpKey } from '../../api/opKey';
 import { LISTS_KEY, beginNoteWrite } from './noteBusy';
 import { ApiError } from '../../api/client';
@@ -66,6 +71,10 @@ export const listContentKeys = {
 export interface NoteExtras {
     body?: string;
     photos?: File[];
+    /** Anything that is not a picture — a PDF, a ticket, a spreadsheet.
+     *  Encrypted and uploaded exactly like a photo, but never put through
+     *  the image decoder and never shrunk. */
+    files?: File[];
     drawing?: DrawingFiles;
     /** Voice notes: uploaded raw, sealed exactly as a photo is. */
     audio?: File[];
@@ -78,10 +87,14 @@ export interface NoteExtras {
  *  device cleared the text). Use `noteSaved` rather than truthiness: a
  *  conflict is an object too, and reading it as success is how a caller ends
  *  up acting as though its text had landed. */
-export type SaveOutcome = boolean | { rev: number | null } | { conflict: { theirs: string | null; rev: number } };
+export type SaveOutcome = boolean | 'saved' | 'queued' | 'failed' | { rev: number | null } | { conflict: { theirs: string | null; rev: number } };
 
 export function noteSaved(outcome: SaveOutcome): boolean {
-    return outcome === true || (typeof outcome === 'object' && outcome !== null && 'rev' in outcome);
+    // 'queued' counts as saved: the words are on this device and the outbox
+    // owns them from here. Only a refusal and a conflict are "not saved".
+    if (outcome === false || outcome === 'failed') return false;
+    if (outcome === true || outcome === 'saved' || outcome === 'queued') return true;
+    return typeof outcome === 'object' && outcome !== null && 'rev' in outcome;
 }
 
 /** The revision a save should name, or undefined when there is nothing to
@@ -95,7 +108,7 @@ function revOf(all: TaskList[] | undefined, listId: number, features: ListFeatur
 }
 
 export function hasExtras(extra: NoteExtras | undefined): extra is NoteExtras {
-    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || !!extra.drawing || (extra.audio?.length ?? 0) > 0);
+    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || (extra.files?.length ?? 0) > 0 || !!extra.drawing || (extra.audio?.length ?? 0) > 0);
 }
 
 export function useListFeatures(): { features: ListFeatures; known: boolean } {
@@ -139,6 +152,13 @@ function reportDeleteFailure(err: unknown, many: boolean): void {
     }
 }
 
+/** What to tell the user when a picture could not even be kept. */
+function mediaFailureMessage(err: unknown): string {
+    if (err instanceof ParkedMediaFullError) return err.message;
+    if (err instanceof Error && err.name === 'TooManyAttachmentsError') return err.message;
+    return 'Couldn’t add the picture';
+}
+
 /** Lists purged this session (a purge must not be retried in a loop). */
 const purgedThisSession = new Set<number>();
 
@@ -156,16 +176,17 @@ export interface ListContentActions {
     ensureFeatures: () => Promise<ListFeatures | null>;
     /** `timing[i]` is item i's date & repeat (a copy of a note keeps them). */
     createContentNote: (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
-    /** Save a note's text. `true` = saved, `false` = it did not save (the
-     *  cache is rolled back and the caller has been told), and a
+    /** Save a note's text. `{ rev }` (or 'saved') = written, 'queued' = kept
+     *  on this device and sent when the connection is back, 'failed' = it did
+     *  not save (the cache is rolled back and the caller has been told), and a
      *  `{ conflict }` means the text was changed somewhere else first: the
      *  server's copy is in `conflict.theirs` (null = they cleared it), the
      *  cache now holds it, and NOTHING was written. */
     setBody: (listId: number, body: string, baseRev?: number) => Promise<SaveOutcome>;
-    /** Replace a note's sidecar. `baseRev` is the revision `next` was built
-     *  from — pass it whenever that was read before an await, or the check
-     *  is judged against a revision the payload never saw. */
-    setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[], baseRev?: number) => Promise<boolean>;
+    /** Drop `dropped` from a note's sidecar (`next` is what is left). An
+     *  intent, applied to whatever the server holds — see the implementation
+     *  for why it needs no base revision. */
+    setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[], audio?: File[]) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
     /** Every trashed note but `keep` (whose move to the trash is still
@@ -189,6 +210,78 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => prev?.map(l => (l.id === id ? fn(l) : l)));
     }, [qc]);
 
+    /**
+     * A note with text or pictures, made with no connection (or behind a
+     * queue): the media is sealed and parked here and now, the note, its
+     * text, its pictures and its items are queued in that order, and the
+     * caller gets a temporary note it can open at once.
+     *
+     * The order matters: every op after the create names the note's
+     * temporary id, which the outbox rewrites when the create replays.
+     */
+    const queueContentNote = useCallback(async (
+        noteTitle: string,
+        body: string,
+        photos: File[],
+        drawings: { files: DrawingFiles; base: string }[],
+        entries: { text: string; timing: NewTaskTiming | undefined }[],
+    ): Promise<NoteRef | null> => {
+        let records: SealedMedia[] = [];
+        if (photos.length > 0 || drawings.length > 0) {
+            try {
+                records = await sealNoteMedia(photos, drawings, 0);
+                await appParkedStore.park(records);
+            } catch (err) {
+                explain('keeping the picture failed', err);
+                pushMessageToast({ title: mediaFailureMessage(err) });
+                return null;   // the composer keeps the draft
+            }
+        }
+        let list: TaskList;
+        try {
+            list = await sendCreateList(noteTitle);
+        } catch (err) {
+            explain('create failed', err);
+            await forgetParkedMedia(records.map(r => r.id));
+            return null;
+        }
+        const ref: NoteRef = { kind: 'list', id: list.id };
+        if (body) {
+            try {
+                await sendNoteOp(ops.setBody(list.id, body));
+            } catch (err) {
+                explain('saving the text failed', err);
+            }
+        }
+        if (records.length > 0) {
+            try {
+                await sendNoteOp(ops.addMedia(list.id, records.map(r => r.id), [], [], `${mediaCountLabel(photos, drawings.length)} on a new note`));
+            } catch (err) {
+                explain('upload failed', err);
+                await forgetParkedMedia(records.map(r => r.id));
+                records = [];
+            }
+        }
+        const created: Task[] = [];
+        for (const e of entries) {
+            try {
+                created.push(await sendCreateTask(ref, e.text, undefined, () => created, e.timing));
+            } catch (err) {
+                explain('create item failed', err);
+            }
+        }
+        const shown = records.map(refOfParked);
+        qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), {
+            ...list,
+            total_tasks: created.length,
+            completed_tasks: 0,
+            body: body || null,
+            attachments: shown.length === 0 ? null : JSON.stringify(shown.map(({ href, name }) => ({ href, name }))),
+        }]);
+        return ref;
+    }, [qc]);
+
     const createContentNote = useCallback(async (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
         // Each item's timing rides with it through the blank-dropping clean.
         const entries = items
@@ -196,14 +289,30 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             .filter((e): e is { text: string; timing: NewTaskTiming | undefined } => e.text !== undefined);
         const cleanItems = entries.map(e => e.text);
         const body = extra.body?.replace(/\s+$/, '') ?? '';
+        const files = extra.files ?? [];
+        // Both go up the same way; only the picture is shrunk first.
+        const photos = [...(extra.photos ?? []), ...files];
+        const drawings = extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [];
+        const noteTitle = deriveContentTitle(title, {
+            body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing,
+            fileNames: files.map(f => f.name),
+        });
+        // Offline, or behind a queue this must not overtake: the note is made
+        // through the outbox instead. It briefly exists without its picture
+        // (three ops, not one request) — which is the price of a photo note
+        // taken with no signal existing at all.
+        //
+        // The persisted queue has to have LOADED before that count means
+        // anything: a note made in the first moments after a reload would
+        // otherwise be sent straight to the server, ahead of what the
+        // previous page left waiting.
+        await ensureOutboxLoaded();
+        if (!navigator.onLine || pendingOutboxCount() > 0) {
+            return queueContentNote(noteTitle, body, photos, drawings, entries);
+        }
         let refs: TaskAttachmentRef[] = [];
         try {
-            refs = await uploadNoteMedia(
-                extra.photos ?? [],
-                extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [],
-                0,
-                nameAudioFiles(extra.audio ?? [], []),
-            );
+            refs = await uploadNoteMedia(photos, drawings, 0, nameAudioFiles(extra.audio ?? [], []));
         } catch (err) {
             explain('upload failed', err);
             pushMessageToast({ title: mediaFailureText(err) });
@@ -214,14 +323,8 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // attempt of this create and different for every other (api/opKey.ts).
         const noteKey = newOpKey();
         try {
-            list = await createTaskListWithContent(
-                deriveContentTitle(title, { body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing, audio: extra.audio?.length ?? 0 }),
-                { body: body || undefined, refs },
-                noteKey,
-            );
+            list = await createTaskListWithContent(noteTitle, { body: body || undefined, refs }, noteKey);
         } catch (err) {
-            // Never queued (its uploads could not wait): the composer says
-            // so when this resolves null, and keeps the draft.
             explain('create failed', err);
             await deleteFiles(fileIdsOf(refs));   // nothing names them now
             return null;
@@ -241,8 +344,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
         return ref;
-    }, [qc]);
+    }, [qc, queueContentNote]);
 
+    // Through the outbox: online with nothing queued this simply runs, and
+    // with no connection the typed text is kept on this device and replayed.
+    // A second save for the same note replaces the queued one, so a
+    // paragraph typed offline is one op, not one per pause in typing.
     const setBody = useCallback(async (listId: number, body: string, baseRev?: number): Promise<SaveOutcome> => {
         const before = lists();
         // The caller's base wins when it has one: the field took it when the
@@ -259,7 +366,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // revision, entirely undeferred.
         const done = beginNoteWrite(LISTS_KEY);
         try {
-            const rev = await setTaskListBody(listId, body, base);
+            const r = await sendNoteOp<number | null>(ops.setBody(listId, body, base));
+            if (r.queued) return 'queued';
+            const rev = r.value ?? null;
             patchList(listId, l => ({ ...l, ...(rev === null ? {} : { content_rev: rev }) }));
             return { rev };
         } catch (err) {
@@ -274,32 +383,53 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             }
             explain('saving the text failed', err);
             qc.setQueryData(keysRef.current.lists, before);
-            return false;
+            return 'failed';
         } finally {
             done();
         }
     }, [qc, lists, patchList, features]);
 
-    /** Replace the sidecar; `dropped` refs are no longer named anywhere and
-     *  their uploads are deleted once the new sidecar is saved. */
-    const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = [], baseRev?: number): Promise<boolean> => {
+    /**
+     * Remove `dropped` from the sidecar (`next` is what is left). Through the
+     * outbox, as an INTENT: replayed later it removes those refs from
+     * whatever the server holds then, so a picture added on another device in
+     * the meantime survives. The uploads behind them are deleted when the
+     * removal reaches the server (notesOutbox.ts), not before.
+     *
+     * A picture still waiting on this device never reached the server at all:
+     * its ciphertext is deleted and the queued op that would have sent it
+     * forgets it — so `serverGone` can be empty and nothing is queued here.
+     * That holds even once its upload has left: an op in flight, or one that
+     * landed while this cache still names the parked ref, is no longer in
+     * the queue for `forgetParked` to rewrite — so the outbox queues that
+     * removal itself, by the href the upload became (notesOutbox.ts,
+     * `forgottenInFlight` and `sentAs`).
+     *
+     * NO compare-and-swap here, deliberately: an intent that names the refs
+     * to drop is applied to whatever the server holds, so there is nothing a
+     * revision check could protect. The whole-sidecar replace that DOES need
+     * one is in `addNoteMedia` below, which names its base explicitly.
+     */
+    const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
         if (current && isAttachmentsLocked(current.attachments ?? null)) {
             pushMessageToast({ title: 'This note’s pictures can’t be read on this device yet, so they can’t be changed here' });
             return false;
         }
         const before = lists();
-        // As for the text: the caller's base wins, because `next` was built
-        // from the sidecar as it stood THEN (addNoteMedia reads it before an
-        // upload that can take seconds). A base read here would be the
-        // revision after that window, and the check could not refuse the very
-        // race it exists for.
-        const base = features.contentRev && baseRev !== undefined ? baseRev : revOf(lists(), listId, features);
+
         patchList(listId, l => ({ ...l, attachments: next.length === 0 ? null : JSON.stringify(next.map(({ href, name }) => ({ href, name }))) }));
+        const parkedGone = parkedIdsOf(dropped);
+        if (parkedGone.length > 0) await forgetParkedMedia(parkedGone);
+        const serverGone = withoutParked(dropped);
+        if (serverGone.length === 0) return true;
+        // Busy under LISTS_KEY for the same reason setBody is: the write
+        // lands in the LISTING query, whose refetch would otherwise bring
+        // back the old sidecar and the old revision.
         const done = beginNoteWrite(LISTS_KEY);
         try {
-            const rev = await setTaskListAttachments(listId, next, base);
-            patchList(listId, l => ({ ...l, ...(rev === null ? {} : { content_rev: rev }) }));
+            const n = serverGone.length;
+            await sendNoteOp(ops.removeMedia(listId, serverGone.map(r => r.href), withoutParked(next), `remove ${n} picture${n === 1 ? '' : 's'}`));
         } catch (err) {
             qc.setQueryData(keysRef.current.lists, before);
             if (err instanceof NoteConflictError) {
@@ -317,10 +447,25 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         } finally {
             done();
         }
-        if (dropped.length > 0) void deleteFiles(fileIdsOf(dropped));
         return true;
-    }, [qc, lists, patchList, features]);
+    }, [qc, lists, patchList]);
 
+    /**
+     * Add pictures, drawings, recordings or files to a note.
+     *
+     * Online with nothing waiting, they are uploaded there and then, exactly
+     * as they always were. Otherwise they are encrypted on this device FIRST
+     * and parked (notesBlobs.ts) and the upload becomes an outbox op — so a
+     * photo taken with no signal is sealed at once and sent when the
+     * connection is back, and the note shows it meanwhile from the parked
+     * bytes.
+     *
+     * The two paths, and not one: parking a copy of a photo that is about to
+     * go up anyway costs a phone two more passes over the ciphertext and
+     * twice its size in IndexedDB, and it let the on-device cap refuse a
+     * picture on a device that was perfectly online — which is not true of
+     * an online device, and not a thing the user could act on.
+     */
     const addNoteMedia = useCallback(async (listId: number, photos: File[], drawings: DrawingFiles[], replacing: TaskAttachmentRef[] = [], audio: File[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);
         const opened = current?.attachments ?? null;
@@ -335,34 +480,86 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // picture during it moves the cached revision. Saving against that
         // one would name THEIRS and drop their picture from the sidecar.
         const baseRev = revOf(lists(), listId, features);
-        // And hold the listing's refetches off for the whole window, so the
-        // optimistic cache this save is built on cannot be replaced under it.
-        const held = beginNoteWrite(LISTS_KEY);
-        let added: TaskAttachmentRef[];
-        try {
-            const bases: string[] = [];
-            let names = kept;
-            for (let i = 0; i < drawings.length; i++) {
-                const base = nextDrawingName(names);
-                bases.push(base);
-                names = [...names, { href: `pending:${base}`, name: `${base}.png` }];
+        const bases: string[] = [];
+        let names = kept;
+        for (let i = 0; i < drawings.length; i++) {
+            const base = nextDrawingName(names);
+            bases.push(base);
+            names = [...names, { href: `pending:${base}`, name: `${base}.png` }];
+        }
+        const named = drawings.map((files, i) => ({ files, base: bases[i] }));
+        const goneHrefs = withoutParked(replacing).map(r => r.href);
+        await ensureOutboxLoaded();
+        if (navigator.onLine && pendingOutboxCount() === 0) {
+            // Hold the listing's refetches off for the whole window, so the
+            // optimistic cache this save is built on cannot be replaced under it.
+            const held = beginNoteWrite(LISTS_KEY);
+            let added: TaskAttachmentRef[];
+            try {
+                added = await uploadNoteMedia(photos, named, kept.length, nameAudioFiles(audio, names));
+            } catch (err) {
+                held();
+                explain('upload failed', err);
+                pushMessageToast({ title: mediaFailureText(err) });
+                return false;
             }
-            added = await uploadNoteMedia(photos, drawings.map((files, i) => ({ files, base: bases[i] })), kept.length, nameAudioFiles(audio, names));
+            const before = lists();
+            patchList(listId, l => ({ ...l, attachments: JSON.stringify([...kept, ...added].map(({ href, name }) => ({ href, name }))) }));
+            try {
+                const rev = await setTaskListAttachments(listId, [...kept, ...added], baseRev);
+                patchList(listId, l => ({ ...l, ...(rev === null ? {} : { content_rev: rev }) }));
+            } catch (err) {
+                qc.setQueryData(keysRef.current.lists, before);
+                if (err instanceof NoteConflictError) {
+                    // Pictures get no two-way choice: there is no half of a
+                    // sidecar to keep, and replacing one set of refs with
+                    // another blind would orphan uploads.
+                    patchList(listId, l => ({ ...l, attachments: err.attachments, content_rev: err.contentRev }));
+                    pushMessageToast({ title: 'This note’s pictures were changed somewhere else, so this change wasn’t saved — the other copy is shown' });
+                } else {
+                    explain('saving the pictures failed', err);
+                }
+                await deleteFiles(fileIdsOf(added));   // nothing names them now
+                return false;
+            } finally {
+                held();
+            }
+            const parkedOut = parkedIdsOf(replacing);
+            if (parkedOut.length > 0) await forgetParkedMedia(parkedOut);
+            if (goneHrefs.length > 0) void deleteFiles(fileIdsOfHrefs(goneHrefs));
+            return true;
+        }
+        let records: SealedMedia[];
+        try {
+            records = await sealNoteMedia(photos, named, kept.length, audio);
+            await appParkedStore.park(records);
         } catch (err) {
-            held();
-            explain('upload failed', err);
-            pushMessageToast({ title: mediaFailureText(err) });
+            explain('keeping the picture failed', err);
+            pushMessageToast({ title: mediaFailureMessage(err) });
             return false;
         }
-        let ok: boolean;
+        const before = lists();
+        const shown = [...kept, ...records.map(refOfParked)];
+        patchList(listId, l => ({ ...l, attachments: JSON.stringify(shown.map(({ href, name }) => ({ href, name }))) }));
+        const parkedReplaced = parkedIdsOf(replacing);
+        if (parkedReplaced.length > 0) await forgetParkedMedia(parkedReplaced);
         try {
-            ok = await setNoteAttachments(listId, [...kept, ...added], replacing, baseRev);
-        } finally {
-            held();
+            await sendNoteOp(ops.addMedia(
+                listId,
+                records.map(r => r.id),
+                goneHrefs,
+                withoutParked(kept),
+                `${mediaCountLabel([...photos, ...audio], drawings.length)} on a note`,
+            ));
+        } catch (err) {
+            explain('upload failed', err);
+            pushMessageToast({ title: 'Couldn’t add the picture' });
+            qc.setQueryData(keysRef.current.lists, before);
+            await forgetParkedMedia(records.map(r => r.id));
+            return false;
         }
-        if (!ok) await deleteFiles(fileIdsOf(added));
-        return ok;
-    }, [lists, setNoteAttachments, features]);
+        return true;
+    }, [qc, lists, patchList, features]);
 
     const ensureFeatures = useCallback(async (): Promise<ListFeatures | null> => {
         try {

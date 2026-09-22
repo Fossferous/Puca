@@ -132,7 +132,10 @@ describe('a note’s text saved on top of someone else’s edit', () => {
         vi.mocked(apiClient.patch).mockRejectedValueOnce(new ApiError('boom', 500, undefined, 'boom'));
         let outcome: unknown;
         await act(async () => { outcome = await actions().setBody(5, 'my words'); });
-        expect(outcome).toBe(false);
+        // 'failed', not a conflict object and not 'queued': the save reached
+        // the server and the server said no.
+        expect(outcome).toBe('failed');
+        expect(noteSaved(outcome as never)).toBe(false);
         expect(cached().body).toBe('mine so far');
     });
 
@@ -167,19 +170,34 @@ describe('a note’s text saved on top of someone else’s edit', () => {
 
         expect(isNoteBusy('lists')).toBe(false);
         let save!: Promise<unknown>;
-        await act(async () => { save = actions().setBody(5, 'my words'); await Promise.resolve(); });
+        // The save goes out through the outbox, which loads its persisted
+        // queue first — several ticks before the PATCH is made, so waiting on
+        // one microtask would land the reply before anything had asked for it.
+        await act(async () => {
+            save = actions().setBody(5, 'my words');
+            for (let i = 0; i < 50 && vi.mocked(apiClient.patch).mock.calls.length === 0; i++) {
+                await new Promise(r => setTimeout(r, 1));
+            }
+        });
+        expect(vi.mocked(apiClient.patch)).toHaveBeenCalled();
         expect(isNoteBusy('lists')).toBe(true);
         // A live event for the notes now waits...
         applyTaskEvent(qc2, { t: 'lists' }, false);
         expect(spy).not.toHaveBeenCalled();
-        // ...while this note's ITEMS are not held: a text save changes none.
-        expect(isNoteBusy('list:5')).toBe(false);
+        // ...and so does this note's own key, because the save goes out
+        // through the outbox, which marks every op's note busy while it is in
+        // flight (notesOutbox.ts, busyKeyOf). A deferral, not a drop: both
+        // refetches run when the save lands, below. What matters here is the
+        // LISTING key, which nothing marked before and which is where a
+        // note's text, title, pictures and revision actually live.
+        expect(isNoteBusy('list:5')).toBe(true);
         applyTaskEvent(qc2, { t: 'list', id: 5 }, false);
-        expect(spy).toHaveBeenCalledWith({ queryKey: ['notes', 'tasks', 'list', 5] });
+        expect(spy).not.toHaveBeenCalled();
 
         await act(async () => { land({ content_rev: 4 }); await save; });
         expect(isNoteBusy('lists')).toBe(false);
         expect(spy).toHaveBeenCalledWith({ queryKey: ['notes', 'lists'] });
+        expect(spy).toHaveBeenCalledWith({ queryKey: ['notes', 'tasks', 'list', 5] });
     });
 
     // A picture is the same story with a much longer window: the sidecar to

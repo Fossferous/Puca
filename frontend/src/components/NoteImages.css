@@ -28,7 +28,7 @@
 .ni-item.drawing .ni-open img { object-fit: contain; background: #fff; }
 .ni-pending { display: block; height: 120px; animation: ni-pulse 1.2s ease-in-out infinite; }
 @keyframes ni-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
-.ni-broken, .ni-file {
+.ni-broken {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -37,6 +37,33 @@
     color: var(--text-muted);
     word-break: break-word;
 }
+/* A file in a note is a DOWNLOAD BUTTON (never a link to a blob: URL — see
+   components/NoteImages.tsx). 44px tall at a coarse pointer, per
+   docs/DESIGN_PHILOSOPHY.md §7. */
+.ni-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    cursor: pointer;
+    word-break: break-word;
+}
+.ni-file:hover:not(:disabled) { background: var(--bg-quaternary); color: var(--text-normal); }
+.ni-file:disabled { cursor: progress; opacity: 0.7; }
+.ni-file.saved { color: var(--text-positive); }
+.ni-file.error { color: var(--text-danger); }
+.ni-file .ni-file-name { flex: 1; min-width: 0; }
+.ni-file .ni-file-note { flex: none; font-size: 0.72rem; color: var(--text-muted); }
+.ni-file svg { flex: none; }
 .ni-tools {
     position: absolute;
     top: 4px;
@@ -257,3 +284,28 @@
 .ni-audio audio { display: block; width: 100%; max-width: 100%; min-width: 0; height: 40px; }
 /* Room for the Remove tool over the player's own controls. */
 .ni-item.audio .ni-tools { top: 6px; right: 6px; }
+/* A picture that exists only on this device until the connection is back
+   (api/parkedMedia.ts). The mark sits over the tile, never replaces it: the
+   picture is real, it is only its upload that has not happened. */
+.ni-item[data-parked="true"] { position: relative; }
+.ni-unsent {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    z-index: 1;
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    /* A MATCHED PAIR of theme tokens, never a fixed colour: every theme
+       that moves --bg-secondary moves --text-muted with it, and a hex
+       fallback would ignore all eight of them and [data-contrast="high"]. */
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+    pointer-events: none;
+}
+
+/* "Kept on this device" under the note text (components/NoteBodyField.tsx):
+   quieter than a failure, louder than the muted "Saving…" beside it. */
+.nb-status.queued { color: var(--text-normal); }

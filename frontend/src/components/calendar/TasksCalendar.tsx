@@ -5,8 +5,8 @@
  * panel-system work. Channel checklists stay live through the socket's
  * ChecklistUpdate, like their tabs.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useQueries, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, type CalendarAction, type CalView } from './Calendar';
 import { IcsImportDialog } from './IcsImportDialog';
 import { CalendarAddSheet, type AddSheetResult } from './CalendarAddSheet';

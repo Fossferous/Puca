@@ -14,9 +14,12 @@
  * and replayed in order. That includes a tick (repeating or not), a date &
  * repeat, a snooze and an item created with a time (calendar tap-to-add), and
  * Delete, which is Move-to-trash wherever the server has a trash
- * (api/listContent.ts trashOrDeleteList, probed when the op runs). What does
- * NOT queue — uploading pictures, a note's text, attachments — fails offline
- * and says so.
+ * (api/listContent.ts trashOrDeleteList, probed when the op runs). A note's
+ * own TEXT and its PICTURES queue too: the text as a `setBody` op, a picture
+ * as ciphertext sealed on this device the moment it is taken and an
+ * `addMedia` op naming it (notesBlobs.ts). What still does not queue is
+ * "Show checkboxes", which would be split in half by a queue, and the Trash
+ * view's Delete forever / Empty trash; each says so.
  *
  * NO WEBSOCKET, deliberately. Púca's main.tsx wires the P2P file-transfer
  * handlers synchronously at boot because the server sweeps PARKED file offers
@@ -685,10 +688,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [snapshot, setTasks, restore]);
 
     const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
-        // A note with text or pictures goes through the content path: its
-        // uploads cannot wait for a connection, so it never queues (it says
-        // so when it fails). Its items keep their timing, as here — a copy
-        // of a text note keeps its items' dates and repeats.
+        // A note with text or pictures goes through the content path, which
+        // makes it in ONE request when there is a connection and queues it
+        // (media sealed on this device first) when there is not. Its items
+        // keep their timing, as here — a copy of a text note keeps its
+        // items' dates and repeats.
         if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra, timing);
         // Timing rides with its item through the blank-dropping clean.
         const timingOf = new Map<number, NewTaskTiming | undefined>();

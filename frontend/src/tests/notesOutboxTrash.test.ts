@@ -73,6 +73,9 @@ function server() {
         online: () => reachable,
         lock: (_n, fn) => fn(),
         onReplayed: s => summaries.push(s),
+        // No media in these cases; the real store is exercised in
+        // notesOfflineContent.test.ts.
+        parked: { park: async () => {}, read: async () => [], remove: async () => {}, sweep: async () => {}, waiting: async () => ({ bytes: 0, items: 0 }) },
     });
     return { ob, trashed, restored, summaries, setReachable: (v: boolean) => { reachable = v; } };
 }

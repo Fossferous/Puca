@@ -4,9 +4,13 @@
  * blur, and when it unmounts (closing the note). Shared by Púca Notes'
  * editor and Púca's Tasks view.
  *
- * A failed save keeps the typed text in the field and says so, with a retry;
- * the cached note reverts (the data layer's rollback), so what the grid shows
- * is always what the server holds. Text that does not decrypt renders as a
+ * A save has three ends. It reached the server; or it was KEPT ON THIS
+ * DEVICE and will be sent when the connection is back (Púca Notes' offline
+ * queue — notes/model/notesOutbox.ts), which the field says rather than
+ * claiming "Saved"; or it was refused, which keeps the typed text in the
+ * field and offers a retry while the cached note reverts (the data layer's
+ * rollback), so what the grid shows is always what the server holds.
+ * Púca's Tasks view has no queue and simply never returns `queued`. Text that does not decrypt renders as a
  * locked line and cannot be edited — a marker must never be sealed back over
  * the ciphertext it stands in for.
  *
@@ -78,7 +82,7 @@ export interface NoteBodyHandle {
  *  and a `conflict` means the text was changed somewhere else first and
  *  NOTHING was written. Plain `boolean` is still accepted, so a caller with
  *  no revision to name needs no change. */
-export type BodySaveOutcome = boolean | { rev: number | null } | { conflict: Conflict };
+export type BodySaveOutcome = SaveResult | { rev: number | null } | { conflict: Conflict };
 
 interface NoteBodyFieldProps {
     /** The OPENED body (null = none). */
@@ -87,8 +91,9 @@ interface NoteBodyFieldProps {
      *  typing started from — see the header. Absent against a server that
      *  has none, which means "no check". */
     contentRev?: number;
-    /** Resolves true once saved. `baseRev` is the revision the text being
-     *  saved was written on top of. */
+    /** Resolves once the save has been decided. `baseRev` is the revision the
+     *  text being saved was written on top of; `queued` = kept on this
+     *  device; `failed` = refused, keep the text. */
     onSave: (text: string, baseRev?: number) => Promise<BodySaveOutcome>;
     readOnly?: boolean;
     placeholder?: string;
@@ -98,7 +103,15 @@ interface NoteBodyFieldProps {
     listId?: number;
 }
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'failed' | 'too-long' | 'conflict';
+/** What a caller's save did. A plain boolean is still accepted so callers
+ *  with neither an offline queue nor revisions (components/
+ *  ListContentBlock.tsx) stay as they are; `{ rev }` names the note's new
+ *  revision, 'queued' means it is kept on this device until the connection
+ *  is back, and `{ conflict }` means the text changed somewhere else first
+ *  and NOTHING was written. */
+export type SaveResult = boolean | 'saved' | 'queued' | 'failed';
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'queued' | 'failed' | 'too-long' | 'conflict';
 
 /** The save refused because the note's text changed elsewhere first, with
  *  the copy that won (null = the other device cleared it) and the revision
@@ -174,21 +187,22 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
         setState('saving');
         const request = save(text, baseRev.current);
         inFlight.current = request;
-        const outcome = await request;
+        const result = await request;
         if (inFlight.current === request) inFlight.current = null;
-        const clash = typeof outcome === 'object' && outcome !== null && 'conflict' in outcome ? outcome.conflict : null;
-        const savedRev = typeof outcome === 'object' && outcome !== null && 'rev' in outcome ? outcome.rev : null;
-        if (outcome !== false && !clash) {
-            // Words typed while the request was out are now written on top of
-            // what it saved, so that is their base.
-            if (savedRev !== null) baseRev.current = savedRev;
-            // Only clean if nothing was typed while the request was out.
-            if (latest.current.draft === text) markDirty(false);
-            setConflict(null);
-            setState('saved');
-        } else if (outcome === false) {
+        const clash = typeof result === 'object' && result !== null && 'conflict' in result ? result.conflict : null;
+        const savedRev = typeof result === 'object' && result !== null && 'rev' in result ? result.rev : null;
+        // Three plain answers ('saved' | 'queued' | 'failed'), a boolean, or
+        // one of the two objects above. A queued save IS saved as far as this
+        // field is concerned — the words are safe on the device — it just
+        // says so differently.
+        const outcome: SaveState = clash ? 'conflict'
+            : result === false || result === 'failed' ? 'failed'
+                : result === 'queued' ? 'queued' : 'saved';
+        if (outcome === 'failed') {
             setState('failed');
-        } else if (clash) {
+            return false;
+        }
+        if (outcome === 'conflict' && clash) {
             // Refused: the text changed somewhere else first. Keep every word
             // that was typed (the field is untouched), and show the other copy
             // so nothing is chosen blind. The next attempt is judged against
@@ -197,9 +211,16 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
             awaitingChoice.current = true;
             setConflict(clash);
             setState('conflict');
+            return false;
         }
-        // Saved = the request was not refused and did not clash.
-        return outcome !== false && !clash;
+        // Words typed while the request was out are now written on top of
+        // what it saved, so that is their base.
+        if (savedRev !== null) baseRev.current = savedRev;
+        // Only clean if nothing was typed while the request was out.
+        if (latest.current.draft === text) markDirty(false);
+        setConflict(null);
+        setState(outcome);
+        return true;
     }, [markDirty]);
 
     useImperativeHandle(handle, (): NoteBodyHandle => ({
@@ -323,6 +344,7 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                 <div className="nb-status failed" role="alert">Too long to save — a note holds about 48,000 characters of text.</div>
             )}
             {state === 'saving' && <div className="nb-status" role="status">Saving…</div>}
+            {state === 'queued' && <div className="nb-status queued" role="status">Kept on this device — it will sync.</div>}
         </div>
     );
 });

@@ -9,7 +9,9 @@ vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7 }));
 
 import { makeIdentity, sealLocal, openLocal } from '../api/e2ee';
 import { TASK_IDENTITY_LOCKED, ENC_KEY_UNAVAILABLE } from '../api/decryptMarkers';
-const { hydrateNotesCache, startNotesCachePersistence, memoryStore, safeToPersist } = await import('../notes/model/notesCache');
+const { hydrateNotesCache, startNotesCachePersistence, memoryStore, safeToPersist, idbStore, NOTES_DB_VERSION } = await import('../notes/model/notesCache');
+const { notesCacheDbName } = await import('../api/notesCacheScrub');
+const { makeFakeIndexedDB } = await import('./fixtures/fakeIndexedDB');
 // @ts-expect-error -- a plain .mjs build script, typed by notes-sw.d.mts for the vite config only
 const { renderNotesServiceWorker } = await import('../../scripts/notes-sw.mjs');
 
@@ -152,5 +154,53 @@ describe('the /notes/ worker cannot shadow anything else', () => {
         w.cache.set('/notes/index.html', new Response('cached page'));
         const offline = await w.fetchEvent('https://app.example.com/notes/', { mode: 'navigate' })!;
         expect(await offline.text()).toBe('cached page');
+    });
+});
+
+
+describe('the database a shipped version left behind', () => {
+    // Version 2 added the store for media sealed on this device
+    // (notes/model/notesBlobs.ts). The upgrade must CREATE what is missing
+    // and drop nothing: an upgrade that recreated the stores would silently
+    // throw away a note typed offline and everything the last page showed.
+    it('opens a version-1 database at version 2 with its cache and its queue intact', async () => {
+        const idb = makeFakeIndexedDB();
+        const sub = 4242;
+        const name = notesCacheDbName(sub);
+        idb.seed(name, 1, {
+            q: { 'hash-1': 'sealed-query' },
+            o: { outbox: 'sealed-queue' },
+        });
+        const real = globalThis.indexedDB;
+        Object.defineProperty(globalThis, 'indexedDB', { value: idb.factory, configurable: true });
+        try {
+            const q = idbStore(sub, 'q')!;
+            const o = idbStore(sub, 'o')!;
+            const m = idbStore(sub, 'm')!;
+            expect(await q.get('hash-1')).toBe('sealed-query');   // the cache survived
+            expect(await o.get('outbox')).toBe('sealed-queue');   // the offline queue survived
+            // ...and the new store exists and works, on the SAME database.
+            await m.put('b:one', 'sealed-photo');
+            expect(await m.get('b:one')).toBe('sealed-photo');
+            expect(idb.version(name)).toBe(NOTES_DB_VERSION);
+            expect(idb.storeNames(name).sort()).toEqual(['m', 'o', 'q']);
+        } finally {
+            if (real === undefined) delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+            else Object.defineProperty(globalThis, 'indexedDB', { value: real, configurable: true });
+        }
+    });
+
+    it('creates all three stores on a database that never existed', async () => {
+        const idb = makeFakeIndexedDB();
+        const sub = 4343;
+        const real = globalThis.indexedDB;
+        Object.defineProperty(globalThis, 'indexedDB', { value: idb.factory, configurable: true });
+        try {
+            await idbStore(sub, 'q')!.put('k', 'v');
+            expect(idb.storeNames(notesCacheDbName(sub)).sort()).toEqual(['m', 'o', 'q']);
+        } finally {
+            if (real === undefined) delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+            else Object.defineProperty(globalThis, 'indexedDB', { value: real, configurable: true });
+        }
     });
 });

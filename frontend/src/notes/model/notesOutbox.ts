@@ -45,6 +45,19 @@
  * so the same create can no longer produce two. The key is random and says
  * NOTHING about what was written; a server older than 070 ignores it and the
  * old at-least-once behaviour returns.
+ * A NOTE'S OWN CONTENT queues too. `setBody` carries the typed text and is
+ * sealed for the server when it runs, like every other op; a second one for
+ * the same note REPLACES the queued one — in its place, but with its OWN op
+ * id — because the editor saves after every pause in typing.
+ * `addMedia` carries only the IDS of ciphertext
+ * parked on this device (notesBlobs.ts) — a photo is encrypted the moment it
+ * is taken, and replay uploads the bytes and then adds the real refs to
+ * whatever the server's sidecar holds at that moment. A dropped or forgotten
+ * media op deletes its ciphertext, and `load` sweeps anything the queue does
+ * not name. What a replayed add or remove takes OUT of the sidecar has its
+ * upload deleted once the server has the new sidecar — the same rule Púca's
+ * Tasks view follows, kept in one place (api/noteMedia.ts).
+ *
  *
  * COLD START. `send` waits for the persisted queue to load before deciding
  * whether an op may run straight away: an op sent in the moment before the
@@ -61,8 +74,14 @@ import {
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
-import { keepHiddenSlots, restoreTaskList, setTaskListTiming, trashOrDeleteList } from '../../api/listContent';
+import {
+    deleteFiles, keepHiddenSlots, restoreTaskList,
+    setTaskListAttachments, setTaskListBody, setTaskListTiming, trashOrDeleteList,
+} from '../../api/listContent';
 import { newOpKey } from '../../api/opKey';
+import { type TaskAttachmentRef } from '../../api/tasks';
+import { addNoteRefs, fileIdsOf, fileIdsOfHrefs, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
+import { appParkedStore, type ParkedStore } from './notesBlobs';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { beginNoteWrite, LISTS_KEY, PREFS_KEY, setQueuedNotes } from './noteBusy';
@@ -108,7 +127,25 @@ type OpBody =
     // no signal is queued like every item date, not lost. Three-state, the
     // same patch api/listContent.ts sends.
     | { k: 'listTiming'; listId: number; patch: { dueAt?: string | null; schedule?: string | null } }
-    | { k: 'prefs'; prefs: TaskTabPref[]; intent: PrefsIntent };
+    | { k: 'prefs'; prefs: TaskTabPref[]; intent: PrefsIntent }
+    // A note's own text. Queued ops for the same note COLLAPSE (see `send`):
+    // NoteBodyField saves a pause after every keystroke, so a paragraph
+    // typed with no connection would otherwise be dozens of ops racing to
+    // overwrite each other.
+    // `expectRev` is the revision the typing STARTED from (migration 069).
+    // It is named only when the op runs INLINE: a replay off the queue drops
+    // it, exactly as `renameList` does, because refusing work done offline
+    // would throw away words nobody can get back.
+    | { k: 'setBody'; listId: number; body: string; expectRev?: number }
+    // Pictures and files sealed on this device (notesBlobs.ts) that still
+    // have to go up. Replay uploads them, then adds the real refs to
+    // whatever the server's sidecar holds THEN — an intent, so a picture
+    // added elsewhere in the meantime is not deleted by a stale replace.
+    // `refs` is this device's view of the finished sidecar, used only when
+    // the op runs inline (online, nothing queued), exactly as `prefs` does.
+    | { k: 'addMedia'; listId: number; blobIds: string[]; replacing: string[]; refs: TaskAttachmentRef[] }
+    // Removing a picture: the same intent/snapshot pair.
+    | { k: 'removeMedia'; listId: number; removing: string[]; refs: TaskAttachmentRef[] };
 
 export type NoteOp = OpBody & {
     /** Unique per op (replay removes by id, never by position). */
@@ -151,6 +188,12 @@ export const ops = {
         withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch }, `${what} ${q(task.description)}`),
     setListTiming: (listId: number, title: string, patch: { dueAt?: string | null; schedule?: string | null }, what: string) =>
         withMeta({ k: 'listTiming', listId, patch }, `${what} ${q(title)}`),
+    setBody: (listId: number, body: string, expectRev?: number) =>
+        withMeta({ k: 'setBody', listId, body, expectRev }, body === '' ? 'clear a note’s text' : `text ${q(body)}`),
+    addMedia: (listId: number, blobIds: string[], replacing: string[], refs: TaskAttachmentRef[], what: string) =>
+        withMeta({ k: 'addMedia', listId, blobIds, replacing, refs }, what),
+    removeMedia: (listId: number, removing: string[], refs: TaskAttachmentRef[], what: string) =>
+        withMeta({ k: 'removeMedia', listId, removing, refs }, what),
     prefs: (prefs: TaskTabPref[], intent: PrefsIntent) =>
         withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes' : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
 };
@@ -161,6 +204,8 @@ export function busyKeyOf(op: OpBody): string {
         case 'createList': case 'renameList': case 'deleteList': case 'restoreList': return LISTS_KEY;
         case 'listTiming': return noteKey({ kind: 'list', id: op.listId });
         case 'prefs': return PREFS_KEY;
+        // The CARD, not the listing: what is unsynced is this one note.
+        case 'setBody': case 'addMedia': case 'removeMedia': return noteKey({ kind: 'list', id: op.listId });
         default: return noteKey(op.note);
     }
 }
@@ -170,6 +215,7 @@ function idsOf(op: OpBody): number[] {
     switch (op.k) {
         case 'createList': return [];
         case 'renameList': case 'deleteList': case 'restoreList': case 'listTiming': return [op.listId];
+        case 'setBody': case 'addMedia': case 'removeMedia': return [op.listId];
         case 'createTask': return [op.note.id, ...(op.parentId !== undefined ? [op.parentId] : [])];
         case 'editTask': case 'updateTask': case 'moveTask': case 'deleteTask': case 'timing': return [op.note.id, op.taskId];
         case 'reorderTask': return [op.note.id, op.taskId, ...(op.afterId !== null ? [op.afterId] : []), ...(op.reparent?.parentId != null ? [op.reparent.parentId] : [])];
@@ -193,9 +239,13 @@ export class UnresolvedTempId extends Error {
 
 type IdMap = Record<string, number>;
 
+/** One ref `addMedia` put on the server, and the parked record it came
+ *  from. What `execOp` answers for an `addMedia`. */
+export interface AddedParked { id: string; ref: TaskAttachmentRef }
+
 /** Run one op against the server. `fromQueue` = a replay: pins and order are
  *  re-derived from the server's current set instead of PUT as captured. */
-export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Promise<unknown> {
+export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parked: ParkedStore = appParkedStore): Promise<unknown> {
     const r = (id: number): number => {
         if (id >= 0) return id;
         const real = idMap[String(id)];
@@ -249,6 +299,45 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Prom
         case 'timing': {
             const n = note(op.note);
             return patchTaskTiming({ id: r(op.taskId), channel_id: n.kind === 'channel' ? n.id : null, created_by: op.createdBy }, op.patch);
+        }
+        case 'setBody': return setTaskListBody(r(op.listId), op.body, fromQueue ? undefined : op.expectRev);
+        case 'addMedia': {
+            const listId = r(op.listId);
+            const records = await parked.read(op.blobIds);
+            // Swept, or a database cleared under us: there is nothing left to
+            // send, and the sidecar must not be rewritten from a stale
+            // snapshot that still names the parked refs.
+            if (records.length === 0) return undefined;
+            const added = await uploadParkedMedia(records);
+            try {
+                // `addNoteRefs` also deletes the uploads behind whatever the
+                // replace dropped — nothing names those now, and leaving
+                // them would charge the owner's quota for a picture no note
+                // shows (api/noteMedia.ts holds that rule for both doors).
+                if (fromQueue) await addNoteRefs(listId, added, op.replacing);
+                else {
+                    await setTaskListAttachments(listId, [...op.refs, ...added]);
+                    if (op.replacing.length > 0) await deleteFiles(fileIdsOfHrefs(op.replacing));
+                }
+            } catch (err) {
+                // Nothing names the uploads now: do not leave them against
+                // the quota (the same rule as uploadNoteMedia).
+                await deleteFiles(fileIdsOf(added));
+                throw err;
+            }
+            await parked.remove(op.blobIds);
+            // PAIRED with the record each ref came from: `uploadParkedMedia`
+            // answers one ref per record, in order. Replay needs that pairing
+            // to take one picture back out again when a Remove landed while
+            // this upload was in flight (`forgetParked` below).
+            return records.map((rec, i): AddedParked => ({ id: rec.id, ref: added[i] }));
+        }
+        case 'removeMedia': {
+            const listId = r(op.listId);
+            if (fromQueue) return removeNoteRefs(listId, op.removing);
+            await setTaskListAttachments(listId, op.refs);
+            if (op.removing.length > 0) await deleteFiles(fileIdsOfHrefs(op.removing));
+            return undefined;
         }
         case 'prefs': {
             if (!fromQueue) return putTaskTabPrefs(op.prefs);
@@ -324,6 +413,9 @@ export interface OutboxDeps {
      *  across tabs; a same-page chain where Web Locks are unavailable. */
     lock: <T>(name: string, fn: () => Promise<T>, opts?: { ifAvailable?: boolean }) => Promise<T | undefined>;
     onReplayed: (summary: ReplaySummary) => void;
+    /** Ciphertext waiting to be uploaded (notesBlobs.ts): a dropped op's
+     *  records are deleted with it, and load() sweeps what no op names. */
+    parked: ParkedStore;
 }
 
 export interface ReplaySummary {
@@ -355,16 +447,28 @@ function webLock<T>(name: string, fn: () => Promise<T>, opts?: { ifAvailable?: b
 export interface Outbox {
     /** How many ops are queued (this page's last view of it). */
     pending(): number;
+    /** Pictures and files still waiting to be uploaded. */
+    pendingMedia(): number;
     queuedKeys(): Set<string>;
     /** The notes whose delete (a move to the trash) is still queued. The
      *  same Set until that changes, so it can be a store snapshot. */
     queuedListDeletes(): ReadonlySet<number>;
     subscribe(cb: () => void): () => void;
     load(): Promise<void>;
+    /** Resolves once `pending()` reflects the PERSISTED queue. Until the
+     *  load finishes it reads 0 whatever a previous page left behind, so
+     *  anything that decides "nothing is waiting, run this directly" has to
+     *  wait for this first — `send` already does. */
+    ready(): Promise<void>;
     send<T>(op: NoteOp): Promise<{ queued: true } | { queued: false; value: T }>;
     replay(): Promise<ReplaySummary | undefined>;
     /** The id a temp id became, once its create has replayed. */
     realId(tempId: number): number | undefined;
+    /** Forget parked media that will never be sent — a picture removed from
+     *  the note before it got a connection. Drops it from any queued
+     *  `addMedia` (and the op with it, once it names nothing) and deletes
+     *  its ciphertext. */
+    forgetParked(blobIds: string[]): Promise<void>;
 }
 
 export function createOutbox(deps: OutboxDeps): Outbox {
@@ -417,11 +521,92 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         return next;
     };
 
+    /**
+     * REMOVING A PICTURE WHOSE UPLOAD HAS OVERTAKEN THE SCREEN.
+     *
+     * `setNoteAttachments` queues nothing server-side for a picture it still
+     * knows by its PARKED name (`puca-parked:<id>`): it only has to forget
+     * the queued op that would have sent it. That holds for exactly as long
+     * as the op is still queued — and it stops holding twice:
+     *
+     *  - while the op is IN FLIGHT. Both `send` and `replay` await `exec`
+     *    outside the queue lock, and `addMedia` reads its ciphertext and
+     *    uploads it before it writes the note's sidecar, so a Remove in that
+     *    window rewrites a queued op that is about to be dropped by oid
+     *    anyway. `forgottenInFlight` holds those ids until the href exists.
+     *  - AFTER it lands, until the note's cached sidecar is re-read. Replay
+     *    invalidates the queries only when the whole run ends, and the
+     *    refetch is a request; until it answers, the editor still shows the
+     *    parked name. `sentAs` holds what each parked id became, so a Remove
+     *    in that window queues the real removal.
+     *
+     * Without both, the ref reaches the server with nothing left to take it
+     * out again: the picture the user removed comes back on the next fetch,
+     * and its upload is charged to their quota for good.
+     */
+    const inFlight = new Set<NoteOp>();
+    const forgottenInFlight = new Set<string>();
+    /** parked id -> the note it went to and the ref it became. Bounded: the
+     *  window it covers is one refetch, so the oldest entries are long dead,
+     *  and evicting one can at worst cost what this whole block prevents. */
+    const sentAs = new Map<string, { listId: number; href: string }>();
+    const SENT_AS_MAX = 256;
+
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffMs = 2_000;
     const scheduleReplay = (ms: number) => {
         if (retryTimer) clearTimeout(retryTimer);
         retryTimer = setTimeout(() => { retryTimer = null; void outbox.replay(); }, ms);
+    };
+
+    /** Queue the removal of whatever these parked ids became — one op per
+     *  note. An INTENT, like every other removal: replayed against whatever
+     *  the sidecar holds then. */
+    const dropSent = async (ids: string[]) => {
+        const byList = new Map<number, string[]>();
+        for (const id of ids) {
+            const sent = sentAs.get(id);
+            if (!sent) continue;
+            sentAs.delete(id);                      // once is enough
+            byList.set(sent.listId, [...(byList.get(sent.listId) ?? []), sent.href]);
+        }
+        if (byList.size === 0) return;
+        for (const [listId, hrefs] of byList) {
+            const n = hrefs.length;
+            await mutate(s => enqueue(s, ops.removeMedia(listId, hrefs, [], `remove ${n} picture${n === 1 ? '' : 's'}`)));
+        }
+        if (deps.online()) scheduleReplay(0);
+    };
+
+    /** Run one op, remembering it while it is out; then record what its
+     *  uploads became, and take back out of the note anything a Remove
+     *  forgot while there was no href yet to name. */
+    const execTracked = async (op: NoteOp, ids: IdMap, fromQueue: boolean): Promise<unknown> => {
+        inFlight.add(op);
+        let value: unknown;
+        try {
+            value = await deps.exec(op, ids, fromQueue);
+        } catch (err) {
+            // It never landed: whatever `forgetParked` rewrote in the QUEUE
+            // (the op is still in it while it is out) is the whole answer.
+            if (op.k === 'addMedia') for (const id of op.blobIds) forgottenInFlight.delete(id);
+            throw err;
+        } finally {
+            inFlight.delete(op);
+        }
+        if (op.k !== 'addMedia') return value;
+        for (const a of (Array.isArray(value) ? value as AddedParked[] : [])) {
+            sentAs.set(a.id, { listId: op.listId, href: a.ref.href });
+            if (sentAs.size > SENT_AS_MAX) {
+                const oldest = sentAs.keys().next().value;
+                if (oldest !== undefined) sentAs.delete(oldest);
+            }
+        }
+        // `delete` answers whether it was there: these are the ids a Remove
+        // named while this very op was out.
+        const late = op.blobIds.filter(id => forgottenInFlight.delete(id));
+        if (late.length > 0) await dropSent(late);
+        return value;
     };
 
     // Which account's persisted queue `view` reflects, and the load under
@@ -437,10 +622,38 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 
     const outbox: Outbox = {
         pending: () => view.queue.length,
+        pendingMedia: () => view.queue.reduce((n, o) => n + (o.k === 'addMedia' ? o.blobIds.length : 0), 0),
         queuedKeys: () => queuedKeysOf(view),
         queuedListDeletes: () => deletes,
         subscribe: cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
         realId: tempId => view.ids[String(tempId)],
+
+        async forgetParked(blobIds) {
+            if (blobIds.length === 0) return;
+            const drop = new Set(blobIds);
+            // An op already out cannot be rewritten; it is answered when it
+            // lands. One that has ALREADY landed is answered now, by the ref
+            // it became — the editor named it `puca-parked:` only because the
+            // replay's refetch has not reached it yet.
+            for (const op of inFlight) {
+                if (op.k !== 'addMedia') continue;
+                for (const id of op.blobIds) if (drop.has(id)) forgottenInFlight.add(id);
+            }
+            await dropSent(blobIds);
+            const next = await mutate(s => ({
+                ...s,
+                queue: s.queue.flatMap((o): NoteOp[] => {
+                    if (o.k !== 'addMedia') return [o];
+                    const kept = o.blobIds.filter(id => !drop.has(id));
+                    if (kept.length === o.blobIds.length) return [o];
+                    // Nothing left to send: the op goes too, or replay would
+                    // rewrite the sidecar for no reason.
+                    return kept.length === 0 ? [] : [{ ...o, blobIds: kept }];
+                }),
+            }));
+            const still = queuedBlobIds(next);
+            await deps.parked.remove(blobIds.filter(id => !still.has(id)));
+        },
 
         load() {
             const c = ctx();
@@ -448,15 +661,25 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             const kv = c.kv;
             const sub = c.sub;
             const p = (async () => {
+                let state = EMPTY;
                 try {
-                    publish(await deps.lock(`pucaNotesOutbox:${sub}`, () => read(sub, c.id, kv)) ?? EMPTY);
+                    state = await deps.lock(`pucaNotesOutbox:${sub}`, () => read(sub, c.id, kv)) ?? EMPTY;
+                    publish(state);
                 } catch {
                     publish(EMPTY);
                 }
                 loadedFor = sub;
+                // Bytes no op names are nobody's: a page that died mid-park,
+                // or a queue cleared by a sign-in as the same account again.
+                try { await deps.parked.sweep(queuedBlobIds(state)); } catch { /* online-only */ }
             })().finally(() => { if (loading?.p === p) loading = null; });
             loading = { sub, p };
             return p;
+        },
+
+        ready() {
+            const c = ctx();
+            return c ? ensureLoaded(c.sub) : Promise.resolve();
         },
 
         async send<T>(op: NoteOp) {
@@ -464,18 +687,18 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             if (c0) await ensureLoaded(c0.sub);
             const mustQueue = view.queue.length > 0 || referencesTemp(op) || !deps.online();
             if (mustQueue) {
-                await mutate(s => ({ ...s, queue: [...s.queue, op] }));
+                await mutate(s => enqueue(s, op));
                 if (deps.online()) scheduleReplay(0);
                 return { queued: true as const };
             }
             const done = beginNoteWrite(busyKeyOf(op));
             try {
-                const value = await deps.exec(op, { ...view.ids }, false) as T;
+                const value = await execTracked(op, { ...view.ids }, false) as T;
                 return { queued: false as const, value };
             } catch (err) {
                 if (!isNetworkError(err)) throw err;
                 // Never reached the server: keep it, and keep the screen as is.
-                await mutate(s => ({ ...s, queue: [...s.queue, op] }));
+                await mutate(s => enqueue(s, op));
                 scheduleReplay(backoffMs);
                 return { queued: true as const };
             } finally {
@@ -492,11 +715,19 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                     const state = await mutate(s => s);   // re-read: another tab may have changed it
                     const head = state.queue[0];
                     if (!head) break;
-                    const dropHead = (dead?: number) => mutate(s => ({
-                        ...s,
-                        queue: s.queue.filter(o => o.oid !== head.oid),
-                        dead: dead === undefined ? s.dead : [...s.dead, dead],
-                    }));
+                    const dropHead = async (dead?: number) => {
+                        const next = await mutate(s => ({
+                            ...s,
+                            queue: s.queue.filter(o => o.oid !== head.oid),
+                            dead: dead === undefined ? s.dead : [...s.dead, dead],
+                        }));
+                        // Its ciphertext is what nobody will ever name again.
+                        if (head.k === 'addMedia') {
+                            const still = queuedBlobIds(next);
+                            await deps.parked.remove(head.blobIds.filter(id => !still.has(id))).catch(() => undefined);
+                        }
+                        return next;
+                    };
                     if (idsOf(head).some(id => state.dead.includes(id))) {
                         summary.dropped.push(head);
                         await dropHead(head.k === 'createTask' || head.k === 'createList' ? head.tempId : undefined);
@@ -505,7 +736,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                     const ids = { ...state.ids };
                     const done = beginNoteWrite(busyKeyOf(head));
                     try {
-                        await deps.exec(head, ids, true);
+                        await execTracked(head, ids, true);
                         summary.sent++;
                         if (head.k === 'createTask' || head.k === 'createList') {
                             const real = ids[String(head.tempId)];
@@ -547,6 +778,37 @@ function queuedKeysOf(s: OutboxState): Set<string> {
     return new Set(s.queue.map(busyKeyOf));
 }
 
+/** Every parked record the queue still names. */
+export function queuedBlobIds(s: OutboxState): Set<string> {
+    return new Set(s.queue.flatMap(o => (o.k === 'addMedia' ? o.blobIds : [])));
+}
+
+/**
+ * Append an op — EXCEPT a second `setBody` for the same note, which replaces
+ * the queued one IN PLACE (keeping its position, so it still replays behind
+ * the create of a note made offline). NoteBodyField saves a pause after
+ * every keystroke; without this, a paragraph typed on a plane is dozens of
+ * ops, each overwriting the last, and the queue count is nonsense.
+ */
+export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
+    if (op.k === 'setBody') {
+        const i = s.queue.findIndex(o => o.k === 'setBody' && o.listId === op.listId);
+        if (i >= 0) {
+            const queue = [...s.queue];
+            // The INDEX is what keeps the order; the replacement keeps its
+            // own oid. Reusing the old one lost the last thing the user
+            // typed: `replay` awaits `exec(head)` OUTSIDE the queue lock, so
+            // a save that collapses in while the head is in flight would be
+            // deleted by the success filter (`oid !== head.oid`) — and by
+            // dropHead on a 403 — as though it were the op that just ran.
+            // With a fresh oid both are no-ops and the newer text replays next.
+            queue[i] = op;
+            return { ...s, queue };
+        }
+    }
+    return { ...s, queue: [...s.queue, op] };
+}
+
 // --- The app's instance --------------------------------------------------------------
 
 let appQc: QueryClient | null = null;
@@ -580,6 +842,7 @@ export const appOutbox = createOutbox({
     online: () => typeof navigator === 'undefined' || navigator.onLine !== false,
     lock: webLock,
     onReplayed,
+    parked: appParkedStore,
 });
 
 /** Run (or queue) one note op. See the module header. */
@@ -626,6 +889,27 @@ export async function sendCreateList(title: string): Promise<TaskList> {
 
 export function pendingOutboxCount(): number {
     return appOutbox.pending();
+}
+
+/**
+ * Await before reading `pendingOutboxCount()` to decide whether something
+ * may run directly. The count is 0 until the persisted queue has loaded, so
+ * a note made in the first moments after a reload would otherwise be sent
+ * straight to the server, ahead of everything the previous page queued —
+ * exactly the overtaking `send`'s own cold-start wait exists to prevent.
+ */
+export function ensureOutboxLoaded(): Promise<void> {
+    return appOutbox.ready();
+}
+
+/** Forget parked media removed from a note before it could be sent. */
+export function forgetParkedMedia(blobIds: string[]): Promise<void> {
+    return appOutbox.forgetParked(blobIds);
+}
+
+/** Pictures and files still waiting for a connection. */
+export function useOutboxPendingMedia(): number {
+    return useSyncExternalStore(appOutbox.subscribe, appOutbox.pendingMedia, () => 0);
 }
 
 /** Whether a card has changes that have not reached the server. */

@@ -41,7 +41,9 @@ let log: string[];
 let toasts: string[];
 function fakeActions(opts: { setBodyOk?: (body: string) => boolean; refuseItem?: string } = {}) {
     let next = 100;
-    const setBody = vi.fn(async (_id: number, body: string) => { log.push(`setBody(${JSON.stringify(body)})`); return opts.setBodyOk ? opts.setBodyOk(body) : true; });
+    // The real setBody is tri-state now (useListContent.ts SaveOutcome): a
+    // save that only QUEUED is not a failure, and only 'failed' is.
+    const setBody = vi.fn(async (_id: number, body: string) => { log.push(`setBody(${JSON.stringify(body)})`); return (opts.setBodyOk ? opts.setBodyOk(body) : true) ? 'saved' as const : 'failed' as const; });
     const addTask = vi.fn(async (_n: unknown, text: string) => { log.push(`addTask(${text})`); return text === opts.refuseItem ? null : made(next++, text); });
     const deleteTaskFrom = vi.fn(async (_n: unknown, id: number) => { log.push(`delete(${id})`); return true; });
     const actions = {
@@ -89,7 +91,7 @@ describe('Show checkboxes never half-applies', () => {
         await convert(f.actions);
         expect(f.addTask).not.toHaveBeenCalled();
         expect(f.setBody).not.toHaveBeenCalled();
-        expect(toasts).toEqual([expect.stringMatching(/while offline or while changes are waiting to sync/)]);
+        expect(toasts).toEqual([expect.stringMatching(/needs a connection, and nothing waiting to sync/)]);
     });
 
     it('with changes still queued: refused the same way (every item would queue behind them)', async () => {
