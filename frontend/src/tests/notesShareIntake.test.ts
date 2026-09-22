@@ -14,7 +14,7 @@
  * these, which hold the answer back on purpose.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { takeShare, type ComposeContent, type ShareIntakeDeps } from '../notes/model/composeIntent';
+import { SHARE_ASK_MS, takeShare, type ComposeContent, type ShareIntakeDeps } from '../notes/model/composeIntent';
 
 const FULL: ComposeContent = { text: true, pictures: true };
 /** What useListFeatures returns before the server has answered. */
@@ -110,6 +110,62 @@ describe('a share decided against the server, not against the page', () => {
         release();
         await done;
         expect(open.mock.calls[0][0].mode).toBe('list');
+    });
+
+    it('an offline share is not swallowed by an ask that never answers', async () => {
+        // The REAL shape of offline here, which the `resolves null` case above
+        // does not reach: ensureFeatures is a react-query fetch, and with the
+        // default networkMode the retryer PAUSES an offline fetch instead of
+        // failing it — the promise simply never settles. Nothing throws, so
+        // the try/catch cannot help, and consumeNativeLaunchShare is a
+        // one-shot: a share lost here is lost for good.
+        vi.useFakeTimers();
+        try {
+            const open = vi.fn();
+            const file = pic();
+            let settled = false;
+            const done = takeShare({ title: 'Snap', body: '', files: [file] }, {
+                ensureContent: () => new Promise<ComposeContent | null>(() => {}),
+                fallback: () => FULL,
+                open,
+                refusePicture: vi.fn(),
+            }).then(() => { settled = true; });
+
+            await vi.advanceTimersByTimeAsync(SHARE_ASK_MS - 1);
+            expect(open, 'the share gave up on the server before it had a fair chance').not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(2);
+            await done;
+            expect(settled).toBe(true);
+            expect(open, 'the share was swallowed by an ask that never answered').toHaveBeenCalledTimes(1);
+            // Judged by what the page last knew, so the picture comes with it.
+            expect(open.mock.calls[0][0].files).toEqual([file]);
+            expect(open.mock.calls[0][0].mode).toBe('text');
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('POSITIVE CONTROL: an answer inside the bound still wins over the page', async () => {
+        vi.useFakeTimers();
+        try {
+            const open = vi.fn();
+            const refusePicture = vi.fn();
+            let answer!: (c: ComposeContent) => void;
+            const done = takeShare({ title: 'Snap', body: '', files: [pic()] }, {
+                // The server CAN keep pictures; the page does not know it yet.
+                ensureContent: () => new Promise<ComposeContent | null>(r => { answer = r; }),
+                fallback: () => ({ text: true, pictures: false }),
+                open,
+                refusePicture,
+            });
+            await vi.advanceTimersByTimeAsync(SHARE_ASK_MS - 100);
+            answer(FULL);
+            await done;
+            expect(refusePicture, 'the bound expired early and the picture was refused').not.toHaveBeenCalled();
+            expect(open.mock.calls[0][0].files).toHaveLength(1);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it('an empty share opens nothing', async () => {

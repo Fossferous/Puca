@@ -693,9 +693,21 @@ instant the share lands, the answer is still `NO_LIST_FEATURES`: the shared
 picture would be thrown away, the user told this server cannot keep pictures
 when it can, and shared text opened as a checklist. When the server cannot be
 asked at all — offline — the page falls back to what it last knew, so an
-offline share still opens something. A local walk cannot catch this: against
-`127.0.0.1` the features query wins, and the picture check passes for the
-wrong reason, so the case is held open in `notesShareIntake.test.ts` instead.
+offline share still opens something.
+
+That wait is **bounded** (`SHARE_ASK_MS`, 1.5 s), and the bound is not
+belt-and-braces: offline the ask does not fail, it never answers. The features
+query is a react-query fetch with the default `networkMode: 'online'`, and
+that retryer does not reject an offline fetch — it *pauses* it, and the
+promise stays pending until the device is back. Nothing is thrown, so the
+`try`/`catch` around the ask sees nothing, and because
+`consumeNativeLaunchShare` is a one-shot an offline share waiting there was
+gone for good: no composer, no toast, nothing to retry. A local walk cannot
+catch any of this: against `127.0.0.1` the features query wins, and the
+picture check passes for the wrong reason, so the cases are held in
+`notesShareIntake.test.ts` instead — including one whose `ensureContent`
+never settles at all, because a mock that resolves `null` is not what offline
+does.
 
 **Shortcuts, the quick tile and the widget.** Three launcher shortcuts
 (`res/xml/shortcuts.xml`), a quick-settings tile (`NotesTileService`) and a 4×1

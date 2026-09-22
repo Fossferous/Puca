@@ -271,7 +271,10 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     // start, and the native handoff beats that request every time: judged
     // against what the page knows at that instant, the picture would be
     // dropped and the user told this server cannot keep pictures when it can
-    // (model/composeIntent's takeShare).
+    // (model/composeIntent's takeShare). The wait is bounded there
+    // (SHARE_ASK_MS): offline this fetchQuery is PAUSED by react-query, not
+    // failed, so it would otherwise never answer and the share — a one-shot —
+    // would be lost in silence.
     const onShared = (shared: SharedIntoNotes) => {
         void takeShare(shared, {
             ensureContent: async () => {

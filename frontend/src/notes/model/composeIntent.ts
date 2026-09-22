@@ -69,16 +69,38 @@ export interface SharedPayload {
 export interface ShareIntakeDeps {
     /** The server's answer about what a note may hold, FETCHED if the page
      *  has not got it yet (useListContent's `ensureFeatures`). `null` when it
-     *  could not be asked at all — offline, or the request failed. */
+     *  could not be asked at all — offline, or the request failed. It may
+     *  also never settle; see SHARE_ASK_MS. */
     ensureContent: () => Promise<ComposeContent | null>;
-    /** What the page already believes. Used ONLY when the ask failed, so an
-     *  offline share still opens something. */
+    /** What the page already believes. Used when the ask failed OR did not
+     *  answer in time, so an offline share still opens something. */
     fallback: () => ComposeContent;
     /** Open the composer on it. Nothing is saved here. */
     open: (intent: Omit<ComposeIntent, 'seq'>) => void;
     /** Say out loud that the picture could not come; a share that vanished
      *  silently looks like a share that never arrived. */
     refusePicture: () => void;
+}
+
+/**
+ * How long a share waits for `GET /notes/features` before it decides on what
+ * the page already believes instead.
+ *
+ * Long enough for a round trip to the user's own server on a phone that has
+ * just woken up, short enough that nobody reads it as the app hanging. The
+ * cost of running out is the cold-start misjudgement takeShare exists to
+ * avoid; the cost of NOT having it is the whole share, silently.
+ */
+export const SHARE_ASK_MS = 1500;
+
+/** Resolve `p`, or null once SHARE_ASK_MS has gone by — whichever is first. */
+function withinAsk(p: Promise<ComposeContent | null>): Promise<ComposeContent | null> {
+    // A rejection arriving after the bound has already answered still has a
+    // handler, so it cannot surface as an unhandled rejection.
+    p.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), SHARE_ASK_MS); });
+    return Promise.race([p, bound]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -92,13 +114,20 @@ export interface ShareIntakeDeps {
  * means deciding against NO_LIST_FEATURES: the shared picture is dropped, the
  * user is told this server cannot keep pictures when it can, and a text share
  * opens as a checklist. So wait for the answer, and fall back to what the
- * page believes only when there is no answer to be had.
+ * page believes only when there is no answer to be had — or none within
+ * SHARE_ASK_MS, which offline is the case that matters.
  */
 export async function takeShare(shared: SharedPayload, deps: ShareIntakeDeps): Promise<void> {
     // Nothing here may lose the share: a rejected ask is the same as no
-    // answer, not an unhandled rejection with the payload inside it.
+    // answer, not an unhandled rejection with the payload inside it — and
+    // NEITHER IS SILENCE. The ask is a react-query fetch, and with the
+    // default `networkMode: 'online'` an offline fetch does not fail: the
+    // retryer PAUSES it, and the promise stays pending until the device is
+    // back. A share arriving offline would therefore wait here for ever, with
+    // no composer and no toast, and because the native handoff is a one-shot
+    // the payload would be gone. So the ask is bounded.
     let answer: ComposeContent | null = null;
-    try { answer = await deps.ensureContent(); } catch { answer = null; }
+    try { answer = await withinAsk(deps.ensureContent()); } catch { answer = null; }
     const content = answer ?? deps.fallback();
     const files = content.pictures ? shared.files : [];
     if (shared.files.length > 0 && files.length === 0) deps.refusePicture();
