@@ -21,9 +21,26 @@
 export type TasksViewTab = 'reminders';
 
 let pending: TasksViewTab | null = null;
+/** The due ids that came with the request, for the row to flash. Ids only —
+ *  never item text, which is E2EE and is decrypted in the view. */
+let pendingIds: number[] = [];
 
-export function requestTasksTab(tab: TasksViewTab): void {
+export function requestTasksTab(tab: TasksViewTab, ids: number[] = []): void {
     pending = tab;
+    pendingIds = ids;
+}
+
+/** The ONE item a due notification named, or null for none/several — the
+ *  same rule Púca Notes applies (notes/native/useNativeReminders). Exported
+ *  so both the event path and the cold-open path decide it identically. */
+export function soleDueId(ids: unknown): number | null {
+    const one = Array.isArray(ids) && ids.length === 1 ? Number(ids[0]) : NaN;
+    return Number.isFinite(one) && one > 0 ? one : null;
+}
+
+/** The ids asked for, WITHOUT spending them — safe to call while rendering. */
+export function peekTasksIds(): number[] {
+    return pendingIds;
 }
 
 /** What was asked for, WITHOUT spending it — safe to call while rendering. */
@@ -34,5 +51,6 @@ export function peekTasksTab(): TasksViewTab | null {
 export function consumeTasksTab(): TasksViewTab | null {
     const t = pending;
     pending = null;
+    pendingIds = [];
     return t;
 }

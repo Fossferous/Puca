@@ -7,6 +7,28 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Share into Púca Notes.** On Android, Púca Notes now appears in the share
+  sheet. Send it text, a text file or a picture from any app and its composer
+  opens with that content already in it — a shared text file arrives as the
+  note's words rather than as an attachment. You still choose the title, add
+  whatever else you want, and press Done. Nothing is saved until you do, and
+  what you shared is encrypted with your key like everything else in a note.
+  It comes with the new Púca Notes app, not with the web update.
+- **Faster ways into Púca Notes on Android.** Long-press the app icon for New
+  note, New list or Reminders; add a Quick Settings tile that opens a new note
+  from the notification shade; or put a home-screen widget on a home screen for
+  a new list, a new note, a drawing or a photo. None of them shows anything
+  about your notes — no titles, not even how many things are due — so the
+  launcher, the shade and the home screen learn nothing, and the tile asks you
+  to unlock first. These arrive with the new Púca Notes app.
+- **A due reminder opens the item.** Tapping the reminder notification when a
+  single item is due now opens that item's note with the item flagged, instead
+  of the list of reminders; when more than one is due it opens Reminders, as
+  before. A repeating item that comes due again opens its note again, however
+  many times it fires while the app is open. The same tap works from the
+  desktop app and the browser. Only the item's number travels in the
+  notification — what the item says is still never in it, on the lock screen,
+  or anywhere else.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

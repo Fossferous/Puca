@@ -9,15 +9,17 @@
  *    also parks that target for a page that was not listening, so the hook
  *    must take it off the shelf too. Found on the emulator: without that,
  *    signing out and back in replayed an old tap and opened Reminders.
+ *  - In the browser and on the desktop there is no plugin at all: the same
+ *    tap arrives as a window event carrying the ids the notification held.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 let available = true;
-let pending: string | null = null;
-let navListener: ((t: string) => void) | null = null;
-const consume = vi.fn(async () => { const t = pending; pending = null; return t; });
+let pending: { target: string | null; item: number | null } = { target: null, item: null };
+let navListener: ((n: { target: string | null; item: number | null }) => void) | null = null;
+const consume = vi.fn(async () => { const t = pending; pending = { target: null, item: null }; return t; });
 const syncNativeReminders = vi.fn(async () => ({ ok: true }));
 const setNativeBackgroundRefresh = vi.fn(async () => undefined);
 const startTaskReminders = vi.fn((_opts?: unknown) => () => {});
@@ -25,7 +27,7 @@ const startTaskReminders = vi.fn((_opts?: unknown) => () => {});
 vi.mock('../notes/native/notesNative', () => ({
     notesNativeAvailable: () => available,
     consumeNativeLaunchNav: () => consume(),
-    onNativeNavigate: (cb: (t: string) => void) => { navListener = cb; return () => { navListener = null; }; },
+    onNativeNavigate: (cb: (n: { target: string | null; item: number | null }) => void) => { navListener = cb; return () => { navListener = null; }; },
     syncNativeReminders: (...a: unknown[]) => syncNativeReminders(...(a as [])),
     setNativeBackgroundRefresh: (...a: unknown[]) => setNativeBackgroundRefresh(...(a as [])),
 }));
@@ -33,23 +35,25 @@ vi.mock('../api/taskReminders', () => ({ startTaskReminders: (o?: unknown) => st
 vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7, getToken: () => 'tok' }));
 vi.mock('../api/config', () => ({ API_BASE_URL: 'https://api.example.test' }));
 
-const { useNotesReminderLoop } = await import('../notes/native/useNativeReminders');
+const { OPEN_REMINDERS_EVENT, onOpenReminders, openRemindersRoute, useNotesReminderLoop } =
+    await import('../notes/native/useNativeReminders');
 
 const settle = async () => { await act(async () => { for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0)); }); };
 
 let container: HTMLDivElement;
 let root: Root;
 const navigate = vi.fn();
+const compose = vi.fn();
 function Shell() {
-    useNotesReminderLoop(navigate);
+    useNotesReminderLoop(navigate, compose);
     return null;
 }
 
 beforeEach(() => {
     available = true;
-    pending = null;
+    pending = { target: null, item: null };
     navListener = null;
-    for (const f of [consume, syncNativeReminders, setNativeBackgroundRefresh, startTaskReminders, navigate]) f.mockClear();
+    for (const f of [consume, syncNativeReminders, setNativeBackgroundRefresh, startTaskReminders, navigate, compose]) f.mockClear();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -76,26 +80,97 @@ describe('useNotesReminderLoop', () => {
     });
 
     it('a launch from a reminder notification lands on Reminders', async () => {
-        pending = 'reminders';
+        pending = { target: 'reminders', item: null };
         act(() => root.render(<Shell />));
         await settle();
         expect(navigate).toHaveBeenCalledWith('/reminders');
+    });
+
+    it('one item due: the launch names it, so the shell can open that item', async () => {
+        pending = { target: 'reminders', item: 42 };
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(navigate).toHaveBeenCalledWith('/reminders?item=42');
+    });
+
+    it('a launcher shortcut, the tile or the widget opens the composer and navigates nowhere', async () => {
+        pending = { target: 'compose-draw', item: null };
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(compose).toHaveBeenCalledWith('draw');
+        expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it('an unknown target still does nothing at all (forward-compat control)', async () => {
+        pending = { target: 'compose-whatever-comes-next', item: null };
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(compose).not.toHaveBeenCalled();
+        expect(navigate).not.toHaveBeenCalled();
     });
 
     it('a tap while running navigates AND clears the parked target, so a later mount does not replay it', async () => {
         act(() => root.render(<Shell />));
         await settle();
         navigate.mockClear();
-        pending = 'reminders';            // what the native side parks alongside the event
-        act(() => navListener?.('reminders'));
+        pending = { target: 'reminders', item: null };   // what the native side parks alongside the event
+        act(() => navListener?.({ target: 'reminders', item: null }));
         await settle();
         expect(navigate).toHaveBeenCalledWith('/reminders');
-        expect(pending).toBeNull();
+        expect(pending.target).toBeNull();
         // Sign out and back in: the shell mounts again.
         act(() => root.render(<></>));
         navigate.mockClear();
         act(() => root.render(<Shell />));
         await settle();
         expect(navigate).not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * The browser / desktop half: notifyTasksDue dispatches the due ids and
+ * Notes routes on them. Nothing else covers this path — it has no plugin,
+ * no walk line, and the phone's half would stay green if it broke.
+ */
+describe('a due-notification click in the browser or on the desktop', () => {
+    it('one item due: the click opens that item’s note', () => {
+        const nav = vi.fn();
+        const off = onOpenReminders(nav);
+        window.dispatchEvent(new CustomEvent(OPEN_REMINDERS_EVENT, { detail: { ids: [42] } }));
+        expect(nav).toHaveBeenCalledWith('/reminders?item=42');
+        off();
+    });
+
+    it('several due: Reminders, with nothing named', () => {
+        const nav = vi.fn();
+        const off = onOpenReminders(nav);
+        window.dispatchEvent(new CustomEvent(OPEN_REMINDERS_EVENT, { detail: { ids: [42, 43] } }));
+        expect(nav).toHaveBeenCalledWith('/reminders');
+        off();
+    });
+
+    it('an event with no ids at all still opens Reminders (an older caller)', () => {
+        const nav = vi.fn();
+        const off = onOpenReminders(nav);
+        window.dispatchEvent(new CustomEvent(OPEN_REMINDERS_EVENT));
+        expect(nav).toHaveBeenCalledWith('/reminders');
+        off();
+    });
+
+    it('unsubscribing really stops it (the shell remounts on every sign-in)', () => {
+        const nav = vi.fn();
+        onOpenReminders(nav)();
+        window.dispatchEvent(new CustomEvent(OPEN_REMINDERS_EVENT, { detail: { ids: [42] } }));
+        expect(nav).not.toHaveBeenCalled();
+    });
+
+    it('a detail that is not what we expect never becomes a route', () => {
+        expect(openRemindersRoute(undefined)).toBe('/reminders');
+        expect(openRemindersRoute({ ids: 'nope' })).toBe('/reminders');
+        expect(openRemindersRoute({ ids: [] })).toBe('/reminders');
+        expect(openRemindersRoute({ ids: ['x'] })).toBe('/reminders');
+        expect(openRemindersRoute({ ids: [0] })).toBe('/reminders');
+        expect(openRemindersRoute({ ids: [-1] })).toBe('/reminders');
+        expect(openRemindersRoute({ ids: [7] })).toBe('/reminders?item=7');
     });
 });

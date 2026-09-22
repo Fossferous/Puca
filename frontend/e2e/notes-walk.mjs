@@ -1479,9 +1479,19 @@ function installFakeAndroid() {
     const calls = [];
     const listeners = {};
     let cb = 0;
+    // A launch payload the walk parks before a reload (sessionStorage
+    // survives one, an init script's own state does not). Taken ONCE, like
+    // the real plugin's one-shot, so the walk can prove it does not replay.
+    const takeParked = key => {
+        try {
+            const v = JSON.parse(sessionStorage.getItem(key) || 'null');
+            sessionStorage.removeItem(key);
+            return v;
+        } catch { return null; }
+    };
     const answers = {
         NotesNative: {
-            info: () => ({ api: 1, features: ['reminders', 'backgroundRefresh', 'exactAlarm', 'battery', 'share', 'calendar', 'launchNav'] }),
+            info: () => ({ api: 2, features: ['reminders', 'backgroundRefresh', 'exactAlarm', 'battery', 'share', 'calendar', 'launchNav', 'shareIn', 'navItem', 'tile'] }),
             syncReminders: o => ({ count: (o.entries || []).length }),
             clearAll: () => ({}),
             setBackgroundRefresh: () => ({ scheduled: true }),
@@ -1495,7 +1505,9 @@ function installFakeAndroid() {
             requestIgnoreBatteryOptimizations: () => ({}),
             shareText: () => ({ ok: true }),
             addToPhoneCalendar: () => ({ ok: true }),
-            consumeLaunchNav: () => ({ target: null }),
+            consumeLaunchNav: () => takeParked('__walkNav') || { target: null, item: -1 },
+            consumeLaunchShare: () => takeParked('__walkShare') || { text: null, subject: null, files: [] },
+            requestAddTile: () => ({ ok: true }),
             removeListener: () => ({}),
         },
         SovereignLocation: {
@@ -1638,6 +1650,135 @@ try {
     ck('android shell (390x844): their buttons hold their labels and are full tap targets',
         banners.length === 2 && banners.every(b => b.clipped === false && b.h >= 43.5 && b.right <= b.barRight + 0.5), JSON.stringify(banners));
     await shotOf(a)('android-shell-exact-battery');
+
+    // --- the ways INTO the app that are not the launcher icon -----------------
+    // A share from another app, a launcher shortcut / quick tile / widget
+    // (all four carry one constant word), and a due notification that named
+    // the ONE item that came due. Driven through the same fake bridge: the
+    // walk parks the launch payload and reloads, which is exactly the cold
+    // start the real ones produce.
+    const info = await a.evaluate(() => window.Capacitor.nativePromise('NotesNative', 'info', {}));
+    ck('android shell: the bridge reports the new entry points (control for every check below)',
+        info.api === 2 && ['shareIn', 'navItem', 'tile'].every(f => info.features.includes(f)), JSON.stringify(info));
+
+    const park = async (key, value) => {
+        await a.evaluate(([k, v]) => sessionStorage.setItem(k, JSON.stringify(v)), [key, value]);
+        await a.reload();
+    };
+    const sheetOpen = () => a.locator('.notes-quickadd-sheet').count();
+    // Back to the grid: these entry points are judged by the cards they add,
+    // and the section above left the app on Reminders.
+    const toGrid = async () => {
+        if (await a.locator('.notes-card').count() > 0) return;
+        await a.tap('.notes-menu-btn');
+        await a.waitForSelector('.notes-rail.open', { timeout: 5000 });
+        await a.locator('.notes-rail-item', { hasText: 'Notes' }).first().tap();
+        await a.waitForSelector('.notes-card', { timeout: 15000 });
+        await closedDrawer(a);
+    };
+    await toGrid();
+
+    // 1. A share of text.
+    const cardsBefore = await a.locator('.notes-card').count();
+    ck('share-in: the walk is on the notes grid to begin with (precondition)', cardsBefore > 0, String(cardsBefore));
+    await park('__walkShare', { text: 'Milk and bread', subject: null, files: [] });
+    await a.waitForSelector('.notes-quickadd-sheet', { timeout: 15000 }).catch(() => {});
+    ck('share-in (390x844): a shared line opens the composer sheet, pre-filled',
+        await sheetOpen() === 1 && (await a.locator('.notes-quickadd-sheet input.notes-quickadd-title').inputValue()) === 'Milk and bread');
+    ck('share-in: NOTHING is saved until Done', await a.locator('.notes-card').count() === cardsBefore);
+    const shareBox = await a.locator('.notes-quickadd-sheet').boundingBox();
+    ck('share-in: the seeded composer fits the viewport', !!shareBox && shareBox.x >= -0.5 && shareBox.x + shareBox.width <= 390.5, JSON.stringify(shareBox));
+    const shareTaps = await a.evaluate(() => [...document.querySelectorAll('.notes-quickadd-sheet button')]
+        .map(b => ({ c: b.className, n: Math.min(b.getBoundingClientRect().width, b.getBoundingClientRect().height) }))
+        .filter(t => t.n > 0));
+    // 43.5 (the 44px floor, less sub-pixel layout), NOT the 24 this check
+    // shipped with. mobile.css gives every `button` min-height/min-width 44px
+    // under a coarse pointer and the Notes page imports it, so all six
+    // controls here measure exactly 44 — measured, class by class. A bar at
+    // 24 could not go red for the regression it names: a control shrinking to
+    // 28px would still have passed it. The class comes out with the number so
+    // a failure says WHICH control lost its size.
+    ck('share-in: every button in the seeded composer is a full tap target',
+        shareTaps.length > 0 && Math.min(...shareTaps.map(t => t.n)) >= 43.5, JSON.stringify(shareTaps));
+    await shotOf(a)('share-in-composer');
+    // Saving it is the positive control that a seeded composer is a real one.
+    await a.locator('.notes-quickadd-sheet .notes-textbtn').tap();
+    await a.waitForFunction(n => document.querySelectorAll('.notes-card').length === n + 1, cardsBefore, { timeout: 15000 }).catch(() => {});
+    ck('share-in: pressing Done creates exactly one card with the shared text',
+        await a.locator('.notes-card').count() === cardsBefore + 1
+        && await a.locator('.notes-card', { hasText: 'Milk and bread' }).count() === 1);
+
+    // 2. One-shot: a reload must not bring the same share back.
+    await a.reload();
+    await a.waitForSelector('.notes-card', { timeout: 20000 });
+    ck('share-in: the payload is consumed once — a reload does not replay it', await sheetOpen() === 0);
+
+    // 3. A shared picture: the page fetches it over the app's own origin.
+    await park('__walkShare', { text: null, subject: 'Snap', files: [{ url: '/notes/icon-192.png', name: 'shared.png', mime: 'image/png', size: 1 }] });
+    await a.waitForSelector('.notes-quickadd-sheet .notes-quickadd-media img', { timeout: 15000 }).catch(() => {});
+    ck('share-in: a shared picture arrives as a chip in the composer',
+        await a.locator('.notes-quickadd-sheet .notes-quickadd-media img').count() === 1);
+    await a.locator('.notes-quickadd-sheet .notes-iconbtn[aria-label="Discard note"]').tap();
+    await a.waitForSelector('.notes-quickadd-sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+    // 4. A launcher shortcut / quick tile / widget cell.
+    await park('__walkNav', { target: 'compose-list', item: -1 });
+    await a.waitForSelector('.notes-quickadd-sheet', { timeout: 15000 }).catch(() => {});
+    ck('shortcut/tile/widget: the list target opens the composer as a checklist',
+        await sheetOpen() === 1 && await a.locator('.notes-quickadd-sheet .notes-quickadd-item input').count() >= 1);
+    await a.locator('.notes-quickadd-sheet .notes-iconbtn[aria-label="Discard note"]').tap();
+    await a.waitForSelector('.notes-quickadd-sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
+    await park('__walkNav', { target: 'compose-something-later', item: -1 });
+    await a.waitForSelector('.notes-card', { timeout: 20000 }).catch(() => {});
+    await toGrid();
+    ck('shortcut: a word this bundle does not know opens nothing and breaks nothing (forward-compat)',
+        await sheetOpen() === 0 && await a.locator('.notes-card').count() > 0);
+
+    // 5. A due notification that named ONE item.
+    ck('android shell: an open item id was read off the page traffic (precondition)', !!open, String(taskRows.length));
+    if (open) {
+        await park('__walkNav', { target: 'reminders', item: open.id });
+        await a.waitForSelector('.tt-item.flash', { timeout: 15000 }).catch(() => {});
+        ck('reminder tap, one item due: that item\'s note opens with the item flagged',
+            await a.locator('.notes-editor').count() === 1 && await a.locator('.tt-item.flash').count() === 1);
+        ck('reminder tap: the flagged row is the item that came due',
+            await a.locator(`#tt-task-${open.id}.flash`).count() === 1);
+        ck('reminder tap: nothing covers the flagged row at 390x844', await onTop(a, '.tt-item.flash'));
+        await shotOf(a)('reminder-tap-item');
+        await a.keyboard.press('Escape');
+        await a.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+        // The SAME item, a second time, WITHOUT a reload: a repeat or a
+        // snooze fires again while the app is still up, and the note must
+        // open again. The resolution is a one-shot per TAP, not per id —
+        // keyed on the id, this second tap recognised it and opened nothing.
+        // Fired through the live listener, not `park`, because park reloads
+        // and a reload is a new page session, where the bug cannot happen.
+        await a.evaluate(id => {
+            for (const cb of (window.__fakeAndroid.listeners['NotesNative:navigate'] || [])) cb({ target: 'reminders', item: id });
+        }, open.id);
+        await a.waitForSelector('.notes-editor', { timeout: 15000 }).catch(() => {});
+        ck('reminder tap: the same item coming due again opens its note a second time',
+            await a.locator('.notes-editor').count() === 1
+            && await a.locator(`#tt-task-${open.id}.flash`).count() === 1);
+        await a.keyboard.press('Escape');
+        await a.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
+    }
+    await park('__walkNav', { target: 'reminders', item: 99999999 });
+    await a.waitForSelector('.notes-reminders', { timeout: 15000 }).catch(() => {});
+    ck('reminder tap: an id that is stale by the time of the tap lands on Reminders, never a blank editor',
+        await a.locator('.notes-reminders').count() === 1 && await a.locator('.notes-editor').count() === 0);
+    await park('__walkNav', { target: 'reminders', item: -1 });
+    await a.waitForSelector('.notes-reminders', { timeout: 15000 }).catch(() => {});
+    await closedDrawer(a);
+    ck('reminder tap, several due: Reminders with nothing flagged, exactly as before',
+        await a.locator('.notes-reminders').count() === 1 && await a.locator('.flash').count() === 0);
+
+    // 6. The E2EE line: only ids and times ever went the other way.
+    const afterCalls = await a.evaluate(() => JSON.stringify(window.__fakeAndroid.calls));
+    ck('share-in / reminder tap: the native side was handed no note content back',
+        !/Eggs|Milk|Bread|Groceries|Shared errand/.test(afterCalls), (afterCalls.match(/Eggs|Milk|Bread|Groceries/) || [''])[0]);
+
     ck('android shell: no page errors', errors.length === aErrors, errors[aErrors]);
     await actx.close();
 } catch (e) {

@@ -211,11 +211,16 @@ interface TaskTreeProps {
     /** Channel checklists name their channel on attachment uploads so the
      *  server can honour ATTACH_FILES at the upload door. Personal lists omit it. */
     channelId?: number;
+    /** Scroll to this task's row and flash it — Púca Notes uses it when a due
+     *  notification named the one item that came due. OPTIONAL: with it
+     *  absent the rendered tree is what it always was, so Púca's own Tasks
+     *  view is untouched. */
+    flashTaskId?: number | null;
 }
 
 export function TaskTree({
     tasks, onToggle, onDelete, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSnooze, onSetAttachments,
-    myPerms, currentUserId, resolveUserName, channelId,
+    myPerms, currentUserId, resolveUserName, channelId, flashTaskId = null,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
     const [subtaskFor, setSubtaskFor] = useState<number | null>(null);
@@ -422,7 +427,8 @@ export function TaskTree({
         return (
         <li
             key={task.id}
-            className={`tt-item ${task.is_completed ? 'completed' : ''} ${depth > 0 ? 'subtask' : ''}`}
+            id={`tt-task-${task.id}`}
+            className={`tt-item ${task.is_completed ? 'completed' : ''} ${depth > 0 ? 'subtask' : ''}${task.id === flashTaskId ? ' flash' : ''}`}
             title={byline ? `Added by ${byline} · ${new Date(parseServerTimestamp(task.created_at)).toLocaleDateString()}` : undefined}
         >
             {/* Ghost keeps the checkbox column aligned on rows that can't

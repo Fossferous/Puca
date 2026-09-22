@@ -447,3 +447,19 @@ body.drag-reorder-active {
 [data-theme="light"] .tt-not-encrypted {
     color: #8a5a00;
 }
+
+/* The one item a due notification came for, flashed inside the open note.
+   Its twin for the Reminders row is components/reminders/Reminders.css;
+   the keyframes are declared here too because Púca Notes and Púca load
+   these two stylesheets independently. Theme tokens only. */
+@keyframes tt-flash {
+    0%   { background: var(--brand-primary); }
+    100% { background: transparent; }
+}
+.tt-item.flash {
+    animation: tt-flash 1.6s ease-out 2;
+    border-radius: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+    .tt-item.flash { animation: none; background: var(--bg-modifier-selected); }
+}

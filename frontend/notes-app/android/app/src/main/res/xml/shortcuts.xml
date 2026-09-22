@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static launcher shortcuts: long-press the Púca Notes icon.
+
+     STATIC ON PURPOSE, and it must stay that way. ShortcutManagerCompat is
+     one import away (Púca uses it for recent conversations), and "recent
+     notes as shortcuts" would write decrypted note titles into the launcher's
+     own database - outside this app's sandbox, and outside anything a
+     sign-out can scrub. Every entry here carries one constant word.
+
+     Every <intent> MUST carry android:action - a static shortcut intent
+     without one is silently dropped at parse time and the shortcut simply
+     never appears. The extra name is NotesNotifier.EXTRA_NAV ("notes_nav"),
+     NOT Púca's "sovereign_nav", and the values are its NAV_ constants.
+     The web half (routeNativeTarget) ships over OTA before this APK. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="new-note"
+        android:enabled="true"
+        android:icon="@drawable/ic_notes_widget_note"
+        android:shortcutShortLabel="@string/shortcut_new_note_short"
+        android:shortcutLongLabel="@string/shortcut_new_note_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.sovereign.notes"
+            android:targetClass="com.sovereign.notes.MainActivity">
+            <extra android:name="notes_nav" android:value="compose-note" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="new-list"
+        android:enabled="true"
+        android:icon="@drawable/ic_notes_widget_list"
+        android:shortcutShortLabel="@string/shortcut_new_list_short"
+        android:shortcutLongLabel="@string/shortcut_new_list_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.sovereign.notes"
+            android:targetClass="com.sovereign.notes.MainActivity">
+            <extra android:name="notes_nav" android:value="compose-list" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="reminders"
+        android:enabled="true"
+        android:icon="@drawable/ic_notes_widget_reminders"
+        android:shortcutShortLabel="@string/shortcut_reminders_short"
+        android:shortcutLongLabel="@string/shortcut_reminders_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.sovereign.notes"
+            android:targetClass="com.sovereign.notes.MainActivity">
+            <extra android:name="notes_nav" android:value="reminders" />
+        </intent>
+    </shortcut>
+</shortcuts>

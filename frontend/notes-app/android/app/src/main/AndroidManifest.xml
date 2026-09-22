@@ -46,6 +46,38 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Share INTO Púca Notes: the composer opens pre-filled and the
+                 user presses Done (or does not). Nothing is saved for them.
+
+                 What arrives here is decrypted note content, so the intake
+                 (NotesNativePlugin.takeShare) copies it once, hands it to the
+                 WebView, and erases it: no SharedPreferences, no ReminderStore,
+                 no notification, and NEVER a Log call — printing the intent
+                 would put what the user shared into logcat.
+
+                 No <uses-permission> goes with this: reading a content:// URI
+                 the sharer granted needs none. MainActivity is already
+                 singleTask, so a share while Notes runs re-enters the same
+                 task through onNewIntent. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+
+            <!-- Long-press-the-icon shortcuts. MUST sit on the activity that
+                 owns MAIN/LAUNCHER — on the application element or any other
+                 activity the launcher never registers them. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+
         </activity>
 
         <provider
@@ -103,6 +135,46 @@
             android:name=".NotesGeofenceService"
             android:foregroundServiceType="location"
             android:exported="false" />
+
+        <!-- The quick-settings tile: "New note", straight from the shade.
+             exported=true because only the SYSTEM binds a tile service, and
+             the BIND_QUICK_SETTINGS_TILE permission is what makes that safe —
+             the same shape as ReminderOwnerProvider above.
+
+             The label is a compile-time constant (NotesTileService.LABEL).
+             The shade is reachable over a locked screen on some phones, so it
+             must never carry a count, a title or anything else from a note. -->
+        <service
+            android:name=".NotesTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_new_note"
+            android:label="@string/tile_new_note"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Home-screen quick capture (new note / list / draw / photo).
+             Exported because the launcher's APPWIDGET_UPDATE broadcast must
+             reach it; that action is a protected broadcast only the system
+             can send.
+
+             RemoteViews are inflated, drawn and CACHED by the launcher
+             process, so this widget carries four fixed labels and nothing
+             else — no note title, no item count, no query into the note
+             store. It is never polled (updatePeriodMillis 0). -->
+        <receiver
+            android:name=".NotesWidgetProvider"
+            android:label="@string/widget_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/notes_widget_info" />
+        </receiver>
     </application>
 
     <!-- Who may ask ReminderOwnerProvider: apps signed with the SAME key as

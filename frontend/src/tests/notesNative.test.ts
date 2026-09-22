@@ -20,7 +20,9 @@ const fake = {
     takeRenewedToken: vi.fn(async (): Promise<{ token: string | null; account: string | null }> => ({ token: null, account: null })),
     shareText: vi.fn(async () => ({ ok: true })),
     addToPhoneCalendar: vi.fn(async (): Promise<{ ok: boolean; reason?: string }> => ({ ok: true })),
-    consumeLaunchNav: vi.fn(async () => ({ target: 'reminders' })),
+    consumeLaunchNav: vi.fn(async (): Promise<{ target: string | null; item?: number | null }> => ({ target: 'reminders' })),
+    consumeLaunchShare: vi.fn(async () => ({ text: null as string | null, subject: null as string | null, files: [] as { url: string | null; name: string; mime: string; size: number }[] })),
+    requestAddTile: vi.fn(async () => ({ ok: true })),
     notificationStatus: vi.fn(async () => ({ granted: false, needsRequest: true, blocked: false })),
 };
 
@@ -98,16 +100,31 @@ describe('degrading without the plugin', () => {
         await expect(nn.shareText({ filename: 'a.md', mime: 'text/plain', text: 'x' })).resolves.toEqual({ ok: false, reason: 'unsupported' });
         await expect(nn.addToPhoneCalendar({ title: 't', beginMs: 1 })).resolves.toEqual({ ok: false, reason: 'unsupported' });
         await expect(nn.nativeNotificationStatus()).resolves.toBeNull();
-        await expect(nn.consumeNativeLaunchNav()).resolves.toBeNull();
+        await expect(nn.consumeNativeLaunchNav()).resolves.toEqual({ target: null, item: null });
+        await expect(nn.consumeNativeLaunchShare()).resolves.toEqual({ text: null, subject: null, files: [] });
+        await expect(nn.requestNativeAddTile()).resolves.toBe(false);
         await expect(nn.clearNativeSession()).resolves.toBeUndefined();
         expect(nn.notesNativeAvailable()).toBe(false);
         for (const f of Object.values(fake)) expect(f).not.toHaveBeenCalled();
     });
 
+    it('the launch item is normalised in ONE place: -1 and 0 mean no item, a real id survives', async () => {
+        // The plugin sends -1 when a due notification named nothing, and an
+        // older APK sends no field at all. Every caller must see the same
+        // shape, or each one invents its own "is there an item?" test.
+        fake.consumeLaunchNav.mockResolvedValueOnce({ target: 'reminders', item: -1 });
+        await expect(nn.consumeNativeLaunchNav()).resolves.toEqual({ target: 'reminders', item: null });
+        fake.consumeLaunchNav.mockResolvedValueOnce({ target: 'reminders', item: 0 });
+        await expect(nn.consumeNativeLaunchNav()).resolves.toEqual({ target: 'reminders', item: null });
+        fake.consumeLaunchNav.mockResolvedValueOnce({ target: 'reminders', item: 42 });
+        await expect(nn.consumeNativeLaunchNav()).resolves.toEqual({ target: 'reminders', item: 42 });
+    });
+
     it('with the plugin, the same calls reach it (positive control)', async () => {
         await expect(nn.syncNativeReminders('7', [{ id: 1, at: 1, mark: 'm' }])).resolves.toEqual({ ok: true });
         expect(fake.syncReminders).toHaveBeenCalledWith({ account: '7', entries: [{ id: 1, at: 1, mark: 'm' }] });
-        await expect(nn.consumeNativeLaunchNav()).resolves.toBe('reminders');
+        await expect(nn.consumeNativeLaunchNav()).resolves.toEqual({ target: 'reminders', item: null });
+        await expect(nn.requestNativeAddTile()).resolves.toBe(true);
         await nn.clearNativeSession();
         expect(fake.clearAll).toHaveBeenCalledTimes(1);
     });

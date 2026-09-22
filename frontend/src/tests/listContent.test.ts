@@ -34,6 +34,15 @@ function task(id: number, o: Partial<Task> = {}): Task {
 }
 const ref = (id: string, mime = 'image/png', name = `${id}.png`) => ({ href: `sovereign-enc:${id}?k=KEY&m=${encodeURIComponent(mime)}`, name });
 
+/** The file id the sealed-sidecar test looks for in the clear. It must be
+ *  LONG, and it must contain a character base64 never produces: the id used
+ *  to be `f1`, and a two-character token turns up in random ciphertext about
+ *  once in twelve runs (measured 2026-09-22, 1 of 12 — the nonce happened to
+ *  encode `…fCf12i9…`). A test that fails at random teaches people to re-run
+ *  it, which is how a real leak gets waved through. */
+const FILE = 'sandcastle-nine';
+const PLAINTEXT = /Holiday|beach|sandcastle-nine/;
+
 beforeAll(async () => {
     await warmIdentities([ME]);
     setActiveIdentity(await testIdentity(...ME));
@@ -91,14 +100,16 @@ describe('writes carry envelopes, never the text', () => {
 
     it('a photo note is created in ONE request with a sealed sidecar', async () => {
         post.mockImplementation(async (_p: string, body: Record<string, string>) => ({ id: 9, title: body.title, created_at: 'x', total_tasks: 0, completed_tasks: 0, body: body.body ?? null, attachments: body.attachments ?? null, trashed_at: null }));
-        const created = await createTaskListWithContent('Holiday', { body: 'beach', refs: [ref('f1')] });
+        const created = await createTaskListWithContent('Holiday', { body: 'beach', refs: [ref(FILE)] });
         expect(post).toHaveBeenCalledTimes(1);
         const sent = post.mock.calls[0][1];
         expect(isEncrypted(sent.title) && isEncrypted(sent.body) && isEncrypted(sent.attachments)).toBe(true);
-        expect(JSON.stringify(sent)).not.toMatch(/Holiday|beach|f1/);
+        // The pattern can fire — over the same fields in the clear it does.
+        expect(JSON.stringify({ title: 'Holiday', body: 'beach', attachments: JSON.stringify([ref(FILE)]) })).toMatch(PLAINTEXT);
+        expect(JSON.stringify(sent)).not.toMatch(PLAINTEXT);
         expect(created.title).toBe('Holiday');
         expect(created.body).toBe('beach');
-        expect(JSON.parse(created.attachments!)).toEqual([ref('f1')]);
+        expect(JSON.parse(created.attachments!)).toEqual([ref(FILE)]);
     });
 });
 

@@ -23,6 +23,25 @@
     cursor: pointer;
 }
 .notes-reminder-row:hover { background: var(--bg-modifier-hover); }
+
+/* The one item a due notification came for. Theme tokens only, never a
+   literal colour, so it survives all eight themes and
+   [data-contrast="high"]; the animation is short and runs twice, because it
+   says "this one" and then gets out of the way. The matching rule for an
+   item row inside the open note is in TaskTree.css (.tt-item.flash), which
+   both front doors load. */
+@keyframes notes-flash {
+    0%   { background: var(--brand-primary); }
+    100% { background: transparent; }
+}
+.notes-reminder-row.flash {
+    animation: notes-flash 1.6s ease-out 2;
+    border-radius: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+    .notes-reminder-row.flash { animation: none; background: var(--bg-modifier-selected); }
+}
+
 .notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
 .notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
 .notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }

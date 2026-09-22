@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom';
 import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
+import { composeModeFor, type ComposeIntent } from '../model/composeIntent';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
 import { DrawingCanvas } from '../../components/DrawingCanvas';
@@ -36,9 +37,24 @@ interface QuickAddProps {
     onDismiss?: () => void;
     /** A parent can force the composer open (the `c` shortcut). */
     openSignal?: number;
+    /**
+     * Open pre-filled, from outside the page: a launcher shortcut, the
+     * quick-settings tile, the home-screen widget, or a share from another
+     * app. Re-seeds whenever `seq` changes, so the same request twice still
+     * re-opens. It NEVER saves — the user presses Done, which is what keeps
+     * a share from another app out of the account on its own.
+     */
+    initial?: ComposeIntent | null;
+    /** Called once this composer has taken `initial`, so the owner can clear
+     *  it. Without this the OTHER mount of QuickAdd (the phone renders both
+     *  the inline card and the sheet; the inline one is only hidden by CSS)
+     *  seeds itself from the same payload the moment the sheet closes — and
+     *  the inline composer SAVES on a click outside, so the shared note was
+     *  created twice. Found by the walk. */
+    onInitialUsed?: () => void;
 }
 
-export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, content }: QuickAddProps) {
+export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, content, initial = null, onInitialUsed }: QuickAddProps) {
     const [open, setOpen] = useState(sheet);
     const [title, setTitle] = useState('');
     const [items, setItems] = useState<string[]>(['']);
@@ -55,11 +71,46 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     useEffect(() => () => { for (const p of picturesRef.current) URL.revokeObjectURL(p.url); }, []);
     const itemRefs = useRef<(HTMLInputElement | null)[]>([]);
     const rootRef = useRef<HTMLDivElement>(null);
+    const cameraBtnRef = useRef<HTMLButtonElement>(null);
     const focusItem = (i: number) => requestAnimationFrame(() => itemRefs.current[i]?.focus());
 
     useEffect(() => {
         if (openSignal > 0) { setOpen(true); focusItem(0); }
     }, [openSignal]);
+
+    // A shortcut, the tile, the widget or a share: open, seeded, on every new
+    // `seq`. A mode this server cannot store degrades to a checklist rather
+    // than rendering a control that does nothing (composeModeFor).
+    const seededSeq = useRef(-1);
+    useEffect(() => {
+        if (!initial || initial.seq === seededSeq.current) return;
+        seededSeq.current = initial.seq;
+        const want = composeModeFor(initial.mode, content);
+        setOpen(true);
+        setMode(want === 'text' ? 'text' : 'list');
+        if (initial.title !== undefined) setTitle(initial.title.slice(0, MAX_TITLE_LENGTH));
+        if (initial.body !== undefined) {
+            // Shared text belongs in a body; on a server with no body field
+            // its lines become the checklist, which is where they would go
+            // if the user had pasted them.
+            if (want === 'text') setBody(initial.body);
+            else {
+                const lines = initial.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 200);
+                setItems(lines.length > 0 ? lines : ['']);
+            }
+        }
+        if (initial.files?.length) addPictures(initial.files);
+        setDrawingOpen(want === 'draw');
+        // The camera cannot be opened for the user: a programmatic click on a
+        // file input needs a user activation, and a launch is not one. The
+        // button is focused instead, so it is one tap away and never dead.
+        if (want === 'photo') requestAnimationFrame(() => cameraBtnRef.current?.focus());
+        else if (want !== 'draw') focusItem(0);
+        onInitialUsed?.();
+        // `content` is read, not depended on: a server-features refetch must
+        // not re-seed a composer the user is already typing in.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [initial]);
 
     const reset = () => {
         setTitle(''); setItems(['']); setBody(''); setMode('list');
@@ -267,7 +318,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                             <input ref={pickRef} type="file" accept="image/*" multiple onChange={onPicked} />
                             {content.camera && (
                                 <>
-                                    <button type="button" className="notes-iconbtn small" aria-label="Take photo" title="Take photo" onClick={() => cameraRef.current?.click()}>
+                                    <button ref={cameraBtnRef} type="button" className="notes-iconbtn small" aria-label="Take photo" title="Take photo" onClick={() => cameraRef.current?.click()}>
                                         <CameraIcon />
                                     </button>
                                     <input ref={cameraRef} type="file" accept="image/*" capture="environment" onChange={onPicked} />

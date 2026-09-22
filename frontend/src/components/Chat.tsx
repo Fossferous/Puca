@@ -3270,8 +3270,8 @@ export function Chat({ onLogout }: ChatProps) {
     // itself, and the handover is a one-slot module — a request nobody is
     // about to read would sit there until some unrelated later open of Tasks
     // spent it and jumped to Reminders out of nowhere.
-    const openRemindersView = () => {
-        if (!(showFriendsPanel && friendsTab === 'tasks')) requestTasksTab('reminders');
+    const openRemindersView = (dueIds: number[] = []) => {
+        if (!(showFriendsPanel && friendsTab === 'tasks')) requestTasksTab('reminders', dueIds);
         openTasksView();
     };
 
@@ -3281,22 +3281,21 @@ export function Chat({ onLogout }: ChatProps) {
     // The handler goes through a ref so the mount-only effect never holds a
     // stale closure. See api/taskReminders.ts for why reminders are
     // client-side (no push transport; content is E2EE).
-    // 'sovereign:open-tasks' stays listened for as well as
-    // 'sovereign:open-reminders': the board is still where a caller that
-    // wants "all my tasks" should land, and a window event costs nothing.
-    const openTasksViewRef = useRef(openTasksView);
-    useEffect(() => { openTasksViewRef.current = openTasksView; });
+    // ONE event name, 'sovereign:open-reminders', settled at the integration
+    // merge: every due-item tap — web, desktop and the Notes phone app —
+    // raises it, and it carries the due ids so the Reminders tab can flash
+    // the one item (api/desktopNotify.ts, notes/native/useNativeReminders).
     const openRemindersViewRef = useRef(openRemindersView);
     useEffect(() => { openRemindersViewRef.current = openRemindersView; });
     useEffect(() => {
         const stopReminders = startTaskReminders();
-        const onOpenTasks = () => openTasksViewRef.current();
-        const onOpenReminders = () => openRemindersViewRef.current();
-        window.addEventListener('sovereign:open-tasks', onOpenTasks);
+        const onOpenReminders = (ev: Event) => {
+            const ids = (ev as CustomEvent).detail?.ids;
+            openRemindersViewRef.current(Array.isArray(ids) ? ids.map(Number) : []);
+        };
         window.addEventListener('sovereign:open-reminders', onOpenReminders);
         return () => {
             stopReminders();
-            window.removeEventListener('sovereign:open-tasks', onOpenTasks);
             window.removeEventListener('sovereign:open-reminders', onOpenReminders);
         };
     }, []);

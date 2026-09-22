@@ -39,11 +39,13 @@ function scopeOf(row: DueRow): { kind: TaskScopeKind; id: number } {
     return { kind: kind as TaskScopeKind, id: Number(id) };
 }
 
-export function TasksReminders({ lists, channels, currentUserId, onOpen }: {
+export function TasksReminders({ lists, channels, currentUserId, onOpen, flashTaskId = null }: {
     lists: TaskList[];
     channels: TasksScopeChannel[];
     currentUserId?: number;
     onOpen: (kind: TaskScopeKind, id: number) => void;
+    /** The one item a due notification named, scrolled to and flashed. */
+    flashTaskId?: number | null;
 }) {
     const now = useHalfMinute();
     const snoozeOn = useTaskFeature('snooze') === true;
@@ -83,6 +85,7 @@ export function TasksReminders({ lists, channels, currentUserId, onOpen }: {
                 groups={groups}
                 now={now}
                 currentUserId={currentUserId}
+                flashTaskId={flashTaskId}
                 onOpen={row => { const s = scopeOf(row); onOpen(s.kind, s.id); }}
                 onToggle={onToggle}
                 onSnooze={snoozeOn ? onSnooze : undefined}

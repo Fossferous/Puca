@@ -89,6 +89,22 @@ Púca's reminders. Anything you do in one is what you see in the other.
   writes its own cache copy, so a second share cannot pull the file out from
   under an app still uploading the first; copies older than 15 minutes go at
   the next share, and signing out removes them all.
+- **Share INTO Púca Notes (Android app).** Púca Notes appears in the phone's
+  share sheet. Send it text, a text file or a picture from any app and the
+  composer opens with that content already in it — a shared text file becomes
+  the note's words, not an attachment — and you still choose the title, add
+  anything else, and press **Done**. Nothing is saved until you do, and what
+  you shared is sealed with your key exactly like anything you type. Being a share target
+  does mean "Púca Notes" is visible in every share sheet on the phone, i.e. it
+  discloses that the app is installed; that is unavoidable if the feature
+  exists at all.
+- **Faster ways in (Android app).** Long-press the app icon for **New note**,
+  **New list** or **Reminders**; add a **quick-settings tile** that opens a new
+  note from the notification shade (account menu → *Add the quick tile*); or
+  put the **home-screen widget** on a home screen for new list / new note /
+  draw / photo. Every one of them carries a single constant word and nothing
+  else — no note titles, no counts — so the launcher, the shade and the home
+  screen learn nothing about your notes.
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable, and it works offline** — a web app manifest lets a browser add
   Notes to the home screen or desktop, and a service worker scoped to
@@ -361,12 +377,85 @@ entry of an id counts (`ReminderPlan.plan`), so each occurrence fires once and
 never re-fires an earlier one. The alarm is re-armed
 after a reboot, an app update, a clock or time-zone change and a change to
 the exact-alarm grant, and a time that passed while the phone was off fires
-at the next arm. Tapping the notification opens Reminders. Just before firing,
+at the next arm. Tapping the notification opens the item's note with that item
+flagged when exactly ONE item is due, and Reminders when more than one is (with
+several, naming one of them would send you to an arbitrary note and hide the
+rest). The only thing that is added to the notification is the item's
+**number** — the same integer the server already holds in clear and already
+sends this phone in the content-free feed. The notification's words are still
+"An item is due", and what the item says is decrypted by the page after the
+tap, never before. The id is removed from the intent as it is read, so a
+rotation cannot replay a tap from hours ago. Just before firing,
 the alarm asks the server once (a few seconds, no retries), so an item
 completed or re-timed on another device since the last look is not
 announced; offline, it fires from what it has. If that check finds the session
 has ended (401), the items the alarm woke up for are still announced — a lost
 session is no reason to swallow a reminder that is already due.
+
+**Share into Notes.** A `SEND` / `SEND_MULTIPLE` filter on the main activity
+makes Púca Notes a share target for text and pictures. What arrives is
+decrypted note content, so the native side copies the shared bytes into
+`cache/share-in/` once, hands the WebView a one-shot payload, erases the
+intent's extras (a rotation re-delivers the same intent — without this the
+composer would re-open with the user's shared text every time), and wipes the
+directory on sign-out. It never reaches the reminder store, a notification or
+logcat, and it is never saved on its own: the composer opens and the user
+presses Done. The payload is capped the way a note is — a title no longer than
+the composer's own limit, at most 12 pictures, a size ceiling per file — and
+each file's type is the one the app resolved itself, not the one the sender
+claimed. The rules live in `ShareIntake.java`, tested off-device.
+
+Three refusals in that file are worth naming, because each one had a way of
+failing quietly:
+
+- **Only a `content://` URI is opened.** A share is a grant; a `file://` URI
+  would be opened with Púca Notes' own uid, which would let any app on the
+  phone name a path inside the app's sandbox and have Notes read it back to
+  the composer. Nothing legitimate sends one — since Android 7 the sender
+  throws for trying.
+- **Only pictures are copied.** The page has exactly one destination for a
+  shared file (the picture list), so a shared `.txt` copied as an attachment
+  would be sealed and stored as a photo no view can render. A shared text file
+  is read into the note's body instead, capped, and only when the sender did
+  not also send text.
+- **`#` and `%` are stripped from a shared name.** The page reads each copy
+  back over the app's own origin, by a URL built from the path: a `#` would
+  start a fragment and a `%` an escape, and the picture would be dropped
+  without a word.
+
+The text extras are read as `CharSequence`, not `String` — an app sharing
+styled or selected text puts a `Spanned` there, and `getStringExtra` answers
+null for one, silently.
+
+On the page side the share **waits for `GET /notes/features`** before it
+decides anything (`model/composeIntent.ts`'s `takeShare`). A share is normally
+a cold start — that is the point of the entry point, the app was not running
+— and the native handoff is a bridge call plus a local file read, while the
+features request is a round trip to the user's own server. Judged at the
+instant the share lands, the answer is still `NO_LIST_FEATURES`: the shared
+picture would be thrown away, the user told this server cannot keep pictures
+when it can, and shared text opened as a checklist. When the server cannot be
+asked at all — offline — the page falls back to what it last knew, so an
+offline share still opens something. A local walk cannot catch this: against
+`127.0.0.1` the features query wins, and the picture check passes for the
+wrong reason, so the case is held open in `notesShareIntake.test.ts` instead.
+
+**Shortcuts, the quick tile and the widget.** Three launcher shortcuts
+(`res/xml/shortcuts.xml`), a quick-settings tile (`NotesTileService`) and a 4×1
+home-screen widget (`NotesWidgetProvider`) all put one constant word in the
+same `notes_nav` extra the notification uses, and the page routes it
+(`routeNativeTarget`). They are **static on purpose**: dynamic shortcuts would
+write decrypted note titles into the launcher's own database, outside the app
+sandbox and outside anything a sign-out can scrub, and a widget's views are
+inflated, drawn and cached by the *launcher* process, where a note title — or
+the information an item count leaks — would sit on a home screen and survive a
+reboot. The widget is never polled (`updatePeriodMillis` 0) because there is
+nothing on it that could go stale. The tile's label is a compile-time constant
+for the same reason the notification's text is a count: the shade is reachable
+over a locked screen on some phones. Tapping the tile on a locked phone asks to
+unlock first, because the composer belongs to a signed-in shell that can show
+decrypted content the moment it mounts. The widget is a fixed dark surface: it
+cannot follow the app's eight themes or `[data-contrast="high"]`.
 
 **Background refresh.** While signed in, the app keeps a copy of the session
 token in its private, backup-excluded storage (`allowBackup=false` plus the
@@ -533,6 +622,13 @@ launch — on **its own channel**:
   in `src/api/mobileOta.ts`) may delay the app but never hold it, and
   `notes/main.tsx` blesses the running bundle first thing, so a bundle that
   never boots is rolled back.
+- The share filter, the shortcuts, the tile and the widget are **native**, so
+  they arrive with a new Púca Notes rather than over the air; `min` in
+  `notes-app/native-min.json` does **not** move for them, because the web layer
+  degrades on an older APK (`notesNative.ts` feature-detects every call) and
+  `scripts/notes-native-min.mjs` records only packages, plugin classes and
+  permissions — it cannot see an intent-filter, a widget or a tile, so that has
+  to be a deliberate judgement rather than a gate.
 - **Native changes** still need a new APK. Every notes manifest carries a
   `native` block: an APK older than `native.min` does not apply the bundle and
   shows *Install the new Púca Notes app* with a Download button to the download
@@ -694,14 +790,32 @@ with its pictures, and only the other items become lines of text.
   client op id yet.
 - **Item text in a reminder or place notification.** It would put decrypted
   note content on the lock screen and in app storage; the phone's background
-  code never holds it. The notification says "An item is due" and opens
-  Reminders.
+  code never holds it. The notification says "An item is due" and opens that
+  item's note (one item due) or Reminders (more than one) — it carries the
+  item's number, never a word of what it says. A **place** notification still
+  opens Reminders whatever it found, because naming the item there would also
+  name where you are.
 - **Done or Snooze buttons on the notification.** The background code cannot
   seal a snooze or read a repeat rule, and a blind "Done" could end a
   repeating item wrongly; tapping opens Reminders instead.
 - **Places that follow the account.** Places stay per app and per device (see
   *The Android app*); syncing them would hand the operator ciphertext of home
   and work coordinates.
+- **Recent notes as launcher shortcuts, and anything data-derived on the quick
+  tile or the home-screen widget.** Google Keep's widget lists note titles;
+  this one cannot. A widget's views are built by Púca Notes but inflated, drawn
+  and cached by the *launcher* process, and a shortcut's label lives in the
+  launcher's own database — both outside this app's sandbox, both surviving a
+  reboot, and neither scrubbed by signing out. Even an item count leaks. The
+  widget shows four fixed labels, the tile one, the shortcuts three.
+- **A share target in the BROWSER.** `public/notes/manifest.webmanifest` has no
+  `share_target` and no `shortcuts` array, so sharing into Notes and the
+  long-press entries are the Android app only. The page has no URL that opens
+  the composer, which is what a PWA shortcut would need.
+- **Opening the camera straight from the widget's Photo button.** A programmatic
+  click on a file input needs a user activation and an app launch is not one,
+  so Chromium refuses it. The target opens the composer with the camera button
+  focused — one tap — rather than a button that appears to do nothing.
 - **A push doorbell for the closed Android app.** An open Notes page has the
   live stream (*Live updates*); a closed app has nothing worth delivering
   over a push, and the hourly refresh is the part that matters.

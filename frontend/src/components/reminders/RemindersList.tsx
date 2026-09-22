@@ -12,7 +12,7 @@
  * notification body, no log (docs/NOTES.md's rule — the server learns when,
  * never what).
  */
-import { type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import './Reminders.css';
 import { formatDueShort } from '../../api/tasks';
 import { type DueRow, type ReminderRowGroups, mayChangeSnooze, remindsSomeoneElse } from '../../api/reminderGroups';
@@ -40,19 +40,28 @@ export interface RemindersListProps {
     extraCount?: number;
     /** Shown when there is nothing at all. */
     empty: ReactNode;
+    /** The one item a due notification came for: its row is scrolled to and
+     *  flashed, so "an item is due" lands on WHICH item. An id only — the
+     *  text is decrypted in the page, after the tap, and never travels. */
+    flashTaskId?: number | null;
 }
 
-function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze }: {
+function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, flash = false }: {
     row: DueRow;
     now: number;
     currentUserId?: number;
     onOpen: (row: DueRow) => void;
     onToggle: (row: DueRow) => void;
     onSnooze?: (row: DueRow, until: number | null) => void;
+    flash?: boolean;
 }) {
     const task = row.source.task;
+    const ref = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (flash) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, [flash]);
     return (
-        <div className="notes-reminder-row" role="button" tabIndex={0}
+        <div ref={ref} id={`notes-reminder-${task.id}`} className={`notes-reminder-row${flash ? ' flash' : ''}`} role="button" tabIndex={0}
             onClick={() => onOpen(row)}
             onKeyDown={e => { if (e.key === 'Enter') onOpen(row); }}
         >
@@ -79,11 +88,11 @@ function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze }: {
     );
 }
 
-export function RemindersList({ groups, now, currentUserId, onOpen, onToggle, onSnooze, header, middle, extraCount = 0, empty }: RemindersListProps) {
+export function RemindersList({ groups, now, currentUserId, onOpen, onToggle, onSnooze, header, middle, extraCount = 0, empty, flashTaskId = null }: RemindersListProps) {
     const total = groups.overdue.length + groups.today.length + groups.upcoming.length + extraCount;
     const rows = (list: DueRow[]) => list.map(row => (
         <Row key={`${row.source.noteKey}/${row.source.task.id}`} row={row} now={now} currentUserId={currentUserId}
-            onOpen={onOpen} onToggle={onToggle} onSnooze={onSnooze} />
+            onOpen={onOpen} onToggle={onToggle} onSnooze={onSnooze} flash={row.source.task.id === flashTaskId} />
     ));
     return (
         <div className="notes-reminders">

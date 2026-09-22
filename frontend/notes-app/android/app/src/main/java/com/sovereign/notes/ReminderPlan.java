@@ -107,6 +107,18 @@ public final class ReminderPlan {
         return r.nextAtMs;
     }
 
+    /**
+     * The one item a due notification may point at: the single id that is due
+     * now, else -1. With two or more the notification names nothing and
+     * behaves exactly as it always has - a tap opens Reminders.
+     *
+     * Deliberately NOT "the first id": with several due, naming one of them
+     * would send the user to an arbitrary note and leave the rest unseen.
+     */
+    public static long soleDue(Result r) {
+        return r != null && r.dueNow.size() == 1 ? r.dueNow.get(0) : -1L;
+    }
+
     /** "An item is due" / "3 items are due" — a count, never content. */
     public static String dueText(int count) {
         return count == 1 ? "An item is due" : count + " items are due";

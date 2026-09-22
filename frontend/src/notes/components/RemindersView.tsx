@@ -36,6 +36,10 @@ interface RemindersViewProps {
     placeItems?: PlaceItem[];
     /** The server stores snoozes (taskFeatures). */
     canSnooze?: boolean;
+    /** The one item a due notification came for: its row is scrolled to and
+     *  flashed, so "an item is due" lands on WHICH item. An id only — the
+     *  text is decrypted here, in the page, after the tap. */
+    flashTaskId?: number | null;
 }
 
 /** One note's item as the shared list's source. The permission answers are
@@ -52,7 +56,7 @@ function sourceOf(item: DueItem, me: number | undefined): CalendarSource {
     };
 }
 
-export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, nativeBanner, placeItems = [], canSnooze = false }: RemindersViewProps) {
+export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, nativeBanner, placeItems = [], canSnooze = false, flashTaskId = null }: RemindersViewProps) {
     const me = currentUserIdFromToken() ?? undefined;
     // The note each row belongs to, so a click, a tick and a snooze can name
     // it again: the shared list only carries the note KEY.
@@ -71,6 +75,7 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
         <RemindersList
             groups={rows}
             now={now}
+            flashTaskId={flashTaskId}
             currentUserId={me}
             extraCount={placeItems.length}
             onOpen={row => { const c = noteOf(row); if (c) onOpen(c); }}

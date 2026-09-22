@@ -61,7 +61,7 @@ import {
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { invalidateTaskScope } from './taskSources';
-import { consumeTasksTab, peekTasksTab } from '../api/tasksViewIntent';
+import { consumeTasksTab, peekTasksIds, peekTasksTab, soleDueId } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
 import { useScheduleSetter, useSnoozeSetter } from './schedule/useScheduleSetter';
@@ -172,6 +172,9 @@ export function TasksView() {
     // something asked for a tab on the way in (a due-item notification asks
     // for Reminders, api/tasksViewIntent.ts).
     const [selected, setSelected] = useState<Selected>(() => (peekTasksTab() === 'reminders' ? { kind: 'reminders', id: 0 } : null));
+    // The one due item the notification named, flashed in the Reminders list.
+    // A PEEK for the same reason the tab is one (StrictMode renders twice).
+    const [flashTaskId, setFlashTaskId] = useState<number | null>(() => soleDueId(peekTasksIds()));
     const [lists, setLists] = useState<TaskList[]>([]);
     const [prefs, setPrefs] = useState<TaskTabPref[]>([]);
     const [tasks, setTasks] = useState<Task[]>([]);
@@ -212,8 +215,13 @@ export function TasksView() {
         // leaving it unspent would make some later, unrelated mount of this
         // view jump to Reminders out of nowhere.
         consumeTasksTab();
-        const onOpenReminders = () => {
+        const onOpenReminders = (ev: Event) => {
             consumeTasksTab();
+            // The ids ride on the one event both front doors use
+            // ('sovereign:open-reminders'): exactly one names an item, and
+            // its row is scrolled to and flashed. Drop the detail here and
+            // the tap quietly degrades to opening the plain list.
+            setFlashTaskId(soleDueId((ev as CustomEvent).detail?.ids));
             setSelected({ kind: 'reminders', id: 0 });
         };
         window.addEventListener('sovereign:open-reminders', onOpenReminders);
@@ -940,6 +948,7 @@ export function TasksView() {
                         lists={lists}
                         channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
                         currentUserId={currentUserId}
+                        flashTaskId={flashTaskId}
                         onOpen={(kind, id) => setSelected({ kind, id })}
                     />
                 </div>

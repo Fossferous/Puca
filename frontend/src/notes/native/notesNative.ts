@@ -41,9 +41,33 @@ interface NotesNativePlugin {
     requestIgnoreBatteryOptimizations(): Promise<void>;
     shareText(opts: { filename: string; mime: string; text: string; subject?: string }): Promise<{ ok: boolean; reason?: string }>;
     addToPhoneCalendar(opts: { title: string; beginMs: number; endMs?: number; allDay?: boolean; location?: string }): Promise<{ ok: boolean; reason?: string }>;
-    consumeLaunchNav(): Promise<{ target: string | null }>;
-    addListener(eventName: 'navigate', listener: (data: { target: string }) => void): Promise<PluginListenerHandle>;
+    consumeLaunchNav(): Promise<{ target: string | null; item?: number | null }>;
+    consumeLaunchShare(): Promise<NativeSharedPayload>;
+    requestAddTile(): Promise<{ ok: boolean; reason?: string }>;
+    addListener(eventName: 'navigate', listener: (data: { target: string; item?: number | null }) => void): Promise<PluginListenerHandle>;
+    addListener(eventName: 'share', listener: () => void): Promise<PluginListenerHandle>;
 }
+
+/** One picture another app shared in, already copied out of its content://
+ *  URI by the native side. `url` is the app's OWN origin
+ *  (https://localhost/_capacitor_file_/…), so fetching it needs no CSP
+ *  change — `connect-src 'self'` already covers it. */
+export interface NativeSharedFile {
+    url: string | null;
+    name: string;
+    mime: string;
+    size: number;
+}
+
+/** What another app shared into Notes. Decrypted note content: it is handed
+ *  over ONCE and the native side erases its copy (NotesNativePlugin). */
+export interface NativeSharedPayload {
+    text: string | null;
+    subject: string | null;
+    files: NativeSharedFile[];
+}
+
+const NOTHING_SHARED: NativeSharedPayload = { text: null, subject: null, files: [] };
 
 const Native = registerPlugin<NotesNativePlugin>('NotesNative');
 
@@ -137,17 +161,34 @@ export async function addToPhoneCalendar(opts: { title: string; beginMs: number;
     }, UNSUPPORTED);
 }
 
-/** The nav target a notification tap launched the app with (one-shot). */
-export async function consumeNativeLaunchNav(): Promise<string | null> {
-    return (await call(() => Native.consumeLaunchNav(), { target: null })).target;
+/** Where a launch came from: a nav target and, when a due notification
+ *  named the ONE item that came due, its id. */
+export interface NativeLaunchNav {
+    target: string | null;
+    /** The single due item's id, or null. Normalised HERE, in one place, so
+     *  an older APK (no field at all), a 0 and a -1 are the same thing to
+     *  every caller. */
+    item: number | null;
 }
 
-/** A notification tap while the app runs. Returns an unsubscribe. */
-export function onNativeNavigate(cb: (target: string) => void): () => void {
+function normaliseItem(raw: unknown): number | null {
+    return typeof raw === 'number' && raw > 0 ? raw : null;
+}
+
+/** The nav target a notification, shortcut, tile or widget tap launched the
+ *  app with (one-shot). */
+export async function consumeNativeLaunchNav(): Promise<NativeLaunchNav> {
+    const r = await call(() => Native.consumeLaunchNav(), { target: null } as { target: string | null; item?: number | null });
+    return { target: r.target, item: normaliseItem(r.item) };
+}
+
+/** A notification (or shortcut, tile, widget) tap while the app runs.
+ *  Returns an unsubscribe. */
+export function onNativeNavigate(cb: (nav: NativeLaunchNav) => void): () => void {
     if (!notesNativeAvailable()) return () => {};
     let handle: PluginListenerHandle | null = null;
     let gone = false;
-    void Native.addListener('navigate', d => cb(d.target)).then(h => {
+    void Native.addListener('navigate', d => cb({ target: d.target, item: normaliseItem(d.item) })).then(h => {
         if (gone) void h.remove();
         else handle = h;
     }).catch(() => { /* older APK */ });
@@ -155,6 +196,70 @@ export function onNativeNavigate(cb: (target: string) => void): () => void {
         gone = true;
         if (handle) void handle.remove();
     };
+}
+
+// --- share INTO Notes -----------------------------------------------------------
+
+/** What another app shared, once. An older APK has no such method, so `call`
+ *  answers the empty payload and the page behaves exactly as it does today. */
+export async function consumeNativeLaunchShare(): Promise<NativeSharedPayload> {
+    const r = await call(() => Native.consumeLaunchShare(), NOTHING_SHARED);
+    return {
+        text: typeof r?.text === 'string' && r.text ? r.text : null,
+        subject: typeof r?.subject === 'string' && r.subject ? r.subject : null,
+        files: Array.isArray(r?.files) ? r.files : [],
+    };
+}
+
+/** A share that arrived while the app was already up. The event carries NO
+ *  content — it is a ping, and the page then asks. */
+export function onNativeShare(cb: () => void): () => void {
+    if (!notesNativeAvailable()) return () => {};
+    let handle: PluginListenerHandle | null = null;
+    let gone = false;
+    void Native.addListener('share', () => cb()).then(h => {
+        if (gone) void h.remove();
+        else handle = h;
+    }).catch(() => { /* older APK */ });
+    return () => {
+        gone = true;
+        if (handle) void handle.remove();
+    };
+}
+
+/**
+ * Read the shared pictures into Files the composer can hold. The bytes come
+ * over the app's own origin rather than base64 across the bridge, which would
+ * copy a whole photo through the JSON channel. A file that cannot be read is
+ * dropped: the rest of the share still arrives.
+ *
+ * PICTURES ONLY, and the APK agrees (ShareIntake.acceptsPicture — a shared
+ * .txt is read into the body instead). The filter stays because the page has
+ * exactly one place to put a shared file: `addPictures`, which object-URLs it
+ * and seals it as a photo. Anything that is not a picture would be stored as
+ * one, and the note would show a broken image for good.
+ */
+export async function fetchSharedFiles(payload: NativeSharedPayload): Promise<File[]> {
+    const out: File[] = [];
+    for (const f of payload.files) {
+        if (!f?.url) continue;
+        if (!(f.mime ?? '').toLowerCase().startsWith('image/')) continue;
+        try {
+            const res = await fetch(f.url);
+            if (!res.ok) continue;
+            const blob = await res.blob();
+            out.push(new File([blob], f.name || 'shared', { type: f.mime || blob.type || 'application/octet-stream' }));
+        } catch {
+            // A copy already pruned, or a bridge hiccup: skip this one.
+        }
+    }
+    return out;
+}
+
+/** Ask Android (13+) to offer "add the Púca Notes tile". false = the user
+ *  must add it from the shade's own edit screen. */
+export async function requestNativeAddTile(): Promise<boolean> {
+    return (await call(() => Native.requestAddTile(), { ok: false })).ok === true;
 }
 
 function claims(token: string | null): { sub: string | null; exp: number } {

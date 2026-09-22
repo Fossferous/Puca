@@ -287,7 +287,10 @@ export function notifyNewMessage(opts: {
  * no other surface, and it is the one notification whose timing is the point.
  * Clicking it (web path) raises the app and opens the Tasks view on its
  * Reminders tab — the grouped list of what is due — via the
- * `sovereign:open-reminders` event Chat listens for.
+ * `sovereign:open-reminders` event Chat listens for. The event carries the
+ * due ids, and Púca Notes opens that one item's note when exactly one is due
+ * (notes/native/useNativeReminders, which also carries the merge note about
+ * this event's name). Drop the detail and that tap quietly stops working.
  */
 export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
     if (count <= 0) return;
@@ -352,7 +355,9 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
         const n = new Notification('Púca Tasks', { body, tag: 'tasks-due' });
         n.onclick = () => {
             void focusApp();
-            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders')); } catch { /* non-DOM env */ }
+            // The ids it already holds ride along: Púca Notes opens the
+            // one item when exactly one is due (Chat.tsx ignores `detail`).
+            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
             n.close();
         };
     } catch {

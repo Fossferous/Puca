@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { loadSettings, saveSettings } from '../../components/settingsStore';
 import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon, UploadIcon } from '../../components/Icons';
 import { NotesLocationSettings } from '../native/NotesLocationSettings';
+import { NotesTileSetting } from '../native/NotesTileSetting';
 import { isMobile } from '../../api/platform';
 import { type NotesSortMode } from '../model/notesPrefs';
 import { NotesUpdateMenu } from './NotesUpdateMenu';
@@ -71,6 +72,7 @@ export function AccountMenu({ username, sort, onSort, onExportMarkdown, onExport
                 </select>
             </div>
             <NotesLocationSettings />
+            <NotesTileSetting />
             <div className="notes-menu-sep" />
             {/* In the Android app these write to Documents/Puca Notes (an
                 Android WebView ignores the download attribute, so the browser

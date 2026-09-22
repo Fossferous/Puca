@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Quick capture: 4x1 cells, horizontally resizable, NEVER polled
+     (updatePeriodMillis 0 - there is no content to go stale, because there is
+     no content). targetCellWidth / previewLayout / description are API 31+
+     and ignored below. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="250dp"
+    android:minHeight="60dp"
+    android:targetCellWidth="4"
+    android:targetCellHeight="1"
+    android:maxResizeHeight="120dp"
+    android:resizeMode="horizontal"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/notes_widget"
+    android:previewLayout="@layout/notes_widget"
+    android:description="@string/widget_description"
+    android:widgetCategory="home_screen" />

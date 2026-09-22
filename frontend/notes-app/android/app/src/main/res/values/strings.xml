@@ -4,4 +4,22 @@
     <string name="title_activity_main">Púca Notes</string>
     <string name="package_name">com.sovereign.notes</string>
     <string name="custom_url_scheme">com.sovereign.notes</string>
+
+    <!-- Launcher shortcuts, the quick-settings tile and the home-screen
+         widget. Every one of these is a CONSTANT: none is ever derived from a
+         note, a count or anything else the launcher or the shade could then
+         show on a locked phone. -->
+    <string name="shortcut_new_note_short">New note</string>
+    <string name="shortcut_new_note_long">Write a new note</string>
+    <string name="shortcut_new_list_short">New list</string>
+    <string name="shortcut_new_list_long">Start a new checklist</string>
+    <string name="shortcut_reminders_short">Reminders</string>
+    <string name="shortcut_reminders_long">Open reminders</string>
+    <string name="tile_new_note">New note</string>
+    <string name="widget_label">Púca Notes</string>
+    <string name="widget_description">Start a note, a list, a drawing or a photo. Shows nothing from your notes.</string>
+    <string name="widget_list">List</string>
+    <string name="widget_note">Note</string>
+    <string name="widget_draw">Draw</string>
+    <string name="widget_photo">Photo</string>
 </resources>

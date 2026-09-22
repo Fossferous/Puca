@@ -54,6 +54,7 @@ public class ReminderReceiver extends BroadcastReceiver {
      *  `outcome` what that check returned (see the class comment). */
     static void fireDue(Context ctx, List<ReminderPlan.Entry> before, int outcome) {
         int count;
+        long sole;
         synchronized (ReminderStore.LOCK) {
             long now = System.currentTimeMillis();
             List<ReminderPlan.Entry> entries =
@@ -61,11 +62,13 @@ public class ReminderReceiver extends BroadcastReceiver {
             Map<String, String> fired = ReminderStore.fired(ctx);
             ReminderPlan.Result r = ReminderPlan.plan(entries, fired, now);
             count = r.dueNow.size();
+            // The one id a tap may open, or -1 (ReminderPlan.soleDue).
+            sole = ReminderPlan.soleDue(r);
             ReminderStore.setFired(ctx, r.prunedFired);
         }
         // A count and the check's outcome only — never an id, a time or a mark.
         android.util.Log.i("NotesReminders", "alarm: " + count + " due (check " + outcome + ")");
-        if (count > 0) NotesNotifier.postDue(ctx, count);
+        if (count > 0) NotesNotifier.postDue(ctx, count, sole);
         ReminderAlarms.arm(ctx);
     }
 }
