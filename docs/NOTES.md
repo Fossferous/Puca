@@ -83,7 +83,13 @@ Púca's reminders. Anything you do in one is what you see in the other.
   a 30-second staleness window, while a list tab keeps its items in its own
   state and writes straight to the API — so every writer outside those two
   tabs calls `invalidateTaskScope` once the server has answered, or a date set
-  in a list is missing from Reminders for up to half a minute. So this is not
+  in a list is missing from Reminders for up to half a minute. That is all of
+  them: the Tasks view's own due and completion writes, the shared date/repeat
+  and snooze setters, and `ChecklistBody` — the channel side panel, a
+  checklist channel, the All-checklists board and Notes-to-self. The socket
+  does not cover that last one either way: a checklist broadcast excludes the
+  member who made the change, and a personal list has no channel to broadcast
+  on at all. So this is not
   a Notes-only surface, and the
   "Reminds whoever set it" line matters more there, because Púca's rows
   include items every other member set.

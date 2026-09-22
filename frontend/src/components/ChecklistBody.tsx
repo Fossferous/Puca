@@ -7,6 +7,7 @@
  * All items are E2EE under the channel group key (see api/tasks.ts).
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
     type Task, type TaskAttachmentRef,
     listTasks, createTask, updateChannelTask, updateChannelTaskAttachments,
@@ -25,6 +26,7 @@ import { PERM, hasPerm } from '../api/permissionBits';
 import { ApiError } from '../api/client';
 import { pushMessageToast } from './messageToastBus';
 import { heldOpKey } from '../api/opKey';
+import { invalidateTaskScope } from './taskSources';
 import { TaskTree } from './TaskTree';
 
 interface ChecklistBodyProps {
@@ -60,6 +62,16 @@ export function ChecklistBody({
     const [newTask, setNewTask] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const isChannel = channelId !== undefined;
+    // This body is the THIRD writer of a task's timing and completion on the
+    // Púca page (the side panel, a checklist channel, the All-checklists
+    // board and the personal Notes-to-self list all render it), and it keeps
+    // its items in component state. The pinned Calendar and Reminders tabs
+    // read the same rows through useTaskSources, a cache with a 30 s
+    // staleTime that nothing here writes — and the socket cannot cover it:
+    // broadcast_checklist EXCLUDES the actor, and a personal list has no
+    // channel to broadcast on at all. So every write below says so itself
+    // (taskSources.invalidateTaskScope).
+    const qc = useQueryClient();
 
     // Surface every post-load task change to the embedder (progress counts).
     // Ref-read so a new callback identity doesn't re-run the effect; gated on
@@ -144,6 +156,10 @@ export function ChecklistBody({
         setTasks(plan.next);
         try {
             await plan.send();
+            // A ticked item leaves Reminders, and a repeating one reappears
+            // at its next time: the dated tabs read a cache this body does
+            // not write.
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to update task:', err);
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
@@ -213,6 +229,9 @@ export function ChecklistBody({
             // due_at is plaintext metadata on both scopes ('' clears).
             await updateTask(task.id, { due_at: dueAt ?? '' });
             pokeTaskReminders(); // arm a near deadline now, not at the next poll
+            // ...and tell the Calendar and Reminders tabs, which read a cache
+            // this body does not write to (taskSources).
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to set due time:', err);
             setTasks(original);
