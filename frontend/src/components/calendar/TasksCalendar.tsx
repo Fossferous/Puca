@@ -5,8 +5,8 @@
  * panel-system work. Channel checklists stay live through the socket's
  * ChecklistUpdate, like their tabs.
  */
-import { useEffect, useRef, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { Calendar, type CalendarAction, type CalView } from './Calendar';
 import { IcsImportDialog } from './IcsImportDialog';
 import { CalendarAddSheet, type AddSheetResult } from './CalendarAddSheet';
@@ -27,6 +27,7 @@ import { currentIcsUid } from '../../api/icsUid';
 import { deliverIcs } from '../../api/icsDelivery';
 import { toastRefusal } from '../../api/refusalToast';
 import { pushMessageToast } from '../messageToastBus';
+import { heldOpKey } from '../../api/opKey';
 import { localDayKey } from '../../utils/calendarMath';
 
 /** The Calendar tab's channels — the shape every dated view takes. */
@@ -62,6 +63,8 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     const [editing, setEditing] = useState<{ kind: 'list' | 'channel'; scope: number; taskId: number } | null>(null);
     const [importing, setImporting] = useState<{ name: string; parsed: IcsParseResult } | null>(null);
     const fileRef = useRef<HTMLInputElement>(null);
+    // One create key per intent, held across a retry by hand (api/opKey.ts).
+    const addKey = useRef(heldOpKey());
 
     // The same read the Reminders tab makes, under the same keys.
     const { sources, tasksIn, refetch: refetchScope } = useTaskSources(lists, channels, currentUserId);
@@ -116,8 +119,12 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
         try {
             if (!r.target) return false;
             const [kind, id] = r.target.split(':');
-            if (kind === 'list') await createListTask(Number(id), r.title, undefined, timing);
-            else await createTask(Number(id), r.title, undefined, timing);
+            // Held across a retry by hand: the add sheet keeps the typed
+            // title when a create fails (api/opKey.ts).
+            const opKey = addKey.current.keyFor(`${r.target}\u0000${r.title}`);
+            if (kind === 'list') await createListTask(Number(id), r.title, undefined, timing, opKey);
+            else await createTask(Number(id), r.title, undefined, timing, opKey);
+            addKey.current.landed();
             setCalendarPrefs({ lastNote: r.target });
             pokeTaskReminders();
             await qc.invalidateQueries({ queryKey: key(kind as 'list' | 'channel', Number(id)) });

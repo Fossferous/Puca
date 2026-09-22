@@ -50,6 +50,20 @@ one-line summary; this file is the full story. Versions follow
   when, never what, and *Keep the time private from the server* hides even
   that. A note in the trash stays quiet, and gets its reminder back if you
   restore it.
+- **Two devices, one note.** If a note's text, title or pictures were changed
+  somewhere else while you were writing, Púca Notes now tells you and shows
+  you both copies, with *Keep mine* and *Use theirs* — instead of quietly
+  replacing one with the other. Your words stay in the field until you
+  choose, nothing is saved while the question is on screen, and a title you
+  are typing is no longer wiped by a rename arriving from another device.
+  Ticking an item or reordering a note is never treated as a clash.
+- **A note or item created on a flaky connection can no longer appear twice.**
+  When Púca Notes sends a new note or item and the answer never arrives, it
+  sends it again — and the server now recognises the repeat and gives back
+  the note it already made, instead of making a second one. Duplicates used
+  to turn up with no way to tell which copy held your later edits. Púca's own
+  Tasks view and its calendar do the same when you press the button again
+  after a create fails.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

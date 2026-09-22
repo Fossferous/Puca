@@ -103,6 +103,50 @@
 .nb-text::placeholder { color: var(--text-faint); }
 .nb-status { font-size: 12px; color: var(--text-muted); }
 .nb-status.failed { color: var(--text-danger); }
+/* Two devices, one note: the refusal, the other copy, and the choice. It
+   owns its own layout rather than borrowing the grid's .notes-status-choice,
+   because this field is also Púca's Tasks view, which never loads notes'
+   sync.css. Wraps at phone width; the buttons keep full tap targets there. */
+.nb-conflict {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px;
+    margin-top: 4px;
+    border: 1px solid var(--text-danger);
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.45;
+}
+.nb-conflict-text { flex: 1 1 220px; min-width: 0; }
+.nb-conflict-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.nb-conflict-actions button {
+    border: 1px solid var(--border-subtle, currentColor);
+    border-radius: 4px;
+    background: none;
+    color: var(--brand-primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 10px;
+}
+@media (pointer: coarse) {
+    .nb-conflict-actions button { min-height: 44px; min-width: 44px; padding: 6px 14px; font-size: 16px; }
+}
+.nb-conflict svg { vertical-align: -2px; margin-right: 4px; }
+.nb-theirs {
+    display: block;
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.12));
+    color: var(--text-normal);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 8.7em;
+    overflow-y: auto;
+}
 .nb-retry {
     border: none;
     background: none;

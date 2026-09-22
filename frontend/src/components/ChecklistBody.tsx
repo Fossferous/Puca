@@ -24,6 +24,7 @@ import { canEditTask } from '../api/tasks';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { ApiError } from '../api/client';
 import { pushMessageToast } from './messageToastBus';
+import { heldOpKey } from '../api/opKey';
 import { TaskTree } from './TaskTree';
 
 interface ChecklistBodyProps {
@@ -66,6 +67,8 @@ export function ChecklistBody({
     const onChangedRef = useRef(onTasksChanged);
     useEffect(() => { onChangedRef.current = onTasksChanged; });
     const loadedOnce = useRef(false);
+    // One create key per intent, held across the user's own retries.
+    const itemKey = useRef(heldOpKey());
     useEffect(() => {
         if (loadedOnce.current) onChangedRef.current?.(tasks);
     }, [tasks]);
@@ -101,8 +104,17 @@ export function ChecklistBody({
         };
     }, [isChannel, channelId, subscribeRoom, loadTasks]);
 
-    const addItem = (description: string, parentId?: number) =>
-        isChannel ? createTask(channelId!, description, parentId) : createListTask(listId!, description, parentId);
+    // One key per intent, held across the user's own retries (api/opKey.ts):
+    // this form has no automatic one, so a failed create is re-sent by hand
+    // and must not be able to make a second item.
+    const addItem = async (description: string, parentId?: number) => {
+        const key = itemKey.current.keyFor(`${isChannel ? 'c' : 'l'}${isChannel ? channelId : listId}\u0000${parentId ?? ''}\u0000${description}`);
+        const created = isChannel
+            ? await createTask(channelId!, description, parentId, undefined, key)
+            : await createListTask(listId!, description, parentId, undefined, key);
+        itemKey.current.landed();
+        return created;
+    };
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();

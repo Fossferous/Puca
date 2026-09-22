@@ -107,6 +107,9 @@ export interface NoteSource {
      *  Absent on a server without them, null when the note does not remind. */
     dueAt?: string | null;
     schedule?: string | null;
+    /** The revision of `body`/`title`/`noteAttachments` (069+ servers,
+     *  personal lists only): what an edit of them names as its base. */
+    contentRev?: number;
 }
 
 /** Everything one card renders from. */
@@ -166,6 +169,7 @@ export function buildNoteCards(
             schedule: s.schedule,
             // The newest of the list's own stamp and its items' (notesTiming).
             updatedAt: noteUpdatedAt(s.updatedAt, tasks),
+            contentRev: s.contentRev,
             key,
             tasks,
             pinned: isFavoriteTab(prefs, { kind: s.ref.kind, id: s.ref.id }),

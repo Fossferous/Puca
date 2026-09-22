@@ -1085,6 +1085,20 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(days) = list_content::trash_retention_days() {
                     list_content::purge_expired_trash(&pool, days).await;
                 }
+                // Púca Notes' create keys (migration 070): the server forgets
+                // that a create happened once no retry could still arrive.
+                // Only the key row goes — never the note it made.
+                if let Some(hours) = retention::retention_hours(
+                    "NOTES_OP_KEY_RETENTION_HOURS",
+                    retention::OP_KEY_RETENTION_HOURS_DEFAULT,
+                ) {
+                    let _ = sqlx::query(
+                        "DELETE FROM task_create_keys WHERE created_at < NOW() - make_interval(hours => $1::int)",
+                    )
+                    .bind(hours as i32)
+                    .execute(&pool)
+                    .await;
+                }
                 if let Some(days) = retention::retention_days("AUDIT_RETENTION_DAYS", retention::AUDIT_RETENTION_DAYS_DEFAULT) {
                     let _ = sqlx::query(
                         "DELETE FROM audit_log WHERE created_at < NOW() - make_interval(days => $1::int)",

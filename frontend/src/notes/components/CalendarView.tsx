@@ -305,8 +305,8 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
                     parsed={importing.parsed}
                     targets={importTargets}
                     io={{
-                        createList: title => createTaskList(title),
-                        createTask: (listId, text, parentId, timing) => createListTask(listId, text, parentId, timing),
+                        createList: (title, opKey) => createTaskList(title, opKey),
+                        createTask: (listId, text, parentId, timing, opKey) => createListTask(listId, text, parentId, timing, opKey),
                         sleep: ms => new Promise(r => setTimeout(r, ms)),
                     }}
                     onClose={() => setImporting(null)}

@@ -17,6 +17,7 @@ import { ApiError } from './client';
 import { type IcsImportItem } from './ics';
 import { deriveDueAt, parseSchedule, serializeSchedule } from './taskSchedule';
 import { type NewTaskTiming, type Task } from './tasks';
+import { newOpKey } from './opKey';
 
 export const PACE_MS = 50;
 /** An .ics bigger than this is refused before it is parsed. */
@@ -39,8 +40,12 @@ const MAX_RETRIES = 6;
 export const MAX_RETRY_WAIT_MS = 60_000;
 
 export interface ImportIO {
-    createList: (title: string) => Promise<{ id: number }>;
-    createTask: (listId: number, text: string, parentId?: number, timing?: NewTaskTiming) => Promise<{ id: number }>;
+    /** `opKey` is this create's random id (api/opKey.ts). It is minted
+     *  OUTSIDE withRetry, so every attempt at one create carries the same
+     *  one and a retry after a lost answer cannot import the same event
+     *  twice. */
+    createList: (title: string, opKey?: string) => Promise<{ id: number }>;
+    createTask: (listId: number, text: string, parentId?: number, timing?: NewTaskTiming, opKey?: string) => Promise<{ id: number }>;
     sleep: (ms: number) => Promise<void>;
 }
 
@@ -122,7 +127,8 @@ export async function runImport(
         if (last < 0 || (state.listCounts[last] ?? 0) + need > MAX_PER_LIST) {
             const n = state.listIds.length;
             const title = n === 0 ? target.title : `${target.title} (${n + 1})`;
-            const l = await withRetry(() => io.createList(title));
+            const listKey = newOpKey();
+            const l = await withRetry(() => io.createList(title, listKey));
             state.listIds.push(l.id);
             state.listCounts.push(0);
             await io.sleep(PACE_MS);
@@ -131,7 +137,8 @@ export async function runImport(
     };
 
     const addDescription = async (it: IcsImportItem, pending: { parentId: number; listId: number }) => {
-        await withRetry(() => io.createTask(pending.listId, it.description!, pending.parentId));
+        const descKey = newOpKey();
+        await withRetry(() => io.createTask(pending.listId, it.description!, pending.parentId, undefined, descKey));
         bump(pending.listId);
         state.pendingDescription = undefined;
         await io.sleep(PACE_MS);
@@ -158,7 +165,8 @@ export async function runImport(
             const need = it.description ? 2 : 1;
             const listId = await currentList(need);
             const schedule = serializeSchedule(it.schedule);
-            const created = await withRetry(() => io.createTask(listId, it.summary, undefined, { schedule, dueAt: deriveDueAt(it.schedule, opts.nowMs) }));
+            const itemKey = newOpKey();
+            const created = await withRetry(() => io.createTask(listId, it.summary, undefined, { schedule, dueAt: deriveDueAt(it.schedule, opts.nowMs) }, itemKey));
             bump(listId);
             await io.sleep(PACE_MS);
             if (it.description) {

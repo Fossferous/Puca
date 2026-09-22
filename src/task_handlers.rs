@@ -52,6 +52,138 @@ fn broadcast_checklist(state: &AppState, channel_id: Option<i64>, exclude: i64) 
     }
 }
 
+/// Idempotent creates (migration 070).
+///
+/// A create may carry `op_key`: a RANDOM id the client made once, when the
+/// user acted, and repeats on every retry. The server claims it in the same
+/// transaction as the insert; a replay finds the key taken and is answered
+/// with the row that create already made, so a lost response can no longer
+/// turn one note into two.
+///
+/// THE KEY IS NEVER DERIVED FROM CONTENT. A digest of a title or an item
+/// would be a stable fingerprint the server could correlate across notes and
+/// accounts. This shape check CANNOT tell a random id from a hex SHA-256
+/// (which is 64 url-safe characters and passes), so the rule lives with the
+/// client that mints the key and is pinned by its tests; here we only keep
+/// the value a short, indexable identifier. It is never logged.
+fn validate_op_key(key: &str) -> Result<(), (StatusCode, &'static str)> {
+    let ok = (16..=64).contains(&key.len())
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if ok {
+        Ok(())
+    } else {
+        Err((StatusCode::BAD_REQUEST, "Bad create key"))
+    }
+}
+
+/// Claim `key` for this user inside `tx`, returning the id the create that
+/// first used it made, THE SCOPE it was made in, and whether THIS call is
+/// that first create.
+///
+/// `DO UPDATE` rather than `DO NOTHING` on purpose: DO NOTHING returns no row
+/// when a CONCURRENT transaction holds the key uncommitted, leaving the loser
+/// with neither an insert nor an id. DO UPDATE takes the row lock and waits
+/// for the winner, then reads its `created_id`. `xmax = 0` is true only for a
+/// row this statement inserted.
+///
+/// The scope comes back because `created_id` alone does not identify a row:
+/// `task_lists.id` and `channel_tasks.id` are independent sequences, so a key
+/// first spent on a note and then replayed on an item names an id that CAN
+/// exist in the other table. Without comparing the scope, the caller's
+/// "wrong scope" refusal would only be an accident of those two id spaces not
+/// overlapping on this particular database.
+async fn claim_op_key(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i64,
+    key: &str,
+    scope: &str,
+    created_id: i64,
+) -> Result<(i64, String, bool), sqlx::Error> {
+    sqlx::query_as(
+        "INSERT INTO task_create_keys (user_id, op_key, scope, created_id) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (user_id, op_key) DO UPDATE SET op_key = EXCLUDED.op_key \
+         RETURNING created_id, scope, (xmax = 0) AS inserted",
+    )
+    .bind(user_id)
+    .bind(key)
+    .bind(scope)
+    .bind(created_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// Is this key already spent, and on what? `Some((created_id, scope))` for a
+/// key whose create has COMMITTED; None for one this server has never seen
+/// (or one still uncommitted in another transaction, which `claim_op_key`
+/// then settles properly).
+///
+/// Read before the create's own checks so that a REPLAY is answered rather
+/// than re-validated: the request it repeats was validated when it landed,
+/// and the state it is judged against has moved on since — most sharply the
+/// per-checklist cap, which COUNTS the very item the key made. This is a
+/// short-circuit only; the transactional claim stays the authority for a key
+/// that is new or racing.
+async fn find_op_key(
+    pool: &sqlx::PgPool,
+    user_id: i64,
+    key: &str,
+) -> Result<Option<(i64, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT created_id, scope FROM task_create_keys WHERE user_id = $1 AND op_key = $2")
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The item an already-claimed key made, scoped to this caller and this
+/// checklist — so a key replayed against a different note is refused rather
+/// than answered with a row from somewhere else.
+async fn re_serve_task(
+    state: &AppState,
+    user_id: i64,
+    channel_id: Option<i64>,
+    list_id: Option<i64>,
+    created_id: i64,
+    key_scope: &str,
+) -> Result<TaskResponse, (StatusCode, &'static str)> {
+    // The key was spent on something that is not an item: `created_id` names
+    // a row in another table and must never be looked up here.
+    if key_scope != "task" {
+        return Err((StatusCode::CONFLICT, REPLAY_WRONG_SCOPE_MESSAGE));
+    }
+    let sql = format!(
+        "SELECT {TASK_COLUMNS} FROM channel_tasks \
+         WHERE id = $1 AND created_by = $2 \
+         AND channel_id IS NOT DISTINCT FROM $3 AND list_id IS NOT DISTINCT FROM $4"
+    );
+    let existing: Option<TaskRow> = sqlx::query_as(&sql)
+        .bind(created_id)
+        .bind(user_id)
+        .bind(channel_id)
+        .bind(list_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to re-serve a replayed item: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create task")
+        })?;
+    match existing {
+        Some(r) => Ok(task_row_to_response(r)),
+        None => Err((StatusCode::CONFLICT, REPLAY_GONE_MESSAGE)),
+    }
+}
+
+/// What a replay whose original row is gone gets: the create really did
+/// happen, and re-running it would resurrect something the user deleted.
+const REPLAY_GONE_MESSAGE: &str = "That was already created, and has since been removed";
+
+/// What a key spent on one kind of thing and replayed on another gets. Never
+/// a client doing what it is told to: one key is minted per create, for that
+/// create. Answering it with the row from the other scope would hand back
+/// something unrelated and throw the typed text away.
+const REPLAY_WRONG_SCOPE_MESSAGE: &str = "That create key was already used for something else";
+
 // --- DTOs ---
 
 #[derive(Serialize)]
@@ -92,6 +224,9 @@ pub struct CreateTaskRequest {
     /// due_at. Absent/null/"" = none. Serde-defaulted: older clients omit it.
     #[serde(default)]
     pub schedule: Option<String>,
+    /// Idempotent create (migration 070): see TaskListRequest::op_key.
+    #[serde(default)]
+    pub op_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +325,13 @@ pub struct TaskListResponse {
     /// both keys and a client can tell them from an older server's silence.
     pub due_at: Option<String>,
     pub schedule: Option<String>,
+    /// How many times this note's OWN content — its title, its sealed body,
+    /// its sealed attachments sidecar — has been written (migration 069).
+    /// Ticking, adding or reordering an ITEM does not move it. A client sends
+    /// it back as `expect_rev` so a stale save is refused instead of landing
+    /// over a newer one. ALWAYS serialized, so every row a 069+ server
+    /// returns carries the key.
+    pub content_rev: i64,
 }
 
 /// due_at as every task-list query renders it (the same shape as created_at).
@@ -228,6 +370,18 @@ pub struct TaskListRequest {
     /// RFC3339 = expect that instant, absent = no check.
     #[serde(default)]
     pub expect_due_at: Option<String>,
+    /// Compare-and-swap on the note's content revision (migration 069): the
+    /// `content_rev` this edit is based on. Absent = no check, which is what
+    /// every client older than 069 sends and what an op queued before it
+    /// replays as. A mismatch is 409 carrying the current copy, and NOTHING
+    /// is written.
+    #[serde(default)]
+    pub expect_rev: Option<i64>,
+    /// Idempotent create (migration 070): a RANDOM client id for this one
+    /// create, unchanged across retries. Absent = today's unguarded create.
+    /// Ignored on PATCH. See `validate_op_key`.
+    #[serde(default)]
+    pub op_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -485,13 +639,40 @@ async fn validate_parent(
     }
 }
 
+/// Insert one item. `Ok((task, true))` = it was created here; `Ok((task,
+/// false))` = this request carried an `op_key` that had already been used, so
+/// the item it made is re-served and NOTHING was written (in particular, no
+/// live event and no channel broadcast — a retry must not look like a second
+/// change to everyone else).
 async fn insert_task(
     state: &AppState,
     channel_id: Option<i64>,
     list_id: Option<i64>,
     payload: &CreateTaskRequest,
     claims: &Claims,
-) -> Result<TaskResponse, (StatusCode, &'static str)> {
+) -> Result<(TaskResponse, bool), (StatusCode, &'static str)> {
+    if let Some(key) = payload.op_key.as_deref() {
+        validate_op_key(key)?;
+        // A REPLAY IS ANSWERED, NOT RE-VALIDATED. Everything below judges a
+        // NEW item against the checklist as it stands now, and for a retry
+        // that state has moved on — the item this key already made is itself
+        // one of the rows the cap counts, so a list standing at exactly
+        // MAX_TASKS_PER_CHECKLIST answered the retry with 400 "This checklist
+        // has reached its task limit". The outbox treats a non-5xx as
+        // unrecoverable (notes/model/notesOutbox.ts): it drops the op and
+        // tells the user their item could not be saved, while the server has
+        // had it all along. The same goes for a parent deleted since.
+        if let Some((created_id, scope)) = find_op_key(&state.pool, claims.sub, key)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to read a create key: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create task")
+            })?
+        {
+            let row = re_serve_task(state, claims.sub, channel_id, list_id, created_id, &scope).await?;
+            return Ok((row, false));
+        }
+    }
     if payload.description.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Description cannot be empty"));
     }
@@ -556,7 +737,17 @@ async fn insert_task(
                   WHERE channel_id IS NOT DISTINCT FROM $1 AND list_id IS NOT DISTINCT FROM $2), $6, $7, $8) \
          RETURNING {TASK_COLUMNS}"
     );
-    let row: Result<TaskRow, _> = sqlx::query_as(&sql)
+    // The insert and the op-key claim commit together or not at all, so a
+    // replay's rolled-back insert raises nothing: Postgres discards a NOTIFY
+    // made in a transaction that never commits, which is why this is a
+    // rollback and not an insert-then-delete (that would broadcast a
+    // create/delete pair to every open device).
+    let fail = |e: sqlx::Error| {
+        tracing::error!("Failed to create task: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create task")
+    };
+    let mut tx = state.pool.begin().await.map_err(fail)?;
+    let row: TaskRow = sqlx::query_as(&sql)
         .bind(channel_id)
         .bind(list_id)
         .bind(payload.parent_id)
@@ -565,16 +756,32 @@ async fn insert_task(
         .bind(attachments)
         .bind(due_at)
         .bind(schedule)
-        .fetch_one(&state.pool)
-        .await;
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(fail)?;
 
-    match row {
-        Ok(r) => Ok(task_row_to_response(r)),
-        Err(e) => {
-            tracing::error!("Failed to create task: {:?}", e);
-            Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to create task"))
-        }
+    let Some(key) = payload.op_key.as_deref() else {
+        // No key: exactly what every client older than migration 070 does.
+        tx.commit().await.map_err(fail)?;
+        return Ok((task_row_to_response(row), true));
+    };
+    let (created_id, key_scope, inserted) = claim_op_key(&mut tx, claims.sub, key, "task", row.0)
+        .await
+        .map_err(fail)?;
+    if inserted {
+        tx.commit().await.map_err(fail)?;
+        return Ok((task_row_to_response(row), true));
     }
+    // A REPLAY of a create this server already made. Throw this attempt away
+    // and hand back the original — scoped to this caller and this checklist,
+    // so a key reused against a different note is refused rather than
+    // answered with someone else's row.
+    tx.rollback().await.map_err(fail)?;
+    // Reached only by a replay that RACED the original (the short-circuit at
+    // the top saw the key still uncommitted); the two paths must answer
+    // identically, so they share one re-serve.
+    let row = re_serve_task(state, claims.sub, channel_id, list_id, created_id, &key_scope).await?;
+    Ok((row, false))
 }
 
 // --- Channel checklist handlers ---
@@ -626,8 +833,12 @@ pub async fn create_task(
         return (StatusCode::FORBIDDEN, "Missing Create Tasks permission").into_response();
     }
     match insert_task(&state, Some(channel_id), None, &payload, &claims).await {
-        Ok(task) => {
-            broadcast_checklist(&state, Some(channel_id), claims.sub);
+        Ok((task, created)) => {
+            // A replayed create changed nothing; telling the room otherwise
+            // would make every open client refetch for no reason.
+            if created {
+                broadcast_checklist(&state, Some(channel_id), claims.sub);
+            }
             Json(task).into_response()
         }
         Err(e) => e.into_response(),
@@ -1394,7 +1605,8 @@ pub async fn list_task_lists(
                 l.is_self, \
                 (replace((COALESCE(l.updated_at, l.created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at, \
                 (replace((l.due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, \
-                l.schedule \
+                l.schedule, \
+                l.content_rev \
          FROM task_lists l \
          LEFT JOIN channel_tasks t ON t.list_id = l.id \
          WHERE l.owner_id = $1 AND (l.trashed_at IS NOT NULL) = $2 \
@@ -1402,7 +1614,7 @@ pub async fn list_task_lists(
          ORDER BY {order}"
     );
     #[allow(clippy::type_complexity)]
-    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool, String, Option<String>, Option<String>);
+    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool, String, Option<String>, Option<String>, i64);
     let rows: Result<Vec<ListRow>, _> = sqlx::query_as(&sql)
         .bind(claims.sub)
         .bind(trashed)
@@ -1412,7 +1624,7 @@ pub async fn list_task_lists(
     match rows {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|(id, title, created_at, total, done, body, attachments, trashed_at, is_self, updated_at, due_at, schedule)| TaskListResponse {
+                .map(|(id, title, created_at, total, done, body, attachments, trashed_at, is_self, updated_at, due_at, schedule, content_rev)| TaskListResponse {
                     id,
                     title,
                     created_at,
@@ -1425,6 +1637,7 @@ pub async fn list_task_lists(
                     updated_at,
                     due_at,
                     schedule,
+                    content_rev,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1472,49 +1685,145 @@ pub async fn create_task_list(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
+    if let Some(key) = payload.op_key.as_deref() {
+        if let Err(e) = validate_op_key(key) {
+            return e.into_response();
+        }
+    }
     // Empty on create means "none" — store NULL, not "".
     let body = payload.body.as_deref().filter(|b| !b.is_empty());
     let attachments = payload.attachments.as_deref().filter(|a| !a.is_empty());
 
-    let sql = format!(
-        "INSERT INTO task_lists (owner_id, title, body, attachments, due_at, schedule) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT}, {LIST_DUE_AT}, schedule"
-    );
+    const LIST_CREATE_COLUMNS: &str = "id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments";
     #[allow(clippy::type_complexity)]
-    let row: Result<(i64, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>), _> = sqlx::query_as(&sql)
+    type CreatedList = (i64, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>, i64);
+    let sql = format!(
+        "INSERT INTO task_lists (owner_id, title, body, attachments, due_at, schedule) VALUES ($1, $2, $3, $4, $5, $6) RETURNING {LIST_CREATE_COLUMNS}, {LIST_UPDATED_AT}, {LIST_DUE_AT}, schedule, content_rev"
+    );
+    // The insert and the op-key claim (migration 070) commit together, so a
+    // replay's insert is rolled back before it can raise a live event.
+    let oops = |e: sqlx::Error| {
+        tracing::error!("Failed to create task list: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create task list",
+        )
+    };
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => return oops(e).into_response(),
+    };
+    let row: CreatedList = match sqlx::query_as(&sql)
         .bind(claims.sub)
         .bind(title)
         .bind(body)
         .bind(attachments)
         .bind(due_at)
         .bind(schedule)
-        .fetch_one(&state.pool)
-        .await;
+        .fetch_one(&mut *tx)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return oops(e).into_response(),
+    };
 
-    match row {
-        Ok((id, title, created_at, body, attachments, updated_at, due_at, schedule)) => Json(TaskListResponse {
-            id,
-            title,
-            created_at,
-            total_tasks: 0,
-            completed_tasks: 0,
-            body,
-            attachments,
-            trashed_at: None,
-            is_self: false,
-            updated_at,
-            due_at,
-            schedule,
-        })
-        .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to create task list: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create task list",
-            )
-                .into_response()
+    // Which row to answer with: the one just inserted (committed), or — when
+    // this request replays a create the server already made — the original,
+    // after this attempt is rolled back.
+    let claim = match payload.op_key.as_deref() {
+        // No key: exactly what every client older than migration 070 does.
+        None => None,
+        Some(key) => match claim_op_key(&mut tx, claims.sub, key, "list", row.0).await {
+            Ok(c) => Some(c),
+            Err(e) => return oops(e).into_response(),
+        },
+    };
+    let answer: TaskListResponse = match claim {
+        None | Some((_, _, true)) => {
+            if let Err(e) = tx.commit().await {
+                return oops(e).into_response();
+            }
+            let (id, title, created_at, body, attachments, updated_at, due_at, schedule, content_rev) = row;
+            // A row this statement just inserted: empty, live, not the
+            // "Notes to self" list. True here, and ONLY here.
+            TaskListResponse {
+                id,
+                title,
+                created_at,
+                total_tasks: 0,
+                completed_tasks: 0,
+                body,
+                attachments,
+                trashed_at: None,
+                is_self: false,
+                updated_at,
+                due_at,
+                schedule,
+                content_rev,
+            }
         }
-    }
+        Some((created_id, key_scope, false)) => {
+            // A REPLAY: throw this attempt away and re-serve the note that
+            // create already made, scoped to this owner.
+            if let Err(e) = tx.rollback().await {
+                return oops(e).into_response();
+            }
+            // The key was spent on an item: `created_id` names a row in
+            // channel_tasks and must never be looked up here.
+            if key_scope != "list" {
+                return (StatusCode::CONFLICT, REPLAY_WRONG_SCOPE_MESSAGE).into_response();
+            }
+            // Read the note as the LISTING would: the original may have been
+            // trashed or filled with items since the answer this call is
+            // replaying was lost, and hard-coding "live, empty" here would
+            // put a phantom card back on the grid.
+            const RE_SERVE_LIST: &str =
+                "SELECT l.id, l.title, (replace((l.created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, \
+                        COUNT(t.id) AS total, \
+                        COUNT(t.id) FILTER (WHERE t.is_completed) AS done, \
+                        l.body, l.attachments, \
+                        (replace((l.trashed_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS trashed_at, \
+                        l.is_self, \
+                        (replace((COALESCE(l.updated_at, l.created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at, \
+                        (replace((l.due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, \
+                        l.schedule, \
+                        l.content_rev \
+                 FROM task_lists l \
+                 LEFT JOIN channel_tasks t ON t.list_id = l.id \
+                 WHERE l.id = $1 AND l.owner_id = $2 \
+                 GROUP BY l.id";
+            #[allow(clippy::type_complexity)]
+            type ReplayedList = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool, String, Option<String>, Option<String>, i64);
+            let existing: Option<ReplayedList> = match sqlx::query_as(RE_SERVE_LIST)
+                .bind(created_id)
+                .bind(claims.sub)
+                .fetch_optional(&state.pool)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return oops(e).into_response(),
+            };
+            let Some((id, title, created_at, total, done, body, attachments, trashed_at, is_self, updated_at, due_at, schedule, content_rev)) = existing else {
+                return (StatusCode::CONFLICT, REPLAY_GONE_MESSAGE).into_response();
+            };
+            TaskListResponse {
+                id,
+                title,
+                created_at,
+                total_tasks: total,
+                completed_tasks: done,
+                body,
+                attachments,
+                trashed_at,
+                is_self,
+                updated_at,
+                due_at,
+                schedule,
+                content_rev,
+            }
+        }
+    };
+    Json(answer).into_response()
 }
 
 /// Get (or lazily create) the caller's single "Notes to self" checklist list —
@@ -1527,11 +1836,11 @@ pub async fn get_self_checklist(
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     let select_self = format!(
-        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT}, {LIST_DUE_AT}, schedule FROM task_lists WHERE owner_id = $1 AND is_self = TRUE"
+        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT}, {LIST_DUE_AT}, schedule, content_rev FROM task_lists WHERE owner_id = $1 AND is_self = TRUE"
     );
     // Try to fetch the existing one first.
     #[allow(clippy::type_complexity)]
-    let existing: Option<(i64, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>)> = sqlx::query_as(&select_self)
+    let existing: Option<(i64, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>, i64)> = sqlx::query_as(&select_self)
     .bind(claims.sub)
     .fetch_optional(&state.pool)
     .await
@@ -1558,7 +1867,7 @@ pub async fn get_self_checklist(
     };
 
     match row {
-        Ok((id, title, created_at, body, attachments, updated_at, due_at, schedule)) => {
+        Ok((id, title, created_at, body, attachments, updated_at, due_at, schedule, content_rev)) => {
             let counts: (i64, i64) = sqlx::query_as(
                 "SELECT COUNT(*), COUNT(*) FILTER (WHERE is_completed) FROM channel_tasks WHERE list_id = $1",
             )
@@ -1580,6 +1889,7 @@ pub async fn get_self_checklist(
                 updated_at,
                 due_at,
                 schedule,
+                content_rev,
             })
             .into_response()
         }
@@ -1666,8 +1976,8 @@ pub async fn rename_task_list(
         }
     };
     #[allow(clippy::type_complexity)]
-    let current: Option<(String, Option<String>, Option<String>, bool, Option<String>)> = match sqlx::query_as(
-        "SELECT title, body, attachments, trashed_at IS NOT NULL, schedule FROM task_lists WHERE id = $1 FOR UPDATE",
+    let current: Option<(String, Option<String>, Option<String>, bool, Option<String>, i64)> = match sqlx::query_as(
+        "SELECT title, body, attachments, trashed_at IS NOT NULL, schedule, content_rev FROM task_lists WHERE id = $1 FOR UPDATE",
     )
     .bind(list_id)
     .fetch_optional(&mut *tx)
@@ -1679,11 +1989,35 @@ pub async fn rename_task_list(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename task list").into_response();
         }
     };
-    let Some((cur_title, cur_body, cur_att, trashed, cur_sched)) = current else {
+    let Some((cur_title, cur_body, cur_att, trashed, cur_sched, cur_rev)) = current else {
         return (StatusCode::NOT_FOUND, "List not found").into_response();
     };
     if trashed {
         return (StatusCode::CONFLICT, crate::list_content::TRASHED_MESSAGE).into_response();
+    }
+    // Compare-and-swap on the note's content (migration 069). A client that
+    // names the revision it edited loses the race rather than landing over
+    // the winner, and gets the current copy back so it can show both and let
+    // the user choose — the same contract as a sealed blob's 409
+    // (src/sealed_blob_handlers.rs). Absent = no check: older clients, and
+    // ops queued before this existed, behave exactly as they did.
+    //
+    // The 409 carries the SEALED values, which is what a GET a moment later
+    // would have handed the same caller. The server learns nothing new.
+    if let Some(expected) = payload.expect_rev {
+        if expected != cur_rev {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "conflict": "stale",
+                    "content_rev": cur_rev,
+                    "title": cur_title,
+                    "body": cur_body,
+                    "attachments": cur_att,
+                })),
+            )
+                .into_response();
+        }
     }
     let downgrade = |cur: Option<&str>, new: Option<&str>| match (cur, new.filter(|n| !n.is_empty())) {
         (Some(c), Some(n)) => crate::envelope_version::edit_is_downgrade(c, n, payload.reads_up_to),
@@ -1698,14 +2032,19 @@ pub async fn rename_task_list(
     }
     // The compare-and-swap rides the same statement, as it does for an item
     // (update_task): two devices advancing the same note reminder cannot
-    // both win, and a loser writes nothing.
-    let result = sqlx::query(
+    // both win, and a loser writes nothing. RETURNING content_rev: the 069
+    // trigger decides it, and handing it back lets a run of saves chain
+    // without a refetch between them. fetch_OPTIONAL, not fetch_one: the row
+    // is locked and known to exist, so the only way to get nothing back is
+    // the compare-and-swap losing.
+    let result: Result<Option<(i64,)>, _> = sqlx::query_as(
         "UPDATE task_lists SET title = COALESCE($1, title), \
          body = CASE WHEN $2 THEN $3 ELSE body END, \
          attachments = CASE WHEN $4 THEN $5 ELSE attachments END, \
          due_at = CASE WHEN $7 THEN $8 ELSE due_at END, \
          schedule = CASE WHEN $9 THEN $10 ELSE schedule END \
-         WHERE id = $6 AND (NOT $11 OR due_at IS NOT DISTINCT FROM $12)",
+         WHERE id = $6 AND (NOT $11 OR due_at IS NOT DISTINCT FROM $12) \
+         RETURNING content_rev",
     )
     .bind(title)
     .bind(payload.body.is_some())
@@ -1719,20 +2058,18 @@ pub async fn rename_task_list(
     .bind(schedule.flatten())
     .bind(expect_due.is_some())
     .bind(expect_due.flatten())
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await;
     let result = match result {
-        // The row is locked and known to exist, so the only way to match
-        // nothing is the compare-and-swap losing.
-        Ok(r) if r.rows_affected() == 0 && expect_due.is_some() => {
+        Ok(None) => {
             return (StatusCode::CONFLICT, crate::task_timing::DUE_CHANGED_MESSAGE).into_response();
         }
-        Ok(_) => tx.commit().await,
+        Ok(Some(rev)) => tx.commit().await.map(|()| rev),
         Err(e) => Err(e),
     };
 
     match result {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok((content_rev,)) => Json(serde_json::json!({ "content_rev": content_rev })).into_response(),
         Err(e) => {
             tracing::error!("Failed to rename task list: {:?}", e);
             (
@@ -1815,7 +2152,7 @@ pub async fn create_list_task(
         return e.into_response();
     }
     match insert_task(&state, None, Some(list_id), &payload, &claims).await {
-        Ok(task) => Json(task).into_response(),
+        Ok((task, _created)) => Json(task).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -2085,4 +2422,414 @@ pub async fn list_task_reminders(
         });
     }
     Json(out).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The op-key shape check (migration 070). It is a SHAPE check and
+    /// nothing more: it cannot tell a random id from a digest, which is why
+    /// the "never derive it from content" rule lives with the client that
+    /// mints the key. What it does guarantee is that the value stays a short
+    /// url-safe identifier the table's CHECK will also accept.
+    #[test]
+    fn op_key_shape_accepts_a_random_id_and_refuses_junk() {
+        // POSITIVE CONTROL first: a check that refused everything would pass
+        // every negative case below.
+        assert!(validate_op_key("m3kd91x-7-q8z4vb2p").is_ok(), "a real client id");
+        assert!(validate_op_key(&"a".repeat(16)).is_ok(), "the shortest accepted");
+        assert!(validate_op_key(&"a".repeat(64)).is_ok(), "the longest accepted");
+        assert!(validate_op_key("AZaz09-_AZaz09-_").is_ok(), "every accepted character");
+
+        assert!(validate_op_key("").is_err(), "empty");
+        assert!(validate_op_key(&"a".repeat(15)).is_err(), "too short to be random");
+        assert!(validate_op_key(&"a".repeat(65)).is_err(), "past the column's cap");
+        for bad in ["abcdefghijklmnop.", "abcdefghijklmnop/", "abcdefghijklmnop+", "abcdefghijklmnop=", "abcdefghij klmnop", "abcdefghijklmno\u{0}"] {
+            assert!(validate_op_key(bad).is_err(), "refused: {bad:?}");
+        }
+        // A byte the PostgreSQL CHECK would also refuse, and which must never
+        // reach it as a lone surrogate or a multi-byte char.
+        assert!(validate_op_key("abcdefghijklmnopé").is_err(), "non-ascii");
+    }
+
+    /// An absent key is not an error: every client older than migration 070
+    /// sends none, and must never be answered with a 400.
+    #[test]
+    fn an_absent_op_key_is_never_checked() {
+        let payload: CreateTaskRequest =
+            serde_json::from_str(r#"{"description":"x"}"#).expect("a create with no op_key parses");
+        assert!(payload.op_key.is_none());
+        let list: TaskListRequest =
+            serde_json::from_str(r#"{"title":"x"}"#).expect("a list create with no op_key parses");
+        assert!(list.op_key.is_none() && list.expect_rev.is_none());
+    }
+}
+
+/// Idempotent creates and the op-key table, against a real database.
+/// Skipped (not failed) when TEST_DATABASE_URL is unset, exactly like
+/// list_content.rs's db_tests — never point it at the dev or production one.
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::state::UserId;
+    use axum::response::Response;
+    use serde_json::Value;
+    use sqlx::PgPool;
+
+    const V2: &str = r#"{"v":2,"t":"self","ct":"AAAA","n":"BBBB"}"#;
+
+    async fn setup() -> Option<(Arc<AppState>, PgPool)> {
+        let Some(url) = crate::migrator::test_database_url() else {
+            println!("skipping: TEST_DATABASE_URL not set");
+            return None;
+        };
+        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await {
+            Ok(p) => p,
+            Err(_) => { println!("skipping: database unreachable"); return None; }
+        };
+        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        Some((state, pool))
+    }
+
+    async fn user(pool: &PgPool, tag: &str) -> Claims {
+        let name = format!("ik_{tag}_{}", uuid::Uuid::new_v4().simple());
+        let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(pool).await.expect("insert user");
+        Claims { sub: id as UserId, username: name, exp: 0, tv: 0, sst: 1_700_000_000, sid: String::new() }
+    }
+
+    async fn json_of(r: Response) -> Value {
+        let b = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&b).unwrap_or(Value::Null)
+    }
+
+    fn list_req(title: &str, op_key: Option<&str>) -> TaskListRequest {
+        TaskListRequest {
+            title: Some(title.to_string()),
+            body: None,
+            attachments: None,
+            reads_up_to: None,
+            due_at: None,
+            schedule: None,
+            expect_due_at: None,
+            expect_rev: None,
+            op_key: op_key.map(String::from),
+        }
+    }
+
+    async fn post_list(state: &Arc<AppState>, c: &Claims, title: &str, key: Option<&str>) -> (StatusCode, Value) {
+        let r = create_task_list(State(state.clone()), Extension(c.clone()), Json(list_req(title, key))).await.into_response();
+        let status = r.status();
+        (status, json_of(r).await)
+    }
+
+    async fn post_item(state: &Arc<AppState>, c: &Claims, list_id: i64, text: &str, key: Option<&str>) -> (StatusCode, Value) {
+        let mut body = serde_json::json!({ "description": text });
+        if let Some(k) = key { body["op_key"] = Value::String(k.to_string()); }
+        let r = create_list_task(
+            State(state.clone()), Path(list_id), Extension(c.clone()),
+            Json(serde_json::from_value(body).unwrap()),
+        ).await.into_response();
+        let status = r.status();
+        (status, json_of(r).await)
+    }
+
+    async fn count_lists(pool: &PgPool, owner: i64) -> i64 {
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM task_lists WHERE owner_id = $1")
+            .bind(owner).fetch_one(pool).await.unwrap();
+        n
+    }
+
+    async fn count_items(pool: &PgPool, list_id: i64) -> i64 {
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM channel_tasks WHERE list_id = $1")
+            .bind(list_id).fetch_one(pool).await.unwrap();
+        n
+    }
+
+    async fn cleanup(pool: &PgPool, who: &[&Claims]) {
+        for c in who {
+            let _ = sqlx::query("DELETE FROM task_lists WHERE owner_id = $1").bind(c.sub).execute(pool).await;
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(c.sub as i32).execute(pool).await;
+        }
+    }
+
+    const KEY_A: &str = "aaaaaaaaaaaaaaaa1";
+    const KEY_B: &str = "bbbbbbbbbbbbbbbb2";
+
+    /// The whole contract of migration 070 for a NOTE: one key, one note;
+    /// the replay gets the original row back; a different key still makes a
+    /// second note; no key at all is still the old at-least-once behaviour.
+    #[tokio::test]
+    async fn the_same_create_key_twice_makes_one_note() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "list").await;
+
+        let (s1, first) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        assert_eq!(s1, StatusCode::OK);
+        let (s2, again) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        assert_eq!(s2, StatusCode::OK, "a replay is answered, not refused");
+        assert_eq!(again["id"], first["id"], "the SAME note comes back");
+        assert_eq!(again["created_at"], first["created_at"], "not a fresh row wearing the same id");
+        assert_eq!(count_lists(&pool, alice.sub).await, 1, "one note on disk");
+
+        // POSITIVE CONTROL: a different key is a different intent.
+        let (_, other) = post_list(&state, &alice, V2, Some(KEY_B)).await;
+        assert_ne!(other["id"], first["id"]);
+        assert_eq!(count_lists(&pool, alice.sub).await, 2);
+
+        // No key: the pre-070 behaviour, preserved for older clients — this
+        // is what proves the guard is keyed and not a global de-duplicator.
+        post_list(&state, &alice, V2, None).await;
+        post_list(&state, &alice, V2, None).await;
+        assert_eq!(count_lists(&pool, alice.sub).await, 4);
+
+        // A malformed key is a 400 and creates nothing.
+        let (bad, _) = post_list(&state, &alice, V2, Some("short")).await;
+        assert_eq!(bad, StatusCode::BAD_REQUEST);
+        assert_eq!(count_lists(&pool, alice.sub).await, 4);
+
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// One account's key can never match another's, and a replay whose row
+    /// was deleted in the meantime is told so instead of resurrecting it.
+    #[tokio::test]
+    async fn create_keys_are_per_account_and_a_deleted_row_is_not_resurrected() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "a").await;
+        let bob = user(&pool, "b").await;
+
+        let (_, mine) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        let (status, theirs) = post_list(&state, &bob, V2, Some(KEY_A)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(theirs["id"], mine["id"], "the same key string, two accounts, two notes");
+        assert_eq!(count_lists(&pool, alice.sub).await, 1);
+        assert_eq!(count_lists(&pool, bob.sub).await, 1);
+
+        // Delete the note, then replay its create: the create really did
+        // happen, so re-running it would resurrect something deliberately
+        // removed. 409, and nothing comes back.
+        let id = mine["id"].as_i64().unwrap();
+        let r = delete_task_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let (status, _) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(count_lists(&pool, alice.sub).await, 0, "nothing was resurrected, and nothing new made");
+
+        cleanup(&pool, &[&alice, &bob]).await;
+    }
+
+    /// The same for an ITEM, including the thing a duplicate would give away:
+    /// the position must not advance twice.
+    #[tokio::test]
+    async fn the_same_create_key_twice_makes_one_item() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "item").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        let (s1, first) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s1, StatusCode::OK);
+        let (s2, again) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s2, StatusCode::OK);
+        assert_eq!(again["id"], first["id"]);
+        assert_eq!(again["position"], first["position"], "a replay did not take a second slot");
+        assert_eq!(count_items(&pool, list_id).await, 1);
+
+        // POSITIVE CONTROL.
+        let (_, second) = post_item(&state, &alice, list_id, V2, Some(KEY_B)).await;
+        assert_ne!(second["id"], first["id"]);
+        assert_eq!(count_items(&pool, list_id).await, 2);
+
+        // A key minted for a NOTE cannot be spent on an item, and vice versa.
+        //
+        // task_lists.id and channel_tasks.id are INDEPENDENT sequences, so
+        // "the id it names is not in this table" is not a guard — on a fresh
+        // database both start near 1 and a cross-scope replay would be
+        // answered with a real, unrelated row. This test therefore MAKES the
+        // two ids collide: the note gets an id past every existing item, and
+        // an item is then forced to that exact id. Only a server that
+        // compares the SCOPE it stored can still refuse.
+        let key_c = "cccccccccccccccc3";
+        let high = bump_ids_past_both(&pool).await;
+        let (_, note) = post_list(&state, &alice, V2, Some(key_c)).await;
+        let note_id = note["id"].as_i64().expect("the note was made");
+        assert!(note_id > high, "the note's id is past every item id that exists");
+        sqlx::query(
+            "INSERT INTO channel_tasks (id, list_id, description, created_by, position) \
+             OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, 99)",
+        )
+        .bind(note_id).bind(list_id).bind(V2).bind(alice.sub)
+        .execute(&pool).await.expect("an item wearing the note's id");
+        // No setval here on purpose: `bump_ids_past_both` already left every
+        // future item id a million above this one, and dragging the sequence
+        // back down to it would undo exactly that.
+        let (status, body) = post_item(&state, &alice, list_id, V2, Some(key_c)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "a key spent on a note is refused on an item");
+        assert_eq!(body, Value::Null, "and no row of any kind comes back");
+        assert_eq!(count_items(&pool, list_id).await, 3, "and made nothing (2 + the planted collision)");
+
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Ballast: `n` extra items on `list_id`, straight into the table. The
+    /// cap counts rows, and what is in them does not matter.
+    ///
+    /// The ids are NEGATIVE, below everything in the table, so that filling a
+    /// checklist to 2000 never consumes 2000 values of the identity sequence
+    /// — which `bump_ids_past_both` below reasons about, on a database these
+    /// concurrent tests share. The sequence never hands out a negative, so
+    /// nothing can collide with these.
+    async fn fill_list(pool: &PgPool, list_id: i64, owner: i64, n: i64) {
+        sqlx::query(
+            "INSERT INTO channel_tasks (id, list_id, description, created_by, position) \
+             OVERRIDING SYSTEM VALUE \
+             SELECT (SELECT LEAST(COALESCE(MIN(id), 0), 0) FROM channel_tasks) - g, $1, $2, $3, 1000 + g \
+             FROM generate_series(1, $4) g",
+        )
+        .bind(list_id).bind(V2).bind(owner).bind(n)
+        .execute(pool).await.expect("fill the checklist to the cap");
+    }
+
+    /// A REPLAY IS ANSWERED EVEN WHEN THE CHECKLIST IS FULL.
+    ///
+    /// Every check in front of the insert judges a NEW item against the list
+    /// as it stands now, and the per-checklist cap counts the very item the
+    /// replayed key already made. So a list standing at exactly the cap
+    /// refused the retry with 400 "This checklist has reached its task
+    /// limit" — and the client's outbox treats a non-5xx as unrecoverable:
+    /// it drops the op and names the item in the "changes made offline
+    /// couldn't be saved" toast, telling the user it was lost when the
+    /// server has had it all along.
+    #[tokio::test]
+    async fn a_replayed_item_is_re_served_even_when_the_checklist_is_full() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "cap").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        // One real create through the handler, carrying its key...
+        let (s1, first) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s1, StatusCode::OK);
+        // ...and the list then fills to EXACTLY the cap, that item included.
+        fill_list(&pool, list_id, alice.sub, MAX_TASKS_PER_CHECKLIST - 1).await;
+        assert_eq!(count_items(&pool, list_id).await, MAX_TASKS_PER_CHECKLIST);
+
+        // The answer to the first attempt never arrived, so it is sent again.
+        let (s2, again) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s2, StatusCode::OK, "a replay is answered, not refused for being over the cap");
+        assert_eq!(again["id"], first["id"], "and it is the SAME item");
+        assert_eq!(again["position"], first["position"]);
+        assert_eq!(count_items(&pool, list_id).await, MAX_TASKS_PER_CHECKLIST, "nothing was added");
+
+        // POSITIVE CONTROL: the cap is still a cap. A genuinely new item is
+        // refused whether or not it carries a key of its own — the replay
+        // path is a way back to a row that exists, not a hole in the limit.
+        let (s3, _) = post_item(&state, &alice, list_id, V2, Some(KEY_B)).await;
+        assert_eq!(s3, StatusCode::BAD_REQUEST, "a NEW keyed item is still capped");
+        let (s4, _) = post_item(&state, &alice, list_id, V2, None).await;
+        assert_eq!(s4, StatusCode::BAD_REQUEST, "and so is a keyless one");
+        assert_eq!(count_items(&pool, list_id).await, MAX_TASKS_PER_CHECKLIST);
+
+        // And a replay whose row was deleted in the meantime still says so,
+        // rather than being answered by the cap.
+        sqlx::query("DELETE FROM channel_tasks WHERE id = $1")
+            .bind(first["id"].as_i64().unwrap()).execute(&pool).await.unwrap();
+        fill_list(&pool, list_id, alice.sub, 1).await;
+        let (s5, _) = post_item(&state, &alice, list_id, V2, Some(KEY_A)).await;
+        assert_eq!(s5, StatusCode::CONFLICT, "gone, not \"the list is full\"");
+
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Clear a band of ids that a `task_lists` row can take and a
+    /// `channel_tasks` row cannot, so the next note's id is free to be
+    /// duplicated by hand in `channel_tasks`. Returns the watermark below it.
+    ///
+    /// The note's id has to be UNREACHABLE by items, not merely unused right
+    /// now. These tests share one database and cargo runs them at the same
+    /// time, so setting both sequences to the same value — which is what this
+    /// did — left the next note and the next item racing for the same number,
+    /// and the planted row hit a 23505 whenever another test created an item
+    /// first. Items are therefore pushed a long way ABOVE the band: every id
+    /// that already exists is below `high`, and every item made from here on
+    /// is above `high + ITEM_GAP`, so anything in between belongs to notes.
+    async fn bump_ids_past_both(pool: &PgPool) -> i64 {
+        const ITEM_GAP: i64 = 1_000_000;
+        let (high,): (i64,) = sqlx::query_as(
+            "SELECT GREATEST((SELECT COALESCE(MAX(id), 0) FROM task_lists), \
+                             (SELECT COALESCE(MAX(id), 0) FROM channel_tasks)) + 1000",
+        )
+        .fetch_one(pool).await.unwrap();
+        for (table, to) in [("task_lists", high), ("channel_tasks", high + ITEM_GAP)] {
+            sqlx::query("SELECT setval(pg_get_serial_sequence($1, 'id'), $2, true)")
+                .bind(table).bind(to)
+                .execute(pool).await.unwrap();
+        }
+        high
+    }
+
+    /// A replay answers with the note AS IT STANDS, not as it was the instant
+    /// it was made. The original may have been trashed or filled with items
+    /// while the lost answer was being retried, and a client that is told
+    /// "live, empty" puts a phantom card back on the grid.
+    #[tokio::test]
+    async fn a_replayed_create_answers_with_the_note_as_it_stands() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "reserve").await;
+
+        let (_, made) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        let id = made["id"].as_i64().unwrap();
+        // The fresh insert IS live and empty — that much was never wrong.
+        assert_eq!(made["trashed_at"], Value::Null);
+        assert_eq!(made["total_tasks"], 0);
+        assert_eq!(made["is_self"], false);
+
+        // Everything that happens between the lost answer and the retry.
+        assert_eq!(post_item(&state, &alice, id, V2, None).await.0, StatusCode::OK);
+        let t = crate::list_content::trash_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert_eq!(t.status(), StatusCode::OK);
+
+        let (status, again) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["id"], made["id"], "still the same note");
+        assert!(again["trashed_at"].is_string(), "a trashed note is not answered as live");
+        assert_eq!(again["total_tasks"], 1, "nor is a note with an item answered as empty");
+        assert_eq!(count_lists(&pool, alice.sub).await, 1, "and the retry made nothing");
+
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// The sweep forgets the key and keeps the note.
+    #[tokio::test]
+    async fn the_sweep_forgets_keys_past_the_window() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "sweep").await;
+        let (_, made) = post_list(&state, &alice, V2, Some(KEY_A)).await;
+        let id = made["id"].as_i64().unwrap();
+
+        // One key inside the window, one backdated past it.
+        post_list(&state, &alice, V2, Some(KEY_B)).await;
+        sqlx::query("UPDATE task_create_keys SET created_at = NOW() - INTERVAL '48 hours' WHERE user_id = $1 AND op_key = $2")
+            .bind(alice.sub).bind(KEY_A).execute(&pool).await.unwrap();
+
+        let swept = sqlx::query("DELETE FROM task_create_keys WHERE created_at < NOW() - make_interval(hours => $1::int)")
+            .bind(24_i32).execute(&pool).await.unwrap().rows_affected();
+        assert!(swept >= 1);
+
+        let (remembered,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM task_create_keys WHERE user_id = $1")
+            .bind(alice.sub).fetch_one(&pool).await.unwrap();
+        assert_eq!(remembered, 1, "the fresh key is still remembered — the sweep is not a truncate");
+        let (gone,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM task_create_keys WHERE user_id = $1 AND op_key = $2")
+            .bind(alice.sub).bind(KEY_A).fetch_one(&pool).await.unwrap();
+        assert_eq!(gone, 0);
+        // The note the forgotten key made is untouched.
+        let (still,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM task_lists WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(still, 1, "the sweep forgets the key, never the note");
+
+        cleanup(&pool, &[&alice]).await;
+    }
 }

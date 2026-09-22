@@ -30,6 +30,8 @@ import {
     taskTabKey,
 } from './tasks';
 import { openListContent, sealSelfField } from './listSeal';
+import { patchListContent } from './listConflict';
+export { NoteConflictError } from './listConflict';
 import { MAX_READABLE_ENVELOPE_VERSION, messageEncState } from './e2ee';
 import { parseEncAttachment } from './attachments';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -52,6 +54,22 @@ export interface ListFeatures {
      *  clock (`serverNowFrom`): a phone whose clock runs ahead must not
      *  delete the owner's trash early. */
     serverClockOffsetMs: number | null;
+    /** Migration 069: every note carries a content revision, and a save may
+     *  name the one it was based on. False = the server does not check, so
+     *  the last save wins as it always did. */
+    contentRev: boolean;
+    /** Migration 070: a create may carry a random id, so a create whose
+     *  answer was lost is not made twice.
+     *
+     *  DELIBERATELY NOT GATED ON, unlike every other flag here. The key is a
+     *  short random field an older server drops on the floor, so sending it
+     *  unconditionally is byte-for-byte the old behaviour there and needs no
+     *  probe; gating would only add a way to stop sending it. It is parsed
+     *  and advertised so an operator (and the walk) can see whether the
+     *  server they are on de-duplicates creates — the server's matching
+     *  `op_key` entry in GET /task-features says the same for the item
+     *  routes. If a reader is ever added, it must not be "skip the key". */
+    idempotentCreates: boolean;
 }
 
 export const NO_LIST_FEATURES: ListFeatures = Object.freeze({
@@ -62,6 +80,8 @@ export const NO_LIST_FEATURES: ListFeatures = Object.freeze({
     trashRetentionDays: 0,
     maxBodyLen: 0,
     serverClockOffsetMs: null,
+    contentRev: false,
+    idempotentCreates: false,
 });
 
 /** Parse the features answer. Anything malformed reads as "not supported"
@@ -82,6 +102,8 @@ export function parseListFeatures(raw: unknown, receivedAt: number = Date.now())
         trashRetentionDays: days,
         maxBodyLen: maxBody,
         serverClockOffsetMs: serverNow === null ? null : serverNow - receivedAt,
+        contentRev: o.content_rev === true,
+        idempotentCreates: o.idempotent_creates === true,
     };
 }
 
@@ -104,10 +126,17 @@ export async function fetchListFeatures(): Promise<ListFeatures> {
 
 // --- Note text and note-level attachments ---------------------------------------------
 
-/** Replace a list's note text; '' clears it. */
-export async function setTaskListBody(listId: number, body: string): Promise<void> {
+/** Replace a list's note text; '' clears it. `expectRev` is the note's
+ *  `content_rev` this save is based on — a mismatch throws NoteConflictError
+ *  and nothing is written (api/listConflict.ts). Omit it (and every client
+ *  older than migration 069 does) for today's last-write-wins. Resolves to
+ *  the note's new revision, or null from a server that has none. */
+export async function setTaskListBody(listId: number, body: string, expectRev?: number): Promise<number | null> {
     const sealed = body === '' ? '' : await sealSelfField(body);
-    return apiClient.patch(`/task-lists/${listId}`, { body: sealed, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    return patchListContent(listId, {
+        body: sealed,
+        ...(expectRev === undefined ? {} : { expect_rev: expectRev }),
+    });
 }
 
 /** The NOTE's own reminder (migration 068), over the same PATCH the title
@@ -128,17 +157,24 @@ export async function setTaskListTiming(
     return apiClient.patch(`/task-lists/${listId}`, body);
 }
 
-/** Replace a list's own attachment refs; an empty array clears them. */
-export async function setTaskListAttachments(listId: number, refs: TaskAttachmentRef[]): Promise<void> {
+/** Replace a list's own attachment refs; an empty array clears them.
+ *  `expectRev` as for setTaskListBody. */
+export async function setTaskListAttachments(listId: number, refs: TaskAttachmentRef[], expectRev?: number): Promise<number | null> {
     const sealed = refs.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(refs));
-    return apiClient.patch(`/task-lists/${listId}`, { attachments: sealed, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    return patchListContent(listId, {
+        attachments: sealed,
+        ...(expectRev === undefined ? {} : { expect_rev: expectRev }),
+    });
 }
 
 /** Create a list with its title, and optionally its note text and refs, in
- *  one request (so a photo note never exists without its photo). */
+ *  one request (so a photo note never exists without its photo). `opKey` is
+ *  this create's random id (api/opKey.ts): held across the caller's retries,
+ *  it stops a create whose answer was lost from making a second note. */
 export async function createTaskListWithContent(
     title: string,
     content: { body?: string; refs?: TaskAttachmentRef[] },
+    opKey?: string,
 ): Promise<TaskList> {
     const payload: Record<string, string> = { title: await sealSelfField(title) };
     if (content.body) payload.body = await sealSelfField(content.body);
@@ -146,6 +182,7 @@ export async function createTaskListWithContent(
     // POST /task-lists also accepts `due_at` and `schedule` (migration 068),
     // so a composer that offers a reminder can create a reminding note in ONE
     // request. Nothing offers that yet, so nothing sends them here.
+    if (opKey) payload.op_key = opKey;
     const created: TaskList = await apiClient.post('/task-lists', payload);
     return {
         ...created,

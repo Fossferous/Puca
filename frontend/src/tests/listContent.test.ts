@@ -130,11 +130,16 @@ describe('capability detection does not depend on having lists', () => {
 
     it('parses the answer field by field, never assuming support', async () => {
         get.mockResolvedValueOnce({ body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 });
-        // A 067 server sends no note_reminders key at all: it must read as
-        // false, never as support (migration 068).
-        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null, noteReminders: false });
+        // A 065-067 server says nothing about the three newer capabilities,
+        // and each must read as "no", never as "yes" (068, 069, 070).
+        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null, noteReminders: false, contentRev: false, idempotentCreates: false });
         expect(parseListFeatures('nonsense')).toEqual(NO_LIST_FEATURES);
         expect(parseListFeatures({ body: 'yes', trash: true, trash_retention_days: -3 })).toEqual({ ...NO_LIST_FEATURES, trash: true });
+        // POSITIVE CONTROL: a 069/070 server's answer turns them on, and only
+        // the literal `true` does — a truthy string does not.
+        expect(parseListFeatures({ trash: true, content_rev: true, idempotent_creates: true }))
+            .toEqual({ ...NO_LIST_FEATURES, trash: true, contentRev: true, idempotentCreates: true });
+        expect(parseListFeatures({ content_rev: 'yes', idempotent_creates: 1 })).toEqual(NO_LIST_FEATURES);
     });
 });
 

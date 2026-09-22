@@ -35,13 +35,16 @@
  * replayed as intents against the server's CURRENT set, never as a stale
  * full replace.
  *
- * CREATES ARE AT-LEAST-ONCE. The create routes take no client op id, so a
- * create the server COMMITTED whose answer was lost (the connection dropped
- * mid-response) looks exactly like one that never arrived: it is queued, or
- * kept, and replayed — and the note or item then exists twice. Deletes,
- * ticks and edits replay harmlessly (the same end state); a duplicate create
- * is visible and the user can delete it. Closing that needs a server-side
- * idempotency key on POST /task-lists and the task create routes (docs/NOTES.md).
+ * CREATES CARRY A KEY. A create the server COMMITTED whose answer was lost
+ * (the connection dropped mid-response) looks exactly like one that never
+ * arrived: it is queued, or kept, and replayed. So every create op is minted
+ * with a random `key` (api/opKey.ts) the moment the user acts — sealed into
+ * the queue with the rest of the op, and therefore identical across every
+ * retry, every replay and every reload. The server claims it with the insert
+ * (migration 070) and answers a replay with the note or item it already made,
+ * so the same create can no longer produce two. The key is random and says
+ * NOTHING about what was written; a server older than 070 ignores it and the
+ * old at-least-once behaviour returns.
  *
  * COLD START. `send` waits for the persisted queue to load before deciding
  * whether an op may run straight away: an op sent in the moment before the
@@ -59,6 +62,7 @@ import {
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
 import { keepHiddenSlots, restoreTaskList, setTaskListTiming, trashOrDeleteList } from '../../api/listContent';
+import { newOpKey } from '../../api/opKey';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { beginNoteWrite, LISTS_KEY, PREFS_KEY, setQueuedNotes } from './noteBusy';
@@ -73,14 +77,20 @@ export type PrefsIntent =
     | { type: 'order'; keys: string[] };
 
 type OpBody =
-    | { k: 'createList'; tempId: number; title: string }
-    | { k: 'renameList'; listId: number; title: string }
+    | { k: 'createList'; tempId: number; title: string; key: string }
+    // `expectRev`: the note's content revision when the user typed the new
+    // title (migration 069). Sent only when the op runs STRAIGHT AWAY — a
+    // replay off the queue deliberately drops it, because the recorded
+    // revision is stale by definition there and refusing every queued rename
+    // would lose offline work the user cannot get back. Offline renames stay
+    // last-write-wins, exactly as this module's header has always said.
+    | { k: 'renameList'; listId: number; title: string; expectRev?: number }
     | { k: 'deleteList'; listId: number }
     // Out of the trash (the Undo of a delete that trashed). Queued behind a
     // trash still waiting offline, so the two replay in the order they were
     // made and the note ends up where the user left it.
     | { k: 'restoreList'; listId: number }
-    | { k: 'createTask'; note: NoteRef; tempId: number; description: string; parentId?: number; timing?: NewTaskTiming }
+    | { k: 'createTask'; note: NoteRef; tempId: number; description: string; parentId?: number; timing?: NewTaskTiming; key: string }
     | { k: 'editTask'; note: NoteRef; taskId: number; description: string; createdBy: number }
     // A due time (setDue). Ticks are `timing` ops: a plain is_completed
     // update is refused for a scheduled item by migration 066's guard.
@@ -121,12 +131,12 @@ export function newTempId(): number {
 const q = (s: string) => `“${s.length > 40 ? `${s.slice(0, 39)}…` : s}”`;
 
 export const ops = {
-    createList: (tempId: number, title: string) => withMeta({ k: 'createList', tempId, title }, `new note ${q(title)}`),
-    renameList: (listId: number, title: string) => withMeta({ k: 'renameList', listId, title }, `rename to ${q(title)}`),
+    createList: (tempId: number, title: string) => withMeta({ k: 'createList', tempId, title, key: newOpKey() }, `new note ${q(title)}`),
+    renameList: (listId: number, title: string, expectRev?: number) => withMeta({ k: 'renameList', listId, title, ...(expectRev === undefined ? {} : { expectRev }) }, `rename to ${q(title)}`),
     deleteList: (listId: number, title: string) => withMeta({ k: 'deleteList', listId }, `delete ${q(title)}`),
     restoreList: (listId: number, title: string) => withMeta({ k: 'restoreList', listId }, `restore ${q(title)}`),
     createTask: (note: NoteRef, tempId: number, description: string, parentId?: number, timing?: NewTaskTiming) =>
-        withMeta({ k: 'createTask', note, tempId, description, parentId, ...(timing ? { timing } : {}) }, `new item ${q(description)}`),
+        withMeta({ k: 'createTask', note, tempId, description, parentId, ...(timing ? { timing } : {}), key: newOpKey() }, `new item ${q(description)}`),
     editTask: (note: NoteRef, task: Task, description: string) =>
         withMeta({ k: 'editTask', note, taskId: task.id, description, createdBy: task.created_by }, `edit ${q(description)}`),
     setDue: (note: NoteRef, task: Task, dueAt: string | null) =>
@@ -195,11 +205,13 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Prom
     const note = (n: NoteRef): NoteRef => ({ kind: n.kind, id: r(n.id) });
     switch (op.k) {
         case 'createList': {
-            const list = await createTaskList(op.title);
+            // op.key rides every attempt of THIS create, so a replay after a
+            // lost answer is answered with the note it already made.
+            const list = await createTaskList(op.title, op.key);
             idMap[String(op.tempId)] = list.id;
             return list;
         }
-        case 'renameList': return renameTaskList(r(op.listId), op.title);
+        case 'renameList': return renameTaskList(r(op.listId), op.title, fromQueue ? undefined : op.expectRev);
         // No expect_due_at on a replay: the compare-and-swap exists so two
         // devices advancing one reminder cannot both win, and a queued edit
         // the user made deliberately is not an advance. It is last-write-wins
@@ -214,8 +226,8 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Prom
             const n = note(op.note);
             const parent = op.parentId === undefined ? undefined : r(op.parentId);
             const created = n.kind === 'channel'
-                ? await createTask(n.id, op.description, parent, op.timing)
-                : await createListTask(n.id, op.description, parent, op.timing);
+                ? await createTask(n.id, op.description, parent, op.timing, op.key)
+                : await createListTask(n.id, op.description, parent, op.timing, op.key);
             idMap[String(op.tempId)] = created.id;
             return created;
         }

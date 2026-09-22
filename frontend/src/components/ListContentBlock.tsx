@@ -18,13 +18,13 @@ import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { type TaskAttachmentRef, type TaskList, isAttachmentsLocked, parseTaskAttachments } from '../api/tasks';
 import {
-    type ListFeatures, NoteFilesUnreadableError, deleteFiles, deleteListForever,
+    type ListFeatures, NoteConflictError, NoteFilesUnreadableError, deleteFiles, deleteListForever,
     restoreTaskList, setTaskListAttachments, setTaskListBody, trashPurgeAt,
 } from '../api/listContent';
 import { listContentQueryKeys } from './useListContentSupport';
 import { type DrawingFiles, type GalleryItem, fileIdsOf, planDrawingReplace, readStrokes, refsOfItem, uploadNoteMedia, withoutItem } from '../api/noteMedia';
 import { type DrawingDoc, parseDrawing } from '../api/drawing';
-import { NoteBodyField } from './NoteBodyField';
+import { NoteBodyField, type BodySaveOutcome } from './NoteBodyField';
 import { NoteImages } from './NoteImages';
 import { DrawingCanvas } from './DrawingCanvas';
 import { pushMessageToast } from './messageToastBus';
@@ -49,15 +49,24 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
     const opened = list.attachments ?? null;
     const refs: TaskAttachmentRef[] = isAttachmentsLocked(opened) ? [] : parseTaskAttachments(opened);
 
-    const saveBody = async (text: string): Promise<boolean> => {
+    const saveBody = async (text: string, baseRev?: number): Promise<BodySaveOutcome> => {
         const before = list.body ?? null;
+        const base = features.contentRev ? (baseRev ?? list.content_rev) : undefined;
         onPatch(list.id, { body: text === '' ? null : text });
         try {
-            await setTaskListBody(list.id, text);
-            return true;
+            const rev = await setTaskListBody(list.id, text, base);
+            if (rev !== null) onPatch(list.id, { content_rev: rev });
+            return { rev };
         } catch (err) {
-            console.error('Failed to save note text:', err);
             onPatch(list.id, { body: before });
+            if (err instanceof NoteConflictError) {
+                // The same contract as Púca Notes': nothing was written, the
+                // note goes back to what the server holds, and the field keeps
+                // the typed words and asks which to keep.
+                onPatch(list.id, { body: err.body, content_rev: err.contentRev });
+                return { conflict: { theirs: err.body, rev: err.contentRev } };
+            }
+            console.error('Failed to save note text:', err);
             return false;
         }
     };
@@ -65,10 +74,19 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
         const before = list.attachments ?? null;
         onPatch(list.id, { attachments: next.length === 0 ? null : JSON.stringify(next) });
         try {
-            await setTaskListAttachments(list.id, next);
+            const rev = await setTaskListAttachments(list.id, next, features.contentRev ? list.content_rev : undefined);
+            if (rev !== null) onPatch(list.id, { content_rev: rev });
         } catch (err) {
-            console.error('Failed to save note pictures:', err);
             onPatch(list.id, { attachments: before });
+            if (err instanceof NoteConflictError) {
+                // Same as Púca Notes': pictures get no two-way choice (there
+                // is no half of a sidecar to keep), so the note goes back to
+                // the copy that won and the user is told.
+                onPatch(list.id, { attachments: err.attachments, content_rev: err.contentRev });
+                pushMessageToast({ title: 'This note’s pictures were changed somewhere else, so this change wasn’t saved — the other copy is shown' });
+                return false;
+            }
+            console.error('Failed to save note pictures:', err);
             return false;
         }
         if (dropped.length > 0) void deleteFiles(fileIdsOf(dropped));
@@ -128,7 +146,7 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
     return (
         <div className="list-content-block">
             {features.body && (
-                <NoteBodyField key={list.id} listId={list.id} value={list.body} onSave={saveBody} placeholder="Add a note…" />
+                <NoteBodyField key={list.id} listId={list.id} value={list.body} contentRev={list.content_rev} onSave={saveBody} placeholder="Add a note…" />
             )}
             {features.attachments && (
                 <NoteImages

@@ -219,6 +219,50 @@ screen. On an older backend (404), or after repeated failures, Notes falls back
 to what it did before: refetch on focus and a 30-second poll while a shared note
 is open. The poll is off only while the stream is live.
 
+## Two devices, one note
+
+Two people — or one person with a phone and a laptop — in the same note at the
+same time used to end with one copy silently replacing the other. A note's own
+content (its **text**, its **title** and its **pictures**) now carries a
+revision, and a save names the revision it was written on top of. If that is no
+longer the current one, the server refuses the save, writes nothing, and hands
+back the copy it holds (migration 069, `expect_rev` on
+`PATCH /task-lists/:id`).
+
+- **Your words are never thrown away before you choose.** The text you typed
+  stays in the field, and a line above it shows the other copy with *Keep
+  mine* and *Use theirs*. *Keep mine* saves again on top of the copy that won;
+  *Use theirs* takes it. If the other copy cannot be read on this device (a
+  key you do not have yet), only *Keep mine* is offered — sealing the words of
+  an error over real content is the one thing the note text field exists to
+  prevent.
+- **The revision is taken when you start typing**, not when the save goes out
+  — for the text and for the title alike. The other device's change usually
+  arrives while you are still writing: the field keeps what you typed, and the
+  save is still judged against what you were writing on top of. Reading the
+  revision at send time would name theirs and quietly win — which for a title
+  would mean their rename disappearing with nothing on screen to say so. A
+  picture takes its revision when the sidecar it is being added to is read,
+  before the upload, for the same reason: the upload is the window the other
+  device's change arrives in.
+- **Nothing is saved while the question is on screen.** Leaving the field,
+  closing the note or moving it to the trash does not answer it: those all
+  used to save, and the save always said *keep mine*, so the other device's
+  words went with nobody choosing. Only three things answer it — *Keep mine*,
+  *Use theirs*, and simply writing more (which dismisses the line and keeps
+  what you wrote). Close the note without answering and the copy that won is
+  what stays; what you had typed is not saved.
+- **Ticking, adding, editing or reordering an ITEM is never a clash.** A note
+  is one card holding both its text and its items, and the revision moves only
+  for the note's own content.
+- **Pictures get no two-way choice** (there is no half of a set of pictures to
+  keep): the note goes back to the copy that won and you are told, so you can
+  add yours again on top of it. A **title** is one line and works the same way.
+- **A title being typed is no longer wiped** by a rename arriving from another
+  device — it used to vanish mid-keystroke.
+- Against a server older than migration 069 nothing here appears and the last
+  save wins, exactly as before.
+
 ## Offline
 
 - **Your notes open with no network.** Every Notes query result is kept in
@@ -250,13 +294,21 @@ is open. The poll is off only while the stream is live.
   offline get temporary ids that are rewritten on replay; if a create is
   refused, everything under it is dropped with it. A change the server refuses
   (lost access, deleted elsewhere) is dropped and one message lists what did not
-  save, in your words. Item edits are last-write-wins: the task API has no
-  revision to compare against. **Creates are at-least-once:** the create
-  routes take no client op id, so a create the server committed whose answer
-  was lost (the connection dropped mid-response) is replayed and the note or
-  item appears twice; delete the extra one. Closing that needs an idempotency
-  key on the server's create routes. A change sent right after a cold start
-  waits for the queue a previous page left behind before it may run.
+  save, in your words. Edits of an ITEM are last-write-wins: an item carries
+  no revision, so a change replayed hours later replaces a newer edit of the
+  same item made elsewhere. A note's own text, title and pictures do not work
+  that way any more — see *Two devices, one note*; a rename replayed off the
+  queue is the one exception, and deliberately still wins, because refusing it
+  would throw away work done offline that nobody can get back. **A create is
+  made once.** Each create carries a random id made on this device when you
+  act and repeated on every retry, so a create the server committed whose
+  answer was lost (the connection dropped mid-response) is recognised when it
+  is sent again and answered with the note or item it already made, instead of
+  making a second one. The id says nothing about what you wrote, and the
+  server forgets it after a day (server owners:
+  `NOTES_OP_KEY_RETENTION_HOURS`, 0 keeps them). A change sent right after a
+  cold start waits for the queue a previous page left behind before it may
+  run.
 - **Not offline:** anything that uploads or seals a note's own content —
   adding an attachment, a photo or a drawing, saving a note's text, creating
   a note with text or pictures, *Show checkboxes* (turning the text into
@@ -872,9 +924,6 @@ with its pictures, and only the other items become lines of text.
   an upload cannot wait for a connection, so adding a photo or drawing,
   saving a note's text, and creating a note with text or pictures need the
   network, and fail with a message when there is none.
-- **Exactly-once creates.** A create whose answer was lost replays and can
-  leave a duplicate note or item (see *Offline*): the create routes take no
-  client op id yet.
 - **Item text in a reminder or place notification.** It would put decrypted
   note content on the lock screen and in app storage; the phone's background
   code never holds it. The notification says "An item is due" and opens that

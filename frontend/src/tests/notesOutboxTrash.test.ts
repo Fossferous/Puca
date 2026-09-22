@@ -35,6 +35,7 @@ import { apiClient } from '../api/client';
 import { makeIdentity } from '../api/e2ee';
 import { resetTrashProbe } from '../api/listContent';
 import { createListTask, createTaskList, deleteTaskList, getTaskTabPrefs, patchTaskTiming, putTaskTabPrefs, type Task } from '../api/tasks';
+import { OP_KEY_SHAPE } from '../api/opKey';
 const { createOutbox, execOp, ops } = await import('../notes/model/notesOutbox');
 const { memoryStore } = await import('../notes/model/notesCache');
 const { resetNoteBusy } = await import('../notes/model/noteBusy');
@@ -135,7 +136,9 @@ describe('the calendar\'s ops at replay', () => {
         vi.mocked(createListTask).mockResolvedValue(task(41));
         s.setReachable(true);
         await s.ob.replay();
-        expect(createListTask).toHaveBeenCalledWith(40, 'Dentist', undefined, timing);
+        // ...with the create key the op was minted with, so a replay after a
+        // lost answer is recognised rather than making a second item.
+        expect(createListTask).toHaveBeenCalledWith(40, 'Dentist', undefined, timing, expect.stringMatching(OP_KEY_SHAPE));
         expect(patchTaskTiming).toHaveBeenCalledWith({ id: 41, channel_id: null, created_by: 7 }, { is_completed: true });
         expect(s.summaries.at(-1)!.touchedDue).toBe(true);   // the reminders are poked once it is on the server
     });
