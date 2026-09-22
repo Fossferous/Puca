@@ -5,16 +5,19 @@
  * explained in its own words.
  */
 import { useCallback, useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { type Task, patchTaskTiming } from '../../api/tasks';
 import { snoozePatch } from '../../api/taskSchedule';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { ApiError } from '../../api/client';
 import { toastRefusal } from '../../api/refusalToast';
 import { pushMessageToast } from '../messageToastBus';
+import { invalidateTaskScope } from '../taskSources';
 
 export function useScheduleSetter(
     tasks: Task[], setTasks: (fn: (prev: Task[]) => Task[]) => void,
 ): (task: Task, schedule: string | null, dueAt: string | null) => Promise<void> {
+    const qc = useQueryClient();
     const tasksRef = useRef(tasks);
     useEffect(() => { tasksRef.current = tasks; }, [tasks]);
     return useCallback(async (task: Task, schedule: string | null, dueAt: string | null) => {
@@ -23,12 +26,16 @@ export function useScheduleSetter(
         try {
             await patchTaskTiming(task, { schedule, due_at: dueAt });
             pokeTaskReminders();
+            // The Calendar and Reminders tabs read a cache these owners do not
+            // write to; without this the change is missing from them until it
+            // goes stale (taskSources.invalidateTaskScope).
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to set the date & repeat:', err);
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             if (before) setTasks(prev => prev.map(t => (t.id === task.id ? { ...t, schedule: before.schedule, due_at: before.due_at } : t)));
         }
-    }, [setTasks]);
+    }, [setTasks, qc]);
 }
 
 /**
@@ -45,6 +52,7 @@ export function useSnoozeSetter(
     setTasks: (fn: (prev: Task[]) => Task[]) => void,
     canEditTime: (task: Task) => boolean,
 ): (task: Task, until: number | null) => Promise<void> {
+    const qc = useQueryClient();
     const tasksRef = useRef(tasks);
     useEffect(() => { tasksRef.current = tasks; }, [tasks]);
     return useCallback(async (task: Task, until: number | null) => {
@@ -59,11 +67,12 @@ export function useSnoozeSetter(
         try {
             await patchTaskTiming(task, patch);
             pokeTaskReminders();
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to snooze:', err);
             // Every refusal says why, in the server's words.
             toastRefusal(err);
             if (before) setTasks(prev => prev.map(t => (t.id === task.id ? { ...t, snooze: before.snooze, due_at: before.due_at } : t)));
         }
-    }, [setTasks, canEditTime]);
+    }, [setTasks, canEditTime, qc]);
 }

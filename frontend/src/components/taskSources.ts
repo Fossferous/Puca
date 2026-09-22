@@ -13,7 +13,7 @@
  * which is ids and times only (src/task_handlers.rs).
  */
 import { useEffect, useMemo } from 'react';
-import { useQueries, useQueryClient } from '@tanstack/react-query';
+import { type QueryClient, useQueries, useQueryClient } from '@tanstack/react-query';
 import { type Task, type TaskList, canCompleteTasks, canEditTask, listListTasks, listTasks } from '../api/tasks';
 import { type CalendarSource } from '../api/taskCalendar';
 import { wsClient, type ServerMessage } from '../api/websocket';
@@ -29,6 +29,26 @@ export type TaskScopeKind = 'list' | 'channel';
 
 /** The cache key a scope's items live under, for every view that shows them. */
 export const taskScopeKey = (kind: TaskScopeKind, id: number) => ['tasks-calendar', kind, id] as const;
+
+/**
+ * Tell the dated views a scope changed.
+ *
+ * The Calendar and Reminders tabs read through useTaskSources with a 30 s
+ * staleTime, while a LIST tab keeps its items in its own component state and
+ * writes straight to the API. So a due time set in a list tab did not reach
+ * either tab until that cache went stale: set a date, tap Reminders, and the
+ * item was not there — for up to half a minute, with nothing to retry. Every
+ * writer outside those tabs calls this after the server has answered.
+ *
+ * The scope comes from the task itself: a personal list carries `list_id`, a
+ * checklist channel `channel_id`.
+ */
+export function invalidateTaskScope(qc: QueryClient, task: Pick<Task, 'list_id' | 'channel_id'>): void {
+    // Exactly one of the two is set. A task with neither belongs to no scope
+    // these views read, so there is nothing to refresh.
+    if (task.list_id != null) void qc.invalidateQueries({ queryKey: taskScopeKey('list', task.list_id) });
+    else if (task.channel_id != null) void qc.invalidateQueries({ queryKey: taskScopeKey('channel', task.channel_id) });
+}
 
 export interface TaskSources {
     sources: CalendarSource[];

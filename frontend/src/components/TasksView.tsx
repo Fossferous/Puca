@@ -47,6 +47,7 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
+import { invalidateTaskScope } from './taskSources';
 import { consumeTasksTab, peekTasksTab } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
@@ -449,6 +450,9 @@ export function TasksView() {
         syncListCounts(selectedList.id, next);
         try {
             await plan.send();
+            // A ticked item leaves Reminders, and a repeating one reappears at
+            // its next time: the dated tabs read a cache this view does not write.
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to update task:', err);
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
@@ -516,6 +520,9 @@ export function TasksView() {
             // due_at is plaintext metadata ('' clears server-side).
             await updateListTask(task.id, { due_at: dueAt ?? '' });
             pokeTaskReminders(); // arm a near deadline now, not at the next poll
+            // ...and tell the Calendar and Reminders tabs, which read a
+            // cache this view does not write to (taskSources).
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to set due time:', err);
             setTasks(original);

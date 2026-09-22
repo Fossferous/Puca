@@ -45,8 +45,13 @@ Púca's reminders. Anything you do in one is what you see in the other.
   tab**, over every personal list and checklist channel, and a due-item
   notification opens it — whether Tasks was closed or already on screen: the
   tap and the web notification click both raise one window event, which a
-  mounted Tasks view answers by switching tabs — so this is not a Notes-only
-  surface, and the
+  mounted Tasks view answers by switching tabs. That tab and the Calendar tab
+  read every scope through one cached query (`components/taskSources.ts`) with
+  a 30-second staleness window, while a list tab keeps its items in its own
+  state and writes straight to the API — so every writer outside those two
+  tabs calls `invalidateTaskScope` once the server has answered, or a date set
+  in a list is missing from Reminders for up to half a minute. So this is not
+  a Notes-only surface, and the
   "Reminds whoever set it" line matters more there, because Púca's rows
   include items every other member set.
 - **Calendar, repeats, snooze, Edited** — a Calendar in the rail, dates and
