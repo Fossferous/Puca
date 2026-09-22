@@ -29,7 +29,8 @@
 // row below the top bar with the account button still tappable, and the
 // account menu shows the version and a working Check for updates.
 // Then the calendar (notes-walk-calendar.mjs): Dublin/en-GB and New York/en-US
-// with a fixed clock beside a DST change, and the phone gate.
+// with a fixed clock beside a DST change, and the phone gate. Last, the label
+// pager (notes-walk-pager.mjs): All + one page per label, tabs, swipes.
 //
 // Every check is ck(): a precondition that did not happen (nothing to measure,
 // an element not found) is a FAIL line, never a silent pass, and any FAIL
@@ -51,6 +52,7 @@ import { chromium, devices } from '@playwright/test';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { calendarWalk } from './notes-walk-calendar.mjs';
+import { pagerWalk } from './notes-walk-pager.mjs';
 
 const outdir = process.argv[2] || 'e2e/shots-notes';
 const baseURL = process.argv[3] || 'http://127.0.0.1:5176';
@@ -811,6 +813,10 @@ ck('card: a link on the card is marked but NOT tappable (the card opens the note
 ck('rail: the label appears', await page.locator('.notes-rail-item', { hasText: 'Errands' }).count() === 1);
 await page.locator('.notes-rail-item', { hasText: 'Errands' }).click();
 await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
+// The label is a PAGE of the pager now (NotesPager.tsx): the rail slides the
+// pager there, and All keeps its notes until it has slid off screen (so it
+// does not go blank on the way out). Count once one page holds a grid.
+await page.waitForFunction(() => document.querySelectorAll('.notes-page.live').length === 1, null, { timeout: 5000 }).catch(() => {});
 // textContent, not innerText: the heading is CSS-uppercased and innerText returns the rendered case.
 ck('label view: filtered heading + the one card', /Label: Errands/.test(await page.locator('h1.notes-section-title').textContent()) && await page.locator('.notes-card').count() === 1);
 // Text ⇄ checklist on the text note, both ways.
@@ -4187,6 +4193,16 @@ ck('app: no page errors', errors.length === 0, errors[0]);
 
 // ---- 15. Calendar (pinned zones, locales and a fixed clock) — notes-walk-calendar.mjs ----------
 const calendar = await calendarWalk({ browser, baseURL, state, username, ck, watch, shotOf, sql: psqlDsn ? sql : null, errors, notesCreatedAt });
+
+// ---- Label pager (swipe between lists) ----
+// All notes, then one page per label, with a tab strip above them
+// (components/NotesPager.tsx): the strip in the rail's order, tab/keyboard/
+// rail/deep-link navigation, search as the negative control, a draft kept
+// through a trackpad flick; and on the phone real touch swipes, a grip drag
+// that must not move the pager, and a vertical scroll inside a page. LAST on
+// purpose: it seeds two labels and seven notes of its own, and nothing after
+// it can be perturbed by them.
+await pagerWalk({ browser, baseURL, state, ck, watch, shotOf, errors });
 
 await browser.close();
 const skipNotes = [
