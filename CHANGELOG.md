@@ -226,7 +226,9 @@ one-line summary; this file is the full story. Versions follow
 - **Snooze.** From Reminders, from the calendar, or from the item's own row
   in a note or a list: 10 minutes, an hour, or tomorrow morning. The reminder
   time the server holds moves with the snooze, so a phone reminding with Púca
-  Notes closed goes off at the snoozed time. Snooze
+  Notes closed goes off at the snoozed time. Snooze is only offered to people
+  allowed to tick the item, and a snooze set by someone who may edit the item
+  cannot be changed or undone by someone who may only tick it.
 - **Change a reminder's time from the Reminders list.** Moving a reminder is
   the commonest thing to do with one, and it no longer means opening the note
   and finding the item: a clock on the row changes when it is due, and an item
@@ -242,12 +244,6 @@ one-line summary; this file is the full story. Versions follow
   rather than 09:00. The server still only ever sees when an item is due,
   never what it is — and the per-item *Keep the time private from the server*
   switch is still there for the ones it should not see at all.
-- **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
-  morning. The reminder time the server holds moves with the snooze, so a
-  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
-  is only offered to people allowed to tick the item, and a snooze set by
-  someone who may edit the item cannot be changed or undone by someone who
-  may only tick it.
 - **Edited.** Notes show when they were last changed, and can be sorted by it.
 - **.ics export and import.** Export gives your dated items as a standard
   calendar file. The file is not encrypted, and the app says so first. Import
@@ -286,9 +282,8 @@ one-line summary; this file is the full story. Versions follow
   added from the calendar, and moving a note to the trash (and its Undo)
   included. If the server refuses one (for example a note deleted elsewhere,
   or a repeating item another device already moved on), you are told which.
-  Adding photos or drawings, a note's text, a note made with text or
-  pictures, and turning a note's text into a checklist need a connection, and
-  the app says so when there is none. Restoring from the Trash waits for a
+  Turning a note's text into a checklist still needs a connection, and the
+  app says so when there is none. Restoring from the Trash waits for a
   move to the trash that has not synced yet, so that move can never undo it.
   The copy on your device is encrypted with a key from your account.
 - **Select several notes at once** and pin, colour, label, archive, move to

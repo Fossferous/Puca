@@ -1341,7 +1341,9 @@ offline bullet below); it is never queued.
   content, and a microphone a notes app can run unattended is not one it
   should own.
 - **Per-person sharing.** A shared note is a channel; there is no "share with
-  one person" that the data model could honour.
+  one person" that the data model could honour. *Send to Púca…* is not that:
+  it posts a snapshot as a chat message, and creates no share, no membership
+  and no live link — edits afterwards do not follow it.
 - **Link previews.** A note shows the address itself — never a fetched title,
   description or picture. See *Links in a note* above for why that is a
   refusal and not a gap.
@@ -1349,12 +1351,6 @@ offline bullet below); it is never queued.
   picture through a different mechanism than the clipboard, so a paste there
   is unreliable; the camera and the picker stay the way in on a phone, and the
   app does not claim otherwise.
-- **Púca Notes in Android's Share sheet.** There is no receiving share intent
-  yet, so "Share → Púca Notes" from the gallery does not appear. That is a
-  native change (a new APK), not something an over-the-air update can add.
-  one person" that the data model could honour. *Send to Púca…* is not that:
-  it posts a snapshot as a chat message, and creates no share, no membership
-  and no live link — edits afterwards do not follow it.
 - **Sending a note to several places, or several notes at once.** The bulk bar
   offers *Copy as text*, not a bulk send: N messages from one click is a spam
   hazard, and a send that is refused half way through has no sensible undo.

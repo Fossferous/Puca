@@ -237,9 +237,96 @@ for (const f of ['docs/USER_GUIDE.md', 'docs/GETTING_STARTED.md']) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// 13. Release notes and the "Not built" list survive a MERGE.
+//     Twelve feature branches were merged into one release, and prose is what
+//     git resolves worst: it kept BOTH sides of an overlapping edit to the
+//     same changelog bullet (one of them truncated mid-sentence, so the
+//     release page would have shipped a dangling word), it landed one
+//     branch's amendment after the WRONG "Not built" bullet (a paragraph that
+//     began mid-quotation), and it left a bullet saying a feature does not
+//     exist that another branch in the same merge had built. None of that is
+//     visible to a type checker, a test or a human skimming a 400-line
+//     section, and all three shipped to users. These are the greps.
+{
+    const lines = read('CHANGELOG.md').split('\n');
+    const start = lines.findIndex((l) => /^## Unreleased/.test(l));
+    if (start === -1) fail('CHANGELOG.md', 'no "## Unreleased" section — update this check if the heading changed');
+    else {
+        let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
+        if (end === -1) end = lines.length;
+        /** Bullets as [headingText, lastLineNumber, lastLineText]. */
+        const bullets = [];
+        for (let i = start; i < end; i++) {
+            const m = /^- \*\*([^*]+)\*\*/.exec(lines[i]);
+            if (!m) continue;
+            let last = i;
+            while (last + 1 < end && /^ {2}\S/.test(lines[last + 1])) last++;
+            bullets.push({
+                head: m[1].trim().replace(/[.:]$/, ''), at: i + 1, endAt: last + 1, endText: lines[last].trim(),
+                text: lines.slice(i, last + 1).map((l) => l.trim()).join(' '),
+            });
+        }
+        // Two branches, one subject, opposite answers — both shipped. The
+        // release that told users photos and note text now work with no
+        // signal also still told them, 200 lines down, that they do not.
+        const offlineMedia = bullets.find((b) => /no longer need a signal/.test(b.text));
+        if (offlineMedia) {
+            for (const b of bullets) {
+                if (b === offlineMedia) continue;
+                if (/(photos|pictures|drawings)[^.]{0,160}need a connection/.test(b.text)) {
+                    fail(`CHANGELOG.md:${b.at}`, `"${b.head}" says photos or a note's text need a connection, and "${offlineMedia.head}" (line ${offlineMedia.at}) says they no longer do — the same release cannot say both`);
+                }
+            }
+        }
+        const seen = new Map();
+        for (const b of bullets) {
+            const was = seen.get(b.head);
+            if (was !== undefined) {
+                fail(`CHANGELOG.md:${b.at}`, `"${b.head}" is already a bullet at line ${was} of the same release — a merge kept both sides of one edit; write ONE bullet and delete the other`);
+            } else seen.set(b.head, b.at);
+            // A release note that stops mid-sentence is a merge casualty: the
+            // rest of it survives in the copy the merge kept beside it.
+            if (b.endText && !/[.!?:)\]»”"`…]$/.test(b.endText)) {
+                fail(`CHANGELOG.md:${b.endAt}`, `"${b.head}" ends mid-sentence ("…${b.endText.slice(-40)}") — restore the rest of it, or fold it into the bullet that has it`);
+            }
+        }
+    }
+}
+{
+    const lines = read('docs/NOTES.md').split('\n');
+    const start = lines.findIndex((l) => /^## Not built/.test(l));
+    if (start === -1) fail('docs/NOTES.md', 'no "## Not built" section — update this check if the heading changed');
+    else {
+        let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
+        if (end === -1) end = lines.length;
+        let prev = null;
+        for (let i = start; i < end; i++) {
+            const line = lines[i];
+            const continuation = /^ {2}\S/.test(line);
+            if (continuation && prev !== null && /\.$/.test(prev)) {
+                // A new sentence that begins lowercase began somewhere else:
+                // an amendment landed after the wrong bullet.
+                const t = line.trim().replace(/^[*_`("“]+/, '');
+                if (/^[a-z]/.test(t)) {
+                    fail(`docs/NOTES.md:${i + 1}`, `this line starts a sentence mid-phrase ("${t.slice(0, 40)}…") — an amendment landed after the wrong bullet; move it to the one it belongs to`);
+                }
+            }
+            prev = continuation || /^- /.test(line) ? line.trimEnd() : null;
+        }
+        // A "Not built" bullet about something the tree now builds.
+        const notBuilt = lines.slice(start, end).join('\n');
+        const manifest = read('frontend/notes-app/android/app/src/main/AndroidManifest.xml');
+        const shareIn = /"shareIn"/.test(read('frontend/notes-app/android/app/src/main/java/com/sovereign/notes/NotesNativePlugin.java'));
+        if (/Share sheet/.test(notBuilt) && /android\.intent\.action\.SEND\b/.test(manifest) && shareIn) {
+            fail('docs/NOTES.md (Not built)', 'still says Púca Notes is not in Android\'s Share sheet, but the Notes manifest declares ACTION_SEND and the plugin advertises "shareIn" — delete the bullet (the browser-side gap has its own)');
+        }
+    }
+}
+
 if (problems.length) {
     console.error(`\ndocs consistency: ${problems.length} problem${problems.length === 1 ? '' : 's'}\n`);
     for (const p of problems) console.error(`  ${p.where}\n    ${p.what}\n`);
     process.exit(1);
 }
-console.log('docs consistency: clean (stale claims, TURN TTL, KDF, recovery docs, ops listing, env coverage, pool default, ExecStart, nginx body size, migration attrs, user-guide control names)');
+console.log('docs consistency: clean (stale claims, TURN TTL, KDF, recovery docs, ops listing, env coverage, pool default, ExecStart, nginx body size, migration attrs, user-guide control names, merged release notes and Not-built list)');
