@@ -8,7 +8,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+
+// The read view renders real links; opening one must not reach the shell.
+vi.mock('../api/openExternal', () => ({ openExternalUrl: vi.fn(), isExternalHref: () => true }));
+
 import { NoteBodyField } from '../components/NoteBodyField';
+import { openExternalUrl } from '../api/openExternal';
 import { BODY_SAVE_DELAY_MS, flushBodySave } from '../api/listContent';
 import { TASK_DECRYPT_FAILED } from '../api/decryptMarkers';
 
@@ -23,10 +28,19 @@ function type(el: HTMLTextAreaElement, value: string) {
     });
 }
 const area = () => container.querySelector('textarea') as HTMLTextAreaElement;
+/** jsdom does no layout, so a real textarea's scrollHeight is always 0 and a
+ *  height assertion could not tell "sized" from "never sized". Stand in for
+ *  it with a height that grows with the text, the way a browser's does. */
+const LINE_PX = 21;
+const stubScrollHeight = () => Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get(this: HTMLTextAreaElement) { return this.value.split('\n').length * LINE_PX; },
+});
 const flushPromises = async () => { for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); }); };
 
 beforeEach(() => {
     vi.useFakeTimers();
+    stubScrollHeight();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -34,6 +48,7 @@ beforeEach(() => {
 afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
+    delete (HTMLTextAreaElement.prototype as Partial<HTMLTextAreaElement>).scrollHeight;
     vi.useRealTimers();
 });
 
@@ -335,6 +350,86 @@ describe('NoteBodyField', () => {
         });
     });
 
+    it('a body with NO link never leaves the textarea', () => {
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="Buy milk" onSave={onSave} />); });
+        expect(container.querySelector('textarea')).not.toBeNull();
+        act(() => { area().dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+        expect(container.querySelector('textarea')).not.toBeNull();
+        expect(container.querySelector('.nb-rendered')).toBeNull();
+    });
+
+    it('typing a URL and blurring SAVES it and then shows it as a link', async () => {
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="" onSave={onSave} />); });
+        type(area(), 'read https://example.com/a');
+        // The blur flush must run BEFORE the read view replaces the textarea,
+        // or the last words typed are the ones that get lost.
+        act(() => { area().dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+        await flushPromises();
+        // The second argument is the base revision the typing started from
+        // (migration 069); this fixture has none, so it is undefined.
+        expect(onSave).toHaveBeenCalledWith('read https://example.com/a', undefined);
+        expect(container.querySelector('textarea')).toBeNull();
+        const a = container.querySelector('.nb-rendered a.note-link') as HTMLAnchorElement;
+        expect(a?.getAttribute('href')).toBe('https://example.com/a');
+    });
+
+    it('clicking the read view (not the link) puts a focused textarea back, with the text intact', async () => {
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="read https://example.com/a" onSave={onSave} />); });
+        const read = container.querySelector('.nb-rendered') as HTMLElement;
+        expect(read).not.toBeNull();
+        act(() => { read.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+        expect(area()).not.toBeNull();
+        expect(area().value).toBe('read https://example.com/a');
+        expect(document.activeElement).toBe(area());
+    });
+
+    it('tapping a LINK in the read view opens it — the focus it takes must not swap in the textarea', () => {
+        // The order a browser uses, and the one this used to get wrong:
+        // Chromium focuses an anchor on MOUSEDOWN, and React wires `onFocus`
+        // to `focusin`, which BUBBLES. So the read view is told about the
+        // focus before the anchor is ever told about its click. If that
+        // focus opens the editor, the anchor is unmounted between mousedown
+        // and mouseup and no click is ever dispatched at it — a web address
+        // in a note's text could be seen and never followed.
+        const onSave = vi.fn(async () => true);
+        act(() => { root.render(<NoteBodyField value="read https://example.com/a" onSave={onSave} />); });
+        const a = container.querySelector('.nb-rendered a.note-link') as HTMLAnchorElement;
+        expect(a).not.toBeNull();
+        act(() => { a.focus(); });
+        expect(container.querySelector('textarea')).toBeNull();   // still the read view...
+        act(() => { a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        expect(openExternalUrl).toHaveBeenCalledWith('https://example.com/a');
+        expect(container.querySelector('textarea')).toBeNull();   // ...and a tap on a link is not an edit
+        // POSITIVE CONTROL: focus that lands anywhere ELSE in the read view
+        // still opens the editor, so the guard above is about the anchor and
+        // not about focus-to-edit having been switched off.
+        const read = container.querySelector('.nb-rendered') as HTMLElement;
+        act(() => { read.focus(); });
+        expect(container.querySelector('textarea')).not.toBeNull();
+        expect(area().value).toBe('read https://example.com/a');
+    });
+
+    it('the textarea comes back at the HEIGHT of the text, not at two rows', () => {
+        // The regression this pins: the read/edit swap mounts a FRESH
+        // textarea without changing the text, so an auto-height effect keyed
+        // on the text alone never fires for it — and `.nb-text` is
+        // `overflow: hidden`, so a ten-line note would show two lines with
+        // the rest clipped until the next keystroke.
+        const body = ['read https://example.com/a', ...Array.from({ length: 9 }, (_, i) => `line ${i}`)].join('\n');
+        act(() => { root.render(<NoteBodyField value={body} onSave={vi.fn(async () => true)} />); });
+        const read = container.querySelector('.nb-rendered') as HTMLElement;
+        expect(read).not.toBeNull();
+        act(() => { read.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+        expect(area().style.height).toBe(`${10 * LINE_PX}px`);
+        // POSITIVE CONTROL: the number tracks the CONTENT, so the assertion
+        // above cannot be passing on a constant.
+        type(area(), 'one line');
+        expect(area().style.height).toBe(`${LINE_PX}px`);
+    });
+
     it('unreadable text is locked: no field to type into', () => {
         act(() => { root.render(<NoteBodyField value={TASK_DECRYPT_FAILED} onSave={vi.fn()} />); });
         expect(container.querySelector('textarea')).toBeNull();
@@ -342,6 +437,8 @@ describe('NoteBodyField', () => {
         // POSITIVE CONTROL: readable text is editable.
         act(() => { root.render(<NoteBodyField value="fine" onSave={vi.fn()} />); });
         expect(container.querySelector('textarea')).not.toBeNull();
+        // …and a marker is never linkified, whatever it happens to contain.
+        expect(container.querySelector('a.note-link')).toBeNull();
     });
 });
 

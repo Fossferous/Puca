@@ -30,7 +30,20 @@ Púca's reminders. Anything you do in one is what you see in the other.
 - **Open a note** — Púca's own task tree: inline edit, subtasks, drag to reorder
   and to nest, due times, attachments, the collapsible Completed section. It is
   the same component Púca renders, so a note lays out exactly as it does in the
-  Tasks view.
+  Tasks view. A **List actions** button appears in its foot as soon
+  as something is ticked, with *Uncheck all* and *Delete checked* — what a
+  weekly shopping list needs to start again. Both offer Undo, and Undo after a
+  delete brings the items back with their dates, repeats, pictures, their
+  ticks and their nesting — a ticked subtask under a parent that was not
+  ticked goes back under that parent, not to the top of the list. *Uncheck
+  all* asks first when a ticked repeating to-do whose series has already
+  finished is among them, because unticking that one reopens a repeat with no
+  next time. Both are refused while offline or while changes are
+  waiting to sync, for the same reason *Show checkboxes* is — a hundred writes
+  that replay later is not what the button looked like when it was tapped. And
+  there is deliberately no "move checked to bottom": ticked items are always in
+  the Completed section at the bottom, here and on the server, so there is
+  nowhere else for them to be.
 - **Search** — over decrypted titles, items, labels and server names, on the
   device; nothing about the query leaves it.
 - **Reminders** — everything with a time, grouped Overdue / Today /
@@ -202,6 +215,13 @@ Nothing here lets the operator read your notes (`docs/SECURITY_MODEL.md`):
 search is local, thumbnails are decrypted client-side as they are in Púca, and
 the prefs document is ciphertext. What the server does learn is the document's
 size and when it is written.
+
+*Uncheck all* and *Delete checked* send the same tick and delete requests the
+server already sees when you tick and delete by hand — one per item, spaced
+out, with no new kind of request and no new field. They are not free of
+signal, though, and it is worth saying plainly: a run of them inside a few
+seconds tells the operator that a list was reset in one go, and how many items
+were ticked. Pacing blunts that; it does not remove it.
 
 ## Live updates
 
@@ -980,6 +1000,88 @@ its Undo is gone — only of items whose delete went through, and never a file
 a live item names at that moment. An item whose delete failed stays an item,
 with its pictures, and only the other items become lines of text.
 
+**Paste and drop.** A picture can be pasted (Ctrl+V) or dropped onto the
+composer or onto an open note, instead of being saved to disk and picked
+again. It takes exactly the same path a picked one does — shrink, encrypt on
+this device, upload — because the paste and drop handlers only produce a
+`File[]` and hand it to the entry point the picker already fed
+(`addPictures` in `QuickAdd.tsx`, `addPhotos` in `NoteContentSection.tsx`).
+There is no second upload call site, and a drop of more pictures than a note
+can hold is refused by the sidecar cap before anything is uploaded, never
+half-applied. A picture pasted with no connection is refused *before* the
+attempt, with a message: an upload never queues (see *Offline*), so failing
+afterwards would be the same outcome with worse manners. The drop outline
+appears only while a drag carrying files is actually over the target, so it
+never promises something a shell that does not deliver drops could not do.
+
+These are Púca **Notes'** gestures. Púca's Tasks view renders the same note
+text and the same pictures (`ListContentBlock.tsx` → `NoteBodyField`,
+`NoteImages`) and therefore shows the same links, but it wires no paste or
+drop handler: there, a picture still goes in through the picker.
+
+A paste that carries TEXT is text, whatever picture came with it. Chromium
+puts an `image/png` on the clipboard *beside* the text for any rich copy — a
+Word paragraph, a range of Excel cells, a selection of a web page — so a
+handler that asks only "is there an image?" turns a pasted table into a
+screenshot of a table. `isTextPaste` (`notes/model/noteContent.ts`) is the
+guard: a real screenshot, or *Copy image*, carries no text at all, which is
+what tells the two apart. Drops are unaffected; an OS drop of files has no
+text. (Púca's chat composer takes the other branch on purpose — an image
+pasted into a message IS the message.)
+
+**Pasting a list.** Paste several lines into an item field, or into *Add an
+item…*, and Púca Notes asks first — showing the lines it is about to add, with
+*Add N items*, *Add as one item* and *Cancel*. It asks because items are
+removed one at a time and an item delete has no Undo: a stray paste of a
+document would otherwise make forty items nobody can take back in one go. The
+lines are split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `,
+`[ ]` and `[x]` are dropped and blank lines are ignored. A paste of ONE line is
+never intercepted — it lands in the field as any paste would.
+
+A pasted line is truncated to the same length the field itself accepts
+(`MAX_ITEM_LENGTH`, 500), so no route into a list can produce an item you
+could not have typed. In the open note the creates are **paced** like every
+other fan-out in the app (`icsImport`'s `PACE_MS`, well under the server's
+50/s per IP), and a run that stops part-way says how many items landed
+rather than leaving an arbitrary prefix of the list unexplained.
+
+**Links in a note.** A web address typed or pasted into a note's text, or
+into an item, becomes tappable. Púca Notes works out where it goes by looking
+at the text it has already decrypted — **nothing is fetched to render a
+link**. No favicon, no page title, no description, no preview card, no site
+icon. The note stays as private on screen as it is on the server.
+
+That refusal is deliberate, and worth stating so nobody adds it back as an
+improvement: fetching a page's metadata or its icon would tell a third party
+the hostname, this device's IP address and the moment of reading — and for a
+note, which the server itself cannot read, it would additionally announce that
+someone is reading *this note* right now. `frontend/src/api/linkPreview.ts`
+records the same deletion for chat.
+
+- Only `http` and `https` become links. `javascript:`, `data:`, `file:`,
+  `mailto:` and a scheme-less `//host` stay plain text
+  (`frontend/src/utils/linkSegments.ts`, sharing chat's `URL_RE`).
+- A link opens OUTSIDE the app: a new browser tab on the web, the desktop
+  shell's `open_external` under Tauri, and the system browser from the
+  Android apps — where it is a top-level navigation the Capacitor bridge
+  turns into `ACTION_VIEW`, because `window.open` is not a path there.
+  Every anchor carries `rel="noopener noreferrer"`, so the destination does
+  not learn the origin and path of the page that was reading a sealed note.
+- Text holding an address swaps to a read view when it is not being edited;
+  tapping anywhere but the link puts the cursor back where you tapped. Text
+  with no address never leaves its editing field.
+- A tap on the link is the link's, including the FOCUS it takes: a browser
+  focuses an anchor on mousedown, and that focus bubbles to the read view
+  around it before the link is ever clicked. The read view ignores a focus
+  that landed on a link, exactly as it ignores a click on one — otherwise the
+  field would replace the link between press and release and the address
+  could be read but never followed.
+- On the card grid a link is **marked but not tappable**: the card's own tap
+  opens the note, and a 44px tap target cannot live inside a clamped two-line
+  preview at 390px.
+- Púca's Tasks view shows the same links, because it renders the same text
+  through the same components.
+
 ## Not built (and why)
 
 - **A transcript in the browser, or below Android 13.** Writing a recording
@@ -993,6 +1095,16 @@ with its pictures, and only the other items become lines of text.
   should own.
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
+- **Link previews.** A note shows the address itself — never a fetched title,
+  description or picture. See *Links in a note* above for why that is a
+  refusal and not a gap.
+- **Pasting a picture inside the Android app.** Android's keyboard inserts a
+  picture through a different mechanism than the clipboard, so a paste there
+  is unreliable; the camera and the picker stay the way in on a phone, and the
+  app does not claim otherwise.
+- **Púca Notes in Android's Share sheet.** There is no receiving share intent
+  yet, so "Share → Púca Notes" from the gallery does not appear. That is a
+  native change (a new APK), not something an over-the-air update can add.
 - **A desktop Notes app.** Notes on a computer is the browser page; the
   desktop installer deliberately carries no copy of it (see *Building and
   serving*).

@@ -1,8 +1,9 @@
 /**
  * Púca Notes — the pure side of a note's own text (`body`): its title when
- * the composer's is blank, and the two conversions between a text note and a
- * checklist. (Its photos and drawings are api/noteMedia.ts.) No network, no
- * DOM; unit-tested (src/tests/noteContent.test.ts).
+ * the composer's is blank, the two conversions between a text note and a
+ * checklist, and what a paste or a drop carries. (Its photos and drawings
+ * are api/noteMedia.ts.) No network, no DOM; unit-tested
+ * (src/tests/noteContent.test.ts).
  */
 import { type Task, buildTaskTree, type TaskNode } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
@@ -45,6 +46,71 @@ export function bodyToItems(body: string): string[] {
         .split(/\r?\n/)
         .map(l => l.trim().replace(/^(?:[-*•]\s+)?(?:\[[ xX]\]\s*)?/, '').trim())
         .filter(l => l !== '');
+}
+
+// --- Paste and drop ------------------------------------------------------------------
+
+/** The items a multi-line paste would become — the SAME splitter "Show
+ *  checkboxes" uses, so a list copied out of anywhere lands the same way
+ *  wherever it is pasted. One line in gives exactly one line out, which is
+ *  what tells the paste handlers there is nothing to ask about. */
+export function linesFromPaste(text: string): string[] {
+    return bodyToItems(text);
+}
+
+/** A multi-line paste kept as ONE item: a single line, the way an `<input>`
+ *  would have taken it had we not intercepted the paste. */
+export function pasteAsOneLine(text: string): string {
+    return text.replace(/\s+/g, ' ').trim();
+}
+
+/** The minimum of a `DataTransfer` this module reads: a clipboard paste and
+ *  an OS drop both satisfy it, and a test can hand-build one. A drop has no
+ *  `getData` worth reading; a paste does. */
+export interface TransferLike {
+    files?: ArrayLike<File> | null;
+    items?: ArrayLike<DataTransferItem> | null;
+    getData?: (format: string) => string;
+}
+
+/** True when this paste is TEXT that merely carries a picture alongside it.
+ *
+ *  Chromium puts an `image/png` on the clipboard NEXT TO the text whenever
+ *  rich content is copied — a Word paragraph, a range of Excel cells, a
+ *  selection of a web page — so "the clipboard holds an image" is not "a
+ *  picture was copied", and a picture handler that only asks the first
+ *  question turns a pasted table into a screenshot of a table. A real
+ *  screenshot, or "Copy image", carries no text at all, which is what tells
+ *  the two apart. Drops are unaffected: an OS drop of files has no text.
+ *
+ *  (Púca's chat composer, Chat.tsx, takes the images-first branch on purpose
+ *  — an image pasted there IS the message. A note's text is not.) */
+export function isTextPaste(dt: TransferLike | null | undefined): boolean {
+    if (!dt || typeof dt.getData !== 'function') return false;
+    return (dt.getData('text/plain') || '').trim() !== '';
+}
+
+/** The files carried by a paste or a drop, split into pictures and the rest.
+ *  Nothing (or no transfer at all) gives two empty arrays. */
+export function filesFromTransfer(dt: TransferLike | null | undefined): { images: File[]; others: File[] } {
+    const images: File[] = [];
+    const others: File[] = [];
+    if (!dt) return { images, others };
+    // `files` is what a drop and a modern paste both fill. Some webviews
+    // leave it empty for a pasted image and fill only `items`, so that is the
+    // fallback — never both, or one screenshot would land twice.
+    let files = dt.files && dt.files.length > 0 ? Array.from(dt.files) : [];
+    if (files.length === 0 && dt.items) {
+        files = Array.from(dt.items)
+            .filter(i => i.kind === 'file')
+            .map(i => i.getAsFile())
+            .filter((f): f is File => f !== null);
+    }
+    for (const f of files) {
+        if (f.type.startsWith('image/')) images.push(f);
+        else others.push(f);
+    }
+    return { images, others };
 }
 
 /** "Hide checkboxes": every item as a line, in the editor's order (open

@@ -18,6 +18,12 @@
     overflow: hidden;
 }
 .notes-card-body.unreadable { color: var(--text-muted); font-style: italic; }
+/* On a card a link is MARKED, not tappable: the card's own tap opens the
+   note, so a live target there would steal it (NoteCardContent.tsx). */
+.notes-card-body .note-link, .notes-card-item-text .note-link {
+    cursor: inherit;
+    pointer-events: none;
+}
 .notes-card-hero {
     margin: -12px -14px 8px;
     display: grid;
@@ -104,6 +110,34 @@
 .notes-trash-meta { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
 .notes-trash-actions { display: flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 
+/* ---------- Paste and drop ---------------------------------------------------
+   The drop affordance appears only while a real drag carrying FILES is over
+   the target (hasTransferFiles): a permanent "drop here" label would be a lie
+   in a shell that never delivers the event. */
+.notes-quickadd.dropping, .notes-editor-content.dropping {
+    outline: 2px dashed var(--brand-primary);
+    outline-offset: -2px;
+    border-radius: 8px;
+}
+.notes-paste-lines {
+    margin: 8px 0;
+    padding: 8px 10px;
+    list-style: none;
+    max-height: 40dvh;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+.notes-paste-line {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-normal);
+    word-break: break-word;
+}
+.notes-paste-line + .notes-paste-line { border-top: 1px solid var(--border-faint); }
+.notes-paste-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
 @media (pointer: coarse) and (max-width: 1024px) {
     .notes-quickadd-body { font-size: 16px; }
     .notes-editor-content .nb-text { font-size: 16px; }
@@ -115,6 +149,10 @@
     .notes-trash-row { flex-direction: column; }
     .notes-trash-actions { justify-content: flex-start; }
     .notes-trash-actions .notes-textbtn, .notes-trash-head .notes-textbtn { min-height: 44px; }
+    /* The paste confirmation must stay answerable on a phone: the line list
+       scrolls, the buttons never leave the screen, and each is a tap target. */
+    .notes-paste-lines { max-height: 40dvh; }
+    .notes-paste-actions .notes-textbtn { min-height: 44px; }
     .notes-card-hero { margin: -14px -14px 8px; }
 }
 @media (prefers-reduced-motion: reduce) {

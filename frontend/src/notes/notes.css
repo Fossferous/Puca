@@ -833,11 +833,15 @@
     .notes-editor-add input, .notes-quickadd-title, .notes-quickadd-item input { font-size: 16px; }
     .notes-editor-foot .notes-textbtn { padding: 10px 12px; }
     /* At 390 the footer holds colour, labels, archive, refresh, the note's
-       own reminder (two buttons), more and Close: it wraps (the base rule)
-       rather than shrinking anything below 44px, and the wrapped rows need
-       a little air between them. */
-    .notes-editor-foot { row-gap: 2px; }
+       own reminder (two buttons), List actions, more and Close: it wraps (the
+       base rule) rather than shrinking anything below 44px, and the wrapped
+       rows need a little air between them. Nothing in this row may be
+       squeezed — flex once took the Open-in-Púca ANCHOR down to 39px, and an
+       anchor is not a <button>, so mobile.css's 44px floor never applied. */
+    .notes-editor-foot { row-gap: 4px; }
+    .notes-editor-foot .notes-iconbtn, .notes-editor-foot .notes-textbtn { flex-shrink: 0; }
     .notes-editor-foot .notes-iconbtn { min-width: 44px; min-height: 44px; }
+    .notes-editor-foot a.notes-iconbtn { min-width: 44px; min-height: 44px; }
 
     .notes-menu-item { padding: 12px 10px; font-size: 15px; }
     /* <select> is a form control too: below 16px iOS zooms the page. */
@@ -875,6 +879,25 @@
 
 /* ---------- Dialog ----------------------------------------------------------------
    The dialog shell moved to components/NotesDialog.css with its component. */
+
+/* ---------- List actions (Uncheck all / Delete checked) --------------------------- */
+.notes-list-actions { display: flex; flex-direction: column; min-width: 200px; }
+.notes-list-actions button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: none;
+    background: none;
+    color: var(--text-normal);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+}
+.notes-list-actions button:hover { background: var(--bg-modifier-hover); }
+.notes-list-actions button.danger { color: var(--text-danger); }
 
 /* ---------- Composer as a phone sheet --------------------------------------------- */
 .notes-quickadd-sheet { padding: 8px; overflow-y: auto; -webkit-overflow-scrolling: touch; }

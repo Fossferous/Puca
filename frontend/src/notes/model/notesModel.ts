@@ -416,6 +416,10 @@ export function reminderBadgeCount(groups: ReminderGroups): number {
 }
 
 export const MAX_TITLE_LENGTH = 100;
+/** What an item field accepts by typing — and therefore what a PASTE may
+ *  create: a pasted line is truncated to the same length, so no route into a
+ *  list can produce an item the field that shows it would refuse. */
+export const MAX_ITEM_LENGTH = 500;
 export const QUICK_TITLE_FROM_ITEM_LENGTH = 60;
 
 /**

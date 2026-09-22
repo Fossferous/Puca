@@ -6,7 +6,8 @@
  * a note's text.
  */
 import { describe, it, expect } from 'vitest';
-import { bodyToItems, itemsToBody, conversionLosses, describeLosses, deriveContentTitle, readableBody, recreationOrder } from '../notes/model/noteContent';
+import { bodyToItems, itemsToBody, conversionLosses, describeLosses, deriveContentTitle, filesFromTransfer, linesFromPaste, pasteAsOneLine, readableBody, recreationOrder } from '../notes/model/noteContent';
+import { hasTransferFiles } from '../notes/model/pasteDrop';
 import { galleryItems, withoutItem, nextDrawingName, heroItems, slotsNeeded, DRAWING_STROKES_MIME } from '../api/noteMedia';
 import { emptyDrawing, parseDrawing, serializeDrawing, toCanvasPoint, DRAWING_WIDTH, MAX_DRAWING_SIDE } from '../api/drawing';
 import { fitWithin, shouldShrink } from '../api/imagePrep';
@@ -202,5 +203,56 @@ describe('a note’s text in search, copy-as-text and the export', () => {
         expect(readableBody(TASK_DECRYPT_FAILED)).toBe('');
         expect(readableBody('ok')).toBe('ok');
         expect(readableBody(null)).toBe('');
+    });
+});
+
+describe('Paste and drop: what a transfer carries', () => {
+    const file = (name: string, type: string) => new File(['x'], name, { type });
+
+    it('a multi-line paste is one line per item, through the SAME splitter as "Show checkboxes"', () => {
+        expect(linesFromPaste('Milk\r\n- Bread\n\n[x] Eggs')).toEqual(['Milk', 'Bread', 'Eggs']);
+    });
+
+    it('one line in is exactly one line out — this is what says "do not ask"', () => {
+        expect(linesFromPaste('   Milk  ')).toEqual(['Milk']);
+        expect(linesFromPaste('Milk\n\n\n')).toEqual(['Milk']);
+        // POSITIVE CONTROL: two lines really do come back as two.
+        expect(linesFromPaste('Milk\nBread')).toHaveLength(2);
+        expect(linesFromPaste('   \n  ')).toEqual([]);
+    });
+
+    it('kept as one item, a paste is the single line an <input> would have taken', () => {
+        expect(pasteAsOneLine('  Milk\nand   bread\t\n')).toBe('Milk and bread');
+    });
+
+    it('splits a transfer into pictures and the rest', () => {
+        const dt = { files: [file('a.png', 'image/png'), file('b.pdf', 'application/pdf'), file('c.jpg', 'image/jpeg')] };
+        const { images, others } = filesFromTransfer(dt);
+        expect(images.map(f => f.name)).toEqual(['a.png', 'c.jpg']);
+        expect(others.map(f => f.name)).toEqual(['b.pdf']);
+    });
+
+    it('falls back to items ONLY when files is empty, so one screenshot never lands twice', () => {
+        const png = file('paste.png', 'image/png');
+        const asItem = { kind: 'file', getAsFile: () => png } as unknown as DataTransferItem;
+        expect(filesFromTransfer({ files: [], items: [asItem] }).images).toHaveLength(1);
+        // Both populated (Chrome): files wins, and the picture is not doubled.
+        expect(filesFromTransfer({ files: [png], items: [asItem] }).images).toHaveLength(1);
+        // A non-file item (a dragged text selection) is not a file.
+        const asString = { kind: 'string', getAsFile: () => null } as unknown as DataTransferItem;
+        expect(filesFromTransfer({ files: [], items: [asString] })).toEqual({ images: [], others: [] });
+    });
+
+    it('no transfer, or an empty one, carries nothing', () => {
+        expect(filesFromTransfer(null)).toEqual({ images: [], others: [] });
+        expect(filesFromTransfer(undefined)).toEqual({ images: [], others: [] });
+        expect(filesFromTransfer({})).toEqual({ images: [], others: [] });
+    });
+
+    it('only a drag carrying Files may be intercepted', () => {
+        expect(hasTransferFiles({ types: ['Files'] })).toBe(true);
+        expect(hasTransferFiles({ types: ['text/plain'] })).toBe(false);
+        expect(hasTransferFiles({ types: [] })).toBe(false);
+        expect(hasTransferFiles(null)).toBe(false);
     });
 });

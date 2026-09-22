@@ -13,6 +13,7 @@ import { isUndecryptable } from '../../api/decryptMarkers';
 import { type GalleryItem } from '../../api/noteMedia';
 import { parseParkedRef } from '../../api/parkedMedia';
 import { parkedObjectUrl } from '../../api/parkedPreview';
+import { NoteLinkText } from '../../components/NoteLinkText';
 import '../noteContent.css';
 
 function HeroImage({ item, visible }: { item: GalleryItem; visible: boolean }) {
@@ -44,5 +45,7 @@ export function NoteHero({ items, visible }: { items: GalleryItem[]; visible: bo
 export function NoteBodyPreview({ body }: { body: string | null | undefined }) {
     if (!body) return null;
     if (isUndecryptable(body)) return <p className="notes-card-body unreadable">{body}</p>;
-    return <p className="notes-card-body">{body}</p>;
+    // Marked, not tappable: the card's own tap opens the note, and a 44px tap
+    // target cannot live inside a line-clamped preview at 390px.
+    return <p className="notes-card-body"><NoteLinkText text={body} interactive={false} /></p>;
 }

@@ -208,6 +208,52 @@ await page.waitForFunction(() => document.querySelectorAll('.notes-card-item').l
 ck('quick add: three items in typed order', (await page.locator('.notes-card-item-text').allInnerTexts()).join(',') === 'Milk,Bread,Eggs');
 await shot('one-card');
 
+// ---- 4a. Paste into the composer ----------------------------------------------------
+// Playwright cannot put a picture on the real clipboard, so the events are
+// synthesized — but they are REAL ClipboardEvents carrying a real
+// DataTransfer, dispatched at the element a person would be typing in, so a
+// handler wired to the wrong node fails here instead of passing silently.
+const pasteText = (selector, text) => page.evaluate(([sel, t]) => {
+    const el = document.querySelector(sel);
+    if (!el) throw new Error(`no ${sel}`);
+    const dt = new DataTransfer();
+    dt.setData('text/plain', t);
+    el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+}, [selector, text]);
+const pastePicture = (selector, b64) => page.evaluate(([sel, data]) => {
+    const bin = atob(data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'pasted.png', { type: 'image/png' }));
+    document.querySelector(sel).dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+}, [selector, b64]);
+
+await openComposer();
+await pasteText('.notes-quickadd-item input', 'Tea\n- Coffee\n[x] Sugar');
+await page.waitForSelector('.notes-paste-dialog', { timeout: 5000 }).catch(() => {});
+ck('paste: a multi-line paste asks before it creates', await page.locator('.notes-paste-dialog').count() === 1);
+ck('paste: the dialog previews every line it will add', (await page.locator('.notes-paste-line').allInnerTexts()).join(',') === 'Tea,Coffee,Sugar');
+ck('paste: nothing is created until the dialog is answered', await page.locator('.notes-quickadd-item input').count() === 1);
+await shot('paste-confirm');
+await page.getByRole('button', { name: 'Add 3 items' }).click();
+await page.waitForFunction(() => document.querySelectorAll('.notes-quickadd-item input').length === 3, null, { timeout: 5000 }).catch(() => {});
+ck('paste: "Add 3 items" creates one item per line, in order',
+    (await page.locator('.notes-quickadd-item input').evaluateAll(els => els.map(e => e.value))).join(',') === 'Tea,Coffee,Sugar');
+// A ONE-line paste is never intercepted.
+await pasteText('.notes-quickadd-item input', 'Just one');
+await sleep(150);
+ck('paste: a one-line paste does NOT open the dialog', await page.locator('.notes-paste-dialog').count() === 0);
+// A picture pasted into the composer previews like a picked one.
+await pastePicture('.notes-quickadd', PNG.toString('base64'));
+await page.waitForSelector('.notes-quickadd-media img', { timeout: 5000 }).catch(() => {});
+ck('paste: a picture lands in the composer as a picture', await page.locator('.notes-quickadd-media img').count() === 1);
+// Discard: this note must not exist for the count/order checks further down.
+page.once('dialog', d => d.accept());
+await page.click('.notes-quickadd-foot button[aria-label="Discard note"]');
+await page.waitForSelector('.notes-quickadd-open', { state: 'detached', timeout: 5000 }).catch(() => {});
+ck('paste: the discarded composer left no extra note', await page.locator('.notes-card').count() === 1);
+
 // ---- 4b. Text, photo and drawing notes -----------------------------------------------
 await openComposer();
 await page.fill('.notes-quickadd-title', 'Poem');
@@ -380,6 +426,123 @@ ck('editor: three TaskTree rows', await page.locator('.notes-editor .tt-item').c
 await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday');
 await sleep(1500);
 ck('editor: note text saves without a button', await page.locator('.notes-editor .nb-status.failed').count() === 0);
+// A picture DROPPED on the open note takes the picker's own seal-and-upload
+// path: it must come back decrypted from the server, not merely appear.
+await page.evaluate(([sel, data]) => {
+    const bin = atob(data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'dropped.png', { type: 'image/png' }));
+    const el = document.querySelector(sel);
+    el.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+}, ['.notes-editor-content', PNG.toString('base64')]);
+await page.waitForFunction(() => document.querySelector('.notes-editor .note-images .ni-open img')?.naturalWidth > 0, null, { timeout: 20000 })
+    .then(() => ck('drop: a picture dropped on the open note is uploaded, sealed and shown decrypted', true))
+    .catch(() => ck('drop: a picture dropped on the open note is uploaded, sealed and shown decrypted', false));
+// Put the note back as it was — later checks count this note's pictures.
+page.once('dialog', d => d.accept());
+await page.click('.notes-editor .note-images button[aria-label="Remove picture"]');
+await page.waitForSelector('.notes-editor .note-images .ni-item', { state: 'detached', timeout: 15000 }).catch(() => {});
+ck('drop: the dropped picture can be removed again', await page.locator('.notes-editor .note-images .ni-item').count() === 0);
+// ---- Links in a note's text (worked out here, never fetched) ------------------------
+// Anything this page asks for that is not our own origin would be a favicon,
+// an OG scrape or an unfurl — the regression this block exists to catch, and
+// one no unit test can see.
+const foreignRequests = [];
+// "Foreign" means OFF THIS MACHINE. The API is a second local origin in this
+// rig, so a baseURL prefix test would call every ordinary fetch a leak — and
+// a check that always fails is a check nobody reads.
+const watchForeign = rq => {
+    const u = rq.url();
+    if (/^(data|blob):/.test(u)) return;
+    try {
+        const h = new URL(u).hostname;
+        if (h !== '127.0.0.1' && h !== 'localhost' && h !== '::1') foreignRequests.push(u);
+    } catch { foreignRequests.push(u); }
+};
+page.on('request', watchForeign);
+await page.fill('.notes-editor-content textarea.nb-text',
+    'Buy before Friday https://example.com/a and javascript:alert(1) and //evil.example/x');
+await page.locator('.notes-editor-sub').click();   // blur → read view
+await page.waitForSelector('.notes-editor-content .nb-rendered', { timeout: 10000 }).catch(() => {});
+ck('note links: a URL in the note text becomes a link',
+    await page.locator('.notes-editor-content .nb-rendered a.note-link').count() === 1);
+const noteHref = await page.locator('.notes-editor-content a.note-link').getAttribute('href').catch(() => null);
+const noteRel = await page.locator('.notes-editor-content a.note-link').getAttribute('rel').catch(() => null);
+ck('note links: the href is the address, opened with noopener AND noreferrer',
+    noteHref === 'https://example.com/a' && /noopener/.test(noteRel ?? '') && /noreferrer/.test(noteRel ?? ''),
+    `${noteHref} rel=${noteRel}`);
+ck('note links: javascript: and a scheme-less //host stay dead text',
+    await page.locator('.notes-editor-content a[href^="javascript:"]').count() === 0
+    && await page.locator('.notes-editor-content a[href^="//"]').count() === 0);
+ck('note links: nothing is fetched to render them', foreignRequests.length === 0, JSON.stringify(foreignRequests.slice(0, 3)));
+// A REAL tap, measured. `click({ trial: true })` deliberately dispatches no
+// click at all, so it could only ever prove the target was hit-testable — and
+// the way this broke was that the FOCUS the tap takes first (Chromium focuses
+// an anchor on mousedown; React's onFocus is `focusin`, which bubbles) swapped
+// the read view for the textarea before any click could reach the anchor.
+// Only a real click, with what it opened read back, can see that.
+await page.evaluate(() => {
+    window.__opened = [];
+    window.__realOpen = window.open;
+    window.open = url => { window.__opened.push(String(url)); return null; };
+});
+await page.locator('.notes-editor-content a.note-link').click();
+// Put window.open back before anything else runs on this page: a stub left
+// lying about would make a later step's link silently do nothing.
+const opened = await page.evaluate(() => { const o = window.__opened; window.open = window.__realOpen; return o; });
+const stillRead = await page.locator('.notes-editor-content textarea.nb-text').count() === 0;
+ck('note links: a real tap opens the address outside the app, and does NOT open the editor',
+    opened.length === 1 && opened[0] === 'https://example.com/a' && stillRead,
+    `${JSON.stringify(opened)} stillRead=${stillRead}`);
+await shot('note-links');
+// Clicking the text — not the link — puts the field back, still editable.
+await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
+ck('note links: clicking the text (not the link) returns to editing',
+    await page.locator('.notes-editor-content textarea.nb-text:focus').count() === 1);
+// ---- The read/edit swap must be INVISIBLE ------------------------------------------
+// Measured in a real browser, because neither half is visible to a unit test
+// in jsdom, which does no layout.
+//
+// The SIZE check is a guard, not a fix: the read view carries BOTH classes
+// (`nb-text nb-rendered`), so every rule written for the field already
+// reaches it — which is exactly the property that would break silently if
+// someone dropped `nb-text` from it while tidying, and the reason
+// NoteImages.css merges the two selectors in the first place.
+//
+// The HEIGHT check is a fix: the swap mounts a FRESH textarea without
+// changing the text, so an auto-height effect keyed on the text alone never
+// fires for it, and `.nb-text` is overflow:hidden — the note would be
+// clipped to two rows until the next keystroke.
+const TALL = ['Buy before Friday https://example.com/a', ...Array.from({ length: 9 }, (_, i) => `line ${i + 1}`)].join('\n');
+await page.fill('.notes-editor-content textarea.nb-text', TALL);
+await page.locator('.notes-editor-sub').click();
+await page.waitForSelector('.notes-editor-content .nb-rendered', { timeout: 10000 }).catch(() => {});
+const readMetrics = await page.evaluate(() => {
+    const el = document.querySelector('.notes-editor-content .nb-rendered');
+    return el ? { h: el.getBoundingClientRect().height, font: getComputedStyle(el).fontSize } : null;
+});
+await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
+await page.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+const editMetrics = await page.evaluate(() => {
+    const el = document.querySelector('.notes-editor-content textarea.nb-text');
+    return el ? { h: el.getBoundingClientRect().height, font: getComputedStyle(el).fontSize, scroll: el.scrollHeight } : null;
+});
+ck('note text: the read view and the field are the same size — no reflow on focus',
+    !!readMetrics && !!editMetrics && readMetrics.font === editMetrics.font,
+    `${readMetrics?.font} vs ${editMetrics?.font}`);
+ck('note text: the field comes back at the HEIGHT of the text, not at two rows',
+    !!readMetrics && !!editMetrics && editMetrics.h > 100 && Math.abs(editMetrics.h - readMetrics.h) <= 2,
+    `read=${readMetrics?.h} edit=${editMetrics?.h}`);
+ck('note text: nothing of the note is clipped by the field that came back',
+    !!editMetrics && editMetrics.scroll <= Math.ceil(editMetrics.h) + 1,
+    `scrollHeight=${editMetrics?.scroll} height=${editMetrics?.h}`);
+await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
+await page.locator('.notes-editor-sub').click();
+await sleep(1500);
+page.off('request', watchForeign);
 // toggle Milk. click(), not check(): the box is a CONTROLLED input whose DOM
 // state React restores until the optimistic update commits a frame later,
 // and check() asserts the flip synchronously — the completed section is the
@@ -441,6 +604,48 @@ if (await eggsSnooze.count() === 1) {
 } else {
     skip('editor: snooze is off on this server (taskFeatures)');
 }
+
+// ---- List actions: Uncheck all / Delete checked -------------------------------------
+const doneBefore = await page.locator('.notes-editor .tt-completed-section .tt-item').count();
+const itemsBefore = await page.locator('.notes-editor .tt-item').count();
+ck('list actions: there is something ticked to act on', doneBefore > 0 && itemsBefore > doneBefore, `completed=${doneBefore} items=${itemsBefore}`);
+// Ticked items are at the bottom with no action taken — the always-on
+// invariant, which is why there is no "move checked to bottom" to build.
+ck('list actions: ticked items already sit below the open ones', await page.evaluate(() => {
+    const open = document.querySelector('.notes-editor .tt-list:not(.completed) .tt-item');
+    const done = document.querySelector('.notes-editor .tt-list.completed .tt-item');
+    return !!open && !!done && open.getBoundingClientRect().top < done.getBoundingClientRect().top;
+}));
+await page.click('.notes-editor-foot button[aria-label="List actions"]');
+await page.waitForSelector('.notes-list-actions', { timeout: 5000 });
+ck('list actions: the menu opens with both rows',
+    await page.locator('.notes-list-actions button').count() === 2
+    && /Uncheck all \(\d+\)/.test(await page.locator('.notes-list-actions').innerText())
+    && /Delete checked \(\d+\)/.test(await page.locator('.notes-list-actions').innerText()));
+await shot('list-actions');
+await page.getByRole('button', { name: /Uncheck all/ }).click();
+await page.waitForSelector('.notes-editor .tt-completed-section', { state: 'detached', timeout: 20000 }).catch(() => {});
+ck('uncheck all: the Completed section is gone', await page.locator('.notes-editor .tt-completed-section').count() === 0);
+ck('uncheck all: no item was lost', await page.locator('.notes-editor .tt-item').count() === itemsBefore);
+await page.waitForSelector('.notes-undo', { timeout: 15000 }).catch(() => {});
+ck('uncheck all: an Undo is offered', await page.locator('.notes-undo').count() === 1);
+await page.click('.notes-undo .notes-textbtn');
+await page.waitForSelector('.notes-editor .tt-completed-section', { timeout: 20000 }).catch(() => {});
+ck('uncheck all: Undo puts the ticks back',
+    await page.locator('.notes-editor .tt-completed-section .tt-item').count() === doneBefore);
+// Delete checked, then Undo: the items come back, still ticked.
+page.once('dialog', d => d.accept());
+await page.click('.notes-editor-foot button[aria-label="List actions"]');
+await page.waitForSelector('.notes-list-actions', { timeout: 5000 });
+await page.getByRole('button', { name: /Delete checked/ }).click();
+await page.waitForFunction(n => document.querySelectorAll('.notes-editor .tt-item').length === n, itemsBefore - doneBefore, { timeout: 20000 }).catch(() => {});
+ck('delete checked: only the ticked items went',
+    await page.locator('.notes-editor .tt-item').count() === itemsBefore - doneBefore);
+await page.click('.notes-undo .notes-textbtn');
+await page.waitForFunction(n => document.querySelectorAll('.notes-editor .tt-item').length === n, itemsBefore, { timeout: 20000 }).catch(() => {});
+ck('delete checked: Undo brings the items back, still ticked',
+    await page.locator('.notes-editor .tt-item').count() === itemsBefore
+    && await page.locator('.notes-editor .tt-completed-section .tt-item').count() === doneBefore);
 // Escape INSIDE an inline item edit must not close the note
 await page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first().locator('.tt-description').click();
 await page.waitForSelector('.notes-editor .tt-edit-input', { timeout: 5000 });
@@ -482,6 +687,9 @@ ck('card: carries the colour', await page.locator('.notes-card[data-color="mint"
 const groceries = () => page.locator('.notes-card', { hasText: 'Groceries' });
 ck('card: shows the label chip and progress', /Errands/.test(await groceries().locator('.notes-card-foot').innerText()) && /1\/5/.test(await groceries().locator('.notes-card-foot').innerText()));
 ck('card: shows the note text above the items', /Buy before Friday/.test(await groceries().locator('.notes-card-body').innerText()));
+ck('card: a link on the card is marked but NOT tappable (the card opens the note)',
+    await groceries().locator('.notes-card-body .note-link').count() === 1
+    && await groceries().locator('.notes-card-body a').count() === 0);
 ck('rail: the label appears', await page.locator('.notes-rail-item', { hasText: 'Errands' }).count() === 1);
 await page.locator('.notes-rail-item', { hasText: 'Errands' }).click();
 await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
@@ -1649,6 +1857,31 @@ await m.tap('.notes-fab');
 await m.waitForSelector('.notes-quickadd.sheet', { timeout: 5000 });
 r = await audit();
 ck('phone: composer inputs ≥ 16px', r.fonts['.notes-quickadd-title'] >= 16 && r.fonts['.notes-quickadd-item input'] >= 16, JSON.stringify(r.fonts));
+// The paste confirmation must be answerable on a phone: inside the viewport,
+// no sideways scroll, and every button a real tap target.
+await m.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', 'Socks\nShirt\nShoes\nSunglasses\nSuncream');
+    document.querySelector('.notes-quickadd-item input')
+        .dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+});
+await m.waitForSelector('.notes-paste-dialog', { timeout: 5000 }).catch(() => {});
+ck('phone: a multi-line paste asks here too', await m.locator('.notes-paste-dialog').count() === 1);
+const pasteBox = await m.locator('.notes-dialog').boundingBox();
+const pasteVh = await m.evaluate(() => window.innerHeight);
+ck('phone: the paste confirmation is inside the viewport',
+    pasteBox && pasteBox.x >= 0 && pasteBox.x + pasteBox.width <= 390.5 && pasteBox.y >= 0 && pasteBox.y + pasteBox.height <= pasteVh + 0.5,
+    JSON.stringify(pasteBox));
+const pasteBtns = await m.locator('.notes-paste-actions button').all();
+const pasteHs = await Promise.all(pasteBtns.map(async b => (await b.boundingBox())?.height ?? 0));
+ck('phone: every paste-confirmation button is a full tap target', pasteHs.length === 3 && pasteHs.every(h => h >= 44), JSON.stringify(pasteHs));
+ck('phone: the paste confirmation does not scroll the page sideways',
+    await m.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+await mshot('phone-paste-confirm');
+await m.getByRole('button', { name: 'Cancel' }).tap();
+await m.waitForSelector('.notes-paste-dialog', { state: 'detached', timeout: 5000 }).catch(() => {});
+ck('phone: Cancel leaves the composer with its one empty item',
+    await m.locator('.notes-quickadd-item input').count() === 1);
 await m.fill('.notes-quickadd-title', 'Phone note');
 await m.locator('.notes-quickadd-item input').first().fill('Charger');
 // A long list must keep Done reachable: the sheet scrolls, nothing is clipped.
@@ -2044,6 +2277,42 @@ ck('phone: editor is full-screen', box && box.height >= vh - 2 && box.width >= 3
 r = await audit();
 ck('phone: editor title + add row ≥ 16px', r.fonts['.notes-editor-title'] >= 16 && r.fonts['.notes-editor-add input'] >= 16, JSON.stringify(r.fonts));
 ck('phone: editor tap targets at size', r.under.length === 0, JSON.stringify(r.under));
+// A long web address must not widen the note. Seed one, measure, put it back.
+const LONG_URL = 'https://example.com/a/very/long/path/that/keeps/going/and/going/so/it/cannot/possibly/fit/on/one/line/at/390px?q=1';
+// Aimed at x:4 — the first word — and not at the middle of the box, because
+// the middle of THIS line is the link itself, and a tap on a link is the
+// link's, not the editor's. The detail string measures that rather than
+// asserting it: the layout may change, the aim should not.
+const centreIsLink = await m.evaluate(() => {
+    const el = document.querySelector('.notes-editor-content .nb-rendered');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    return !!hit?.closest('a.note-link');
+});
+await m.tap('.notes-editor-content .nb-rendered', { position: { x: 4, y: 4 } });
+await m.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+ck('phone: tapping the words beside a link puts the field back',
+    await m.locator('.notes-editor-content textarea.nb-text').count() === 1,
+    `middle of the line is the link: ${centreIsLink}`);
+await m.fill('.notes-editor-content textarea.nb-text', `Buy before Friday ${LONG_URL}`);
+await m.tap('.notes-editor-sub');
+await m.waitForSelector('.notes-editor-content .nb-rendered a.note-link', { timeout: 10000 }).catch(() => {});
+r = await audit();
+ck('phone: a long link in a note does not widen the page',
+    !r.bodyScrollsHorizontally && r.widest <= r.vw + 1, `widest=${r.widest} vw=${r.vw}`);
+ck('phone: the note text is still ≥ 16px in its read view', r.fonts['.nb-text'] >= 16, `${r.fonts['.nb-text']}px`);
+const linkBox = await m.locator('.notes-editor-content a.note-link').boundingBox();
+ck('phone: the link is inside the viewport and has real height',
+    linkBox && linkBox.x >= 0 && linkBox.x + linkBox.width <= 390.5 && linkBox.height > 0, JSON.stringify(linkBox));
+await mshot('phone-note-link');
+await m.tap('.notes-editor-content .nb-rendered', { position: { x: 4, y: 4 } });
+await m.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 }).catch(() => {});
+ck('phone: tapping the text (not the link) returns to editing',
+    await m.locator('.notes-editor-content textarea.nb-text').count() === 1);
+await m.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
+await m.tap('.notes-editor-sub');
+await new Promise(res => setTimeout(res, 1500));
 const grip = await m.evaluate(() => { const g = document.querySelector('.notes-editor .tt-grip:not(.tt-grip-ghost)'); return g ? parseFloat(getComputedStyle(g).opacity) : -1; });
 ck('phone: the drag grip is visible (not the desktop hover state)', grip >= 0.5, String(grip));
 ck('phone: the move arrows (tap alternative) are shown', await m.locator('.notes-editor .tt-move').first().isVisible());
@@ -2063,6 +2332,24 @@ const pb = await m.locator('.notes-popover').boundingBox();
 ck('phone: colour popover inside the viewport', pb && pb.x >= 0 && pb.x + pb.width <= 390.5 && pb.y >= 0 && pb.y + pb.height <= vh + 0.5, JSON.stringify(pb));
 await mshot('phone-popover');
 await m.keyboard.press('Escape');
+await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+// List actions at 390x844: answerable, inside the viewport, targets at size.
+if (await m.locator('.notes-editor-foot button[aria-label="List actions"]').count() === 1) {
+    await m.tap('.notes-editor-foot button[aria-label="List actions"]');
+    await m.waitForSelector('.notes-list-actions', { timeout: 5000 });
+    const laBoxes = await Promise.all((await m.locator('.notes-list-actions button').all()).map(async b => (await b.boundingBox())?.height ?? 0));
+    ck('phone: every list-action row is a full tap target', laBoxes.length === 2 && laBoxes.every(h => h >= 44), JSON.stringify(laBoxes));
+    const laBox = await m.locator('.notes-popover').boundingBox();
+    ck('phone: the list-actions popover is inside the viewport',
+        laBox && laBox.x >= 0 && laBox.x + laBox.width <= 390.5 && laBox.y >= 0 && laBox.y + laBox.height <= vh + 0.5, JSON.stringify(laBox));
+    ck('phone: the editor foot still does not scroll sideways',
+        await m.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    await mshot('phone-list-actions');
+    await m.keyboard.press('Escape');
+    await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+} else {
+    skip('phone: the list-actions popover', 'nothing is ticked in this note here');
+}
 await m.getByRole('button', { name: 'Close', exact: true }).tap();
 await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 

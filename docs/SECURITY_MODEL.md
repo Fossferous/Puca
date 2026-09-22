@@ -104,7 +104,10 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   note's uploads itself when its trash time runs out (`docs/NOTES.md`). A
   transcript, where the phone makes one, is made ON the phone and stored as
   ordinary sealed note text; the recording is never sent anywhere to be
-  transcribed.
+  transcribed. A web address inside a note's text or an item is found and
+  rendered as a link entirely on the device, with no request of any kind, so
+  neither the server nor the site learns that the note holds a link or that it
+  is being read (`docs/NOTES.md`, *Links in a note*).
 - IP addresses and device tokens
 - When a phone with the Púca Notes app is alive: while signed in, the app
   asks `GET /task-reminders` about once an hour even while it is closed (and
@@ -230,7 +233,13 @@ task and per note:
   a PATCH shortly after each alert fires (15 minutes after, with a
   compare-and-swap), and ticking a repeating to-do moves its `due_at` forward
   rather than completing it. An observer of writes can tell those items recur
-  even though the rule is sealed.
+  even though the rule is sealed. Púca Notes' *Uncheck all* and *Delete
+  checked* add nothing new to what a write says — they send the same per-item
+  tick and delete requests the server already sees — but they send a run of
+  them within a few seconds, which is recognisable as "a list was reset in one
+  go", and the size of the run says how many items had been ticked. They are
+  paced (one at a time, ~50 ms apart) for the API limiter's sake; that blunts
+  the signal, it does not remove it.
 
 **Swaps the server could make.** A checklist item's schedule and snooze bind the
 channel, epoch and creator into their tag (`chan-taskevt`, `chan-tasksnz`,

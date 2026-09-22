@@ -42,7 +42,11 @@ const INLINE_DELIMS: { open: string; type: 'strong' | 'em' | 'underline' | 'stri
     { open: '_', type: 'em' },
 ];
 
-const URL_RE = /^https?:\/\/[^\s<]+[^\s<.,:;"')\]]/i;
+/** A bare URL at the START of the input: http(s) only, and the tail class
+ *  keeps trailing punctuation out of the href. Exported so notes' own
+ *  linkifier (utils/linkSegments.ts) uses THIS regex rather than a second
+ *  copy that would drift away from it. */
+export const URL_RE = /^https?:\/\/[^\s<]+[^\s<.,:;"')\]]/i;
 // Allow letters, numbers, underscore, dot, hyphen in mention/channel names.
 const NAME_RE = /^[a-z0-9_.-]+/i;
 

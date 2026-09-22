@@ -51,12 +51,21 @@
  * While this field is mounted it OWNS the note's text: anything else that
  * wants to add to it (a voice note's transcript) goes through the
  * `appendText` handle below rather than writing to the note behind it.
+ * Text holding a WEB ADDRESS swaps to a read view when it is not being
+ * edited, so the address can be tapped (NoteLinkText). Text with no address
+ * never leaves the textarea — the swap buys nothing there, and this component
+ * owns the debounced save, the blur flush, the unmount flush and the
+ * trash-waits-for-the-last-keystroke registration, so the less of it a new
+ * mount/unmount sits in the middle of, the better. On blur the flush is
+ * kicked BEFORE the swap, so the last words typed are saved, not lost.
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { isUndecryptable } from '../api/decryptMarkers';
 import { BODY_SAVE_DELAY_MS, MAX_BODY_BYTES, bodyBytes, registerBodyFlush } from '../api/listContent';
 import { appendTranscript } from '../notes/model/audioNote';
 import { LockIcon, WarningIcon } from './Icons';
+import { NoteLinkText } from './NoteLinkText';
+import { hasLink } from '../utils/linkSegments';
 import './NoteImages.css';
 
 /** What `appendText` did. `too-long` = it would not fit and NOTHING was
@@ -121,6 +130,36 @@ interface Conflict {
     rev?: number;
 }
 
+/** The character offset in `root`'s text under (x, y), or null when this
+ *  browser cannot say (older WebViews) — the caller then keeps the caret at
+ *  the end. The rendered view's text content IS the draft, so a walk of its
+ *  text nodes maps a DOM position straight onto a string offset. */
+function caretOffsetAt(root: HTMLElement | null, x: number, y: number): number | null {
+    if (!root) return null;
+    const doc = root.ownerDocument;
+    const api = doc as Document & {
+        caretRangeFromPoint?: (x: number, y: number) => Range | null;
+        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+    let node: Node | null = null;
+    let offset = 0;
+    if (typeof api.caretRangeFromPoint === 'function') {
+        const r = api.caretRangeFromPoint(x, y);
+        if (r) { node = r.startContainer; offset = r.startOffset; }
+    } else if (typeof api.caretPositionFromPoint === 'function') {
+        const p = api.caretPositionFromPoint(x, y);
+        if (p) { node = p.offsetNode; offset = p.offset; }
+    }
+    if (!node || !root.contains(node)) return null;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let total = 0;
+    while (walker.nextNode()) {
+        if (walker.currentNode === node) return total + offset;
+        total += walker.currentNode.textContent?.length ?? 0;
+    }
+    return null;
+}
+
 export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(function NoteBodyField(
     { value, contentRev, onSave, readOnly = false, placeholder = 'Note', autoFocus = false, listId }: NoteBodyFieldProps,
     handle,
@@ -153,6 +192,12 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
     }, []);
     const timer = useRef<number | null>(null);
     const areaRef = useRef<HTMLTextAreaElement>(null);
+    const readRef = useRef<HTMLDivElement>(null);
+    // The read/edit swap: `editing` wins, and text with no link never swaps.
+    const [editing, setEditing] = useState(autoFocus);
+    // Where the click that started this edit landed, so the caret goes there
+    // rather than to the end of the note.
+    const pendingCaret = useRef<number | null>(null);
     // A body that changed elsewhere (another device, a refetch) replaces the
     // draft while nothing is being typed here. Mid-edit, the typed text stays
     // — and is no longer the end of the story: the save that follows names
@@ -258,12 +303,34 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
         };
     }, [settle, listId]);
 
+    // Clicking the read view puts the textarea back with the caret where the
+    // click landed (end of text when the browser cannot say).
     useLayoutEffect(() => {
+        if (!editing) return;
+        const el = areaRef.current;
+        if (!el || document.activeElement === el) return;
+        el.focus();
+        const at = pendingCaret.current;
+        pendingCaret.current = null;
+        if (at !== null) el.setSelectionRange(at, at);
+    }, [editing]);
+
+    // Computed HERE, above the effects, because the auto-height below has to
+    // depend on it: the swap remounts the textarea without changing `draft`.
+    const showRead = !editing && hasLink(draft);
+
+    // The field is as tall as its text. `showRead` is a dependency, not
+    // decoration: the read/edit swap mounts a FRESH textarea at its rows={2}
+    // size while `draft` is unchanged, so an effect keyed on the text alone
+    // never fires for it — and `.nb-text` is `overflow: hidden`, so the rest
+    // of the note would simply be clipped until the next keystroke.
+    useLayoutEffect(() => {
+        if (showRead) return;
         const el = areaRef.current;
         if (!el) return;
         el.style.height = 'auto';
         el.style.height = `${el.scrollHeight}px`;
-    }, [draft]);
+    }, [draft, showRead]);
 
     // Take the other device's copy: it becomes the field, and the save that
     // follows is based on it, so it can no longer clash.
@@ -293,6 +360,39 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
 
     return (
         <div className="note-body-field">
+            {showRead ? (
+                <div
+                    ref={readRef}
+                    className="nb-text nb-rendered"
+                    role="textbox"
+                    tabIndex={readOnly ? -1 : 0}
+                    aria-label="Note text"
+                    aria-readonly={readOnly}
+                    onFocus={e => {
+                        if (readOnly) return;
+                        // Guarded exactly like the click below, and for the
+                        // same reason — but this one is what actually decides
+                        // whether a link can be tapped at all. Chromium
+                        // focuses an anchor on MOUSEDOWN and React wires
+                        // `onFocus` to `focusin`, which BUBBLES, so this runs
+                        // before the anchor's own click. Opening the editor
+                        // here unmounts the anchor between mousedown and
+                        // mouseup and the click never happens.
+                        if ((e.target as Element).closest('a')) return;
+                        setEditing(true);
+                    }}
+                    onClick={e => {
+                        if (readOnly) return;
+                        // A tap on a link belongs to the link (NoteLinkText
+                        // already stopped it), not to the editor.
+                        if ((e.target as Element).closest('a')) return;
+                        pendingCaret.current = caretOffsetAt(readRef.current, e.clientX, e.clientY);
+                        setEditing(true);
+                    }}
+                >
+                    <NoteLinkText text={draft} />
+                </div>
+            ) : (
             <textarea
                 ref={areaRef}
                 className="nb-text"
@@ -302,6 +402,7 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                 autoFocus={autoFocus}
                 aria-label="Note text"
                 rows={2}
+                onFocus={() => setEditing(true)}
                 onChange={e => {
                     // Writing more over the banner is a deliberate "keep
                     // mine": the other copy has been read and the user has
@@ -309,14 +410,23 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                     // release the hold too, or the field would never save
                     // again.
                     awaitingChoice.current = false;
+                    // Typing a URL must not swap the field out from under the
+                    // caret: while this field is being used, it stays a field.
+                    setEditing(true);
                     markDirty(true);
                     setDraft(e.target.value);
                     setState('idle');
                     if (timer.current !== null) window.clearTimeout(timer.current);
                     timer.current = window.setTimeout(() => { void flush(); }, BODY_SAVE_DELAY_MS);
                 }}
-                onBlur={() => { void flush(); }}
+                onBlur={() => {
+                    // Kick the save FIRST: it reads the live draft, and only
+                    // then may the field be replaced by the read view.
+                    void flush();
+                    setEditing(false);
+                }}
             />
+            )}
             {state === 'conflict' && conflict && (
                 <div className="nb-status failed nb-conflict" role="alert" data-conflict="stale">
                     <span className="nb-conflict-text">

@@ -26,13 +26,20 @@ import {
     RefreshIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { PERM, hasPerm } from '../../api/permissionBits';
-import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
+import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
+import { ListActionsMenu } from './ListActionsMenu';
+import { PastedLinesDialog } from './PastedLinesDialog';
+import { linesFromPaste, pasteAsOneLine } from '../model/noteContent';
+import { PACE_MS } from '../../api/icsImport';
+import { pushMessageToast } from '../../components/messageToastBus';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { NoteDueChip, NoteReminderControl } from '../../components/schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from '../../components/schedule/halfMinuteClock';
 import { EditedStamp } from './EditedStamp';
+
+const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
 interface NoteEditorProps {
     card: NoteCard;
@@ -143,6 +150,36 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         addRef.current?.focus();
     };
 
+    // A multi-line paste into "Add an item…" asks before it creates: an item
+    // is removed one at a time with no Undo (onDelete below goes straight to
+    // deleteTaskFrom), so forty silent items would be unrecoverable.
+    const [paste, setPaste] = useState<{ lines: string[]; text: string } | null>(null);
+    const onPasteNewItem = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        const lines = linesFromPaste(e.clipboardData?.getData('text') ?? '');
+        if (lines.length < 2) return;   // one line pastes as normal
+        e.preventDefault();
+        setPaste({ lines, text: e.clipboardData?.getData('text') ?? '' });
+    };
+    const addPastedLines = async (lines: string[]) => {
+        setPaste(null);
+        // One create per line, in order, through the SAME addTask a typed
+        // item uses — so each is sealed here and queues offline like any
+        // other. Paced like every other fan-out of creates in this app
+        // (icsImport's PACE_MS, well under the server's 50/s per IP): a
+        // hundred-line paste in one burst is exactly what trips the limiter.
+        // Truncated to what the field itself accepts, and a run that stops
+        // part-way SAYS where it stopped — addTask's own toast explains the
+        // refusal, not how much of the list arrived.
+        let made = 0;
+        for (const line of lines) {
+            if (made > 0) await sleep(PACE_MS);
+            if (!await actions.addTask(ref, line.slice(0, MAX_ITEM_LENGTH))) break;
+            made++;
+        }
+        if (made < lines.length) pushMessageToast({ title: `Added ${made} of ${lines.length} items` });
+        addRef.current?.focus();
+    };
+
     return createPortal(
         <div className="notes-editor-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
             <div className="notes-editor" data-color={card.color} role="dialog" aria-modal="true" aria-label={card.title || 'Untitled note'}>
@@ -202,8 +239,9 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                                 value={newItem}
                                 onChange={e => setNewItem(e.target.value)}
                                 placeholder="Add an item…"
-                                maxLength={500}
+                                maxLength={MAX_ITEM_LENGTH}
                                 aria-label="New item"
+                                onPaste={onPasteNewItem}
                                 autoFocus={tasks.length === 0}
                             />
                             <button type="submit" aria-label="Add item" disabled={!newItem.trim()}><PlusIcon /></button>
@@ -260,6 +298,10 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         />
                     )}
                     <button type="button" className="notes-iconbtn" aria-label="Refresh this note" title="Refresh" onClick={() => void actions.refreshNote(ref)}><RefreshIcon /></button>
+                    {/* Uncheck all / Delete checked, on the editor's LIVE
+                        items. Shown only when something is ticked, and only
+                        on a personal note. */}
+                    <ListActionsMenu note={ref} actions={actions} tasks={tasks} />
                     {pucaHref && (
                         <a className="notes-iconbtn" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
                     )}
@@ -267,6 +309,14 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="More actions" title="More" onClick={e => onMenu(e, card, e.currentTarget)}><MoreVerticalIcon /></button>
                     <button type="button" className="notes-textbtn" onClick={onClose}>Close</button>
                 </div>
+                {paste && (
+                    <PastedLinesDialog
+                        lines={paste.lines}
+                        onAddSeparate={() => void addPastedLines(paste.lines)}
+                        onAddOne={() => { setPaste(null); setNewItem(v => `${v}${pasteAsOneLine(paste.text)}`.slice(0, MAX_ITEM_LENGTH)); addRef.current?.focus(); }}
+                        onCancel={() => { setPaste(null); addRef.current?.focus(); }}
+                    />
+                )}
             </div>
         </div>,
         document.body,

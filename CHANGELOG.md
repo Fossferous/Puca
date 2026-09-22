@@ -82,6 +82,34 @@ one-line summary; this file is the full story. Versions follow
   the device, and Púca Notes tells you plainly when you reach it — and
   because the browser can clear a site's storage, pictures waiting are not a
   backup. Turning a note's text into a checklist still needs a connection.
+- **Reset a checklist in one go.** A note's foot now has *List actions*:
+  *Uncheck all* puts every ticked item back, and *Delete checked* removes them.
+  Both offer Undo, and Undo brings deleted items back with their dates,
+  repeats, pictures, their ticks and their place in the list — a ticked
+  subtask goes back under the item it was under. If a repeating to-do whose
+  series has already finished is among the ticked items, Púca Notes asks
+  first — unticking it would reopen a repeat with no next time. Ticked items
+  were always at the bottom in their own Completed section, so there is
+  nothing to move.
+- **Tappable links in notes.** A web address in a note's text, or in one of
+  its items, is now a link you can tap — in Púca Notes and in Púca's Tasks
+  view. Púca works out where the link goes from the text on your device: it
+  never asks the internet anything to show you a link, so opening a note tells
+  nobody that you are reading it, and you will never see a fetched page title
+  or site icon. Only ordinary web addresses become links, and they open in
+  your browser rather than inside the app. On the card grid a link is marked
+  but not tappable, so tapping the card still opens the note.
+- **Paste and drop into a note.** In Púca Notes, paste a screenshot straight
+  into a note, or drop a picture onto it, instead of saving it to disk first.
+  Pasted pictures are made smaller and encrypted on your device exactly like
+  picked ones, and a paste with no connection says so rather than half-adding
+  it. Paste several lines into a list and Púca Notes asks whether to make one
+  item per line, showing you the lines first — items are removed one at a time,
+  so it asks before it creates. Pasting text that happens to carry a picture
+  alongside it — a table copied out of a spreadsheet, a paragraph out of a
+  document — puts the text in the note, not a picture of it. (Púca's Tasks
+  view shows the same notes and the same links, but pictures go in there
+  through the picker, as before.)
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with
