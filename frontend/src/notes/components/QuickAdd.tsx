@@ -357,7 +357,16 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
             if (d.empty) { dismiss(); return; }   // emptied while we waited
             ok = await onCreate(d.from.title, d.raw, extras(d.from));
         } finally {
-            setSaving(false);
+            // ONLY the save that still owns the composer may stop the
+            // "Saving…" state. A Discard during the transcript wait bumps the
+            // token and clears the flag itself, and the next note's save can
+            // already be in flight by the time this one unwinds — clearing it
+            // here unconditionally re-enabled Done under that second save, and
+            // `if (saving) return` at the top of close() is the only re-entry
+            // guard there is. A second Done, an outside pointerdown or a tap on
+            // the sheet's backdrop then created the note twice, uploading the
+            // same pictures again against the quota.
+            if (closeToken.current === token) setSaving(false);
         }
         if (!ok) return;   // the owner has toasted why; the draft stays
         // Discarded while the note was being created: whatever is on the

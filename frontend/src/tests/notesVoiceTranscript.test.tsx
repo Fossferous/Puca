@@ -368,6 +368,55 @@ describe('the composer: a voice note is written down there too', () => {
         expect(onCreate.mock.calls[0][2], 'the discarded recording came back').toBeUndefined();
     });
 
+    it('the cancelled save does not stop the NEXT note claiming to be saving', async () => {
+        // Save #1 parks on the transcript; Discard cancels it; save #2 for the
+        // next note is in flight when #1 finally unwinds. Whose "Saving…" is
+        // it? Only #2's — and close()'s ONLY re-entry guard is that flag, so
+        // clearing it early lets an outside click create the note a second
+        // time, with a second upload of the same pictures.
+        let finishCreate!: (ok: boolean) => void;
+        const onCreate = vi.fn(() => new Promise<boolean>(r => { finishCreate = r; }));
+        const resolveWith = pendingTranscribe();
+        await openComposer(onCreate as never);
+        await recordAndKeep('Voice note');
+        await act(async () => { byText('Done')!.click(); });
+        await settle();
+        expect(onCreate, 'the save did not wait, so there is no window to test').not.toHaveBeenCalled();
+
+        await act(async () => { byLabel('Discard note')!.click(); });
+        await settle();
+
+        // The next note, typed and sent, while the old transcript is still out.
+        await act(async () => { byText('Take a note…')!.click(); });
+        typeInput(input('Title'), 'Bread');
+        await act(async () => { byText('Done')!.click(); });
+        await settle();
+        expect(onCreate).toHaveBeenCalledTimes(1);
+        expect(byText('Saving…'), 'the second save never claimed the composer').toBeTruthy();
+
+        // The discarded note's transcript arrives at last and save #1 unwinds.
+        await resolveWith({ text: 'pick up the prescription', reason: null });
+        const stillSaving = byText('Saving…');
+        expect(stillSaving, 'the cancelled save cleared the live save’s “Saving…”').toBeTruthy();
+        expect(stillSaving!.disabled, 'Done is pressable again while the note is still being created').toBe(true);
+
+        // A click outside the card is a save-and-close. It must find the
+        // composer busy, not create "Bread" a second time.
+        await act(async () => {
+            document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+        });
+        await settle();
+        expect(onCreate, 'the note was created twice').toHaveBeenCalledTimes(1);
+
+        // POSITIVE CONTROL: when the live save really answers, the composer
+        // stops saying "Saving…" and closes, so the assertions above are not
+        // passing on a flag that is simply stuck on.
+        await act(async () => { finishCreate(true); await Promise.resolve(); });
+        await settle();
+        expect(byText('Saving…')).toBeUndefined();
+        expect(byText('Take a note…'), 'the composer never closed after the save landed').toBeTruthy();
+    });
+
     it('a take that is removed takes its words with it', async () => {
         const onCreate = vi.fn(async () => true);
         const resolveWith = pendingTranscribe();
