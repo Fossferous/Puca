@@ -671,7 +671,7 @@ mod tests {
             hub.publish_to_user(1, &TaskEvent::List(i));
         }
         assert!(sub.lagged.load(Ordering::SeqCst), "the dropped events are recorded");
-        let claims = Claims { sub: 1, username: "u".into(), exp: chrono::Utc::now().timestamp() + 3600, tv: 0, sst: 0, sid: String::new() };
+        let claims = Claims { sub: 1, username: "u".into(), exp: chrono::Utc::now().timestamp() + 3600, tv: 0, sst: 0, sid: String::new(), ls: false };
         let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://127.0.0.1:1/none").unwrap();
         let s = event_stream(pool, claims, sub, None, Duration::from_secs(3600));
         futures::pin_mut!(s);
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(hub.stream_count(), 4, "still at the cap");
         assert!(first.evicted.load(Ordering::SeqCst), "the OLDEST went");
         assert!(rest.iter().all(|s| !s.evicted.load(Ordering::SeqCst)));
-        let claims = Claims { sub: 9, username: "u".into(), exp: chrono::Utc::now().timestamp() + 3600, tv: 0, sst: 0, sid: String::new() };
+        let claims = Claims { sub: 9, username: "u".into(), exp: chrono::Utc::now().timestamp() + 3600, tv: 0, sst: 0, sid: String::new(), ls: false };
         let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://127.0.0.1:1/none").unwrap();
         let s = event_stream(pool, claims, first, None, Duration::from_secs(3600));
         futures::pin_mut!(s);
@@ -912,7 +912,7 @@ mod tests {
         let sid = format!("sid-{}", uuid::Uuid::new_v4().simple());
         sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)").bind(&sid).bind(user as i32).execute(&pool).await.unwrap();
         let (tv,): (i32,) = sqlx::query_as("SELECT token_version FROM users WHERE id = $1").bind(user as i32).fetch_one(&pool).await.unwrap();
-        let claims = Claims { sub: user, username: "u".into(), exp: chrono::Utc::now().timestamp() + 3600, tv, sst: 0, sid: sid.clone() };
+        let claims = Claims { sub: user, username: "u".into(), exp: chrono::Utc::now().timestamp() + 3600, tv, sst: 0, sid: sid.clone(), ls: false };
         let hub = TaskEventHub::new();
         let s = event_stream(pool.clone(), claims, hub.subscribe(user), None, Duration::from_millis(200));
         futures::pin_mut!(s);

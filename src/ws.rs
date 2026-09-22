@@ -4423,12 +4423,17 @@ pub fn create_token_with_start(
     token_version: i32,
     session_start: i64,
     sid: &str,
+    long: bool,
     secret: &str,
 ) -> Result<String, String> {
     use jsonwebtoken::{encode, EncodingKey, Header};
 
+    // `long` = the user asked to stay signed in on this device. It picks the
+    // token's lifetime and is stamped into the claims so renewal can carry it
+    // forward — see crate::auth::Claims::ls for what it does and does not
+    // change (revocation: nothing).
     let expiration = Utc::now()
-        .checked_add_signed(chrono::Duration::hours(crate::auth::TOKEN_TTL_HOURS))
+        .checked_add_signed(chrono::Duration::seconds(crate::auth::token_ttl_secs(long)))
         .expect("valid timestamp")
         .timestamp();
 
@@ -4439,6 +4444,7 @@ pub fn create_token_with_start(
         tv: token_version,
         sst: session_start,
         sid: sid.to_string(),
+        ls: long,
     };
 
     encode(

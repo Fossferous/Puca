@@ -182,6 +182,13 @@ pub struct LoginStep2Request {
     pub new_salt_hex: Option<String>,
     #[serde(default)]
     pub new_verifier_hex: Option<String>,
+    /// "Stay signed in on this device" — mint a long session (30-day token,
+    /// one-year cap) instead of the ordinary 24-hour one. `#[serde(default)]`
+    /// so a client that never sends it, which is every client before this
+    /// release, is unchanged; and so the new client can ship BEFORE this
+    /// server, where the field is simply ignored.
+    #[serde(default)]
+    pub stay_signed_in: bool,
 }
 
 #[derive(Serialize)]
@@ -787,8 +794,16 @@ pub async fn login_step_2(
         // 5. Create JWT token instead of session, stamped with the current
         // token_version (M1) so a later logout/reset can revoke it, and with a
         // fresh session id so THIS sign-in can be revoked on its own.
+        //
+        // ...and with the session length the user asked for. This is the ONE
+        // place `stay_signed_in` is read: it only ever applies to a session
+        // being created here by a real password proof. The `reproving` branch
+        // above deliberately ignores it — an already-signed-in caller
+        // re-proving their password for a key-custody write keeps the token it
+        // already holds, so ticking a box on a re-proof cannot silently extend
+        // a session that was not started that way.
         let sid = Uuid::new_v4().to_string();
-        let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &sid, &state.jwt_secret)
+        let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &sid, payload.stay_signed_in, &state.jwt_secret)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)")
             .bind(&sid)

@@ -44,6 +44,27 @@ pub struct Claims {
     /// revoked for them); their first sliding renewal mints one.
     #[serde(default)]
     pub sid: String,
+    /// Long session — the user ticked "Stay signed in on this device" at the
+    /// sign-in form. It changes two numbers and nothing else: the token's own
+    /// lifetime (`LONG_TOKEN_TTL_DAYS` instead of `TOKEN_TTL_HOURS`) and the
+    /// absolute cap renewal is measured against (`LONG_MAX_SESSION_DAYS`
+    /// instead of `MAX_SESSION_DAYS`). Carried forward by every renewal, so
+    /// the choice survives without a database column.
+    ///
+    /// REVOCATION IS UNCHANGED, and that is what makes the longer lifetime
+    /// acceptable: signing out locally drops the token; `POST
+    /// /auth/logout-session` revokes this one `sid` (checked on every request
+    /// and on the WebSocket upgrade); revoking the device revokes the sessions
+    /// it proved; and "sign out everywhere", a password change or a recovery
+    /// reset bump `users.token_version`, which kills every outstanding token
+    /// for the account instantly. An already-EXPIRED long token is never
+    /// renewed either — `validate_token` refuses it before `renew_if_stale`
+    /// is ever reached.
+    ///
+    /// `#[serde(default)]` so every token minted before this claim existed
+    /// decodes as `false` and keeps its old 24-hour behaviour exactly.
+    #[serde(default)]
+    pub ls: bool,
 }
 
 /// Lifetime of a freshly minted token.
@@ -70,6 +91,37 @@ const RENEW_WHEN_REMAINING_HOURS: i64 = 20;
 /// A sliding session still ends: after this long since the user actually
 /// signed in, renewal stops and they must authenticate again.
 const MAX_SESSION_DAYS: i64 = 30;
+
+/// Lifetime of a freshly minted LONG token ("Stay signed in on this device").
+///
+/// The renewal cadence above only helps someone who uses the app. A device
+/// that is switched off, or a browser tab closed, for longer than the token's
+/// own lifetime comes back to the sign-in form no matter how wide the window
+/// is — which is the whole complaint about Púca Notes on a phone: a day away
+/// and the notes are behind a password again. So the opt-in moves the
+/// LIFETIME, not the window: a month of silence is fine, and ordinary use
+/// still slides it forward.
+pub const LONG_TOKEN_TTL_DAYS: i64 = 30;
+/// ...and a long session still ends. A year after the real sign-in, renewal
+/// stops and the password is asked for again.
+const LONG_MAX_SESSION_DAYS: i64 = 365;
+/// How old a token must be before a request renews it — ONE cadence for both
+/// kinds, derived from the numbers above rather than restated, so a normal
+/// session keeps exactly the behaviour it has today (24 h TTL, renew below
+/// 20 h remaining = renew once four hours old) and a long one renews on the
+/// same four-hour rhythm against its own 30-day TTL.
+const RENEW_AFTER_AGE_HOURS: i64 = TOKEN_TTL_HOURS - RENEW_WHEN_REMAINING_HOURS;
+
+/// The token's full lifetime in seconds, by kind. The ONE place either TTL is
+/// turned into a duration — `create_token_with_start` mints against it and
+/// `renew_if_stale` measures against it, so the two cannot drift.
+pub fn token_ttl_secs(long: bool) -> i64 {
+    if long {
+        LONG_TOKEN_TTL_DAYS * 86_400
+    } else {
+        TOKEN_TTL_HOURS * 3600
+    }
+}
 /// Response header carrying a renewed token. Must be in the CORS
 /// `expose_headers` list or browsers can't read it cross-origin.
 pub const RENEWED_TOKEN_HEADER: &str = "x-renewed-token";
@@ -80,22 +132,31 @@ pub const RENEWED_TOKEN_HEADER: &str = "x-renewed-token";
 /// Safe against the obvious abuse: this runs only AFTER the caller's token has
 /// been validated and its `tv` matched against the live `users.token_version`,
 /// and the new token carries that same `tv` — so anything that bumps that
-/// counter kills every renewed token instantly. NOTE that in-app "Sign out" is
-/// deliberately local-only: `token_version` is per-USER with no per-session
-/// claim, so revoking there would sign the user out on every other device too.
-/// Account-wide revocation is therefore a password change or recovery reset
-/// (both bump it). `sst` bounds how long a stolen-but-unrevoked token can keep
-/// renewing itself in the meantime.
+/// counter kills every renewed token instantly. Account-wide revocation is a
+/// password change, a recovery reset or "sign out everywhere" (all three bump
+/// it); in-app "Sign out" revokes THIS session by its `sid` (`logout_session`)
+/// and leaves the account's other devices alone — the note that once stood
+/// here, saying sign-out was local-only because there was no per-session
+/// claim, predates `sid`. `sst` bounds how long a stolen-but-unrevoked token
+/// can keep renewing itself in the meantime, against `MAX_SESSION_DAYS` or,
+/// for a long session, `LONG_MAX_SESSION_DAYS`.
 pub fn renew_if_stale(claims: &Claims, sid: &str, secret: &str) -> Option<String> {
     let now = Utc::now().timestamp();
-    if claims.exp - now > RENEW_WHEN_REMAINING_HOURS * 3600 {
+    // Renew once the token is RENEW_AFTER_AGE_HOURS into its own life. For an
+    // ordinary token that is "remaining < 20 h of 24", byte for byte what it
+    // has always been; for a long one, "remaining < 30 days minus 4 h".
+    if claims.exp - now > token_ttl_secs(claims.ls) - RENEW_AFTER_AGE_HOURS * 3600 {
         return None; // plenty of life left
     }
     let started = if claims.sst > 0 { claims.sst } else { now };
-    if now - started > MAX_SESSION_DAYS * 86_400 {
+    let cap_days = if claims.ls { LONG_MAX_SESSION_DAYS } else { MAX_SESSION_DAYS };
+    if now - started > cap_days * 86_400 {
         return None; // session too old to slide — require a real sign-in
     }
-    crate::ws::create_token_with_start(claims.sub, &claims.username, claims.tv, started, sid, secret)
+    // `claims.ls` carries the choice forward: the flag lives in the token, so
+    // a renewal is the only thing that can keep it alive, and losing it here
+    // would quietly demote a long session to 24 hours at its first renewal.
+    crate::ws::create_token_with_start(claims.sub, &claims.username, claims.tv, started, sid, claims.ls, secret)
         .ok()
 }
 
@@ -258,6 +319,18 @@ mod tests {
     const SECRET: &str = "test-secret-for-renewal-rules";
 
     fn claims_with(exp_offset_secs: i64, sst: i64) -> Claims {
+        claims_of_kind(exp_offset_secs, sst, false)
+    }
+
+    /// The same, for a LONG session (`ls: true`). Separate entry point on
+    /// purpose: every test above still builds an ordinary token through
+    /// `claims_with`, so they remain the positive control that the long
+    /// session changed nothing for everybody else.
+    fn long_claims_with(exp_offset_secs: i64, sst: i64) -> Claims {
+        claims_of_kind(exp_offset_secs, sst, true)
+    }
+
+    fn claims_of_kind(exp_offset_secs: i64, sst: i64, ls: bool) -> Claims {
         Claims {
             sub: 7,
             username: "tester".to_string(),
@@ -265,6 +338,7 @@ mod tests {
             tv: 3,
             sst,
             sid: String::new(),
+            ls,
         }
     }
 
@@ -354,6 +428,128 @@ mod tests {
             "expired token must not validate"
         );
     }
+
+    // ---- "Stay signed in on this device" (Claims::ls) ----------------------
+    //
+    // The six tests above are the NEGATIVE CONTROL for these: they build their
+    // claims through `claims_with`, which is `ls: false`, and they are
+    // unchanged. If anything below leaked into the ordinary path — a wider
+    // renewal window, a longer TTL, a looser cap — they would go red.
+
+    #[test]
+    fn a_long_session_token_is_minted_for_thirty_days_and_says_so() {
+        // The whole point of the feature: the LIFETIME moves, so a phone that
+        // was off for a week still opens Notes without the password. A minted
+        // ordinary token is checked alongside, in the same test, so "30 days"
+        // cannot silently become the answer for everyone.
+        let now = Utc::now().timestamp();
+        let long = crate::ws::create_token_with_start(7, "alice", 3, now, "sid-l", true, SECRET).unwrap();
+        let long = validate_token(&long, SECRET).expect("long token must verify");
+        assert!(long.ls, "the claim must record the choice, or renewal cannot carry it");
+        let long_days = (long.exp - now) as f64 / 86_400.0;
+        assert!(
+            (LONG_TOKEN_TTL_DAYS as f64 - long_days).abs() < 0.01,
+            "a long token must live {LONG_TOKEN_TTL_DAYS} days, got {long_days}",
+        );
+
+        let normal = crate::ws::create_token_with_start(7, "alice", 3, now, "sid-n", false, SECRET).unwrap();
+        let normal = validate_token(&normal, SECRET).expect("ordinary token must verify");
+        assert!(!normal.ls);
+        let normal_hours = (normal.exp - now) as f64 / 3600.0;
+        assert!(
+            (TOKEN_TTL_HOURS as f64 - normal_hours).abs() < 0.01,
+            "an ordinary token must still live {TOKEN_TTL_HOURS} hours, got {normal_hours}",
+        );
+    }
+
+    #[test]
+    fn a_long_session_renews_on_the_same_four_hour_cadence_and_keeps_its_flag() {
+        // Four hours into its 30 days. The cadence is expressed against the
+        // token's OWN ttl, so this is the same rhythm an ordinary session has
+        // — not "renew only in the last four hours of a month", which would
+        // let a fortnightly user's session die with two weeks left on it.
+        let now = Utc::now().timestamp();
+        let four_hours_old = LONG_TOKEN_TTL_DAYS * 86_400 - 4 * 3600 - 60;
+        let c = long_claims_with(four_hours_old, now);
+        let renewed = renew_if_stale(&c, &c.sid, SECRET).expect("a long token 4h into its life must renew");
+        let out = validate_token(&renewed, SECRET).expect("renewed token must verify");
+        assert!(out.ls, "the long-session flag must carry forward, or the first renewal demotes it to 24h");
+        assert_eq!(out.tv, c.tv, "revocation counter must carry over");
+        assert_eq!(out.sst, now, "session start must NOT reset, or the one-year cap never bites");
+        let days_left = (out.exp - now) as f64 / 86_400.0;
+        assert!((LONG_TOKEN_TTL_DAYS as f64 - days_left).abs() < 0.01, "renewal must mint another full 30 days, got {days_left}");
+    }
+
+    #[test]
+    fn a_long_session_younger_than_four_hours_is_not_renewed() {
+        // Minting a JWT on every request for a month-long token would be pure
+        // waste; and without this the test above could pass by renewing
+        // unconditionally.
+        let now = Utc::now().timestamp();
+        let c = long_claims_with(LONG_TOKEN_TTL_DAYS * 86_400 - 3600, now); // 1h old
+        assert!(renew_if_stale(&c, &c.sid, SECRET).is_none());
+    }
+
+    #[test]
+    fn a_long_session_stops_renewing_a_year_after_the_real_sign_in() {
+        // It is a long session, not a permanent one: past the cap the password
+        // is asked for again. Asserted just either side of the boundary so a
+        // cap that was quietly removed (or set to i64::MAX) fails here.
+        let now = Utc::now().timestamp();
+        let inside = long_claims_with(3600, now - (LONG_MAX_SESSION_DAYS * 86_400 - 86_400));
+        assert!(renew_if_stale(&inside, &inside.sid, SECRET).is_some(), "a day short of the cap still renews");
+        let past = long_claims_with(3600, now - (LONG_MAX_SESSION_DAYS * 86_400 + 60));
+        assert!(renew_if_stale(&past, &past.sid, SECRET).is_none(), "past the cap, renewal must stop");
+    }
+
+    #[test]
+    fn at_thirty_one_days_the_two_caps_disagree_and_that_is_the_whole_point() {
+        // One session start, two kinds of token: the ordinary one is past its
+        // 30-day cap and must stop, the long one is nowhere near 365 and must
+        // keep going. If `ls` were ignored when the cap is chosen, one of
+        // these two assertions fails whichever way it went.
+        let started = Utc::now().timestamp() - (MAX_SESSION_DAYS * 86_400 + 86_400);
+        let ordinary = claims_with(3600, started);
+        assert!(renew_if_stale(&ordinary, &ordinary.sid, SECRET).is_none(), "31 days is past the ordinary cap");
+        let long = long_claims_with(3600, started);
+        assert!(renew_if_stale(&long, &long.sid, SECRET).is_some(), "31 days is well inside the long cap");
+    }
+
+    #[test]
+    fn an_expired_long_token_is_refused_outright_and_never_renewed() {
+        // A month is long enough that "expired" will genuinely happen. The
+        // middleware validates before it renews, so an expired long token is
+        // an expired token — it cannot be slid forward by an hour or a month.
+        let c = long_claims_with(-3600, Utc::now().timestamp() - 7200);
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &c,
+            &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap();
+        assert!(validate_token(&token, SECRET).is_err(), "expired long token must not validate");
+    }
+
+    #[test]
+    fn a_token_minted_before_the_claim_existed_decodes_as_an_ordinary_session() {
+        // Every token outstanding when this ships has no `ls` field at all.
+        // It must decode (not 400 the user out) and it must decode as FALSE —
+        // defaulting the other way would silently hand every live session a
+        // month-long life nobody asked for.
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        let legacy = serde_json::json!({
+            "sub": 7, "username": "alice", "exp": Utc::now().timestamp() + 3600, "tv": 3,
+            "sst": Utc::now().timestamp() - 7200, "sid": "s"
+        });
+        let tok = encode(&Header::default(), &legacy, &EncodingKey::from_secret(SECRET.as_bytes())).unwrap();
+        let out = validate_token(&tok, SECRET).expect("a pre-ls token must still decode");
+        assert!(!out.ls, "no `ls` means an ordinary 24-hour session");
+        let renewed = renew_if_stale(&out, &out.sid, SECRET).expect("and it still renews");
+        let back = validate_token(&renewed, SECRET).unwrap();
+        assert!(!back.ls);
+        let hours = (back.exp - Utc::now().timestamp()) as f64 / 3600.0;
+        assert!((TOKEN_TTL_HOURS as f64 - hours).abs() < 0.01, "renewed to 24h, got {hours}");
+    }
 }
 
 #[cfg(test)]
@@ -364,7 +560,8 @@ mod session_tests {
 
     #[test]
     fn a_minted_token_carries_its_session_id_and_a_legacy_token_decodes_as_empty() {
-        let tok = crate::ws::create_token_with_start(7, "alice", 3, 1_700_000_000, "sid-abc", SECRET).unwrap();
+        // `false`: an ordinary session — this test is about the sid claim.
+        let tok = crate::ws::create_token_with_start(7, "alice", 3, 1_700_000_000, "sid-abc", false, SECRET).unwrap();
         let c = validate_token(&tok, SECRET).unwrap();
         assert_eq!(c.sid, "sid-abc");
         assert_eq!(c.sst, 1_700_000_000);
@@ -377,7 +574,7 @@ mod session_tests {
 
     #[test]
     fn renewal_carries_the_session_id_forward() {
-        let c = Claims { sub: 7, username: "alice".into(), exp: Utc::now().timestamp() + 60, tv: 3, sst: Utc::now().timestamp() - 60, sid: "sid-keep".into() };
+        let c = Claims { sub: 7, username: "alice".into(), exp: Utc::now().timestamp() + 60, tv: 3, sst: Utc::now().timestamp() - 60, sid: "sid-keep".into(), ls: false };
         let renewed = renew_if_stale(&c, &c.sid, SECRET).expect("past halfway: renews");
         assert_eq!(validate_token(&renewed, SECRET).unwrap().sid, "sid-keep");
     }
@@ -404,7 +601,7 @@ mod session_tests {
             sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)").bind(sid).bind(uid).execute(&pool).await.unwrap();
         }
         sqlx::query("UPDATE token_sessions SET revoked_at = NOW() WHERE sid = 'sid-dead'").execute(&pool).await.unwrap();
-        let claims = |sid: &str, tv: i32| Claims { sub: uid as UserId, username: name.clone(), exp: 0, tv, sst: 0, sid: sid.into() };
+        let claims = |sid: &str, tv: i32| Claims { sub: uid as UserId, username: name.clone(), exp: 0, tv, sst: 0, sid: sid.into(), ls: false };
         assert!(token_session_live(&pool, &claims("sid-live", tv)).await.unwrap(), "the sibling session lives");
         assert!(!token_session_live(&pool, &claims("sid-dead", tv)).await.unwrap(), "the revoked session is refused");
         assert!(token_session_live(&pool, &claims("", tv)).await.unwrap(), "a legacy token (no sid) is judged on token_version alone");
