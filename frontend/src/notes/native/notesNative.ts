@@ -12,8 +12,10 @@
  * is inert in it too.
  *
  * Content: reminder entries are ids and times (the server already holds both
- * in clear); status calls carry nothing. Only shareText and addToPhoneCalendar
- * move user content, and only when the user asked for that, at that moment.
+ * in clear); status calls carry nothing. Only shareText, addToPhoneCalendar
+ * and transcribePcm move user content, and only when the user asked for that,
+ * at that moment. transcribePcm is handed a cache PATH, never audio bytes,
+ * and what it transcribes never leaves the phone (notes/model/transcribe.ts).
  */
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { decodeJwtPayload } from '../../api/auth';
@@ -41,6 +43,7 @@ interface NotesNativePlugin {
     requestIgnoreBatteryOptimizations(): Promise<void>;
     shareText(opts: { filename: string; mime: string; text: string; subject?: string }): Promise<{ ok: boolean; reason?: string }>;
     addToPhoneCalendar(opts: { title: string; beginMs: number; endMs?: number; allDay?: boolean; location?: string }): Promise<{ ok: boolean; reason?: string }>;
+    transcribePcm(opts: { path: string; sampleRate: number }): Promise<{ text: string | null; reason?: string }>;
     consumeLaunchNav(): Promise<{ target: string | null; item?: number | null }>;
     consumeLaunchShare(): Promise<NativeSharedPayload>;
     requestAddTile(): Promise<{ ok: boolean; reason?: string }>;
@@ -159,6 +162,18 @@ export async function addToPhoneCalendar(opts: { title: string; beginMs: number;
         const r = await Native.addToPhoneCalendar(opts);
         return r.ok ? { ok: true } as Outcome : { ok: false, reason: r.reason ?? 'could not open the calendar' } as Outcome;
     }, UNSUPPORTED);
+}
+
+/**
+ * Write down a recording that this device already decoded to raw 16 kHz mono
+ * PCM in its own cache. `path` is a file URI — the audio itself never crosses
+ * the bridge. The native side uses Android's ON-DEVICE recogniser or refuses;
+ * a browser, an older APK or a failure all resolve to a refusal with a reason
+ * and never throw. The caller (notes/model/transcribe.ts) owns the cache file
+ * and deletes it whatever happens.
+ */
+export async function nativeTranscribePcm(opts: { path: string; sampleRate: number }): Promise<{ text: string | null; reason?: string }> {
+    return call(() => Native.transcribePcm(opts), { text: null, reason: 'unsupported' });
 }
 
 /** Where a launch came from: a nav target and, when a due notification

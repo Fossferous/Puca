@@ -1,14 +1,19 @@
 /**
- * Uploading a note's own photos and drawings: shrink (photos), encrypt,
- * upload, and hand back the refs for the list's sealed sidecar
+ * Uploading a note's own photos, drawings and voice notes: shrink (photos),
+ * encrypt, upload, and hand back the refs for the list's sealed sidecar
  * (api/listContent.ts). All-or-nothing per call: if one upload fails, the
  * ones that already landed are deleted again, so a failed save never leaves
  * files counting against the quota that no note names.
+ *
+ * A recording goes up RAW — never through prepareImageForUpload, which is an
+ * image path — but through exactly the same seal as a photo, so the server
+ * cannot tell one kind of attachment from another.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
 import { decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
 import { deleteFiles } from './listContent';
+import { assertClipUploadable, isAudioMime } from '../notes/model/audioNote';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
 export const DRAWING_STROKES_MIME = 'application/x-puca-drawing';
@@ -21,7 +26,9 @@ export interface DrawingFiles {
 
 export class TooManyAttachmentsError extends Error {
     constructor() {
-        super(`A note holds at most ${MAX_TASK_ATTACHMENTS} photos and drawings (a drawing counts twice)`);
+        // Recordings take a slot too (slotsNeeded counts them), and this
+        // message is shown to the user verbatim — it must list what it counts.
+        super(`A note holds at most ${MAX_TASK_ATTACHMENTS} photos, drawings and recordings (a drawing counts twice)`);
         this.name = 'TooManyAttachmentsError';
     }
 }
@@ -45,17 +52,22 @@ async function uploadAll(files: File[]): Promise<TaskAttachmentRef[]> {
     }
 }
 
-/** Upload photos (shrunk first) and drawings; `base(i)` names drawing i
- *  (`drawing-<n>`, see notes/model/noteContent.ts). Throws — with nothing
- *  left behind — on any failure, including a sidecar that would overflow. */
+/** Upload photos (shrunk first), drawings, and recordings (raw); `base(i)`
+ *  names drawing i (`drawing-<n>`, see notes/model/noteContent.ts). Throws —
+ *  with nothing left behind — on any failure, including a sidecar that would
+ *  overflow or a clip over the upload budget. */
 export async function uploadNoteMedia(
     photos: File[],
     drawings: { files: DrawingFiles; base: string }[],
     existing: number,
+    audio: File[] = [],
 ): Promise<TaskAttachmentRef[]> {
-    if (existing + slotsNeeded(photos.length, drawings.length) > MAX_TASK_ATTACHMENTS) throw new TooManyAttachmentsError();
+    if (existing + slotsNeeded(photos.length + audio.length, drawings.length) > MAX_TASK_ATTACHMENTS) throw new TooManyAttachmentsError();
+    // Before anything is read or encrypted: a clip too big for the server
+    // must not cost an upload of everything beside it first.
+    for (const a of audio) assertClipUploadable(a.size);
     const prepared = await Promise.all(photos.map(prepareImageForUpload));
-    const files: File[] = [...prepared];
+    const files: File[] = [...prepared, ...audio];
     for (const d of drawings) {
         files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));
         files.push(new File([d.files.strokes], `${d.base}.json`, { type: DRAWING_STROKES_MIME }));
@@ -80,12 +92,23 @@ export function fileIdsOf(refs: TaskAttachmentRef[]): string[] {
 // --- The gallery -------------------------------------------------------------------------
 
 /** One entry of a note's gallery. A drawing is its PNG plus the strokes file
- *  that makes it editable again; the strokes file is never shown on its own. */
+ *  that makes it editable again; the strokes file is never shown on its own.
+ *  An `audio` item is a voice note and gets a player, not a paperclip. */
 export interface GalleryItem {
     ref: TaskAttachmentRef;
-    kind: 'image' | 'drawing' | 'file';
+    kind: 'image' | 'drawing' | 'file' | 'audio';
     /** Drawings: the strokes ref paired with this PNG. */
     strokes?: TaskAttachmentRef;
+}
+
+/** What to CALL a gallery entry when speaking to the user — the Remove
+ *  button's label and the confirm that button opens must say the same word,
+ *  or "Remove this picture?" on a note full of photos reads as the wrong
+ *  attachment being deleted. One helper so the two cannot drift. */
+export function galleryItemNoun(item: GalleryItem): string {
+    if (item.kind === 'drawing') return 'drawing';
+    if (item.kind === 'audio') return 'voice note';
+    return 'picture';
 }
 
 function baseName(name: string): string {
@@ -120,6 +143,8 @@ export function galleryItems(opened: string | null | undefined): GalleryItem[] {
             } else {
                 out.push({ ref: r, kind: 'image' });
             }
+        } else if (isAudioMime(mime)) {
+            out.push({ ref: r, kind: 'audio' });
         } else {
             out.push({ ref: r, kind: 'file' });
         }
@@ -161,14 +186,38 @@ export function planDrawingReplace(refs: TaskAttachmentRef[], replacing?: Galler
 
 /** The next free `drawing-<n>` base name in a sidecar. */
 export function nextDrawingName(refs: TaskAttachmentRef[]): string {
-    let n = 1;
-    const taken = new Set(refs.map(r => baseName(r.name)));
-    while (taken.has(`drawing-${n}`)) n++;
-    return `drawing-${n}`;
+    return nextBase(refs, 'drawing');
 }
 
-/** The pictures a note's card leads with: photos and drawings, never files
- *  or strokes, at most `max`. */
+/** The next free `voice-<n>` base name in a sidecar. */
+export function nextAudioName(refs: TaskAttachmentRef[]): string {
+    return nextBase(refs, 'voice');
+}
+
+/** Name each recording `voice-<n>.<ext>` against a sidecar that already holds
+ *  `refs`, so two clips saved in one go do not collide. The extension comes
+ *  from the file the recorder handed over; its mime is the authority. */
+export function nameAudioFiles(files: File[], refs: TaskAttachmentRef[]): File[] {
+    let names = refs;
+    return files.map(f => {
+        const base = nextAudioName(names);
+        const ext = f.name.includes('.') ? f.name.slice(f.name.lastIndexOf('.') + 1) : 'bin';
+        const named = `${base}.${ext}`;
+        names = [...names, { href: `pending:${base}`, name: named }];
+        return new File([f], named, { type: f.type });
+    });
+}
+
+function nextBase(refs: TaskAttachmentRef[], prefix: string): string {
+    let n = 1;
+    const taken = new Set(refs.map(r => baseName(r.name)));
+    while (taken.has(`${prefix}-${n}`)) n++;
+    return `${prefix}-${n}`;
+}
+
+/** The pictures a note's card leads with: photos and drawings ONLY — named
+ *  positively, so a new kind (a voice note) can never become a card's hero
+ *  picture by falling through a `!== 'file'` filter. At most `max`. */
 export function heroItems(opened: string | null | undefined, max = 3): GalleryItem[] {
-    return galleryItems(opened).filter(i => i.kind !== 'file').slice(0, max);
+    return galleryItems(opened).filter(i => i.kind === 'image' || i.kind === 'drawing').slice(0, max);
 }

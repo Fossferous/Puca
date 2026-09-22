@@ -457,6 +457,73 @@ unlock first, because the composer belongs to a signed-in shell that can show
 decrypted content the moment it mounts. The widget is a fixed dark surface: it
 cannot follow the app's eight themes or `[data-contrast="high"]`.
 
+**Voice notes, and the microphone.** *Voice note* in the composer and in an
+open note records on this device: the recorder asks with a prominent
+disclosure first, then takes the microphone, shows the elapsed time and a
+level, and stops at five minutes. The APK declares `RECORD_AUDIO` and
+`MODIFY_AUDIO_SETTINGS` — Capacitor's WebView bridge asks for the pair
+together, and an undeclared one denies the whole request. **Foreground only**:
+there is no service and no `FOREGROUND_SERVICE_MICROPHONE` type, and the
+recorder releases the microphone when it stops, when it is closed, and when
+Púca Notes leaves the screen. As with the camera, a permission arrives with a
+NEW APK, not with an OTA — `native-min.json` rises to the release that ships
+it, so an older APK is offered "install the new app" instead of web code it
+cannot run.
+
+**Transcripts stay on the phone.** Where the phone can do it, Púca Notes also
+writes down what you said and puts the text in the note. It uses Android's
+**on-device** recogniser only — `SpeechRecognizer.createOnDeviceSpeechRecognizer`,
+and only when `isOnDeviceRecognitionAvailable` says the model is installed —
+because the browser's own `SpeechRecognition` is a cloud service in Chrome and
+Android's default recogniser is a cloud service on many phones;
+`EXTRA_PREFER_OFFLINE` is a hint, not a promise, and is never used as one.
+Feeding a recorded clip to the recogniser needs `EXTRA_AUDIO_SOURCE`, which is
+**Android 13 or newer**. Everywhere else — the browser page, an older APK, an
+older phone, a phone with no model — Púca Notes REFUSES, says so in words, and
+keeps the recording rather than sending it anywhere. `TranscribeGate` (pure
+Java, JUnit-tested) is the only thing that may say yes, and it has no branch
+that allows a networked recogniser; `src/tests/notesTranscribeNoCloud.test.ts`
+sweeps the Notes sources so the refusal cannot be "fixed" with a fallback.
+
+The recogniser reads raw audio from a file, so the clip is decoded on the
+device to 16 kHz mono PCM, written to the app's **cache** for the length of
+the call, and deleted afterwards on every path, refusals included; the sealed
+copy in the note is the only one that lasts. Clips longer than two minutes are
+not written down (the PCM would be megabytes crossing the bridge for no better
+transcript) — they are still saved. The transcript is ordinary sealed note
+text, which is also what makes a voice note findable: search reads a note's
+title, text, labels and items, and never an attachment's name.
+
+That cache file is written through Capacitor's Filesystem plugin, which takes
+base64 and nothing else, so the decoded PCM crosses the JS/native bridge as
+base64 — in 192 KB chunks (about six seconds of speech each), so no single
+multi-megabyte string is ever built, but it crosses. **This was weighed and
+accepted.** What it costs: on a DEBUGGABLE build, Capacitor logs every plugin
+call's payload (`Bridge.callPluginMethod`, guarded by `Logger.shouldLog()`),
+so the audio of a voice note is recoverable from logcat on a developer's own
+machine. A release APK is not debuggable and logs none of it, nothing leaves
+the phone on either build, and the two-minute cap bounds what a debug build
+could spill. What avoiding it would cost: handing the COMPRESSED clip over
+instead (~8x fewer bytes) and decoding it natively with MediaExtractor and
+MediaCodec — a new native audio-decode path, with its own formats and
+failures, to close a hole that only exists in builds we hand to nobody. If
+Notes ever grows a native decoder for another reason, move this onto it.
+
+Both capture surfaces write it down, and each puts the words where they
+survive. In the COMPOSER the take is transcribed as soon as it is kept, and
+*Done* waits for it if it has not finished, so the note is created with the
+text already in it. In an OPEN note the transcript goes through the text
+FIELD — added to what is being typed, not written to the note behind it:
+transcribing takes a second or two, the recorder sheet is already closed, and
+that field's own autosave would otherwise put a half-typed line back over the
+words. If the note is closed before the transcript is ready it is dropped
+rather than written over whatever was saved last. Both sides of the call are
+bounded (`TranscribeGate.watchdogMs`, `transcribeBudgetMs`): a recogniser
+whose service dies mid-session never calls back, and waiting for ever would
+leave that cache file — the one unsealed copy of the recording — on the phone.
+What a segmented session heard before a later segment failed is kept, not
+thrown away with the error.
+
 **Background refresh.** While signed in, the app keeps a copy of the session
 token in its private, backup-excluded storage (`allowBackup=false` plus the
 include-only backup and data-extraction rules copied from Púca) and a
@@ -690,16 +757,23 @@ Migration 065 gives a personal list three nullable columns, and
   reads these fields STRICTLY (`frontend/src/api/listSeal.ts`): unlike titles,
   they never held plaintext, so a non-envelope value shows as unreadable
   instead of as your own words.
-- **`attachments`** — the note's own photos and drawings, the same sealed
-  sidecar a task item carries, pointing at ordinary end-to-end encrypted
-  uploads. Photos are shrunk on the device before encryption
+- **`attachments`** — the note's own photos, drawings and voice notes, the
+  same sealed sidecar a task item carries, pointing at ordinary end-to-end
+  encrypted uploads. Photos are shrunk on the device before encryption
   (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`frontend/src/api/drawing.ts`; the editor is
-  `frontend/src/components/DrawingCanvas.tsx`, shared by both apps). On a phone, *Photo* offers the
-  camera (`<input accept="image/*" capture>`); on Android that needs the
-  `IMAGE_CAPTURE` entry under `<queries>` in each app's manifest, so the
-  camera arrives with a new APK of each app, not with an OTA.
+  `frontend/src/components/DrawingCanvas.tsx`, shared by both apps). A **voice
+  note** is recorded on the device (`notes/components/AudioRecorder.tsx`) and
+  uploaded RAW — never through the image path — but sealed by exactly the same
+  helper, so the server holds an encrypted blob and its size and cannot tell a
+  recording from a picture. It plays back in Púca Notes and in Púca's Tasks
+  view, with controls and never by itself, and takes one sidecar slot of the
+  twelve (25 MB a clip, five minutes). A recording is never a card's hero
+  picture. On a phone, *Photo* offers the camera (`<input accept="image/*"
+  capture>`); on Android that needs the `IMAGE_CAPTURE` entry under `<queries>`
+  in each app's manifest, so the camera arrives with a new APK of each app, not
+  with an OTA.
 - **`trashed_at`** — *Move to trash* (`POST /task-lists/:id/trash`) hides the
   note from every listing and from the reminder feed, and makes it read-only
   (every write is a 409) until it is restored. The Trash view (rail, in
@@ -775,6 +849,15 @@ with its pictures, and only the other items become lines of text.
 
 ## Not built (and why)
 
+- **A transcript in the browser, or below Android 13.** Writing a recording
+  down happens with Android's own on-device recogniser or not at all (see
+  *The Android app*); everywhere else Púca Notes says so and keeps the
+  recording. Sending it somewhere to be transcribed is not a fallback this
+  app will grow.
+- **Recording with the app closed.** The microphone is foreground-only, with
+  no service behind it: the phone's background code never holds decrypted note
+  content, and a microphone a notes app can run unattended is not one it
+  should own.
 - **Per-person sharing.** A shared note is a channel; there is no "share with
   one person" that the data model could honour.
 - **A desktop Notes app.** Notes on a computer is the browser page; the

@@ -7,16 +7,33 @@
  *
  * Rendered inline on desktop; on a phone the FAB opens the same component
  * as a full-screen sheet (`sheet`), because the inline card is hidden there.
+ *
+ * A VOICE NOTE kept here is written down the same way an open note's is
+ * (notes/model/transcribe.ts: this phone's on-device recogniser or an honest
+ * refusal, never the network), and the words go into the note's TEXT —
+ * without them the note is titled "Voice note" with an empty body and search,
+ * which reads text and never attachment names, can never find it again. The
+ * transcript starts at *Keep* rather than at *Done*, so it is usually ready
+ * by the time the note is saved; Done waits for it if it is not. That wait is
+ * real seconds with the composer still live underneath it, so the save reads
+ * the draft as it stands when the wait ENDS — a title typed meanwhile is in
+ * the note, and Discard pressed meanwhile cancels the save instead of being
+ * overtaken by it.
  */
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
+import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, MicIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { composeModeFor, type ComposeIntent } from '../model/composeIntent';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
 import { DrawingCanvas } from '../../components/DrawingCanvas';
+import { MAX_BODY_BYTES, bodyBytes } from '../../api/listContent';
+import { pushMessageToast } from '../../components/messageToastBus';
+import { AudioRecorder, type RecordedClip } from './AudioRecorder';
+import { appendTranscript, canRecordAudio } from '../model/audioNote';
+import { transcribeClip } from '../model/transcribe';
 import '../noteContent.css';
 
 /** A picture waiting in the composer, with its on-device preview URL. */
@@ -63,6 +80,23 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const [body, setBody] = useState('');
     const [pictures, setPictures] = useState<PendingPicture[]>([]);
     const [drawingOpen, setDrawingOpen] = useState(false);
+    const [clip, setClip] = useState<RecordedClip | null>(null);
+    const [recorderOpen, setRecorderOpen] = useState(false);
+    /** Why the take was not written down (an honest sentence), or null. */
+    const [clipNotice, setClipNotice] = useState<string | null>(null);
+    const [transcribing, setTranscribing] = useState(false);
+    /** What the phone heard, and the job still hearing it. Refs, not state:
+     *  `close()` reads both AFTER awaiting, when a captured state value would
+     *  be the one from the render that started the save. */
+    const transcriptRef = useRef<string | null>(null);
+    const transcribeJob = useRef<Promise<void> | null>(null);
+    /** Bumped whenever the take is replaced or removed, so a transcript that
+     *  arrives late cannot attach itself to a different recording. */
+    const clipToken = useRef(0);
+    const clipRef = useRef<RecordedClip | null>(null);
+    useEffect(() => { clipRef.current = clip; });
+    // The recorded take is an object URL of a file on this device.
+    useEffect(() => () => { if (clipRef.current) URL.revokeObjectURL(clipRef.current.url); }, []);
     const pickRef = useRef<HTMLInputElement>(null);
     const cameraRef = useRef<HTMLInputElement>(null);
     const picturesRef = useRef(pictures);
@@ -72,6 +106,18 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const itemRefs = useRef<(HTMLInputElement | null)[]>([]);
     const rootRef = useRef<HTMLDivElement>(null);
     const cameraBtnRef = useRef<HTMLButtonElement>(null);
+    /** The draft as the LAST render had it. `close()` waits for the phone to
+     *  finish writing a recording down before it creates the note, and a value
+     *  captured in the Done click's closure would be the one from before that
+     *  wait — so a title typed, an item added or a picture attached while
+     *  "Writing down what you said…" was on the screen would be read from a
+     *  dead render and silently dropped. Assigned during render rather than in
+     *  an effect, so it can never be a beat behind what is on the screen. */
+    const live = useRef({ title, items, mode, body, pictures, clip });
+    live.current = { title, items, mode, body, pictures, clip };
+    /** Bumped by anything that means "this draft is no longer being saved":
+     *  Discard pressed while a save is waiting must not create the note. */
+    const closeToken = useRef(0);
     const focusItem = (i: number) => requestAnimationFrame(() => itemRefs.current[i]?.focus());
 
     useEffect(() => {
@@ -112,17 +158,64 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [initial]);
 
+    /** Drop the take and everything that belongs to it. */
+    const dropClip = () => {
+        clipToken.current++;
+        transcriptRef.current = null;
+        transcribeJob.current = null;
+        setClipNotice(null);
+        setTranscribing(false);
+        if (clipRef.current) URL.revokeObjectURL(clipRef.current.url);
+        setClip(null);
+    };
+    /** Write the take down ON THIS DEVICE, or say why not. Skipped when the
+     *  server cannot hold a note's text at all: there would be nowhere to put
+     *  the words, and the clip is saved either way. */
+    const startTranscribe = (take: RecordedClip) => {
+        if (!content?.text) return;
+        const token = clipToken.current;
+        setTranscribing(true);
+        setClipNotice(null);
+        transcribeJob.current = (async () => {
+            try {
+                const r = await transcribeClip(take.file, take.durationMs);
+                if (clipToken.current !== token) return;
+                if (r.text) transcriptRef.current = r.text;
+                else setClipNotice(r.reason);
+            } catch (err) {
+                console.error('[notes] transcribing failed:', err);
+                if (clipToken.current === token) setClipNotice('The recording is saved, but this device couldn’t write it down.');
+            } finally {
+                if (clipToken.current === token) setTranscribing(false);
+            }
+        })();
+    };
     const reset = () => {
         setTitle(''); setItems(['']); setBody(''); setMode('list');
-        for (const p of pictures) URL.revokeObjectURL(p.url);
+        // live, not the closure: reset() also runs after an await, and a
+        // picture added during that wait has a URL of its own to free.
+        for (const p of live.current.pictures) URL.revokeObjectURL(p.url);
         setPictures([]);
+        dropClip();
     };
-    const extras = (): NoteExtras | undefined => {
-        const photos = pictures.flatMap(p => (p.photo ? [p.photo] : []));
-        const drawing = pictures.find(p => p.drawing)?.drawing;
-        const text = mode === 'text' ? body : '';
-        if (!text.trim() && photos.length === 0 && !drawing) return undefined;
-        return { body: text.trim() ? text : undefined, photos, drawing };
+    /** Anything worth saving, transcript aside (a transcript only exists when
+     *  a recording does, and a recording is content on its own). */
+    const hasContent = (from = live.current) => from.pictures.length > 0 || !!from.clip || (from.mode === 'text' && from.body.trim() !== '');
+    const extras = (from = live.current): NoteExtras | undefined => {
+        const photos = from.pictures.flatMap(p => (p.photo ? [p.photo] : []));
+        const drawing = from.pictures.find(p => p.drawing)?.drawing;
+        const typed = from.mode === 'text' ? from.body.trim() : '';
+        const audio = from.clip ? [from.clip.file] : [];
+        let text = typed;
+        const heard = transcriptRef.current;
+        if (heard) {
+            const joined = appendTranscript(typed, heard, MAX_BODY_BYTES, bodyBytes);
+            // Refused rather than clipped: the user's own words stay whole.
+            if (joined === null) pushMessageToast({ title: 'There was no room in this note’s text for what was said — the recording is saved.' });
+            else text = joined;
+        }
+        if (text === '' && photos.length === 0 && !drawing && audio.length === 0) return undefined;
+        return { body: text || undefined, photos, drawing, audio };
     };
     const addPictures = (files: File[]) => {
         setPictures(prev => [...prev, ...files.map(f => ({ key: ++pictureSeq, url: URL.createObjectURL(f), photo: f }))]);
@@ -139,31 +232,58 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     });
     const hasDrawing = pictures.some(p => p.drawing);
 
+    /** The draft as it stands at this instant — what a save would create. */
+    const draftNow = () => {
+        const from = live.current;
+        const raw = from.mode === 'list' ? from.items : [];
+        return { from, raw, empty: from.title.trim() === '' && cleanQuickItems(raw).length === 0 && !hasContent(from) };
+    };
+
     const close = async () => {
-        const cleaned = mode === 'list' ? cleanQuickItems(items) : [];
-        const extra = extras();
-        if (title.trim() === '' && cleaned.length === 0 && !extra) {
+        if (saving) return;
+        const dismiss = () => {
             reset();
             setOpen(!sheet && false);
             onDismiss?.();
-            return;
-        }
-        if (saving) return;
+        };
+        if (draftNow().empty) { dismiss(); return; }
         setSaving(true);
+        const token = ++closeToken.current;
         let ok = false;
         try {
-            ok = await onCreate(title, mode === 'list' ? items : [], extra);
+            // What the phone is still writing down belongs IN this note, so
+            // the save waits for it rather than racing it into a second
+            // write. Bounded: transcribe.ts gives up on its own.
+            if (transcribeJob.current) {
+                try { await transcribeJob.current; } catch { /* the job answers, it never rejects */ }
+            }
+            // Everything below reads the draft AFTER that wait, which can be
+            // seconds long and which nothing about the composer freezes.
+            // Discard pressed in it means this save is cancelled: the draft is
+            // already gone, and creating the note now would bring back the
+            // very recording the user just threw away.
+            if (closeToken.current !== token) return;
+            const d = draftNow();
+            if (d.empty) { dismiss(); return; }   // emptied while we waited
+            ok = await onCreate(d.from.title, d.raw, extras(d.from));
         } finally {
             setSaving(false);
         }
         if (!ok) return;   // the owner has toasted why; the draft stays
+        // Discarded while the note was being created: whatever is on the
+        // screen now belongs to the next note, so leave it alone.
+        if (closeToken.current !== token) return;
         reset();
         setOpen(false);
         onDismiss?.();
     };
 
     const discard = () => {
-        if ((pictures.length > 0 || body.trim()) && !window.confirm('Discard this note?')) return;
+        if ((pictures.length > 0 || clip || body.trim()) && !window.confirm('Discard this note?')) return;
+        // A save still waiting for the transcript is off, and the composer
+        // must stop claiming to be saving a note that no longer exists.
+        closeToken.current++;
+        setSaving(false);
         reset(); setOpen(false); onDismiss?.();
     };
 
@@ -171,7 +291,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     useEffect(() => {
         if (!open || sheet) return;
         const onDown = (e: PointerEvent) => {
-            if (drawingOpen) return;   // the drawing editor is portaled outside this card
+            // The drawing editor and the recorder are portaled outside this
+            // card, so a click inside either reads as "outside" and would
+            // save-and-close the composer under them.
+            if (drawingOpen || recorderOpen) return;
             if (rootRef.current && !rootRef.current.contains(e.target as Node)) void close();
         };
         document.addEventListener('pointerdown', onDown);
@@ -231,8 +354,17 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     autoFocus={sheet}
                     aria-label="Title"
                 />
-                {pictures.length > 0 && (
+                {(pictures.length > 0 || clip) && (
                     <div className="notes-quickadd-media">
+                        {clip && (
+                            <figure className="qa-clip">
+                                <audio src={clip.url} controls preload="metadata" aria-label="Recording preview" />
+                                <button type="button" className="ni-tool" aria-label="Remove recording" title="Remove"
+                                    onClick={dropClip}>
+                                    <CloseIcon size={14} />
+                                </button>
+                            </figure>
+                        )}
                         {pictures.map(p => (
                             <figure key={p.key}>
                                 <img src={p.url} alt={p.drawing ? 'Drawing' : (p.photo?.name ?? 'Photo')} />
@@ -242,6 +374,11 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                             </figure>
                         ))}
                     </div>
+                )}
+                {(transcribing || clipNotice) && (
+                    <p className="notes-transcribe-notice" role="status">
+                        {transcribing ? 'Writing down what you said, on this device…' : clipNotice}
+                    </p>
                 )}
                 {mode === 'text' && (
                     <textarea
@@ -329,6 +466,11 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                                     <PencilIcon />
                                 </button>
                             )}
+                            {!clip && canRecordAudio() && (
+                                <button type="button" className="notes-iconbtn small" aria-label="Voice note" title="Voice note" onClick={() => setRecorderOpen(true)}>
+                                    <MicIcon />
+                                </button>
+                            )}
                         </>
                     )}
                     <button type="button" className="notes-iconbtn small" aria-label="Discard note" title="Discard" onClick={discard}>
@@ -339,6 +481,18 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     </button>
                 </div>
             </div>
+            {recorderOpen && (
+                <AudioRecorder
+                    onCancel={() => setRecorderOpen(false)}
+                    onSave={next => {
+                        dropClip();               // a second take replaces the first, transcript and all
+                        setClip(next);
+                        setRecorderOpen(false);
+                        startTranscribe(next);
+                        return true;
+                    }}
+                />
+            )}
             {drawingOpen && (
                 <DrawingCanvas
                     onCancel={() => setDrawingOpen(false)}

@@ -29,6 +29,17 @@ one-line summary; this file is the full story. Versions follow
   desktop app and the browser. Only the item's number travels in the
   notification — what the item says is still never in it, on the lock screen,
   or anywhere else.
+- **Voice notes in Púca Notes.** Record a note instead of typing it, from the
+  composer or from an open note. The recording is encrypted on your device
+  and stored like a photo, and it plays back — only when you press play — in
+  Púca Notes and in Púca's Tasks view. On Android 13 and newer, where the
+  phone can do it without sending anything anywhere, Púca Notes also writes
+  down what you said and puts the text in the note, so you can search for it
+  later. Where the phone cannot write it down on its own it says so and keeps
+  the recording, rather than sending it to anyone else. The microphone is used
+  only while you are recording, with the app on screen, and Púca Notes asks
+  before it uses it the first time. Needs the new Púca Notes app from the
+  download page.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

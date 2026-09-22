@@ -195,3 +195,21 @@
     .tasks-trash-btn { padding: 8px 14px; }
     .tasks-trash-title { flex-basis: 100%; font-size: 15px; }
 }
+
+/* ---------- Voice notes ---------------------------------------------------------
+   A recording is a real player, never a paperclip chip. `controls` only: the
+   markup carries no autoplay and nothing calls play(), so this element is
+   silent until someone presses it. */
+.ni-item.audio { background: none; overflow: visible; }
+.ni-audio { display: flex; flex-direction: column; gap: 6px; padding: 10px; min-width: 0; }
+.ni-audio-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+    word-break: break-word;
+}
+.ni-audio audio { display: block; width: 100%; max-width: 100%; min-width: 0; height: 40px; }
+/* Room for the Remove tool over the player's own controls. */
+.ni-item.audio .ni-tools { top: 6px; right: 6px; }

@@ -1,6 +1,8 @@
 /**
- * TaskAttachments — compact strip of E2EE picture/video attachments under a
- * task row (works for subtasks too; they render through the same TaskTree).
+ * TaskAttachments — compact strip of E2EE picture/video/audio attachments
+ * under a task row (works for subtasks too; they render through the same
+ * TaskTree). A recording made in Púca Notes plays here too, and never by
+ * itself: `controls`, no `autoplay`, no call to play().
  *
  * Each ref's sovereign-enc: href carries the per-file AES key, so decryption
  * happens entirely client-side (decryptToBlobUrl caches by file id). A ref
@@ -13,6 +15,7 @@ import { parseEncAttachment, decryptToBlobUrl, videoMimeFor } from '../api/attac
 import { ImageLightbox } from './ImageLightbox';
 import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
+import { isAudioMime } from '../notes/model/audioNote';
 import './TaskAttachments.css';
 
 interface TaskAttachmentsProps {
@@ -73,6 +76,9 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     }
     if (videoMimeFor(refItem.name, parsed.mime)) {
         return <video className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;
+    }
+    if (isAudioMime(parsed.mime)) {
+        return <audio className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} />;
     }
     // A BUTTON, never a link: `download` is ignored by middle-click and
     // "Open link in new tab", and a blob: document inherits this app's origin

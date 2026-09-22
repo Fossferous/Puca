@@ -81,7 +81,11 @@ let skipped = 0;
 const skip = (n, why) => { console.log(`SKIP  ${n}${why ? `  — ${why}` : ''}`); skipped++; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const browser = await chromium.launch({ args: ['--mute-audio'] });   // a walk never makes a sound
+const browser = await chromium.launch({ args: [
+    '--mute-audio',                          // a walk never makes a sound
+    '--use-fake-device-for-media-stream',    // and never opens a real microphone
+    '--use-fake-ui-for-media-stream',
+] });
 const errors = [];
 const watch = page => {
     // Accept a confirm (Delete forever, Empty trash) that nothing else is
@@ -91,6 +95,20 @@ const watch = page => {
     page.on('pageerror', e => { errors.push(String(e)); console.log('[pageerror]', String(e).slice(0, 300)); });
     page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 200)); });
 };
+/** The disclosure must come BEFORE the microphone is asked for; recording the
+ *  ORDER is the only way that can fail honestly (both calls happen either way).
+ *  Installed on the CONTEXT, so it is in place from the first navigation. */
+const watchMicOrder = ctx => ctx.addInitScript(() => {
+    window.__micOrder = [];
+    const c = window.confirm.bind(window);
+    window.confirm = msg => { window.__micOrder.push('confirm'); return c(msg); };
+    const md = navigator.mediaDevices;
+    if (md && md.getUserMedia) {
+        const g = md.getUserMedia.bind(md);
+        md.getUserMedia = o => { window.__micOrder.push('getUserMedia'); return g(o); };
+    }
+});
+
 let n = 0;
 const shotOf = page => async name => {
     n++;
@@ -111,7 +129,8 @@ const openComposerOn = page => async () => {
 // =============================================================================
 // Desktop
 // =============================================================================
-const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL });
+const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL, permissions: ['microphone'] });
+await watchMicOrder(ctx);
 const page = await ctx.newPage();
 watch(page);
 const shot = shotOf(page);
@@ -119,6 +138,19 @@ const shot = shotOf(page);
 // only inside the Notes Android app).
 const browserUpdateChecks = [];
 page.on('request', rq => { if (rq.url().includes('/api/mobile-updates/check')) browserUpdateChecks.push(rq.url()); });
+// Anything that leaves this MACHINE. A recording must never be sent anywhere
+// to be written down, so this list is asserted EMPTY across the voice-note
+// section (the only transcriber allowed is the phone's own, offline). The
+// page's own origin and the API are both on loopback in this rig, so the
+// check is "no host but this one", not "no host but the page's".
+const hostOf = u => { try { return new URL(u).hostname; } catch { return u; } };
+const LOCAL = new Set(['127.0.0.1', 'localhost', '::1', '']);
+const offMachineRequests = [];
+page.on('request', rq => {
+    const u = rq.url();
+    if (u.startsWith('data:') || u.startsWith('blob:')) return;
+    if (!LOCAL.has(hostOf(u))) offMachineRequests.push(u);
+});
 const openComposer = openComposerOn(page);
 
 // ---- 1. Notes before any sign-in: its OWN login card, not the main app ----------
@@ -230,6 +262,112 @@ await page.waitForSelector('.notes-draw-canvas', { state: 'detached', timeout: 5
 await page.getByRole('button', { name: 'Close', exact: true }).click();
 await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 await shot('text-photo-drawing-cards');
+
+// ---- 4c. Voice notes -----------------------------------------------------------------
+// Chromium's FAKE capture device, and --mute-audio stays on: the walk opens no
+// real microphone and makes no sound. No check below ever calls play() —
+// everything is asserted on `autoplay`, `paused` and `readyState`.
+await openComposer();
+await page.evaluate(() => { window.__micOrder = []; });
+offMachineRequests.length = 0;
+ck('voice note: the composer offers one', await page.locator('.notes-quickadd-foot button[aria-label="Voice note"]').count() === 1);
+
+// A take ABANDONED mid-recording, first. A real MediaRecorder fires onstop in
+// a LATER task than the stop() that caused it, so this is the one path a unit
+// test with an inline fake cannot prove: the handler runs after the sheet is
+// gone, and a preview URL minted there is one nothing can ever revoke. Only
+// audio blobs are counted — the cards mint their own for pictures.
+await page.evaluate(() => {
+    window.__audioBlobs = 0;
+    const make = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = b => { if (b && typeof b.type === 'string' && b.type.startsWith('audio/')) window.__audioBlobs++; return make(b); };
+});
+await page.click('.notes-quickadd-foot button[aria-label="Voice note"]');
+await page.waitForSelector('.notes-recorder button[aria-label="Stop recording"]', { timeout: 10000 });
+await sleep(1200);
+await page.click('.notes-recorder button[aria-label="Close"]');
+await page.waitForSelector('.notes-recorder', { state: 'detached', timeout: 5000 });
+await sleep(1000);   // the browser getting round to onstop
+ck('voice note: Close while recording leaves no unreachable preview URL behind',
+    await page.evaluate(() => window.__audioBlobs) === 0, `audio blob urls=${await page.evaluate(() => window.__audioBlobs)}`);
+ck('voice note: ...and the abandoned take is not in the composer',
+    await page.locator('.notes-quickadd-media audio').count() === 0);
+
+await page.click('.notes-quickadd-foot button[aria-label="Voice note"]');
+await page.waitForSelector('.notes-recorder', { timeout: 10000 });
+const micOrder = await page.evaluate(() => (window.__micOrder || []).join(','));
+ck('voice note: the disclosure is shown BEFORE the microphone is asked for', micOrder.startsWith('confirm,getUserMedia'), micOrder);
+await page.waitForSelector('.notes-recorder button[aria-label="Stop recording"]', { timeout: 10000 }).catch(() => {});
+let recText = await page.locator('.notes-recorder').innerText().catch(() => '');
+ck('voice note: recording shows elapsed time and a Stop',
+    await page.locator('.notes-recorder button[aria-label="Stop recording"]').count() === 1
+    && /^\d+:\d\d$/.test((await page.locator('.notes-recorder-time').innerText().catch(() => '')).trim()),
+    recText.replace(/\s+/g, ' ').slice(0, 140));
+await sleep(1500);
+await page.click('.notes-recorder button[aria-label="Stop recording"]');
+const previewed = await page.waitForSelector('.notes-recorder audio', { timeout: 10000 }).then(() => true).catch(() => false);
+recText = await page.locator('.notes-recorder').innerText().catch(() => '');
+ck('voice note: stopping produces a take to keep', previewed, recText.replace(/\s+/g, ' ').slice(0, 140));
+ck('voice note: the take previews before it is kept, and never autoplays',
+    previewed && await page.locator('.notes-recorder audio').evaluate(a => a.autoplay === false && a.paused === true && a.controls === true));
+await shot('voice-recorder');
+await page.getByRole('button', { name: 'Keep' }).click();
+await page.waitForSelector('.notes-quickadd-media audio', { timeout: 10000 });
+ck('voice note: the clip previews in the composer', await page.locator('.notes-quickadd-media audio').count() === 1);
+// POSITIVE CONTROL for the check above: keeping a take DOES mint one, so the
+// zero there means "not created", not "not counted".
+ck('voice note: (control) a kept take mints its preview URL',
+    await page.evaluate(() => window.__audioBlobs) > 0, `audio blob urls=${await page.evaluate(() => window.__audioBlobs)}`);
+ck('voice note: the composer preview never autoplays',
+    await page.locator('.notes-quickadd-media audio').evaluate(a => a.autoplay === false && a.paused === true));
+// A take kept in the COMPOSER is written down like one kept in an open note —
+// on the phone's own recogniser or not at all. In a browser there is none, so
+// what must show is the refusal, in words, with nothing having left the machine.
+await page.waitForSelector('.notes-quickadd .notes-transcribe-notice', { timeout: 15000 }).catch(() => {});
+const qaNotice = await page.locator('.notes-quickadd .notes-transcribe-notice').count() === 1
+    ? (await page.locator('.notes-quickadd .notes-transcribe-notice').innerText()).trim() : '';
+ck('voice note: the composer says why the browser did not write it down',
+    /on-device|can.t write down|recording is saved/i.test(qaNotice), qaNotice.slice(0, 120));
+ck('voice note: nothing left this machine while the composer refused', offMachineRequests.length === 0, offMachineRequests.slice(0, 3).join(','));
+// Discarded on purpose: the database checks below count the notes this walk
+// made, and the clip that matters is added to an EXISTING note next.
+await page.locator('.notes-quickadd-foot button[aria-label="Discard note"]').click();
+await page.waitForSelector('.notes-quickadd-media audio', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+// Into an existing note, through the editor — the front door Púca's Tasks view
+// shares.
+offMachineRequests.length = 0;
+await page.locator('.notes-card', { hasText: 'Sketch' }).click();
+await page.waitForSelector('.notes-editor .ni-actions button[aria-label="Voice note"]', { timeout: 15000 });
+await page.click('.notes-editor .ni-actions button[aria-label="Voice note"]');
+await page.waitForSelector('.notes-recorder', { timeout: 10000 });
+await sleep(1200);
+await page.click('.notes-recorder button[aria-label="Stop recording"]');
+await page.waitForSelector('.notes-recorder audio', { timeout: 10000 });
+await page.getByRole('button', { name: 'Keep' }).click();
+await page.waitForSelector('.notes-editor .ni-item.audio audio[src^="blob:"]', { timeout: 25000 });
+ck('voice note: the editor plays it — a player, not a paperclip chip',
+    await page.locator('.notes-editor .ni-item.audio audio[src^="blob:"]').count() === 1
+    && await page.locator('.notes-editor .ni-file').count() === 0);
+const decoded = await page.waitForFunction(
+    () => document.querySelector('.notes-editor .ni-item.audio audio')?.readyState > 0,
+    null, { timeout: 10000 }).then(() => true).catch(() => false);
+ck('voice note: the clip decrypted (metadata loaded, still silent)',
+    decoded && await page.locator('.notes-editor .ni-item.audio audio').evaluate(a => a.paused === true && a.autoplay === false));
+await page.waitForSelector('.notes-transcribe-notice', { timeout: 15000 }).catch(() => {});
+const notice = await page.locator('.notes-transcribe-notice').count() === 1
+    ? (await page.locator('.notes-transcribe-notice').innerText()).trim() : '';
+ck('voice note: the browser refuses to write it down, honestly and in words',
+    /on-device|can.t write down|recording is saved/i.test(notice), notice.slice(0, 120));
+ck('voice note: nothing left this machine while it refused to write it down', offMachineRequests.length === 0, offMachineRequests.slice(0, 3).join(','));
+ck('voice note: the clip is a sealed attachment, not a hero picture on the card',
+    await page.locator('.notes-editor .ni-item.audio').count() === 1);
+await shot('voice-note-editor');
+await page.getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+ck('voice note: the card still leads with the drawing, never with a recording',
+    await page.locator('.notes-card', { hasText: 'Sketch' }).locator('.notes-card-hero img.drawing').count() === 1
+    && await page.locator('.notes-card', { hasText: 'Sketch' }).locator('audio').count() === 0);
 
 // ---- 5. The editor is Púca's TaskTree ----------------------------------------------
 await page.locator('.notes-card', { hasText: 'Groceries' }).click();
@@ -505,7 +643,7 @@ if (psqlDsn) {
         ck('database: nothing left in the trash', trashedRows === '0', trashedRows);
         // E2EE: the note text and the photo/drawing refs are envelopes; the words are nowhere.
         const bodies = sql(`SELECT string_agg(coalesce(body,'') || '|' || coalesce(attachments,''), E'\n') FROM task_lists WHERE id IN (${mine})`);
-        ck('database: note text is stored sealed', /"t":"self"/.test(bodies) && !/Roses|Violets|Friday|beach\.png|drawing-1/.test(bodies), bodies.slice(0, 120));
+        ck('database: note text is stored sealed', /"t":"self"/.test(bodies) && !/Roses|Violets|Friday|beach\.png|drawing-1|voice-1/.test(bodies), bodies.slice(0, 120));
         const nonEnvelope = sql(`SELECT count(*) FROM task_lists WHERE id IN (${mine}) AND ((body IS NOT NULL AND body NOT LIKE '{%') OR (attachments IS NOT NULL AND attachments NOT LIKE '{%'))`);
         ck('database: no note text or sidecar is anything but an envelope', nonEnvelope === '0', nonEnvelope);
         // An OPEN top-level row of the FIRST list (Groceries, still in the main
@@ -984,7 +1122,8 @@ ck('desktop: no page errors', errors.length === 0, errors[0]);
 const state = await ctx.storageState();
 await ctx.close();
 const iphone = devices['iPhone 13'];
-const mctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL, storageState: state });
+const mctx = await browser.newContext({ ...iphone, defaultBrowserType: undefined, baseURL, storageState: state, permissions: ['microphone'] });
+await watchMicOrder(mctx);
 const m = await mctx.newPage();
 watch(m);
 const mshot = shotOf(m);
@@ -1075,6 +1214,32 @@ ck('phone: the canvas takes touch as drawing, not scrolling', await m.evaluate((
 await mshot('phone-drawing');
 await m.getByRole('button', { name: 'Cancel' }).tap();
 await m.waitForSelector('.notes-draw', { state: 'detached', timeout: 5000 });
+// A voice note at 390x844: the recorder sheet and the player must fit.
+ck('phone: the composer offers a voice note', await m.locator('.notes-quickadd-foot button[aria-label="Voice note"]').count() === 1);
+await m.tap('.notes-quickadd-foot button[aria-label="Voice note"]');
+await m.waitForSelector('.notes-recorder', { timeout: 10000 });
+const rbx = await m.locator('.notes-recorder').boundingBox();
+r = await audit();
+ck('phone: the recorder sheet fits the viewport with its targets at size',
+    rbx && rbx.x >= -0.5 && rbx.x + rbx.width <= 390.5 && r.under.length === 0 && !r.bodyScrollsHorizontally,
+    JSON.stringify({ rbx, u: r.under }));
+await mshot('phone-voice-recorder');
+await sleep(1000);
+await m.tap('.notes-recorder button[aria-label="Stop recording"]');
+await m.waitForSelector('.notes-recorder audio', { timeout: 10000 });
+await m.getByRole('button', { name: 'Keep' }).tap();
+await m.waitForSelector('.notes-quickadd-media audio', { timeout: 10000 });
+const plx = await m.locator('.notes-quickadd-media audio').boundingBox();
+r = await audit();
+ck('phone: the recording player does not overflow 390',
+    plx && plx.x >= -0.5 && plx.x + plx.width <= 390.5 && !r.bodyScrollsHorizontally, JSON.stringify(plx));
+ck('phone: the recording preview never autoplays',
+    await m.locator('.notes-quickadd-media audio').evaluate(a => a.autoplay === false && a.paused === true));
+await m.waitForSelector('.notes-quickadd .notes-transcribe-notice', { timeout: 15000 }).catch(() => {});
+const mNoticeBox = await m.locator('.notes-quickadd .notes-transcribe-notice').boundingBox().catch(() => null);
+ck('phone: the "not written down" line reads at 390 without overflowing',
+    mNoticeBox && mNoticeBox.x >= -0.5 && mNoticeBox.x + mNoticeBox.width <= 390.5,
+    JSON.stringify(mNoticeBox));
 await m.locator('.notes-quickadd.sheet button[aria-label="Discard note"]').tap();
 await m.waitForSelector('.notes-quickadd.sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
 // The Trash at phone size — with a note in it, or there is nothing to measure.
