@@ -1,34 +1,10 @@
 /**
- * The twelve card tints as a radio group of swatches. Colour is never the
- * only carrier: each swatch is labelled by name, and the card also carries
- * the name in its title attribute (notesModel NOTE_COLORS).
+ * MOVED to components/notes/ColorPicker.tsx — this colour/label chrome is shared
+ * with Púca's Tasks view now, so it no longer belongs under notes/.
+ *
+ * This re-export is here for the branches that were cut before the move and
+ * still import './ColorPicker' from inside notes/components/ (a rename on one
+ * side and a new importer on the other merge CLEANLY and then fail to
+ * build). Delete it, and fix the importers, once they are all in.
  */
-import { CheckIcon } from '../../components/Icons';
-import { NOTE_COLORS, type NoteColor } from '../model/notesModel';
-
-interface ColorPickerProps {
-    value: NoteColor;
-    onChange: (c: NoteColor) => void;
-}
-
-export function ColorPicker({ value, onChange }: ColorPickerProps) {
-    return (
-        <div role="radiogroup" aria-label="Note colour" className="notes-swatches">
-            {NOTE_COLORS.map(c => (
-                <button
-                    key={c}
-                    type="button"
-                    role="radio"
-                    aria-checked={c === value}
-                    aria-label={c === 'default' ? 'No colour' : c}
-                    title={c === 'default' ? 'No colour' : c}
-                    className={`notes-swatch ${c === value ? 'selected' : ''}`}
-                    data-color={c}
-                    onClick={() => onChange(c)}
-                >
-                    {c === value && <CheckIcon size={14} />}
-                </button>
-            ))}
-        </div>
-    );
-}
+export { ColorPicker } from '../../components/notes/ColorPicker';

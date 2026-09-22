@@ -6,6 +6,7 @@ import ResetPassword from './components/ResetPassword';
 import VerifyEmail from './components/VerifyEmail';
 import { isAuthenticated, logout, getToken, softExpireSession, isTokenExpired, currentUserIdFromToken } from './api/auth';
 import { notesSignOutWarning, readNotesUnsynced } from './api/notesCacheScrub';
+import { flushNotesPrefs, useNotesPrefsUnsyncedFlag } from './notes/model/notesPrefsSync';
 import { resetAuthExpiredFlag, probeSession } from './api/client';
 import { checkForNewVersion, openDownloadPage, type AppVersionInfo } from './api/appVersion';
 import { RETRY_DELAYS_MS, failureFor, type ConnectionFailure } from './appConnection.utils';
@@ -70,8 +71,19 @@ function App() {
   // Helper to get token from URL for reset/verify
   const urlToken = new URLSearchParams(location.search).get('token') || '';
 
-  // Stable logout handler
-  const handleLogout = () => {
+  // Keep the flag below honest for PÚCA's own writes: the Tasks view sets
+  // colours, labels and archive now, and this publishes what has not reached
+  // the account's sealed document yet (Notes' queued-edit count is left alone).
+  useNotesPrefsUnsyncedFlag();
+
+  // Stable logout handler. `async` only for the flush below — every caller
+  // treats it as fire-and-forget, as it always was.
+  const handleLogout = async () => {
+    // Last chance to save what this browser holds and the account does not:
+    // a colour set here a second ago is still inside the push debounce, and
+    // logout() is about to scrub it. Bounded and never fatal — whatever does
+    // not land is exactly what the question below is about.
+    await flushNotesPrefs();
     // Púca Notes' unsent offline edits and unsynced colours/labels on this
     // browser go with any sign-out (logout() scrubs them); ask first, as
     // Notes' own sign-out does (api/notesCacheScrub.ts).
@@ -401,7 +413,7 @@ function App() {
               <button className="primary" onClick={handleRetry}>Try again</button>
             )}
             {stale && <button onClick={handleRetry}>Try again anyway</button>}
-            <button onClick={handleLogout}>Sign out</button>
+            <button onClick={() => { void handleLogout(); }}>Sign out</button>
           </div>
         </div>
       </div>

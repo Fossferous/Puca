@@ -11,11 +11,24 @@
  *
  * The pinned first tab is "All tasks": a board of every list and channel
  * checklist as live interactive cards — the default view when Tasks opens.
+ *
+ * COLOUR, LABELS AND ARCHIVE are Púca Notes' organisation, and this view is
+ * the second front door onto it: one account-wide sealed-to-self document
+ * (notes/model/notesPrefsSync.ts — the server holds ciphertext and a revision,
+ * never a colour or a label), read here through the same synchronous snapshot
+ * Notes reads and written through the same mutators, so there is one merge
+ * rule and not two. A device with no identity yet (locked seed, not enrolled)
+ * gets 'locked' and simply shows no colours: never a banner for someone who
+ * has never opened Notes.
+ *
+ * The filter and the archive HIDE tabs, and a tab-order save is a full
+ * replace — so everything hidden goes into `hiddenKeys` beside the trashed
+ * lists, or favouriting one tab would drop every hidden note's slot.
  */
 
 import { ApiError } from '../api/client';
 import { pushMessageToast } from './messageToastBus';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import {
     type Task,
@@ -59,7 +72,22 @@ import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { ArchiveIcon, BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TagIcon, TasksIcon, TrashIcon } from './Icons';
+// Púca Notes' organisation, shared rather than forked — see the header.
+import { type NoteColor } from '../notes/model/notesModel';
+import {
+    forgetNoteKeys,
+    getNotesPrefs,
+    setNoteArchived,
+    setNoteColor,
+    setNoteLabels,
+    subscribeNotesPrefs,
+} from '../notes/model/notesPrefs';
+import { useNotesPrefsSync } from '../notes/model/notesPrefsSync';
+import { ColorPicker } from './notes/ColorPicker';
+import { LabelPicker } from './notes/LabelPicker';
+import { Popover } from './notes/Popover';
+import { PrefsSyncBanner } from './notes/PrefsSyncBanner';
 import { TasksCalendar } from './calendar/TasksCalendar';
 import { TasksReminders } from './reminders/TasksReminders';
 import { useSwipe } from '../hooks/useSwipe';
@@ -122,6 +150,23 @@ interface BarTab {
  *  (TasksCalendar, TasksReminders). */
 type Selected = { kind: TaskTabKind | 'calendar' | 'reminders'; id: number } | null;
 
+/** What the tab bar and the board are showing: everything unarchived, one
+ *  label, or the archive. A view choice, not a stored setting — it starts at
+ *  'all' every time Tasks opens, as Notes' rail does. */
+type NoteFilter = { kind: 'all' } | { kind: 'label'; label: string } | { kind: 'archive' };
+
+/** The union of every label in use, in the order the rail shows them. */
+function labelsInUse(keys: string[], byKey: Record<string, string[]>): string[] {
+    const seen = new Map<string, string>();
+    for (const k of keys) {
+        for (const l of byKey[k] ?? []) {
+            const lower = l.toLocaleLowerCase();
+            if (!seen.has(lower)) seen.set(lower, l);
+        }
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
+
 export function TasksView() {
     // null = the pinned "All tasks" board (the default view) — unless
     // something asked for a tab on the way in (a due-item notification asks
@@ -142,6 +187,15 @@ export function TasksView() {
     const notesHref = notesUrl();
     // Púca Notes' text/photo notes and the trash, where the server has them.
     const support = useListContentSupport();
+    // Colour, labels and archive: the account's sealed document, kept in step
+    // while this view is up, and the synchronous snapshot every render reads.
+    const prefsSyncStatus = useNotesPrefsSync();
+    const notePrefs = useSyncExternalStore(subscribeNotesPrefs, getNotesPrefs, getNotesPrefs);
+    const [noteFilter, setNoteFilter] = useState<NoteFilter>({ kind: 'all' });
+    const [filterAnchor, setFilterAnchor] = useState<HTMLElement | null>(null);
+    // The colour / label pickers, anchored to the tab or card they were opened
+    // from (the context menu has no submenus, and would not want one on touch).
+    const [picker, setPicker] = useState<{ kind: 'color' | 'labels'; tab: BarTab; anchor: HTMLElement | null } | null>(null);
     const qc = useQueryClient();
     const patchList = (id: number, patch: Partial<TaskList>) => setLists(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
     // Read at async completion time (the reparent refetch guard) — the load
@@ -204,11 +258,37 @@ export function TasksView() {
     const listTabs: BarTab[] = lists.map(l => ({ kind: 'list' as const, id: l.id, label: l.title }));
     // Saved order first, then anything the prefs haven't seen (new lists /
     // newly joined servers) in natural order. Cheap enough to run per render.
-    const orderedTabs = orderTaskTabs([...listTabs, ...channelTabs], prefs);
+    const allTabs = orderTaskTabs([...listTabs, ...channelTabs], prefs);
 
+    const isArchived = (key: string) => notePrefs.archived[key] === true;
+    const matchesFilter = (key: string) => {
+        if (noteFilter.kind === 'archive') return isArchived(key);
+        if (isArchived(key)) return false;
+        if (noteFilter.kind === 'label') {
+            const want = noteFilter.label.toLocaleLowerCase();
+            return (notePrefs.labels[key] ?? []).some(l => l.toLocaleLowerCase() === want);
+        }
+        return true;
+    };
+    /** What the bar and the board show right now. */
+    const orderedTabs = allTabs.filter(t => matchesFilter(taskTabKey(t)));
+    /** Tabs that exist but are not on screen: the trash, the archive, and
+     *  whatever a label filter is leaving out. A tab-pref save is a full
+     *  replace (PUT /task-tab-prefs), so each of these has to be put back at
+     *  the index it holds — the bug already fixed for the trash alone
+     *  (api/listContent.ts keepHiddenSlots, tasksViewTrashSlots.test.tsx). */
+    const hiddenKeys: ReadonlySet<string> = new Set<string>([
+        ...support.trashedKeys,
+        ...allTabs.filter(t => !matchesFilter(taskTabKey(t))).map(taskTabKey),
+    ]);
+    const noteLabels = labelsInUse(allTabs.map(taskTabKey), notePrefs.labels);
+    const archivedCount = allTabs.filter(t => isArchived(taskTabKey(t))).length;
+
+    // Resolved from ALL tabs, not the visible ones: archiving the open note
+    // takes it off the bar, and "that checklist is gone" would be a lie.
     const selectedList = selected?.kind === 'list' ? (lists.find(l => l.id === selected.id) ?? null) : null;
     const selectedChannel = selected?.kind === 'channel'
-        ? (orderedTabs.find(t => t.kind === 'channel' && t.id === selected.id) ?? null)
+        ? (allTabs.find(t => t.kind === 'channel' && t.id === selected.id) ?? null)
         : null;
 
     /** Optimistically apply a new pref set and persist it; roll back on error
@@ -234,8 +314,9 @@ export function TasksView() {
     };
 
     const toggleFavorite = (tab: BarTab) => {
-        // A trashed list keeps its slot in the saved order (api/listContent.ts).
-        savePrefs(toggleFavoriteKeepingHidden(orderedTabs, prefs, tab, support.trashedKeys));
+        // Every tab the trash, the archive or a filter is hiding keeps its slot
+        // in the saved order (api/listContent.ts).
+        savePrefs(toggleFavoriteKeepingHidden(orderedTabs, prefs, tab, hiddenKeys));
     };
 
     // Tab drag: mouse drags after a small threshold; touch long-presses to
@@ -252,7 +333,7 @@ export function TasksView() {
             const newKeys = [...order];
             newKeys.splice(insertAt, 0, key);
             const newOrder = newKeys.map(k => byKey.get(k)).filter((t): t is BarTab => !!t);
-            savePrefs(buildPrefsForOrder(keepHiddenSlots(newOrder, prefs, support.trashedKeys), prefs));
+            savePrefs(buildPrefsForOrder(keepHiddenSlots(newOrder, prefs, hiddenKeys), prefs));
         },
     });
 
@@ -339,6 +420,11 @@ export function TasksView() {
             const created = await createTaskList(title);
             setLists(prev => [...prev, created]);
             setSelected({ kind: 'list', id: created.id });
+            // A brand-new list has no labels and is not archived, so ANY
+            // filter hides it: the editor would open on a note with no tab and
+            // no card, and the "Show all notes" way back only appears when the
+            // board is empty — which it is not. Creating one means showing it.
+            setNoteFilter({ kind: 'all' });
             setNewListTitle('');
             setAddingList(false);
         } catch (err) {
@@ -392,6 +478,9 @@ export function TasksView() {
         if (selected?.kind === 'list' && selected.id === list.id) setSelected(null);
         try {
             await deleteTaskList(list.id);
+            // Gone for good, so its colour and labels are too. A note moved to
+            // the TRASH keeps them for a restore — that branch returned above.
+            forgetNoteKeys([`list:${list.id}`]);
         } catch (err) {
             console.error('Failed to delete list:', err);
             setLists(original);
@@ -568,15 +657,37 @@ export function TasksView() {
         }
     };
 
-    /** Context-menu items for a tab/card: favourite always; personal lists
-     *  additionally rename + delete. */
-    const menuItemsFor = (tab: BarTab): ContextMenuItem[] => {
+    /** Archive or unarchive a note. Either way it leaves the surface the user
+     *  is looking at, so an open editor for it would be stranded. */
+    const setArchived = (tab: BarTab, archived: boolean) => {
+        setNoteArchived(taskTabKey(tab), archived);
+        if (selected?.kind === tab.kind && selected.id === tab.id) setSelected(null);
+    };
+
+    /** Context-menu items for a tab/card: favourite, colour, labels and
+     *  archive on every note; personal lists additionally rename + delete. */
+    const menuItemsFor = (tab: BarTab, anchor: HTMLElement | null): ContextMenuItem[] => {
         const fav = isFavoriteTab(prefs, tab);
         const items: ContextMenuItem[] = [{
             id: 'favorite-tab',
             label: fav ? 'Unfavourite' : 'Favourite',
             icon: 'star',
             onClick: () => toggleFavorite(tab),
+        }, {
+            id: 'note-color',
+            label: 'Colour…',
+            icon: 'palette',
+            onClick: () => setPicker({ kind: 'color', tab, anchor }),
+        }, {
+            id: 'note-labels',
+            label: 'Labels…',
+            icon: 'tag',
+            onClick: () => setPicker({ kind: 'labels', tab, anchor }),
+        }, {
+            id: 'note-archive',
+            label: isArchived(taskTabKey(tab)) ? 'Unarchive' : 'Archive',
+            icon: 'archive',
+            onClick: () => setArchived(tab, !isArchived(taskTabKey(tab))),
         }];
         if (tab.kind === 'list') {
             const list = lists.find(l => l.id === tab.id);
@@ -606,22 +717,30 @@ export function TasksView() {
     };
 
     const renderTab = (tab: BarTab) => {
+        const key = taskTabKey(tab);
         const isActive = selected !== null && selected.kind === tab.kind && selected.id === tab.id;
         const fav = isFavoriteTab(prefs, tab);
         const list = tab.kind === 'list' ? lists.find(l => l.id === tab.id) : undefined;
+        const labels = notePrefs.labels[key] ?? [];
         return (
             <button
-                key={taskTabKey(tab)}
+                key={key}
                 className={`tasks-tab ${isActive ? 'active' : ''} ${tab.kind === 'channel' ? 'tasks-tab-channel' : ''}`}
-                data-drag-key={taskTabKey(tab)}
+                data-drag-key={key}
                 data-drag-group="bar"
+                data-color={notePrefs.colors[key] ?? 'default'}
                 onClick={() => { setSelected({ kind: tab.kind, id: tab.id }); }}
-                onContextMenu={(e) => showContextMenu(e, menuItemsFor(tab))}
+                onContextMenu={(e) => { const anchor = e.currentTarget; showContextMenu(e, menuItemsFor(tab, anchor)); }}
                 title={tab.kind === 'channel' ? `#${tab.label} in ${tab.serverName}` : tab.label}
             >
                 {fav && <StarIcon className="tasks-tab-star" />}
                 {tab.kind === 'channel' && <ChecklistIcon className="tasks-tab-kind" />}
                 <span className="tasks-tab-title">{tab.label}</span>
+                {labels.length > 0 && (
+                    <span className="tasks-tab-labels">
+                        {labels.map(l => <span key={l} className="tasks-tab-label">{l}</span>)}
+                    </span>
+                )}
                 {list && list.total_tasks > 0 && (
                     <span className="tasks-tab-count">{list.completed_tasks}/{list.total_tasks}</span>
                 )}
@@ -631,16 +750,18 @@ export function TasksView() {
 
     /** One interactive board card (used by the All-tasks view). */
     const renderCard = (tab: BarTab) => {
+        const key = taskTabKey(tab);
         const fav = isFavoriteTab(prefs, tab);
         const list = tab.kind === 'list' ? lists.find(l => l.id === tab.id) : undefined;
+        const labels = notePrefs.labels[key] ?? [];
         return (
-            <section className="checklist-card" key={taskTabKey(tab)}>
+            <section className="checklist-card" key={key} data-color={notePrefs.colors[key] ?? 'default'}>
                 <header
                     className="checklist-card-header"
                     role="button"
                     title="Open"
                     onClick={() => { setSelected({ kind: tab.kind, id: tab.id }); scrollActiveTabIntoView(); }}
-                    onContextMenu={(e) => showContextMenu(e, menuItemsFor(tab))}
+                    onContextMenu={(e) => { const anchor = e.currentTarget; showContextMenu(e, menuItemsFor(tab, anchor)); }}
                 >
                     {tab.kind === 'list' ? <FileTextIcon /> : <ChecklistIcon />} {tab.label}
                     {fav && <StarIcon className="tasks-tab-star" />}
@@ -650,6 +771,21 @@ export function TasksView() {
                             : list && list.total_tasks > 0 ? `${list.completed_tasks}/${list.total_tasks}` : ''}
                     </span>
                 </header>
+                {labels.length > 0 && (
+                    <div className="tasks-card-labels">
+                        {labels.map(l => (
+                            <button
+                                key={l}
+                                type="button"
+                                className="tasks-card-label"
+                                title={`Show only notes labelled ${l}`}
+                                onClick={() => setNoteFilter({ kind: 'label', label: l })}
+                            >
+                                <TagIcon /> {l}
+                            </button>
+                        ))}
+                    </div>
+                )}
                 {tab.kind === 'list' && listBodySnippet(list) && <p className="tasks-card-body">{listBodySnippet(list)}</p>}
                 {tab.kind === 'list' ? (
                     <ChecklistBody
@@ -681,8 +817,16 @@ export function TasksView() {
         />
     );
 
+    const filterName = noteFilter.kind === 'archive' ? 'Archive'
+        : noteFilter.kind === 'label' ? noteFilter.label
+        : 'All notes';
+    const pickerKey = picker ? taskTabKey(picker.tab) : '';
+
     return (
         <div className="tasks-view-outer">
+            {/* Colour/label/archive syncing that did NOT happen — the same
+                three states, and the same two ways out, Notes shows. */}
+            <PrefsSyncBanner status={prefsSyncStatus} />
             {/* Tab bar: pinned All-tasks board, then every list + server
                 checklist as draggable tabs, with New-list pinned right. */}
             <div className="tasks-tabbar">
@@ -753,6 +897,19 @@ export function TasksView() {
                     >
                         <PlusIcon />
                     </button>
+                    {/* In the FIXED actions block, never in the scroller: the
+                        bar scrolls away under a coarse pointer and a filter
+                        you cannot find is a filter you cannot turn off. */}
+                    {allTabs.length > 0 && (
+                        <button
+                            className={`tasks-tab tasks-tab-icon tasks-tab-filter ${noteFilter.kind === 'all' ? '' : 'on'}`}
+                            title={`Showing: ${filterName}`}
+                            aria-label={`Filter notes — showing ${filterName}`}
+                            onClick={(e) => setFilterAnchor(e.currentTarget)}
+                        >
+                            {noteFilter.kind === 'archive' ? <ArchiveIcon /> : <TagIcon />}
+                        </button>
+                    )}
                     {notesHref && (
                         <a
                             className="tasks-tab tasks-tab-icon tasks-tab-notes"
@@ -794,7 +951,16 @@ export function TasksView() {
                 ) : orderedTabs.length === 0 ? (
                     <div className="tasks-editor-empty" {...contentSwipe}>
                         <div className="tasks-empty-icon"><FileTextIcon size={40} /></div>
-                        <p>Create a list with New list, above — or make any text channel a checklist and it will show up here.</p>
+                        {allTabs.length > 0 ? (
+                            // Not "you have nothing" — a filter is on, and saying
+                            // so is the only way back from it.
+                            <p>
+                                Nothing {noteFilter.kind === 'archive' ? 'in the archive' : <>labelled “{filterName}”</>}.{' '}
+                                <button type="button" className="tasks-empty-link" onClick={() => setNoteFilter({ kind: 'all' })}>Show all notes</button>
+                            </p>
+                        ) : (
+                            <p>Create a list with New list, above — or make any text channel a checklist and it will show up here.</p>
+                        )}
                         {trashSection}
                     </div>
                 ) : (
@@ -909,6 +1075,58 @@ export function TasksView() {
                     position={contextMenu.position}
                     onClose={hideContextMenu}
                 />
+            )}
+
+            {filterAnchor && (
+                <Popover anchor={filterAnchor} onClose={() => setFilterAnchor(null)} label="Filter notes">
+                    <h4>Show</h4>
+                    <div className="tasks-filter-menu">
+                        <button
+                            type="button"
+                            className={`tasks-filter-item ${noteFilter.kind === 'all' ? 'active' : ''}`}
+                            onClick={() => { setNoteFilter({ kind: 'all' }); setFilterAnchor(null); }}
+                        >
+                            <NoteIcon /><span className="tasks-filter-label">All notes</span>
+                            <span className="tasks-filter-count">{allTabs.length - archivedCount}</span>
+                        </button>
+                        {noteLabels.map(l => (
+                            <button
+                                key={l}
+                                type="button"
+                                className={`tasks-filter-item ${noteFilter.kind === 'label' && noteFilter.label.toLocaleLowerCase() === l.toLocaleLowerCase() ? 'active' : ''}`}
+                                onClick={() => { setNoteFilter({ kind: 'label', label: l }); setFilterAnchor(null); }}
+                            >
+                                <TagIcon /><span className="tasks-filter-label">{l}</span>
+                            </button>
+                        ))}
+                        <button
+                            type="button"
+                            className={`tasks-filter-item ${noteFilter.kind === 'archive' ? 'active' : ''}`}
+                            onClick={() => { setNoteFilter({ kind: 'archive' }); setFilterAnchor(null); }}
+                        >
+                            <ArchiveIcon /><span className="tasks-filter-label">Archive</span>
+                            <span className="tasks-filter-count">{archivedCount}</span>
+                        </button>
+                    </div>
+                </Popover>
+            )}
+            {picker?.kind === 'color' && (
+                <Popover anchor={picker.anchor} onClose={() => setPicker(null)} label="Note colour">
+                    <h4>Colour</h4>
+                    <ColorPicker
+                        value={notePrefs.colors[pickerKey] ?? 'default'}
+                        onChange={(c: NoteColor) => setNoteColor(pickerKey, c)}
+                    />
+                </Popover>
+            )}
+            {picker?.kind === 'labels' && (
+                <Popover anchor={picker.anchor} onClose={() => setPicker(null)} label="Note labels">
+                    <LabelPicker
+                        all={noteLabels}
+                        value={notePrefs.labels[pickerKey] ?? []}
+                        onChange={ls => setNoteLabels(pickerKey, ls)}
+                    />
+                </Popover>
             )}
         </div>
     );

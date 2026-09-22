@@ -90,6 +90,17 @@ export function writeNotesUnsynced(uid: number, u: NotesUnsynced): void {
     } catch { /* private mode */ }
 }
 
+/**
+ * Update ONLY the prefs half, keeping whatever outbox count is already
+ * recorded. Púca's Tasks view writes colours, labels and archive too, but it
+ * has no outbox — publishing a zero there would erase the count Notes wrote
+ * in the next tab, and the sign-out question would stop mentioning edits that
+ * really are still queued.
+ */
+export function writeNotesUnsyncedPrefs(uid: number, prefs: boolean): void {
+    writeNotesUnsynced(uid, { ...readNotesUnsynced(uid), prefs });
+}
+
 export function readNotesUnsynced(uid: number | null): NotesUnsynced {
     if (uid === null) return { ops: 0, prefs: false };
     try {

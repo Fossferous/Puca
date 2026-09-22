@@ -132,7 +132,10 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   document sealed to your own key (`/sealed-blobs/notes-prefs`, its own HKDF key
   and an AAD naming your account and the document); the server stores ciphertext
   and a revision number, and so learns its **size, how often and when it is
-  written** — roughly how much you organise, never what. The live-update stream
+  written** — roughly how much you organise, never what. Púca's own Tasks view
+  reads and writes the SAME document (docs/NOTES.md, *Both front doors agree*),
+  so a read or a write of it says only that one of the two is open, not which.
+  The live-update stream
   (`/events/tasks`) is held open per signed-in Notes page, so the server also
   sees **when Notes is open** and which of your lists or checklists changed —
   ids it already held, never a title, item, label or time. Neither route adds

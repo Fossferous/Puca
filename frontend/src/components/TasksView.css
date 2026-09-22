@@ -1,5 +1,6 @@
 /* Outer column: a Google-Tasks-style tab bar above the active list, which
    takes all remaining height (no cramped list-picker split, esp. on mobile). */
+@import '../styles/noteChrome.css';
 .tasks-view-outer {
     display: flex;
     flex-direction: column;
@@ -309,3 +310,144 @@
     align-items: center;
 }
 .tasks-tab-notes:hover { text-decoration: none; }
+
+/* --- Púca Notes' organisation: colour, labels, archive -----------------------
+   The tint tokens, the swatch grid, the label picker and the popover they open
+   in are shared with Notes (styles/noteChrome.css, imported at the top of this
+   file). What is local is how a TAB and a BOARD CARD wear a tint, and the
+   filter control beside New list. */
+
+.tasks-tab[data-color="coral"] { background: linear-gradient(var(--notes-tint-coral), var(--notes-tint-coral)), transparent; }
+.tasks-tab[data-color="peach"] { background: linear-gradient(var(--notes-tint-peach), var(--notes-tint-peach)), transparent; }
+.tasks-tab[data-color="sand"] { background: linear-gradient(var(--notes-tint-sand), var(--notes-tint-sand)), transparent; }
+.tasks-tab[data-color="mint"] { background: linear-gradient(var(--notes-tint-mint), var(--notes-tint-mint)), transparent; }
+.tasks-tab[data-color="sage"] { background: linear-gradient(var(--notes-tint-sage), var(--notes-tint-sage)), transparent; }
+.tasks-tab[data-color="fog"] { background: linear-gradient(var(--notes-tint-fog), var(--notes-tint-fog)), transparent; }
+.tasks-tab[data-color="storm"] { background: linear-gradient(var(--notes-tint-storm), var(--notes-tint-storm)), transparent; }
+.tasks-tab[data-color="dusk"] { background: linear-gradient(var(--notes-tint-dusk), var(--notes-tint-dusk)), transparent; }
+.tasks-tab[data-color="blossom"] { background: linear-gradient(var(--notes-tint-blossom), var(--notes-tint-blossom)), transparent; }
+.tasks-tab[data-color="clay"] { background: linear-gradient(var(--notes-tint-clay), var(--notes-tint-clay)), transparent; }
+.tasks-tab[data-color="chalk"] { background: linear-gradient(var(--notes-tint-chalk), var(--notes-tint-chalk)), transparent; }
+
+.checklist-card[data-color="coral"] { background: linear-gradient(var(--notes-tint-coral), var(--notes-tint-coral)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="peach"] { background: linear-gradient(var(--notes-tint-peach), var(--notes-tint-peach)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="sand"] { background: linear-gradient(var(--notes-tint-sand), var(--notes-tint-sand)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="mint"] { background: linear-gradient(var(--notes-tint-mint), var(--notes-tint-mint)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="sage"] { background: linear-gradient(var(--notes-tint-sage), var(--notes-tint-sage)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="fog"] { background: linear-gradient(var(--notes-tint-fog), var(--notes-tint-fog)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="storm"] { background: linear-gradient(var(--notes-tint-storm), var(--notes-tint-storm)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="dusk"] { background: linear-gradient(var(--notes-tint-dusk), var(--notes-tint-dusk)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="blossom"] { background: linear-gradient(var(--notes-tint-blossom), var(--notes-tint-blossom)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="clay"] { background: linear-gradient(var(--notes-tint-clay), var(--notes-tint-clay)), var(--bg-secondary, #2b2d31); }
+.checklist-card[data-color="chalk"] { background: linear-gradient(var(--notes-tint-chalk), var(--notes-tint-chalk)), var(--bg-secondary, #2b2d31); }
+
+/* A tinted tab still answers the pointer: the tint rules above sit after
+   .tasks-tab:hover in this file and would otherwise win it outright. */
+.tasks-tab[data-color]:not([data-color="default"]):hover { filter: brightness(1.18); }
+
+/* The way out of a filter that has left the board empty. */
+.tasks-empty-link {
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--text-link, #7fb8ff);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+/* High contrast: the wash would undo the re-tokenised text, so the colour
+   becomes an edge stripe instead (--stripe comes from styles/noteChrome.css,
+   the same map Notes' cards read). */
+[data-contrast="high"] .tasks-tab[data-color]:not([data-color="default"]) {
+    background: none;
+    box-shadow: inset 3px 0 0 var(--stripe, var(--border-subtle));
+}
+[data-contrast="high"] .checklist-card[data-color]:not([data-color="default"]) {
+    background: var(--bg-secondary, #2b2d31);
+    border-left: 4px solid var(--stripe, var(--border-subtle));
+}
+
+/* Labels on a tab: the bar is tight, so they are a hint, not a list — the
+   title keeps the room and the chips take what is left. The board card below
+   shows them in full, and they filter from there. */
+.tasks-tab-labels {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+    overflow: hidden;
+}
+.tasks-tab-label {
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.68rem;
+    line-height: 1.5;
+    padding: 0 5px;
+    border-radius: 7px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-muted, #949ba4);
+}
+
+.tasks-card-labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 6px;
+}
+.tasks-card-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: none;
+    border-radius: 9px;
+    padding: 2px 8px;
+    font-size: 11px;
+    background: var(--bg-tertiary, #40444b);
+    color: var(--text-muted, #949ba4);
+    cursor: pointer;
+}
+.tasks-card-label:hover { color: var(--text-normal, #dcddde); }
+.tasks-card-label .svrn-icon { font-size: 11px; }
+
+/* The filter control: an icon button in the FIXED actions block, marked when
+   it is hiding anything. */
+.tasks-tab-filter.on { color: var(--accent-color, #5865f2); }
+
+.tasks-filter-menu { display: flex; flex-direction: column; min-width: 200px; }
+.tasks-filter-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 8px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-normal, #dcddde);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+.tasks-filter-item:hover { background: var(--bg-modifier-hover, rgba(255, 255, 255, 0.06)); }
+.tasks-filter-item.active { color: var(--accent-color, #5865f2); }
+.tasks-filter-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tasks-filter-count { font-size: 11px; color: var(--text-muted, #949ba4); font-variant-numeric: tabular-nums; }
+
+/* The sync banner sits above the bar, inside the view's own padding. */
+.tasks-view-outer > .notes-status { margin: 8px 10px 0; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* The bar is already scrolling horizontally at 390px; the label hint
+       would push the titles out of it, and the board card keeps them. */
+    .tasks-tab-labels { display: none; }
+    .tasks-tab-filter { min-width: 44px; justify-content: center; }
+    .tasks-filter-item { padding: 12px 10px; font-size: 15px; min-height: 44px; }
+    .tasks-card-label { padding: 6px 10px; font-size: 13px; }
+}

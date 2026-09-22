@@ -44,7 +44,7 @@ import { currentUserIdFromToken } from '../../api/auth';
 import { getActiveIdentity, openAccountBlob, sealAccountBlob, type Identity } from '../../api/e2ee';
 import { isNetworkError } from '../../api/client';
 import { getSealedBlob, putSealedBlob, type GetBlobResult, type PutBlobResult } from '../../api/sealedBlobs';
-import { writeNotesUnsynced } from '../../api/notesCacheScrub';
+import { writeNotesUnsynced, writeNotesUnsyncedPrefs } from '../../api/notesCacheScrub';
 import { MAX_LABELS_PER_NOTE, type NotesNoteState } from './notesModel';
 import { dedupeLabels, getNotesPrefs, parseNotesPrefs, replaceNoteState, subscribeNotesPrefs } from './notesPrefs';
 
@@ -419,6 +419,43 @@ export function useNotesUnsyncedFlag(outboxPending: number): void {
 }
 
 /**
+ * The same flag, published by PÚCA. Púca's Tasks view writes this document
+ * too, so its sign-out warning has to be about its OWN unsent writes as well
+ * as Notes' — but Púca has no outbox, so it publishes only the prefs half
+ * (writeNotesUnsyncedPrefs) and leaves Notes' queued-edit count alone.
+ *
+ * Mounted at the top of the app, not in the Tasks view: a colour set and then
+ * navigated away from within the push debounce leaves the view unmounted with
+ * the write still local, and a publisher that unmounted with it would leave
+ * the flag saying the opposite.
+ *
+ * It may RAISE the flag from anywhere, but it may only CLEAR it off the back
+ * of a sync that actually SUCCEEDED here. The flag is one shared key that
+ * Notes publishes too, from its own module state: unsynced() answers true
+ * outright while the status is 'unreadable', 'rollback' or 'local-only', and
+ * in the Púca bundle the status stays 'idle' until the Tasks view has been
+ * opened at least once. A Púca tab in any other state therefore cannot tell a
+ * clean document from a refused rollback the Notes tab is sitting on — so it
+ * says nothing rather than writing false over Notes' true and dropping a real
+ * warning. Over-warning is the safe side of this; under-warning loses data.
+ */
+export function useNotesPrefsUnsyncedFlag(): void {
+    useEffect(() => {
+        const publish = () => {
+            const uid = currentUserIdFromToken();
+            if (uid === null) return;
+            const unsynced = appSync.unsynced();
+            if (!unsynced && appSync.status() !== 'synced') return;
+            writeNotesUnsyncedPrefs(uid, unsynced);
+        };
+        publish();
+        const offSettled = appSync.subscribeSettled(publish);
+        const offLocal = subscribeNotesPrefs(publish);
+        return () => { offSettled(); offLocal(); };
+    }, []);
+}
+
+/**
  * Push what is pending now, bounded: a sign-out's last chance to save it.
  * Resolves with whether anything is STILL unsynced afterwards.
  */
@@ -440,7 +477,7 @@ export function useNotesPrefsSync(): PrefsSyncStatus {
         let timer: number | undefined;
         const schedule = () => {
             window.clearTimeout(timer);
-            timer = window.setTimeout(() => { void appSync.push(); }, PUSH_DEBOUNCE_MS);
+            timer = window.setTimeout(() => { timer = undefined; void appSync.push(); }, PUSH_DEBOUNCE_MS);
         };
         const unsub = subscribeNotesPrefs(schedule);
         const onFocus = () => { void appSync.pull(); };
@@ -449,7 +486,11 @@ export function useNotesPrefsSync(): PrefsSyncStatus {
         window.addEventListener('online', onOnline);
         return () => {
             unsub();
-            window.clearTimeout(timer);
+            // A colour picked and then navigated away from inside the debounce
+            // must still go out: this view unmounts, the write does not. Only
+            // when one is genuinely outstanding — `timer` is cleared as it
+            // fires, so an unmount long after the last edit asks for nothing.
+            if (timer !== undefined) { window.clearTimeout(timer); timer = undefined; void appSync.push(); }
             window.removeEventListener('focus', onFocus);
             window.removeEventListener('online', onOnline);
         };

@@ -1,19 +1,21 @@
 /**
- * Púca Notes — the device-local note state: colour, labels, archived, and
- * the grid/list view choice.
+ * The note state behind colour, labels and the archive — plus the grid/list
+ * view choice, which stays on this device.
  *
- * WHY DEVICE-LOCAL. Notes is a presentation of Púca's task data, and the ask
- * was that the INFORMATION and FUNCTIONALITY be what persists — the pin and
- * the card order already live server-side as Púca's own tab prefs
+ * WHERE IT LIVES. Notes is a presentation of Púca's task data, and the ask was
+ * that the INFORMATION and FUNCTIONALITY be what persists — the pin and the
+ * card order already live server-side as Púca's own tab prefs
  * (task_tab_prefs), and the items, due times and attachments are the tasks
  * themselves. A card's tint, its labels and whether it is tucked into the
- * archive have no home in that schema, and inventing one means a migration
- * and a backend ship to both hosts. So they live here, in localStorage, the
- * same way saved places do (api/taskPlaces.ts). SINCE MIGRATION 067 this
- * store is the local copy of a sealed-to-self server blob: colour, labels and
- * archive follow the account (notesPrefsSync.ts does the syncing; this module
- * stays the synchronous snapshot the UI reads). The grid/list and sort
- * choices are NOT synced — they are per device, on purpose.
+ * archive have no home in that schema, so SINCE MIGRATION 067 they are one
+ * sealed-to-self document per account and this module is the local copy of
+ * it — a synchronous localStorage snapshot the UI can read during a render
+ * (notesPrefsSync.ts does the syncing). The grid/list and sort choices are
+ * NOT synced — they are per device, on purpose.
+ *
+ * BOTH FRONT DOORS WRITE IT. Notes' own shell and Púca's Tasks view
+ * (components/TasksView.tsx) call the same mutators below and go out through
+ * the same compare-and-swap, so there is one merge rule and not two.
  *
  * NAMESPACED PER ACCOUNT, deliberately, like taskPlaces: the key carries the
  * user id, so on a shared browser user B never sees user A's labels, and a
@@ -271,8 +273,9 @@ export function forgetNoteKeys(keys: readonly string[]): void {
     write({ ...p, colors: drop(p.colors), labels: drop(p.labels), archived: drop(p.archived) });
 }
 
-// Another tab (Púca, or a second Notes window) wrote our key: re-read so the
-// next render reflects it. Guarded for non-DOM test environments.
+// Another tab (Púca's Tasks view, or a second Notes window) wrote our key:
+// re-read so the next render reflects it. Guarded for non-DOM test
+// environments.
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     window.addEventListener('storage', e => {
         if (e.key === null || e.key.startsWith(STORAGE_PREFIX)) invalidateNotesPrefs();
