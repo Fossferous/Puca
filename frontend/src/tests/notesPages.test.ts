@@ -10,7 +10,7 @@
 // `return '/'` fails all of them; only the two fallback cases would pass.
 import { describe, it, expect } from 'vitest';
 import {
-    ALL_PAGE_KEY, hasPageForPath, labelRoute, pageIndexForPath, pageRoutes, routeForIndex,
+    ALL_PAGE_KEY, hasPageForPath, labelRoute, pageIndexForPath, pageRoutes, pagesOnScreen, routeForIndex,
 } from '../notes/model/notesPages';
 
 // allLabels() hands these over sorted and de-duplicated, one casing each.
@@ -95,5 +95,38 @@ describe('routeForIndex', () => {
         }
         // The control: the loop above ran over more than just the All page.
         expect(pages.length).toBeGreaterThan(1);
+    });
+});
+
+// Which pages hold a real grid while the pager moves. The quiet failure here
+// is answering the ROUTE's page alone — the page being swiped towards (or
+// the one being left) then shows blank — so every case below that is not at
+// rest expects TWO pages, and the at-rest cases expect exactly one.
+describe('pagesOnScreen', () => {
+    const W = 390;
+
+    it('at rest on a page, that page alone', () => {
+        expect(pagesOnScreen(2 * W, W)).toEqual([2, 2]);
+        expect(pagesOnScreen(0, W)).toEqual([0, 0]);
+    });
+
+    it('a sub-pixel off a snap point is still ONE page, either side', () => {
+        expect(pagesOnScreen(2 * W + 0.4, W)).toEqual([2, 2]);
+        expect(pagesOnScreen(2 * W - 0.4, W)).toEqual([2, 2]);
+    });
+
+    it('mid-swipe, both pages — the one being left and the one arriving', () => {
+        expect(pagesOnScreen(595, W)).toEqual([1, 2]);
+        // A couple of pixels in is already two pages: the sliver must have its notes.
+        expect(pagesOnScreen(2 * W + 2, W)).toEqual([2, 3]);
+        expect(pagesOnScreen(2 * W - 2, W)).toEqual([1, 2]);
+    });
+
+    it('a rubber band past the first page is still page 0, not page -1', () => {
+        expect(pagesOnScreen(-30, W)).toEqual([0, 0]);
+    });
+
+    it('no width yet (not laid out) answers nothing rather than dividing by zero', () => {
+        expect(pagesOnScreen(100, 0)).toBeNull();
     });
 });

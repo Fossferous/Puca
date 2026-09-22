@@ -84,3 +84,21 @@ export function routeForIndex(index: number, labels: readonly string[]): string 
     const i = Math.min(Math.max(Math.round(index), 0), pages.length - 1);
     return pages[i].route;
 }
+
+/**
+ * The pages any part of which is on screen, as [first, last], when the pager
+ * is scrolled to `scrollLeft` and every page is `width` wide. This is what
+ * decides which pages hold a real grid while the pager moves: the one being
+ * swiped towards from the first sliver of it, the one being left until the
+ * last. One pixel of slack either side, so a scroller resting a sub-pixel off
+ * a snap point (fractional device pixels) is ON one page rather than
+ * straddling two — which would mount a neighbour at rest for nothing. Null
+ * before there is a width to divide by.
+ */
+export function pagesOnScreen(scrollLeft: number, width: number): [number, number] | null {
+    if (!(width > 0)) return null;
+    const at = scrollLeft / width;
+    const first = Math.max(0, Math.floor(at + 1 / width));
+    const last = Math.max(first, Math.ceil(at - 1 / width));
+    return [first, last];
+}
