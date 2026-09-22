@@ -1642,6 +1642,55 @@ const pucaChipLook = await page.evaluate(() => {
 ck('púca: and it is a real chip there, not bare text (notes.css is not loaded in Púca)',
     pucaChipLook && pucaChipLook.border >= 1 && pucaChipLook.radius === '999px' && pucaChipLook.pad !== '0px',
     JSON.stringify(pucaChipLook));
+// THE OTHER FRONT DOOR, with that reminder still set. Section 9 walked this
+// row in P\u00faca Notes; here it has to be in P\u00daCA's own Reminders tab, over the
+// same note. The twelve-branch merge shipped a Tasks view that could SET a
+// note's reminder and two dated tabs that read a projection built from task
+// rows only \u2014 so the row, and every `isNote` branch written for it, was
+// unreachable from this side and no single-branch walk could have seen it.
+await page.locator('.tasks-tab-reminders').click();
+await page.waitForSelector('.tasks-reminders .notes-reminders', { timeout: 10000 });
+const pucaPoemRow = () => page.locator('.tasks-reminders .notes-reminder-row', { hasText: 'Poem' });
+await page.waitForSelector('.tasks-reminders .notes-reminder-row.note', { timeout: 15000 }).catch(() => {});
+ck('p\u00faca reminders: a note reminder set HERE is listed here', await pucaPoemRow().count() === 1);
+ck('p\u00faca reminders: it reads as the note itself \u2014 a bell, no tick box, no snooze',
+    await page.locator('.tasks-reminders .notes-reminder-row.note').count() === 1
+    && /This note itself/.test(await pucaPoemRow().innerText())
+    && await pucaPoemRow().locator('input[type="checkbox"]').count() === 0
+    && await pucaPoemRow().locator('.notes-snooze').count() === 0);
+// The note row is drawn from the lists the view already holds; the ITEM rows
+// arrive with the per-list reads, so this control has to wait for them or it
+// races the fetch (it did, once in five runs).
+await page.waitForSelector('.tasks-reminders .notes-reminder-row:not(.note) input[type="checkbox"]', { timeout: 15000 }).catch(() => {});
+ck('p\u00faca reminders: an ITEM row still has its tick box (positive control)',
+    await page.locator('.tasks-reminders .notes-reminder-row:not(.note) input[type="checkbox"]').count() >= 1);
+await shot('puca-note-reminder-row');
+// Clear it from the row \u2014 the one thing that row offers \u2014 and the note's own
+// chip goes with it, because the row and the header write through one setter.
+// Guarded: with no row there is nothing to click, and a walk that throws here
+// would take every later section down with it instead of reporting this one.
+if (await pucaPoemRow().count() === 1) {
+    await pucaPoemRow().locator('.notes-reminder-clear').click();
+    await sleep(800);
+    ck('p\u00faca reminders: clearing it from the row removes the row', await pucaPoemRow().count() === 0);
+    await page.locator('.tasks-tab', { hasText: 'Poem' }).click();
+    await page.waitForSelector('.tasks-editor-header', { timeout: 10000 });
+    ck('p\u00faca reminders: and the note\u2019s own chip went with it',
+        await page.locator('.tasks-editor-header .note-due-chip').count() === 0);
+    // Set it again, so the header's own clear below still has something to clear.
+    await page.locator('.tasks-editor-header button[aria-label="Remind me"]').click();
+    await page.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
+    await page.fill('.tasks-editor-header input[aria-label="Remind me at"]', `${pucaDue.getFullYear()}-${ppad(pucaDue.getMonth() + 1)}-${ppad(pucaDue.getDate())}T09:00`);
+    await page.locator('.tasks-editor-header .tt-due-set').click();
+    await sleep(800);
+    ck('p\u00faca: the chip is back (control for the clear that follows)', await page.locator('.tasks-editor-header .note-due-chip').count() === 1);
+} else {
+    ck('p\u00faca reminders: clearing it from the row removes the row', false, 'the row was never listed, so Clear could not be reached');
+    ck('p\u00faca reminders: and the note\u2019s own chip went with it', false, 'not reached');
+    await page.locator('.tasks-tab', { hasText: 'Poem' }).click();
+    await page.waitForSelector('.tasks-editor-header', { timeout: 10000 });
+}
+
 // Put it back: later sections (and Notes) expect the fixture unchanged.
 await page.locator('.tasks-editor-header button[aria-label="Edit this note\u2019s reminder"]').click();
 await page.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
@@ -1964,7 +2013,15 @@ const synced = await page.waitForSelector('[data-sync="pending"]', { state: 'det
 ck('offline: back online, the queue replays', synced);
 const offlineOnB = await pageB.waitForSelector('.notes-card:has-text("Offline note")', { timeout: 15000 }).then(() => true, () => false);
 ck('offline: the edit made offline reached the server and device B sees it', offlineOnB);
-const itemOnB = await pageB.waitForFunction(() => /Written on a plane/.test(document.body.innerText), null, { timeout: 10000 }).then(() => true, () => false);
+// 20 s, the budget its two neighbours already use, not the 10 s it shipped
+// with. Device B learns about a PERSONAL note's items by refetching on its
+// own schedule — a personal list never broadcasts, so there is no event to
+// ride — and 10 s was inside the jitter of that: adding ten seconds of walk
+// higher up (section 12c's note-reminder row) moved the phase and turned it
+// red twice running, with the note, its text and its picture all arriving.
+// The claim is unchanged: the item created offline must reach device B, which
+// is what proves its temp id was rewritten on replay.
+const itemOnB = await pageB.waitForFunction(() => /Written on a plane/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
 ck('offline: its item came through too (temp ids rewritten)', itemOnB);
 const bodyOnB = await pageB.waitForFunction(() => /Typed at 30,000 feet/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
 ck('offline: the text written with no network reached device B', bodyOnB);
