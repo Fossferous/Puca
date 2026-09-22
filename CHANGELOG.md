@@ -164,6 +164,27 @@ one-line summary; this file is the full story. Versions follow
   and a label left on an archived note could not be reached at all.
   Labels stay encrypted with your own key: the change is one write of
   the same sealed list, and the server still cannot read a single name.
+- **Send a note into Púca.** From a note's menu — or the open note — *Send to
+  Púca…* posts it as a message in one of your channels or to someone in a
+  direct message: the shopping list, in the chat, without copying and pasting.
+  Púca Notes always asks first and names where it is going, because a note
+  sent to a channel can be read by everyone in it and cannot be unsent. It
+  offers only channels you can actually post in. Anything this device cannot
+  read is left out rather than guessed, and the app says how many things that
+  was; pictures stay in the note and are listed by name. A note too long to go
+  as one message says so before you send it, rather than failing afterwards.
+- **Save a message to Notes.** Right-click a message in Púca (long press on a
+  phone) and pick *Save to Notes* to keep it as a new note or as an item in one
+  you already have — its pictures can come too. The copy is yours: it is
+  encrypted again under your own key and uploaded as your own file, so it
+  survives the message being deleted, and deleting the note does not touch the
+  chat. Only your own notes are offered, never a shared one, and a note whose
+  text or pictures this device cannot read yet is not offered either — saving
+  into one would write over what you still have elsewhere. Messages you cannot
+  read, and clips, are not offered. While it is saving, the window stays put —
+  closing it would not stop the save — and if the pictures fail after the text
+  has gone in, it says the text was kept, so you do not save the same message
+  twice trying again.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with
@@ -360,6 +381,10 @@ one-line summary; this file is the full story. Versions follow
   your microphone to RNNoise for the rest of the session and the picker says
   so; pick DeepFilter to try it again, and the next launch starts on your
   saved choice as before.
+- **A direct message sent from outside the chat window now arrives straight
+  away.** It reaches the other person immediately, wakes their phone and moves
+  the conversation to the top of their list, exactly as one typed in Púca
+  always did.
 - **Sound in automatically recorded clips no longer runs 100 to 200 ms
   behind the picture, and no longer drifts.** The desktop-audio player the
   clip buffer records through schedules each packet a little ahead, and

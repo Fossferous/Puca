@@ -70,8 +70,27 @@ export function getDMMessages(conversationId: string, limit: number = 50): Promi
 }
 
 /**
- * Send a message in a DM conversation
+ * Send a message in a DM conversation over REST.
+ *
+ * This is the ONLY DM send that is not the WebSocket, and it exists because
+ * Púca Notes must never open one (docs/NOTES.md, *Sessions*): the socket
+ * registers a presence session and would consume PARKED peer-to-peer file
+ * offers meant for the chat app. `POST /dms/:id/messages` runs the same
+ * consent, block and validation gates as the socket path, and since this
+ * release it also fans the message out, parks-and-wakes an offline recipient
+ * and bumps the conversation's timestamp — so a send from Notes is
+ * indistinguishable from one typed in Púca.
+ *
+ * `wire` is ALREADY the sealed envelope (encryptDMContent). Nothing here
+ * encrypts: passing plaintext would store plaintext.
+ *
+ * Do not import api/websocket into this module — dms.ts's only non-crypto
+ * import is ./client, and Notes' bundle depends on that staying true.
  */
+export function sendDMMessageRest(conversationId: string, wire: string): Promise<DMMessage> {
+    return apiClient.post(`/dms/${conversationId}/messages`, { content: wire });
+}
+
 // --- E2EE Support (pairwise) ---
 
 import { getActiveIdentity,

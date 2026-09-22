@@ -26,7 +26,7 @@ import { fileIdsOf } from '../../api/noteMedia';
 import { TaskTree } from '../../components/TaskTree';
 import {
     ArchiveIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
-    RefreshIcon, SearchIcon, TagIcon, WarningIcon,
+    RefreshIcon, SearchIcon, SendIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
@@ -58,6 +58,11 @@ interface NoteEditorProps {
     onPickLabels: (card: NoteCard, anchor: HTMLElement) => void;
     /** Archive/unarchive through the owner (Undo snackbar). */
     onArchive: (card: NoteCard, archived: boolean) => void;
+    /** Post this note into a channel or DM ("Send to Púca…"). In its own
+     *  footer button as well as the menu: the Notes Android shell has no
+     *  "Open in Púca" to fall back on (NotesRail's isMobile gate), so this is
+     *  its only route into a conversation. */
+    onSendToPuca: () => void;
     /** Where this note lives in Púca (web only; null hides the link). */
     pucaHref: string | null;
     /** A layer above the editor is open (context menu, popover, dialog):
@@ -72,7 +77,7 @@ interface NoteEditorProps {
     query?: string;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false, flashTaskId = null, query }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, flashTaskId = null, query }: NoteEditorProps) {
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
     const tasksQuery = useNoteTasks(ref, { live: true });
@@ -400,8 +405,9 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         items. Shown only when something is ticked, and only
                         on a personal note. */}
                     <ListActionsMenu note={ref} actions={actions} tasks={tasks} />
+                    <button type="button" className="notes-iconbtn" aria-label="Send to Púca" title="Send to Púca…" onClick={onSendToPuca}><SendIcon /></button>
                     {pucaHref && (
-                        <a className="notes-iconbtn" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
+                        <a className="notes-iconbtn notes-open-puca" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>
                     )}
                     <span className="spacer" />
                     <button type="button" className="notes-iconbtn" aria-label="More actions" title="More" onClick={e => onMenu(e, card, e.currentTarget)}><MoreVerticalIcon /></button>

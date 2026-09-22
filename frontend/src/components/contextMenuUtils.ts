@@ -6,7 +6,8 @@ import {
     copyImageToClipboard,
     describeCopyFailure,
 } from '../api/copyImage';
-import { decodeClipRef } from '../api/clips/clipRef';
+import { decodeClipRef, hasClipRef } from '../api/clips/clipRef';
+import { isUndecryptable } from '../api/decryptMarkers';
 import { formatClock } from '../api/clips/clipPresets';
 
 // --- Pure message-action text helpers (unit-tested in tests/messageActions.test.ts) ---
@@ -88,6 +89,22 @@ export function stripAttachmentKeys(content: string): string {
         // A clip ref (docs/CLIPS.md) is one packed blob whose key cannot be
         // separated from the rest: drop the whole payload (scrubClipRefs).
         .replace(/sovereign-clip:v1\?[^\s)]*/gi, 'sovereign-clip:v1');
+}
+
+/**
+ * May this message be saved into a note?
+ *
+ * No for a message this device cannot decrypt — offering to keep a marker
+ * would file `[encrypted — key unavailable]` as if it were content — and no
+ * for a clip post, for the same reason Forward is hidden on one: the body
+ * carries the clip's decryption key, and a note outlives the consent window
+ * the clip was approved for (docs/CLIPS.md).
+ *
+ * Exported and pure so both call sites in Chat.tsx share ONE rule and
+ * tests/messageActions.test.ts can hold it to it.
+ */
+export function canSaveToNotes(content: string): boolean {
+    return !isUndecryptable(content) && !hasClipRef(content);
 }
 
 /**
@@ -240,8 +257,11 @@ export const menuItems = {
         }),
         quote: (onQuote: () => void): ContextMenuItem => ({
             id: 'quote',
+            // 'file-text', not 'note': the note icon now means Púca Notes
+            // (saveToNotes below), and one signifier cannot mean two things
+            // in the same menu (docs/ICON_LANGUAGE.md).
             label: 'Quote',
-            icon: 'note',
+            icon: 'file-text',
             onClick: onQuote,
         }),
         forward: (onForward: () => void): ContextMenuItem => ({
@@ -249,6 +269,17 @@ export const menuItems = {
             label: 'Forward',
             icon: 'forward',
             onClick: onForward,
+        }),
+        // Keep this message in one of YOUR notes. A copy, not a link: the
+        // caller re-seals the text to your own key and re-uploads any picture
+        // as your file (api/captureToNote.ts). Never offered for a message
+        // this device cannot decrypt, and never for a clip post — see
+        // `canSaveToNotes` below, which both call sites use.
+        saveToNotes: (onSave: () => void): ContextMenuItem => ({
+            id: 'save-to-notes',
+            label: 'Save to Notes',
+            icon: 'note',
+            onClick: onSave,
         }),
         edit: (onEdit: () => void): ContextMenuItem => ({
             id: 'edit-message',

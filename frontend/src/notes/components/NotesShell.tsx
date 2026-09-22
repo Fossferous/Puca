@@ -28,6 +28,7 @@ import { restoreLabels } from '../model/notesBulk';
 import { setNotesSort, setNotesView, setReminderTimes, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
+import { SendToPucaSheet } from './SendToPucaSheet';
 import { AccountMenu } from './AccountMenu';
 import { ColorPicker } from '../../components/notes/ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
@@ -82,6 +83,7 @@ function isCoarse(): boolean {
 type Popup =
     | { kind: 'color'; key: string; anchor: HTMLElement }
     | { kind: 'labels'; key: string; anchor: HTMLElement }
+    | { kind: 'send'; key: string }
     | { kind: 'account'; anchor: HTMLElement };
 
 type Pending =
@@ -476,6 +478,10 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         }
         items.push(
             { id: 'copy-text', label: 'Copy as text', icon: 'copy', onClick: () => { void copyAsText(card); } },
+            // The better version of the same intent: Copy-as-text's destination
+            // is the clipboard and a plaintext paste; this one re-encrypts for
+            // the channel or person it names, and asks before it does.
+            { id: 'send-puca', label: 'Send to Púca…', icon: 'send', onClick: () => setPopup({ kind: 'send', key: card.key }) },
             { id: 'duplicate', label: 'Make a copy', icon: 'file-text', onClick: () => { void duplicate(card); } },
         );
         if (canShareNotes()) items.push({ id: 'share', label: 'Share…', icon: 'upload', onClick: () => { void shareNote(card); } });
@@ -699,6 +705,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onPickColor={onPickColor}
                     onPickLabels={onPickLabels}
                     onArchive={archiveWithUndo}
+                    onSendToPuca={() => setPopup({ kind: 'send', key: openCard.key })}
                     pucaHref={pucaHref}
                     escapeBlocked={!!popup || !!contextMenu || help || labelMgr}
                     flashTaskId={flashItem}
@@ -716,6 +723,13 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                 <Popover anchor={popup.anchor} onClose={() => setPopup(null)} label="Note labels">
                     <LabelPicker all={labels} value={popupCard.labels} onChange={ls => actions.setLabels(popupCard.ref, ls)} />
                 </Popover>
+            )}
+            {popup?.kind === 'send' && popupCard && (
+                <SendToPucaSheet
+                    card={popupCard}
+                    onClose={() => setPopup(null)}
+                    onSent={where => pushMessageToast({ title: `Sent to ${where}` })}
+                />
             )}
             {popup?.kind === 'account' && (
                 <Popover anchor={popup.anchor} onClose={() => setPopup(null)} label="Account">

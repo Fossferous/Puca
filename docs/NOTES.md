@@ -1211,6 +1211,99 @@ records the same deletion for chat.
 - Púca's Tasks view shows the same links, because it renders the same text
   through the same components.
 
+## Sending a note into Púca, and keeping a message as a note
+
+Notes and the chat are two front doors onto one account, and these are the two
+doors between them. Both are one-way COPIES made at the moment you ask for
+them: neither creates a share, a membership or a live link, and neither keeps
+anything in step afterwards.
+
+**Send to Púca…** is on a note's menu and in the open note's footer. It lists
+the text channels you can actually post in — your channel permissions are
+known here, so a channel you cannot post in is not offered rather than offered
+and refused — and the direct-message conversations you already have. Checklist
+channels are left out: a shared note IS one, and posting its text into its own
+feed means nothing.
+
+It always asks first and names where the text is going, because the message is
+re-encrypted for that channel's members or that person and **cannot be
+unsent**. Rows this device cannot read are LEFT OUT rather than guessed, and
+the sheet says how many (the export writes the marker instead — a file you
+keep may say what it could not read; a message other people read may not).
+Pictures do not travel: a note's photos are sealed under the note's own key,
+so the message lists them by name. A clip reference loses its payload, which
+is the clip's key.
+
+A note can also simply be too long. The server's limit is 8000 bytes of the
+ENCRYPTED message, and sealing costs a nonce, a tag, base64 and — for a direct
+message — one wrapped key per device the recipient has, so a note of roughly
+six thousand characters is already over it. The sheet measures that before it
+seals anything and says so in the confirm step, and the DM path re-measures the
+real envelope before it posts, because only then is the true size known. While
+a send is in flight the sheet cannot be dismissed at all: closing it would not
+cancel the request, and confirming again would post the note twice.
+
+The mechanics, for the next reader: a channel goes through the same
+`POST /channels/:id/messages` the composer uses, so the server broadcasts,
+notifies and wakes exactly as it does for anything typed in Púca; a DM goes
+through `POST /dms/:conversation_id/messages` — **not** the socket, which
+Notes still never opens (*Sessions*, above). That REST route now delivers,
+parks-and-wakes and bumps the conversation's timestamp the way the socket path
+always has, so a note sent from Notes is indistinguishable from a message
+typed in Púca. That fan-out is not a pure function and is not provable by
+reading, so it has its own live two-client harness —
+`frontend/e2e/notes-send-verify.mjs`, run against a throwaway backend. Its
+header says how to confirm it can fail: revert the block in
+`src/dm_handlers.rs` and the delivery, echo, park and timestamp stages go red
+while the WebSocket control stage stays green.
+
+**That fan-out must reach EVERY host before this bundle does.** The repo's
+standing order is clients first (CLAUDE.md), and the DM half is the exception:
+the client cannot tell an old server from a new one, so against a host without
+the fan-out *Send to Púca…* still says "Sent to …", the message is stored, and
+nothing is announced — no live bubble, no wake, no reorder, just a silent
+delivery whenever the recipient next opens that conversation. It is the
+failure the feature was built to avoid, and it looks like success from both
+ends. So ship `dual-ship.sh backend` to BOTH hosts first, then the Notes
+bundle that offers DM targets. ("No HTTP contract change" is true of the route
+and says nothing about the order: the route already existed, and what changed
+is what it DOES.)
+
+**Save to Notes** is the other direction, on a message's menu in Púca (right
+click, or long press on a phone). It keeps the message as a new note or as an
+item in one you already have, and only your OWN notes are offered — never a
+shared checklist, which would publish the message to that channel. The text is
+re-sealed to your own key with every attachment reference stripped out: those
+references carry the file's key and its fetch capability, and neither belongs
+in a note. A picture you choose to keep is decrypted, encrypted again under a
+NEW key and uploaded as your own file, so deleting the message later leaves
+the note intact, and deleting the note takes only its own copy. A message this
+device cannot decrypt is not offered, and neither is a clip post — its body
+carries the clip key, and a note outlives the window the clip was approved for.
+
+A note whose TEXT or whose pictures this device cannot read yet is not offered
+as a destination either. Every write here replaces what is stored — the note's
+text wholesale, the picture list wholesale — so saving into such a note would
+seal the captured line over ciphertext the account still holds under a key this
+device has not got, and no device could ever read it again. That is the rule
+`isAttachmentsLocked` already carried for the picture list; it applies to the
+text for exactly the same reason. The refusal survives changing your mind about
+pictures after picking a note, and a save that half-succeeds — the note made,
+the item refused — undoes the note rather than leaving it behind with pictures
+that nothing names.
+
+Into a note you ALREADY have there is nothing to undo: the item, or the text
+appended to it, is in a note you keep. So a failure after that point says the
+text was kept and the pictures were not, and points you at Notes to finish it
+— rather than "nothing was kept", which is a lie that earns a retry, and the
+retry writes the same line a second time. And like the send sheet, this one
+cannot be dismissed while a save is in flight: neither the backdrop nor the X
+closes it, because closing does not cancel the upload and saving again would
+keep the message twice.
+
+Like every other picture and text save, a capture needs the network (see the
+offline bullet below); it is never queued.
+
 ## Not built (and why)
 
 - **A transcript in the browser, or below Android 13.** Writing a recording
@@ -1234,6 +1327,12 @@ records the same deletion for chat.
 - **Púca Notes in Android's Share sheet.** There is no receiving share intent
   yet, so "Share → Púca Notes" from the gallery does not appear. That is a
   native change (a new APK), not something an over-the-air update can add.
+  one person" that the data model could honour. *Send to Púca…* is not that:
+  it posts a snapshot as a chat message, and creates no share, no membership
+  and no live link — edits afterwards do not follow it.
+- **Sending a note to several places, or several notes at once.** The bulk bar
+  offers *Copy as text*, not a bulk send: N messages from one click is a spam
+  hazard, and a send that is refused half way through has no sensible undo.
 - **A desktop Notes app.** Notes on a computer is the browser page; the
   desktop installer deliberately carries no copy of it (see *Building and
   serving*).

@@ -1471,6 +1471,14 @@ await sleep(200);
 await page.goto('/chat');
 await page.waitForSelector('.chat-container', { timeout: 20000 });
 try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+// Púca asks about a recovery code ~3 s after it mounts, and the overlay
+// swallows clicks wherever it lands. This used to be answered forty lines
+// below, on the assumption that the section outlasts it; under load it arrived
+// mid-section instead and intercepted the trash click. Answer it here, while
+// nothing else is happening. It is not under test.
+await page.waitForSelector('.recovery-done-btn', { timeout: 8000 })
+    .then(() => page.click('.recovery-done-btn'))
+    .catch(() => { /* not shown */ });
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
@@ -1705,6 +1713,11 @@ const archivedWhileTrashed = await np.locator('.notes-rail-item', { hasText: 'Ar
 ck('notes (second tab): opened while Púca holds Packing in the trash — it is in the Notes trash, not counted as archived', packingInNotesTrash && archivedWhileTrashed === '0', `inTrash=${packingInNotesTrash} archived=${archivedWhileTrashed}`);
 await np.close();
 await dismissRecoveryReminder(page);
+// A second chance at the same reminder, in case it had not appeared yet when
+// this section started (it is answered above).
+await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* not shown */ });
 await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button', { name: 'Restore' }).click();
 await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
     .then(() => ck('púca: Restore puts it back in the bar (still archived, so behind the Archive filter)', true))
@@ -2181,6 +2194,293 @@ if (psqlDsn) {
 }
 
 await ctxB.close();
+
+// ---- 12e. Send a note into Púca (a channel or a DM) -------------------------------------------------
+// Its OWN context, for two reasons: the websocket counter below must see only
+// what the NOTES page opens (the `page` above has visited /chat, which opens
+// one by design), and the picker must be read on a freshly loaded Notes.
+{
+    const sctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL, storageState: await ctx.storageState() });
+    const sp = await sctx.newPage();
+    watch(sp);
+    const notesSockets = [];
+    sp.on('websocket', ws => notesSockets.push(ws.url()));
+    await sp.goto('/notes/');
+    await sp.waitForSelector('.notes-card', { timeout: 20000 });
+    const sapi = await apiBaseOf(sp);
+    ck('send setup: the API base was read off the page', !!sapi, String(sapi));
+    const mkServer = await authed(sp, sapi, 'POST', '/servers', { name: 'Walk send' });
+    ck('send setup: a server was created (positive control)', mkServer.status >= 200 && mkServer.status < 300, `${mkServer.status} ${mkServer.body.slice(0, 120)}`);
+    const sendServerId = JSON.parse(mkServer.body).id;
+    const chanList = await authed(sp, sapi, 'GET', `/servers/${sendServerId}/channels`);
+    const textChannel = JSON.parse(chanList.body).find(c => c.channel_type === 0);
+    ck('send setup: the server has a text channel', !!textChannel, textChannel ? `#${textChannel.name}` : chanList.body.slice(0, 120));
+    // A second text channel, turned into a CHECKLIST channel — the one thing
+    // the picker must never offer (its feed IS a note).
+    const mkList = await authed(sp, sapi, 'POST', `/servers/${sendServerId}/channels`, { name: 'walk-list', channel_type: 0 });
+    let listChannelId = null;
+    if (mkList.status >= 200 && mkList.status < 300) listChannelId = JSON.parse(mkList.body).id;
+    if (psqlDsn && listChannelId != null) sql(`UPDATE channels SET has_checklist = true WHERE id = ${listChannelId}`);
+
+    await sp.reload();
+    await sp.waitForSelector('.notes-card:has-text("Poem")', { timeout: 20000 });
+    await sp.locator('.notes-card', { hasText: 'Poem' }).hover();
+    await sp.locator('.notes-card', { hasText: 'Poem' }).locator('button[aria-label="More actions"]').click();
+    await sp.waitForSelector('.context-menu', { timeout: 5000 });
+    ck('send: the card menu offers "Send to Púca…"', await sp.locator('.context-menu-item', { hasText: 'Send to Púca' }).count() === 1);
+    await sp.locator('.context-menu-item', { hasText: 'Send to Púca' }).click();
+    await sp.waitForSelector('.notes-send-target', { timeout: 15000 });
+    const sendRows = (await sp.locator('.notes-send-target').allInnerTexts()).map(t => t.trim());
+    ck('send: the picker lists the text channel', sendRows.some(t => t.includes(textChannel.name)), sendRows.join(' | '));
+    if (psqlDsn && listChannelId != null) {
+        ck('send: a CHECKLIST channel is not offered (its feed is a note already)', !sendRows.some(t => t.includes('walk-list')), sendRows.join(' | '));
+    } else {
+        skip('send: a CHECKLIST channel is not offered', 'no psql DSN: the walk cannot flip has_checklist');
+    }
+    await shot('send-picker');
+
+    await sp.locator('.notes-send-target', { hasText: textChannel.name }).click();
+    await sp.waitForSelector('.notes-send-confirm', { timeout: 5000 });
+    const confirmText = await sp.locator('.notes-send-confirm').innerText();
+    ck('send: picking a target asks first and names it', new RegExp('#' + textChannel.name).test(confirmText) && /read it/.test(confirmText), confirmText.slice(0, 160).replace(/\n/g, ' '));
+    const beforeSend = await authed(sp, sapi, 'GET', `/channels/${textChannel.id}/messages?limit=50`);
+    ck('send: NOTHING is posted until Send is pressed', JSON.parse(beforeSend.body).length === 0, beforeSend.body.slice(0, 120));
+    await shot('send-confirm');
+    await sp.locator('.notes-send-go').click();
+    await sp.waitForSelector('.notes-send-confirm', { state: 'detached', timeout: 20000 }).catch(() => {});
+    await sleep(1500);
+    const afterSend = JSON.parse((await authed(sp, sapi, 'GET', `/channels/${textChannel.id}/messages?limit=50`)).body);
+    ck('send: exactly one message landed in the channel', afterSend.length === 1, String(afterSend.length));
+    ck('send: what the SERVER stores is ciphertext, not the note', afterSend.length === 1
+        && !/Roses are red/.test(afterSend[0].content) && /^\{"v"|^v\d:/.test(afterSend[0].content),
+        afterSend.length === 1 ? afterSend[0].content.slice(0, 60) : 'no message');
+    ck('send: the Notes page never opened a WebSocket', notesSockets.length === 0, notesSockets.join(', '));
+
+    // Read it back where a person would: Púca's own channel view decrypts it.
+    const rp = await sctx.newPage();
+    watch(rp);
+    await rp.goto('/chat');
+    await rp.waitForSelector('.chat-container', { timeout: 20000 });
+    try { await rp.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+    await rp.locator('.server-icon[title="Walk send"]').click();
+    await rp.waitForSelector('.channel .channel-name', { timeout: 15000 });
+    await rp.locator('.channel', { hasText: textChannel.name }).first().click();
+    const landed = await rp.waitForSelector('.message-content:has-text("Roses are red")', { timeout: 20000 }).then(() => true, () => false);
+    ck('send: the note reads as ordinary text in the channel', landed);
+    const posted = landed ? await rp.locator('.message-content').last().innerText() : '';
+    ck('send: no decrypt-failure marker was posted as content', landed && !/Encrypted —|Unable to decrypt/.test(posted), posted.slice(0, 120).replace(/\n/g, ' '));
+    await shot('send-landed');
+    await rp.close();
+
+    // The phone: the sheet is where the Notes Android shell's ONLY route into a
+    // conversation lives (it has no "Open in Púca"), so it must fit the phone.
+    const spctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: await ctx.storageState() });
+    const spp = await spctx.newPage();
+    watch(spp);
+    await spp.goto('/notes/');
+    await spp.waitForSelector('.notes-card:has-text("Poem")', { timeout: 20000 });
+
+    // The open note's footer at phone width: eight buttons do not fit 390px, so
+    // "Open in Púca" is the one that goes. It is hidden by its OWN class now,
+    // not by a `> a` element selector, and Send must still be there — it is the
+    // Notes Android shell's only route into a conversation.
+    await spp.locator('.notes-card', { hasText: 'Poem' }).tap();
+    await spp.waitForSelector('.notes-editor', { timeout: 10000 });
+    ck('phone editor: "Send to Púca" is in the footer',
+        await spp.locator('.notes-editor-foot button[aria-label="Send to Púca"]').count() === 1);
+    // In the DOM but not visible — its own positive control: a missing class
+    // reads as count 0, a broken rule reads as visible, and both are red.
+    const openInPuca = spp.locator('.notes-editor-foot .notes-open-puca');
+    const openInPucaCount = await openInPuca.count();
+    ck('phone editor: "Open in Púca" is rendered but hidden by the phone rule (the card menu still offers it)',
+        openInPucaCount === 1 && (await openInPuca.isVisible()) === false, `count=${openInPucaCount}`);
+    ck('phone editor: the footer does not overflow 390px',
+        await spp.evaluate(() => {
+            const f = document.querySelector('.notes-editor-foot');
+            return !!f && f.scrollWidth <= f.clientWidth + 1;
+        }));
+    await shotOf(spp)('send-editor-foot-phone');
+    // Close it by the button, not Escape: the editor's Escape belongs to
+    // whatever has focus inside it (the title input just blurs), and an
+    // editor left open swallows every tap that follows.
+    await spp.locator('.notes-editor button[aria-label="Close note"]').tap();
+    ck('phone editor: it closes again', await spp.waitForSelector('.notes-editor', { state: 'detached', timeout: 10000 }).then(() => true, () => false));
+
+    await spp.locator('.notes-card', { hasText: 'Poem' }).locator('button[aria-label="More actions"]').tap();
+    await spp.waitForSelector('.context-menu', { timeout: 5000 });
+    await spp.locator('.context-menu-item', { hasText: 'Send to Púca' }).tap();
+    await spp.waitForSelector('.notes-send-target', { timeout: 15000 });
+    const noOverflow = await spp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);
+    ck('phone send: no horizontal overflow at 390x844', noOverflow);
+    const rowHeights = await spp.evaluate(() => [...document.querySelectorAll('.notes-send-target')].map(e => e.getBoundingClientRect().height));
+    ck('phone send: every target is at least 44px tall', rowHeights.length > 0 && rowHeights.every(h => h >= 43.5), rowHeights.join(','));
+    const filterPx = await spp.evaluate(() => {
+        const el = document.querySelector('.notes-send-filter');
+        return el ? parseFloat(getComputedStyle(el).fontSize) : 0;
+    });
+    ck('phone send: the filter input is 16px (no iOS focus-zoom)', filterPx >= 16, String(filterPx));
+    await shotOf(spp)('send-picker-phone');
+    await spctx.close();
+    await sctx.close();
+}
+
+// ---- 12f. Save a message into a note (the other direction) ------------------------------------------
+// The same channel 12e posted into: a message with text AND a picture, kept in
+// a note. The assertion that earns its keep is the last one — the captured
+// note names a DIFFERENT uploaded file than the message, so the copy survives
+// the message being deleted and deleting the note takes only its own copy.
+{
+    const cctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL, storageState: await ctx.storageState() });
+    const cp = await cctx.newPage();
+    watch(cp);
+    await cp.goto('/chat');
+    await cp.waitForSelector('.chat-container', { timeout: 20000 });
+    try { await cp.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+    await cp.locator('.server-icon[title="Walk send"]').click();
+    await cp.waitForSelector('.channel .channel-name', { timeout: 15000 });
+    // 'default', never 'walk-list': a checklist channel hides the composer.
+    await cp.locator('.channel', { hasText: 'default' }).first().click();
+    await cp.waitForSelector('.message-form', { timeout: 15000 });
+
+    const filesBefore = psqlDsn ? Number(sql('SELECT count(*) FROM uploaded_files')) : null;
+    await cp.locator('.message-form input[type="file"]').first().setInputFiles({ name: 'camp.png', mimeType: 'image/png', buffer: PNG });
+    // Wait for the chip to finish uploading — Enter before that sends the text alone.
+    await cp.waitForSelector('.composer-chip-ready, .composer-chip-done', { timeout: 30000 })
+        .catch(() => cp.waitForSelector('.composer-chip', { timeout: 5000 }).catch(() => {}));
+    await cp.fill('.message-textarea', 'pack the tent');
+    await cp.locator('.message-textarea').press('Enter');
+    const sentWithPicture = await cp.waitForSelector('.message-content:has-text("pack the tent")', { timeout: 20000 }).then(() => true, () => false);
+    ck('capture setup: a message with text and a picture was sent', sentWithPicture);
+    const filesAfterSend = psqlDsn ? Number(sql('SELECT count(*) FROM uploaded_files')) : null;
+    if (psqlDsn) ck('capture setup: the picture is an uploaded file', filesAfterSend === filesBefore + 1, `${filesBefore} -> ${filesAfterSend}`);
+
+    await cp.locator('.message', { hasText: 'pack the tent' }).last().click({ button: 'right' });
+    await cp.waitForSelector('.context-menu', { timeout: 5000 });
+    ck('capture: the message menu offers "Save to Notes"', await cp.locator('.context-menu-item', { hasText: 'Save to Notes' }).count() === 1);
+    await cp.locator('.context-menu-item', { hasText: 'Save to Notes' }).click();
+    await cp.waitForSelector('.save-note-row', { timeout: 15000 });
+    const noteRows = (await cp.locator('.save-note-row').allInnerTexts()).map(t => t.trim());
+    ck('capture: the picker offers New note and personal notes only — never the channel', noteRows.includes('New note') && !noteRows.some(t => /Walk send|walk-list/.test(t)), noteRows.join(' | '));
+    ck('capture: it offers to keep the picture as a copy of your own', /copy of your own/i.test(await cp.locator('.save-note-check').innerText().catch(() => '')));
+    await shot('capture-picker');
+    await cp.locator('.save-note-row', { hasText: 'New note' }).click();
+    await cp.locator('.save-note-go').click();
+    await cp.waitForSelector('.save-note-modal', { state: 'detached', timeout: 30000 }).catch(() => {});
+    await sleep(2000);
+    const filesAfterCapture = psqlDsn ? Number(sql('SELECT count(*) FROM uploaded_files')) : null;
+    if (psqlDsn) {
+        ck('capture: the note got its OWN file — a second upload, not the sender\'s', filesAfterCapture === filesAfterSend + 1, `${filesAfterSend} -> ${filesAfterCapture}`);
+    } else {
+        skip('capture: the note got its OWN file', 'no psql DSN: the walk cannot count uploads');
+    }
+
+    // ...and it is there, in Notes, with the picture decrypting.
+    const np2 = await cctx.newPage();
+    watch(np2);
+    await np2.goto('/notes/');
+    const captured = await np2.waitForSelector('.notes-card:has-text("pack the tent")', { timeout: 25000 }).then(() => true, () => false);
+    ck('capture: the note is in Notes, titled after the message', captured);
+    if (captured) {
+        await np2.locator('.notes-card', { hasText: 'pack the tent' }).click();
+        await np2.waitForSelector('.notes-editor', { timeout: 10000 });
+        const noteText = await np2.locator('.notes-editor').innerText();
+        ck('capture: the captured text carries no file key', !/[?&]k=/.test(noteText) && !/sovereign-enc/.test(noteText), noteText.slice(0, 120).replace(/\n/g, ' '));
+        const picShows = await np2.waitForFunction(() => {
+            const img = document.querySelector('.notes-editor .ni-item img, .notes-editor .ni-open img');
+            return !!img && img.naturalWidth > 0;
+        }, null, { timeout: 25000 }).then(() => true, () => false);
+        ck('capture: the copied picture decrypts in the note', picShows);
+        await shot('capture-note');
+        await np2.keyboard.press('Escape');
+    }
+    await np2.close();
+
+    // The exits are SHUT while a save is in flight. Closing does not cancel
+    // the request — the copies keep uploading and the note keeps being
+    // written — so a backdrop click that hid a running save would earn a
+    // second save, and the message would be kept twice. The route is held
+    // open deliberately, because the real one is far too quick to catch.
+    const listsBeforeHeld = psqlDsn ? Number(sql('SELECT count(*) FROM task_lists')) : null;
+    await cp.route('**/task-lists', async route => {
+        if (route.request().method() === 'POST') await new Promise(r => setTimeout(r, 4000));
+        // A held route can be torn down under us (the page navigates, or the
+        // walk unroutes while this one is still sleeping). Letting that reject
+        // would kill the run as an unhandled rejection, not fail a check.
+        await route.continue().catch(() => {});
+    });
+    await cp.locator('.message', { hasText: 'pack the tent' }).last().click({ button: 'right' });
+    await cp.waitForSelector('.context-menu', { timeout: 5000 });
+    await cp.locator('.context-menu-item', { hasText: 'Save to Notes' }).click();
+    await cp.waitForSelector('.save-note-row', { timeout: 15000 });
+    // No pictures: this is about the exits, not a second upload.
+    await cp.locator('.save-note-check input').uncheck().catch(() => {});
+    await cp.locator('.save-note-row', { hasText: 'New note' }).click();
+    await cp.locator('.save-note-go').click();
+    const inFlight = await cp.waitForFunction(
+        () => /Saving/.test(document.querySelector('.save-note-go')?.textContent ?? ''),
+        null, { timeout: 8000 }).then(() => true, () => false);
+    ck('capture: the save is held in flight (the harness caught it)', inFlight);
+    if (inFlight) {
+        ck('capture: the X is disabled while it saves', await cp.locator('.save-note-close').isDisabled());
+        ck('capture: Cancel is disabled while it saves', await cp.locator('.save-note-cancel').isDisabled());
+        await cp.locator('.save-note-overlay').click({ position: { x: 4, y: 4 } });
+        const stillOpen = await cp.locator('.save-note-modal').count() === 1;
+        ck('capture: the backdrop does not close a save in flight', stillOpen);
+        if (!stillOpen) {
+            // What a person does when the sheet vanishes mid-save: save it
+            // again. The note count below is what that costs — and it is why
+            // the count check, not just the two above, has to be here.
+            await cp.locator('.message', { hasText: 'pack the tent' }).last().click({ button: 'right' });
+            await cp.waitForSelector('.context-menu', { timeout: 5000 });
+            await cp.locator('.context-menu-item', { hasText: 'Save to Notes' }).click();
+            await cp.waitForSelector('.save-note-row', { timeout: 15000 });
+            await cp.locator('.save-note-check input').uncheck().catch(() => {});
+            await cp.locator('.save-note-row', { hasText: 'New note' }).click();
+            await cp.locator('.save-note-go').click();
+        }
+    }
+    await cp.waitForSelector('.save-note-modal', { state: 'detached', timeout: 30000 }).catch(() => {});
+    await sleep(6000);
+    await cp.unroute('**/task-lists').catch(() => {});
+    if (psqlDsn) {
+        const listsAfterHeld = Number(sql('SELECT count(*) FROM task_lists'));
+        ck('capture: the held save kept the message ONCE', listsAfterHeld === listsBeforeHeld + 1,
+            `${listsBeforeHeld} -> ${listsAfterHeld}`);
+    } else {
+        skip('capture: the held save kept the message ONCE', 'no psql DSN: the walk cannot count notes');
+    }
+
+    // The phone: the picker is reached by long-press there, and must fit.
+    const cpctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: await ctx.storageState() });
+    const cpp = await cpctx.newPage();
+    watch(cpp);
+    await cpp.goto('/chat');
+    await cpp.waitForSelector('.chat-container', { timeout: 25000 });
+    try { await cpp.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+    await cpp.locator('.server-icon[title="Walk send"]').click().catch(() => {});
+    await cpp.locator('.channel', { hasText: 'default' }).first().click({ timeout: 10000 }).catch(() => {});
+    await cpp.waitForSelector('.message-content:has-text("pack the tent")', { timeout: 20000 }).catch(() => {});
+    const reached = await cpp.locator('.message', { hasText: 'pack the tent' }).last().count() > 0;
+    if (!reached) {
+        skip('phone capture: the picker fits 390x844', 'the phone view did not land on the channel');
+    } else {
+        await cpp.locator('.message', { hasText: 'pack the tent' }).last().click({ button: 'right' });
+        await cpp.waitForSelector('.context-menu', { timeout: 5000 });
+        await cpp.locator('.context-menu-item', { hasText: 'Save to Notes' }).tap();
+        await cpp.waitForSelector('.save-note-row', { timeout: 15000 });
+        ck('phone capture: no horizontal overflow at 390x844', await cpp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+        const rh = await cpp.evaluate(() => [...document.querySelectorAll('.save-note-row')].map(e => e.getBoundingClientRect().height));
+        ck('phone capture: every row is at least 44px tall', rh.length > 0 && rh.every(h => h >= 43.5), rh.join(','));
+        const fs2 = await cpp.evaluate(() => {
+            const el = document.querySelector('.save-note-filter');
+            return el ? parseFloat(getComputedStyle(el).fontSize) : 0;
+        });
+        ck('phone capture: the filter input is 16px (no iOS focus-zoom)', fs2 >= 16, String(fs2));
+        await shotOf(cpp)('capture-picker-phone');
+    }
+    await cpctx.close();
+    await cctx.close();
+}
 
 // ---- 13. Cross-tab: a Notes sign-out lands the main app's tab on its login ---------------------------
 const page2 = await ctx.newPage();

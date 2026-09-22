@@ -19,7 +19,7 @@ import { InviteModal } from './InviteModal';
 import { ServerSettingsModal } from './ServerSettingsModal';
 import { UserProfilePopup } from './UserProfilePopup';
 import { ContextMenu } from './ContextMenu';
-import { useContextMenu, menuItems, imageMenuItems, formatQuote, stripAttachmentKeys, replyPreviewText } from './contextMenuUtils';
+import { useContextMenu, menuItems, imageMenuItems, formatQuote, stripAttachmentKeys, replyPreviewText, canSaveToNotes } from './contextMenuUtils';
 import { clipsAvailable, focusClipProposal, refreshPendingClips } from '../api/clips/clipProposals';
 import { hasClipRef } from '../api/clips/clipRef';
 import { Toast } from './Toast';
@@ -31,6 +31,7 @@ import {
 } from './unreadStore';
 import { addReaction, notifyReactionChanged } from '../api/reactions';
 import { ForwardModal } from './ForwardModal';
+import { SaveToNoteModal } from './SaveToNoteModal';
 import { getToken } from '../api/auth';
 import { appIsForeground, isMobile as isNativeMobile, RC_ENABLED } from '../api/platform';
 import {
@@ -1267,6 +1268,8 @@ export function Chat({ onLogout }: ChatProps) {
     // Content is all a forward needs: it's re-encrypted by the target's own
     // send path, and attachment markdown carries its own key.
     const [forwardingContent, setForwardingContent] = useState<string | null>(null);
+    // The message being kept in a note (SaveToNoteModal), or null.
+    const [savingToNote, setSavingToNote] = useState<string | null>(null);
 
     // "Add Reaction" from the message context menu: tells that message's
     // <MessageReactions> to open its full picker (custom emojis included),
@@ -5234,6 +5237,10 @@ export function Chat({ onLogout }: ChatProps) {
                                                     // A clip post is never forwarded: it carries the clip KEY, and a
                                                     // forwarded copy would play in rooms nobody consented to, with no stamp.
                                                     ...(hasClipRef(msg.content) ? [] : [menuItems.message.forward(() => setForwardingContent(msg.content))]),
+                                                    // Keep it in one of your own notes. Not for a clip
+                                                    // post or a message this device cannot read —
+                                                    // canSaveToNotes is the one rule both sites share.
+                                                    ...(canSaveToNotes(msg.content) ? [menuItems.message.saveToNotes(() => setSavingToNote(msg.content))] : []),
                                                     menuItems.message.copy(msg.content),
                                                     // DMs have no server-side delete — "for me" is the
                                                     // one deletion a DM offers, and it works on both
@@ -5401,6 +5408,8 @@ export function Chat({ onLogout }: ChatProps) {
                                                     ...(!currentCollection ? [menuItems.message.quote(() => handleQuote(msg.content))] : []),
                                                     // Never for a clip post (docs/CLIPS.md): the body carries the clip key.
                                                     ...(hasClipRef(msg.content) ? [] : [menuItems.message.forward(() => setForwardingContent(msg.content))]),
+                                                    // Keep it in one of your own notes (see the DM site).
+                                                    ...(canSaveToNotes(msg.content) ? [menuItems.message.saveToNotes(() => setSavingToNote(msg.content))] : []),
                                                     menuItems.message.copy(msg.content),
                                                     // Local hide, any persisted message — deletes nothing.
                                                     ...(!isLocal ? [menuItems.message.hide(() => hideMessageForMe(msg.id))] : []),
@@ -6000,6 +6009,18 @@ export function Chat({ onLogout }: ChatProps) {
             {/* In-app message shade stack (also portaled). Always mounted so
                 pushMessageToast from the WS handlers has a sink. */}
             <MessageToasts />
+
+            {/* Keep a message in one of your own notes (a copy, not a link). */}
+            {savingToNote !== null && (
+                <SaveToNoteModal
+                    content={savingToNote}
+                    onClose={() => setSavingToNote(null)}
+                    onSaved={title => pushMessageToast({
+                        title: `Saved to “${title}”`,
+                        onClick: () => openTasksView(),
+                    })}
+                />
+            )}
 
             {/* Forward Message Modal */}
             {forwardingContent !== null && (
