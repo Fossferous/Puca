@@ -87,6 +87,10 @@ describe('NotesLogin: stay signed in on this device', () => {
         expect(box()!.checked).toBe(true);
         expect(container.textContent).toMatch(/Stay signed in on this device/);
         expect(container.textContent).toMatch(/lasts up to a year without a check-in, instead of a day/);
+        // ...and a screen reader hears that line with the box, not somewhere
+        // after it: the input names the hint as its description.
+        const hint = document.getElementById(box()!.getAttribute('aria-describedby') ?? '');
+        expect(hint?.textContent).toMatch(/Sign out to end it early\./);
     });
 
     it('passes the tick to login()', async () => {

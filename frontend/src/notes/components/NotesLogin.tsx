@@ -123,10 +123,11 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
                                 checked={stay}
                                 onChange={e => chooseStay(e.target.checked)}
                                 disabled={busy}
+                                aria-describedby="stay-signed-in-hint"
                             />
                             <span className="checkbox-text">Stay signed in on this device</span>
                         </label>
-                        <p className="notes-stay-hint">
+                        <p className="notes-stay-hint" id="stay-signed-in-hint">
                             Your session on this device then lasts up to a year without a check-in, instead of a
                             day. Sign out to end it early.
                         </p>
