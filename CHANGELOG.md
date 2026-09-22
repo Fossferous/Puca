@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.817 — 2026-09-22
 
+Púca Notes grows up: share into it from any app, voice notes, a reminder on a note itself, text and pictures while offline, undo in the editor, a label manager, links, drag ordering, search that shows its matches, and its tools in Púca too; remote control no longer freezes on a screen that is not changing; Keep RNNoise keeps RNNoise; clip sound stays in step with the picture.
 ### Changed
 - **Make a copy now copies the whole note.** A copy used to carry only a
   note's text and its unticked items, flattened. It now brings the pictures
