@@ -15,7 +15,7 @@
 import { useEffect, useMemo } from 'react';
 import { type QueryClient, useQueries, useQueryClient } from '@tanstack/react-query';
 import { type Task, type TaskList, canCompleteTasks, canEditTask, listListTasks, listTasks } from '../api/tasks';
-import { type CalendarSource } from '../api/taskCalendar';
+import { type CalendarSource, noteAsCalendarItem } from '../api/taskCalendar';
 import { wsClient, type ServerMessage } from '../api/websocket';
 
 export interface TasksScopeChannel {
@@ -58,7 +58,18 @@ export interface TaskSources {
     refetch: (kind: TaskScopeKind, id: number) => Promise<void>;
 }
 
-export function useTaskSources(lists: TaskList[], channels: TasksScopeChannel[], currentUserId?: number): TaskSources {
+export interface TaskSourceOptions {
+    /** The server keeps a note's OWN reminder (migration 068,
+     *  listContent.features.noteReminders). Off — or on a server without it —
+     *  a list carries no timing of its own and none is projected. It is the
+     *  same flag that decides whether the Tasks view offers the control that
+     *  SETS one, and it is read once, by TasksView, so the control and the
+     *  two dated tabs cannot disagree about whether note reminders exist. */
+    noteReminders?: boolean;
+}
+
+export function useTaskSources(lists: TaskList[], channels: TasksScopeChannel[], currentUserId?: number, opts: TaskSourceOptions = {}): TaskSources {
+    const noteReminders = opts.noteReminders === true;
     const qc = useQueryClient();
     const listQ = useQueries({ queries: lists.map(l => ({ queryKey: taskScopeKey('list', l.id), queryFn: () => listListTasks(l.id), staleTime: 30_000 })) });
     const chanQ = useQueries({ queries: channels.map(c => ({ queryKey: taskScopeKey('channel', c.id), queryFn: () => listTasks(c.id), staleTime: 30_000 })) });
@@ -76,14 +87,40 @@ export function useTaskSources(lists: TaskList[], channels: TasksScopeChannel[],
     const listData = listQ.map(q => q.data);
     const chanData = chanQ.map(q => q.data);
     const sources: CalendarSource[] = useMemo(() => [
-        ...lists.flatMap((l, i) => ((listData[i] as Task[] | undefined) ?? []).map(t => ({ task: t, noteKey: `list:${l.id}`, noteTitle: l.title, canEdit: true }))),
+        ...lists.flatMap((l, i) => [
+            // The NOTE'S OWN reminder (migration 068) before its items, as
+            // Púca Notes' calendar and Reminders list place it. It is not a
+            // task and is never stored as one: noteAsCalendarItem projects
+            // the list's title and timing under the negative id `-list_id`,
+            // the namespace GET /task-reminders already uses for it.
+            //
+            // canEdit is FALSE here although the list is this user's. Both
+            // dated tabs read THIS one array, and `canEdit` is what opens the
+            // calendar's drag, "Move to date…", "Skip this time" and "Date &
+            // repeat…" — every one of which would PATCH /tasks/-5, a route
+            // that does not exist. A note's reminder is changed from the
+            // note (docs/NOTES.md), or cleared from its Reminders row, which
+            // is offered on `isNote` and not on this flag. Púca Notes' own
+            // calendar says false for exactly the same reason.
+            ...(noteReminders && (l.due_at || l.schedule)
+                ? [{
+                    task: noteAsCalendarItem({ id: l.id, title: l.title, dueAt: l.due_at, schedule: l.schedule }),
+                    noteKey: `list:${l.id}`,
+                    noteTitle: l.title,
+                    canEdit: false,
+                    canComplete: false,
+                    isNote: true,
+                }]
+                : []),
+            ...((listData[i] as Task[] | undefined) ?? []).map(t => ({ task: t, noteKey: `list:${l.id}`, noteTitle: l.title, canEdit: true })),
+        ]),
         ...channels.flatMap((c, i) => ((chanData[i] as Task[] | undefined) ?? []).map(t => ({
             task: t, noteKey: `channel:${c.id}`, noteTitle: `#${c.label}`, serverName: c.serverName, canEdit: canEditTask(t, currentUserId, c.myPerms),
             canComplete: canCompleteTasks(c.myPerms),
         }))),
         // The query result arrays are new every render; their data is what matters.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    ], [lists, channels, currentUserId, ...listData, ...chanData]);
+    ], [lists, channels, currentUserId, noteReminders, ...listData, ...chanData]);
 
     const tasksIn = (kind: TaskScopeKind, id: number): Task[] | undefined => (
         kind === 'list'

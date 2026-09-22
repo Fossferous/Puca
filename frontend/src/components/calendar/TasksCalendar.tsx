@@ -45,11 +45,15 @@ function useHalfMinute(): number {
     return now;
 }
 
-export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
+export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteReminders = false }: {
     lists: TaskList[];
     channels: TasksCalendarChannel[];
     currentUserId?: number;
     onOpen: (kind: 'list' | 'channel', id: number) => void;
+    /** The server keeps a note's OWN reminder (migration 068): it appears on
+     *  this calendar as the note it is — a bell, nothing to tick and nothing
+     *  to drag — exactly as it does in Púca Notes' calendar. */
+    noteReminders?: boolean;
 }) {
     const qc = useQueryClient();
     const prefs = useCalendarPrefs();
@@ -67,7 +71,7 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     const addKey = useRef(heldOpKey());
 
     // The same read the Reminders tab makes, under the same keys.
-    const { sources, tasksIn, refetch: refetchScope } = useTaskSources(lists, channels, currentUserId);
+    const { sources, tasksIn, refetch: refetchScope } = useTaskSources(lists, channels, currentUserId, { noteReminders });
 
     const scopeOf = (e: CalendarEntry): { kind: 'list' | 'channel'; id: number } => {
         const [kind, id] = e.source.noteKey.split(':');

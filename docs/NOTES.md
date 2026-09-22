@@ -1424,6 +1424,21 @@ wrote, in the card preview, in Reminders and on the calendar, and ticking it
   alerts, skipped dates and a repeat rule for free. The card shows the note's
   own reminder as its own chip, next to — never merged with — the chip for the
   soonest due **item** in it: they are two different things.
+- **Where it shows, in BOTH doors.** Púca Notes' Reminders list and calendar,
+  and Púca's pinned Reminders and Calendar tabs. The tabs read
+  `components/taskSources.ts`, which projects a list carrying `due_at` or
+  `schedule` through the same `noteAsCalendarItem` the Notes views use, gated
+  on the same `note_reminders` feature that decides whether the control above
+  is offered at all — so a note's reminder cannot be settable in the Tasks
+  view and invisible in the tab beside it, which is exactly what the
+  twelve-branch merge shipped. The projection says `canEdit: false` on
+  purpose: both tabs read that ONE array, and `canEdit` is what opens the
+  calendar's drag, *Move to date…*, *Skip this time* and *Date & repeat…*,
+  each of which would `PATCH /tasks/-5`. The row is a **bell** with *This
+  note itself*, no tick box, no snooze and no note column; its one control is
+  **Clear**, which goes back to the view that owns the lists and uses the
+  same setter as the clock in the note's header, rolled back and explained
+  the same way when the server refuses.
 - **What the server holds.** Two nullable columns on the note's row:
   `due_at`, the next reminder instant **in plaintext**, exactly the trade an
   item's `due_at` already makes (docs/SECURITY_MODEL.md §2 — the server

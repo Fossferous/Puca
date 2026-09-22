@@ -39,17 +39,24 @@ function scopeOf(row: DueRow): { kind: TaskScopeKind; id: number } {
     return { kind: kind as TaskScopeKind, id: Number(id) };
 }
 
-export function TasksReminders({ lists, channels, currentUserId, onOpen, flashTaskId = null }: {
+export function TasksReminders({ lists, channels, currentUserId, onOpen, flashTaskId = null, noteReminders = false, onClearNote }: {
     lists: TaskList[];
     channels: TasksScopeChannel[];
     currentUserId?: number;
     onOpen: (kind: TaskScopeKind, id: number) => void;
     /** The one item a due notification named, scrolled to and flashed. */
     flashTaskId?: number | null;
+    /** The server keeps a note's OWN reminder (migration 068): those rows
+     *  appear here too, exactly as they do in Púca Notes' Reminders list. */
+    noteReminders?: boolean;
+    /** Clear a note's own reminder from its row — the only thing such a row
+     *  offers besides opening the note. Owned by TasksView, which holds the
+     *  lists and rolls a refusal back. */
+    onClearNote?: (listId: number) => void;
 }) {
     const now = useHalfMinute();
     const snoozeOn = useTaskFeature('snooze') === true;
-    const { sources, tasksIn, refetch } = useTaskSources(lists, channels, currentUserId);
+    const { sources, tasksIn, refetch } = useTaskSources(lists, channels, currentUserId, { noteReminders });
     const groups = groupReminderSources(sources, now);
 
     const run = async (row: DueRow, fn: () => Promise<void>) => {
@@ -89,6 +96,7 @@ export function TasksReminders({ lists, channels, currentUserId, onOpen, flashTa
                 onOpen={row => { const s = scopeOf(row); onOpen(s.kind, s.id); }}
                 onToggle={onToggle}
                 onSnooze={snoozeOn ? onSnooze : undefined}
+                onClearNote={onClearNote ? (row => { onClearNote(scopeOf(row).id); }) : undefined}
                 empty={<RemindersEmpty>Nothing is due. Give any item a date from its clock button and it shows up here.</RemindersEmpty>}
             />
         </div>

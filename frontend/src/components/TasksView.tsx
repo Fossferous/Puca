@@ -979,6 +979,7 @@ export function TasksView() {
                         lists={lists}
                         channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
                         currentUserId={currentUserId}
+                        noteReminders={support.features.noteReminders}
                         onOpen={(kind, id) => setSelected({ kind, id })}
                     />
                 </div>
@@ -989,6 +990,14 @@ export function TasksView() {
                         channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
                         currentUserId={currentUserId}
                         flashTaskId={flashTaskId}
+                        noteReminders={support.features.noteReminders}
+                        // The same setter the control in the list's own header
+                        // uses, so a clear from the row is rolled back and
+                        // explained the same way (saveListTiming).
+                        onClearNote={listId => {
+                            const list = lists.find(l => l.id === listId);
+                            if (list) void saveListTiming(list, { dueAt: null, schedule: null });
+                        }}
                         onOpen={(kind, id) => setSelected({ kind, id })}
                     />
                 </div>
