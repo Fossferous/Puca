@@ -121,7 +121,17 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
             const [kind, id] = r.target.split(':');
             // Held across a retry by hand: the add sheet keeps the typed
             // title when a create fails (api/opKey.ts).
-            const opKey = addKey.current.keyFor(`${r.target}\u0000${r.title}`);
+            //
+            // The intent covers EVERY field the sheet can still change after
+            // a failure, not just the target and the title. CalendarAddSheet
+            // keeps all its state when onSubmit resolves false, so the day,
+            // the time, all-day and event/to-do are still on screen and
+            // editable — and an intent blind to them made an edited time the
+            // SAME intent. Against a create the server had committed but
+            // could not answer, the replay short-circuit then re-served the
+            // original row at its ORIGINAL timing, answered 200, and the
+            // sheet closed as a success with the change silently dropped.
+            const opKey = addKey.current.keyFor([r.target, r.dayKey, r.time, r.allDay, r.kind, r.title].join('\u0000'));
             if (kind === 'list') await createListTask(Number(id), r.title, undefined, timing, opKey);
             else await createTask(Number(id), r.title, undefined, timing, opKey);
             addKey.current.landed();
