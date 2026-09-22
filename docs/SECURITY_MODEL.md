@@ -80,7 +80,7 @@ whether the tool fits your threat model.
 - **A Púca Notes sign-in stays signed in for up to a year unless you say otherwise.**
   Notes' sign-in ticks *Stay signed in on this device* by default: the token then lives
   30 days and renews on use, up to a year from the sign-in, and on the Notes phone app the
-  hourly reminder check is use. In a browser Notes and Púca share one token, so the web
+  background reminder check is use. In a browser Notes and Púca share one token, so the web
   app gets the same session. A copied token is therefore good for up to 30 days, renewable
   until the year is up, unless the session is ended. From another device that takes *Sign
   out of every device* or a password change; revoking a device does not reach a Notes

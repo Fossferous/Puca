@@ -10,9 +10,9 @@ one-line summary; this file is the full story. Versions follow
 - **Stay signed in on this device.** Púca Notes' own sign-in now has a tick
   box, on by default, that keeps this device signed in for up to a year rather
   than a day, as long as it is used at least once a month. On the Notes phone
-  app the hourly reminder check counts as use, so a phone that is switched on
-  stays signed in for the year even if Notes is never opened. It is what stops
-  the app asking for your password after a weekend with the phone off: until
+  app the background reminder check counts as use, so a phone that is switched
+  on can stay signed in for the year even if Notes is never opened. It is what
+  stops the app asking for your password after a weekend with the phone off: until
   now a session lasted 24 hours and only stretched when you used it, so time
   away — not inactivity in the app — was what sent you back to the sign-in
   form. **In a browser it covers Púca too:** Notes and the web app share one

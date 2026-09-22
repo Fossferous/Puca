@@ -599,9 +599,10 @@ a device that sends no request for more than 30 days asks again — the year is
 the outer limit for a device that keeps coming back, after which the password is
 asked for whatever the box says. **On the Notes phone app the background
 refresh counts as coming back** (*Background refresh* under *The Android app*):
-each hourly `GET /task-reminders` renews a token more than four hours old, so a
-phone that is switched on and signed in stays signed in for the whole year
-whether or not Notes is ever opened. When a session expires with the box clear,
+each `GET /task-reminders` it sends renews a token more than four hours old, so
+a phone that is switched on and signed in can stay signed in for the whole year
+without Notes ever being opened — one run of the job a month is enough, however
+rarely Android schedules it. When a session expires with the box clear,
 the form says so and suggests the box; with the box ticked that advice is
 already taken, and the form leaves it out.
 
