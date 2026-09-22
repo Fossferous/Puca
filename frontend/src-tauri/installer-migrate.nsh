@@ -179,10 +179,26 @@
   ; freshly extracted 0.9.1 copies of both abandoned in %TEMP% from the same
   ; install run.
   DetailPrint "Releasing any helper still holding its own file open..."
-  nsExec::ExecToLog 'taskkill /F /T /IM puca-agent.exe'
+  ; taskkill prints "ERROR: The process ... not found." when there is nothing
+  ; to stop, which is the COMMON case and read as a failed install by the
+  ; owner (2026-09-22). Its output goes to the stack, and the log says what
+  ; happened in plain words.
+  nsExec::ExecToStack 'taskkill /F /T /IM puca-agent.exe'
   Pop $R0
-  nsExec::ExecToLog 'taskkill /F /T /IM puca-service.exe'
+  Pop $R1
+  ${If} $R0 == 0
+    DetailPrint "  puca-agent.exe was still running: stopped."
+  ${Else}
+    DetailPrint "  puca-agent.exe: not running."
+  ${EndIf}
+  nsExec::ExecToStack 'taskkill /F /T /IM puca-service.exe'
   Pop $R0
+  Pop $R1
+  ${If} $R0 == 0
+    DetailPrint "  puca-service.exe was still running: stopped."
+  ${Else}
+    DetailPrint "  puca-service.exe: not running."
+  ${EndIf}
 !macroend
 
 !macro RemoveSupersededBinary OLD_BINARY

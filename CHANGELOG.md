@@ -17,6 +17,10 @@ one-line summary; this file is the full story. Versions follow
   present a picture when it has none to send, keeps the last one across a
   pointer hand-over, and re-fits it when you zoom, so a still desktop
   sharpens as you zoom in like a moving one.
+- **The installer no longer prints two ERROR lines on every update.** They
+  came from stopping the helper programs before replacing them, which
+  reports an error when a helper was simply not running; the log now says
+  "not running" instead.
 - **"Keep RNNoise" now keeps RNNoise.** When DeepFilter fell behind and the
   voice panel offered *Keep RNNoise*, the button only closed the notice: your
   sound was already on RNNoise, but the setting still said DeepFilter, so the
