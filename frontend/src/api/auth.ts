@@ -482,7 +482,7 @@ export async function generateVerifierForReset(username: string, password: strin
  *
  * Throws on a wrong password, an invalid server key, or a failed M2 check.
  */
-async function srpExchange(username: string, password: string): Promise<string> {
+async function srpExchange(username: string, password: string, staySignedIn = false): Promise<string> {
     const { a, A } = generateClientEphemeral();
 
     const step1Response: { salt_hex: string; b_pub_hex: string; attempt_id?: string; srp_version?: number } = await apiClient.post('/auth/login/step1', {
@@ -525,6 +525,13 @@ async function srpExchange(username: string, password: string): Promise<string> 
         m_hex: bytesToHex(M1),
         ...(attempt_id ? { attempt_id } : {}),
         ...(upgrade ?? {}),
+        // "Stay signed in on this device": asks the server for a long session
+        // (a 30-day token instead of 24 hours; see src/auth.rs Claims::ls).
+        // Sent ONLY when asked, so a sign-in that did not ask produces the
+        // byte-identical body it always did — which is also what lets this
+        // client ship before the server: the field is simply absent, and a
+        // server that does know it defaults to false anyway.
+        ...(staySignedIn ? { stay_signed_in: true } : {}),
     });
 
     const expectedM2 = await computeM2(A, M1, K);
@@ -570,8 +577,16 @@ export class RetiredKeyFormatError extends Error {
     }
 }
 
-export async function login(username: string, password: string): Promise<string> {
-    const token = await srpExchange(username, password);
+/** What a caller can ask for beyond the password itself. */
+export interface LoginOptions {
+    /** Ask the server for a long session on this device — see
+     *  STAY_SIGNED_IN_KEY. Omitted or false means the ordinary 24-hour one,
+     *  and sends nothing extra on the wire. */
+    staySignedIn?: boolean;
+}
+
+export async function login(username: string, password: string, opts?: LoginOptions): Promise<string> {
+    const token = await srpExchange(username, password, opts?.staySignedIn === true);
     localStorage.setItem('auth_token', token);
     adoptPendingHistoryKey(username); // a key registration parked for this account
     await restoreIdentityAfterLogin(username, password);
@@ -1078,18 +1093,33 @@ export function isTokenExpired(token: string | null): boolean {
 }
 
 /**
- * The session died out from under the user (expired token) — drop ONLY the
- * token so the login screen shows. Deliberately NOT logout(): that clears the
- * E2EE identity/seed, and a mere re-authentication should never risk the
- * user's keys — after signing back in, everything decrypts as before.
- */
-/**
  * Where "Remember me" stores the credential blob it replays on next launch.
  * Lives here rather than in Login.tsx so `logout()` cannot drift from the
  * component that writes it — that drift is exactly what made sign-out a no-op.
  */
 export const REMEMBER_ME_KEY = 'sovereign_remember';
 
+/**
+ * Where Púca Notes remembers the "Stay signed in on this device" tick.
+ *
+ * Next to REMEMBER_ME_KEY for the same reason that one lives here: `logout()`
+ * below has to know every key the sign-in form writes, or the two drift.
+ * Unlike the remember-me blob, this one is DELIBERATELY KEPT across a
+ * sign-out. It is not a credential and it is not about an account — it is a
+ * statement about this device ("this is my phone, do not keep asking"), and
+ * clearing it would silently re-arm the shorter session for someone who had
+ * already said otherwise, on the one path where they are least likely to
+ * notice. Absent means ticked: the box defaults on, and only `'false'` turns
+ * it off.
+ */
+export const STAY_SIGNED_IN_KEY = 'pucaStaySignedIn';
+
+/**
+ * The session died out from under the user (expired token) — drop ONLY the
+ * token so the login screen shows. Deliberately NOT logout(): that clears the
+ * E2EE identity/seed, and a mere re-authentication should never risk the
+ * user's keys — after signing back in, everything decrypts as before.
+ */
 export function softExpireSession(): void {
     localStorage.removeItem('auth_token');
     // Deliberately KEEPS the remember-me blob: a soft expiry is precisely the
@@ -1220,6 +1250,10 @@ export function logout(): void {
     // out from inside the app, since the blob is only cleared by signing in
     // again with the box unticked, which requires being signed out.
     localStorage.removeItem(REMEMBER_ME_KEY);
+    // STAY_SIGNED_IN_KEY is NOT removed here, and that is deliberate — see its
+    // definition. It carries no account and no credential, only this device's
+    // answer to "keep me signed in", and a sign-out is not a reason to forget
+    // it (the next sign-in form shows the answer the user last gave).
     clearActiveIdentity(); // Clear E2EE identity on logout
     clearDmKeys(); // session and history keys must not outlive the session on a shared machine
     clearIdentityRestoreFailure(); // a missing identity is not missing once signed out

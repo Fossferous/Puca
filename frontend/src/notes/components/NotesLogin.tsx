@@ -12,7 +12,7 @@
  */
 import { useState, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
-import { login, RetiredKeyFormatError } from '../../api/auth';
+import { login, RetiredKeyFormatError, STAY_SIGNED_IN_KEY } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import '../../components/Login.css';
@@ -24,6 +24,18 @@ interface NotesLoginProps {
     onSuccess: () => void;
 }
 
+/** This device's answer to "stay signed in". Absent means yes: the box is
+ *  ticked by default, and only an explicit 'false' turns it off. Storage can
+ *  throw (a locked-down profile), and a checkbox is not worth a blank screen —
+ *  fall back to the default. */
+function readStaySignedIn(): boolean {
+    try {
+        return localStorage.getItem(STAY_SIGNED_IN_KEY) !== 'false';
+    } catch {
+        return true;
+    }
+}
+
 export function NotesLogin({ onSuccess }: NotesLoginProps) {
     const location = useLocation();
     const expired = !!(location.state as { expired?: boolean } | null)?.expired;
@@ -31,6 +43,17 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
+    const [stay, setStay] = useState(readStaySignedIn);
+
+    /** Remember the choice on the DEVICE, as soon as it is made — not on a
+     *  successful sign-in. Someone who unticks the box and then mistypes their
+     *  password should not have to untick it again. */
+    const chooseStay = (next: boolean) => {
+        setStay(next);
+        try {
+            localStorage.setItem(STAY_SIGNED_IN_KEY, next ? 'true' : 'false');
+        } catch { /* a profile that refuses storage still gets the session it asked for */ }
+    };
 
     const submit = async (e: FormEvent) => {
         e.preventDefault();
@@ -38,7 +61,7 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
         setError('');
         setBusy(true);
         try {
-            await login(username.trim(), password);
+            await login(username.trim(), password, { staySignedIn: stay });
             setPassword('');
             onSuccess();
         } catch (err) {
@@ -63,7 +86,7 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
                 <h1 className="login-title">Púca Notes</h1>
                 <p className="login-subtitle">Notes and checklists from your Púca account</p>
                 {expired && (
-                    <p className="login-message">Your session expired. Sign in again to continue — your notes and keys are safe on this device.</p>
+                    <p className="login-message">Your session expired. Sign in again to continue — your notes and keys are safe on this device. Tick Stay signed in to avoid this.</p>
                 )}
                 <form className="login-form" onSubmit={submit}>
                     <div className="form-group">
@@ -91,6 +114,22 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
                             required
                             disabled={busy}
                         />
+                    </div>
+                    <div className="form-group notes-stay">
+                        <label className="checkbox-label notes-stay-row" htmlFor="stay-signed-in">
+                            <input
+                                id="stay-signed-in"
+                                type="checkbox"
+                                checked={stay}
+                                onChange={e => chooseStay(e.target.checked)}
+                                disabled={busy}
+                            />
+                            <span className="checkbox-text">Stay signed in on this device</span>
+                        </label>
+                        <p className="notes-stay-hint">
+                            Your session on this device then lasts up to a year without a check-in, instead of a
+                            day. Sign out to end it early.
+                        </p>
                     </div>
                     {error && <div className="error-message" role="alert">{error}</div>}
                     <button type="submit" className="login-button" disabled={busy || !username.trim() || !password}>
