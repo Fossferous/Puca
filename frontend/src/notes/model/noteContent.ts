@@ -5,9 +5,19 @@
  * are api/noteMedia.ts.) No network, no DOM; unit-tested
  * (src/tests/noteContent.test.ts).
  */
-import { type Task, buildTaskTree, type TaskNode } from '../../api/tasks';
+import {
+    type NewTaskTiming, type Task, type TaskAttachmentRef, buildTaskTree, isAttachmentsLocked,
+    parseTaskAttachments, type TaskNode,
+} from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
-import { deriveQuickTitle } from './notesModel';
+import { parseSchedule, parseSnooze, serializeSchedule } from '../../api/taskSchedule';
+import { deriveQuickTitle, type NoteRef } from './notesModel';
+
+/** An item's attachment refs when this device can read its sidecar, else
+ *  none — a locked sidecar is ciphertext, not an empty list. */
+export function readableAttachmentsOf(t: Task): TaskAttachmentRef[] {
+    return t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [];
+}
 
 /** Readable note text, or '' for none / a decrypt-failure marker. */
 export function readableBody(body: string | null | undefined): string {
@@ -177,5 +187,136 @@ export function recreationOrder(tasks: Task[]): Task[] {
         }
     };
     walk(buildTaskTree(tasks));
+    return out;
+}
+
+// --- Putting items back ---------------------------------------------------------------
+
+/** What `recreateSubtree` needs of the data layer. A structural type rather
+ *  than NoteActions itself: this file is pure model code, so the tests hand
+ *  it fakes and nothing here imports the query layer. */
+export interface RecreateActions {
+    addTask: (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming) => Promise<Task | null>;
+    setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
+    snoozeTask: (note: NoteRef, task: Task, until: number | null) => Promise<void>;
+    /** Mark an item done exactly as it was — never the tick path, which
+     *  ADVANCES a repeating series (api/taskCompletion.ts planToggle). */
+    restoreCompleted: (note: NoteRef, task: Task) => Promise<void>;
+}
+
+export interface RecreateResult {
+    /** The id each item came back as, by the id it had. */
+    idMap: Map<number, number>;
+    /** Items that did not come back (refused, or their parent did not). */
+    missing: number;
+    /** Items whose date & repeat or snooze this device cannot read, so they
+     *  came back without it: sealing the failure marker back would write it
+     *  over the ciphertext it stands in for. */
+    unreadableTiming: number;
+}
+
+/**
+ * Create these items again, parents before children, as close to what they
+ * were as the wire allows: text, nesting, due time, date & repeat, snooze,
+ * attachments and tick state. Used by the Undo of "Hide checkboxes" and by
+ * the Undo of an item delete.
+ *
+ * What it deliberately does NOT do: it does not tick a completed item
+ * through the normal path, because for a repeating to-do that MOVES the
+ * series on to its next occurrence instead of marking it done — an item
+ * brought back would come back at the wrong date. The schedule is restored
+ * byte-for-byte (same uid, same doneThrough: this is a restore, not a copy)
+ * and the completion goes as a plain timing patch.
+ *
+ * The items come back as NEW items: new ids, appended at the end of their
+ * group, and in a shared note created by whoever pressed Undo. An item whose
+ * parent is NOT in the snapshot (the root of a deleted subtree, which still
+ * names the live item it hung under) goes back under that parent; only a
+ * parent that WAS in the snapshot and did not come back takes its children
+ * with it.
+ *
+ * Each tick is restored at the one moment that reproduces it. Completing an
+ * item sweeps its subtree as it stands AT THAT MOMENT (src/task_handlers.rs,
+ * the recursive UPDATE) and re-opening one un-completes every ancestor, so
+ * "done parent, open child" — which a child added after the parent was
+ * ticked really is — cannot be put back after the fact. So a tick waits
+ * until every completed item below it exists (`doneClosure`) and goes before
+ * the first open one is created.
+ */
+export async function recreateSubtree(
+    actions: RecreateActions, note: NoteRef, snapshot: Task[],
+): Promise<RecreateResult> {
+    const out: RecreateResult = { idMap: new Map(), missing: 0, unreadableTiming: 0 };
+    const inSnapshot = new Map(snapshot.map(t => [t.id, t]));
+    const childrenOf = new Map<number, Task[]>();
+    for (const t of snapshot) {
+        if (t.parent_id === null || !inSnapshot.has(t.parent_id)) continue;
+        const kids = childrenOf.get(t.parent_id);
+        if (kids) kids.push(t); else childrenOf.set(t.parent_id, [t]);
+    }
+    /** The items that must ALREADY EXIST when this one's tick is restored:
+     *  every descendant reachable through completed items only, which the
+     *  server's sweep will tick along with it. Anything under an OPEN item
+     *  must not exist yet, or the sweep would tick that too. */
+    const doneClosure = (t: Task): Set<number> => {
+        const ids = new Set<number>();
+        const walk = (parent: Task) => {
+            for (const c of childrenOf.get(parent.id) ?? []) {
+                if (!c.is_completed) continue;
+                ids.add(c.id);
+                walk(c);
+            }
+        };
+        walk(t);
+        return ids;
+    };
+    // Ticks owed, outermost first (snapshot order is parents before children).
+    const owed: Array<{ made: Task; waitingFor: Set<number> }> = [];
+    /** Restore every tick that is not still waiting for `next` to exist —
+     *  all of them once the snapshot is finished. */
+    const settle = async (next?: Task) => {
+        for (let i = 0; i < owed.length;) {
+            if (next && owed[i].waitingFor.has(next.id)) { i++; continue; }
+            const [p] = owed.splice(i, 1);
+            await actions.restoreCompleted(note, p.made);
+        }
+    };
+    for (const t of snapshot) {
+        await settle(t);
+        // Parents come first, so a missing mapping for a parent that WAS in
+        // the snapshot means it never came back: its children go with it
+        // rather than to the top level. A parent outside the snapshot is a
+        // live item — the root of a deleted subtree hangs off one.
+        const inSnap = t.parent_id !== null && inSnapshot.has(t.parent_id);
+        const parent = t.parent_id === null
+            ? undefined
+            : (out.idMap.get(t.parent_id) ?? (inSnap ? undefined : t.parent_id));
+        if (t.parent_id !== null && parent === undefined) { out.missing++; continue; }
+        const sched = parseSchedule(t.schedule);
+        let timing: NewTaskTiming | undefined;
+        if (sched.state === 'ok') {
+            try {
+                timing = { dueAt: t.due_at, schedule: serializeSchedule(sched.schedule, sched.raw) };
+            } catch {
+                out.unreadableTiming++;
+            }
+        } else if (sched.state === 'readonly') {
+            out.unreadableTiming++;
+        }
+        if (!timing && t.due_at) timing = { dueAt: t.due_at };
+        const made = await actions.addTask(note, t.description, parent, timing);
+        if (!made) { out.missing++; continue; }
+        out.idMap.set(t.id, made.id);
+        const refs = readableAttachmentsOf(t);
+        if (refs.length > 0) await actions.setAttachments(note, made, refs);
+        const snooze = parseSnooze(t.snooze);
+        if (snooze) await actions.snoozeTask(note, made, Date.parse(snooze.until));
+        else if (t.snooze && isUndecryptable(t.snooze)) out.unreadableTiming++;
+        // Completing a parent sweeps its subtree, so only the top of each
+        // completed branch is marked, and only once that branch exists.
+        const parentDone = t.parent_id !== null && inSnapshot.get(t.parent_id)?.is_completed === true;
+        if (t.is_completed && !parentDone) owed.push({ made, waitingFor: doneClosure(t) });
+    }
+    await settle();
     return out;
 }

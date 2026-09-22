@@ -6,6 +6,20 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Changed
+- **Make a copy now copies the whole note.** A copy used to carry only a
+  note's text and its unticked items, flattened. It now brings the pictures
+  and drawings, every item including the ones already ticked, their nesting,
+  and their dates and repeats — and it takes the note's colour and labels
+  (never its pin, and never the archive). The pictures are encrypted again for
+  the copy, so deleting one note forever never affects the other's; they count
+  against your storage twice. Two things it no longer does quietly: a note
+  holding something this device cannot read is refused with a message instead
+  of copied with that part missing, and a note whose items are still loading
+  is no longer copied to an empty note that says "Copied". A copy that fails
+  — offline, or because the server said no — now says so, rather than
+  leaving the screen unchanged with nothing to tell you it did not happen.
+
 ### Added
 - **Share into Púca Notes.** On Android, Púca Notes now appears in the share
   sheet. Send it text, a text file or a picture from any app and its composer
@@ -110,6 +124,23 @@ one-line summary; this file is the full story. Versions follow
   document — puts the text in the note, not a picture of it. (Púca's Tasks
   view shows the same notes and the same links, but pictures go in there
   through the picker, as before.)
+- **Undo a deleted item.** Deleting an item inside a note now offers Undo for
+  a few seconds, and brings the item and everything under it back with its
+  date, repeat, snooze, pictures and tick state — a repeating to-do comes
+  back on the date it was on, not the next one. A subtask deleted on its own
+  comes back under the item it was under, and a branch that was only part
+  done comes back part done. Its pictures are kept for as
+  long as Undo is offered and deleted afterwards; before, they stayed on the
+  server counting against your storage for good. An item brought back is a
+  new item: in a shared note it is now yours, and it comes back at the end of
+  its group.
+- **Undo and redo a note's text.** While a note is open you can step back and
+  forward through what you typed — with Ctrl+Z and Ctrl+Shift+Z, or the pair
+  of buttons that appears under the text, so it works on a phone as well. A
+  paste undoes in one step, even after the note has saved it. The history
+  lives only on the page you are typing on: it is never written to the
+  offline copy, it starts again when an edit arrives from another device, and
+  it goes when you close the note.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

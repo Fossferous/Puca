@@ -17,8 +17,11 @@
  *
  * Both conversions offer Undo. "Hide checkboxes" is lossy when items nest,
  * carry due times or attachments, or are done — it asks first, and its Undo
- * re-creates the items with those properties (so the attachment files are
- * kept while Undo is offered). Once the Undo window closes — it expires, a
+ * re-creates the items with those properties through the one re-creation
+ * routine the item-delete Undo also uses (model/noteContent.ts
+ * recreateSubtree), so the attachment files are kept while Undo is offered
+ * and a repeating to-do comes back on its own date rather than the next
+ * one. Once the Undo window closes — it expires, a
  * newer Undo replaces it, or the note closes — nothing names those files any
  * more, and they are deleted rather than left on the server. Only the files
  * of items whose delete actually went through, and never one a live item
@@ -39,22 +42,20 @@ import { type NoteCard } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 import { ensureOutboxLoaded, pendingOutboxCount } from '../model/notesOutbox';
 import { noteSaved } from '../model/useListContent';
-import { bodyToItems, conversionLosses, describeLosses, filesFromTransfer, isTextPaste, itemsToBody, readableBody, recreationOrder } from '../model/noteContent';
+import {
+    bodyToItems, conversionLosses, describeLosses, filesFromTransfer, isTextPaste, itemsToBody,
+    readableAttachmentsOf, readableBody, recreateSubtree, recreationOrder,
+} from '../model/noteContent';
 import { hasTransferFiles, ONLY_PICTURES, PASTE_OFFLINE } from '../model/pasteDrop';
 import { type DrawingDoc, parseDrawing } from '../../api/drawing';
 import { DrawingCanvas } from '../../components/DrawingCanvas';
 import { AudioRecorder, type RecordedClip } from './AudioRecorder';
 import { canRecordAudio } from '../model/audioNote';
 import { transcribeClip } from '../model/transcribe';
-import { UndoBar } from './UndoBar';
+import { type EditorUndoApi, useEditorUndo } from './useEditorUndo';
 import '../noteContent.css';
 
 const COARSE = '(pointer: coarse) and (max-width: 1024px)';
-
-/** An item's attachment refs, when this device can read them. */
-function attachmentsOf(t: Task) {
-    return t.attachments && !isAttachmentsLocked(t.attachments) ? parseTaskAttachments(t.attachments) : [];
-}
 
 interface Props {
     card: NoteCard;
@@ -63,13 +64,14 @@ interface Props {
     tasks: Task[];
     /** False while the items are still loading (no conversion then). */
     tasksLoaded: boolean;
+    /** The editor's ONE Undo snackbar (useEditorUndo). NoteEditor passes its
+     *  own so a conversion and an item delete share a bar instead of stacking
+     *  two at the same fixed position; without it this section keeps one of
+     *  its own, which is what the unit tests drive. */
+    undo?: EditorUndoApi;
 }
 
-/** `commit` runs when the Undo can no longer happen (see the header). */
-type Undo = { token: number; message: string; run: () => Promise<void>; commit?: () => void };
-let undoSeq = 0;
-
-export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props) {
+export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: Props) {
     const c = actions.content;
     const [drawing, setDrawing] = useState<{ item?: GalleryItem; initial?: DrawingDoc } | null>(null);
     const [recording, setRecording] = useState(false);
@@ -78,24 +80,17 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
     const [transcribeNotice, setTranscribeNotice] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [dragging, setDragging] = useState(false);
-    const [undo, setUndoState] = useState<Undo | null>(null);
     const [converting, setConverting] = useState(false);
-    const undoRef = useRef<Undo | null>(null);
     /** The live text field, while there is one — a transcript is added
      *  through it, never behind it (see keepClip). */
     const bodyRef = useRef<NoteBodyHandle>(null);
+    // ONE Undo bar for the whole editor: NoteEditor owns it and hands `push`
+    // down, and a section rendered on its own (the tests) keeps its own.
+    const own = useEditorUndo();
+    const setUndo = undo?.push ?? own.push;
     // The items as they are NOW, for a commit that runs after they changed.
     const tasksRef = useRef(tasks);
     useEffect(() => { tasksRef.current = tasks; });
-    /** Replace the pending Undo; the one replaced can no longer happen. */
-    const setUndo = (next: Undo | null, committed = true) => {
-        const prev = undoRef.current;
-        undoRef.current = next;
-        setUndoState(next);
-        if (prev && prev !== next && committed) prev.commit?.();
-    };
-    // Closing the note ends the Undo too.
-    useEffect(() => () => { undoRef.current?.commit?.(); undoRef.current = null; }, []);
     if (card.ref.kind !== 'list') return null;
     const listId = card.ref.id;
     const ref = card.ref;
@@ -238,7 +233,6 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                 return;
             }
             setUndo({
-                token: ++undoSeq,
                 message: 'Turned the text into a checklist',
                 run: async () => {
                     if (!noteSaved(await c.setBody(listId, before))) return;
@@ -282,30 +276,15 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
             }
             // The dropped items' uploads: kept for the Undo, deleted after it —
             // never one a live item names by then.
-            const orphaned = fileIdsOf(snapshot.flatMap(attachmentsOf));
+            const orphaned = fileIdsOf(snapshot.flatMap(readableAttachmentsOf));
             setUndo({
-                token: ++undoSeq,
                 message: 'Turned the checklist into text',
                 run: async () => {
-                    const idMap = new Map<number, number>();
-                    for (const t of snapshot) {
-                        const parent = t.parent_id === null ? undefined : idMap.get(t.parent_id);
-                        const made = await actions.addTask(ref, t.description, parent);
-                        if (!made) continue;
-                        idMap.set(t.id, made.id);
-                        if (t.due_at) await actions.setDue(ref, made, t.due_at);
-                        if (t.attachments && !isAttachmentsLocked(t.attachments)) {
-                            await actions.setAttachments(ref, made, parseTaskAttachments(t.attachments));
-                        }
-                        // Completing a parent completes its subtree, so only
-                        // the top of each completed branch is toggled.
-                        const parentDone = t.parent_id !== null && snapshot.find(p => p.id === t.parent_id)?.is_completed;
-                        if (t.is_completed && !parentDone) await actions.toggleTask(ref, made, true);
-                    }
+                    await recreateSubtree(actions, ref, snapshot);
                     await c.setBody(listId, before);
                 },
                 commit: orphaned.length > 0 ? () => {
-                    const named = new Set(fileIdsOf(tasksRef.current.flatMap(attachmentsOf)));
+                    const named = new Set(fileIdsOf(tasksRef.current.flatMap(readableAttachmentsOf)));
                     const unused = orphaned.filter(id => !named.has(id));
                     if (unused.length > 0) void deleteFiles(unused);
                 } : undefined,
@@ -397,14 +376,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded }: Props)
                     }}
                 />
             )}
-            {undo && (
-                <UndoBar
-                    token={undo.token}
-                    message={undo.message}
-                    onUndo={() => { const u = undo; setUndo(null, false); void u.run(); }}
-                    onExpire={() => setUndo(null)}
-                />
-            )}
+            {!undo && own.bar}
         </div>
     );
 }

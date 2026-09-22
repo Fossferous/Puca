@@ -44,7 +44,7 @@ import {
     listListTasks, updateListTaskAttachments,
     listTasks, updateChannelTaskAttachments,
     getTaskTabPrefs,
-    applyMove, applyReorder, collectSubtreeIds, serializeTaskAttachments,
+    applyMove, applyReorder, applyToggle, collectSubtreeIds, serializeTaskAttachments,
     buildPrefsForOrder, isFavoriteTab, canEditTask,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
@@ -68,6 +68,7 @@ import {
     type NoteCard, type NoteRef, type NoteSource, type NotesNoteState,
     buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder, withCreatedList,
 } from './notesModel';
+import { type CopyPlan } from './noteText';
 import { useTaskEventsLive } from './taskEvents';
 import { ops, sendCreateList, sendCreateTask, sendNoteOp, type PrefsIntent } from './notesOutbox';
 import { anythingQueued } from './noteBusy';
@@ -421,11 +422,21 @@ export interface NoteActions {
      *  it. `what` is the words the offline queue shows the user. Personal
      *  notes only (a channel checklist has no list row): false for one. */
     setNoteTiming: (note: NoteRef, patch: { dueAt?: string | null; schedule?: string | null }, what?: string) => Promise<boolean>;
+    /** Mark an item done EXACTLY as it stands — never the tick path, which
+     *  advances a repeating to-do to its next occurrence
+     *  (api/taskCompletion.ts). Only for putting an item back as it was
+     *  (noteContent.ts recreateSubtree); everything a user ticks goes
+     *  through toggleTask. */
+    restoreCompleted: (note: NoteRef, task: Task) => Promise<void>;
     setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
      *  and null only when nothing was saved. */
     createNote: (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
+    /** "Make a copy" (noteText.ts copyPlanOf). Always the content path: a
+     *  copy may carry pictures, which cannot wait for a connection, so it
+     *  never queues and says so when it fails. */
+    copyNote: (plan: CopyPlan) => Promise<NoteRef | null>;
     /** `baseRev` is the note's content revision when the user STARTED typing
      *  the new title (NoteEditor captures it on the clean→dirty edge). Pass
      *  it, or a rename made while another device's landed will name THEIRS
@@ -674,6 +685,27 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore, canEditTime, sendTiming]);
 
+    const restoreCompleted = useCallback(async (note: NoteRef, task: Task) => {
+        // A timing patch, not a plain is_completed update: migration 066's
+        // guard refuses the latter for a scheduled item. It carries no
+        // schedule of its own, so the series stays exactly where the
+        // restored schedule put it.
+        const original = await snapshot(note);
+        // applyToggle, not a one-item map: the server sweeps the whole
+        // subtree when an item is completed (task_handlers.rs), and the
+        // children are already there by the time this runs.
+        const next = applyToggle(original, task, true);
+        restore(note, next);
+        syncListCounts(note, next);
+        try {
+            await sendTiming(note, task, { is_completed: true }, 'put back as done');
+        } catch (err) {
+            explain('restoring the tick failed', err);
+            restore(note, original);
+            syncListCounts(note, original);
+        }
+    }, [snapshot, restore, syncListCounts, sendTiming]);
+
     const setAttachments = useCallback(async (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => {
         const original = await snapshot(note);
         try {
@@ -734,6 +766,10 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
         return ref;
     }, [qc]);
+
+    const copyNote = useCallback(async (plan: CopyPlan): Promise<NoteRef | null> => {
+        return contentRef.current.createNoteFromPlan(plan);
+    }, []);
 
     const renameNote = useCallback(async (note: NoteRef, title: string, baseRev?: number): Promise<boolean> => {
         if (note.kind !== 'list') return false;
@@ -934,12 +970,12 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, [qc]);
 
     return useMemo(() => ({
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, setAttachments,
-        createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, restoreCompleted, setAttachments,
+        createNote, copyNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
-        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, setAttachments,
-        createNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
+        toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, restoreCompleted, setAttachments,
+        createNote, copyNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);
 }

@@ -28,8 +28,7 @@ import { normalizeLabel, type NoteCard, type NoteColor, MAX_LABEL_LENGTH } from 
 import { labelCoverage, setArchivedOf, setColorOf, setLabelOn } from '../model/notesBulk';
 import { type NoteActions, useNotesPrefs } from '../model/notesQueries';
 import { type BulkPendingApi } from './useNoteSelection';
-import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
-import { readableBody } from '../model/noteContent';
+import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { ColorPicker } from '../../components/notes/ColorPicker';
 import { Popover } from '../../components/notes/Popover';
@@ -86,13 +85,26 @@ export function SelectionBar({ cards, actions, labels, bulk, onClear, onSelectAl
     const duplicate = async () => {
         onClear();
         let made = 0;
+        let unreadable = 0;
+        // Sequential: each copy now re-encrypts the note's pictures, and a
+        // bulk copy must not fan out N x 12 uploads at once.
         for (const c of cards) {
             // A copy as the card menu makes one (NotesShell duplicate): the
-            // note's text too, and its open items' dates where the server keeps them.
-            const body = readableBody(c.body);
-            if (await actions.createNote(`${c.title} (copy)`, openItemsOf(c), body ? { body } : undefined, scheduleOnServer ? openItemTimingOf(c) : undefined)) made++;
+            // whole note, and nothing at all when part of it cannot be read here.
+            // Unreadable here, or still loading: either way it is not copied.
+            if (copyRefusal(copyBlockersOf(c))) { unreadable++; continue; }
+            const ref = await actions.copyNote(copyPlanOf(c, { schedules: !!scheduleOnServer }));
+            if (!ref) continue;
+            made++;
+            if (c.color !== 'default') actions.setColor(ref, c.color);
+            if (c.labels.length > 0) actions.setLabels(ref, c.labels);
         }
-        pushMessageToast({ title: made === cards.length ? `Made ${made} copies — open items only, un-nested` : `Made ${made} of ${cards.length} copies` });
+        const title = made === cards.length
+            ? `Made ${made} cop${made === 1 ? 'y' : 'ies'}`
+            : unreadable > 0
+                ? `Made ${made} of ${cards.length} copies — ${unreadable} couldn’t be copied on this device`
+                : `Made ${made} of ${cards.length} copies`;
+        pushMessageToast({ title });
     };
 
     return createPortal(

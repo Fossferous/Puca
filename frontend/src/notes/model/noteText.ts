@@ -3,14 +3,14 @@
  * offers. Pure over the decrypted cards the grid already holds; nothing here
  * talks to the server, and the download is a Blob the browser saves.
  */
-import { type Task, buildTaskTree, type TaskNode, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
+import { type Task, type TaskAttachmentRef, buildTaskTree, type TaskNode, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from './notesModel';
 import { isMobile } from '../../api/platform';
 import { type SaveResult } from '../../api/saveAttachment';
 import { NOTES_FOLDER, deviceWriteFailedMessage, saveTextToDevice, timestampedName } from '../../api/saveToDevice';
 import { noteScheduleForExport, scheduleForExport } from './notesTiming';
-import { type NewTaskTiming } from '../../api/tasks';
+import { readableBody } from './noteContent';
 import { newUid, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import { describeSchedule } from '../../api/scheduleFormat';
 
@@ -104,41 +104,131 @@ export function notesToJson(cards: NoteCard[], exportedAt: string): string {
     return JSON.stringify({ app: 'Púca Notes', exportedAt, notes }, null, 2) + '\n';
 }
 
-/** The open (unchecked) items of a note as flat text lines — what "Make a
- *  copy" recreates. Nesting is not carried: a copy is a fresh list. */
-export function openItemsOf(card: NoteCard): string[] {
-    const out: string[] = [];
-    const walk = (nodes: TaskNode[]) => {
-        for (const n of nodes) {
-            if (n.task.is_completed || isUndecryptable(n.task.description)) continue;
-            out.push(n.task.description);
-            walk(n.children);
-        }
+// --- Make a copy ------------------------------------------------------------------------
+//
+// A copy is the whole note again: its text, its pictures and drawings, and
+// every item — ticked or not — with its nesting, its due time and its date
+// & repeat. Two rules keep it honest:
+//
+//  - The schedule is re-sealed under a NEW uid with `doneThrough` cleared: a
+//    copy is a new series, not the same event twice.
+//  - Pictures are RE-ENCRYPTED for the copy rather than re-pointed (that is
+//    createNoteFromPlan's job, not this file's). Copying the source's href
+//    would put two notes' names on one upload, which is exactly the hazard
+//    docs/SECURITY_MODEL.md describes: *Delete forever* on either note would
+//    delete files the other still shows.
+//
+// A note holding something this device cannot read is not copied at all,
+// rather than copied with the unreadable part quietly missing — the same
+// choice "Hide checkboxes" makes.
+
+export interface CopyItem {
+    text: string;
+    completed: boolean;
+    dueAt: string | null;
+    /** A re-sealed schedule (new uid, no progress), or null. */
+    schedule: string | null;
+    attachments: TaskAttachmentRef[];
+    children: CopyItem[];
+}
+
+export interface CopyPlan {
+    title: string;
+    body: string;
+    /** The note's OWN sidecar, as the source holds it (to be re-encrypted). */
+    noteRefs: TaskAttachmentRef[];
+    items: CopyItem[];
+    /** Uploads the copy must encrypt again; a drawing is two of them. */
+    files: number;
+}
+
+export interface CopyBlockers {
+    /** The items query has not resolved: copying now would make an EMPTY note
+     *  and report success. */
+    itemsNotLoaded: boolean;
+    unreadableItems: number;
+    unreadableSchedules: number;
+    unreadableBody: boolean;
+    /** The note's own title cannot be read here, so the copy would be called
+     *  "[Unable to decrypt] (copy)". */
+    unreadableTitle: boolean;
+    lockedSidecar: boolean;
+}
+
+export function copyBlockersOf(card: NoteCard): CopyBlockers {
+    const out: CopyBlockers = {
+        itemsNotLoaded: card.tasks === null,
+        unreadableItems: 0,
+        unreadableSchedules: 0,
+        unreadableBody: !!card.body && isUndecryptable(card.body),
+        unreadableTitle: isUndecryptable(card.title),
+        lockedSidecar: isAttachmentsLocked(card.noteAttachments ?? null),
     };
-    walk(buildTaskTree(card.tasks ?? []));
+    for (const t of card.tasks ?? []) {
+        if (isUndecryptable(t.description)) out.unreadableItems++;
+        if (parseSchedule(t.schedule).state === 'readonly') out.unreadableSchedules++;
+        if (isAttachmentsLocked(t.attachments)) out.lockedSidecar = true;
+    }
     return out;
 }
 
-/** The timing of each item openItemsOf returns, in the same order, for
- *  "Make a copy": a scheduled item keeps its schedule — under a NEW uid, as
- *  a copy is a new event, not the same one twice — and its next reminder; a plain
- *  item's due time is not copied, as before. A schedule this device cannot
- *  read is not copied. */
-export function openItemTimingOf(card: NoteCard): (NewTaskTiming | undefined)[] {
-    const out: (NewTaskTiming | undefined)[] = [];
-    const walk = (nodes: TaskNode[]) => {
-        for (const n of nodes) {
-            if (n.task.is_completed || isUndecryptable(n.task.description)) continue;
-            const p = parseSchedule(n.task.schedule);
-            let schedule: string | null = null;
-            if (p.state === 'ok') {
-                try { schedule = serializeSchedule({ ...p.schedule, uid: newUid(), doneThrough: undefined }, p.raw); } catch { schedule = null; }
+/** The one thing to say when a note cannot be copied here, or null when it
+ *  can. The wording matches the "Hide checkboxes" refusal. */
+export function copyRefusal(b: CopyBlockers): string | null {
+    if (b.itemsNotLoaded) return 'Still opening this note — try the copy again in a moment';
+    if (b.unreadableItems > 0 || b.unreadableSchedules > 0 || b.unreadableBody || b.unreadableTitle || b.lockedSidecar) {
+        return 'Some of this note can’t be read on this device, so it can’t be copied here';
+    }
+    return null;
+}
+
+/**
+ * What to make. Only valid once `copyRefusal(copyBlockersOf(card))` is null;
+ * `schedules` is false against a server that does not store them (it would
+ * drop the field silently), and then only the due time is carried.
+ */
+export function copyPlanOf(card: NoteCard, opts: { schedules?: boolean } = {}): CopyPlan {
+    const schedules = opts.schedules !== false;
+    let files = 0;
+    const refsOf = (attachments: string | null): TaskAttachmentRef[] => {
+        const refs = isAttachmentsLocked(attachments) ? [] : parseTaskAttachments(attachments);
+        files += refs.length;
+        return refs;
+    };
+    const walk = (nodes: TaskNode[]): CopyItem[] => nodes.map(n => {
+        const p = parseSchedule(n.task.schedule);
+        let schedule: string | null = null;
+        if (schedules && p.state === 'ok') {
+            try {
+                schedule = serializeSchedule({ ...p.schedule, uid: newUid(), doneThrough: undefined }, p.raw);
+            } catch {
+                schedule = null;
             }
-            out.push(schedule ? { dueAt: n.task.due_at, schedule } : undefined);
-            walk(n.children);
+        }
+        return {
+            text: n.task.description,
+            completed: n.task.is_completed,
+            dueAt: n.task.due_at,
+            schedule,
+            attachments: refsOf(n.task.attachments),
+            children: walk(n.children),
+        };
+    });
+    const noteRefs = refsOf(card.noteAttachments ?? null);
+    const items = walk(buildTaskTree(card.tasks ?? []));
+    return { title: `${card.title} (copy)`, body: readableBody(card.body), noteRefs, items, files };
+}
+
+/** Every item of a plan, parents before children. */
+export function flattenCopyItems(items: CopyItem[]): Array<{ item: CopyItem; parent: CopyItem | null }> {
+    const out: Array<{ item: CopyItem; parent: CopyItem | null }> = [];
+    const walk = (list: CopyItem[], parent: CopyItem | null) => {
+        for (const item of list) {
+            out.push({ item, parent });
+            walk(item.children, item);
         }
     };
-    walk(buildTaskTree(card.tasks ?? []));
+    walk(items, null);
     return out;
 }
 

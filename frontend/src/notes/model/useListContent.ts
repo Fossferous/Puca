@@ -31,6 +31,8 @@ import {
     type TaskList,
     createListTask,
     parseTaskAttachments,
+    patchTaskTiming,
+    updateListTaskAttachments,
     isAttachmentsLocked,
 } from '../../api/tasks';
 import {
@@ -49,7 +51,7 @@ import {
 } from '../../api/listContent';
 import {
     type DrawingFiles, type SealedMedia,
-    fileIdsOf, fileIdsOfHrefs, mediaCountLabel, nameAudioFiles, nextDrawingName, refOfParked, sealNoteMedia, uploadNoteMedia,
+    fileIdsOf, fileIdsOfHrefs, mediaCountLabel, nameAudioFiles, nextDrawingName, refOfParked, resealRefs, sealNoteMedia, uploadNoteMedia,
 } from '../../api/noteMedia';
 import { parkedIdsOf, withoutParked } from '../../api/parkedMedia';
 import { ParkedMediaFullError, appParkedStore } from './notesBlobs';
@@ -61,6 +63,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { type NoteRef, cleanQuickItems } from './notesModel';
 import { deriveContentTitle } from './noteContent';
+import { type CopyItem, type CopyPlan, flattenCopyItems } from './noteText';
 
 export const listContentKeys = {
     features: ['notes', 'features'] as const,
@@ -78,6 +81,9 @@ export interface NoteExtras {
     drawing?: DrawingFiles;
     /** Voice notes: uploaded raw, sealed exactly as a photo is. */
     audio?: File[];
+    /** Refs that are ALREADY uploaded and sealed, to go straight into the new
+     *  note's sidecar — a copy encrypts the source's pictures again itself. */
+    refs?: TaskAttachmentRef[];
 }
 
 /** What a save of a note's text answers with: `{ rev }` saved (naming the
@@ -108,7 +114,8 @@ function revOf(all: TaskList[] | undefined, listId: number, features: ListFeatur
 }
 
 export function hasExtras(extra: NoteExtras | undefined): extra is NoteExtras {
-    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || (extra.files?.length ?? 0) > 0 || !!extra.drawing || (extra.audio?.length ?? 0) > 0);
+    return !!extra && (!!extra.body?.trim() || (extra.photos?.length ?? 0) > 0 || (extra.files?.length ?? 0) > 0
+        || !!extra.drawing || (extra.audio?.length ?? 0) > 0 || (extra.refs?.length ?? 0) > 0);
 }
 
 export function useListFeatures(): { features: ListFeatures; known: boolean } {
@@ -183,6 +190,10 @@ export interface ListContentActions {
      *  server's copy is in `conflict.theirs` (null = they cleared it), the
      *  cache now holds it, and NOTHING was written. */
     setBody: (listId: number, body: string, baseRev?: number) => Promise<SaveOutcome>;
+    /** "Make a copy": the whole note again — text, pictures (re-encrypted
+     *  under fresh keys), and every item with its nesting, dates and tick
+     *  state. Never queued: its uploads cannot wait for a connection. */
+    createNoteFromPlan: (plan: CopyPlan) => Promise<NoteRef | null>;
     /** Drop `dropped` from a note's sidecar (`next` is what is left). An
      *  intent, applied to whatever the server holds — see the implementation
      *  for why it needs no base revision. */
@@ -312,7 +323,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         let refs: TaskAttachmentRef[] = [];
         try {
-            refs = await uploadNoteMedia(photos, drawings, 0, nameAudioFiles(extra.audio ?? [], []));
+            refs = [
+                ...await uploadNoteMedia(photos, drawings, 0, nameAudioFiles(extra.audio ?? [], [])),
+                // Already uploaded and sealed by the caller: they go into the
+                // sidecar as they are, and into the rollback below.
+                ...(extra.refs ?? []),
+            ];
         } catch (err) {
             explain('upload failed', err);
             pushMessageToast({ title: mediaFailureText(err) });
@@ -345,6 +361,105 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
         return ref;
     }, [qc, queueContentNote]);
+
+    /**
+     * Make the copy. The pictures are re-encrypted FIRST and all-or-nothing:
+     * if the list create then fails, every upload made for this copy is
+     * deleted again, so a failed copy never bills the owner for orphans.
+     * Items are created parents-first so a child lands under the copy's own
+     * parent id; a subtree whose parent failed is skipped rather than raised
+     * to the top level, and the count is reported.
+     */
+    const createNoteFromPlan = useCallback(async (plan: CopyPlan): Promise<NoteRef | null> => {
+        const uploaded: TaskAttachmentRef[] = [];
+        const reseal = async (refs: TaskAttachmentRef[]) => {
+            if (refs.length === 0) return [];
+            const made = await resealRefs(refs);
+            uploaded.push(...made);
+            return made;
+        };
+        const flat = flattenCopyItems(plan.items);
+        const itemRefs = new Map<CopyItem, TaskAttachmentRef[]>();
+        let noteRefs: TaskAttachmentRef[];
+        try {
+            noteRefs = await reseal(plan.noteRefs);
+            for (const { item } of flat) {
+                if (item.attachments.length > 0) itemRefs.set(item, await reseal(item.attachments));
+            }
+        } catch (err) {
+            if (!explain('copying the pictures failed', err)) {
+                pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t copy the pictures — check your connection' });
+            }
+            await deleteFiles(fileIdsOf(uploaded));
+            return null;
+        }
+        let list: TaskList;
+        try {
+            list = await createTaskListWithContent(plan.title, { body: plan.body || undefined, refs: noteRefs });
+        } catch (err) {
+            // Never queued (its uploads could not wait), and nothing names
+            // what was uploaded for it now. A copy is asked for from a menu
+            // with nowhere to report a null, so it says so itself — a
+            // failed copy must never look like a copy that happened.
+            if (!explain('copy failed', err)) {
+                pushMessageToast({ title: 'Couldn’t copy the note — check your connection' });
+            }
+            await deleteFiles(fileIdsOf(uploaded));
+            return null;
+        }
+        const ref: NoteRef = { kind: 'list', id: list.id };
+        const created: Task[] = [];
+        const newIdOf = new Map<CopyItem, number>();
+        let missing = 0;
+        let timed = false;
+        for (const { item, parent } of flat) {
+            const parentId = parent === null ? undefined : newIdOf.get(parent);
+            if (parent !== null && parentId === undefined) { missing++; continue; }
+            const timing: NewTaskTiming | undefined = item.schedule
+                ? { dueAt: item.dueAt, schedule: item.schedule }
+                : item.dueAt ? { dueAt: item.dueAt } : undefined;
+            let made: Task;
+            try {
+                made = await createListTask(list.id, item.text, parentId, timing);
+            } catch (err) {
+                explain('copying an item failed', err);
+                missing++;
+                continue;
+            }
+            newIdOf.set(item, made.id);
+            if (timing) timed = true;
+            const refs = itemRefs.get(item);
+            if (refs) {
+                try {
+                    await updateListTaskAttachments(made.id, refs);
+                    made = { ...made, attachments: JSON.stringify(refs.map(({ href, name }) => ({ href, name }))) };
+                } catch (err) {
+                    explain('copying an item’s pictures failed', err);
+                }
+            }
+            if (item.completed) {
+                // A timing patch, not a plain is_completed: migration 066's
+                // guard refuses the latter for a scheduled item, and the
+                // ordinary tick would advance a repeating one.
+                try {
+                    await patchTaskTiming(made, { is_completed: true });
+                    made = { ...made, is_completed: true };
+                } catch (err) {
+                    explain('copying an item’s tick failed', err);
+                }
+            }
+            created.push(made);
+        }
+        if (timed) pokeTaskReminders();
+        qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), {
+            ...list, total_tasks: created.length, completed_tasks: created.filter(t => t.is_completed).length,
+        }]);
+        if (missing > 0) {
+            pushMessageToast({ title: `The copy is missing ${missing} item${missing === 1 ? '' : 's'} — check it against the original` });
+        }
+        return ref;
+    }, [qc]);
 
     // Through the outbox: online with nothing queued this simply runs, and
     // with no connection the typed text is kept on this device and replayed.
@@ -633,6 +748,6 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const trashEnabled = known && features.trash;
     return useMemo(() => ({
         features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures,
-        createContentNote, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash,
-    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
+        createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash,
+    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
 }

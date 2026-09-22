@@ -25,8 +25,7 @@ import { type ComposeIntent, type ComposeMode, takeShare } from '../model/compos
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
-import { noteToMarkdown, openItemsOf, openItemTimingOf } from '../model/noteText';
-import { readableBody } from '../model/noteContent';
+import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
 import { AccountMenu } from './AccountMenu';
 import { ColorPicker } from '../../components/notes/ColorPicker';
 import { ShortcutsHelp } from './NotesDialog';
@@ -381,11 +380,20 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         }
     };
     const duplicate = async (card: NoteCard) => {
-        const ref = await actions.createNote(`${card.title} (copy)`, openItemsOf(card),
-            readableBody(card.body) ? { body: readableBody(card.body) } : undefined,
-            scheduleOnServer ? openItemTimingOf(card) : undefined);
+        // A note holding something this device cannot read is not copied at
+        // all, rather than copied with the unreadable part missing (the same
+        // choice "Hide checkboxes" makes).
+        const refusal = copyRefusal(copyBlockersOf(card));
+        if (refusal) { pushMessageToast({ title: refusal }); return; }
+        const plan = copyPlanOf(card, { schedules: !!scheduleOnServer });
+        const ref = await actions.copyNote(plan);
         if (ref) {
-            pushMessageToast({ title: 'Copied — open items only, un-nested' });
+            // The copy takes the note's colour and labels, but is never
+            // pinned and never lands in the archive: a copy is made to be
+            // looked at now.
+            if (card.color !== 'default') actions.setColor(ref, card.color);
+            if (card.labels.length > 0) actions.setLabels(ref, card.labels);
+            pushMessageToast({ title: plan.files > 0 ? 'Copied — pictures and all' : 'Copied' });
             setParams(p => { p.set('note', `${ref.kind}:${ref.id}`); return p; });
         }
     };

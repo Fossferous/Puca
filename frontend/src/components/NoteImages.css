@@ -197,6 +197,22 @@ a.note-link { cursor: pointer; }
     cursor: pointer;
     padding: 0;
 }
+.nb-actions { display: flex; gap: 2px; margin-top: -2px; }
+.nb-histbtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.nb-histbtn:hover:not(:disabled) { background: var(--bg-modifier-hover); color: var(--text-normal); }
+.nb-histbtn:disabled { opacity: 0.35; cursor: default; }
 .nb-locked {
     font-size: 13px;
     color: var(--text-warning);
@@ -208,6 +224,8 @@ a.note-link { cursor: pointer; }
 @media (pointer: coarse) and (max-width: 1024px) {
     .nb-text, .nb-rendered { font-size: 16px; }   /* below 16px iOS zooms on focus */
     .nb-retry { min-height: 44px; padding: 0 8px; }
+    /* DESIGN_PHILOSOPHY §7: a finger needs 44px. */
+    .nb-histbtn { width: 44px; height: 44px; }
 }
 
 /* Púca's Tasks view: a list's note text and pictures (ListContentBlock.tsx)

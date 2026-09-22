@@ -14,12 +14,15 @@
  * propagation (its other three editors do), so a window-level close would
  * swallow that cancel. isEditableTarget is the guard.
  */
-import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { isEditableTarget } from '../../api/hotkeys';
 import { isUndecryptable } from '../../api/decryptMarkers';
+import { assignTaskPlace } from '../../api/taskPlaces';
+import { deleteFiles } from '../../api/listContent';
+import { fileIdsOf } from '../../api/noteMedia';
 import { TaskTree } from '../../components/TaskTree';
 import {
     ArchiveIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
@@ -31,9 +34,10 @@ import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
 import { ListActionsMenu } from './ListActionsMenu';
 import { PastedLinesDialog } from './PastedLinesDialog';
-import { linesFromPaste, pasteAsOneLine } from '../model/noteContent';
+import { linesFromPaste, pasteAsOneLine, readableAttachmentsOf, recreateSubtree } from '../model/noteContent';
 import { PACE_MS } from '../../api/icsImport';
 import { pushMessageToast } from '../../components/messageToastBus';
+import { useEditorUndo } from './useEditorUndo';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { NoteDueChip, NoteReminderControl } from '../../components/schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from '../../components/schedule/halfMinuteClock';
@@ -96,6 +100,12 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     // Not Date.now() in render: the chip must flip to "overdue" while the
     // note is open, and an impure render call fails the lint gate.
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
+    // One Undo bar for the whole editor: the conversions below offer Undo too,
+    // and `.notes-undo` is fixed to the bottom of the viewport.
+    const undo = useEditorUndo();
+    // The items as they are NOW, for a commit that runs after they changed.
+    const tasksRef = useRef(tasks);
+    useEffect(() => { tasksRef.current = tasks; });
     const currentUserId = currentUserIdFromToken() ?? undefined;
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
@@ -138,6 +148,47 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         setTitleDirty(false);
         if (isChannel || titleUnreadable || !t || t === card.title) { setTitleDraft(card.title); return; }
         void actions.renameNote(ref, t, base);
+    };
+
+    /**
+     * Delete an item, and offer to put it back. The subtree is held in memory
+     * only (it is decrypted content — see useEditorUndo's header); its
+     * uploads are kept while Undo is offered and deleted once it can no
+     * longer happen, never one a live item still names by then. Before this
+     * they were orphaned against the owner's storage for good.
+     *
+     * What comes back is a NEW item: a new id, appended at the end of its
+     * group, and in a shared note created by whoever pressed Undo.
+     */
+    const deleteItem = async (subtree: Task[], places: Array<[number, string]>) => {
+        const root = subtree[0];
+        if (!root) return;
+        // False means the delete was refused and the item put back: its files
+        // are its own again, so there is nothing to undo and nothing to clean.
+        if (!await actions.deleteTaskFrom(ref, root.id)) return;
+        const orphaned = fileIdsOf(subtree.flatMap(readableAttachmentsOf));
+        const label = isUndecryptable(root.description) ? '' : root.description.replace(/\s+/g, ' ').trim();
+        undo.push({
+            message: label ? `Deleted “${label.length > 24 ? `${label.slice(0, 23)}…` : label}”` : 'Item deleted',
+            run: async () => {
+                const { idMap, missing, unreadableTiming } = await recreateSubtree(actions, ref, subtree);
+                // This phone's own place reminders, back on the new ids.
+                for (const [oldId, placeId] of places) {
+                    const made = idMap.get(oldId);
+                    if (made !== undefined) assignTaskPlace(made, placeId);
+                }
+                if (missing > 0) {
+                    pushMessageToast({ title: `${missing} item${missing === 1 ? '' : 's'} couldn’t be put back — add ${missing === 1 ? 'it' : 'them'} again` });
+                } else if (unreadableTiming > 0) {
+                    pushMessageToast({ title: 'Put back, but a date this device can’t read didn’t come with it' });
+                }
+            },
+            commit: orphaned.length > 0 ? () => {
+                const named = new Set(fileIdsOf(tasksRef.current.flatMap(readableAttachmentsOf)));
+                const unused = orphaned.filter(id => !named.has(id));
+                if (unused.length > 0) void deleteFiles(unused);
+            } : undefined,
+        });
     };
 
     const addItem = async (e: React.FormEvent) => {
@@ -231,7 +282,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                 )}
 
                 <div className="notes-editor-body">
-                    <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} />
+                    <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} undo={undo} />
                     {canCreate && (
                         <form className="notes-editor-add" onSubmit={addItem}>
                             <input
@@ -254,6 +305,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             tasks={tasks}
                             onToggle={(t, done) => void actions.toggleTask(ref, t, done)}
                             onDelete={id => void actions.deleteTaskFrom(ref, id)}
+                            onDeleteSubtree={(subtree, places) => void deleteItem(subtree, places)}
                             onEdit={(t, text) => void actions.editTask(ref, t, text)}
                             onAddSubtask={(parentId, text) => void actions.addTask(ref, text, parentId)}
                             onMove={(t, dir) => void actions.moveTaskIn(ref, t, dir)}
@@ -273,6 +325,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             tasks={tasks}
                             onToggle={(t, done) => void actions.toggleTask(ref, t, done)}
                             onDelete={id => void actions.deleteTaskFrom(ref, id)}
+                            onDeleteSubtree={(subtree, places) => void deleteItem(subtree, places)}
                             onEdit={(t, text) => void actions.editTask(ref, t, text)}
                             onAddSubtask={(parentId, text) => void actions.addTask(ref, text, parentId)}
                             onMove={(t, dir) => void actions.moveTaskIn(ref, t, dir)}
@@ -318,6 +371,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     />
                 )}
             </div>
+            {undo.bar}
         </div>,
         document.body,
     );

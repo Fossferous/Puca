@@ -58,14 +58,24 @@
  * trash-waits-for-the-last-keystroke registration, so the less of it a new
  * mount/unmount sits in the middle of, the better. On blur the flush is
  * kicked BEFORE the swap, so the last words typed are saved, not lost.
+ * UNDO AND REDO are the field's own (textHistory.ts), not the browser's: a
+ * textarea's native stack is wiped by the sync branch below writing the value
+ * programmatically, and a phone has no Ctrl key. Ctrl/Cmd+Z and
+ * Ctrl/Cmd+Shift+Z (or Ctrl+Y) drive it, and a pair of buttons appears once
+ * there is anything to go back to. The history holds DECRYPTED note text and
+ * lives in React state only — it is never written to the offline cache and
+ * goes when the note closes.
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { isUndecryptable } from '../api/decryptMarkers';
 import { BODY_SAVE_DELAY_MS, MAX_BODY_BYTES, bodyBytes, registerBodyFlush } from '../api/listContent';
 import { appendTranscript } from '../notes/model/audioNote';
-import { LockIcon, WarningIcon } from './Icons';
+import { LockIcon, RedoIcon, UndoIcon, WarningIcon } from './Icons';
 import { NoteLinkText } from './NoteLinkText';
 import { hasLink } from '../utils/linkSegments';
+import {
+    type TextHistory, canRedoText, canUndoText, newTextHistory, pushText, redoText, undoText,
+} from './textHistory';
 import './NoteImages.css';
 
 /** What `appendText` did. `too-long` = it would not fit and NOTHING was
@@ -204,9 +214,14 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
     // the revision it was based on, so the server refuses it rather than
     // letting it land over the newer copy, and the choice below appears.
     const [seen, setSeen] = useState(current);
+    const [history, setHistory] = useState<TextHistory>(() => newTextHistory(current));
     if (seen !== current) {
         setSeen(current);
         if (!isDirty) { setDraft(current); setConflict(null); }
+        // A body that landed from elsewhere RESETS the history rather than
+        // becoming a step in it: Undo must not be able to put this device's
+        // older text back over another device's newer save.
+        if (!isDirty) { setDraft(current); setHistory(newTextHistory(current)); }
     }
 
     // The save on its way to the server, if any (the cached value already
@@ -354,6 +369,24 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
     // is the one thing this file exists to prevent.
     const theirsReadable = conflict !== null && conflict.theirs !== null && !isUndecryptable(conflict.theirs);
 
+    /** Queue the save a pause from now, as typing does. */
+    const scheduleSave = useCallback(() => {
+        if (timer.current !== null) window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => { void flush(); }, BODY_SAVE_DELAY_MS);
+    }, [flush]);
+
+    /** Step through the history: the text it lands on is a real edit, so it
+     *  is dirty and saves itself like any other. */
+    const step = useCallback((next: TextHistory) => {
+        if (next === history) return;
+        setHistory(next);
+        setDraft(next.stack[next.index]);
+        markDirty(true);
+        setState('idle');
+        scheduleSave();
+        areaRef.current?.focus();
+    }, [history, markDirty, scheduleSave]);
+
     if (isUndecryptable(current)) {
         return <div className="nb-locked"><LockIcon /> This note’s text can’t be read yet: {current}</div>;
     }
@@ -413,11 +446,21 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                     // Typing a URL must not swap the field out from under the
                     // caret: while this field is being used, it stays a field.
                     setEditing(true);
+                    const next = e.target.value;
                     markDirty(true);
-                    setDraft(e.target.value);
+                    setDraft(next);
+                    setHistory(h => pushText(h, next, Date.now()));
                     setState('idle');
-                    if (timer.current !== null) window.clearTimeout(timer.current);
-                    timer.current = window.setTimeout(() => { void flush(); }, BODY_SAVE_DELAY_MS);
+                    scheduleSave();
+                }}
+                onKeyDown={e => {
+                    // Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (Ctrl+Y as well). Taken
+                    // from the browser on purpose: its own stack is gone the
+                    // moment a sync writes the value.
+                    if (readOnly || e.altKey || !(e.ctrlKey || e.metaKey)) return;
+                    const key = e.key.toLowerCase();
+                    if (key === 'z' && !e.shiftKey) { e.preventDefault(); step(undoText(history)); }
+                    else if ((key === 'z' && e.shiftKey) || key === 'y') { e.preventDefault(); step(redoText(history)); }
                 }}
                 onBlur={() => {
                     // Kick the save FIRST: it reads the live draft, and only
@@ -442,6 +485,30 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
                         <button type="button" data-action="keep-mine" onClick={keepMine}>Keep mine</button>
                         {theirsReadable && <button type="button" data-action="use-theirs" onClick={useTheirs}>Use theirs</button>}
                     </span>
+                </div>
+            )}
+            {!readOnly && (canUndoText(history) || canRedoText(history)) && (
+                <div className="nb-actions">
+                    <button
+                        type="button"
+                        className="nb-histbtn"
+                        aria-label="Undo"
+                        title="Undo (Ctrl+Z)"
+                        disabled={!canUndoText(history)}
+                        onClick={() => step(undoText(history))}
+                    >
+                        <UndoIcon />
+                    </button>
+                    <button
+                        type="button"
+                        className="nb-histbtn"
+                        aria-label="Redo"
+                        title="Redo (Ctrl+Shift+Z)"
+                        disabled={!canRedoText(history)}
+                        onClick={() => step(redoText(history))}
+                    >
+                        <RedoIcon />
+                    </button>
                 </div>
             )}
             {state === 'failed' && (

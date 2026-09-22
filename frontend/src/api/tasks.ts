@@ -595,6 +595,25 @@ export function collectSubtreeIds(tasks: Task[], rootId: number): Set<number> {
 }
 
 /**
+ * A task and everything under it, every parent before its children and each
+ * level in display order — the order the subtree can be created in again.
+ * Notes' editor hands this to its delete Undo; an id that names no task
+ * gives an empty array.
+ */
+export function subtreeInOrder(tasks: Task[], rootId: number): Task[] {
+    const ids = collectSubtreeIds(tasks, rootId);
+    const out: Task[] = [];
+    const walk = (nodes: TaskNode[]) => {
+        for (const n of nodes) {
+            if (ids.has(n.task.id)) out.push(n.task);
+            walk(n.children);
+        }
+    };
+    walk(buildTaskTree(tasks));
+    return out;
+}
+
+/**
  * Apply a one-slot move locally by swapping positions with the nearest
  * visible sibling (same parent, same completion state), mirroring the
  * server's swap. Returns the input array unchanged at the edges.
